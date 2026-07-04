@@ -4,10 +4,24 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "WEFT reference server binary (M1+)"
+description = "WEFT reference server binary: config, acceptors, telemetry."
 
 [dependencies]
 weft-proto = { path = "../weft-proto" }
+weft-core = { path = "../weft-core" }
+weft-transport = { path = "../weft-transport" }
+tokio = { workspace = true }
+quinn = { workspace = true }
+rcgen = { workspace = true }
+rustls-pki-types = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
-[lints]
-workspace = true
+[dev-dependencies]
+weft-proto = { path = "../weft-proto" }
+rustls = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }

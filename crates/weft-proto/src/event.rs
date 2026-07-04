@@ -106,12 +106,15 @@ pub enum Event {
     },
     /// Boxed: much larger than every other variant.
     Message(Box<MessageEvent>),
-    /// `MEMBER <#chan> <user@net> <join|part>` with optional `display=`.
+    /// `MEMBER <#chan> <user@net> <join|part>` with optional `display=` and
+    /// `count=` (member count after the change; §6.3: JOIN responds with
+    /// `MEMBER` + `POLICY` + `count=`).
     Member {
         channel: ChannelName,
         user: UserRef,
         action: MemberAction,
         display: Option<String>,
+        count: Option<u64>,
     },
     /// `TYPING <#chan> <user@net> <start|stop>` — never stored.
     Typing {
@@ -216,6 +219,7 @@ impl Event {
                     user: args.req("user")?.parse()?,
                     action: args.req("action")?.parse()?,
                     display: line.tags.get("display").filter(|v| !v.is_empty()).cloned(),
+                    count: u64_tag(line, "count", "MEMBER")?,
                 })
             }
             "TYPING" => {
@@ -307,9 +311,13 @@ impl Event {
                 user,
                 action,
                 display,
+                count,
             } => {
                 if let Some(display) = display {
                     tags.insert("display".to_string(), display.clone());
+                }
+                if let Some(count) = count {
+                    tags.insert("count".to_string(), count.to_string());
                 }
                 (
                     "MEMBER",
@@ -449,11 +457,29 @@ mod tests {
 
     #[test]
     fn member_typing_marked_presence_policy_round_trip() {
+        // JOIN response form: label + count= (§6.3).
+        let join_echo = Reply::with_label(
+            Event::Member {
+                channel: "#general".parse().unwrap(),
+                user: "ada@hda.example".parse().unwrap(),
+                action: MemberAction::Join,
+                display: Some("Ada L.".into()),
+                count: Some(3),
+            },
+            "j1",
+        );
+        assert_eq!(
+            join_echo.serialize().unwrap(),
+            "@count=3;display=Ada\\sL.;label=j1 MEMBER #general ada@hda.example join"
+        );
+        round_trip(&join_echo);
+        // Broadcast form: no label, tags optional.
         round_trip(&Reply::new(Event::Member {
             channel: "#general".parse().unwrap(),
             user: "ada@hda.example".parse().unwrap(),
-            action: MemberAction::Join,
-            display: Some("Ada L.".into()),
+            action: MemberAction::Part,
+            display: None,
+            count: None,
         }));
         round_trip(&Reply::new(Event::Typing {
             channel: "#general".parse().unwrap(),

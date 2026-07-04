@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/weft-proto", "crates/weftd"]
+members = ["crates/weft-proto", "crates/weft-core", "crates/weft-transport", "crates/weftd"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,17 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 thiserror = "1"
 ulid = "1"
-
-[workspace.lints.clippy]
-unwrap_used = "warn"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net", "signal"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+# ring only — a second provider (aws-lc-rs) would make rustls's process-default ambiguous.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-pki-types = "1"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
+tokio-tungstenite = "0.24"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"

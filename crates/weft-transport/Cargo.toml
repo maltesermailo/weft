@@ -1,0 +1,18 @@
+[package]
+name = "weft-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WEFT transports (L2): QUIC (quinn) and WebSocket line framing. Frames bytes into lines; never interprets verbs."
+
+[dependencies]
+weft-proto = { path = "../weft-proto" }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+tokio-tungstenite = { workspace = true }

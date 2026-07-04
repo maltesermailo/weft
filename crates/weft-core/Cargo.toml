@@ -1,0 +1,16 @@
+[package]
+name = "weft-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WEFT domain logic (L2): session FSM, channel actors, registry. No sockets — speaks through the ControlStream trait."
+
+[dependencies]
+weft-proto = { path = "../weft-proto" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+ulid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

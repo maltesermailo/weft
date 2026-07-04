@@ -1,0 +1,12 @@
+//! Tracing setup. Spans come from weft-core (per session, per verb); this
+//! just installs the subscriber. `RUST_LOG` overrides the default level.
+
+use tracing_subscriber::EnvFilter;
+
+pub fn init() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+}

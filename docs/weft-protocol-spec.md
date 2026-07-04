@@ -242,7 +242,7 @@ Invite tokens = capability tokens with **unbound subject**: one object = single-
 | `DELETED <#chan> <msgid>` | `by=` | tombstone; sole survivor of a deleted message in batches |
 | `REACTION <#chan> <msgid> <emoji>` | `op=`, `by=` | **live only** |
 | `REACTIONS <#chan> <msgid> <emoji> <count>` | `by=` (first ≤20 actors, comma-sep) | **batch summary form** (§12.1) |
-| `MEMBER <#chan> <user@net> <join\|part>` | `display=` | |
+| `MEMBER <#chan> <user@net> <join\|part>` | `display=`, `count=` | `count=` = member count after the change (the §6.3 JOIN response) |
 | `TYPING <#chan> <user@net> <start\|stop>` | | never stored |
 | `MARKED <#chan> <msgid>` | | read-marker sync to the account's own sessions |
 | `PRESENCE <user@net> <online\|away\|dnd\|invisible>` | | never bridged |
