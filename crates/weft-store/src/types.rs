@@ -1,7 +1,9 @@
 //! Storage row types. Event-sourced (§9.3): edits, deletes, and reactions
 //! are rows referencing the original message's msgid — never mutations.
 
-use weft_proto::{Account, ChannelName, MsgId, MsgMeta, NamespaceName, RetentionPolicy, Ulid, UserRef};
+use weft_proto::{
+    Account, ChannelName, MsgId, MsgMeta, NamespaceName, RetentionPolicy, Ulid, UserRef,
+};
 
 /// Where events live: a channel, or a same-network DM pair (§9.5).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -100,12 +102,18 @@ pub struct Verification {
 
 /// A channel's stored settings (§6.3). `view_gated` needs the anti-
 /// enumeration branch in the session layer (invariant 1); `topic` rides
-/// `CHANMETA`.
+/// `CHANMETA`. `category` + `position` are the Discord-style layout within
+/// a namespace (spec extension — see Appendix A): channels sort by
+/// (category, position, name).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelRecord {
     pub policy: RetentionPolicy,
     pub topic: Option<String>,
     pub view_gated: bool,
+    /// Category name (a free label) grouping channels in a namespace.
+    pub category: Option<String>,
+    /// Sort order within the (namespace, category); default 0.
+    pub position: i64,
 }
 
 /// A recorded capability grant (§6.5, §10.4). The server keeps these so an

@@ -200,6 +200,9 @@ pub enum Command {
     },
     /// `DISCOVER [cursor]` — public namespace directory (§6.2).
     Discover { cursor: Option<String> },
+    /// `CHANNELS <ns>` — the ordered channel layout of a namespace (spec
+    /// extension: Discord-style categories + order).
+    Channels { namespace: NamespaceName },
     /// Any verb outside the known set. Servers ignore it silently (§4).
     Unknown { verb: String },
 }
@@ -574,6 +577,9 @@ impl Command {
             "DISCOVER" => Ok(Command::Discover {
                 cursor: Args::new(line, "DISCOVER").opt().map(str::to_string),
             }),
+            "CHANNELS" => Ok(Command::Channels {
+                namespace: Args::new(line, "CHANNELS").req("namespace")?.parse()?,
+            }),
             _ => Ok(Command::Unknown {
                 verb: verb.to_string(),
             }),
@@ -768,7 +774,11 @@ impl Command {
                 tags.insert("root".to_string(), root_key.clone());
                 (
                     "NS",
-                    vec!["CREATE".to_string(), name.to_string(), visibility.to_string()],
+                    vec![
+                        "CREATE".to_string(),
+                        name.to_string(),
+                        visibility.to_string(),
+                    ],
                     None,
                 )
             }
@@ -805,9 +815,8 @@ impl Command {
                 vec!["DELETE".to_string(), name.to_string(), confirm.to_string()],
                 None,
             ),
-            Command::Discover { cursor } => {
-                ("DISCOVER", cursor.iter().cloned().collect(), None)
-            }
+            Command::Discover { cursor } => ("DISCOVER", cursor.iter().cloned().collect(), None),
+            Command::Channels { namespace } => ("CHANNELS", vec![namespace.to_string()], None),
             Command::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown command"));
             }
@@ -1211,11 +1220,17 @@ mod tests {
         let parsed = Request::parse("@root=K== NS CREATE gaming").unwrap();
         assert!(matches!(
             parsed.command,
-            Command::NsCreate { visibility: crate::types::Visibility::Unlisted, .. }
+            Command::NsCreate {
+                visibility: crate::types::Visibility::Unlisted,
+                ..
+            }
         ));
         assert_eq!(
             Request::parse("NS CREATE gaming"),
-            Err(ParseError::MissingParam { verb: "NS", what: "root tag (namespace root pubkey)" })
+            Err(ParseError::MissingParam {
+                verb: "NS",
+                what: "root tag (namespace root pubkey)"
+            })
         );
 
         round_trip(&Request::new(Command::NsMeta {
@@ -1237,6 +1252,13 @@ mod tests {
             confirm: "gaming".parse().unwrap(),
         }));
         assert!(Request::parse("NS FROB x").is_err());
+    }
+
+    #[test]
+    fn channels_round_trips() {
+        round_trip(&Request::new(Command::Channels {
+            namespace: "gaming".parse().unwrap(),
+        }));
     }
 
     #[test]

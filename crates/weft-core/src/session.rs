@@ -654,12 +654,16 @@ impl<S: ControlStream> Session<S> {
                 name,
                 visibility,
                 root_key,
-            } => self.on_ns_create(label, name, visibility, root_key, account).await,
+            } => {
+                self.on_ns_create(label, name, visibility, root_key, account)
+                    .await
+            }
             Command::NsMeta { name, key, value } => {
                 self.on_ns_meta(label, name, key, value, account).await
             }
             Command::NsVisibility { name, visibility } => {
-                self.on_ns_visibility(label, name, visibility, account).await
+                self.on_ns_visibility(label, name, visibility, account)
+                    .await
             }
             Command::NsDelegate {
                 name,
@@ -674,6 +678,7 @@ impl<S: ControlStream> Session<S> {
                 self.on_ns_delete(label, name, confirm, account).await
             }
             Command::Discover { cursor } => self.on_discover(label, cursor).await,
+            Command::Channels { namespace } => self.on_channels(label, namespace).await,
             Command::Hello { .. }
             | Command::AuthPassword { .. }
             | Command::AuthKey { .. }
@@ -1635,12 +1640,37 @@ impl<S: ControlStream> Session<S> {
                     .set_channel_view_gated(&channel, gated)
                     .await
             }
+            // Layout (spec extension): category groups channels, position
+            // orders them. Both read the current record to preserve the
+            // other field.
+            "category" | "position" => {
+                let current = match self.ctx.channel_store.channel(&channel).await {
+                    Ok(Some(record)) => record,
+                    Ok(None) => return self.no_such_target(label).await,
+                    Err(e) => return self.internal(label, &e).await,
+                };
+                let (category, position) = if key == "category" {
+                    let cat = (!value.is_empty()).then(|| value.clone());
+                    (cat, current.position)
+                } else {
+                    let Ok(pos) = value.parse::<i64>() else {
+                        self.send_err(label, ErrCode::Policy, None, "position must be an integer")
+                            .await?;
+                        return Ok(Flow::Continue);
+                    };
+                    (current.category, pos)
+                };
+                self.ctx
+                    .channel_store
+                    .set_channel_layout(&channel, category.as_deref(), position)
+                    .await
+            }
             _ => {
                 self.send_err(
                     label,
                     ErrCode::Policy,
                     None,
-                    "meta key must be topic|view-gated",
+                    "meta key must be topic|view-gated|category|position",
                 )
                 .await?;
                 return Ok(Flow::Continue);
@@ -1901,8 +1931,13 @@ impl<S: ControlStream> Session<S> {
     ) -> io::Result<Flow> {
         // The submitted root key must be a real Ed25519 pubkey (§2.1).
         if weft_crypto::PublicKey::from_b64(&root_key).is_err() {
-            self.send_err(label, ErrCode::Malformed, None, "root must be a b64 ed25519 pubkey")
-                .await?;
+            self.send_err(
+                label,
+                ErrCode::Malformed,
+                None,
+                "root must be a b64 ed25519 pubkey",
+            )
+            .await?;
             return Ok(Flow::Continue);
         }
         // §2.2 creation policy: gated needs `ns-create`; open enforces a
@@ -2000,14 +2035,24 @@ impl<S: ControlStream> Session<S> {
         account: Account,
     ) -> io::Result<Flow> {
         if !matches!(key.as_str(), "title" | "description" | "icon") {
-            self.send_err(label, ErrCode::Policy, None, "meta key must be title|description|icon")
-                .await?;
+            self.send_err(
+                label,
+                ErrCode::Policy,
+                None,
+                "meta key must be title|description|icon",
+            )
+            .await?;
             return Ok(Flow::Continue);
         }
         let Some(mut record) = self.ns_admin_gate(label.clone(), &name, &account).await? else {
             return Ok(Flow::Continue);
         };
-        if let Err(e) = self.ctx.namespaces.set_namespace_meta(&name, &key, &value).await {
+        if let Err(e) = self
+            .ctx
+            .namespaces
+            .set_namespace_meta(&name, &key, &value)
+            .await
+        {
             return self.internal(label, &e).await;
         }
         match key.as_str() {
@@ -2051,13 +2096,22 @@ impl<S: ControlStream> Session<S> {
         account: Account,
     ) -> io::Result<Flow> {
         if name != confirm {
-            self.send_err(label, ErrCode::Policy, None, "DELETE must repeat the namespace name")
-                .await?;
+            self.send_err(
+                label,
+                ErrCode::Policy,
+                None,
+                "DELETE must repeat the namespace name",
+            )
+            .await?;
             return Ok(Flow::Continue);
         }
         // Owner or operator (§6.2). ns_admin_gate covers both (owner holds
         // ns-admin, operators hold everything).
-        if self.ns_admin_gate(label.clone(), &name, &account).await?.is_none() {
+        if self
+            .ns_admin_gate(label.clone(), &name, &account)
+            .await?
+            .is_none()
+        {
             return Ok(Flow::Continue);
         }
         if let Err(e) = self.ctx.namespaces.delete_namespace(&name).await {
@@ -2086,7 +2140,12 @@ impl<S: ControlStream> Session<S> {
         cursor: Option<String>,
     ) -> io::Result<Flow> {
         const PAGE: usize = 50;
-        let public = match self.ctx.namespaces.list_public(cursor.as_deref(), PAGE).await {
+        let public = match self
+            .ctx
+            .namespaces
+            .list_public(cursor.as_deref(), PAGE)
+            .await
+        {
             Ok(public) => public,
             Err(e) => return self.internal(label, &e).await,
         };
@@ -2094,10 +2153,61 @@ impl<S: ControlStream> Session<S> {
             .then(|| public.last().map(|ns| ns.name.to_string()))
             .flatten();
         for record in &public {
-            self.send_event(label.clone(), Self::ns_meta_event(record)).await?;
+            self.send_event(label.clone(), Self::ns_meta_event(record))
+                .await?;
         }
         if let Some(cursor) = next_cursor {
             self.send_event(label, Event::More { cursor }).await?;
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// The ordered channel layout of a namespace (spec extension). A
+    /// non-member of a `private` namespace can't observe it (invariant 1).
+    async fn on_channels(
+        &mut self,
+        label: Option<String>,
+        namespace: weft_proto::NamespaceName,
+    ) -> io::Result<Flow> {
+        let record = match self.ctx.namespaces.namespace(&namespace).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return self.no_such_target(label).await,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        // Private namespaces are invisible unless you belong (view cap).
+        if record.visibility == "private" {
+            let State::Ready { account } = self.state.clone() else {
+                unreachable!("on_channels only dispatched in READY");
+            };
+            let scope = TokenScope::Namespace(namespace.to_string());
+            let member = self
+                .ctx
+                .account_has_cap(&account, &Capability::View, &scope, unix_now())
+                .await
+                .unwrap_or(false);
+            if !member {
+                return self.no_such_target(label).await;
+            }
+        }
+        let channels = match self
+            .ctx
+            .channel_store
+            .channels_in_namespace(namespace.as_str())
+            .await
+        {
+            Ok(channels) => channels,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        for (name, record) in channels {
+            self.send_event(
+                label.clone(),
+                Event::ChannelLayout {
+                    channel: name,
+                    category: record.category,
+                    position: record.position,
+                },
+            )
+            .await?;
         }
         Ok(Flow::Continue)
     }

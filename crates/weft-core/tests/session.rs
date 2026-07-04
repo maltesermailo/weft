@@ -1229,3 +1229,227 @@ async fn invite_revoke_kills_the_link() {
     ada.send(&format!("INVITE REDEEM {invite_id}"));
     ada.expect_err(ErrCode::NoSuchTarget).await;
 }
+
+// ---- M4-5: user-owned namespaces + DISCOVER ----
+
+/// A fresh ed25519 pubkey (b64) to serve as a namespace root key.
+fn root_key_b64() -> String {
+    Keypair::generate().public().to_b64()
+}
+
+#[tokio::test]
+async fn any_user_can_create_a_namespace_and_owns_it() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let root = root_key_b64();
+    ada.send(&format!("@label=n1;root={root} NS CREATE gaming public"));
+    let reply = ada.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("n1"));
+    let Event::NsMeta {
+        name,
+        visibility,
+        owner,
+        ..
+    } = &reply.event
+    else {
+        panic!("expected NS-META, got {reply:?}");
+    };
+    assert_eq!(name.as_str(), "gaming");
+    assert_eq!(visibility.to_string(), "public");
+    assert_eq!(owner.as_deref(), Some("ada"));
+
+    // As owner, ada holds every cap in her namespace — she can create a
+    // namespaced channel (deferred in M4a, unlocked by ownership).
+    ada.send("@label=c1 CHANNEL CREATE #gaming/general");
+    let reply = ada.recv().await;
+    assert!(
+        matches!(&reply.event, Event::Policy { channel, .. } if channel.as_str() == "#gaming/general"),
+        "owner should create channels in her ns, got {reply:?}"
+    );
+
+    // ...and delegate ns caps to someone else.
+    ada.send("@label=d1 NS DELEGATE gaming bob ban,kick");
+    assert!(matches!(ada.recv().await.event, Event::Token { .. }));
+
+    // A non-owner cannot create channels in the namespace.
+    let mut eve = ready(&ctx, "eve").await;
+    eve.send("CHANNEL CREATE #gaming/secret");
+    eve.expect_err(ErrCode::CapRequired).await;
+}
+
+#[tokio::test]
+async fn namespace_name_conflicts() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming", root_key_b64()));
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send(&format!("@root={} NS CREATE gaming", root_key_b64()));
+    bob.expect_err(ErrCode::Conflict).await;
+}
+
+#[tokio::test]
+async fn namespace_meta_and_visibility_are_owner_only() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!(
+        "@root={} NS CREATE gaming unlisted",
+        root_key_b64()
+    ));
+    ada.recv().await;
+
+    ada.send("@label=m1 NS META gaming title :The Gaming Lounge");
+    let reply = ada.recv().await;
+    assert!(
+        matches!(&reply.event, Event::NsMeta { title: Some(t), .. } if t == "The Gaming Lounge")
+    );
+    ada.send("@label=v1 NS VISIBILITY gaming public");
+    assert!(
+        matches!(&ada.recv().await.event, Event::NsMeta { visibility, .. } if visibility.to_string() == "public")
+    );
+
+    // A non-owner can't administer it.
+    let mut eve = ready(&ctx, "eve").await;
+    eve.send("NS META gaming title :hijacked");
+    eve.expect_err(ErrCode::CapRequired).await;
+    // ...and a nonexistent namespace is NO-SUCH-TARGET.
+    eve.send("NS META ghost title :x");
+    eve.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn discover_lists_only_public_namespaces() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE alpha public", root_key_b64()));
+    ada.recv().await;
+    ada.send(&format!(
+        "@root={} NS CREATE bravo unlisted",
+        root_key_b64()
+    ));
+    ada.recv().await;
+    ada.send(&format!(
+        "@root={} NS CREATE charlie public",
+        root_key_b64()
+    ));
+    ada.recv().await;
+
+    let mut eve = ready(&ctx, "eve").await;
+    eve.send("@label=disc DISCOVER");
+    // Public namespaces only, name-sorted; no BATCH bracket for DISCOVER.
+    let mut seen = Vec::new();
+    loop {
+        let reply = eve.recv().await;
+        match reply.event {
+            Event::NsMeta {
+                name, visibility, ..
+            } => {
+                assert_eq!(visibility.to_string(), "public");
+                seen.push(name.to_string());
+            }
+            Event::More { .. } => continue,
+            other => panic!("unexpected in DISCOVER: {other:?}"),
+        }
+        if seen.len() == 2 {
+            break;
+        }
+    }
+    assert_eq!(seen, vec!["alpha", "charlie"]); // bravo is unlisted
+}
+
+#[tokio::test]
+async fn namespace_quota_is_enforced_when_open() {
+    // Tiny quota via a custom ctx.
+    let info = weft_core::ServerInfo {
+        network: "test.example".parse().unwrap(),
+        motd: None,
+        features: Vec::new(),
+    };
+    let ctx = Arc::new(ServerCtx::new(
+        info,
+        std::iter::empty(),
+        Keypair::generate(),
+        true,
+        Arc::new(MemoryStore::default()),
+        "permanent".parse().unwrap(),
+        std::iter::empty::<weft_proto::Account>(),
+        true, // open
+        1,    // quota of 1
+    ));
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE first", root_key_b64()));
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    ada.send(&format!("@root={} NS CREATE second", root_key_b64()));
+    ada.expect_err(ErrCode::Quota).await;
+}
+
+#[tokio::test]
+async fn ns_create_rejects_a_bad_root_key() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send("@root=not-a-real-key NS CREATE gaming");
+    ada.expect_err(ErrCode::Malformed).await;
+}
+
+#[tokio::test]
+async fn channel_categories_and_ordering() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    // Own a namespace, then build a channel layout inside it.
+    ada.send(&format!("@root={} NS CREATE team", root_key_b64()));
+    ada.recv().await;
+    for chan in ["#team/general", "#team/random", "#team/voice"] {
+        ada.send(&format!("CHANNEL CREATE {chan}"));
+        ada.recv().await; // POLICY
+    }
+    // Categorize + order: general/random under "text", voice uncategorized.
+    ada.send("CHANNEL META #team/general category :text");
+    assert!(matches!(&ada.recv().await.event, Event::Chanmeta { key, .. } if key == "category"));
+    ada.send("CHANNEL META #team/general position :0");
+    ada.recv().await;
+    ada.send("CHANNEL META #team/random category :text");
+    ada.recv().await;
+    ada.send("CHANNEL META #team/random position :1");
+    ada.recv().await;
+    // Reorder: move random ahead of general.
+    ada.send("CHANNEL META #team/random position :-1");
+    ada.recv().await;
+
+    // Read the layout back, ordered.
+    ada.send("@label=cl CHANNELS team");
+    let mut layout = Vec::new();
+    for _ in 0..3 {
+        let reply = ada.recv().await;
+        assert_eq!(reply.label.as_deref(), Some("cl"));
+        let Event::ChannelLayout {
+            channel,
+            category,
+            position,
+        } = reply.event
+        else {
+            panic!("expected CHANNEL-LAYOUT");
+        };
+        layout.push((channel.to_string(), category, position));
+    }
+    // voice (uncategorized) first, then text by position: random(-1) before general(0).
+    assert_eq!(layout[0].0, "#team/voice");
+    assert_eq!(
+        layout[1],
+        ("#team/random".to_string(), Some("text".to_string()), -1)
+    );
+    assert_eq!(
+        layout[2],
+        ("#team/general".to_string(), Some("text".to_string()), 0)
+    );
+
+    // Non-owner can set neither (needs pin cap in the ns).
+    let mut eve = ready(&ctx, "eve").await;
+    eve.send("CHANNEL META #team/general category :hijack");
+    eve.expect_err(ErrCode::CapRequired).await;
+    // ...but can read a public/unlisted namespace's layout.
+    eve.send("CHANNELS team");
+    assert!(matches!(
+        eve.recv().await.event,
+        Event::ChannelLayout { .. }
+    ));
+}

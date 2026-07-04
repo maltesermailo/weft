@@ -356,6 +356,8 @@ impl ChannelStore for MemoryStore {
                 policy,
                 topic: None,
                 view_gated: false,
+                category: None,
+                position: 0,
             });
         Ok(())
     }
@@ -399,6 +401,41 @@ impl ChannelStore for MemoryStore {
     async fn delete_channel(&self, name: &ChannelName) -> Result<bool, StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         Ok(inner.channels.remove(name).is_some())
+    }
+
+    async fn set_channel_layout(
+        &self,
+        name: &ChannelName,
+        category: Option<&str>,
+        position: i64,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(record) = inner.channels.get_mut(name) {
+            record.category = category.map(str::to_string);
+            record.position = position;
+        }
+        Ok(())
+    }
+
+    async fn channels_in_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<(ChannelName, ChannelRecord)>, StoreError> {
+        let prefix = format!("#{namespace}/");
+        let inner = self.inner.lock().expect("store lock");
+        let mut out: Vec<(ChannelName, ChannelRecord)> = inner
+            .channels
+            .iter()
+            .filter(|(name, _)| name.as_str().starts_with(&prefix))
+            .map(|(name, record)| (name.clone(), record.clone()))
+            .collect();
+        out.sort_by(|(an, ar), (bn, br)| {
+            ar.category
+                .cmp(&br.category)
+                .then(ar.position.cmp(&br.position))
+                .then(an.cmp(bn))
+        });
+        Ok(out)
     }
 }
 

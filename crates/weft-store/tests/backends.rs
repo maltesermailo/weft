@@ -464,11 +464,23 @@ where
     let record = store.namespace(&ns).await.unwrap().unwrap();
     assert_eq!(record.owner.as_str(), format!("owner-{tag}"));
     assert_eq!(record.root_key, "B64ROOT==");
-    assert_eq!(store.namespaces_owned(&format!("owner-{tag}")).await.unwrap(), 1);
+    assert_eq!(
+        store
+            .namespaces_owned(&format!("owner-{tag}"))
+            .await
+            .unwrap(),
+        1
+    );
 
     // Meta + visibility.
-    store.set_namespace_meta(&ns, "title", "The Lounge").await.unwrap();
-    store.set_namespace_meta(&ns, "icon", ":game:").await.unwrap();
+    store
+        .set_namespace_meta(&ns, "title", "The Lounge")
+        .await
+        .unwrap();
+    store
+        .set_namespace_meta(&ns, "icon", ":game:")
+        .await
+        .unwrap();
     store.set_namespace_visibility(&ns, "public").await.unwrap();
     let record = store.namespace(&ns).await.unwrap().unwrap();
     assert_eq!(record.title.as_deref(), Some("The Lounge"));
@@ -477,16 +489,60 @@ where
     // DISCOVER lists public namespaces, cursor-paginated.
     let page = store.list_public(None, 100).await.unwrap();
     assert!(page.iter().any(|n| n.name == ns));
-    let after_all = store.list_public(Some(&format!("gaming{tag}")), 100).await.unwrap();
-    assert!(!after_all.iter().any(|n| n.name == ns), "cursor is exclusive");
+    let after_all = store
+        .list_public(Some(&format!("gaming{tag}")), 100)
+        .await
+        .unwrap();
+    assert!(
+        !after_all.iter().any(|n| n.name == ns),
+        "cursor is exclusive"
+    );
 
     // Unlisted/private namespaces never appear in DISCOVER.
-    store.set_namespace_visibility(&ns, "private").await.unwrap();
+    store
+        .set_namespace_visibility(&ns, "private")
+        .await
+        .unwrap();
     let page = store.list_public(None, 100).await.unwrap();
     assert!(!page.iter().any(|n| n.name == ns));
 
     assert!(store.delete_namespace(&ns).await.unwrap());
     assert!(store.namespace(&ns).await.unwrap().is_none());
+
+    // -- channel layout: categories + order within a namespace --
+    let nsl = format!("layout{tag}");
+    let c1: weft_proto::ChannelName = format!("#{nsl}/general").parse().unwrap();
+    let c2: weft_proto::ChannelName = format!("#{nsl}/random").parse().unwrap();
+    let c3: weft_proto::ChannelName = format!("#{nsl}/voice").parse().unwrap();
+    for c in [&c1, &c2, &c3] {
+        store
+            .upsert_channel(c, RetentionPolicy::Permanent)
+            .await
+            .unwrap();
+    }
+    // general: text/0, random: text/1, voice: (no category)/0
+    store
+        .set_channel_layout(&c1, Some("text"), 0)
+        .await
+        .unwrap();
+    store
+        .set_channel_layout(&c2, Some("text"), 1)
+        .await
+        .unwrap();
+    store.set_channel_layout(&c3, None, 0).await.unwrap();
+    let ordered = store.channels_in_namespace(&nsl).await.unwrap();
+    let names: Vec<String> = ordered.iter().map(|(n, _)| n.to_string()).collect();
+    // Uncategorized (voice) sorts first (NULL category), then text by position.
+    assert_eq!(
+        names,
+        vec![
+            format!("#{nsl}/voice"),
+            format!("#{nsl}/general"),
+            format!("#{nsl}/random")
+        ]
+    );
+    assert_eq!(ordered[1].1.category.as_deref(), Some("text"));
+    assert_eq!(ordered[1].1.position, 0);
 }
 
 #[tokio::test]

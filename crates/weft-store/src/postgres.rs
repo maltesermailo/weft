@@ -529,23 +529,12 @@ impl ChannelStore for PgStore {
     }
 
     async fn channel(&self, name: &ChannelName) -> Result<Option<ChannelRecord>, StoreError> {
-        let row =
-            sqlx::query("SELECT policy, topic, view_gated FROM weft_channels WHERE name = $1")
-                .bind(name.as_str())
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(backend_err)?;
-        row.map(|row| {
-            Ok(ChannelRecord {
-                policy: row
-                    .get::<&str, _>("policy")
-                    .parse()
-                    .map_err(|_| StoreError::Backend("corrupt channel policy".to_string()))?,
-                topic: row.get("topic"),
-                view_gated: row.get("view_gated"),
-            })
-        })
-        .transpose()
+        let row = sqlx::query("SELECT * FROM weft_channels WHERE name = $1")
+            .bind(name.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        row.map(|row| channel_from_row(&row)).transpose()
     }
 
     async fn set_channel_topic(&self, name: &ChannelName, topic: &str) -> Result<(), StoreError> {
@@ -580,6 +569,61 @@ impl ChannelStore for PgStore {
             .map_err(backend_err)?;
         Ok(result.rows_affected() == 1)
     }
+
+    async fn set_channel_layout(
+        &self,
+        name: &ChannelName,
+        category: Option<&str>,
+        position: i64,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE weft_channels SET category = $2, position = $3 WHERE name = $1")
+            .bind(name.as_str())
+            .bind(category)
+            .bind(position)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn channels_in_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<(ChannelName, ChannelRecord)>, StoreError> {
+        let prefix = format!("#{namespace}/%");
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM weft_channels WHERE name LIKE $1
+            ORDER BY category NULLS FIRST, position, name
+            "#,
+        )
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.iter()
+            .map(|row| {
+                let name = row
+                    .get::<&str, _>("name")
+                    .parse()
+                    .map_err(|_| StoreError::Backend("corrupt channel name".to_string()))?;
+                Ok((name, channel_from_row(row)?))
+            })
+            .collect()
+    }
+}
+
+fn channel_from_row(row: &sqlx::postgres::PgRow) -> Result<ChannelRecord, StoreError> {
+    Ok(ChannelRecord {
+        policy: row
+            .get::<&str, _>("policy")
+            .parse()
+            .map_err(|_| StoreError::Backend("corrupt channel policy".to_string()))?,
+        topic: row.get("topic"),
+        view_gated: row.get("view_gated"),
+        category: row.get("category"),
+        position: row.get::<Option<i64>, _>("position").unwrap_or(0),
+    })
 }
 
 #[async_trait]
@@ -863,12 +907,14 @@ impl NamespaceStore for PgStore {
             "icon" => "icon",
             _ => return Ok(()),
         };
-        sqlx::query(&format!("UPDATE weft_namespaces SET {column} = $2 WHERE name = $1"))
-            .bind(name.as_str())
-            .bind(value)
-            .execute(&self.pool)
-            .await
-            .map_err(backend_err)?;
+        sqlx::query(&format!(
+            "UPDATE weft_namespaces SET {column} = $2 WHERE name = $1"
+        ))
+        .bind(name.as_str())
+        .bind(value)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
         Ok(())
     }
 

@@ -228,6 +228,13 @@ pub enum Event {
     More {
         cursor: String,
     },
+    /// `CHANNEL-LAYOUT <#chan> <position>` with optional `category=` — one
+    /// per channel in a namespace's layout (spec extension).
+    ChannelLayout {
+        channel: ChannelName,
+        category: Option<String>,
+        position: i64,
+    },
     Err(ErrEvent),
     /// Any event outside the known set — MUST be ignored by clients.
     Unknown {
@@ -531,6 +538,21 @@ impl Event {
                     cursor: args.req("cursor")?.to_string(),
                 })
             }
+            "CHANNEL-LAYOUT" => {
+                let mut args = Args::new(line, "CHANNEL-LAYOUT");
+                let channel = args.req("channel")?.parse()?;
+                let position = args.req("position")?;
+                let position = position.parse().map_err(|_| ParseError::BadParam {
+                    verb: "CHANNEL-LAYOUT",
+                    what: "position",
+                    value: position.to_string(),
+                })?;
+                Ok(Event::ChannelLayout {
+                    channel,
+                    category: line.tags.get("category").filter(|v| !v.is_empty()).cloned(),
+                    position,
+                })
+            }
             "ERR" => {
                 let mut args = Args::new(line, "ERR");
                 Ok(Event::Err(ErrEvent {
@@ -769,6 +791,20 @@ impl Event {
                 )
             }
             Event::More { cursor } => ("MORE", vec![cursor.clone()], None),
+            Event::ChannelLayout {
+                channel,
+                category,
+                position,
+            } => {
+                if let Some(category) = category {
+                    tags.insert("category".to_string(), category.clone());
+                }
+                (
+                    "CHANNEL-LAYOUT",
+                    vec![channel.to_string(), position.to_string()],
+                    None,
+                )
+            }
             Event::Err(err) => {
                 if let Some(retry_after) = err.retry_after {
                     tags.insert("retry-after".to_string(), retry_after.to_string());
@@ -1140,6 +1176,24 @@ mod tests {
             channel: "#general".parse().unwrap(),
             key: "topic".into(),
             value: "welcome to the channel".into(),
+        }));
+    }
+
+    #[test]
+    fn channel_layout_round_trips() {
+        round_trip(&Reply::with_label(
+            Event::ChannelLayout {
+                channel: "#gaming/general".parse().unwrap(),
+                category: Some("text".into()),
+                position: 3,
+            },
+            "c1",
+        ));
+        // Uncategorized.
+        round_trip(&Reply::new(Event::ChannelLayout {
+            channel: "#gaming/lobby".parse().unwrap(),
+            category: None,
+            position: 0,
         }));
     }
 

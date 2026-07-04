@@ -127,6 +127,22 @@ pub trait ChannelStore: Send + Sync {
 
     /// CHANNEL DELETE. False = no such channel.
     async fn delete_channel(&self, name: &ChannelName) -> Result<bool, StoreError>;
+
+    /// Set a channel's layout within its namespace (category + position) —
+    /// the Discord-style ordering (spec extension).
+    async fn set_channel_layout(
+        &self,
+        name: &ChannelName,
+        category: Option<&str>,
+        position: i64,
+    ) -> Result<(), StoreError>;
+
+    /// Channels in a namespace, ordered by (category, position, name) — the
+    /// layout the client renders. `namespace` matches the `#ns/…` prefix.
+    async fn channels_in_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<(ChannelName, ChannelRecord)>, StoreError>;
 }
 
 /// Capability grants + per-scope revocation epochs (§6.5, §10.4). The
