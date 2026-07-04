@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 use weft_proto::{ErrCode, Event, Reply};
 use weft_transport::insecure::client_endpoint;
 use weft_transport::QuicControlStream;
-use weftd::config::{Config, Identity, Listen};
+use weftd::config::{ChannelConfig, Config, Identity, Listen};
 
 // ---- harness ----
 
@@ -24,7 +24,10 @@ async fn start_with(channels: &[&str], tweak: impl FnOnce(&mut Config)) -> weftd
     let mut config = Config {
         network: "test.example".to_string(),
         motd: Some("conformance".to_string()),
-        channels: channels.iter().map(|c| c.to_string()).collect(),
+        channels: channels
+            .iter()
+            .map(|c| ChannelConfig::Name(c.to_string()))
+            .collect(),
         listen: Listen {
             quic: "127.0.0.1:0".parse().unwrap(),
             ws: Some("127.0.0.1:0".parse().unwrap()),
@@ -437,4 +440,136 @@ async fn operator_pem_certificates_are_accepted() {
     assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
     server.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- M3a: persistence, mutations, HISTORY ----
+
+/// The full message lifecycle over real QUIC: post, edit, react, delete,
+/// then fetch HISTORY and check the batch is the §12.1 materialization.
+#[tokio::test]
+async fn message_lifecycle_and_history_over_quic() {
+    let server = start_with(&[], |config| {
+        config.channels = vec![
+            ChannelConfig::Name("#kept".to_string()),
+            ChannelConfig::Detailed {
+                name: "#volatile".to_string(),
+                policy: "ephemeral".to_string(),
+            },
+        ];
+    })
+    .await;
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#kept").await;
+
+    // The configured non-default policy is announced on join (§5.2).
+    ada.send("JOIN #volatile").await;
+    ada.recv().await; // MEMBER
+    let reply = ada.recv().await;
+    assert!(
+        matches!(&reply.event, Event::Policy { policy, .. } if policy.to_string() == "ephemeral"),
+        "got {reply:?}"
+    );
+
+    ada.send("MSG #kept :draft").await;
+    let Event::Message(msg) = ada.recv().await.event else {
+        panic!()
+    };
+    let msgid = msg.msgid.to_string();
+    ada.send(&format!("EDIT {msgid} :final")).await;
+    assert!(matches!(ada.recv().await.event, Event::Edited { .. }));
+    ada.send(&format!("REACT {msgid} 🚀")).await;
+    assert!(matches!(ada.recv().await.event, Event::Reaction { .. }));
+
+    ada.send("@label=h1 HISTORY #kept").await;
+    assert!(matches!(ada.recv().await.event, Event::BatchStart { .. }));
+    let Event::Message(materialized) = ada.recv().await.event else {
+        panic!("expected materialized MESSAGE")
+    };
+    assert_eq!(materialized.body, "final");
+    assert_eq!(materialized.edited, Some(1));
+    let Event::Reactions { emoji, count, .. } = ada.recv().await.event else {
+        panic!("expected REACTIONS summary")
+    };
+    assert_eq!((emoji.as_str(), count), ("🚀", 1));
+    let Event::BatchEnd { compacted, .. } = ada.recv().await.event else {
+        panic!()
+    };
+    assert!(compacted);
+
+    // Ephemeral channel: honest empty batch.
+    ada.send("MSG #volatile :vanishes").await;
+    ada.recv().await;
+    ada.send("HISTORY #volatile").await;
+    assert!(matches!(ada.recv().await.event, Event::BatchStart { .. }));
+    let Event::BatchEnd {
+        truncated: true, ..
+    } = ada.recv().await.event
+    else {
+        panic!("ephemeral history must be empty + truncated")
+    };
+    server.shutdown().await;
+}
+
+// ---- M3b: DMs + MARK sync ----
+
+#[tokio::test]
+async fn dms_and_mark_sync_over_quic() {
+    let server = start_server(&["#general"]).await;
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    let mut bob = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+    bob.ready("bob").await;
+
+    // DM: labeled echo to sender, copy to recipient, history symmetric.
+    ada.send("@label=d1 MSG @bob :hey bob").await;
+    let echo = ada.recv().await;
+    assert_eq!(echo.label.as_deref(), Some("d1"));
+    let Event::Message(sent) = &echo.event else {
+        panic!()
+    };
+    let copy = bob.recv().await;
+    let Event::Message(received) = &copy.event else {
+        panic!("expected DM MESSAGE, got {copy:?}");
+    };
+    assert_eq!(received.msgid, sent.msgid);
+
+    bob.send("HISTORY @ada").await;
+    assert!(matches!(bob.recv().await.event, Event::BatchStart { .. }));
+    let Event::Message(item) = bob.recv().await.event else {
+        panic!()
+    };
+    assert_eq!(item.body, "hey bob");
+    assert!(matches!(bob.recv().await.event, Event::BatchEnd { .. }));
+
+    // Unknown recipient: the anti-enumeration code (§2.2).
+    ada.send("MSG @nobody :hello?").await;
+    let reply = ada.recv().await;
+    assert!(matches!(&reply.event, Event::Err(e) if e.code == ErrCode::NoSuchTarget));
+
+    // MARK: echo to the marker, sync to the same account's other device.
+    let mut ada2 = QuicClient::connect(server.quic_addr).await;
+    ada2.send("HELLO weft/1").await;
+    ada2.recv().await;
+    ada2.send(&format!("AUTH PASSWORD ada :{PASSWORD}")).await;
+    ada2.recv().await;
+
+    ada.send("JOIN #general").await;
+    ada.recv().await;
+    ada.recv().await;
+    ada.send("MSG #general :mark me").await;
+    let Event::Message(msg) = ada.recv().await.event else {
+        panic!()
+    };
+    ada.send(&format!("@label=k1 MARK #general {}", msg.msgid))
+        .await;
+    let echo = ada.recv().await;
+    assert_eq!(echo.label.as_deref(), Some("k1"));
+    assert!(matches!(&echo.event, Event::Marked { .. }));
+    let sync = ada2.recv().await;
+    assert!(
+        matches!(&sync.event, Event::Marked { msgid, .. } if *msgid == msg.msgid),
+        "second device must get the MARKED sync, got {sync:?}"
+    );
+    server.shutdown().await;
 }

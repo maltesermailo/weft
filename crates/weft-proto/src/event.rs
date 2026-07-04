@@ -1,4 +1,4 @@
-//! Server → client events for the M0 verb set (§7). Unknown events decode
+//! Server → client events (§7). Unknown events decode
 //! to [`Event::Unknown`] and MUST be ignored by clients (§7).
 
 use crate::errcode::ErrCode;
@@ -7,7 +7,7 @@ use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
 use crate::name::{ChannelName, NetworkName, Target, UserRef};
 use crate::policy::RetentionPolicy;
-use crate::types::{MemberAction, MsgMeta, PresenceStatus, TypingState};
+use crate::types::{MemberAction, MsgMeta, PresenceStatus, ReactionOp, TypingState};
 
 /// An event plus its optional `label` echo (§3.5). Only direct responses
 /// carry a label; broadcast copies never do — that distinction is the
@@ -62,6 +62,10 @@ pub struct MessageEvent {
     pub msgid: MsgId,
     pub body: String,
     pub meta: MsgMeta,
+    /// Batch form only (§12.1): number of edits collapsed into `body`.
+    pub edited: Option<u64>,
+    /// Batch form only: unix ms of the final edit (`edited-at=`).
+    pub edited_at: Option<u64>,
 }
 
 /// `ERR <CODE> [context] :text` (§8).
@@ -90,7 +94,7 @@ impl ErrEvent {
     }
 }
 
-/// M0 event set.
+/// The event set through M3 (§7).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// `WELCOME <network> [:motd]` with `features=`/`attestation=` tags (§3.6).
@@ -141,8 +145,51 @@ pub enum Event {
     Pong {
         token: Option<String>,
     },
+    /// `EDITED <target> <user@net> :new` — live only, never in batches
+    /// (§7, §12.1). Carries its own `msgid=` plus `edit-of=`.
+    Edited {
+        target: Target,
+        user: UserRef,
+        msgid: MsgId,
+        edit_of: MsgId,
+        body: String,
+    },
+    /// `DELETED <target> <msgid>` — the tombstone (§7); `by=` optional.
+    Deleted {
+        target: Target,
+        msgid: MsgId,
+        by: Option<UserRef>,
+    },
+    /// `REACTION <target> <msgid> <emoji>` with `op=`, `by=` — live only.
+    Reaction {
+        target: Target,
+        msgid: MsgId,
+        emoji: String,
+        op: ReactionOp,
+        by: UserRef,
+    },
+    /// `REACTIONS <target> <msgid> <emoji> <count>` — batch summary form
+    /// (§12.1); `by=` lists the first ≤20 actors, count is authoritative.
+    Reactions {
+        target: Target,
+        msgid: MsgId,
+        emoji: String,
+        count: u64,
+        by: Vec<UserRef>,
+    },
+    /// `BATCH START` with `id=` — opens a HISTORY page (§7).
+    BatchStart {
+        id: String,
+    },
+    /// `BATCH END` with `id=` + `truncated`/`compacted` flags. `truncated`
+    /// marks retention gaps — silence about gaps is forbidden (§6.4).
+    BatchEnd {
+        id: String,
+        truncated: bool,
+        compacted: bool,
+    },
     Err(ErrEvent),
-    /// Any event outside the M0 set — MUST be ignored by clients.
+    /// Any event outside the known set — MUST be ignored by clients.
     Unknown {
         verb: String,
     },
@@ -210,6 +257,8 @@ impl Event {
                     msgid,
                     body: args.trailing_req("body")?.to_string(),
                     meta: MsgMeta::from_tags(&line.tags)?,
+                    edited: u64_tag(line, "edited", "MESSAGE")?,
+                    edited_at: u64_tag(line, "edited-at", "MESSAGE")?,
                 })))
             }
             "MEMBER" => {
@@ -257,6 +306,113 @@ impl Event {
                     token: args.opt().map(str::to_string),
                 })
             }
+            "EDITED" => {
+                let mut args = Args::new(line, "EDITED");
+                let tag_msgid = |key: &'static str| -> Result<MsgId, ParseError> {
+                    line.tags
+                        .get(key)
+                        .ok_or(ParseError::MissingParam {
+                            verb: "EDITED",
+                            what: key,
+                        })?
+                        .parse()
+                };
+                Ok(Event::Edited {
+                    target: args.req("target")?.parse()?,
+                    user: args.req("user")?.parse()?,
+                    msgid: tag_msgid("msgid")?,
+                    edit_of: tag_msgid("edit-of")?,
+                    body: args.trailing_req("new body")?.to_string(),
+                })
+            }
+            "DELETED" => {
+                let mut args = Args::new(line, "DELETED");
+                Ok(Event::Deleted {
+                    target: args.req("target")?.parse()?,
+                    msgid: args.req("msgid")?.parse()?,
+                    by: line.tags.get("by").map(|v| v.parse()).transpose()?,
+                })
+            }
+            "REACTION" => {
+                let mut args = Args::new(line, "REACTION");
+                Ok(Event::Reaction {
+                    target: args.req("target")?.parse()?,
+                    msgid: args.req("msgid")?.parse()?,
+                    emoji: args.req("emoji")?.to_string(),
+                    op: line
+                        .tags
+                        .get("op")
+                        .ok_or(ParseError::MissingParam {
+                            verb: "REACTION",
+                            what: "op tag",
+                        })?
+                        .parse()?,
+                    by: line
+                        .tags
+                        .get("by")
+                        .ok_or(ParseError::MissingParam {
+                            verb: "REACTION",
+                            what: "by tag",
+                        })?
+                        .parse()?,
+                })
+            }
+            "REACTIONS" => {
+                let mut args = Args::new(line, "REACTIONS");
+                let target = args.req("target")?.parse()?;
+                let msgid = args.req("msgid")?.parse()?;
+                let emoji = args.req("emoji")?.to_string();
+                let count = args.req("count")?;
+                let count = count.parse().map_err(|_| ParseError::BadParam {
+                    verb: "REACTIONS",
+                    what: "count",
+                    value: count.to_string(),
+                })?;
+                let by = line
+                    .tags
+                    .get("by")
+                    .map(|v| {
+                        v.split(',')
+                            .filter(|a| !a.is_empty())
+                            .map(str::parse)
+                            .collect::<Result<Vec<UserRef>, _>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                Ok(Event::Reactions {
+                    target,
+                    msgid,
+                    emoji,
+                    count,
+                    by,
+                })
+            }
+            "BATCH" => {
+                let mut args = Args::new(line, "BATCH");
+                let sub = args.req("START|END")?.to_ascii_uppercase();
+                let id = line
+                    .tags
+                    .get("id")
+                    .filter(|v| !v.is_empty())
+                    .cloned()
+                    .ok_or(ParseError::MissingParam {
+                        verb: "BATCH",
+                        what: "id tag",
+                    })?;
+                match sub.as_str() {
+                    "START" => Ok(Event::BatchStart { id }),
+                    "END" => Ok(Event::BatchEnd {
+                        id,
+                        truncated: line.tags.contains_key("truncated"),
+                        compacted: line.tags.contains_key("compacted"),
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "BATCH",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
             "ERR" => {
                 let mut args = Args::new(line, "ERR");
                 Ok(Event::Err(ErrEvent {
@@ -300,6 +456,12 @@ impl Event {
             Event::Message(message) => {
                 message.meta.write_tags(&mut tags)?;
                 tags.insert("msgid".to_string(), message.msgid.to_string());
+                if let Some(edited) = message.edited {
+                    tags.insert("edited".to_string(), edited.to_string());
+                }
+                if let Some(edited_at) = message.edited_at {
+                    tags.insert("edited-at".to_string(), edited_at.to_string());
+                }
                 (
                     "MESSAGE",
                     vec![message.target.to_string(), message.sender.to_string()],
@@ -346,6 +508,82 @@ impl Event {
                 None,
             ),
             Event::Pong { token } => ("PONG", token.iter().cloned().collect(), None),
+            Event::Edited {
+                target,
+                user,
+                msgid,
+                edit_of,
+                body,
+            } => {
+                tags.insert("msgid".to_string(), msgid.to_string());
+                tags.insert("edit-of".to_string(), edit_of.to_string());
+                (
+                    "EDITED",
+                    vec![target.to_string(), user.to_string()],
+                    Some(body.clone()),
+                )
+            }
+            Event::Deleted { target, msgid, by } => {
+                if let Some(by) = by {
+                    tags.insert("by".to_string(), by.to_string());
+                }
+                ("DELETED", vec![target.to_string(), msgid.to_string()], None)
+            }
+            Event::Reaction {
+                target,
+                msgid,
+                emoji,
+                op,
+                by,
+            } => {
+                tags.insert("op".to_string(), op.to_string());
+                tags.insert("by".to_string(), by.to_string());
+                (
+                    "REACTION",
+                    vec![target.to_string(), msgid.to_string(), emoji.clone()],
+                    None,
+                )
+            }
+            Event::Reactions {
+                target,
+                msgid,
+                emoji,
+                count,
+                by,
+            } => {
+                if !by.is_empty() {
+                    let actors: Vec<String> = by.iter().map(UserRef::to_string).collect();
+                    tags.insert("by".to_string(), actors.join(","));
+                }
+                (
+                    "REACTIONS",
+                    vec![
+                        target.to_string(),
+                        msgid.to_string(),
+                        emoji.clone(),
+                        count.to_string(),
+                    ],
+                    None,
+                )
+            }
+            Event::BatchStart { id } => {
+                tags.insert("id".to_string(), id.clone());
+                ("BATCH", vec!["START".to_string()], None)
+            }
+            Event::BatchEnd {
+                id,
+                truncated,
+                compacted,
+            } => {
+                tags.insert("id".to_string(), id.clone());
+                if *truncated {
+                    tags.insert("truncated".to_string(), String::new());
+                }
+                if *compacted {
+                    tags.insert("compacted".to_string(), String::new());
+                }
+                ("BATCH", vec!["END".to_string()], None)
+            }
             Event::Err(err) => {
                 if let Some(retry_after) = err.retry_after {
                     tags.insert("retry-after".to_string(), retry_after.to_string());
@@ -432,6 +670,8 @@ mod tests {
                     fmt: Some("md".into()),
                     ..MsgMeta::default()
                 },
+                edited: None,
+                edited_at: None,
             })),
             "req-1", // echo copy carries the sender's label = the ack (§9.2)
         ));
@@ -445,6 +685,8 @@ mod tests {
                 attachments: vec!["ref1".into()],
                 ..MsgMeta::default()
             },
+            edited: None,
+            edited_at: None,
         }))));
         assert_eq!(
             Reply::parse("MESSAGE #general ada@hda.example :hi"),
@@ -543,6 +785,120 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn batch_form_message_round_trips_with_edit_tags() {
+        // §12.1 wire form: final body + edited count/timestamp, no EDITED chain.
+        let reply = Reply::new(Event::Message(Box::new(MessageEvent {
+            target: "#general".parse().unwrap(),
+            sender: "ada@hda.example".parse().unwrap(),
+            msgid: MSGID.parse().unwrap(),
+            body: "final text".into(),
+            meta: MsgMeta::default(),
+            edited: Some(3),
+            edited_at: Some(1_700_000_000_000),
+        })));
+        let wire = reply.serialize().unwrap();
+        assert!(wire.contains("edited=3"), "{wire}");
+        assert!(wire.contains("edited-at=1700000000000"), "{wire}");
+        round_trip(&reply);
+    }
+
+    #[test]
+    fn edited_event_round_trips_live_form() {
+        round_trip(&Reply::new(Event::Edited {
+            target: "#general".parse().unwrap(),
+            user: "ada@hda.example".parse().unwrap(),
+            msgid: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap(),
+            edit_of: MSGID.parse().unwrap(),
+            body: "corrected".into(),
+        }));
+        // Both msgid= and edit-of= are required.
+        assert!(Reply::parse(
+            "@msgid=hda.example/01ARZ3NDEKTSV4RRFFQ69G5FB0 EDITED #a ada@hda.example :x"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn deleted_tombstone_round_trips() {
+        round_trip(&Reply::new(Event::Deleted {
+            target: "#general".parse().unwrap(),
+            msgid: MSGID.parse().unwrap(),
+            by: Some("mod@hda.example".parse().unwrap()),
+        }));
+        round_trip(&Reply::new(Event::Deleted {
+            target: "@ada".parse().unwrap(),
+            msgid: MSGID.parse().unwrap(),
+            by: None,
+        }));
+    }
+
+    #[test]
+    fn reaction_live_and_summary_forms_round_trip() {
+        round_trip(&Reply::new(Event::Reaction {
+            target: "#general".parse().unwrap(),
+            msgid: MSGID.parse().unwrap(),
+            emoji: "🦀".into(),
+            op: ReactionOp::Add,
+            by: "ada@hda.example".parse().unwrap(),
+        }));
+        // Batch summary (§12.1): count authoritative, actors capped upstream.
+        // Shortcodes travel bare — `:ferris:` would collide with the §4
+        // trailing marker (spec §18 #8).
+        let reply = Reply::new(Event::Reactions {
+            target: "#general".parse().unwrap(),
+            msgid: MSGID.parse().unwrap(),
+            emoji: "ferris".into(),
+            count: 41,
+            by: vec![
+                "ada@hda.example".parse().unwrap(),
+                "bob@hda.example".parse().unwrap(),
+            ],
+        });
+        let wire = reply.serialize().unwrap();
+        assert!(
+            wire.contains("by=ada@hda.example,bob@hda.example"),
+            "{wire}"
+        );
+        round_trip(&reply);
+        // Empty actor list stays representable (by= omitted).
+        round_trip(&Reply::new(Event::Reactions {
+            target: "#general".parse().unwrap(),
+            msgid: MSGID.parse().unwrap(),
+            emoji: "x".into(),
+            count: 0,
+            by: vec![],
+        }));
+    }
+
+    #[test]
+    fn batch_brackets_round_trip() {
+        let start = Reply::with_label(Event::BatchStart { id: "b1".into() }, "h1");
+        assert_eq!(start.serialize().unwrap(), "@id=b1;label=h1 BATCH START");
+        round_trip(&start);
+
+        let end = Reply::with_label(
+            Event::BatchEnd {
+                id: "b1".into(),
+                truncated: true,
+                compacted: true,
+            },
+            "h1",
+        );
+        // Flag tags carry no value (§4).
+        assert_eq!(
+            end.serialize().unwrap(),
+            "@compacted;id=b1;label=h1;truncated BATCH END"
+        );
+        round_trip(&end);
+        round_trip(&Reply::new(Event::BatchEnd {
+            id: "b2".into(),
+            truncated: false,
+            compacted: false,
+        }));
+        assert!(Reply::parse("BATCH START").is_err()); // id required
     }
 
     #[test]

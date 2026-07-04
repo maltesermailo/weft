@@ -35,7 +35,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```
 
-Toolchain: MSRV 1.75, no nightly. Deps so far (workspace-pinned): thiserror, ulid, tokio, tokio-util, futures-util, quinn, rustls (**ring provider only** — a second provider makes the process default ambiguous), rustls-pki-types, rcgen (ring), tokio-tungstenite, tracing(+subscriber), serde, toml, anyhow, ed25519-dalek, ciborium, base64, rand, sha2, subtle, axum, rustls-pemfile.
+Toolchain: MSRV 1.75, no nightly. Deps so far (workspace-pinned): thiserror, ulid, tokio, tokio-util, futures-util, quinn, rustls (**ring provider only** — a second provider makes the process default ambiguous), rustls-pki-types, rcgen (ring), tokio-tungstenite, tracing(+subscriber), serde, toml, anyhow, ed25519-dalek, ciborium, base64, rand, argon2, async-trait, axum, rustls-pemfile, sqlx (postgres, runtime queries only — no compile-time DB).
 
 ## Conventions
 
@@ -71,12 +71,15 @@ Actor-per-channel, task-per-connection, `tokio::mpsc` inboxes + `broadcast` fan-
 - **M0 ✅** codec: weft-proto for session+relay verbs (HELLO/REGISTER/AUTH×4/QUIT/PING/PONG/PRESENCE/JOIN/PART/TYPING/MARK/MSG incl. `@user` DM targets), events, error registry. 49 tests green.
 - **M1 ✅** echo server: `ControlStream` trait (defined in weft-core — its port; weftd adapts the transport types), quinn acceptor (ALPN `weft/1`), WS fallback (tokio-tungstenite; axum arrives with well-known in M2), session FSM `NEGOTIATING→UNAUTHED→READY` (§3.3), static config channel registry + actors, MSG relay with label echo-ack + `(session,label)` dedup, `ephemeral` only, anonymous AUTH (real auth = M2). Conformance: black-box QUIC+WS tests in `crates/weftd/tests/conformance/`. 73 tests green workspace-wide.
 - **M2 ✅** identity: weft-crypto (Ed25519 keys, deterministic-CBOR attestations, challenge proofs, constant-time password hashes), REGISTER/AUTH PASSWORD/AUTH KEY/AUTH PROOF/AUTH ENROLL with uniform AUTH-FAILED, in-memory account registry (traits + persistence = M3), `/.well-known/weft` (axum), operator PEM certs + persisted signing key. 101 tests green workspace-wide.
-- **M3** persistence: sqlx **PostgreSQL** store (connection URL in config; memory impl remains the test/dev backend, so `weftd` still runs DB-less), retention policies + purge task, HISTORY/BATCH, EDIT/DELETE/REACT materialization, **compaction task (§12.1: audit window, edit collapse, REACTIONS summaries)**, MARK sync, DMs. Postgres integration tests gate on `WEFT_TEST_DATABASE_URL` (skipped when absent).
+- **M3a ✅** persistence, memory path: weft-store (EventStore/AccountStore traits, memory backend, **§12.1 materialization as one shared pure fn**), per-channel retention config, EDIT/DELETE/REACT (+UNREACT) with origin/author checks, HISTORY/BATCH (compacted wire form, honest `truncated` via purge watermark), argon2 PHC password hashes. 134 tests green.
+- **M3b ✅** persistence, durable path: sqlx **PostgreSQL** backend behind the weft-store traits (one shared contract suite runs against both backends; PG tests gate on `WEFT_TEST_DATABASE_URL`), **channels load from the store at boot** (config = seed data — the substrate for M4's CHANNEL CREATE), maintenance task (retention purge + §12.1 compaction via one shared pure `compaction_plan`), MARK sync + §9.7 MARKED snapshot, DMs via the account directory actor, verification-claims infrastructure (email/age/... — store level only, wire flow needs spec design). 146 tests green.
 - **M4** capabilities: token mint/verify chains, GRANT/REVOKE, revocation epochs, NS verbs **incl. recovery ladder (NS RECOVERY SET / RECOVER / RECOVERY CANCEL, delay windows, root-history)**, CHANNEL verbs, INVITE lifecycle, view gating, DISCOVER, REPORT/REPORTS verbs + retention holds (§6.7, §12.1).
 - **M5** federation: BRIDGE manifest state machine, remote ingestion, strictest-policy negotiation, backfill (§11.7), NETBLOCK, REPORT-FORWARD (§11.9).
 - **M6+** media (BLAKE3 content addressing, STREAM, mirroring §11.8), threads filter, E2EE (openmls, feature `e2ee`), WEFT-RT voice, WEFT-IRC gateway (a third `ControlStream` impl in its own crate).
 
-Current focus: **M3** (persistence): weft-store traits (`EventStore`, `AccountStore` — the in-memory `Accounts` in weft-core becomes the memory impl and password hashing upgrades to a real KDF before hashes touch disk), sqlx PostgreSQL, retention + purge, HISTORY/BATCH, EDIT/DELETE/REACT materialization, compaction (§12.1), MARK sync, DMs.
+Current focus: **M4** (capabilities).
+
+Parked owner requests (need spec design before implementation — §18 territory): email/age verification **wire flow** (store infrastructure exists: `weft_store::Verification`, claim→confirm lifecycle); web admin panel (would ride the axum surface in weftd).
 
 ## Deliberately deferred — do not add
 

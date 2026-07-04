@@ -15,14 +15,43 @@ pub struct Config {
     /// WELCOME trailing text (§3.6).
     pub motd: Option<String>,
     /// The static channel set (JOIN never auto-creates and CHANNEL CREATE
-    /// is M4, so channels exist only by being listed here).
-    pub channels: Vec<String>,
+    /// is M4, so channels exist only by being listed here). Entries are a
+    /// bare name (`"#general"`, default policy `retained:90d` per §6.3) or
+    /// `{ name = "#logs", policy = "ephemeral" }`.
+    pub channels: Vec<ChannelConfig>,
     /// §6.1: REGISTER works only when `open`.
     pub registration: Registration,
+    /// §9.5: one retention policy for all DMs (default `permanent`).
+    pub dm_policy: String,
     pub listen: Listen,
     pub identity: Identity,
+    pub storage: Storage,
     /// TLS identity for QUIC. Absent → fresh self-signed (dev only).
     pub tls: Option<Tls>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ChannelConfig {
+    Name(String),
+    Detailed { name: String, policy: String },
+}
+
+impl ChannelConfig {
+    pub fn name(&self) -> &str {
+        match self {
+            ChannelConfig::Name(name) => name,
+            ChannelConfig::Detailed { name, .. } => name,
+        }
+    }
+
+    /// §6.3: CHANNEL CREATE defaults to `retained:90d`.
+    pub fn policy(&self) -> &str {
+        match self {
+            ChannelConfig::Name(_) => "retained:90d",
+            ChannelConfig::Detailed { policy, .. } => policy,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -59,15 +88,49 @@ pub struct Tls {
     pub key: PathBuf,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Storage {
+    pub backend: StorageBackend,
+    /// PostgreSQL connection URL (required for `backend = "postgres"`).
+    pub url: Option<String>,
+    /// Retention purge + compaction cadence.
+    pub maintenance_interval_secs: u64,
+    /// §12.1 `compact-after` audit window.
+    pub compact_after_hours: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageBackend {
+    /// In-memory: DB-less dev/test; nothing survives a restart.
+    #[default]
+    Memory,
+    Postgres,
+}
+
+impl Default for Storage {
+    fn default() -> Self {
+        Self {
+            backend: StorageBackend::Memory,
+            url: None,
+            maintenance_interval_secs: 300,
+            compact_after_hours: 24,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             network: "localhost".to_string(),
             motd: None,
-            channels: vec!["#general".to_string()],
+            channels: vec![ChannelConfig::Name("#general".to_string())],
             registration: Registration::Open,
+            dm_policy: "permanent".to_string(),
             listen: Listen::default(),
             identity: Identity::default(),
+            storage: Storage::default(),
             tls: None,
         }
     }

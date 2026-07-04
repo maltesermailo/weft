@@ -21,8 +21,9 @@ use tokio::sync::mpsc;
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        eprintln!("usage: weft-tui [host:port] [account] [#channel]");
-        eprintln!("defaults: 127.0.0.1:4433, guest<pid>, no auto-join");
+        eprintln!("usage: weft-tui [host:port] [account] [#channel] [password]");
+        eprintln!("defaults: 127.0.0.1:4433, guest<pid>, no auto-join, dev password");
+        eprintln!("(existing account with another password: pass it, or /login in-app)");
         return Ok(());
     }
     let target = args.first().map(String::as_str).unwrap_or("127.0.0.1:4433");
@@ -34,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
         .parse::<weft_proto::Account>()
         .context("invalid account name (lowercase a-z 0-9 - _ .)")?;
     let autojoin = args.get(2).cloned();
+    let password = args.get(3).cloned().filter(|p| !p.is_empty());
 
     let (host, _) = target
         .rsplit_once(':')
@@ -50,7 +52,15 @@ async fn main() -> anyhow::Result<()> {
     spawn_input_thread(ev_tx);
 
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, App::new(account, autojoin, out_tx), ev_rx).await;
+    // ratatui::init doesn't grab the mouse; we want wheel scrolling.
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
+    let result = run(
+        &mut terminal,
+        App::new(account, password, autojoin, out_tx),
+        ev_rx,
+    )
+    .await;
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     // Give the net task a beat to flush the trailing QUIT.
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -62,7 +72,7 @@ async fn run(
     mut app: App,
     mut events: mpsc::UnboundedReceiver<AppEvent>,
 ) -> anyhow::Result<()> {
-    terminal.draw(|frame| ui::render(frame, &app))?;
+    terminal.draw(|frame| ui::render(frame, &mut app))?;
     while let Some(event) = events.recv().await {
         app.on_event(event);
         // Coalesce bursts (message floods, key repeats) into one redraw.
@@ -72,7 +82,7 @@ async fn run(
                 Err(_) => break,
             }
         }
-        terminal.draw(|frame| ui::render(frame, &app))?;
+        terminal.draw(|frame| ui::render(frame, &mut app))?;
         if app.quit {
             break;
         }

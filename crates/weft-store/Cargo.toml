@@ -1,0 +1,20 @@
+[package]
+name = "weft-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WEFT storage (L1): EventStore/AccountStore traits, in-memory backend, §12.1 materialization. Deps: proto only."
+
+[features]
+# sqlx PostgreSQL backend; off by default so weft-core test builds stay light.
+postgres = ["dep:sqlx"]
+
+[dependencies]
+weft-proto = { path = "../weft-proto" }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+sqlx = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -9,6 +9,7 @@ description = "WEFT domain logic (L2): session FSM, channel actors, registry. No
 [dependencies]
 weft-proto = { path = "../weft-proto" }
 weft-crypto = { path = "../weft-crypto" }
+weft-store = { path = "../weft-store" }
 rand = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

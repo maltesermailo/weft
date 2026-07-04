@@ -26,6 +26,10 @@ pub const MAX_PARAMS: usize = 15;
 pub const MAX_LABEL_BYTES: usize = 64;
 /// §6.4: at most 10 `attach.N` tags per MSG/MESSAGE.
 pub const MAX_ATTACHMENTS: usize = 10;
+/// §6.4: reaction emoji (or `:shortcode:`) length cap.
+pub const MAX_EMOJI_BYTES: usize = 32;
+/// §6.4: HISTORY page size cap; servers clamp, they don't error.
+pub const MAX_HISTORY_LIMIT: u32 = 500;
 
 /// Tag map. `BTreeMap` so serialization is deterministic (CLAUDE.md:
 /// deterministic output wherever a signature might apply). A flag tag

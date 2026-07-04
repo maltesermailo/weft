@@ -1,15 +1,25 @@
 //! Channel actor: one task exclusively owns one channel's member list and
 //! mints its msgids — the actor's inbox order IS the channel's total order
-//! (spec §9.1, architecture doc §3). Fan-out via `tokio::broadcast`; a
+//! (spec §9.1, architecture doc §3), which is also why every stored event
+//! is appended here and nowhere else. Fan-out via `tokio::broadcast`; a
 //! lagging subscriber gets `RecvError::Lagged`, which the session turns
-//! into `ERR SLOW` (§9.2) — the actor never buffers per-client.
+//! into `ERR SLOW` (§9.2).
+//!
+//! Commands arrive pre-validated by the session (membership, authorship,
+//! tombstone checks). Per-sender mpsc ordering makes that sound for a
+//! session's *own* actions; cross-session races (e.g. concurrent DELETE
+//! and EDIT) are tolerated by materialization, where Delete always wins.
+
+use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tracing::error;
 use ulid::Ulid;
 use weft_proto::{
     Account, ChannelName, Event, MemberAction, MessageEvent, MsgId, MsgMeta, NetworkName,
-    RetentionPolicy, Target, TypingState, UserRef,
+    ReactionOp, RetentionPolicy, Target, TypingState, UserRef,
 };
+use weft_store::{EventKind, EventRecord, EventStore, Scope};
 
 use crate::session::SessionId;
 
@@ -19,9 +29,9 @@ const BROADCAST_CAPACITY: usize = 512;
 const INBOX_CAPACITY: usize = 256;
 
 /// A broadcast item. `origin` lets each session tell its own events apart:
-/// the sender's MESSAGE copy becomes the labeled echo-ack (§9.2); its other
-/// own copies (MEMBER/TYPING) are skipped because the session already sent
-/// the direct response.
+/// the sender's MESSAGE/EDITED/DELETED/REACTION copy becomes the labeled
+/// echo-ack (§9.2); its other own copies are skipped because the session
+/// already sent the direct response.
 #[derive(Debug, Clone)]
 pub struct ChannelEvent {
     pub origin: SessionId,
@@ -51,14 +61,35 @@ enum Cmd {
         body: String,
         meta: MsgMeta,
     },
+    /// Pre-validated by the session (author, not tombstoned).
+    Edit {
+        session: SessionId,
+        root: MsgId,
+        body: String,
+    },
+    Delete {
+        session: SessionId,
+        root: MsgId,
+    },
+    React {
+        session: SessionId,
+        root: MsgId,
+        emoji: String,
+        add: bool,
+    },
     Typing {
         session: SessionId,
         state: TypingState,
     },
+    /// §6.1 PRESENCE: relayed to co-members, never stored, never bridged.
+    Presence {
+        session: SessionId,
+        status: weft_proto::PresenceStatus,
+    },
 }
 
-/// Cheap handle to a channel actor. All methods are fire-and-forget except
-/// `join`; results flow back through the broadcast stream.
+/// Cheap handle to a channel actor. Mutations are fire-and-forget: the
+/// broadcast copy (echoed with the sender's label) is the ack (§9.2).
 #[derive(Debug, Clone)]
 pub struct ChannelHandle {
     pub name: ChannelName,
@@ -94,25 +125,61 @@ impl ChannelHandle {
             .await;
     }
 
+    pub async fn edit(&self, session: SessionId, root: MsgId, body: String) {
+        let _ = self
+            .inbox
+            .send(Cmd::Edit {
+                session,
+                root,
+                body,
+            })
+            .await;
+    }
+
+    pub async fn delete(&self, session: SessionId, root: MsgId) {
+        let _ = self.inbox.send(Cmd::Delete { session, root }).await;
+    }
+
+    pub async fn react(&self, session: SessionId, root: MsgId, emoji: String, add: bool) {
+        let _ = self
+            .inbox
+            .send(Cmd::React {
+                session,
+                root,
+                emoji,
+                add,
+            })
+            .await;
+    }
+
     pub async fn typing(&self, session: SessionId, state: TypingState) {
         let _ = self.inbox.send(Cmd::Typing { session, state }).await;
     }
+
+    pub async fn presence(&self, session: SessionId, status: weft_proto::PresenceStatus) {
+        let _ = self.inbox.send(Cmd::Presence { session, status }).await;
+    }
 }
 
-/// Spawn the actor task. M1 actors live for the process lifetime (the
-/// channel set is static config; lazy spawn/park comes with dynamic
-/// channels in M4).
-pub fn spawn(name: ChannelName, network: NetworkName) -> ChannelHandle {
+/// Spawn the actor task. Actors live for the process lifetime (the channel
+/// set is static config until CHANNEL CREATE in M4).
+pub fn spawn(
+    name: ChannelName,
+    network: NetworkName,
+    policy: RetentionPolicy,
+    store: Arc<dyn EventStore>,
+) -> ChannelHandle {
     let (inbox_tx, inbox) = mpsc::channel(INBOX_CAPACITY);
     let handle = ChannelHandle {
         name: name.clone(),
         inbox: inbox_tx,
     };
     let actor = Actor {
+        scope: Scope::Channel(name.clone()),
         name,
         network,
-        // M1 is relay-only (§5.2 `ephemeral`); persistence lands in M3.
-        policy: RetentionPolicy::Ephemeral,
+        policy,
+        store,
         members: std::collections::HashMap::new(),
         events: broadcast::Sender::new(BROADCAST_CAPACITY),
         ulids: ulid::Generator::new(),
@@ -122,9 +189,11 @@ pub fn spawn(name: ChannelName, network: NetworkName) -> ChannelHandle {
 }
 
 struct Actor {
+    scope: Scope,
     name: ChannelName,
     network: NetworkName,
     policy: RetentionPolicy,
+    store: Arc<dyn EventStore>,
     members: std::collections::HashMap<SessionId, Account>,
     events: broadcast::Sender<ChannelEvent>,
     ulids: ulid::Generator,
@@ -133,11 +202,11 @@ struct Actor {
 impl Actor {
     async fn run(mut self, mut inbox: mpsc::Receiver<Cmd>) {
         while let Some(cmd) = inbox.recv().await {
-            self.handle(cmd);
+            self.handle(cmd).await;
         }
     }
 
-    fn handle(&mut self, cmd: Cmd) {
+    async fn handle(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Join {
                 session,
@@ -177,15 +246,21 @@ impl Actor {
                 body,
                 meta,
             } => {
-                let Some(account) = self.members.get(&session) else {
+                let Some(sender) = self.member(session) else {
                     return; // raced with a part; session-side checks already answered
                 };
-                let sender = UserRef::new(account.clone(), self.network.clone());
-                // Monotonic within the actor = per-channel total order. The
-                // generator only fails when >2^80 IDs land in one ms; fall
-                // back to a fresh random ULID rather than dropping traffic.
-                let ulid = self.ulids.generate().unwrap_or_else(|_| Ulid::new());
-                let msgid = MsgId::new(self.network.clone(), ulid);
+                let msgid = self.mint();
+                let record = EventRecord {
+                    scope: self.scope.clone(),
+                    msgid: msgid.clone(),
+                    root: msgid.clone(),
+                    sender: sender.clone(),
+                    kind: EventKind::Message {
+                        body: body.clone(),
+                        meta: meta.clone(),
+                    },
+                };
+                self.persist(record).await;
                 self.broadcast(
                     session,
                     Event::Message(Box::new(MessageEvent {
@@ -194,12 +269,100 @@ impl Actor {
                         msgid,
                         body,
                         meta,
+                        edited: None,
+                        edited_at: None,
                     })),
                 );
             }
+            Cmd::Edit {
+                session,
+                root,
+                body,
+            } => {
+                let Some(user) = self.member(session) else {
+                    return;
+                };
+                let msgid = self.mint();
+                self.persist(EventRecord {
+                    scope: self.scope.clone(),
+                    msgid: msgid.clone(),
+                    root: root.clone(),
+                    sender: user.clone(),
+                    kind: EventKind::Edit { body: body.clone() },
+                })
+                .await;
+                self.broadcast(
+                    session,
+                    Event::Edited {
+                        target: Target::Channel(self.name.clone()),
+                        user,
+                        msgid,
+                        edit_of: root,
+                        body,
+                    },
+                );
+            }
+            Cmd::Delete { session, root } => {
+                let Some(user) = self.member(session) else {
+                    return;
+                };
+                let msgid = self.mint();
+                self.persist(EventRecord {
+                    scope: self.scope.clone(),
+                    msgid,
+                    root: root.clone(),
+                    sender: user.clone(),
+                    kind: EventKind::Delete,
+                })
+                .await;
+                self.broadcast(
+                    session,
+                    Event::Deleted {
+                        target: Target::Channel(self.name.clone()),
+                        msgid: root,
+                        by: Some(user),
+                    },
+                );
+            }
+            Cmd::React {
+                session,
+                root,
+                emoji,
+                add,
+            } => {
+                let Some(user) = self.member(session) else {
+                    return;
+                };
+                let msgid = self.mint();
+                self.persist(EventRecord {
+                    scope: self.scope.clone(),
+                    msgid,
+                    root: root.clone(),
+                    sender: user.clone(),
+                    kind: EventKind::React {
+                        emoji: emoji.clone(),
+                        add,
+                    },
+                })
+                .await;
+                self.broadcast(
+                    session,
+                    Event::Reaction {
+                        target: Target::Channel(self.name.clone()),
+                        msgid: root,
+                        emoji,
+                        op: if add {
+                            ReactionOp::Add
+                        } else {
+                            ReactionOp::Remove
+                        },
+                        by: user,
+                    },
+                );
+            }
             Cmd::Typing { session, state } => {
-                if let Some(account) = self.members.get(&session) {
-                    let user = UserRef::new(account.clone(), self.network.clone());
+                if let Some(user) = self.member(session) {
+                    // Relay only — never stored (§6.3).
                     self.broadcast(
                         session,
                         Event::Typing {
@@ -210,11 +373,40 @@ impl Actor {
                     );
                 }
             }
+            Cmd::Presence { session, status } => {
+                if let Some(user) = self.member(session) {
+                    self.broadcast(session, Event::Presence { user, status });
+                }
+            }
         }
+    }
+
+    fn member(&self, session: SessionId) -> Option<UserRef> {
+        self.members.get(&session).map(|a| self.user(a))
     }
 
     fn user(&self, account: &Account) -> UserRef {
         UserRef::new(account.clone(), self.network.clone())
+    }
+
+    /// Monotonic within the actor = per-channel total order. The generator
+    /// only fails when >2^80 IDs land in one ms; fall back to a fresh
+    /// random ULID rather than dropping traffic.
+    fn mint(&mut self) -> MsgId {
+        let ulid = self.ulids.generate().unwrap_or_else(|_| Ulid::new());
+        MsgId::new(self.network.clone(), ulid)
+    }
+
+    /// §5.2 `ephemeral` = relay only; everything else is stored. A storage
+    /// failure degrades to relay-only delivery (live members still get the
+    /// event) rather than dropping traffic — logged, never silent.
+    async fn persist(&self, record: EventRecord) {
+        if self.policy == RetentionPolicy::Ephemeral {
+            return;
+        }
+        if let Err(e) = self.store.append(record).await {
+            error!(channel = %self.name, "event not persisted: {e}");
+        }
     }
 
     fn broadcast(&self, origin: SessionId, event: Event) {
@@ -228,7 +420,7 @@ fn member_event(channel: &ChannelName, user: UserRef, action: MemberAction, coun
         channel: channel.clone(),
         user,
         action,
-        display: None, // display profiles land with identity (M2)
+        display: None, // display profiles land with identity profiles
         count: Some(count),
     }
 }

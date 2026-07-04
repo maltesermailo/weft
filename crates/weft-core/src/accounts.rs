@@ -1,24 +1,16 @@
-//! In-memory account registry: password hashes + enrolled device keys.
-//!
-//! M2-scoped: accounts live for the process (a restart forgets them). M3
-//! introduces the `AccountStore` trait in weft-store with a PostgreSQL
-//! implementation; this type becomes its memory backend. The *semantics*
-//! here — uniform failure, constant-time verification — are permanent.
+//! Account operations over the [`AccountStore`] port. The *semantics* live
+//! here — uniform failure, constant-time verification (invariant 5) —
+//! while the storage backend (memory now, PostgreSQL in M3b) only holds
+//! rows. Password hashes cross the store boundary as PHC strings.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use weft_crypto::{PasswordHash, PublicKey};
-use weft_proto::Account;
+use weft_proto::{Account, MsgId};
+use weft_store::{AccountStore, StoreError};
 
-struct Record {
-    password: PasswordHash,
-    devices: Vec<PublicKey>,
-}
-
-#[derive(Default)]
 pub struct Accounts {
-    records: Mutex<HashMap<Account, Record>>,
+    store: Arc<dyn AccountStore>,
 }
 
 pub enum RegisterOutcome {
@@ -27,97 +19,141 @@ pub enum RegisterOutcome {
     Exists,
 }
 
-/// Hash compared against when the account does not exist, so unknown-account
-/// and wrong-password take the same code path AND the same time
-/// (security invariant 5: `AUTH-FAILED` is uniform).
+/// Hash verified against when the account does not exist, so
+/// unknown-account and wrong-password do the same argon2 work and take the
+/// same code path (invariant 5: `AUTH-FAILED` is uniform).
 fn dummy_hash() -> &'static PasswordHash {
     static DUMMY: OnceLock<PasswordHash> = OnceLock::new();
     DUMMY.get_or_init(|| PasswordHash::new("weftd-nonexistent-account-dummy"))
 }
 
 impl Accounts {
-    pub fn register(&self, account: &Account, password: &str) -> RegisterOutcome {
-        let mut records = self.records.lock().expect("accounts lock");
-        if records.contains_key(account) {
-            return RegisterOutcome::Exists;
-        }
-        records.insert(
-            account.clone(),
-            Record {
-                password: PasswordHash::new(password),
-                devices: Vec::new(),
-            },
-        );
-        RegisterOutcome::Created
+    pub fn new(store: Arc<dyn AccountStore>) -> Self {
+        Self { store }
     }
 
-    /// Constant-time, uniform: a missing account verifies (and fails)
-    /// against a dummy hash instead of returning early.
-    pub fn verify_password(&self, account: &Account, password: &str) -> bool {
-        let records = self.records.lock().expect("accounts lock");
-        let record = records.get(account);
-        let hash = record.map_or(dummy_hash(), |r| &r.password);
-        let matched = hash.verify(password);
-        matched && record.is_some()
+    pub async fn register(
+        &self,
+        account: &Account,
+        password: &str,
+    ) -> Result<RegisterOutcome, StoreError> {
+        let hash = PasswordHash::new(password);
+        Ok(if self.store.register(account, hash.as_phc()).await? {
+            RegisterOutcome::Created
+        } else {
+            RegisterOutcome::Exists
+        })
     }
 
-    /// Add a device key (idempotent). False iff the account is unknown —
-    /// unreachable from the session layer, which only enrolls while authed.
-    pub fn enroll_device(&self, account: &Account, device: PublicKey) -> bool {
-        let mut records = self.records.lock().expect("accounts lock");
-        match records.get_mut(account) {
-            None => false,
-            Some(record) => {
-                if !record.devices.contains(&device) {
-                    record.devices.push(device);
-                }
-                true
-            }
-        }
+    /// Constant-time, uniform: a missing (or corrupt) stored hash verifies
+    /// — and fails — against the dummy instead of returning early.
+    pub async fn verify_password(
+        &self,
+        account: &Account,
+        password: &str,
+    ) -> Result<bool, StoreError> {
+        let stored = self
+            .store
+            .password_phc(account)
+            .await?
+            .and_then(|phc| PasswordHash::from_phc(&phc).ok());
+        let known = stored.is_some();
+        let hash = stored.unwrap_or_else(|| dummy_hash().clone());
+        Ok(hash.verify(password) && known)
     }
 
-    pub fn device_enrolled(&self, account: &Account, device: &PublicKey) -> bool {
-        let records = self.records.lock().expect("accounts lock");
-        records
-            .get(account)
-            .is_some_and(|record| record.devices.contains(device))
+    pub async fn enroll_device(
+        &self,
+        account: &Account,
+        device: PublicKey,
+    ) -> Result<bool, StoreError> {
+        self.store.enroll_device(account, *device.as_bytes()).await
+    }
+
+    pub async fn device_enrolled(
+        &self,
+        account: &Account,
+        device: &PublicKey,
+    ) -> Result<bool, StoreError> {
+        self.store.device_enrolled(account, device.as_bytes()).await
+    }
+
+    pub async fn set_mark(
+        &self,
+        account: &Account,
+        target: &str,
+        msgid: &MsgId,
+    ) -> Result<(), StoreError> {
+        self.store.set_mark(account, target, msgid).await
+    }
+
+    pub async fn marks(&self, account: &Account) -> Result<Vec<(String, MsgId)>, StoreError> {
+        self.store.marks(account).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use weft_store::MemoryStore;
+
+    fn accounts() -> Accounts {
+        Accounts::new(Arc::new(MemoryStore::default()))
+    }
 
     fn account(s: &str) -> Account {
         s.parse().unwrap()
     }
 
-    #[test]
-    fn register_verify_and_conflict() {
-        let accounts = Accounts::default();
+    #[tokio::test]
+    async fn register_verify_and_conflict() {
+        let accounts = accounts();
         assert!(matches!(
-            accounts.register(&account("ada"), "pw-longenough"),
-            RegisterOutcome::Created
+            accounts.register(&account("ada"), "pw-longenough").await,
+            Ok(RegisterOutcome::Created)
         ));
         assert!(matches!(
-            accounts.register(&account("ada"), "other-password"),
-            RegisterOutcome::Exists
+            accounts.register(&account("ada"), "other-password").await,
+            Ok(RegisterOutcome::Exists)
         ));
-        assert!(accounts.verify_password(&account("ada"), "pw-longenough"));
-        assert!(!accounts.verify_password(&account("ada"), "wrong-password"));
+        assert!(accounts
+            .verify_password(&account("ada"), "pw-longenough")
+            .await
+            .unwrap());
+        assert!(!accounts
+            .verify_password(&account("ada"), "wrong-password")
+            .await
+            .unwrap());
         // Unknown account takes the same path and fails.
-        assert!(!accounts.verify_password(&account("ghost"), "pw-longenough"));
+        assert!(!accounts
+            .verify_password(&account("ghost"), "pw-longenough")
+            .await
+            .unwrap());
     }
 
-    #[test]
-    fn device_enrollment() {
-        let accounts = Accounts::default();
-        accounts.register(&account("ada"), "pw-longenough");
+    #[tokio::test]
+    async fn device_enrollment() {
+        let accounts = accounts();
+        accounts
+            .register(&account("ada"), "pw-longenough")
+            .await
+            .unwrap();
         let device = weft_crypto::Keypair::generate().public();
-        assert!(!accounts.device_enrolled(&account("ada"), &device));
-        assert!(accounts.enroll_device(&account("ada"), device));
-        assert!(accounts.enroll_device(&account("ada"), device)); // idempotent
-        assert!(accounts.device_enrolled(&account("ada"), &device));
-        assert!(!accounts.enroll_device(&account("ghost"), device));
+        assert!(!accounts
+            .device_enrolled(&account("ada"), &device)
+            .await
+            .unwrap());
+        assert!(accounts
+            .enroll_device(&account("ada"), device)
+            .await
+            .unwrap());
+        assert!(accounts
+            .device_enrolled(&account("ada"), &device)
+            .await
+            .unwrap());
+        assert!(!accounts
+            .enroll_device(&account("ghost"), device)
+            .await
+            .unwrap());
     }
 }

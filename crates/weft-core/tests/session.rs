@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use weft_core::{run_session, Attestation, ControlStream, Keypair, ServerCtx, ServerInfo};
+use weft_core::{
+    run_session, Attestation, ControlStream, Keypair, MemoryStore, ServerCtx, ServerInfo,
+};
+use weft_proto::RetentionPolicy;
 use weft_proto::{ErrCode, Event, MemberAction, Reply};
 
 struct MockStream {
@@ -70,10 +73,12 @@ impl Client {
 const PASSWORD: &str = "test-password-123";
 
 fn ctx(channels: &[&str]) -> Arc<ServerCtx> {
-    ctx_with(channels, true)
+    // §6.3 default policy.
+    let channels: Vec<(&str, &str)> = channels.iter().map(|c| (*c, "retained:90d")).collect();
+    ctx_with(&channels, true)
 }
 
-fn ctx_with(channels: &[&str], registration_open: bool) -> Arc<ServerCtx> {
+fn ctx_with(channels: &[(&str, &str)], registration_open: bool) -> Arc<ServerCtx> {
     let info = ServerInfo {
         network: "test.example".parse().unwrap(),
         motd: Some("welcome!".to_string()),
@@ -81,9 +86,13 @@ fn ctx_with(channels: &[&str], registration_open: bool) -> Arc<ServerCtx> {
     };
     Arc::new(ServerCtx::new(
         info,
-        channels.iter().map(|c| c.parse().unwrap()),
+        channels
+            .iter()
+            .map(|(c, p)| (c.parse().unwrap(), p.parse::<RetentionPolicy>().unwrap())),
         Keypair::generate(),
         registration_open,
+        Arc::new(MemoryStore::default()),
+        "permanent".parse().unwrap(), // §9.5 DM default
     ))
 }
 
@@ -378,7 +387,7 @@ async fn join_responds_member_policy_and_broadcasts() {
     let reply = ada.recv().await;
     assert_eq!(reply.label.as_deref(), Some("j1"));
     assert!(
-        matches!(&reply.event, Event::Policy { policy, .. } if policy.to_string() == "ephemeral")
+        matches!(&reply.event, Event::Policy { policy, .. } if policy.to_string() == "retained:90d")
     );
 
     // A second joiner is broadcast to ada — without a label (§3.5).
@@ -480,10 +489,10 @@ async fn msg_error_paths() {
     let ctx = ctx(&["#general", "#other"]);
     let mut client = joined(&ctx, "ada", "#general").await;
 
-    client.send("@label=e1 MSG @bob :hi"); // DMs are M3
+    client.send("@label=e1 MSG @ghost :hi"); // unknown DM recipient (§2.2)
     assert_eq!(
         client
-            .expect_err(ErrCode::Unsupported)
+            .expect_err(ErrCode::NoSuchTarget)
             .await
             .label
             .as_deref(),
@@ -580,4 +589,436 @@ async fn preauth_idle_times_out() {
     // §3.3: idle pre-auth sessions are closed after 30 s. Paused time
     // auto-advances, so this returns immediately when the timer fires.
     assert!(client.closed().await);
+}
+
+// ---- M3a: message mutations + HISTORY ----
+
+/// Send a MSG and return the echoed msgid.
+async fn say(client: &mut Client, channel: &str, body: &str) -> String {
+    client.send(&format!("MSG {channel} :{body}"));
+    let Event::Message(msg) = client.recv().await.event else {
+        panic!("expected MESSAGE echo");
+    };
+    msg.msgid.to_string()
+}
+
+#[tokio::test]
+async fn edit_echoes_with_label_and_broadcasts() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bob = joined(&ctx, "bob", "#general").await;
+    ada.recv().await; // bob's join broadcast
+
+    let msgid = say(&mut ada, "#general", "typo").await;
+    bob.recv().await; // bob's copy
+
+    ada.send(&format!("@label=e1 EDIT {msgid} :fixed"));
+    let echo = ada.recv().await;
+    assert_eq!(echo.label.as_deref(), Some("e1"));
+    let Event::Edited {
+        edit_of,
+        body,
+        msgid: edit_id,
+        ..
+    } = &echo.event
+    else {
+        panic!("expected EDITED echo, got {echo:?}");
+    };
+    assert_eq!(edit_of.to_string(), msgid);
+    assert_eq!(body, "fixed");
+    assert_ne!(
+        edit_id.to_string(),
+        msgid,
+        "edits get their own msgid (§9.3)"
+    );
+
+    let copy = bob.recv().await;
+    assert_eq!(copy.label, None);
+    assert!(matches!(&copy.event, Event::Edited { body, .. } if body == "fixed"));
+}
+
+#[tokio::test]
+async fn edit_authority_is_author_only() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bob = joined(&ctx, "bob", "#general").await;
+    ada.recv().await;
+
+    let msgid = say(&mut ada, "#general", "ada's message").await;
+    bob.recv().await;
+
+    // §6.4: edit-own only — no edit-any, deliberately.
+    bob.send(&format!("@label=x EDIT {msgid} :bob was here"));
+    let reply = bob.expect_err(ErrCode::CapRequired).await;
+    let Event::Err(err) = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(err.context.as_deref(), Some("edit-own"));
+
+    // DELETE likewise (delete-any arrives with capability tokens, M4).
+    bob.send(&format!("DELETE {msgid}"));
+    bob.expect_err(ErrCode::CapRequired).await;
+}
+
+#[tokio::test]
+async fn mutations_on_missing_or_foreign_msgids_are_indistinct() {
+    let ctx = ctx(&["#general"]);
+    let mut client = joined(&ctx, "ada", "#general").await;
+
+    // Nonexistent local msgid → NO-SUCH-TARGET (§2.2).
+    client.send("EDIT test.example/01ARZ3NDEKTSV4RRFFQ69G5FAV :x");
+    client.expect_err(ErrCode::NoSuchTarget).await;
+    // Foreign origin → FORBIDDEN origin (§11.4).
+    client.send("EDIT other.example/01ARZ3NDEKTSV4RRFFQ69G5FAV :x");
+    let reply = client.expect_err(ErrCode::Forbidden).await;
+    let Event::Err(err) = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(err.context.as_deref(), Some("origin"));
+}
+
+#[tokio::test]
+async fn deleted_messages_tombstone_and_reject_further_mutation() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let msgid = say(&mut ada, "#general", "regrettable").await;
+
+    ada.send(&format!("@label=d1 DELETE {msgid}"));
+    let echo = ada.recv().await;
+    assert_eq!(echo.label.as_deref(), Some("d1"));
+    assert!(matches!(&echo.event, Event::Deleted { msgid: m, .. } if m.to_string() == msgid));
+
+    // §2.2: a tombstoned msgid is indistinguishable from an expired one.
+    ada.send(&format!("EDIT {msgid} :necromancy"));
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+    ada.send(&format!("REACT {msgid} 👍"));
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn reactions_relay_live() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bob = joined(&ctx, "bob", "#general").await;
+    ada.recv().await;
+    let msgid = say(&mut ada, "#general", "react to me").await;
+    bob.recv().await;
+
+    bob.send(&format!("@label=r1 REACT {msgid} 🦀"));
+    let echo = bob.recv().await;
+    assert_eq!(echo.label.as_deref(), Some("r1"));
+    let copy = ada.recv().await;
+    let Event::Reaction { emoji, op, by, .. } = &copy.event else {
+        panic!("expected REACTION, got {copy:?}");
+    };
+    assert_eq!(emoji, "🦀");
+    assert_eq!(*op, weft_proto::ReactionOp::Add);
+    assert_eq!(by.to_string(), "bob@test.example");
+
+    bob.send(&format!("UNREACT {msgid} 🦀"));
+    bob.recv().await;
+    let copy = ada.recv().await;
+    assert!(matches!(
+        &copy.event,
+        Event::Reaction {
+            op: weft_proto::ReactionOp::Remove,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn history_serves_compacted_batches() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+
+    let m1 = say(&mut ada, "#general", "first").await;
+    let m2 = say(&mut ada, "#general", "second v1").await;
+    let m3 = say(&mut ada, "#general", "doomed").await;
+    // Mutate: edit m2 twice, react to m1 (net one 👍), delete m3.
+    ada.send(&format!("EDIT {m2} :second v2"));
+    ada.recv().await;
+    ada.send(&format!("EDIT {m2} :second final"));
+    ada.recv().await;
+    ada.send(&format!("REACT {m1} 👍"));
+    ada.recv().await;
+    ada.send(&format!("REACT {m1} 🔥"));
+    ada.recv().await;
+    ada.send(&format!("UNREACT {m1} 🔥"));
+    ada.recv().await;
+    ada.send(&format!("DELETE {m3}"));
+    ada.recv().await;
+
+    ada.send("@label=h1 HISTORY #general limit=10");
+    let start = ada.recv().await;
+    assert_eq!(
+        start.label.as_deref(),
+        Some("h1"),
+        "batch lines echo the label (§3.5)"
+    );
+    let Event::BatchStart { id } = &start.event else {
+        panic!("expected BATCH START, got {start:?}");
+    };
+    let batch_id = id.clone();
+
+    // m1: original body + REACTIONS summary (👍 only — 🔥 cancelled, §12.1).
+    let Event::Message(msg1) = ada.recv().await.event else {
+        panic!()
+    };
+    assert_eq!(msg1.msgid.to_string(), m1);
+    assert_eq!(msg1.body, "first");
+    assert_eq!(msg1.edited, None);
+    let Event::Reactions {
+        emoji, count, by, ..
+    } = ada.recv().await.event
+    else {
+        panic!("expected REACTIONS summary");
+    };
+    assert_eq!((emoji.as_str(), count), ("👍", 1));
+    assert_eq!(by.len(), 1);
+
+    // m2: final body + edited=2, never an EDITED chain (invariant 10).
+    let Event::Message(msg2) = ada.recv().await.event else {
+        panic!()
+    };
+    assert_eq!(msg2.msgid.to_string(), m2);
+    assert_eq!(msg2.body, "second final");
+    assert_eq!(msg2.edited, Some(2));
+    assert!(msg2.edited_at.is_some());
+
+    // m3: tombstone only.
+    let Event::Deleted { msgid, .. } = ada.recv().await.event else {
+        panic!("expected DELETED tombstone");
+    };
+    assert_eq!(msgid.to_string(), m3);
+
+    let end = ada.recv().await;
+    let Event::BatchEnd {
+        id,
+        truncated,
+        compacted,
+    } = &end.event
+    else {
+        panic!("expected BATCH END, got {end:?}");
+    };
+    assert_eq!(id, &batch_id);
+    assert!(compacted, "wire form is always materialized (§12.1)");
+    assert!(!truncated, "nothing purged yet");
+}
+
+#[tokio::test]
+async fn history_pages_with_before_cursor() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    for i in 1..=5 {
+        say(&mut ada, "#general", &format!("m{i}")).await;
+    }
+    ada.send("HISTORY #general limit=2");
+    ada.recv().await; // START
+    let Event::Message(newer) = ada.recv().await.event else {
+        panic!()
+    };
+    assert_eq!(newer.body, "m4");
+    let Event::Message(newest) = ada.recv().await.event else {
+        panic!()
+    };
+    assert_eq!(newest.body, "m5");
+    ada.recv().await; // END
+
+    ada.send(&format!("HISTORY #general limit=2 before={}", newer.msgid));
+    ada.recv().await;
+    let Event::Message(m2) = ada.recv().await.event else {
+        panic!()
+    };
+    assert_eq!(m2.body, "m2");
+    let Event::Message(m3) = ada.recv().await.event else {
+        panic!()
+    };
+    assert_eq!(m3.body, "m3");
+    ada.recv().await;
+}
+
+#[tokio::test]
+async fn ephemeral_history_is_empty_and_truncated() {
+    let ctx = ctx_with(&[("#volatile", "ephemeral")], true);
+    let mut ada = joined(&ctx, "ada", "#volatile").await;
+    say(&mut ada, "#volatile", "gone with the wind").await;
+
+    ada.send("HISTORY #volatile");
+    assert!(matches!(ada.recv().await.event, Event::BatchStart { .. }));
+    let end = ada.recv().await;
+    let Event::BatchEnd { truncated, .. } = &end.event else {
+        panic!("ephemeral batch must be empty, got {end:?}");
+    };
+    assert!(truncated, "silence about gaps is forbidden (§6.4)");
+
+    // And nothing can be edited — nothing was stored.
+    ada.send("EDIT test.example/01ARZ3NDEKTSV4RRFFQ69G5FAV :x");
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn history_requires_membership() {
+    let ctx = ctx(&["#general", "#other"]);
+    let mut client = joined(&ctx, "ada", "#general").await;
+    client.send("HISTORY #other");
+    let reply = client.expect_err(ErrCode::CapRequired).await;
+    let Event::Err(err) = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(err.context.as_deref(), Some("view"));
+    client.send("HISTORY #ghost");
+    client.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+// ---- M3b: DMs, MARK sync, snapshots ----
+
+#[tokio::test]
+async fn dm_echo_delivery_and_multidevice_fanout() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+    // Bob's second device: AUTH PASSWORD on the same account.
+    let mut bob2 = connect(&ctx);
+    bob2.send("HELLO weft/1");
+    bob2.recv().await;
+    bob2.send(&format!("AUTH PASSWORD bob :{PASSWORD}"));
+    bob2.recv().await;
+
+    ada.send("@label=d1 MSG @bob :psst");
+    let echo = ada.recv().await;
+    assert_eq!(echo.label.as_deref(), Some("d1"), "DM echo is the ack");
+    let Event::Message(msg) = &echo.event else {
+        panic!("expected MESSAGE echo, got {echo:?}");
+    };
+    assert_eq!(msg.target.to_string(), "@bob");
+    assert_eq!(msg.sender.to_string(), "ada@test.example");
+
+    // Both of bob's devices receive it, without labels.
+    for device in [&mut bob, &mut bob2] {
+        let copy = device.recv().await;
+        assert_eq!(copy.label, None);
+        let Event::Message(copy_msg) = &copy.event else {
+            panic!("expected MESSAGE, got {copy:?}");
+        };
+        assert_eq!(copy_msg.msgid, msg.msgid);
+    }
+}
+
+#[tokio::test]
+async fn dm_mutations_and_history() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+
+    ada.send("MSG @bob :draft one");
+    let Event::Message(msg) = ada.recv().await.event else {
+        panic!()
+    };
+    let msgid = msg.msgid.to_string();
+    bob.recv().await;
+
+    // Author edits; peer reacts; both flow through the directory.
+    ada.send(&format!("@label=e1 EDIT {msgid} :final one"));
+    let echo = ada.recv().await;
+    assert_eq!(echo.label.as_deref(), Some("e1"));
+    assert!(matches!(&echo.event, Event::Edited { body, .. } if body == "final one"));
+    assert!(matches!(bob.recv().await.event, Event::Edited { .. }));
+
+    // Peer cannot edit the author's message (edit-own, §6.4).
+    bob.send(&format!("EDIT {msgid} :bob's version"));
+    bob.expect_err(ErrCode::CapRequired).await;
+    bob.send(&format!("REACT {msgid} 👍"));
+    bob.recv().await; // own REACTION echo
+    assert!(matches!(ada.recv().await.event, Event::Reaction { .. }));
+
+    // An outsider's mutation attempt is indistinguishable from nonexistent.
+    let mut eve = ready(&ctx, "eve").await;
+    eve.send(&format!("EDIT {msgid} :hijack"));
+    eve.expect_err(ErrCode::NoSuchTarget).await;
+    eve.send("HISTORY @ada");
+    assert!(matches!(eve.recv().await.event, Event::BatchStart { .. }));
+    let Event::BatchEnd { .. } = eve.recv().await.event else {
+        panic!("eve must not see ada+bob's DM");
+    };
+
+    // Participant history: materialized, compacted.
+    bob.send("@label=h1 HISTORY @ada");
+    assert!(matches!(bob.recv().await.event, Event::BatchStart { .. }));
+    let Event::Message(item) = bob.recv().await.event else {
+        panic!()
+    };
+    assert_eq!(item.body, "final one");
+    assert_eq!(item.edited, Some(1));
+    let Event::Reactions { count: 1, .. } = bob.recv().await.event else {
+        panic!("expected REACTIONS summary")
+    };
+    assert!(matches!(bob.recv().await.event, Event::BatchEnd { .. }));
+}
+
+#[tokio::test]
+async fn mark_syncs_across_devices_and_snapshots_on_login() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let msgid = say(&mut ada, "#general", "read me").await;
+
+    // Second device, online now.
+    let mut ada2 = connect(&ctx);
+    ada2.send("HELLO weft/1");
+    ada2.recv().await;
+    ada2.send(&format!("AUTH PASSWORD ada :{PASSWORD}"));
+    ada2.recv().await;
+
+    ada.send(&format!("@label=k1 MARK #general {msgid}"));
+    let echo = ada.recv().await;
+    assert_eq!(echo.label.as_deref(), Some("k1"));
+    assert!(matches!(&echo.event, Event::Marked { .. }));
+    // The other device gets the sync copy.
+    let sync = ada2.recv().await;
+    assert!(
+        matches!(&sync.event, Event::Marked { msgid: m, .. } if m.to_string() == msgid),
+        "got {sync:?}"
+    );
+
+    // A third device logging in later gets the snapshot (§9.7).
+    let mut ada3 = connect(&ctx);
+    ada3.send("HELLO weft/1");
+    ada3.recv().await;
+    ada3.send(&format!("AUTH PASSWORD ada :{PASSWORD}"));
+    ada3.recv().await; // WELCOME
+    let snapshot = ada3.recv().await;
+    assert!(
+        matches!(&snapshot.event, Event::Marked { msgid: m, .. } if m.to_string() == msgid),
+        "expected MARKED snapshot, got {snapshot:?}"
+    );
+
+    // MARK requires membership.
+    ada.send(&format!("MARK #ghost {msgid}"));
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn presence_relays_to_co_members_but_never_invisible() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bob = joined(&ctx, "bob", "#general").await;
+    ada.recv().await; // bob's join broadcast
+
+    bob.send("PRESENCE away");
+    let reply = ada.recv().await;
+    assert!(
+        matches!(&reply.event, Event::Presence { user, status, .. }
+            if user.to_string() == "bob@test.example" && status.to_string() == "away"),
+        "got {reply:?}"
+    );
+
+    // §6.1: invisible renders offline — it must NOT be relayed.
+    bob.send("PRESENCE invisible");
+    bob.send("PING check");
+    assert!(matches!(bob.recv().await.event, Event::Pong { .. }));
+    ada.send("PING probe");
+    assert!(
+        matches!(ada.recv().await.event, Event::Pong { .. }),
+        "ada must see no PRESENCE for invisible"
+    );
 }

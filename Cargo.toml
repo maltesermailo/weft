@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-core", "crates/weft-transport", "crates/weftd", "crates/weft-tui"]
+members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weftd", "crates/weft-tui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -32,6 +32,18 @@ ciborium = "0.2"
 base64 = "0.22"
 rand = "0.8"
 sha2 = "0.10"
+argon2 = "0.5"
+async-trait = "0.1"
 subtle = "2"
 axum = "0.7"
 rustls-pemfile = "2"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros"] }
+
+# argon2 at debug-build speed takes >1 s per hash, which makes auth-heavy
+# tests crawl and flake against client timeouts. Optimizing just the hash
+# crates keeps `cargo test` honest without touching production parameters.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

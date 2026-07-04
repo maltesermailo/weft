@@ -23,7 +23,8 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tracing::info;
-use weft_core::{Keypair, ServerCtx, ServerInfo};
+use weft_core::{ChannelStore, Keypair, MaintenanceConfig, MemoryStore, ServerCtx, ServerInfo};
+use weft_store::{AccountStore, EventStore, PgStore};
 
 pub use config::Config;
 
@@ -56,14 +57,31 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         .network
         .parse()
         .with_context(|| format!("invalid network name {:?}", config.network))?;
-    let channels = config
+    // Config channels are validated here, then *seeded* into the store —
+    // the store is the source of truth the registry loads from.
+    let seed_channels = config
         .channels
         .iter()
-        .map(|name| {
-            name.parse::<weft_proto::ChannelName>()
-                .with_context(|| format!("invalid channel {name:?}"))
+        .map(|channel| {
+            let name = channel
+                .name()
+                .parse::<weft_proto::ChannelName>()
+                .with_context(|| format!("invalid channel {:?}", channel.name()))?;
+            let policy = channel
+                .policy()
+                .parse::<weft_proto::RetentionPolicy>()
+                .with_context(|| format!("invalid policy {:?} for {}", channel.policy(), name))?;
+            anyhow::ensure!(
+                policy != weft_proto::RetentionPolicy::E2ee,
+                "e2ee channels land in M6 ({name})"
+            );
+            Ok((name, policy))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let dm_policy: weft_proto::RetentionPolicy = config
+        .dm_policy
+        .parse()
+        .with_context(|| format!("invalid dm_policy {:?}", config.dm_policy))?;
 
     // Network signing key (§10.2): persisted so attestations stay valid
     // across restarts; ephemeral only when explicitly configured away.
@@ -75,14 +93,58 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
     let info = ServerInfo {
         network: network.clone(),
         motd: config.motd.clone(),
-        features: Vec::new(), // media/voice/e2ee/backfill/presence: later milestones
+        features: vec!["presence".to_string()], // media/voice/e2ee/backfill: later
     };
-    let ctx = Arc::new(ServerCtx::new(
-        info,
-        channels,
-        identity,
-        config.registration == config::Registration::Open,
-    ));
+    // Backend selection. Both paths run the same seed-then-load boot:
+    // config channels are upserted, then the registry is built from
+    // list_channels() — channels created at runtime (M4) or by an earlier
+    // boot survive on Postgres.
+    let registration_open = config.registration == config::Registration::Open;
+    let maintenance = MaintenanceConfig {
+        interval: std::time::Duration::from_secs(config.storage.maintenance_interval_secs),
+        compact_after: std::time::Duration::from_secs(config.storage.compact_after_hours * 3600),
+    };
+    let (ctx, channels, mut tasks) = match config.storage.backend {
+        config::StorageBackend::Memory => {
+            boot(
+                info,
+                identity,
+                registration_open,
+                dm_policy,
+                maintenance,
+                Arc::new(MemoryStore::default()),
+                &seed_channels,
+            )
+            .await?
+        }
+        config::StorageBackend::Postgres => {
+            let url = config
+                .storage
+                .url
+                .as_deref()
+                .context("storage.backend = \"postgres\" requires storage.url")?;
+            let store = PgStore::connect(url)
+                .await
+                .context("connecting to PostgreSQL")?;
+            boot(
+                info,
+                identity,
+                registration_open,
+                dm_policy,
+                maintenance,
+                Arc::new(store),
+                &seed_channels,
+            )
+            .await?
+        }
+    };
+    info!(
+        channels = channels.len(),
+        backend = ?config.storage.backend,
+        registration = ?config.registration,
+        dm_policy = %dm_policy,
+        "channel registry loaded from store"
+    );
 
     // TLS identity: operator-provided PEM ("real certs"), else a fresh
     // self-signed one — fine for dev, unverifiable by design.
@@ -96,10 +158,10 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         .context("binding QUIC endpoint")?;
     let quic_addr = endpoint.local_addr()?;
 
-    let mut tasks = vec![tokio::spawn(acceptor::accept_quic(
+    tasks.push(tokio::spawn(acceptor::accept_quic(
         endpoint.clone(),
         Arc::clone(&ctx),
-    ))];
+    )));
 
     let ws_addr = match config.listen.ws {
         None => None,
@@ -193,4 +255,51 @@ fn self_signed(
         vec![cert.cert.der().clone()],
         PrivateKeyDer::Pkcs8(cert.key_pair.serialize_der().into()),
     ))
+}
+
+/// Seed config channels into the store, load the full channel set back
+/// (store = source of truth), build the context, start maintenance.
+#[allow(clippy::type_complexity)]
+async fn boot<S>(
+    info: ServerInfo,
+    identity: Keypair,
+    registration_open: bool,
+    dm_policy: weft_proto::RetentionPolicy,
+    maintenance: MaintenanceConfig,
+    store: Arc<S>,
+    seed: &[(weft_proto::ChannelName, weft_proto::RetentionPolicy)],
+) -> anyhow::Result<(
+    Arc<ServerCtx>,
+    Vec<(weft_proto::ChannelName, weft_proto::RetentionPolicy)>,
+    Vec<JoinHandle<()>>,
+)>
+where
+    S: EventStore + AccountStore + ChannelStore + 'static,
+{
+    for (name, policy) in seed {
+        store
+            .upsert_channel(name, *policy)
+            .await
+            .map_err(|e| anyhow::anyhow!("seeding channel {name}: {e}"))?;
+    }
+    let channels = store
+        .list_channels()
+        .await
+        .map_err(|e| anyhow::anyhow!("loading channels: {e}"))?;
+    let ctx = Arc::new(ServerCtx::new(
+        info,
+        channels.iter().cloned(),
+        identity,
+        registration_open,
+        Arc::clone(&store),
+        dm_policy,
+    ));
+    let events: Arc<dyn EventStore> = store;
+    let tasks = vec![weft_core::spawn_maintenance(
+        events,
+        channels.clone(),
+        dm_policy,
+        maintenance,
+    )];
+    Ok((ctx, channels, tasks))
 }

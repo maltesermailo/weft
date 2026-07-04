@@ -67,3 +67,66 @@ conformance tests and the TUI now share it — ~55 duplicated lines deleted.
 - Per-channel buffers instead of one timeline; unread markers via MARK (M3).
 - A `--ws` flag to exercise the WebSocket fallback path interactively.
 - Scripted "conversation replay" mode for load-testing channels.
+
+## M3 addendum — mutations, DMs, selection mode, presence
+
+*Status: 13 TUI unit tests (153 workspace-wide), clippy clean, both new
+interaction styles verified live under a pty against a Postgres-backed
+server.*
+
+**Commands**: `/edit [msgid] <text>` (defaults to your last message),
+`/delete [msgid]`, `/react` / `/unreact [msgid] <emoji>` (defaults to the
+last message seen), `/history [target] [limit]`, `/mark`,
+`/status <online|away|dnd|invisible>`. Explicit-msgid forms kept for
+protocol testing; tracked-msgid defaults for actual use.
+
+**Selection mode (the Discord-like part)**: `↑` on an empty input enters
+selection; `↑`/`↓` walk message entries (auto-scrolls into view, reversed
+highlight); then `e` prefills the input with the message's msgid + current
+body for editing (own messages only), `d` deletes, `r` prefills a react,
+`m` marks the channel read at that message, `Esc` returns to typing.
+`LogEntry` now carries an optional `MsgRef { msgid, target, body, own }`
+to power this; the renderer stashes the viewport height on `App` so
+selection can keep itself visible.
+
+**Conversation model**: DMs surface as `@peer` entries that Tab cycles
+alongside channels; an inbound DM becomes the current conversation if none
+is set. Joining a channel auto-fetches `HISTORY limit=20` (§9.7 client
+behavior — also exercises batches constantly). Batch messages render
+`(edited ×n)`, REACTIONS summaries, tombstones, `── history ──` brackets
+with truncated/compacted flags, and MARKED confirmations.
+
+**Presence**: server-side relay implemented in this pass (channel-actor
+broadcast to co-members; `invisible` accepted but never relayed — there is
+no "went offline" wire status, flagged as a spec gap). weftd now
+advertises `features=presence` (§3.6). TUI renders `● bob is away`.
+
+**Fixed along the way**: argon2 at debug-build speed (>1 s/hash) made
+auth-heavy tests crawl and flake against the 5 s client timeout under
+parallel load — `[profile.dev.package.argon2] opt-level = 3` dropped the
+core suite from 23.6 s to 1.55 s without touching production parameters.
+
+**Parked**: "edit servers" (channel/namespace administration) needs M4's
+CHANNEL/NS verbs — no protocol surface exists yet; the panel/TUI UX should
+be designed against those, not invented ahead of them.
+
+## Discord-parity addendum (same day)
+
+- **`↑` = edit your last message** (Discord muscle memory): prefills
+  `/edit <msgid> <current body>`; skips tombstoned messages; falls back to
+  browse mode when you haven't sent anything. Message browsing moved to
+  `Alt+↑` (or `/select`).
+- **Reaction picker** ("the smiley button"): `Ctrl+E` targets the newest
+  message, `r`/`+` the selected one; the input line becomes a 1–9 palette
+  (👍 ❤️ 😂 🎉 🤔 👀 🔥 🦀 😢); custom emoji still via `/react`.
+- **Infinite scroll**: `PageUp` at the top of the buffer issues
+  `HISTORY before=<oldest known> limit=20` and **splices the batch in at
+  the top** (selection/picker indices shift; old messages excluded from
+  newest-tracking; single in-flight backfill, keyed by request label).
+  Verified live against Postgres: paged from "old message 11" back through
+  "old message 1" into the previous session's edits and reactions.
+- Fixed en route: `send_command` now returns its label (backfill batch
+  recognition); dead `select_react` prefill removed.
+
+Status: 154 tests workspace-wide, clippy clean, all three interactions
+verified under a pty against a Postgres-backed server.

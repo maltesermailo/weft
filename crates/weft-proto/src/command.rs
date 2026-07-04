@@ -100,8 +100,33 @@ pub enum Command {
         body: Option<String>,
         meta: MsgMeta,
     },
-    /// Any verb outside the M0 set. Servers ignore it silently (§4).
+    /// `EDIT <msgid> :<new>` — edit-own only, honored at origin (§6.4).
+    Edit { msgid: MsgId, body: String },
+    /// `DELETE <msgid>` — tombstone (§6.4).
+    Delete { msgid: MsgId },
+    /// `REACT <msgid> <emoji>` — idempotent (§6.4).
+    React { msgid: MsgId, emoji: String },
+    /// `UNREACT <msgid> <emoji>`.
+    Unreact { msgid: MsgId, emoji: String },
+    /// `HISTORY <target> [before=] [after=] [limit=] [thread=]` —
+    /// key=value middle params, any order (§6.4).
+    History {
+        target: Target,
+        before: Option<MsgId>,
+        after: Option<MsgId>,
+        limit: Option<u32>,
+        thread: Option<MsgId>,
+    },
+    /// Any verb outside the known set. Servers ignore it silently (§4).
     Unknown { verb: String },
+}
+
+/// §6.4 emoji, ≤32 bytes. The `:shortcode:` form conflicts with the §4
+/// grammar (a leading `:` starts the trailing) — flagged in spec §18 #8;
+/// until that's decided, shortcodes travel bare and a leading colon is
+/// rejected. Middle-param grammar already excludes spaces.
+fn emoji_ok(emoji: &str) -> bool {
+    !emoji.is_empty() && emoji.len() <= crate::line::MAX_EMOJI_BYTES && !emoji.starts_with(':')
 }
 
 impl Command {
@@ -197,6 +222,72 @@ impl Command {
                     meta: MsgMeta::from_tags(&line.tags)?,
                 })
             }
+            "EDIT" => {
+                let mut args = Args::new(line, "EDIT");
+                Ok(Command::Edit {
+                    msgid: args.req("msgid")?.parse()?,
+                    body: args.trailing_req("new body")?.to_string(),
+                })
+            }
+            "DELETE" => {
+                let mut args = Args::new(line, "DELETE");
+                Ok(Command::Delete {
+                    msgid: args.req("msgid")?.parse()?,
+                })
+            }
+            "REACT" | "UNREACT" => {
+                let react = verb == "REACT";
+                let mut args = Args::new(line, if react { "REACT" } else { "UNREACT" });
+                let msgid = args.req("msgid")?.parse()?;
+                let emoji = args.req("emoji")?.to_string();
+                if !emoji_ok(&emoji) {
+                    return Err(ParseError::BadParam {
+                        verb: if react { "REACT" } else { "UNREACT" },
+                        what: "emoji",
+                        value: emoji,
+                    });
+                }
+                Ok(if react {
+                    Command::React { msgid, emoji }
+                } else {
+                    Command::Unreact { msgid, emoji }
+                })
+            }
+            "HISTORY" => {
+                let mut args = Args::new(line, "HISTORY");
+                let target = args.req("target")?.parse()?;
+                // key=value params in any order; unknown keys ignored
+                // (lenient-in), duplicates last-wins.
+                let mut before = None;
+                let mut after = None;
+                let mut limit = None;
+                let mut thread = None;
+                while let Some(param) = args.opt() {
+                    let Some((key, value)) = param.split_once('=') else {
+                        continue;
+                    };
+                    match key {
+                        "before" => before = Some(value.parse()?),
+                        "after" => after = Some(value.parse()?),
+                        "thread" => thread = Some(value.parse()?),
+                        "limit" => {
+                            limit = Some(value.parse().map_err(|_| ParseError::BadParam {
+                                verb: "HISTORY",
+                                what: "limit",
+                                value: value.to_string(),
+                            })?)
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Command::History {
+                    target,
+                    before,
+                    after,
+                    limit,
+                    thread,
+                })
+            }
             _ => Ok(Command::Unknown {
                 verb: verb.to_string(),
             }),
@@ -249,6 +340,44 @@ impl Command {
             Command::Msg { target, body, meta } => {
                 meta.write_tags(&mut tags)?;
                 ("MSG", vec![target.to_string()], body.clone())
+            }
+            Command::Edit { msgid, body } => ("EDIT", vec![msgid.to_string()], Some(body.clone())),
+            Command::Delete { msgid } => ("DELETE", vec![msgid.to_string()], None),
+            Command::React { msgid, emoji } | Command::Unreact { msgid, emoji } => {
+                if !emoji_ok(emoji) {
+                    return Err(SerializeError::BadParam {
+                        param: emoji.clone(),
+                        reason: "emoji must be 1..=32 bytes",
+                    });
+                }
+                let verb = if matches!(self, Command::React { .. }) {
+                    "REACT"
+                } else {
+                    "UNREACT"
+                };
+                (verb, vec![msgid.to_string(), emoji.clone()], None)
+            }
+            Command::History {
+                target,
+                before,
+                after,
+                limit,
+                thread,
+            } => {
+                let mut params = vec![target.to_string()];
+                if let Some(before) = before {
+                    params.push(format!("before={before}"));
+                }
+                if let Some(after) = after {
+                    params.push(format!("after={after}"));
+                }
+                if let Some(limit) = limit {
+                    params.push(format!("limit={limit}"));
+                }
+                if let Some(thread) = thread {
+                    params.push(format!("thread={thread}"));
+                }
+                ("HISTORY", params, None)
             }
             Command::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown command"));
@@ -453,6 +582,84 @@ mod tests {
             panic!()
         };
         assert_eq!(meta.attachments, vec!["a", "b", "j"]);
+    }
+
+    #[test]
+    fn edit_delete_round_trip() {
+        let edit = Request::with_label(
+            Command::Edit {
+                msgid: MSGID.parse().unwrap(),
+                body: "fixed the typo".into(),
+            },
+            "e1",
+        );
+        assert_eq!(
+            edit.serialize().unwrap(),
+            format!("@label=e1 EDIT {MSGID} :fixed the typo")
+        );
+        round_trip(&edit);
+        round_trip(&Request::new(Command::Delete {
+            msgid: MSGID.parse().unwrap(),
+        }));
+        // EDIT requires a body (empty trailing is a meaningful empty body).
+        assert!(Request::parse(&format!("EDIT {MSGID}")).is_err());
+    }
+
+    #[test]
+    fn react_unreact_round_trip_and_emoji_limits() {
+        round_trip(&Request::new(Command::React {
+            msgid: MSGID.parse().unwrap(),
+            emoji: "🦀".into(),
+        }));
+        round_trip(&Request::new(Command::Unreact {
+            msgid: MSGID.parse().unwrap(),
+            emoji: "ferris".into(), // bare shortcode (spec §18 #8)
+        }));
+        // >32 bytes rejected both directions.
+        assert!(Request::parse(&format!("REACT {MSGID} {}", "x".repeat(33))).is_err());
+        let over = Request::new(Command::React {
+            msgid: MSGID.parse().unwrap(),
+            emoji: "x".repeat(33),
+        });
+        assert!(over.serialize().is_err());
+        // Leading colon collides with the trailing marker (§4).
+        assert!(Request::parse(&format!("REACT {MSGID} :colon:")).is_err());
+    }
+
+    #[test]
+    fn history_params_any_order_round_trip() {
+        let request = Request::with_label(
+            Command::History {
+                target: "#general".parse().unwrap(),
+                before: Some(MSGID.parse().unwrap()),
+                after: None,
+                limit: Some(50),
+                thread: None,
+            },
+            "h1",
+        );
+        assert_eq!(
+            request.serialize().unwrap(),
+            format!("@label=h1 HISTORY #general before={MSGID} limit=50")
+        );
+        round_trip(&request);
+
+        // Any order, DM targets, unknown keys ignored (lenient-in).
+        let parsed =
+            Request::parse(&format!("HISTORY @ada limit=10 x-custom=1 after={MSGID}")).unwrap();
+        let Command::History {
+            target,
+            after: Some(_),
+            limit: Some(10),
+            before: None,
+            thread: None,
+        } = parsed.command
+        else {
+            panic!("bad parse: {parsed:?}");
+        };
+        assert_eq!(target.to_string(), "@ada");
+
+        assert!(Request::parse("HISTORY #general limit=abc").is_err());
     }
 
     #[test]

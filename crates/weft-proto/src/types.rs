@@ -71,6 +71,14 @@ wire_enum!(
     }
 );
 
+wire_enum!(
+    /// `REACTION ... op=add|remove` (§7) — live reaction increments.
+    ReactionOp, "reaction op", {
+        Add => "add",
+        Remove => "remove",
+    }
+);
+
 /// Metadata tags shared by `MSG` and `MESSAGE`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MsgMeta {

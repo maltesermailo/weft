@@ -191,8 +191,8 @@ S: @attestation=<b64> WELCOME hda.example
 **MSG** `MSG <#chan|@user> [:body]` — tags `fmt=md`, `reply-to=`, `thread=`, `attach.N=` (≤10). Cap `send` (+`attach`). Empty body legal iff attachments. **Echo `MESSAGE` (with `msgid` + `label`) is the ack.** Errors: `CAP-REQUIRED`, `TOO-LARGE`, `THROTTLED` (`retry-after=`), `NO-SUCH-TARGET`.
 **EDIT** `EDIT <msgid> :<new>` — Cap `edit-own` only (no `edit-any`, deliberately). Accepted only at the msgid's origin network; elsewhere `FORBIDDEN origin`. → `EDITED` broadcast.
 **DELETE** `DELETE <msgid>` — Cap `delete-own` | `delete-any`. Tombstone. → `DELETED`.
-**REACT / UNREACT** `REACT <msgid> <emoji>` — Unicode emoji ≤32 B or `:shortcode:` (ns emoji sets, open question). Cap `react`. Idempotent. → `REACTION op=add|remove` (live).
-**HISTORY** `HISTORY <target> [before=] [after=] [limit=<≤500>] [thread=]` — target: channel or `@user`. Cap: membership / acked manifest bounded by `history` flag. → `BATCH START` … **compacted** events (§12.1) … `BATCH END [truncated]`. `truncated` marks retention gaps; silence about gaps is forbidden.
+**REACT / UNREACT** `REACT <msgid> <emoji>` — Unicode emoji ≤32 B; shortcodes travel **bare** (a leading `:` collides with the §4 trailing marker — see §18 #8). Cap `react`. Idempotent. → `REACTION op=add|remove` (live).
+**HISTORY** `HISTORY <target> [before=<msgid>] [after=<msgid>] [limit=<≤500>] [thread=<msgid>]` — options are `key=value` middle params, any order, unknown keys ignored; target: channel or `@user`. Cap: membership / acked manifest bounded by `history` flag. → `BATCH START` … **compacted** events (§12.1) … `BATCH END [truncated]`. `truncated` marks retention gaps; silence about gaps is forbidden.
 **STREAM** `STREAM OFFER <media|backfill> <mime> <bytes>` → `STREAM ACCEPT <token>` → data-plane transfer. HISTORY switches to STREAM above ~200 events (RECOMMENDED).
 
 ### 6.5 Capabilities & invites
@@ -238,10 +238,10 @@ Invite tokens = capability tokens with **unbound subject**: one object = single-
 | `WELCOME <network>` | `features=`, `attestation=` | → READY |
 | `CHALLENGE <nonce>` | | keypair auth |
 | `MESSAGE <#chan|@user> <user@net> :body` | `msgid=`, `reply-to=`, `thread=`, `attach.N=`, `fmt=`, `label=` (echo only); **in batches also `edited=<n>`, `edited-at=<ms>`** | echo = ack |
-| `EDITED <#chan> <user@net> :new` | own `msgid=`, `edit-of=` | **live only** — compacted out of batches |
-| `DELETED <#chan> <msgid>` | `by=` | tombstone; sole survivor of a deleted message in batches |
-| `REACTION <#chan> <msgid> <emoji>` | `op=`, `by=` | **live only** |
-| `REACTIONS <#chan> <msgid> <emoji> <count>` | `by=` (first ≤20 actors, comma-sep) | **batch summary form** (§12.1) |
+| `EDITED <#chan\|@user> <user@net> :new` | own `msgid=`, `edit-of=` | **live only** — compacted out of batches |
+| `DELETED <#chan\|@user> <msgid>` | `by=` | tombstone; sole survivor of a deleted message in batches |
+| `REACTION <#chan\|@user> <msgid> <emoji>` | `op=`, `by=` | **live only** |
+| `REACTIONS <#chan\|@user> <msgid> <emoji> <count>` | `by=` (first ≤20 actors, comma-sep) | **batch summary form** (§12.1) |
 | `MEMBER <#chan> <user@net> <join\|part>` | `display=`, `count=` | `count=` = member count after the change (the §6.3 JOIN response) |
 | `TYPING <#chan> <user@net> <start\|stop>` | | never stored |
 | `MARKED <#chan> <msgid>` | | read-marker sync to the account's own sessions |
@@ -253,7 +253,7 @@ Invite tokens = capability tokens with **unbound subject**: one object = single-
 | `REPORTED <report-id>` | `label=` | ack to reporter |
 | `REPORT-FILED <report-id> <msgid> <category>` | `state=verified\|unverified\|reporter-attested`, `reporter=` (per config), `scope=` | to `reports` cap holders |
 | `REPORT-RESOLVED <report-id> <action>` | | handlers get full form; reporter gets minimal form |
-| `BATCH START\|END` | `id=`, `truncated`, **`compacted`** | brackets HISTORY |
+| `BATCH START\|END` | `id=`, `truncated`, **`compacted`** | brackets HISTORY; **every** line of a batch (brackets and items) echoes the request label — batches are data pages (§3.5) |
 | `MORE <cursor>` / `PONG` | | |
 | `ERR <CODE> [ctx] :text` | `label=`, `retry-after=`, `max=` | §8 |
 
@@ -464,7 +464,7 @@ Optional server-side RFC 2812 + IRCv3 gateway (:6697 TLS); the gateway is the ho
 5. Backfill quotas for `history: full` + `media: mirror` bridges.
 6. IRC-gateway media upload — implementation-defined for now.
 7. Cross-network DMs: consent + routing without a channel manifest.
-8. Custom emoji sets per namespace.
+8. Custom emoji sets per namespace. **Note (M3):** the `:shortcode:` form cannot travel as a middle param — a leading `:` is the §4 trailing marker. Until decided, implementations send shortcodes bare and reject leading-colon emoji.
 9. Recovery-set privacy: should members see *who* the quorum is, or only that one exists? (Currently: existence only.)
 10. Report data retention: how long do resolved reports themselves persist (distinct from content holds)? Legal-compliance minimums vary by jurisdiction — likely network config with a floor.
 11. Name. WEFT remains a placeholder.
@@ -474,6 +474,8 @@ Optional server-side RFC 2812 + IRCv3 gateway (:6697 TLS); the gateway is the ho
 ## Appendix A — Decision history
 
 v0.1 core design → v0.2 namespaces + manifest bridging → v0.3 user-owned namespaces, visibility, invites → v0.4 NETBLOCK → v0.5 backfill + `history` flag → v0.6 media, mirroring, WEFT-IRC → v0.7 implementability audit → v0.8 consolidation → v0.9 namespace recovery ladder + message compaction → **v0.10 message reporting: home-network routing, retention holds, honest e2ee/ephemeral limits, bridge forwarding (this document)**.
+
+*Amendments (M3a implementation)*: §6.4 pins HISTORY's `key=value` middle-param syntax; §6.4 REACT emoji shortcodes travel bare (leading `:` collides with the §4 trailing marker — see §18 #8); §7 widens EDITED/DELETED/REACTION/REACTIONS targets to `<#chan|@user>` ahead of DM support; §7 documents that every line of a batch echoes the request label (data-page reading of §3.5).
 
 *Amendments (M2 implementation)*: §6.1 defines the previously unspecified AUTH ENROLL response (`@attestation=` WELCOME, mirroring AUTH KEY success); §10.2 pins the `/.well-known/weft` document format (JSON: `protocol`, `network`, `signing-key`).
 
