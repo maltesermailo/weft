@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use weft_core::{run_session, ControlStream, ServerCtx, ServerInfo};
+use weft_core::{run_session, Attestation, ControlStream, Keypair, ServerCtx, ServerInfo};
 use weft_proto::{ErrCode, Event, MemberAction, Reply};
 
 struct MockStream {
@@ -67,7 +67,13 @@ impl Client {
     }
 }
 
+const PASSWORD: &str = "test-password-123";
+
 fn ctx(channels: &[&str]) -> Arc<ServerCtx> {
+    ctx_with(channels, true)
+}
+
+fn ctx_with(channels: &[&str], registration_open: bool) -> Arc<ServerCtx> {
     let info = ServerInfo {
         network: "test.example".parse().unwrap(),
         motd: Some("welcome!".to_string()),
@@ -76,6 +82,8 @@ fn ctx(channels: &[&str]) -> Arc<ServerCtx> {
     Arc::new(ServerCtx::new(
         info,
         channels.iter().map(|c| c.parse().unwrap()),
+        Keypair::generate(),
+        registration_open,
     ))
 }
 
@@ -94,12 +102,13 @@ fn connect(ctx: &Arc<ServerCtx>) -> Client {
     }
 }
 
-/// HELLO + anonymous AUTH; drains both WELCOMEs.
+/// HELLO + REGISTER (registration doubles as authentication, §6.1);
+/// drains both WELCOMEs.
 async fn ready(ctx: &Arc<ServerCtx>, account: &str) -> Client {
     let mut client = connect(ctx);
     client.send("HELLO weft/1");
     assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
-    client.send(&format!("AUTH PASSWORD {account} :anything"));
+    client.send(&format!("REGISTER {account} :{PASSWORD}"));
     assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
     client
 }
@@ -154,24 +163,188 @@ async fn state_gating_rejects_early_verbs() {
     assert!(matches!(client.recv().await.event, Event::Pong { token: Some(t) } if t == "t1"));
 }
 
-#[tokio::test]
-async fn register_is_forbidden_in_m1() {
-    let ctx = ctx(&[]);
-    let mut client = connect(&ctx);
+/// HELLO only — for driving auth by hand.
+async fn helloed(ctx: &Arc<ServerCtx>) -> Client {
+    let mut client = connect(ctx);
     client.send("HELLO weft/1");
-    client.recv().await;
-    client.send("REGISTER ada :longenoughpassword");
-    client.expect_err(ErrCode::Forbidden).await;
+    assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+    client
 }
 
 #[tokio::test]
-async fn key_auth_is_unsupported_until_m2() {
+async fn register_then_password_auth() {
     let ctx = ctx(&[]);
-    let mut client = connect(&ctx);
-    client.send("HELLO weft/1");
-    client.recv().await;
-    client.send("AUTH KEY ada B64KEY==");
-    client.expect_err(ErrCode::Unsupported).await;
+    let _ada = ready(&ctx, "ada").await; // registers ada
+
+    let mut second = helloed(&ctx).await;
+    second.send(&format!("@label=a1 AUTH PASSWORD ada :{PASSWORD}"));
+    let reply = second.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("a1"));
+    let Event::Welcome { attestation, .. } = &reply.event else {
+        panic!("expected WELCOME, got {reply:?}");
+    };
+    assert_eq!(attestation, &None); // attestations belong to key auth
+}
+
+#[tokio::test]
+async fn auth_failed_is_uniform_across_causes() {
+    // Invariant 5: wrong password, unknown account, and proof-without-
+    // challenge are indistinguishable — same code, same text.
+    let ctx = ctx(&[]);
+    let _ada = ready(&ctx, "ada").await;
+
+    let mut texts = Vec::new();
+    for line in [
+        "AUTH PASSWORD ada :wrong-password-here",
+        "AUTH PASSWORD ghost :wrong-password-here",
+        "AUTH PROOF c2lnbmF0dXJl",
+    ] {
+        let mut client = helloed(&ctx).await;
+        client.send(line);
+        let reply = client.expect_err(ErrCode::AuthFailed).await;
+        let Event::Err(err) = reply.event else {
+            unreachable!()
+        };
+        texts.push(err.text);
+    }
+    assert_eq!(texts[0], texts[1]);
+    assert_eq!(texts[1], texts[2]);
+}
+
+#[tokio::test]
+async fn register_gates_policy_conflict_and_forbidden() {
+    let ctx = ctx(&[]);
+    let mut client = helloed(&ctx).await;
+    client.send("REGISTER ada :short"); // §6.1: password ≥ 12 B
+    client.expect_err(ErrCode::Policy).await;
+    client.send(&format!("REGISTER ada :{PASSWORD}"));
+    assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+
+    let mut second = helloed(&ctx).await;
+    second.send(&format!("REGISTER ada :{PASSWORD}"));
+    second.expect_err(ErrCode::Conflict).await; // name taken
+
+    let closed = ctx_with(&[], false);
+    let mut client = helloed(&closed).await;
+    client.send(&format!("REGISTER bob :{PASSWORD}"));
+    client.expect_err(ErrCode::Forbidden).await; // registration closed
+}
+
+/// Full §6.1 key-auth round trip against the real session:
+/// ENROLL on a password session, then CHALLENGE/PROOF on a fresh one.
+#[tokio::test]
+async fn auth_key_challenge_proof_flow() {
+    let ctx = ctx(&["#general"]);
+    let device = Keypair::generate();
+
+    // Enroll the device while authed; response carries an attestation.
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!(
+        "@label=e1 AUTH ENROLL {}",
+        device.public().to_b64()
+    ));
+    let reply = ada.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("e1"));
+    let Event::Welcome {
+        attestation: Some(_),
+        ..
+    } = &reply.event
+    else {
+        panic!("ENROLL must answer WELCOME + attestation, got {reply:?}");
+    };
+
+    // Fresh session: AUTH KEY → CHALLENGE → PROOF → WELCOME + attestation.
+    let mut session = helloed(&ctx).await;
+    session.send(&format!(
+        "@label=k1 AUTH KEY ada {}",
+        device.public().to_b64()
+    ));
+    let reply = session.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("k1"));
+    let Event::Challenge { nonce } = &reply.event else {
+        panic!("expected CHALLENGE, got {reply:?}");
+    };
+    let nonce = weft_crypto::b64::decode(nonce).unwrap();
+    assert_eq!(nonce.len(), weft_crypto::CHALLENGE_NONCE_LEN);
+
+    // §6.1: the proof signs nonce ‖ network-name.
+    let sig = weft_crypto::sign_challenge(&device, &nonce, "test.example");
+    session.send(&format!(
+        "@label=k2 AUTH PROOF {}",
+        weft_crypto::signature_to_b64(&sig)
+    ));
+    let reply = session.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("k2"));
+    let Event::Welcome {
+        attestation: Some(blob),
+        ..
+    } = &reply.event
+    else {
+        panic!("expected WELCOME + attestation, got {reply:?}");
+    };
+
+    // The attestation verifies against the network's published key and
+    // names the right account/device.
+    let attestation = Attestation::from_b64(blob).unwrap();
+    assert!(attestation.verify(&ctx.identity_public(), 0).is_ok());
+    assert_eq!(attestation.account, "ada");
+    assert_eq!(attestation.network, "test.example");
+    assert_eq!(attestation.device, device.public());
+
+    // And the session is READY.
+    session.send("JOIN #general");
+    assert!(matches!(session.recv().await.event, Event::Member { .. }));
+}
+
+#[tokio::test]
+async fn auth_key_rejects_unenrolled_device_and_replays() {
+    let ctx = ctx(&[]);
+    let _ada = ready(&ctx, "ada").await;
+    let device = Keypair::generate(); // never enrolled
+
+    // Valid proof, unknown device → the same uniform AUTH-FAILED.
+    let mut session = helloed(&ctx).await;
+    session.send(&format!("AUTH KEY ada {}", device.public().to_b64()));
+    let Event::Challenge { nonce } = session.recv().await.event else {
+        panic!()
+    };
+    let nonce = weft_crypto::b64::decode(&nonce).unwrap();
+    let sig = weft_crypto::sign_challenge(&device, &nonce, "test.example");
+    session.send(&format!(
+        "AUTH PROOF {}",
+        weft_crypto::signature_to_b64(&sig)
+    ));
+    session.expect_err(ErrCode::AuthFailed).await;
+
+    // The challenge was consumed: replaying the same proof fails too.
+    session.send(&format!(
+        "AUTH PROOF {}",
+        weft_crypto::signature_to_b64(&sig)
+    ));
+    session.expect_err(ErrCode::AuthFailed).await;
+}
+
+#[tokio::test]
+async fn cross_network_proof_is_rejected() {
+    // Invariant 5: sig(nonce ‖ other-network) must not authenticate here.
+    let ctx = ctx(&[]);
+    let device = Keypair::generate();
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("AUTH ENROLL {}", device.public().to_b64()));
+    ada.recv().await;
+
+    let mut session = helloed(&ctx).await;
+    session.send(&format!("AUTH KEY ada {}", device.public().to_b64()));
+    let Event::Challenge { nonce } = session.recv().await.event else {
+        panic!()
+    };
+    let nonce = weft_crypto::b64::decode(&nonce).unwrap();
+    let sig = weft_crypto::sign_challenge(&device, &nonce, "evil.example");
+    session.send(&format!(
+        "AUTH PROOF {}",
+        weft_crypto::signature_to_b64(&sig)
+    ));
+    session.expect_err(ErrCode::AuthFailed).await;
 }
 
 #[tokio::test]

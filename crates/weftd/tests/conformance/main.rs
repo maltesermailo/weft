@@ -3,86 +3,38 @@
 //! ports (CLAUDE.md M1: `tests/conformance/`).
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use quinn::crypto::rustls::QuicClientConfig;
 use tokio_tungstenite::tungstenite::Message;
 use weft_proto::{ErrCode, Event, Reply};
+use weft_transport::insecure::client_endpoint;
 use weft_transport::QuicControlStream;
-use weftd::config::{Config, Listen};
+use weftd::config::{Config, Identity, Listen};
 
 // ---- harness ----
 
+const PASSWORD: &str = "conformance-pw-123";
+
 async fn start_server(channels: &[&str]) -> weftd::Server {
-    let config = Config {
+    start_with(channels, |_| {}).await
+}
+
+async fn start_with(channels: &[&str], tweak: impl FnOnce(&mut Config)) -> weftd::Server {
+    let mut config = Config {
         network: "test.example".to_string(),
         motd: Some("conformance".to_string()),
         channels: channels.iter().map(|c| c.to_string()).collect(),
         listen: Listen {
             quic: "127.0.0.1:0".parse().unwrap(),
             ws: Some("127.0.0.1:0".parse().unwrap()),
+            http: Some("127.0.0.1:0".parse().unwrap()),
         },
+        identity: Identity { key_file: None }, // ephemeral key per test
+        ..Config::default()
     };
+    tweak(&mut config);
     weftd::start(config).await.expect("server start")
-}
-
-/// Test-only TLS verifier: the M1 server runs on a fresh self-signed cert
-/// (nothing to pin until well-known lands in M2), so conformance clients
-/// accept any certificate. Never ship this pattern in a real client.
-#[derive(Debug)]
-struct AcceptAnyCert(Arc<rustls::crypto::CryptoProvider>);
-
-impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
-}
-
-fn client_endpoint(alpn: &[u8]) -> quinn::Endpoint {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert(provider)))
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![alpn.to_vec()];
-    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(tls).unwrap(),
-    )));
-    endpoint
 }
 
 /// A QUIC conformance client. Keeps endpoint + connection alive for the
@@ -95,7 +47,7 @@ struct QuicClient {
 
 impl QuicClient {
     async fn connect(addr: SocketAddr) -> Self {
-        let endpoint = client_endpoint(weft_transport::ALPN);
+        let endpoint = client_endpoint(weft_transport::ALPN).unwrap();
         let connection = endpoint
             .connect(addr, "localhost")
             .unwrap()
@@ -124,11 +76,11 @@ impl QuicClient {
         Reply::parse(&line).expect("unparseable server line")
     }
 
-    /// HELLO + anonymous AUTH, draining both WELCOMEs.
+    /// HELLO + REGISTER (registration doubles as auth, §6.1).
     async fn ready(&mut self, account: &str) {
         self.send("HELLO weft/1").await;
         assert!(matches!(self.recv().await.event, Event::Welcome { .. }));
-        self.send(&format!("AUTH PASSWORD {account} :pw")).await;
+        self.send(&format!("REGISTER {account} :{PASSWORD}")).await;
         assert!(matches!(self.recv().await.event, Event::Welcome { .. }));
     }
 
@@ -155,7 +107,7 @@ async fn quic_full_session_flow() {
     assert_eq!(network.as_str(), "test.example");
     assert_eq!(motd.as_deref(), Some("conformance"));
 
-    client.send("AUTH PASSWORD ada :pw").await;
+    client.send(&format!("REGISTER ada :{PASSWORD}")).await;
     assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
     client.join("#general").await;
 
@@ -200,9 +152,38 @@ async fn quic_relays_between_connections() {
 }
 
 #[tokio::test]
+#[ignore = "slow (~45 s): exercises the idle/keepalive windows; run with --ignored"]
+async fn quic_survives_a_long_quiet_gap_with_keepalive() {
+    // Regression: quinn's default 30 s max_idle_timeout once silently killed
+    // quiet-but-healthy connections. A client keeping the §3.4 cadence
+    // (PING every 10 s, answered) must survive an arbitrarily long lull —
+    // neither the transport idle limit (120 s) nor the session's liveness
+    // window (~30 s of line silence) may fire.
+    let server = start_server(&["#general"]).await;
+    let mut client = QuicClient::connect(server.quic_addr).await;
+    client.ready("ada").await;
+    client.join("#general").await;
+
+    for i in 0..4 {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        client.send(&format!("PING k{i}")).await;
+        let reply = client.recv().await;
+        assert!(
+            matches!(&reply.event, Event::Pong { token: Some(t) } if t == &format!("k{i}")),
+            "keepalive {i} not answered: {reply:?}"
+        );
+    }
+
+    client.send("@label=s1 MSG #general :still here").await;
+    let echo = client.recv().await;
+    assert_eq!(echo.label.as_deref(), Some("s1"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn quic_rejects_wrong_alpn() {
     let server = start_server(&[]).await;
-    let endpoint = client_endpoint(b"not-weft");
+    let endpoint = client_endpoint(b"not-weft").unwrap();
     let result = endpoint
         .connect(server.quic_addr, "localhost")
         .unwrap()
@@ -279,7 +260,7 @@ async fn ws_fallback_speaks_the_same_protocol() {
 
     client.send("HELLO weft/1").await;
     assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
-    client.send("AUTH PASSWORD ada :pw").await;
+    client.send(&format!("REGISTER ada :{PASSWORD}")).await;
     assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
     client.send("JOIN #general").await;
     assert!(matches!(client.recv().await.event, Event::Member { .. }));
@@ -303,7 +284,7 @@ async fn quic_and_ws_share_channels() {
     let mut ws = WsClient::connect(server.ws_addr.expect("ws enabled")).await;
     ws.send("HELLO weft/1").await;
     ws.recv().await;
-    ws.send("AUTH PASSWORD bob :pw").await;
+    ws.send(&format!("REGISTER bob :{PASSWORD}")).await;
     ws.recv().await;
     ws.send("JOIN #general").await;
     ws.recv().await;
@@ -322,4 +303,138 @@ async fn quic_and_ws_share_channels() {
     assert_eq!(received.msgid, echo.msgid);
 
     server.shutdown().await;
+}
+
+// ---- M2: identity ----
+
+/// Raw HTTP GET, no client dep: fetch the §10.2 well-known document.
+async fn fetch_wellknown(addr: SocketAddr) -> serde_json::Value {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    tcp.write_all(
+        b"GET /.well-known/weft HTTP/1.1\r\nHost: test.example\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .expect("request");
+    let mut response = String::new();
+    tcp.read_to_string(&mut response).await.expect("response");
+    let (head, body) = response.split_once("\r\n\r\n").expect("http response");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    serde_json::from_str(body.trim()).expect("json body")
+}
+
+/// The whole §6.1 + §10.2 story, black-box: register, enroll a device,
+/// key-auth on a fresh connection, and verify the attestation against the
+/// signing key published at /.well-known/weft — exactly what a remote
+/// network would do.
+#[tokio::test]
+async fn key_auth_attestation_verifies_against_wellknown() {
+    let server = start_server(&["#general"]).await;
+    let device = weft_crypto::Keypair::generate();
+
+    let mut first = QuicClient::connect(server.quic_addr).await;
+    first.ready("ada").await;
+    first
+        .send(&format!("AUTH ENROLL {}", device.public().to_b64()))
+        .await;
+    let reply = first.recv().await;
+    assert!(
+        matches!(
+            &reply.event,
+            Event::Welcome {
+                attestation: Some(_),
+                ..
+            }
+        ),
+        "ENROLL must return an attestation, got {reply:?}"
+    );
+
+    // Fresh connection, challenge-response.
+    let mut second = QuicClient::connect(server.quic_addr).await;
+    second.send("HELLO weft/1").await;
+    second.recv().await;
+    second
+        .send(&format!("AUTH KEY ada {}", device.public().to_b64()))
+        .await;
+    let reply = second.recv().await;
+    let Event::Challenge { nonce } = &reply.event else {
+        panic!("expected CHALLENGE, got {reply:?}");
+    };
+    let nonce = weft_crypto::b64::decode(nonce).unwrap();
+    let sig = weft_crypto::sign_challenge(&device, &nonce, "test.example");
+    second
+        .send(&format!(
+            "AUTH PROOF {}",
+            weft_crypto::signature_to_b64(&sig)
+        ))
+        .await;
+    let reply = second.recv().await;
+    let Event::Welcome {
+        attestation: Some(blob),
+        ..
+    } = &reply.event
+    else {
+        panic!("expected WELCOME + attestation, got {reply:?}");
+    };
+
+    // Remote-verifier path: well-known key ⇒ attestation checks out.
+    let doc = fetch_wellknown(server.http_addr.expect("http enabled")).await;
+    assert_eq!(doc["network"], "test.example");
+    let signing_key =
+        weft_crypto::PublicKey::from_b64(doc["signing-key"].as_str().expect("signing-key"))
+            .expect("valid published key");
+    let attestation = weft_crypto::Attestation::from_b64(blob).expect("parseable attestation");
+    attestation
+        .verify(&signing_key, 0)
+        .expect("attestation must verify");
+    assert_eq!(attestation.account, "ada");
+    assert_eq!(attestation.device, device.public());
+
+    // Key-authed session is READY.
+    second.join("#general").await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn wrong_password_and_closed_registration() {
+    let server = start_with(&[], |config| {
+        config.registration = weftd::config::Registration::Closed;
+    })
+    .await;
+    let mut client = QuicClient::connect(server.quic_addr).await;
+    client.send("HELLO weft/1").await;
+    client.recv().await;
+    client.send(&format!("REGISTER ada :{PASSWORD}")).await;
+    let reply = client.recv().await;
+    assert!(matches!(&reply.event, Event::Err(e) if e.code == ErrCode::Forbidden));
+    client.send("AUTH PASSWORD ada :wrong-password!!").await;
+    let reply = client.recv().await;
+    assert!(matches!(&reply.event, Event::Err(e) if e.code == ErrCode::AuthFailed));
+    server.shutdown().await;
+}
+
+/// "Real certs": the operator-supplied PEM path must produce a working
+/// QUIC endpoint (self-signed here, but exercising exactly the load path).
+#[tokio::test]
+async fn operator_pem_certificates_are_accepted() {
+    let dir = std::env::temp_dir().join(format!("weftd-tls-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cert = rcgen::generate_simple_self_signed(vec!["test.example".to_string()]).unwrap();
+    let cert_path = dir.join("cert.pem");
+    let key_path = dir.join("key.pem");
+    std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+    std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
+
+    let server = start_with(&[], |config| {
+        config.tls = Some(weftd::config::Tls {
+            cert: cert_path.clone(),
+            key: key_path.clone(),
+        });
+    })
+    .await;
+    let mut client = QuicClient::connect(server.quic_addr).await;
+    client.send("HELLO weft/1").await;
+    assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+    server.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
 }

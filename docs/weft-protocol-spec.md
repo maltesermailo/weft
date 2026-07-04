@@ -94,7 +94,7 @@ open → NEGOTIATING --HELLO/WELCOME--> UNAUTHED --AUTH ok--> READY --QUIT/error
 `NEGOTIATING`: only `HELLO`. `UNAUTHED`: only `AUTH`, `REGISTER`, `PING`, `QUIT`. Else `ERR NOT-AUTHED`. Idle pre-auth sessions closed after 30 s (RECOMMENDED).
 
 ### 3.4 Keepalive
-`PING [token]` → `PONG [token]` mandatory. RECOMMENDED 60 s interval, 2 missed = dead. QUIC keepalive may substitute for sending, not for answering.
+`PING [token]` → `PONG [token]` mandatory. RECOMMENDED 10 s interval (matching contemporary chat clients), 2 missed = dead. QUIC keepalive may substitute for sending, not for answering.
 
 ### 3.5 Labeled responses (normative)
 Any command MAY carry `label=<opaque ≤64 B>`. Every **direct** response — success event, data page, `ERR` — echoes it; broadcast copies never do. Libraries SHOULD label everything; this is request correlation and the ack foundation (§9.2).
@@ -157,7 +157,7 @@ S: CHALLENGE <b64-nonce-32B>
 C: AUTH PROOF <b64-sig(nonce ‖ network-name)>
 S: @attestation=<b64> WELCOME hda.example
 ```
-`nonce‖network-name` prevents cross-network replay. `AUTH ENROLL <b64-pubkey>` (while authed) adds a device.
+`nonce‖network-name` prevents cross-network replay. `AUTH ENROLL <b64-pubkey>` (while authed) adds a device → `@attestation=<b64> WELCOME` carrying the new device's attestation (same success shape as AUTH KEY).
 **QUIT** `QUIT [:reason]`. **PING/PONG** §3.4.
 **PRESENCE** `PRESENCE <online|away|dnd|invisible>` — same-network visibility only; never bridged; `invisible` renders offline.
 
@@ -317,7 +317,12 @@ Backoff 1→60 s jittered → `HELLO` → `AUTH KEY` → server sends `MEMBER`/`
 `user@network.tld`; home network handles registration, recovery, moderation accountability.
 
 ### 10.2 Portable keypair attestation
-Ed25519 device keys; home network signs `{pubkey, account, network, expiry, sig}`; verified remotely via `https://<network>/.well-known/weft` (cached). No global identity server. Rotation = superseding attestation; revocation via well-known. Key rotation never evades NETBLOCK (name-keyed).
+Ed25519 device keys; home network signs `{pubkey, account, network, expiry, sig}` (deterministic CBOR encode-before-sign); verified remotely via `https://<network>/.well-known/weft` (cached). No global identity server. Rotation = superseding attestation; revocation via well-known. Key rotation never evades NETBLOCK (name-keyed).
+
+Well-known document (JSON):
+```json
+{ "protocol": "weft/1", "network": "hda.example", "signing-key": "<b64-ed25519-pubkey>" }
+```
 
 ### 10.3 Display identity
 Signed profile blob (nick, avatar) travels with the user; remotes MAY override display, MUST show canonical `user@network`.
@@ -469,5 +474,9 @@ Optional server-side RFC 2812 + IRCv3 gateway (:6697 TLS); the gateway is the ho
 ## Appendix A — Decision history
 
 v0.1 core design → v0.2 namespaces + manifest bridging → v0.3 user-owned namespaces, visibility, invites → v0.4 NETBLOCK → v0.5 backfill + `history` flag → v0.6 media, mirroring, WEFT-IRC → v0.7 implementability audit → v0.8 consolidation → v0.9 namespace recovery ladder + message compaction → **v0.10 message reporting: home-network routing, retention holds, honest e2ee/ephemeral limits, bridge forwarding (this document)**.
+
+*Amendments (M2 implementation)*: §6.1 defines the previously unspecified AUTH ENROLL response (`@attestation=` WELCOME, mirroring AUTH KEY success); §10.2 pins the `/.well-known/weft` document format (JSON: `protocol`, `network`, `signing-key`).
+
+*Amendment (M1 implementation)*: §3.4 keepalive interval lowered from RECOMMENDED 60 s to **10 s** to match contemporary chat clients; the "2 missed = dead" rule scales accordingly (~30 s liveness window).
 
 *Editorial (M0 implementation)*: §7 said "as v0.8" for the `TYPING`/`MARKED`/`PRESENCE`/`POLICY` event payloads, contradicting the "fully self-contained" claim; the table now spells them out as implemented by `weft-proto` (`TYPING <#chan> <user@net> <start|stop>`, `MARKED <#chan> <msgid>`, `PRESENCE <user@net> <status>`, `POLICY <#chan> <policy>`). `CHANMETA` remains deferred (M4).

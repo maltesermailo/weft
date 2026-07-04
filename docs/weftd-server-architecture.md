@@ -33,8 +33,8 @@ weftd/
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── traits.rs           # EventStore, AccountStore, TokenIndex, MediaStore
-│   │       ├── sqlite/
-│   │       │   ├── mod.rs          # sqlx SQLite impl of all traits
+│   │       ├── postgres/
+│   │       │   ├── mod.rs          # sqlx PostgreSQL impl of all traits
 │   │       │   ├── schema.rs       # migrations (events, tombstones, accounts, tokens)
 │   │       │   └── retention.rs    # purge task: honors per-channel policy
 │   │       └── memory.rs           # in-mem impl for tests + `ephemeral`-only deployments
@@ -124,19 +124,19 @@ All member sessions subscribe → serialize Event → write to their stream
 | WS fallback + well-known | `axum` | one HTTP surface, keeps hyper out of core |
 | Serialization (tokens) | `ciborium` + `ed25519-dalek` | deterministic CBOR encode before sign |
 | IDs | `ulid` | monotonic generator per channel actor |
-| Storage | `sqlx` (SQLite) | WAL mode; single-file deploy story |
+| Storage | `sqlx` (PostgreSQL) | pooled connections; proper concurrent writers for busy networks — the memory backend keeps the zero-dependency dev/`ephemeral` story |
 | Errors | `thiserror` (libs) / `anyhow` (bin) | |
 | Config | `serde` + `toml` | |
 | Observability | `tracing` | span per connection, per verb |
 
-Deliberately deferred: `openmls` (E2EE, feature-flag `e2ee`), SFU/voice (separate `weft-rt` crate later), Postgres backend (trait already allows it).
+Deliberately deferred: `openmls` (E2EE, feature-flag `e2ee`), SFU/voice (separate `weft-rt` crate later), SQLite backend (trait already allows it; PostgreSQL chosen 2026-07 — reversal of the original single-file choice).
 
 ## 5. Build Order (suggested milestones)
 
 1. **M0 — codec**: `weft-proto` complete + fuzz targets green. Round-trip golden tests.
 2. **M1 — echo server**: weftd over QUIC+WS, HELLO/AUTH(anon)/JOIN/MSG relay, `ephemeral` only. *This is already a usable IRC replacement.*
 3. **M2 — identity**: weft-crypto attestations, AUTH with keypair proof, well-known endpoint.
-4. **M3 — persistence**: sqlite store, `retained`/`permanent` policies, HISTORY, EDIT/DELETE/REACT materialization.
+4. **M3 — persistence**: postgres store, `retained`/`permanent` policies, HISTORY, EDIT/DELETE/REACT materialization.
 5. **M4 — capabilities**: token minting, GRANT/REVOKE, refresh cycle, revocation epochs.
 6. **M5 — bridging**: BRIDGE handshake, remote ingestion, strictest-policy negotiation.
 7. **M6+**: media data-plane, threads filter, E2EE flag, weft-rt.

@@ -1,0 +1,17 @@
+[package]
+name = "weft-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WEFT identity primitives (L0): Ed25519 device/network keys, signed attestations (deterministic CBOR), challenge proofs, password hashing. Pure — no I/O, no tokio."
+
+[dependencies]
+thiserror = { workspace = true }
+ed25519-dalek = { workspace = true }
+ciborium = { workspace = true }
+serde = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }

@@ -13,10 +13,11 @@ Independent sovereign networks; federation is explicit **signed manifest peering
 ```
 crates/weft-proto      L0  wire codec, verbs, events, errcode, IDs, policies — pure, no I/O, no tokio
 crates/weft-crypto     L0  attestations, capability tokens                   — pure, no I/O, no tokio
-crates/weft-store      L1  storage traits + sqlite/memory impls              — deps: proto
+crates/weft-store      L1  storage traits + postgres/memory impls            — deps: proto
 crates/weft-core       L2  sessions, channel actors, router                  — deps: proto, crypto, store
 crates/weft-transport  L2  quinn + WS framing                                — deps: proto ONLY
 crates/weftd           L3  binary: config, acceptor, well-known, telemetry   — deps: everything
+crates/weft-tui        —   dev tool: terminal test client (ratatui)          — deps: proto, transport (insecure-client feature)
 ```
 
 Non-negotiable:
@@ -34,7 +35,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```
 
-Toolchain: MSRV 1.75, no nightly. Deps so far (workspace-pinned): thiserror, ulid, tokio, tokio-util, futures-util, quinn, rustls (**ring provider only** — a second provider makes the process default ambiguous), rustls-pki-types, rcgen (ring), tokio-tungstenite, tracing(+subscriber), serde, toml, anyhow.
+Toolchain: MSRV 1.75, no nightly. Deps so far (workspace-pinned): thiserror, ulid, tokio, tokio-util, futures-util, quinn, rustls (**ring provider only** — a second provider makes the process default ambiguous), rustls-pki-types, rcgen (ring), tokio-tungstenite, tracing(+subscriber), serde, toml, anyhow, ed25519-dalek, ciborium, base64, rand, sha2, subtle, axum, rustls-pemfile.
 
 ## Conventions
 
@@ -69,14 +70,14 @@ Actor-per-channel, task-per-connection, `tokio::mpsc` inboxes + `broadcast` fan-
 
 - **M0 ✅** codec: weft-proto for session+relay verbs (HELLO/REGISTER/AUTH×4/QUIT/PING/PONG/PRESENCE/JOIN/PART/TYPING/MARK/MSG incl. `@user` DM targets), events, error registry. 49 tests green.
 - **M1 ✅** echo server: `ControlStream` trait (defined in weft-core — its port; weftd adapts the transport types), quinn acceptor (ALPN `weft/1`), WS fallback (tokio-tungstenite; axum arrives with well-known in M2), session FSM `NEGOTIATING→UNAUTHED→READY` (§3.3), static config channel registry + actors, MSG relay with label echo-ack + `(session,label)` dedup, `ephemeral` only, anonymous AUTH (real auth = M2). Conformance: black-box QUIC+WS tests in `crates/weftd/tests/conformance/`. 73 tests green workspace-wide.
-- **M2** identity: weft-crypto attestations, AUTH KEY challenge-response, `AUTH ENROLL`, `/.well-known/weft` (axum).
-- **M3** persistence: sqlx SQLite store, retention policies + purge task, HISTORY/BATCH, EDIT/DELETE/REACT materialization, **compaction task (§12.1: audit window, edit collapse, REACTIONS summaries)**, MARK sync, DMs.
+- **M2 ✅** identity: weft-crypto (Ed25519 keys, deterministic-CBOR attestations, challenge proofs, constant-time password hashes), REGISTER/AUTH PASSWORD/AUTH KEY/AUTH PROOF/AUTH ENROLL with uniform AUTH-FAILED, in-memory account registry (traits + persistence = M3), `/.well-known/weft` (axum), operator PEM certs + persisted signing key. 101 tests green workspace-wide.
+- **M3** persistence: sqlx **PostgreSQL** store (connection URL in config; memory impl remains the test/dev backend, so `weftd` still runs DB-less), retention policies + purge task, HISTORY/BATCH, EDIT/DELETE/REACT materialization, **compaction task (§12.1: audit window, edit collapse, REACTIONS summaries)**, MARK sync, DMs. Postgres integration tests gate on `WEFT_TEST_DATABASE_URL` (skipped when absent).
 - **M4** capabilities: token mint/verify chains, GRANT/REVOKE, revocation epochs, NS verbs **incl. recovery ladder (NS RECOVERY SET / RECOVER / RECOVERY CANCEL, delay windows, root-history)**, CHANNEL verbs, INVITE lifecycle, view gating, DISCOVER, REPORT/REPORTS verbs + retention holds (§6.7, §12.1).
 - **M5** federation: BRIDGE manifest state machine, remote ingestion, strictest-policy negotiation, backfill (§11.7), NETBLOCK, REPORT-FORWARD (§11.9).
 - **M6+** media (BLAKE3 content addressing, STREAM, mirroring §11.8), threads filter, E2EE (openmls, feature `e2ee`), WEFT-RT voice, WEFT-IRC gateway (a third `ControlStream` impl in its own crate).
 
-Current focus: **M2** (identity): weft-crypto attestations, AUTH KEY challenge-response replacing M1's anonymous AUTH PASSWORD (`session.rs::on_unauthed` is the seam), `/.well-known/weft` via axum, real certs.
+Current focus: **M3** (persistence): weft-store traits (`EventStore`, `AccountStore` — the in-memory `Accounts` in weft-core becomes the memory impl and password hashing upgrades to a real KDF before hashes touch disk), sqlx PostgreSQL, retention + purge, HISTORY/BATCH, EDIT/DELETE/REACT materialization, compaction (§12.1), MARK sync, DMs.
 
 ## Deliberately deferred — do not add
 
-openmls, SFU/voice, Postgres, Biscuit tokens, SRV discovery, cross-network DMs, per-message rate-limiter beyond THROTTLED plumbing, shared blocklists. If a task appears to need one, flag it instead of adding the dependency. Open questions live in spec §18 — decisions there belong to Jannik, not to a coding session.
+openmls, SFU/voice, SQLite backend (the traits allow it; Postgres is the chosen engine — decision reversed 2026-07), Biscuit tokens, SRV discovery, cross-network DMs, per-message rate-limiter beyond THROTTLED plumbing, shared blocklists. If a task appears to need one, flag it instead of adding the dependency. Open questions live in spec §18 — decisions there belong to Jannik, not to a coding session.

@@ -10,14 +10,20 @@
 
 #![forbid(unsafe_code)]
 
+mod accounts;
 mod channel;
 mod context;
 mod registry;
 mod session;
 mod stream;
 
+pub use accounts::Accounts;
 pub use channel::{ChannelEvent, ChannelHandle, JoinAck};
 pub use context::{ServerCtx, ServerInfo, PROTOCOL_VERSION};
 pub use registry::Registry;
 pub use session::{run_session, SessionId};
 pub use stream::ControlStream;
+
+// Consumers construct a ServerCtx with a signing key and verify attestations
+// against it — re-exported so they share one weft-crypto version.
+pub use weft_crypto::{Attestation, Keypair, PublicKey};

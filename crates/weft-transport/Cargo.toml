@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 description = "WEFT transports (L2): QUIC (quinn) and WebSocket line framing. Frames bytes into lines; never interprets verbs."
 
+[features]
+# Client endpoint that skips certificate verification. For test tooling
+# against M1's self-signed dev certs ONLY — never enable in a real client.
+insecure-client = []
+
 [dependencies]
 weft-proto = { path = "../weft-proto" }
 thiserror = { workspace = true }

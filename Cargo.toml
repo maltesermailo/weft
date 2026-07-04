@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/weft-proto", "crates/weft-core", "crates/weft-transport", "crates/weftd"]
+members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-core", "crates/weft-transport", "crates/weftd", "crates/weft-tui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -25,3 +25,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow = "1"
+ratatui = "0.29"
+crossterm = "0.28"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+ciborium = "0.2"
+base64 = "0.22"
+rand = "0.8"
+sha2 = "0.10"
+subtle = "2"
+axum = "0.7"
+rustls-pemfile = "2"

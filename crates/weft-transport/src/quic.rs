@@ -5,10 +5,11 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use quinn::crypto::rustls::QuicServerConfig;
-use quinn::{Connection, RecvStream, SendStream};
+use quinn::{Connection, IdleTimeout, RecvStream, SendStream, TransportConfig};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::Join;
 use tokio_util::codec::{Framed, LinesCodec};
@@ -20,6 +21,25 @@ use crate::TransportError;
 /// TLS handshake before a single line is read.
 pub const ALPN: &[u8] = b"weft/1";
 
+/// Transport-level idle limit. quinn's default (30 s) matched the §3.4 PING
+/// cadence too tightly and silently killed quiet-but-healthy connections.
+/// Must stay comfortably above the PING interval AND above the session
+/// layer's line-based liveness window (READY: 30 s), which is the intended
+/// arbiter of aliveness.
+const MAX_IDLE: Duration = Duration::from_secs(120);
+
+/// Shared transport tuning. `keep_alive`: §3.4 lets QUIC keepalives
+/// substitute for *sending* PINGs — clients want one; the server does not
+/// (liveness is the client's burden).
+pub(crate) fn transport_config(keep_alive: Option<Duration>) -> TransportConfig {
+    let mut transport = TransportConfig::default();
+    transport.max_idle_timeout(Some(
+        IdleTimeout::try_from(MAX_IDLE).expect("well below the VarInt bound"),
+    ));
+    transport.keep_alive_interval(keep_alive);
+    transport
+}
+
 /// Build the QUIC server config: TLS with the given identity, ALPN pinned.
 pub fn server_config(
     cert_chain: Vec<CertificateDer<'static>>,
@@ -30,7 +50,9 @@ pub fn server_config(
         .with_single_cert(cert_chain, key)?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let quic_tls = QuicServerConfig::try_from(tls).map_err(|_| TransportError::NoTls13)?;
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_tls)))
+    let mut config = quinn::ServerConfig::with_crypto(Arc::new(quic_tls));
+    config.transport_config(Arc::new(transport_config(None)));
+    Ok(config)
 }
 
 /// Bind a listening endpoint.

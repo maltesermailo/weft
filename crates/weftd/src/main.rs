@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let server = weftd::start(config).await?;
-    info!(quic = %server.quic_addr, ws = ?server.ws_addr, "weftd listening");
+    info!(quic = %server.quic_addr, ws = ?server.ws_addr, http = ?server.http_addr, "weftd listening");
 
     tokio::signal::ctrl_c().await?;
     info!("shutting down");

@@ -30,8 +30,8 @@ pub type SessionId = u64;
 
 /// §3.3: idle pre-auth sessions closed after 30 s.
 const PREAUTH_IDLE: Duration = Duration::from_secs(30);
-/// §3.4: 60 s keepalive interval, 2 missed = dead (plus slack).
-const READY_IDLE: Duration = Duration::from_secs(180);
+/// §3.4: 10 s keepalive interval, 2 missed = dead (plus slack).
+const READY_IDLE: Duration = Duration::from_secs(30);
 /// §9.2: dedup MSG retries by (session, label) for 5 minutes.
 const DEDUP_WINDOW: Duration = Duration::from_secs(300);
 /// §8: MALFORMED — close after 5 per 60 s.
@@ -61,10 +61,19 @@ pub async fn run_session<S: ControlStream>(stream: S, ctx: Arc<ServerCtx>) {
     .await;
 }
 
+/// AUTH KEY state between CHALLENGE and PROOF (§6.1). One per session;
+/// a new AUTH KEY replaces it, any PROOF consumes it.
+#[derive(Debug, Clone)]
+struct PendingChallenge {
+    account: Account,
+    device: weft_crypto::PublicKey,
+    nonce: [u8; weft_crypto::CHALLENGE_NONCE_LEN],
+}
+
 #[derive(Debug, Clone)]
 enum State {
     Negotiating,
-    Unauthed,
+    Unauthed { challenge: Option<PendingChallenge> },
     Ready { account: Account },
 }
 
@@ -222,7 +231,7 @@ impl<S: ControlStream> Session<S> {
         }
         match self.state.clone() {
             State::Negotiating => self.on_negotiating(label, cmd).await,
-            State::Unauthed => self.on_unauthed(label, cmd).await,
+            State::Unauthed { challenge } => self.on_unauthed(label, cmd, challenge).await,
             State::Ready { account } => self.on_ready(label, cmd, account).await,
         }
     }
@@ -239,7 +248,7 @@ impl<S: ControlStream> Session<S> {
                     motd: info.motd.clone(),
                 };
                 self.send_event(label, welcome).await?;
-                self.state = State::Unauthed;
+                self.state = State::Unauthed { challenge: None };
                 Ok(Flow::Continue)
             }
             Command::Hello { .. } => {
@@ -258,39 +267,92 @@ impl<S: ControlStream> Session<S> {
     }
 
     /// §3.3 UNAUTHED: only AUTH, REGISTER, PING, QUIT.
-    async fn on_unauthed(&mut self, label: Option<String>, cmd: Command) -> io::Result<Flow> {
+    async fn on_unauthed(
+        &mut self,
+        label: Option<String>,
+        cmd: Command,
+        challenge: Option<PendingChallenge>,
+    ) -> io::Result<Flow> {
         match cmd {
-            // M1 is anonymous auth: every credential is accepted and the
-            // session claims the account name (architecture doc §5,
-            // "AUTH(anon)"). Real verification — constant-time compare,
-            // uniform AUTH-FAILED — arrives with the account store in M2.
-            Command::AuthPassword { account, .. } => {
-                let welcome = Event::Welcome {
-                    network: self.ctx.info.network.clone(),
-                    features: Vec::new(),
-                    attestation: None, // attestations land in M2
-                    motd: None,
+            Command::Register { account, password } => {
+                self.on_register(label, account, &password).await
+            }
+            Command::AuthPassword { account, password } => {
+                // Constant-time verify, dummy-hash for unknown accounts —
+                // one code, one text, one timing envelope (invariant 5).
+                if self.ctx.accounts.verify_password(&account, &password) {
+                    self.welcome_authed(label, account, None).await
+                } else {
+                    self.auth_failed(label).await
+                }
+            }
+            // §6.1 step 1: issue a 32-byte nonce. Issued regardless of
+            // whether the account or key is known — existence must not be
+            // observable before PROOF (anti-enumeration discipline).
+            Command::AuthKey { account, pubkey } => {
+                let Ok(device) = weft_crypto::PublicKey::from_b64(&pubkey) else {
+                    // Undecodable key material is a shape error, independent
+                    // of any account state — MALFORMED leaks nothing.
+                    return self
+                        .on_malformed(
+                            label,
+                            &ParseError::Invalid {
+                                what: "device key",
+                                value: pubkey,
+                            },
+                        )
+                        .await;
                 };
-                self.send_event(label, welcome).await?;
-                self.state = State::Ready { account };
-                Ok(Flow::Continue)
-            }
-            Command::AuthKey { .. } | Command::AuthProof { .. } => {
-                self.send_err(label, ErrCode::Unsupported, None, "key auth lands in M2")
-                    .await?;
-                Ok(Flow::Continue)
-            }
-            Command::Register { .. } => {
-                // §6.1: REGISTER needs `registration: open`; M1 has no
-                // account store, so registration is categorically closed.
-                self.send_err(
+                let nonce: [u8; weft_crypto::CHALLENGE_NONCE_LEN] = rand::random();
+                self.send_event(
                     label,
-                    ErrCode::Forbidden,
-                    None,
-                    "registration is closed on this network",
+                    Event::Challenge {
+                        nonce: weft_crypto::b64::encode(nonce),
+                    },
                 )
                 .await?;
+                // A second AUTH KEY replaces any pending challenge.
+                self.state = State::Unauthed {
+                    challenge: Some(PendingChallenge {
+                        account,
+                        device,
+                        nonce,
+                    }),
+                };
                 Ok(Flow::Continue)
+            }
+            // §6.1 step 2: verify sig(nonce ‖ network-name) and enrollment.
+            Command::AuthProof { signature } => {
+                // The challenge is single-use: consumed on any PROOF.
+                self.state = State::Unauthed { challenge: None };
+                let Some(pending) = challenge else {
+                    return self.auth_failed(label).await;
+                };
+                let Ok(signature) = weft_crypto::signature_from_b64(&signature) else {
+                    return self.auth_failed(label).await;
+                };
+                // Evaluate both conditions unconditionally — no early exit
+                // that would let timing separate "bad proof" from
+                // "unknown device" (invariant 5).
+                let proof_ok = weft_crypto::verify_challenge(
+                    &pending.device,
+                    &pending.nonce,
+                    self.ctx.network_name(),
+                    &signature,
+                );
+                let enrolled = self
+                    .ctx
+                    .accounts
+                    .device_enrolled(&pending.account, &pending.device);
+                if proof_ok && enrolled {
+                    let attestation =
+                        self.ctx
+                            .mint_attestation(&pending.account, pending.device, unix_now());
+                    self.welcome_authed(label, pending.account, Some(attestation.to_b64()))
+                        .await
+                } else {
+                    self.auth_failed(label).await
+                }
             }
             Command::Ping { token } => {
                 self.send_event(label, Event::Pong { token }).await?;
@@ -299,6 +361,74 @@ impl<S: ControlStream> Session<S> {
             Command::Quit { .. } => Ok(Flow::Close),
             _ => self.not_authed(label, "authenticate first").await,
         }
+    }
+
+    /// §6.1 REGISTER: gated on config, password ≥ 12 B, unique name.
+    /// Success is also authentication (→ WELCOME → READY).
+    async fn on_register(
+        &mut self,
+        label: Option<String>,
+        account: Account,
+        password: &str,
+    ) -> io::Result<Flow> {
+        if !self.ctx.registration_open {
+            self.send_err(
+                label,
+                ErrCode::Forbidden,
+                None,
+                "registration is closed on this network",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        if password.len() < 12 {
+            self.send_err(
+                label,
+                ErrCode::Policy,
+                None,
+                "password must be at least 12 bytes",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        match self.ctx.accounts.register(&account, password) {
+            crate::accounts::RegisterOutcome::Exists => {
+                self.send_err(label, ErrCode::Conflict, None, "account name is taken")
+                    .await?;
+                Ok(Flow::Continue)
+            }
+            crate::accounts::RegisterOutcome::Created => {
+                self.welcome_authed(label, account, None).await
+            }
+        }
+    }
+
+    /// Successful auth: WELCOME (with `attestation=` for key auth, §6.1)
+    /// and the READY transition.
+    async fn welcome_authed(
+        &mut self,
+        label: Option<String>,
+        account: Account,
+        attestation: Option<String>,
+    ) -> io::Result<Flow> {
+        let welcome = Event::Welcome {
+            network: self.ctx.info.network.clone(),
+            features: Vec::new(),
+            attestation,
+            motd: None,
+        };
+        self.send_event(label, welcome).await?;
+        self.state = State::Ready { account };
+        Ok(Flow::Continue)
+    }
+
+    /// The single failure surface for every credential problem — unknown
+    /// account, wrong password, bad proof, unknown device, missing
+    /// challenge. One code, one text (§8: AUTH-FAILED is uniform).
+    async fn auth_failed(&mut self, label: Option<String>) -> io::Result<Flow> {
+        self.send_err(label, ErrCode::AuthFailed, None, "authentication failed")
+            .await?;
+        Ok(Flow::Continue)
     }
 
     async fn on_ready(
@@ -322,9 +452,30 @@ impl<S: ControlStream> Session<S> {
             Command::Part { channel, .. } => self.on_part(label, channel).await,
             Command::Typing { channel, state } => self.on_typing(label, channel, state).await,
             Command::Msg { target, body, meta } => self.on_msg(label, target, body, meta).await,
-            Command::AuthEnroll { .. } => {
-                self.unsupported(label, "device enrollment lands in M2")
-                    .await
+            // §6.1: add a device while authed. Responds like key auth —
+            // WELCOME carrying the new device's attestation.
+            Command::AuthEnroll { pubkey } => {
+                let Ok(device) = weft_crypto::PublicKey::from_b64(&pubkey) else {
+                    return self
+                        .on_malformed(
+                            label,
+                            &ParseError::Invalid {
+                                what: "device key",
+                                value: pubkey,
+                            },
+                        )
+                        .await;
+                };
+                self.ctx.accounts.enroll_device(&account, device);
+                let attestation = self.ctx.mint_attestation(&account, device, unix_now());
+                let welcome = Event::Welcome {
+                    network: self.ctx.info.network.clone(),
+                    features: Vec::new(),
+                    attestation: Some(attestation.to_b64()),
+                    motd: None,
+                };
+                self.send_event(label, welcome).await?;
+                Ok(Flow::Continue)
             }
             Command::Presence { .. } => {
                 self.unsupported(label, "presence is not offered yet").await
@@ -625,6 +776,14 @@ impl<S: ControlStream> Session<S> {
             self.no_such_target(label).await
         }
     }
+}
+
+/// Unix seconds — server-stamped time (§9.6); client clocks are untrusted.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) // pre-1970 clock: expire everything rather than panic
 }
 
 /// Pump one channel's broadcast into the session queue, translating lag.

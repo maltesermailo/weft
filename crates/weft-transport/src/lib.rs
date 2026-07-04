@@ -9,6 +9,8 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "insecure-client")]
+pub mod insecure;
 mod quic;
 mod ws;
 
