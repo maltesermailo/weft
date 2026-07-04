@@ -1,0 +1,11 @@
+[package]
+name = "weft-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WEFT wire codec (L0): line grammar, verbs, events, error registry, IDs, retention policies. Pure — no I/O, no tokio."
+
+[dependencies]
+thiserror.workspace = true
+ulid.workspace = true

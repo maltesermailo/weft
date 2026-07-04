@@ -1,0 +1,13 @@
+[package]
+name = "weftd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WEFT reference server binary (M1+)"
+
+[dependencies]
+weft-proto = { path = "../weft-proto" }
+
+[lints]
+workspace = true
