@@ -5,9 +5,9 @@ use crate::errcode::ErrCode;
 use crate::error::{ParseError, SerializeError};
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
-use crate::name::{ChannelName, NetworkName, Target, UserRef};
+use crate::name::{ChannelName, NamespaceName, NetworkName, Target, UserRef};
 use crate::policy::RetentionPolicy;
-use crate::types::{MemberAction, MsgMeta, PresenceStatus, ReactionOp, TypingState};
+use crate::types::{MemberAction, MsgMeta, PresenceStatus, ReactionOp, TypingState, Visibility};
 
 /// An event plus its optional `label` echo (§3.5). Only direct responses
 /// carry a label; broadcast copies never do — that distinction is the
@@ -187,6 +187,46 @@ pub enum Event {
         id: String,
         truncated: bool,
         compacted: bool,
+    },
+    /// `TOKEN <subject> <scope>` with the minted capability token in the
+    /// `token=` tag (§6.5, §10.4). Response to GRANT and to refresh.
+    Token {
+        subject: String,
+        scope: String,
+        token: String,
+        expiry: Option<u64>,
+    },
+    /// `INVITED <scope> <invite-id> :<link>` — the shareable invite (§6.5);
+    /// the unbound token rides the `token=` tag, `weft://<net>/i/<b64>` link
+    /// in the trailing.
+    Invited {
+        scope: String,
+        invite_id: String,
+        token: String,
+        link: Option<String>,
+        max_uses: Option<u32>,
+        expiry: Option<u64>,
+    },
+    /// `CHANMETA <#chan> <key> :<value>` (§7) — channel metadata change.
+    Chanmeta {
+        channel: ChannelName,
+        key: String,
+        value: String,
+    },
+    /// `NS-META <ns> <visibility>` with optional `owner=`/`title=`/
+    /// `description=`/`icon=` tags (§7). Namespace state + DISCOVER entries;
+    /// recovery fields (§2.4) ride here in M4c.
+    NsMeta {
+        name: NamespaceName,
+        visibility: Visibility,
+        owner: Option<String>,
+        title: Option<String>,
+        description: Option<String>,
+        icon: Option<String>,
+    },
+    /// `MORE <cursor>` — pagination continuation (DISCOVER, §6.2).
+    More {
+        cursor: String,
     },
     Err(ErrEvent),
     /// Any event outside the known set — MUST be ignored by clients.
@@ -413,6 +453,84 @@ impl Event {
                     }),
                 }
             }
+            "TOKEN" => {
+                let mut args = Args::new(line, "TOKEN");
+                let subject = args.req("subject")?.to_string();
+                let scope = args.req("scope")?.to_string();
+                let token = line
+                    .tags
+                    .get("token")
+                    .filter(|v| !v.is_empty())
+                    .cloned()
+                    .ok_or(ParseError::MissingParam {
+                        verb: "TOKEN",
+                        what: "token tag",
+                    })?;
+                Ok(Event::Token {
+                    subject,
+                    scope,
+                    token,
+                    expiry: u64_tag(line, "expiry", "TOKEN")?,
+                })
+            }
+            "INVITED" => {
+                let mut args = Args::new(line, "INVITED");
+                let scope = args.req("scope")?.to_string();
+                let invite_id = args.req("invite-id")?.to_string();
+                let token = line
+                    .tags
+                    .get("token")
+                    .filter(|v| !v.is_empty())
+                    .cloned()
+                    .ok_or(ParseError::MissingParam {
+                        verb: "INVITED",
+                        what: "token tag",
+                    })?;
+                Ok(Event::Invited {
+                    scope,
+                    invite_id,
+                    token,
+                    link: args.trailing_opt(),
+                    max_uses: line
+                        .tags
+                        .get("max-uses")
+                        .map(|v| {
+                            v.parse().map_err(|_| ParseError::BadParam {
+                                verb: "INVITED",
+                                what: "max-uses",
+                                value: v.clone(),
+                            })
+                        })
+                        .transpose()?,
+                    expiry: u64_tag(line, "expiry", "INVITED")?,
+                })
+            }
+            "CHANMETA" => {
+                let mut args = Args::new(line, "CHANMETA");
+                Ok(Event::Chanmeta {
+                    channel: args.req("channel")?.parse()?,
+                    key: args.req("key")?.to_string(),
+                    value: args.trailing_req("value")?.to_string(),
+                })
+            }
+            "NS-META" => {
+                let mut args = Args::new(line, "NS-META");
+                let tag = |k: &str| line.tags.get(k).filter(|v| !v.is_empty()).cloned();
+                Ok(Event::NsMeta {
+                    name: args.req("name")?.parse()?,
+                    visibility: args.req("visibility")?.parse()?,
+                    owner: tag("owner"),
+                    title: tag("title"),
+                    description: tag("description"),
+                    icon: tag("icon"),
+                })
+            }
+            "MORE" => {
+                let mut args = Args::new(line, "MORE");
+                Ok(Event::More {
+                    cursor: args.req("cursor")?.to_string(),
+                })
+            }
             "ERR" => {
                 let mut args = Args::new(line, "ERR");
                 Ok(Event::Err(ErrEvent {
@@ -584,6 +702,73 @@ impl Event {
                 }
                 ("BATCH", vec!["END".to_string()], None)
             }
+            Event::Token {
+                subject,
+                scope,
+                token,
+                expiry,
+            } => {
+                tags.insert("token".to_string(), token.clone());
+                if let Some(expiry) = expiry {
+                    tags.insert("expiry".to_string(), expiry.to_string());
+                }
+                ("TOKEN", vec![subject.clone(), scope.clone()], None)
+            }
+            Event::Invited {
+                scope,
+                invite_id,
+                token,
+                link,
+                max_uses,
+                expiry,
+            } => {
+                tags.insert("token".to_string(), token.clone());
+                if let Some(max_uses) = max_uses {
+                    tags.insert("max-uses".to_string(), max_uses.to_string());
+                }
+                if let Some(expiry) = expiry {
+                    tags.insert("expiry".to_string(), expiry.to_string());
+                }
+                (
+                    "INVITED",
+                    vec![scope.clone(), invite_id.clone()],
+                    link.clone(),
+                )
+            }
+            Event::Chanmeta {
+                channel,
+                key,
+                value,
+            } => (
+                "CHANMETA",
+                vec![channel.to_string(), key.clone()],
+                Some(value.clone()),
+            ),
+            Event::NsMeta {
+                name,
+                visibility,
+                owner,
+                title,
+                description,
+                icon,
+            } => {
+                for (k, v) in [
+                    ("owner", owner),
+                    ("title", title),
+                    ("description", description),
+                    ("icon", icon),
+                ] {
+                    if let Some(v) = v {
+                        tags.insert(k.to_string(), v.clone());
+                    }
+                }
+                (
+                    "NS-META",
+                    vec![name.to_string(), visibility.to_string()],
+                    None,
+                )
+            }
+            Event::More { cursor } => ("MORE", vec![cursor.clone()], None),
             Event::Err(err) => {
                 if let Some(retry_after) = err.retry_after {
                     tags.insert("retry-after".to_string(), retry_after.to_string());
@@ -902,12 +1087,97 @@ mod tests {
     }
 
     #[test]
+    fn token_event_round_trips() {
+        let reply = Reply::with_label(
+            Event::Token {
+                subject: "ada".into(),
+                scope: "ns:gaming".into(),
+                token: "B64TOKENBLOB==".into(),
+                expiry: Some(3600),
+            },
+            "g1",
+        );
+        let wire = reply.serialize().unwrap();
+        assert!(wire.contains("token=B64TOKENBLOB=="), "{wire}");
+        round_trip(&reply);
+        // token= tag is mandatory.
+        assert_eq!(
+            Reply::parse("TOKEN ada ns:gaming"),
+            Err(ParseError::MissingParam {
+                verb: "TOKEN",
+                what: "token tag"
+            })
+        );
+    }
+
+    #[test]
+    fn invited_event_round_trips_with_link() {
+        round_trip(&Reply::with_label(
+            Event::Invited {
+                scope: "ns:gaming".into(),
+                invite_id: "inv-1".into(),
+                token: "B64UNBOUND==".into(),
+                link: Some("weft://hda.example/i/B64UNBOUND==".into()),
+                max_uses: Some(5),
+                expiry: None,
+            },
+            "i1",
+        ));
+        // Minimal form: no link, no limits.
+        round_trip(&Reply::new(Event::Invited {
+            scope: "#general".into(),
+            invite_id: "inv-2".into(),
+            token: "B64==".into(),
+            link: None,
+            max_uses: None,
+            expiry: None,
+        }));
+    }
+
+    #[test]
+    fn chanmeta_event_round_trips() {
+        round_trip(&Reply::new(Event::Chanmeta {
+            channel: "#general".parse().unwrap(),
+            key: "topic".into(),
+            value: "welcome to the channel".into(),
+        }));
+    }
+
+    #[test]
+    fn ns_meta_and_more_round_trip() {
+        round_trip(&Reply::with_label(
+            Event::NsMeta {
+                name: "gaming".parse().unwrap(),
+                visibility: crate::types::Visibility::Public,
+                owner: Some("ada".into()),
+                title: Some("The Lounge".into()),
+                description: None,
+                icon: None,
+            },
+            "n1",
+        ));
+        // Minimal: just name + visibility.
+        round_trip(&Reply::new(Event::NsMeta {
+            name: "quiet".parse().unwrap(),
+            visibility: crate::types::Visibility::Unlisted,
+            owner: None,
+            title: None,
+            description: None,
+            icon: None,
+        }));
+        round_trip(&Reply::new(Event::More {
+            cursor: "next-page".into(),
+        }));
+    }
+
+    #[test]
     fn unknown_event_is_ignored_not_error() {
-        let reply = Reply::parse("@label=l1 NS-META gaming :something new").unwrap();
+        // NETBLOCKED is a federation event (M5) — still unknown here.
+        let reply = Reply::parse("@label=l1 NETBLOCKED evil.example :severed").unwrap();
         assert_eq!(
             reply.event,
             Event::Unknown {
-                verb: "NS-META".into()
+                verb: "NETBLOCKED".into()
             }
         );
         assert_eq!(reply.label.as_deref(), Some("l1")); // label still visible for correlation

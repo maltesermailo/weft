@@ -6,8 +6,9 @@
 
 use weft_proto::{Account, MsgId, MsgMeta, RetentionPolicy, Ulid, UserRef};
 use weft_store::{
-    materialize, AccountStore, ChannelStore, EventKind, EventRecord, EventStore, HistoryItem,
-    MemoryStore, Page, Scope,
+    materialize, AccountStore, CapabilityStore, ChannelStore, EventKind, EventRecord, EventStore,
+    HistoryItem, InviteRecord, InviteStore, MemoryStore, NamespaceRecord, NamespaceStore, Page,
+    RedeemOutcome, Scope,
 };
 
 fn user(name: &str) -> UserRef {
@@ -55,7 +56,7 @@ fn page(limit: usize) -> Page {
 /// suite is re-runnable against a persistent database.
 async fn suite<S>(store: &S, tag: &str)
 where
-    S: EventStore + AccountStore + ChannelStore,
+    S: EventStore + AccountStore + ChannelStore + CapabilityStore + InviteStore + NamespaceStore,
 {
     let chan: Scope = Scope::Channel(format!("#suite-{tag}").parse().unwrap());
     let ada: Account = format!("ada-{tag}").parse().unwrap();
@@ -311,6 +312,181 @@ where
     let channels = store.list_channels().await.unwrap();
     let found = channels.iter().find(|(n, _)| n == &name).unwrap();
     assert_eq!(found.1.to_string(), "retained:7d");
+
+    // -- channel metadata + delete (§6.3) --
+    store.set_channel_topic(&name, "the topic").await.unwrap();
+    store.set_channel_view_gated(&name, true).await.unwrap();
+    let record = store.channel(&name).await.unwrap().unwrap();
+    assert_eq!(record.topic.as_deref(), Some("the topic"));
+    assert!(record.view_gated);
+    assert_eq!(record.policy.to_string(), "retained:7d");
+    assert!(store.delete_channel(&name).await.unwrap());
+    assert!(!store.delete_channel(&name).await.unwrap()); // idempotent-ish
+    assert!(store.channel(&name).await.unwrap().is_none());
+
+    // -- capability grants + revocation epochs (§6.5, §10.4) --
+    let subj = format!("ada-{tag}");
+    let scope = format!("#grants-{tag}");
+    store
+        .record_grant(&subj, &scope, &["ban".into(), "kick".into()], 0, Some(9999))
+        .await
+        .unwrap();
+    let grants = store.grants_for(&subj).await.unwrap();
+    let g = grants.iter().find(|g| g.scope == scope).unwrap();
+    assert_eq!(g.caps, vec!["ban".to_string(), "kick".to_string()]);
+    assert_eq!(g.expiry, Some(9999));
+    // Re-grant replaces.
+    store
+        .record_grant(&subj, &scope, &["ban".into()], 1, None)
+        .await
+        .unwrap();
+    let g = store
+        .grants_for(&subj)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|g| g.scope == scope)
+        .unwrap();
+    assert_eq!(g.caps, vec!["ban".to_string()]);
+    assert_eq!(g.epoch, 1);
+    // Partial revoke of a cap not held is a no-op; revoking the held cap
+    // drops the whole grant.
+    assert_eq!(
+        store
+            .revoke_grants(&subj, &scope, Some(&["kick".into()]))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .revoke_grants(&subj, &scope, Some(&["ban".into()]))
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(store
+        .grants_for(&subj)
+        .await
+        .unwrap()
+        .iter()
+        .all(|g| g.scope != scope));
+
+    // Epochs monotonic per scope.
+    let escope = format!("ns:epoch-{tag}");
+    assert_eq!(store.scope_epoch(&escope).await.unwrap(), 0);
+    assert_eq!(store.bump_epoch(&escope).await.unwrap(), 1);
+    assert_eq!(store.bump_epoch(&escope).await.unwrap(), 2);
+    assert_eq!(store.scope_epoch(&escope).await.unwrap(), 2);
+
+    // -- invites: counter + expiry, atomic redeem (§6.5) --
+    let limited = format!("inv-limited-{tag}");
+    store
+        .create_invite(InviteRecord {
+            id: limited.clone(),
+            scope: format!("ns:club-{tag}"),
+            caps: vec!["view".into(), "send".into()],
+            uses_left: Some(2),
+            expiry: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.redeem_invite(&limited, 100).await.unwrap(),
+        RedeemOutcome::Redeemed(_)
+    ));
+    assert!(matches!(
+        store.redeem_invite(&limited, 100).await.unwrap(),
+        RedeemOutcome::Redeemed(_)
+    ));
+    assert_eq!(
+        store.redeem_invite(&limited, 100).await.unwrap(),
+        RedeemOutcome::Exhausted
+    );
+    // Expired invite reads Gone.
+    let expiring = format!("inv-exp-{tag}");
+    store
+        .create_invite(InviteRecord {
+            id: expiring.clone(),
+            scope: "#x".into(),
+            caps: vec!["view".into()],
+            uses_left: None,
+            expiry: Some(500),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.redeem_invite(&expiring, 499).await.unwrap(),
+        RedeemOutcome::Redeemed(_)
+    )); // unlimited, still valid
+    assert_eq!(
+        store.redeem_invite(&expiring, 500).await.unwrap(),
+        RedeemOutcome::Gone
+    );
+    // Revoke removes it; unknown ids are Gone.
+    assert!(store.revoke_invite(&limited).await.unwrap());
+    assert_eq!(
+        store.redeem_invite(&limited, 100).await.unwrap(),
+        RedeemOutcome::Gone
+    );
+    assert_eq!(
+        store.redeem_invite("no-such-invite", 100).await.unwrap(),
+        RedeemOutcome::Gone
+    );
+
+    // -- namespaces (§2.1, §2.2) --
+    let ns: weft_proto::NamespaceName = format!("gaming{tag}").parse().unwrap();
+    assert!(store
+        .create_namespace(NamespaceRecord {
+            name: ns.clone(),
+            owner: format!("owner-{tag}").parse().unwrap(),
+            root_key: "B64ROOT==".into(),
+            visibility: "unlisted".into(),
+            title: None,
+            description: None,
+            icon: None,
+        })
+        .await
+        .unwrap());
+    // Name taken → false (CONFLICT).
+    assert!(!store
+        .create_namespace(NamespaceRecord {
+            name: ns.clone(),
+            owner: format!("someone-{tag}").parse().unwrap(),
+            root_key: "OTHER==".into(),
+            visibility: "public".into(),
+            title: None,
+            description: None,
+            icon: None,
+        })
+        .await
+        .unwrap());
+    let record = store.namespace(&ns).await.unwrap().unwrap();
+    assert_eq!(record.owner.as_str(), format!("owner-{tag}"));
+    assert_eq!(record.root_key, "B64ROOT==");
+    assert_eq!(store.namespaces_owned(&format!("owner-{tag}")).await.unwrap(), 1);
+
+    // Meta + visibility.
+    store.set_namespace_meta(&ns, "title", "The Lounge").await.unwrap();
+    store.set_namespace_meta(&ns, "icon", ":game:").await.unwrap();
+    store.set_namespace_visibility(&ns, "public").await.unwrap();
+    let record = store.namespace(&ns).await.unwrap().unwrap();
+    assert_eq!(record.title.as_deref(), Some("The Lounge"));
+    assert_eq!(record.visibility, "public");
+
+    // DISCOVER lists public namespaces, cursor-paginated.
+    let page = store.list_public(None, 100).await.unwrap();
+    assert!(page.iter().any(|n| n.name == ns));
+    let after_all = store.list_public(Some(&format!("gaming{tag}")), 100).await.unwrap();
+    assert!(!after_all.iter().any(|n| n.name == ns), "cursor is exclusive");
+
+    // Unlisted/private namespaces never appear in DISCOVER.
+    store.set_namespace_visibility(&ns, "private").await.unwrap();
+    let page = store.list_public(None, 100).await.unwrap();
+    assert!(!page.iter().any(|n| n.name == ns));
+
+    assert!(store.delete_namespace(&ns).await.unwrap());
+    assert!(store.namespace(&ns).await.unwrap().is_none());
 }
 
 #[tokio::test]

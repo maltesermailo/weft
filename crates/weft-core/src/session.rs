@@ -16,12 +16,13 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, error, info, info_span, warn, Instrument};
+use weft_crypto::{Capability, PublicKey, Subject, TokenScope};
 use weft_proto::{
     Account, ChannelName, Command, ErrCode, ErrEvent, Event, Line, MemberAction, MsgId, MsgMeta,
-    ParseError, Reply, Request, Target, UserRef, MAX_LABEL_BYTES,
+    ParseError, Reply, Request, RetentionPolicy, Target, UserRef, Visibility, MAX_LABEL_BYTES,
 };
 
-use weft_store::Scope;
+use weft_store::{InviteRecord, RedeemOutcome, Scope};
 
 use crate::channel::{ChannelEvent, ChannelHandle};
 use crate::context::{ServerCtx, PROTOCOL_VERSION};
@@ -593,6 +594,86 @@ impl<S: ControlStream> Session<S> {
                 Ok(Flow::Continue)
             }
             Command::Mark { channel, msgid } => self.on_mark(label, channel, msgid, account).await,
+            // §6.5 / §6.3 capability verbs.
+            Command::Grant {
+                subject,
+                scope,
+                caps,
+                expiry,
+            } => {
+                self.on_grant(label, subject, scope, caps, expiry, account)
+                    .await
+            }
+            Command::Revoke {
+                subject,
+                scope,
+                caps,
+                epoch,
+            } => {
+                self.on_revoke(label, subject, scope, caps, epoch, account)
+                    .await
+            }
+            Command::ChannelCreate { channel, policy } => {
+                self.on_channel_create(label, channel, policy, account)
+                    .await
+            }
+            Command::ChannelPolicy {
+                channel,
+                policy,
+                purge,
+            } => {
+                self.on_channel_policy(label, channel, policy, purge, account)
+                    .await
+            }
+            Command::ChannelMeta {
+                channel,
+                key,
+                value,
+            } => {
+                self.on_channel_meta(label, channel, key, value, account)
+                    .await
+            }
+            Command::ChannelDelete { channel, confirm } => {
+                self.on_channel_delete(label, channel, confirm, account)
+                    .await
+            }
+            Command::InviteMint {
+                scope,
+                max_uses,
+                expiry,
+            } => {
+                self.on_invite_mint(label, scope, max_uses, expiry, account)
+                    .await
+            }
+            Command::InviteRevoke { invite_id } => {
+                self.on_invite_revoke(label, invite_id, account).await
+            }
+            Command::InviteRedeem { token } => self.on_invite_redeem(label, token, account).await,
+            // §6.2 namespace verbs.
+            Command::NsCreate {
+                name,
+                visibility,
+                root_key,
+            } => self.on_ns_create(label, name, visibility, root_key, account).await,
+            Command::NsMeta { name, key, value } => {
+                self.on_ns_meta(label, name, key, value, account).await
+            }
+            Command::NsVisibility { name, visibility } => {
+                self.on_ns_visibility(label, name, visibility, account).await
+            }
+            Command::NsDelegate {
+                name,
+                subject,
+                caps,
+            } => {
+                // Sugar for GRANT at ns: scope (§6.2).
+                self.on_grant(label, subject, format!("ns:{name}"), caps, None, account)
+                    .await
+            }
+            Command::NsDelete { name, confirm } => {
+                self.on_ns_delete(label, name, confirm, account).await
+            }
+            Command::Discover { cursor } => self.on_discover(label, cursor).await,
             Command::Hello { .. }
             | Command::AuthPassword { .. }
             | Command::AuthKey { .. }
@@ -612,13 +693,23 @@ impl<S: ControlStream> Session<S> {
         account: Account,
     ) -> io::Result<Flow> {
         if invite.is_some() {
-            return self.unsupported(label, "invites land in M4").await;
+            // JOIN with an invite-ref is INVITE REDEEM territory; redeem
+            // directly (§6.5) rather than here.
+            return self
+                .unsupported(label, "use INVITE REDEEM to redeem an invite")
+                .await;
         }
-        let Some(handle) = self.ctx.registry.get(&channel).cloned() else {
-            // §2.2 anti-enumeration: unknown and (future) hidden channels
-            // share this one code.
+        let Some(handle) = self.ctx.registry.get(&channel) else {
+            // §2.2 anti-enumeration: unknown and hidden channels share this
+            // one code.
             return self.no_such_target(label).await;
         };
+        // §6.3 view gating: a view-gated channel is invisible to a
+        // non-member without the `view` cap — same NO-SUCH-TARGET as a
+        // channel that does not exist (invariant 1).
+        if self.view_gated_denied(&channel, &account).await {
+            return self.no_such_target(label).await;
+        }
         let Some(ack) = handle.join(self.id, account.clone()).await else {
             self.send_err(label, ErrCode::Internal, None, "channel unavailable")
                 .await?;
@@ -1202,6 +1293,815 @@ impl<S: ControlStream> Session<S> {
         }
     }
 
+    // ---- capability verbs (§6.5 GRANT/REVOKE/INVITE, §6.3 CHANNEL) ----
+
+    /// True if a view-gated channel must hide from `account` (no `view`
+    /// cap) — indistinguishable from nonexistent (invariant 1). Store
+    /// errors fail closed (deny) so a hiccup never leaks existence.
+    async fn view_gated_denied(&self, channel: &ChannelName, account: &Account) -> bool {
+        match self.ctx.channel_store.channel(channel).await {
+            Ok(Some(record)) if record.view_gated => {
+                let scope = TokenScope::Channel(channel.to_string());
+                match self
+                    .ctx
+                    .account_has_cap(account, &Capability::View, &scope, unix_now())
+                    .await
+                {
+                    Ok(has) => !has,
+                    Err(e) => {
+                        error!("view-gate cap check failed: {e}");
+                        true
+                    }
+                }
+            }
+            Ok(_) => false,
+            Err(e) => {
+                error!("view-gate lookup failed: {e}");
+                false
+            }
+        }
+    }
+
+    async fn cap_required(&mut self, label: Option<String>, cap: &str) -> io::Result<Flow> {
+        self.send_err(label, ErrCode::CapRequired, Some(cap), "missing capability")
+            .await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_grant(
+        &mut self,
+        label: Option<String>,
+        subject: String,
+        scope: String,
+        caps: String,
+        expiry: Option<u64>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        // A grant at ns: scope needs the namespace to exist; enforcement
+        // works through owner/table (the network-key-signed token is a
+        // same-network artifact — a root-key-signed chain arrives with
+        // federation, M5).
+        if let TokenScope::Namespace(ns) = &token_scope {
+            if !self.namespace_exists(ns).await {
+                return self.no_such_target(label).await;
+            }
+        }
+        let parsed = match parse_caps(&caps) {
+            Some(caps) => caps,
+            None => {
+                self.send_err(label, ErrCode::Malformed, None, "unknown capability")
+                    .await?;
+                return Ok(Flow::Continue);
+            }
+        };
+        let now = unix_now();
+        // Invariant 4: authority checked before any state change.
+        for cap in &parsed {
+            match self
+                .ctx
+                .account_can_grant(&account, cap, &token_scope, now)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return self.cap_required(label, &format!("grant:{cap}")).await,
+                Err(e) => return self.internal(label, &e).await,
+            }
+        }
+        let epoch = match self.ctx.caps.scope_epoch(&scope).await {
+            Ok(epoch) => epoch,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let absolute_expiry = expiry.map(|ttl| now + ttl);
+        let cap_strings: Vec<String> = parsed.iter().map(Capability::to_string).collect();
+        if let Err(e) = self
+            .ctx
+            .caps
+            .record_grant(&subject, &scope, &cap_strings, epoch, absolute_expiry)
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        let token = self.ctx.mint_token(
+            subject_from_str(&subject),
+            token_scope,
+            parsed,
+            epoch,
+            absolute_expiry.unwrap_or(u64::MAX),
+        );
+        self.send_event(
+            label,
+            Event::Token {
+                subject,
+                scope,
+                token,
+                expiry: absolute_expiry,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_revoke(
+        &mut self,
+        label: Option<String>,
+        subject: String,
+        scope: String,
+        caps: Option<String>,
+        epoch: Option<u64>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        // The caps we intend to remove (given, or all currently held).
+        let grants = match self.ctx.caps.grants_for(&subject).await {
+            Ok(grants) => grants,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let cap_list: Option<Vec<String>> = caps.as_ref().map(|c| {
+            c.split(',')
+                .filter(|c| !c.is_empty())
+                .map(str::to_string)
+                .collect()
+        });
+        let target: Vec<Capability> = match &cap_list {
+            Some(list) => list.iter().filter_map(|c| c.parse().ok()).collect(),
+            None => grants
+                .iter()
+                .filter(|g| g.scope == scope)
+                .flat_map(|g| g.caps.iter())
+                .filter_map(|c| c.parse().ok())
+                .collect(),
+        };
+        let now = unix_now();
+        for cap in &target {
+            match self
+                .ctx
+                .account_can_grant(&account, cap, &token_scope, now)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return self.cap_required(label, &format!("grant:{cap}")).await,
+                Err(e) => return self.internal(label, &e).await,
+            }
+        }
+        if let Err(e) = self
+            .ctx
+            .caps
+            .revoke_grants(&subject, &scope, cap_list.as_deref())
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        // `epoch` present = bump the scope's revocation epoch, killing every
+        // already-issued token there (§10.4).
+        let new_epoch = if epoch.is_some() {
+            self.ctx.caps.bump_epoch(&scope).await
+        } else {
+            self.ctx.caps.scope_epoch(&scope).await
+        };
+        let new_epoch = match new_epoch {
+            Ok(epoch) => epoch,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        // Re-mint a token reflecting what remains (empty caps if none).
+        let remaining: Vec<Capability> = match self.ctx.caps.grants_for(&subject).await {
+            Ok(grants) => grants
+                .into_iter()
+                .filter(|g| g.scope == scope)
+                .flat_map(|g| g.caps)
+                .filter_map(|c| c.parse().ok())
+                .collect(),
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let token = self.ctx.mint_token(
+            subject_from_str(&subject),
+            token_scope,
+            remaining,
+            new_epoch,
+            u64::MAX,
+        );
+        self.send_event(
+            label,
+            Event::Token {
+                subject,
+                scope,
+                token,
+                expiry: None,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_channel_create(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        policy: Option<RetentionPolicy>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        // A namespaced channel (#ns/chan) needs its namespace to exist;
+        // the owner (or an ns-admin/chan-create holder) may create it.
+        if let Some(ns) = channel.namespace() {
+            if !self.namespace_exists(ns).await {
+                return self.no_such_target(label).await;
+            }
+        }
+        let policy = policy.unwrap_or_else(|| "retained:90d".parse().expect("valid default"));
+        if policy == RetentionPolicy::E2ee {
+            return self.unsupported(label, "e2ee channels land in M6").await;
+        }
+        let scope = TokenScope::Channel(channel.to_string());
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::ChanCreate, &scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "chan-create").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        match self.ctx.registry.create(channel.clone(), policy) {
+            None => {
+                self.send_err(label, ErrCode::Conflict, None, "channel already exists")
+                    .await?;
+                Ok(Flow::Continue)
+            }
+            Some(_) => {
+                if let Err(e) = self
+                    .ctx
+                    .channel_store
+                    .upsert_channel(&channel, policy)
+                    .await
+                {
+                    return self.internal(label, &e).await;
+                }
+                debug!(%channel, "channel created");
+                self.send_event(label, Event::Policy { channel, policy })
+                    .await?;
+                Ok(Flow::Continue)
+            }
+        }
+    }
+
+    async fn on_channel_policy(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        policy: RetentionPolicy,
+        purge: bool,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if !self.ctx.registry.exists(&channel) {
+            return self.no_such_target(label).await;
+        }
+        if policy == RetentionPolicy::E2ee {
+            return self.unsupported(label, "e2ee transitions land in M6").await;
+        }
+        let scope = TokenScope::Channel(channel.to_string());
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::Policy, &scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "policy").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        if let Err(e) = self
+            .ctx
+            .channel_store
+            .upsert_channel(&channel, policy)
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        if let Some(handle) = self.ctx.registry.get(&channel) {
+            handle.set_policy(self.id, policy).await; // broadcasts POLICY to members
+        }
+        if purge {
+            // Tightening purges now (§6.3): drop everything currently stored.
+            if let Err(e) = self
+                .ctx
+                .events
+                .purge_before(&Scope::Channel(channel.clone()), unix_now() * 1000)
+                .await
+            {
+                return self.internal(label, &e).await;
+            }
+        }
+        // Labeled ack to the actor's own session (members got the broadcast).
+        self.send_event(label, Event::Policy { channel, policy })
+            .await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_channel_meta(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        key: String,
+        value: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if !self.ctx.registry.exists(&channel) {
+            return self.no_such_target(label).await;
+        }
+        let scope = TokenScope::Channel(channel.to_string());
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::Pin, &scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "pin").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        let result = match key.as_str() {
+            "topic" => {
+                self.ctx
+                    .channel_store
+                    .set_channel_topic(&channel, &value)
+                    .await
+            }
+            "view-gated" => {
+                let gated = matches!(value.as_str(), "yes" | "true" | "on" | "1");
+                self.ctx
+                    .channel_store
+                    .set_channel_view_gated(&channel, gated)
+                    .await
+            }
+            _ => {
+                self.send_err(
+                    label,
+                    ErrCode::Policy,
+                    None,
+                    "meta key must be topic|view-gated",
+                )
+                .await?;
+                return Ok(Flow::Continue);
+            }
+        };
+        if let Err(e) = result {
+            return self.internal(label, &e).await;
+        }
+        self.send_event(
+            label,
+            Event::Chanmeta {
+                channel,
+                key,
+                value,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_channel_delete(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        confirm: ChannelName,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if channel != confirm {
+            self.send_err(
+                label,
+                ErrCode::Policy,
+                None,
+                "DELETE must repeat the channel name",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        if !self.ctx.registry.exists(&channel) {
+            return self.no_such_target(label).await;
+        }
+        let scope = TokenScope::Channel(channel.to_string());
+        // ns-admin covers channels in a namespace; operators cover all.
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::NsAdmin, &scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "ns-admin").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        self.ctx.registry.remove(&channel); // drops the actor handle
+        if let Err(e) = self.ctx.channel_store.delete_channel(&channel).await {
+            return self.internal(label, &e).await;
+        }
+        debug!(%channel, "channel deleted");
+        self.send_event(
+            label,
+            Event::Chanmeta {
+                channel,
+                key: "deleted".to_string(),
+                value: String::new(),
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_invite_mint(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        max_uses: Option<u32>,
+        expiry: Option<u64>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::Invite, &token_scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "invite").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        // The invite grants membership (view+send) at the scope on redeem.
+        let caps = vec!["view".to_string(), "send".to_string()];
+        let invite_id = format!("i{}", weft_proto::Ulid::new());
+        let absolute_expiry = expiry.map(|ttl| unix_now() + ttl);
+        if let Err(e) = self
+            .ctx
+            .invites
+            .create_invite(InviteRecord {
+                id: invite_id.clone(),
+                scope: scope.clone(),
+                caps,
+                uses_left: max_uses,
+                expiry: absolute_expiry,
+            })
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        let link = format!("weft://{}/i/{invite_id}", self.ctx.info.network);
+        self.send_event(
+            label,
+            Event::Invited {
+                scope,
+                invite_id: invite_id.clone(),
+                token: invite_id,
+                link: Some(link),
+                max_uses,
+                expiry: absolute_expiry,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_invite_revoke(
+        &mut self,
+        label: Option<String>,
+        invite_id: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let invite = match self.ctx.invites.invite(&invite_id).await {
+            Ok(Some(invite)) => invite,
+            Ok(None) => return self.no_such_target(label).await,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let Some(token_scope) = TokenScope::parse(&invite.scope) else {
+            return self.no_such_target(label).await;
+        };
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::Invite, &token_scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "invite").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        if let Err(e) = self.ctx.invites.revoke_invite(&invite_id).await {
+            return self.internal(label, &e).await;
+        }
+        // Confirmation: the invite echoed back closed (max-uses=0, no link).
+        self.send_event(
+            label,
+            Event::Invited {
+                scope: invite.scope,
+                invite_id: invite_id.clone(),
+                token: invite_id,
+                link: None,
+                max_uses: Some(0),
+                expiry: None,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_invite_redeem(
+        &mut self,
+        label: Option<String>,
+        invite_id: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let outcome = match self.ctx.invites.redeem_invite(&invite_id, unix_now()).await {
+            Ok(outcome) => outcome,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        // §6.5/§2.2: dead or exhausted invites are indistinct from absent.
+        let invite = match outcome {
+            RedeemOutcome::Redeemed(invite) => invite,
+            RedeemOutcome::Exhausted | RedeemOutcome::Gone => {
+                return self.no_such_target(label).await;
+            }
+        };
+        // Bind the granted membership caps to the redeemer.
+        let epoch = match self.ctx.caps.scope_epoch(&invite.scope).await {
+            Ok(epoch) => epoch,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        if let Err(e) = self
+            .ctx
+            .caps
+            .record_grant(account.as_str(), &invite.scope, &invite.caps, epoch, None)
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        debug!(%account, scope = %invite.scope, "invite redeemed");
+        // Channel-scope invites auto-join (§6.5); namespace-scope invites
+        // grant membership and return the namespace's NS-META so the client
+        // knows what it joined (its channels come via DISCOVER/JOIN).
+        match TokenScope::parse(&invite.scope) {
+            Some(TokenScope::Channel(chan)) => match chan.parse::<ChannelName>() {
+                Ok(channel) => self.on_join(label, channel, None, account).await,
+                Err(_) => self.no_such_target(label).await,
+            },
+            Some(TokenScope::Namespace(ns)) => match ns.parse::<weft_proto::NamespaceName>() {
+                Ok(name) => match self.ctx.namespaces.namespace(&name).await {
+                    Ok(Some(record)) => {
+                        self.send_event(label, Self::ns_meta_event(&record)).await?;
+                        Ok(Flow::Continue)
+                    }
+                    Ok(None) => self.no_such_target(label).await,
+                    Err(e) => self.internal(label, &e).await,
+                },
+                Err(_) => self.no_such_target(label).await,
+            },
+            _ => self.no_such_target(label).await,
+        }
+    }
+
+    async fn bad_scope(&mut self, label: Option<String>) -> io::Result<Flow> {
+        self.send_err(
+            label,
+            ErrCode::Malformed,
+            None,
+            "scope must be #chan, ns:<name>, or *",
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    // ---- namespace verbs (§6.2 NS / DISCOVER) ----
+
+    async fn namespace_exists(&self, name: &str) -> bool {
+        let Ok(name) = name.parse::<weft_proto::NamespaceName>() else {
+            return false;
+        };
+        matches!(self.ctx.namespaces.namespace(&name).await, Ok(Some(_)))
+    }
+
+    /// Build the NS-META reply for a namespace record.
+    fn ns_meta_event(record: &weft_store::NamespaceRecord) -> Event {
+        Event::NsMeta {
+            name: record.name.clone(),
+            visibility: record.visibility.parse().unwrap_or(Visibility::Unlisted),
+            owner: Some(record.owner.to_string()),
+            title: record.title.clone(),
+            description: record.description.clone(),
+            icon: record.icon.clone(),
+        }
+    }
+
+    async fn on_ns_create(
+        &mut self,
+        label: Option<String>,
+        name: weft_proto::NamespaceName,
+        visibility: Visibility,
+        root_key: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        // The submitted root key must be a real Ed25519 pubkey (§2.1).
+        if weft_crypto::PublicKey::from_b64(&root_key).is_err() {
+            self.send_err(label, ErrCode::Malformed, None, "root must be a b64 ed25519 pubkey")
+                .await?;
+            return Ok(Flow::Continue);
+        }
+        // §2.2 creation policy: gated needs `ns-create`; open enforces a
+        // per-account quota.
+        if self.ctx.ns_creation_open {
+            let owned = match self.ctx.namespaces.namespaces_owned(account.as_str()).await {
+                Ok(n) => n,
+                Err(e) => return self.internal(label, &e).await,
+            };
+            if owned >= self.ctx.ns_quota {
+                let mut err = ErrEvent::new(ErrCode::Quota, "namespace quota reached");
+                err.max = Some(self.ctx.ns_quota);
+                self.send_event(label, Event::Err(err)).await?;
+                return Ok(Flow::Continue);
+            }
+        } else {
+            let scope = TokenScope::Wildcard;
+            match self
+                .ctx
+                .account_has_cap(&account, &Capability::NsCreate, &scope, unix_now())
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return self.cap_required(label, "ns-create").await,
+                Err(e) => return self.internal(label, &e).await,
+            }
+        }
+        let record = weft_store::NamespaceRecord {
+            name: name.clone(),
+            owner: account.clone(),
+            root_key,
+            visibility: visibility.to_string(),
+            title: None,
+            description: None,
+            icon: None,
+        };
+        match self.ctx.namespaces.create_namespace(record.clone()).await {
+            Ok(true) => {
+                debug!(%name, %account, "namespace created");
+                self.send_event(label, Self::ns_meta_event(&record)).await?;
+                Ok(Flow::Continue)
+            }
+            Ok(false) => {
+                self.send_err(label, ErrCode::Conflict, None, "namespace name is taken")
+                    .await?;
+                Ok(Flow::Continue)
+            }
+            Err(e) => self.internal(label, &e).await,
+        }
+    }
+
+    /// Shared owner/ns-admin gate for NS META/VISIBILITY/DELETE.
+    /// `Ok(Some(record))` = authorized; `Ok(None)` = refused/answered.
+    async fn ns_admin_gate(
+        &mut self,
+        label: Option<String>,
+        name: &weft_proto::NamespaceName,
+        account: &Account,
+    ) -> io::Result<Option<weft_store::NamespaceRecord>> {
+        let record = match self.ctx.namespaces.namespace(name).await {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                self.no_such_target(label).await?;
+                return Ok(None);
+            }
+            Err(e) => {
+                self.internal(label, &e).await?;
+                return Ok(None);
+            }
+        };
+        let scope = TokenScope::Namespace(name.to_string());
+        match self
+            .ctx
+            .account_has_cap(account, &Capability::NsAdmin, &scope, unix_now())
+            .await
+        {
+            Ok(true) => Ok(Some(record)),
+            Ok(false) => {
+                self.cap_required(label, "ns-admin").await?;
+                Ok(None)
+            }
+            Err(e) => {
+                self.internal(label, &e).await?;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn on_ns_meta(
+        &mut self,
+        label: Option<String>,
+        name: weft_proto::NamespaceName,
+        key: String,
+        value: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if !matches!(key.as_str(), "title" | "description" | "icon") {
+            self.send_err(label, ErrCode::Policy, None, "meta key must be title|description|icon")
+                .await?;
+            return Ok(Flow::Continue);
+        }
+        let Some(mut record) = self.ns_admin_gate(label.clone(), &name, &account).await? else {
+            return Ok(Flow::Continue);
+        };
+        if let Err(e) = self.ctx.namespaces.set_namespace_meta(&name, &key, &value).await {
+            return self.internal(label, &e).await;
+        }
+        match key.as_str() {
+            "title" => record.title = Some(value),
+            "description" => record.description = Some(value),
+            "icon" => record.icon = Some(value),
+            _ => {}
+        }
+        self.send_event(label, Self::ns_meta_event(&record)).await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_ns_visibility(
+        &mut self,
+        label: Option<String>,
+        name: weft_proto::NamespaceName,
+        visibility: Visibility,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(mut record) = self.ns_admin_gate(label.clone(), &name, &account).await? else {
+            return Ok(Flow::Continue);
+        };
+        if let Err(e) = self
+            .ctx
+            .namespaces
+            .set_namespace_visibility(&name, &visibility.to_string())
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        record.visibility = visibility.to_string();
+        self.send_event(label, Self::ns_meta_event(&record)).await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_ns_delete(
+        &mut self,
+        label: Option<String>,
+        name: weft_proto::NamespaceName,
+        confirm: weft_proto::NamespaceName,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if name != confirm {
+            self.send_err(label, ErrCode::Policy, None, "DELETE must repeat the namespace name")
+                .await?;
+            return Ok(Flow::Continue);
+        }
+        // Owner or operator (§6.2). ns_admin_gate covers both (owner holds
+        // ns-admin, operators hold everything).
+        if self.ns_admin_gate(label.clone(), &name, &account).await?.is_none() {
+            return Ok(Flow::Continue);
+        }
+        if let Err(e) = self.ctx.namespaces.delete_namespace(&name).await {
+            return self.internal(label, &e).await;
+        }
+        debug!(%name, "namespace deleted");
+        // Reflect deletion as an NS-META marker (private + no owner).
+        self.send_event(
+            label,
+            Event::NsMeta {
+                name,
+                visibility: Visibility::Private,
+                owner: None,
+                title: None,
+                description: Some("deleted".to_string()),
+                icon: None,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_discover(
+        &mut self,
+        label: Option<String>,
+        cursor: Option<String>,
+    ) -> io::Result<Flow> {
+        const PAGE: usize = 50;
+        let public = match self.ctx.namespaces.list_public(cursor.as_deref(), PAGE).await {
+            Ok(public) => public,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let next_cursor = (public.len() == PAGE)
+            .then(|| public.last().map(|ns| ns.name.to_string()))
+            .flatten();
+        for record in &public {
+            self.send_event(label.clone(), Self::ns_meta_event(record)).await?;
+        }
+        if let Some(cursor) = next_cursor {
+            self.send_event(label, Event::More { cursor }).await?;
+        }
+        Ok(Flow::Continue)
+    }
+
     // ---- channel events ----
 
     async fn on_event(&mut self, event: SessionEvent) -> io::Result<()> {
@@ -1345,7 +2245,7 @@ impl<S: ControlStream> Session<S> {
         channel: &ChannelName,
         cap: &'static str,
     ) -> io::Result<Flow> {
-        if self.ctx.registry.get(channel).is_some() {
+        if self.ctx.registry.exists(channel) {
             self.send_err(
                 label,
                 ErrCode::CapRequired,
@@ -1366,6 +2266,24 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0) // pre-1970 clock: expire everything rather than panic
+}
+
+/// Parse a comma-separated cap list; `None` if any token is not a known
+/// capability (§10.4).
+fn parse_caps(caps: &str) -> Option<Vec<Capability>> {
+    caps.split(',')
+        .filter(|c| !c.is_empty())
+        .map(|c| c.parse::<Capability>().ok())
+        .collect()
+}
+
+/// A GRANT/REVOKE subject: a b64 device key if it parses as one, else an
+/// account name (§6.5).
+fn subject_from_str(s: &str) -> Subject {
+    match PublicKey::from_b64(s) {
+        Ok(key) => Subject::Key(key),
+        Err(_) => Subject::Account(s.to_string()),
+    }
 }
 
 /// Pump one channel's broadcast into the session queue, translating lag.

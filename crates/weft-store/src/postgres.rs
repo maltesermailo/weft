@@ -10,11 +10,16 @@ use async_trait::async_trait;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
-use weft_proto::{Account, ChannelName, MsgId, MsgMeta, RetentionPolicy, Ulid};
+use weft_proto::{Account, ChannelName, MsgId, MsgMeta, NamespaceName, RetentionPolicy, Ulid};
 
 use crate::compact::compaction_plan;
-use crate::traits::{AccountStore, ChannelStore, EventStore};
-use crate::types::{EventKind, EventRecord, Page, Scope, Verification};
+use crate::traits::{
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, NamespaceStore,
+};
+use crate::types::{
+    ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page,
+    RedeemOutcome, Scope, Verification,
+};
 use crate::StoreError;
 
 pub struct PgStore {
@@ -521,5 +526,402 @@ impl ChannelStore for PgStore {
                 Ok((name, policy))
             })
             .collect()
+    }
+
+    async fn channel(&self, name: &ChannelName) -> Result<Option<ChannelRecord>, StoreError> {
+        let row =
+            sqlx::query("SELECT policy, topic, view_gated FROM weft_channels WHERE name = $1")
+                .bind(name.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        row.map(|row| {
+            Ok(ChannelRecord {
+                policy: row
+                    .get::<&str, _>("policy")
+                    .parse()
+                    .map_err(|_| StoreError::Backend("corrupt channel policy".to_string()))?,
+                topic: row.get("topic"),
+                view_gated: row.get("view_gated"),
+            })
+        })
+        .transpose()
+    }
+
+    async fn set_channel_topic(&self, name: &ChannelName, topic: &str) -> Result<(), StoreError> {
+        sqlx::query("UPDATE weft_channels SET topic = $2 WHERE name = $1")
+            .bind(name.as_str())
+            .bind(topic)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn set_channel_view_gated(
+        &self,
+        name: &ChannelName,
+        gated: bool,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE weft_channels SET view_gated = $2 WHERE name = $1")
+            .bind(name.as_str())
+            .bind(gated)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn delete_channel(&self, name: &ChannelName) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM weft_channels WHERE name = $1")
+            .bind(name.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+}
+
+#[async_trait]
+impl CapabilityStore for PgStore {
+    async fn record_grant(
+        &self,
+        subject: &str,
+        scope: &str,
+        caps: &[String],
+        epoch: u64,
+        expiry: Option<u64>,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO weft_grants (subject, scope, caps, epoch, expiry)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (subject, scope)
+            DO UPDATE SET caps = EXCLUDED.caps, epoch = EXCLUDED.epoch, expiry = EXCLUDED.expiry
+            "#,
+        )
+        .bind(subject)
+        .bind(scope)
+        .bind(caps.join(","))
+        .bind(epoch as i64)
+        .bind(expiry.map(|e| e as i64))
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn grants_for(&self, subject: &str) -> Result<Vec<GrantRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT subject, scope, caps, epoch, expiry FROM weft_grants WHERE subject = $1",
+        )
+        .bind(subject)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(rows
+            .iter()
+            .map(|row| GrantRecord {
+                subject: row.get("subject"),
+                scope: row.get("scope"),
+                caps: split_caps(row.get("caps")),
+                epoch: row.get::<i64, _>("epoch") as u64,
+                expiry: row.get::<Option<i64>, _>("expiry").map(|e| e as u64),
+            })
+            .collect())
+    }
+
+    async fn revoke_grants(
+        &self,
+        subject: &str,
+        scope: &str,
+        caps: Option<&[String]>,
+    ) -> Result<u64, StoreError> {
+        match caps {
+            None => {
+                let result =
+                    sqlx::query("DELETE FROM weft_grants WHERE subject = $1 AND scope = $2")
+                        .bind(subject)
+                        .bind(scope)
+                        .execute(&self.pool)
+                        .await
+                        .map_err(backend_err)?;
+                Ok(result.rows_affected())
+            }
+            Some(drop) => {
+                // Read-modify-write the caps list; the whole grant goes if
+                // nothing is left.
+                let Some(row) =
+                    sqlx::query("SELECT caps FROM weft_grants WHERE subject = $1 AND scope = $2")
+                        .bind(subject)
+                        .bind(scope)
+                        .fetch_optional(&self.pool)
+                        .await
+                        .map_err(backend_err)?
+                else {
+                    return Ok(0);
+                };
+                let mut remaining = split_caps(row.get("caps"));
+                let before = remaining.len();
+                remaining.retain(|c| !drop.contains(c));
+                let removed = (before - remaining.len()) as u64;
+                if remaining.is_empty() {
+                    sqlx::query("DELETE FROM weft_grants WHERE subject = $1 AND scope = $2")
+                        .bind(subject)
+                        .bind(scope)
+                        .execute(&self.pool)
+                        .await
+                        .map_err(backend_err)?;
+                } else {
+                    sqlx::query(
+                        "UPDATE weft_grants SET caps = $3 WHERE subject = $1 AND scope = $2",
+                    )
+                    .bind(subject)
+                    .bind(scope)
+                    .bind(remaining.join(","))
+                    .execute(&self.pool)
+                    .await
+                    .map_err(backend_err)?;
+                }
+                Ok(removed)
+            }
+        }
+    }
+
+    async fn scope_epoch(&self, scope: &str) -> Result<u64, StoreError> {
+        let epoch: Option<i64> =
+            sqlx::query_scalar("SELECT epoch FROM weft_epochs WHERE scope = $1")
+                .bind(scope)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        Ok(epoch.unwrap_or(0) as u64)
+    }
+
+    async fn bump_epoch(&self, scope: &str) -> Result<u64, StoreError> {
+        let epoch: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO weft_epochs (scope, epoch) VALUES ($1, 1)
+            ON CONFLICT (scope) DO UPDATE SET epoch = weft_epochs.epoch + 1
+            RETURNING epoch
+            "#,
+        )
+        .bind(scope)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(epoch as u64)
+    }
+}
+
+#[async_trait]
+impl InviteStore for PgStore {
+    async fn create_invite(&self, invite: InviteRecord) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO weft_invites (id, scope, caps, uses_left, expiry) VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(&invite.id)
+        .bind(&invite.scope)
+        .bind(invite.caps.join(","))
+        .bind(invite.uses_left.map(|u| u as i32))
+        .bind(invite.expiry.map(|e| e as i64))
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn invite(&self, id: &str) -> Result<Option<InviteRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, scope, caps, uses_left, expiry FROM weft_invites WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(row.map(|row| invite_from_row(&row)))
+    }
+
+    async fn redeem_invite(&self, id: &str, now: u64) -> Result<RedeemOutcome, StoreError> {
+        // Atomic: decrement only when a use remains and not expired.
+        // RETURNING lets us distinguish "counted down" from "no change".
+        let updated = sqlx::query(
+            r#"
+            UPDATE weft_invites
+            SET uses_left = uses_left - 1
+            WHERE id = $1
+              AND (expiry IS NULL OR expiry > $2)
+              AND (uses_left IS NULL OR uses_left > 0)
+            RETURNING id, scope, caps, uses_left, expiry
+            "#,
+        )
+        .bind(id)
+        .bind(now as i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        if let Some(row) = updated {
+            return Ok(RedeemOutcome::Redeemed(invite_from_row(&row)));
+        }
+        // No row updated: either gone/expired, or exhausted. Distinguish.
+        let existing: Option<(Option<i32>, Option<i64>)> =
+            sqlx::query_as("SELECT uses_left, expiry FROM weft_invites WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        match existing {
+            None => Ok(RedeemOutcome::Gone),
+            Some((_, Some(expiry))) if now as i64 >= expiry => Ok(RedeemOutcome::Gone),
+            Some((Some(0), _)) => Ok(RedeemOutcome::Exhausted),
+            _ => Ok(RedeemOutcome::Gone),
+        }
+    }
+
+    async fn revoke_invite(&self, id: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM weft_invites WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+}
+
+#[async_trait]
+impl NamespaceStore for PgStore {
+    async fn create_namespace(&self, record: NamespaceRecord) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO weft_namespaces (name, owner, root_key, visibility, title, description, icon)
+            VALUES ($1,$2,$3,$4,$5,$6,$7)
+            ON CONFLICT (name) DO NOTHING
+            "#,
+        )
+        .bind(record.name.as_str())
+        .bind(record.owner.as_str())
+        .bind(&record.root_key)
+        .bind(&record.visibility)
+        .bind(&record.title)
+        .bind(&record.description)
+        .bind(&record.icon)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn namespace(&self, name: &NamespaceName) -> Result<Option<NamespaceRecord>, StoreError> {
+        let row = sqlx::query("SELECT * FROM weft_namespaces WHERE name = $1")
+            .bind(name.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        row.map(|row| namespace_from_row(&row)).transpose()
+    }
+
+    async fn namespaces_owned(&self, owner: &str) -> Result<u64, StoreError> {
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM weft_namespaces WHERE owner = $1")
+            .bind(owner)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(n as u64)
+    }
+
+    async fn list_public(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<NamespaceRecord>, StoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM weft_namespaces
+            WHERE visibility = 'public' AND ($1::text IS NULL OR name > $1)
+            ORDER BY name
+            LIMIT $2
+            "#,
+        )
+        .bind(after)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.iter().map(namespace_from_row).collect()
+    }
+
+    async fn set_namespace_meta(
+        &self,
+        name: &NamespaceName,
+        key: &str,
+        value: &str,
+    ) -> Result<(), StoreError> {
+        // Whitelist the column — never interpolate a key into SQL.
+        let column = match key {
+            "title" => "title",
+            "description" => "description",
+            "icon" => "icon",
+            _ => return Ok(()),
+        };
+        sqlx::query(&format!("UPDATE weft_namespaces SET {column} = $2 WHERE name = $1"))
+            .bind(name.as_str())
+            .bind(value)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn set_namespace_visibility(
+        &self,
+        name: &NamespaceName,
+        visibility: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE weft_namespaces SET visibility = $2 WHERE name = $1")
+            .bind(name.as_str())
+            .bind(visibility)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn delete_namespace(&self, name: &NamespaceName) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM weft_namespaces WHERE name = $1")
+            .bind(name.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+}
+
+fn namespace_from_row(row: &sqlx::postgres::PgRow) -> Result<NamespaceRecord, StoreError> {
+    let corrupt = || StoreError::Backend("corrupt namespace row".to_string());
+    Ok(NamespaceRecord {
+        name: row.get::<&str, _>("name").parse().map_err(|_| corrupt())?,
+        owner: row.get::<&str, _>("owner").parse().map_err(|_| corrupt())?,
+        root_key: row.get("root_key"),
+        visibility: row.get("visibility"),
+        title: row.get("title"),
+        description: row.get("description"),
+        icon: row.get("icon"),
+    })
+}
+
+fn split_caps(caps: String) -> Vec<String> {
+    caps.split(',')
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn invite_from_row(row: &sqlx::postgres::PgRow) -> InviteRecord {
+    InviteRecord {
+        id: row.get("id"),
+        scope: row.get("scope"),
+        caps: split_caps(row.get("caps")),
+        uses_left: row.get::<Option<i32>, _>("uses_left").map(|u| u as u32),
+        expiry: row.get::<Option<i64>, _>("expiry").map(|e| e as u64),
     }
 }

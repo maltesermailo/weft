@@ -38,9 +38,9 @@ pub use line::{
     MAX_HISTORY_LIMIT, MAX_LABEL_BYTES, MAX_LINE_BYTES, MAX_PARAMS, MAX_TAGS, MAX_TAG_KEY_BYTES,
     MAX_TAG_VALUE_BYTES,
 };
-pub use name::{Account, ChannelName, NetworkName, Target, UserRef};
+pub use name::{Account, ChannelName, NamespaceName, NetworkName, Target, UserRef};
 pub use policy::{RetainedFor, RetentionPolicy, RetentionUnit};
-pub use types::{MemberAction, MsgMeta, PresenceStatus, ReactionOp, TypingState};
+pub use types::{MemberAction, MsgMeta, PresenceStatus, ReactionOp, TypingState, Visibility};
 
 // Re-exported so consumers (weft-core mints ULIDs in channel actors) share
 // one ulid version without a direct dependency.

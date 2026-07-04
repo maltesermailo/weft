@@ -1,7 +1,7 @@
 //! Storage row types. Event-sourced (§9.3): edits, deletes, and reactions
 //! are rows referencing the original message's msgid — never mutations.
 
-use weft_proto::{Account, ChannelName, MsgId, MsgMeta, Ulid, UserRef};
+use weft_proto::{Account, ChannelName, MsgId, MsgMeta, NamespaceName, RetentionPolicy, Ulid, UserRef};
 
 /// Where events live: a channel, or a same-network DM pair (§9.5).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -96,4 +96,73 @@ pub struct Verification {
     pub subject: String,
     /// Unix seconds when confirmed; `None` = still pending.
     pub verified_at: Option<u64>,
+}
+
+/// A channel's stored settings (§6.3). `view_gated` needs the anti-
+/// enumeration branch in the session layer (invariant 1); `topic` rides
+/// `CHANMETA`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelRecord {
+    pub policy: RetentionPolicy,
+    pub topic: Option<String>,
+    pub view_gated: bool,
+}
+
+/// A recorded capability grant (§6.5, §10.4). The server keeps these so an
+/// authed same-network account's caps are checkable without a token round-
+/// trip; the signed token returned to the client is for delegation and
+/// federation. `subject` is an account name or b64 pubkey; `scope` is a
+/// raw scope string (`#chan|ns:<name>|*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantRecord {
+    pub subject: String,
+    pub scope: String,
+    pub caps: Vec<String>,
+    /// The scope revocation epoch at issue; a later epoch bump invalidates
+    /// this grant (§10.4).
+    pub epoch: u64,
+    /// Unix seconds; `None` = no expiry (operator/root grants).
+    pub expiry: Option<u64>,
+}
+
+/// A minted invite (§6.5): an unbound authorization redeemable up to
+/// `uses_left` times until `expiry`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteRecord {
+    pub id: String,
+    pub scope: String,
+    pub caps: Vec<String>,
+    /// `None` = unlimited uses.
+    pub uses_left: Option<u32>,
+    /// Unix seconds; `None` = no expiry.
+    pub expiry: Option<u64>,
+}
+
+/// A user-owned namespace (§2.1, §2.2). `owner` is the account that
+/// created it (holds all caps at `ns:<name>` same-network); `root_key` is
+/// the client-generated root pubkey the owner holds — the crypto anchor
+/// for TRANSFER/recovery/federation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceRecord {
+    pub name: NamespaceName,
+    pub owner: Account,
+    /// Base64 Ed25519 root pubkey (§2.1).
+    pub root_key: String,
+    /// `public | unlisted | private` (§2.2), stored as the wire string.
+    pub visibility: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub icon: Option<String>,
+}
+
+/// Result of an atomic redeem attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedeemOutcome {
+    /// Redeemed; carries the scope + caps to grant the redeemer.
+    Redeemed(InviteRecord),
+    /// Counter exhausted.
+    Exhausted,
+    /// No such invite, revoked, or expired — one indistinct outcome so the
+    /// session answers NO-SUCH-TARGET uniformly (§2.2).
+    Gone,
 }

@@ -6,11 +6,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use weft_proto::{Account, ChannelName, MsgId, RetentionPolicy, Ulid};
+use weft_proto::{Account, ChannelName, MsgId, NamespaceName, RetentionPolicy, Ulid};
 
 use crate::compact::compaction_plan;
-use crate::traits::{AccountStore, ChannelStore, EventStore};
-use crate::types::{EventRecord, Page, Scope, Verification};
+use crate::traits::{
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, NamespaceStore,
+};
+use crate::types::{
+    ChannelRecord, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page, RedeemOutcome,
+    Scope, Verification,
+};
 use crate::StoreError;
 
 struct AccountRecord {
@@ -35,7 +40,15 @@ struct Inner {
     /// Purge watermarks (ms) for honest `truncated` flags.
     watermarks: HashMap<String, u64>,
     accounts: HashMap<Account, AccountRecord>,
-    channels: HashMap<ChannelName, RetentionPolicy>,
+    channels: HashMap<ChannelName, ChannelRecord>,
+    /// (subject, scope) → grant.
+    grants: HashMap<(String, String), GrantRecord>,
+    /// scope → revocation epoch.
+    epochs: HashMap<String, u64>,
+    /// invite id → record.
+    invites: HashMap<String, InviteRecord>,
+    /// namespace name → record.
+    namespaces: HashMap<NamespaceName, NamespaceRecord>,
 }
 
 #[derive(Default)]
@@ -335,7 +348,15 @@ impl ChannelStore for MemoryStore {
         policy: RetentionPolicy,
     ) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
-        inner.channels.insert(name.clone(), policy);
+        inner
+            .channels
+            .entry(name.clone())
+            .and_modify(|record| record.policy = policy)
+            .or_insert(ChannelRecord {
+                policy,
+                topic: None,
+                view_gated: false,
+            });
         Ok(())
     }
 
@@ -344,10 +365,229 @@ impl ChannelStore for MemoryStore {
         let mut channels: Vec<_> = inner
             .channels
             .iter()
-            .map(|(name, policy)| (name.clone(), *policy))
+            .map(|(name, record)| (name.clone(), record.policy))
             .collect();
         channels.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(channels)
+    }
+
+    async fn channel(&self, name: &ChannelName) -> Result<Option<ChannelRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner.channels.get(name).cloned())
+    }
+
+    async fn set_channel_topic(&self, name: &ChannelName, topic: &str) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(record) = inner.channels.get_mut(name) {
+            record.topic = Some(topic.to_string());
+        }
+        Ok(())
+    }
+
+    async fn set_channel_view_gated(
+        &self,
+        name: &ChannelName,
+        gated: bool,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(record) = inner.channels.get_mut(name) {
+            record.view_gated = gated;
+        }
+        Ok(())
+    }
+
+    async fn delete_channel(&self, name: &ChannelName) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        Ok(inner.channels.remove(name).is_some())
+    }
+}
+
+#[async_trait]
+impl CapabilityStore for MemoryStore {
+    async fn record_grant(
+        &self,
+        subject: &str,
+        scope: &str,
+        caps: &[String],
+        epoch: u64,
+        expiry: Option<u64>,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        inner.grants.insert(
+            (subject.to_string(), scope.to_string()),
+            GrantRecord {
+                subject: subject.to_string(),
+                scope: scope.to_string(),
+                caps: caps.to_vec(),
+                epoch,
+                expiry,
+            },
+        );
+        Ok(())
+    }
+
+    async fn grants_for(&self, subject: &str) -> Result<Vec<GrantRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .grants
+            .values()
+            .filter(|g| g.subject == subject)
+            .cloned()
+            .collect())
+    }
+
+    async fn revoke_grants(
+        &self,
+        subject: &str,
+        scope: &str,
+        caps: Option<&[String]>,
+    ) -> Result<u64, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let key = (subject.to_string(), scope.to_string());
+        match caps {
+            None => Ok(inner.grants.remove(&key).is_some() as u64),
+            Some(drop) => {
+                let Some(grant) = inner.grants.get_mut(&key) else {
+                    return Ok(0);
+                };
+                let before = grant.caps.len();
+                grant.caps.retain(|c| !drop.contains(c));
+                let removed = (before - grant.caps.len()) as u64;
+                if grant.caps.is_empty() {
+                    inner.grants.remove(&key);
+                }
+                Ok(removed)
+            }
+        }
+    }
+
+    async fn scope_epoch(&self, scope: &str) -> Result<u64, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner.epochs.get(scope).copied().unwrap_or(0))
+    }
+
+    async fn bump_epoch(&self, scope: &str) -> Result<u64, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let epoch = inner.epochs.entry(scope.to_string()).or_insert(0);
+        *epoch += 1;
+        Ok(*epoch)
+    }
+}
+
+#[async_trait]
+impl InviteStore for MemoryStore {
+    async fn create_invite(&self, invite: InviteRecord) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        inner.invites.insert(invite.id.clone(), invite);
+        Ok(())
+    }
+
+    async fn invite(&self, id: &str) -> Result<Option<InviteRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner.invites.get(id).cloned())
+    }
+
+    async fn redeem_invite(&self, id: &str, now: u64) -> Result<RedeemOutcome, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let Some(invite) = inner.invites.get_mut(id) else {
+            return Ok(RedeemOutcome::Gone);
+        };
+        if invite.expiry.is_some_and(|e| now >= e) {
+            return Ok(RedeemOutcome::Gone);
+        }
+        match invite.uses_left {
+            Some(0) => Ok(RedeemOutcome::Exhausted),
+            Some(n) => {
+                invite.uses_left = Some(n - 1);
+                Ok(RedeemOutcome::Redeemed(invite.clone()))
+            }
+            None => Ok(RedeemOutcome::Redeemed(invite.clone())),
+        }
+    }
+
+    async fn revoke_invite(&self, id: &str) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        Ok(inner.invites.remove(id).is_some())
+    }
+}
+
+#[async_trait]
+impl NamespaceStore for MemoryStore {
+    async fn create_namespace(&self, record: NamespaceRecord) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if inner.namespaces.contains_key(&record.name) {
+            return Ok(false);
+        }
+        inner.namespaces.insert(record.name.clone(), record);
+        Ok(true)
+    }
+
+    async fn namespace(&self, name: &NamespaceName) -> Result<Option<NamespaceRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner.namespaces.get(name).cloned())
+    }
+
+    async fn namespaces_owned(&self, owner: &str) -> Result<u64, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .namespaces
+            .values()
+            .filter(|ns| ns.owner.as_str() == owner)
+            .count() as u64)
+    }
+
+    async fn list_public(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<NamespaceRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut public: Vec<NamespaceRecord> = inner
+            .namespaces
+            .values()
+            .filter(|ns| ns.visibility == "public")
+            .filter(|ns| after.map_or(true, |cursor| ns.name.as_str() > cursor))
+            .cloned()
+            .collect();
+        public.sort_by(|a, b| a.name.cmp(&b.name));
+        public.truncate(limit);
+        Ok(public)
+    }
+
+    async fn set_namespace_meta(
+        &self,
+        name: &NamespaceName,
+        key: &str,
+        value: &str,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(ns) = inner.namespaces.get_mut(name) {
+            let value = Some(value.to_string());
+            match key {
+                "title" => ns.title = value,
+                "description" => ns.description = value,
+                "icon" => ns.icon = value,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn set_namespace_visibility(
+        &self,
+        name: &NamespaceName,
+        visibility: &str,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(ns) = inner.namespaces.get_mut(name) {
+            ns.visibility = visibility.to_string();
+        }
+        Ok(())
+    }
+
+    async fn delete_namespace(&self, name: &NamespaceName) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        Ok(inner.namespaces.remove(name).is_some())
     }
 }
 

@@ -75,10 +75,25 @@ const PASSWORD: &str = "test-password-123";
 fn ctx(channels: &[&str]) -> Arc<ServerCtx> {
     // §6.3 default policy.
     let channels: Vec<(&str, &str)> = channels.iter().map(|c| (*c, "retained:90d")).collect();
-    ctx_with(&channels, true)
+    ctx_full(&channels, true, &[])
+}
+
+/// Context with an operator account (holds every cap at `*`) — for the
+/// capability-verb tests.
+fn ctx_ops(channels: &[&str], operators: &[&str]) -> Arc<ServerCtx> {
+    let channels: Vec<(&str, &str)> = channels.iter().map(|c| (*c, "retained:90d")).collect();
+    ctx_full(&channels, true, operators)
 }
 
 fn ctx_with(channels: &[(&str, &str)], registration_open: bool) -> Arc<ServerCtx> {
+    ctx_full(channels, registration_open, &[])
+}
+
+fn ctx_full(
+    channels: &[(&str, &str)],
+    registration_open: bool,
+    operators: &[&str],
+) -> Arc<ServerCtx> {
     let info = ServerInfo {
         network: "test.example".parse().unwrap(),
         motd: Some("welcome!".to_string()),
@@ -93,6 +108,9 @@ fn ctx_with(channels: &[(&str, &str)], registration_open: bool) -> Arc<ServerCtx
         registration_open,
         Arc::new(MemoryStore::default()),
         "permanent".parse().unwrap(), // §9.5 DM default
+        operators.iter().map(|o| o.parse().unwrap()),
+        true, // §2.2 namespace creation open
+        10,   // quota
     ))
 }
 
@@ -1021,4 +1039,193 @@ async fn presence_relays_to_co_members_but_never_invisible() {
         matches!(ada.recv().await.event, Event::Pong { .. }),
         "ada must see no PRESENCE for invisible"
     );
+}
+
+// ---- M4a: capabilities, channels, invites, view gating ----
+
+/// Authenticate an operator (holds every cap at `*`).
+async fn ready_op(ctx: &Arc<ServerCtx>, account: &str) -> Client {
+    ready(ctx, account).await
+}
+
+#[tokio::test]
+async fn grant_lets_a_member_use_an_elevated_cap() {
+    let ctx = ctx_ops(&["#general"], &["boss"]);
+    // Non-operator ada cannot create channels...
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    ada.send("@label=c1 CHANNEL CREATE #ada-chan");
+    let reply = ada.expect_err(ErrCode::CapRequired).await;
+    let Event::Err(err) = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(err.context.as_deref(), Some("chan-create"));
+
+    // ...until the operator grants chan-create at `*`.
+    let mut boss = ready_op(&ctx, "boss").await;
+    boss.send("@label=g1 GRANT ada * chan-create");
+    let reply = boss.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("g1"));
+    assert!(matches!(&reply.event, Event::Token { subject, .. } if subject == "ada"));
+
+    // Now ada can create.
+    ada.send("@label=c2 CHANNEL CREATE #ada-chan retained:30d");
+    let reply = ada.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("c2"));
+    assert!(matches!(&reply.event, Event::Policy { channel, policy }
+            if channel.as_str() == "#ada-chan" && policy.to_string() == "retained:30d"));
+    // And join the channel she made.
+    ada.send("JOIN #ada-chan");
+    assert!(matches!(ada.recv().await.event, Event::Member { .. }));
+}
+
+#[tokio::test]
+async fn revoke_and_epoch_bump_remove_authority() {
+    let ctx = ctx_ops(&["#general"], &["boss"]);
+    let mut boss = ready_op(&ctx, "boss").await;
+    let mut ada = joined(&ctx, "ada", "#general").await;
+
+    boss.send("GRANT ada * chan-create");
+    boss.recv().await; // TOKEN
+    ada.send("CHANNEL CREATE #x1");
+    assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
+
+    // Revoke it; ada loses the cap.
+    boss.send("@label=r1 REVOKE ada * chan-create");
+    let reply = boss.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("r1"));
+    assert!(matches!(&reply.event, Event::Token { .. })); // reflects remaining (none)
+    ada.send("CHANNEL CREATE #x2");
+    ada.expect_err(ErrCode::CapRequired).await;
+}
+
+#[tokio::test]
+async fn only_operators_bootstrap_grants() {
+    let ctx = ctx_ops(&["#general"], &["boss"]);
+    // A plain member cannot grant caps they don't hold grant: for.
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    ada.send("@label=g GRANT bob * chan-create");
+    let reply = ada.expect_err(ErrCode::CapRequired).await;
+    let Event::Err(err) = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(err.context.as_deref(), Some("grant:chan-create"));
+}
+
+#[tokio::test]
+async fn channel_policy_and_delete_require_caps() {
+    let ctx = ctx_ops(&["#general"], &["boss"]);
+    let mut boss = ready_op(&ctx, "boss").await;
+
+    // Operator creates and reconfigures a channel.
+    boss.send("CHANNEL CREATE #ops");
+    boss.recv().await;
+    boss.send("@label=p1 CHANNEL POLICY #ops ephemeral");
+    let reply = boss.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("p1"));
+    assert!(
+        matches!(&reply.event, Event::Policy { policy, .. } if policy.to_string() == "ephemeral")
+    );
+
+    // META view-gated.
+    boss.send("@label=m1 CHANNEL META #ops view-gated :yes");
+    let reply = boss.recv().await;
+    assert!(matches!(&reply.event, Event::Chanmeta { key, .. } if key == "view-gated"));
+
+    // DELETE requires the confirmation to match.
+    boss.send("CHANNEL DELETE #ops #wrong");
+    boss.expect_err(ErrCode::Policy).await;
+    boss.send("@label=d1 CHANNEL DELETE #ops #ops");
+    let reply = boss.recv().await;
+    assert!(matches!(&reply.event, Event::Chanmeta { key, .. } if key == "deleted"));
+    // Gone: joining now is NO-SUCH-TARGET.
+    boss.send("JOIN #ops");
+    boss.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn view_gated_channel_hides_without_the_view_cap() {
+    let ctx = ctx_ops(&["#general"], &["boss"]);
+    let mut boss = ready_op(&ctx, "boss").await;
+    boss.send("CHANNEL CREATE #secret");
+    boss.recv().await;
+    boss.send("CHANNEL META #secret view-gated :yes");
+    boss.recv().await;
+
+    // A plain account can't even tell it exists (invariant 1).
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send("@label=j JOIN #secret");
+    let reply = ada.expect_err(ErrCode::NoSuchTarget).await;
+    assert_eq!(reply.label.as_deref(), Some("j"));
+
+    // Grant view → it becomes reachable.
+    boss.send("GRANT ada #secret view");
+    boss.recv().await;
+    ada.send("JOIN #secret");
+    assert!(matches!(ada.recv().await.event, Event::Member { .. }));
+}
+
+#[tokio::test]
+async fn invite_mint_and_redeem_grants_membership() {
+    let ctx = ctx_ops(&["#general"], &["boss"]);
+    let mut boss = ready_op(&ctx, "boss").await;
+    boss.send("CHANNEL CREATE #club");
+    boss.recv().await;
+    boss.send("CHANNEL META #club view-gated :yes");
+    boss.recv().await;
+
+    // Mint a 1-use invite for the gated channel.
+    boss.send("@label=i1 INVITE MINT #club max-uses=1");
+    let reply = boss.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("i1"));
+    let Event::Invited {
+        invite_id, token, ..
+    } = &reply.event
+    else {
+        panic!("expected INVITED, got {reply:?}");
+    };
+    assert_eq!(invite_id, token);
+    let id = invite_id.clone();
+
+    // Ada can't join the gated channel directly...
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send("JOIN #club");
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+    // ...but redeeming the invite grants membership and auto-joins.
+    ada.send(&format!("@label=rd INVITE REDEEM {id}"));
+    let reply = ada.recv().await;
+    assert!(
+        matches!(&reply.event, Event::Member { user, .. } if user.account.as_str() == "ada"),
+        "redeem should auto-join, got {reply:?}"
+    );
+    assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
+
+    // Second redeem: counter exhausted → NO-SUCH-TARGET (§2.2).
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send(&format!("INVITE REDEEM {id}"));
+    bob.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn invite_revoke_kills_the_link() {
+    let ctx = ctx_ops(&["#general"], &["boss"]);
+    let mut boss = ready_op(&ctx, "boss").await;
+    boss.send("CHANNEL CREATE #club");
+    boss.recv().await;
+    boss.send("INVITE MINT #club");
+    let Event::Invited { invite_id, .. } = boss.recv().await.event else {
+        panic!()
+    };
+    boss.send(&format!("@label=rv INVITE REVOKE {invite_id}"));
+    let reply = boss.recv().await;
+    assert!(matches!(
+        &reply.event,
+        Event::Invited {
+            max_uses: Some(0),
+            ..
+        }
+    ));
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("INVITE REDEEM {invite_id}"));
+    ada.expect_err(ErrCode::NoSuchTarget).await;
 }

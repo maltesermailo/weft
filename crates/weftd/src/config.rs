@@ -21,8 +21,13 @@ pub struct Config {
     pub channels: Vec<ChannelConfig>,
     /// §6.1: REGISTER works only when `open`.
     pub registration: Registration,
+    /// §11.3: operator accounts hold every capability at `*` (the network
+    /// key's authority) — they bootstrap the grant chain.
+    pub operators: Vec<String>,
     /// §9.5: one retention policy for all DMs (default `permanent`).
     pub dm_policy: String,
+    /// §2.2 namespace creation policy.
+    pub namespaces: Namespaces,
     pub listen: Listen,
     pub identity: Identity,
     pub storage: Storage,
@@ -60,6 +65,32 @@ pub enum Registration {
     #[default]
     Open,
     Closed,
+}
+
+/// §2.2 namespace creation: `open` (any account, up to `quota`) or `gated`
+/// (needs the `ns-create` cap).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Namespaces {
+    pub creation: NsCreation,
+    pub quota: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NsCreation {
+    #[default]
+    Open,
+    Gated,
+}
+
+impl Default for Namespaces {
+    fn default() -> Self {
+        Self {
+            creation: NsCreation::Open,
+            quota: 10, // §2.2 default quota
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,6 +158,8 @@ impl Default for Config {
             motd: None,
             channels: vec![ChannelConfig::Name("#general".to_string())],
             registration: Registration::Open,
+            operators: Vec::new(),
+            namespaces: Namespaces::default(),
             dm_policy: "permanent".to_string(),
             listen: Listen::default(),
             identity: Identity::default(),

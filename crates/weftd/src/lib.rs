@@ -23,8 +23,8 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tracing::info;
-use weft_core::{ChannelStore, Keypair, MaintenanceConfig, MemoryStore, ServerCtx, ServerInfo};
-use weft_store::{AccountStore, EventStore, PgStore};
+use weft_core::{Keypair, MaintenanceConfig, MemoryStore, ServerCtx, ServerInfo};
+use weft_store::{AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, PgStore};
 
 pub use config::Config;
 
@@ -82,6 +82,19 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         .dm_policy
         .parse()
         .with_context(|| format!("invalid dm_policy {:?}", config.dm_policy))?;
+    // §11.3: operator accounts hold the network key's authority (every cap
+    // at `*`) — the root of the grant chain.
+    let operators = config
+        .operators
+        .iter()
+        .map(|name| {
+            name.parse::<weft_proto::Account>()
+                .with_context(|| format!("invalid operator {name:?}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    // §2.2 namespace creation policy.
+    let ns_creation_open = config.namespaces.creation == config::NsCreation::Open;
+    let ns_quota = config.namespaces.quota;
 
     // Network signing key (§10.2): persisted so attestations stay valid
     // across restarts; ephemeral only when explicitly configured away.
@@ -114,6 +127,9 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 maintenance,
                 Arc::new(MemoryStore::default()),
                 &seed_channels,
+                operators.clone(),
+                ns_creation_open,
+                ns_quota,
             )
             .await?
         }
@@ -134,6 +150,9 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 maintenance,
                 Arc::new(store),
                 &seed_channels,
+                operators.clone(),
+                ns_creation_open,
+                ns_quota,
             )
             .await?
         }
@@ -259,7 +278,7 @@ fn self_signed(
 
 /// Seed config channels into the store, load the full channel set back
 /// (store = source of truth), build the context, start maintenance.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 async fn boot<S>(
     info: ServerInfo,
     identity: Keypair,
@@ -268,13 +287,22 @@ async fn boot<S>(
     maintenance: MaintenanceConfig,
     store: Arc<S>,
     seed: &[(weft_proto::ChannelName, weft_proto::RetentionPolicy)],
+    operators: Vec<weft_proto::Account>,
+    ns_creation_open: bool,
+    ns_quota: u64,
 ) -> anyhow::Result<(
     Arc<ServerCtx>,
     Vec<(weft_proto::ChannelName, weft_proto::RetentionPolicy)>,
     Vec<JoinHandle<()>>,
 )>
 where
-    S: EventStore + AccountStore + ChannelStore + 'static,
+    S: EventStore
+        + AccountStore
+        + ChannelStore
+        + CapabilityStore
+        + InviteStore
+        + weft_store::NamespaceStore
+        + 'static,
 {
     for (name, policy) in seed {
         store
@@ -293,6 +321,9 @@ where
         registration_open,
         Arc::clone(&store),
         dm_policy,
+        operators,
+        ns_creation_open,
+        ns_quota,
     ));
     let events: Arc<dyn EventStore> = store;
     let tasks = vec![weft_core::spawn_maintenance(

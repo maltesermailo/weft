@@ -4,7 +4,12 @@
 use async_trait::async_trait;
 use weft_proto::{Account, ChannelName, MsgId, RetentionPolicy, Ulid};
 
-use crate::types::{EventRecord, Page, Scope, Verification};
+use weft_proto::NamespaceName;
+
+use crate::types::{
+    ChannelRecord, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page, RedeemOutcome,
+    Scope, Verification,
+};
 use crate::StoreError;
 
 #[async_trait]
@@ -94,11 +99,11 @@ pub trait AccountStore: Send + Sync {
 }
 
 /// The channel set lives in the store — config entries are *seeded* into
-/// it at boot and the store is the source of truth from then on. This is
-/// the substrate CHANNEL CREATE (M4) will write through.
+/// it at boot and the store is the source of truth from then on. CHANNEL
+/// CREATE/DELETE/META (§6.3) write through here.
 #[async_trait]
 pub trait ChannelStore: Send + Sync {
-    /// Insert or update a channel's policy.
+    /// Insert or update a channel's policy (leaves topic/view-gated intact).
     async fn upsert_channel(
         &self,
         name: &ChannelName,
@@ -106,4 +111,110 @@ pub trait ChannelStore: Send + Sync {
     ) -> Result<(), StoreError>;
 
     async fn list_channels(&self) -> Result<Vec<(ChannelName, RetentionPolicy)>, StoreError>;
+
+    /// Full settings for one channel.
+    async fn channel(&self, name: &ChannelName) -> Result<Option<ChannelRecord>, StoreError>;
+
+    /// CHANNEL META topic (§6.3).
+    async fn set_channel_topic(&self, name: &ChannelName, topic: &str) -> Result<(), StoreError>;
+
+    /// CHANNEL META view-gated (§6.3) — flips the anti-enumeration branch.
+    async fn set_channel_view_gated(
+        &self,
+        name: &ChannelName,
+        gated: bool,
+    ) -> Result<(), StoreError>;
+
+    /// CHANNEL DELETE. False = no such channel.
+    async fn delete_channel(&self, name: &ChannelName) -> Result<bool, StoreError>;
+}
+
+/// Capability grants + per-scope revocation epochs (§6.5, §10.4). The
+/// server-side grant table is the enforcement fast path for same-network
+/// authed accounts.
+#[async_trait]
+pub trait CapabilityStore: Send + Sync {
+    /// Record a granted capability (GRANT). Replaces any existing grant for
+    /// the same (subject, scope) — re-granting re-mints (§10.4).
+    async fn record_grant(
+        &self,
+        subject: &str,
+        scope: &str,
+        caps: &[String],
+        epoch: u64,
+        expiry: Option<u64>,
+    ) -> Result<(), StoreError>;
+
+    /// All grants held by a subject (account or pubkey).
+    async fn grants_for(&self, subject: &str) -> Result<Vec<GrantRecord>, StoreError>;
+
+    /// REVOKE: drop grants for (subject, scope); `caps = None` drops all.
+    /// Returns the number removed.
+    async fn revoke_grants(
+        &self,
+        subject: &str,
+        scope: &str,
+        caps: Option<&[String]>,
+    ) -> Result<u64, StoreError>;
+
+    /// The current revocation epoch for a scope (0 if never bumped).
+    async fn scope_epoch(&self, scope: &str) -> Result<u64, StoreError>;
+
+    /// Bump and return the new epoch — invalidates every grant/token at the
+    /// scope issued before it (§10.4).
+    async fn bump_epoch(&self, scope: &str) -> Result<u64, StoreError>;
+}
+
+/// Invite lifecycle (§6.5).
+#[async_trait]
+pub trait InviteStore: Send + Sync {
+    async fn create_invite(&self, invite: InviteRecord) -> Result<(), StoreError>;
+
+    async fn invite(&self, id: &str) -> Result<Option<InviteRecord>, StoreError>;
+
+    /// Atomically decrement the counter and check expiry. The single
+    /// mutating check keeps concurrent redeems from over-drawing a
+    /// limited-use invite.
+    async fn redeem_invite(&self, id: &str, now: u64) -> Result<RedeemOutcome, StoreError>;
+
+    /// INVITE REVOKE — closes the counter. False = no such invite.
+    async fn revoke_invite(&self, id: &str) -> Result<bool, StoreError>;
+}
+
+/// User-owned namespaces (§2.1, §2.2).
+#[async_trait]
+pub trait NamespaceStore: Send + Sync {
+    /// Create a namespace. False = name already taken (§6.2 CONFLICT).
+    async fn create_namespace(&self, record: NamespaceRecord) -> Result<bool, StoreError>;
+
+    async fn namespace(&self, name: &NamespaceName) -> Result<Option<NamespaceRecord>, StoreError>;
+
+    /// Namespaces owned by an account (for quota enforcement, §2.2).
+    async fn namespaces_owned(&self, owner: &str) -> Result<u64, StoreError>;
+
+    /// The `public` directory, sorted by name, for DISCOVER (§6.2). `after`
+    /// is the exclusive cursor (a namespace name); `limit` caps the page.
+    async fn list_public(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<NamespaceRecord>, StoreError>;
+
+    /// NS META (title/description/icon) — `key` is one of those.
+    async fn set_namespace_meta(
+        &self,
+        name: &NamespaceName,
+        key: &str,
+        value: &str,
+    ) -> Result<(), StoreError>;
+
+    /// NS VISIBILITY.
+    async fn set_namespace_visibility(
+        &self,
+        name: &NamespaceName,
+        visibility: &str,
+    ) -> Result<(), StoreError>;
+
+    /// NS DELETE. False = no such namespace.
+    async fn delete_namespace(&self, name: &NamespaceName) -> Result<bool, StoreError>;
 }

@@ -4,8 +4,8 @@
 use crate::error::{ParseError, SerializeError};
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
-use crate::name::{Account, ChannelName, Target};
-use crate::types::{MsgMeta, PresenceStatus, TypingState};
+use crate::name::{Account, ChannelName, NamespaceName, Target};
+use crate::types::{MsgMeta, PresenceStatus, TypingState, Visibility};
 
 /// A command plus its optional `label` (§3.5). The label is echoed on every
 /// direct response — including `ERR` — and never on broadcast copies.
@@ -117,8 +117,110 @@ pub enum Command {
         limit: Option<u32>,
         thread: Option<MsgId>,
     },
+    /// `GRANT <subject> <scope> <caps> [expiry=<s>]` (§6.5). `subject` is an
+    /// account or b64 pubkey, `scope` is `#chan|ns:<name>|*`, `caps` a comma
+    /// list — all validated by the capability layer, not the codec.
+    Grant {
+        subject: String,
+        scope: String,
+        caps: String,
+        expiry: Option<u64>,
+    },
+    /// `REVOKE <subject> <scope> [caps=<list>] [epoch]` (§6.5). No caps and
+    /// no epoch = revoke everything for the subject at the scope.
+    Revoke {
+        subject: String,
+        scope: String,
+        caps: Option<String>,
+        /// Bumps the scope revocation epoch (§10.4).
+        epoch: Option<u64>,
+    },
+    /// `CHANNEL CREATE <#chan> [policy]` — default `retained:90d` (§6.3).
+    ChannelCreate {
+        channel: ChannelName,
+        policy: Option<crate::RetentionPolicy>,
+    },
+    /// `CHANNEL POLICY <#chan> <policy> [purge]` (§6.3).
+    ChannelPolicy {
+        channel: ChannelName,
+        policy: crate::RetentionPolicy,
+        purge: bool,
+    },
+    /// `CHANNEL META <#chan> <topic|view-gated> :<value>` (§6.3) → `CHANMETA`.
+    ChannelMeta {
+        channel: ChannelName,
+        key: String,
+        value: String,
+    },
+    /// `CHANNEL DELETE <#chan> <#chan>` — confirmed by repetition (§6.3).
+    ChannelDelete {
+        channel: ChannelName,
+        confirm: ChannelName,
+    },
+    /// `INVITE MINT <scope> [max-uses=] [expiry=]` (§6.5) → `INVITED`.
+    InviteMint {
+        scope: String,
+        max_uses: Option<u32>,
+        expiry: Option<u64>,
+    },
+    /// `INVITE REVOKE <invite-id>` — closes the counter (§6.5).
+    InviteRevoke { invite_id: String },
+    /// `INVITE REDEEM <b64>` — verifies chain + counter, mints a member
+    /// token bound to the redeemer (§6.5).
+    InviteRedeem { token: String },
+    /// `NS CREATE <name> [tier]` with `@root=<b64-pubkey>` (§6.2). The
+    /// client generates the namespace root key and submits its pubkey.
+    NsCreate {
+        name: NamespaceName,
+        visibility: Visibility,
+        root_key: String,
+    },
+    /// `NS META <name> <title|description|icon> :<value>` (§6.2).
+    NsMeta {
+        name: NamespaceName,
+        key: String,
+        value: String,
+    },
+    /// `NS VISIBILITY <name> <tier>` (§6.2).
+    NsVisibility {
+        name: NamespaceName,
+        visibility: Visibility,
+    },
+    /// `NS DELEGATE <name> <account|pubkey> <cap>[,...]` — sugar for GRANT
+    /// at `ns:` scope (§6.2).
+    NsDelegate {
+        name: NamespaceName,
+        subject: String,
+        caps: String,
+    },
+    /// `NS DELETE <name> <name>` — confirmed by repetition (§6.2).
+    NsDelete {
+        name: NamespaceName,
+        confirm: NamespaceName,
+    },
+    /// `DISCOVER [cursor]` — public namespace directory (§6.2).
+    Discover { cursor: Option<String> },
     /// Any verb outside the known set. Servers ignore it silently (§4).
     Unknown { verb: String },
+}
+
+/// Comma-separated cap list as a middle param (no spaces).
+fn caps_ok(caps: &str) -> bool {
+    !caps.is_empty() && !caps.contains(' ')
+}
+
+/// Scan middle params for an optional `key=<u64>`.
+fn kv_u64(line: &Line, verb: &'static str, key: &'static str) -> Result<Option<u64>, ParseError> {
+    for param in &line.params {
+        if let Some(value) = param.strip_prefix(key).and_then(|r| r.strip_prefix('=')) {
+            return Ok(Some(value.parse().map_err(|_| ParseError::BadParam {
+                verb,
+                what: key,
+                value: value.to_string(),
+            })?));
+        }
+    }
+    Ok(None)
 }
 
 /// §6.4 emoji, ≤32 bytes. The `:shortcode:` form conflicts with the §4
@@ -288,6 +390,190 @@ impl Command {
                     thread,
                 })
             }
+            "GRANT" => {
+                let mut args = Args::new(line, "GRANT");
+                let subject = args.req("subject")?.to_string();
+                let scope = args.req("scope")?.to_string();
+                let caps = args.req("caps")?.to_string();
+                if !caps_ok(&caps) {
+                    return Err(ParseError::BadParam {
+                        verb: "GRANT",
+                        what: "caps",
+                        value: caps,
+                    });
+                }
+                Ok(Command::Grant {
+                    subject,
+                    scope,
+                    caps,
+                    expiry: kv_u64(line, "GRANT", "expiry")?,
+                })
+            }
+            "REVOKE" => {
+                let mut args = Args::new(line, "REVOKE");
+                let subject = args.req("subject")?.to_string();
+                let scope = args.req("scope")?.to_string();
+                // Remaining params: `caps=<list>` and/or a bare epoch number.
+                let mut caps = None;
+                let mut epoch = None;
+                while let Some(param) = args.opt() {
+                    if let Some(list) = param.strip_prefix("caps=") {
+                        caps = Some(list.to_string());
+                    } else if let Ok(n) = param.parse::<u64>() {
+                        epoch = Some(n);
+                    }
+                }
+                Ok(Command::Revoke {
+                    subject,
+                    scope,
+                    caps,
+                    epoch,
+                })
+            }
+            "CHANNEL" => {
+                let mut args = Args::new(line, "CHANNEL");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "CREATE" => Ok(Command::ChannelCreate {
+                        channel: args.req("channel")?.parse()?,
+                        policy: args.opt().map(str::parse).transpose()?,
+                    }),
+                    "POLICY" => {
+                        let channel = args.req("channel")?.parse()?;
+                        let policy = args.req("policy")?.parse()?;
+                        // `purge` is a bare flag keyword after the policy.
+                        let purge = args.opt().is_some_and(|p| p.eq_ignore_ascii_case("purge"));
+                        Ok(Command::ChannelPolicy {
+                            channel,
+                            policy,
+                            purge,
+                        })
+                    }
+                    "META" => Ok(Command::ChannelMeta {
+                        channel: args.req("channel")?.parse()?,
+                        key: args.req("key")?.to_string(),
+                        value: args.trailing_req("value")?.to_string(),
+                    }),
+                    "DELETE" => Ok(Command::ChannelDelete {
+                        channel: args.req("channel")?.parse()?,
+                        confirm: args.req("confirmation")?.parse()?,
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "CHANNEL",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
+            "INVITE" => {
+                let mut args = Args::new(line, "INVITE");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "MINT" => {
+                        let scope = args.req("scope")?.to_string();
+                        let mut max_uses = None;
+                        let mut expiry = None;
+                        while let Some(param) = args.opt() {
+                            if let Some(v) = param.strip_prefix("max-uses=") {
+                                max_uses = Some(v.parse().map_err(|_| ParseError::BadParam {
+                                    verb: "INVITE",
+                                    what: "max-uses",
+                                    value: v.to_string(),
+                                })?);
+                            } else if let Some(v) = param.strip_prefix("expiry=") {
+                                expiry = Some(v.parse().map_err(|_| ParseError::BadParam {
+                                    verb: "INVITE",
+                                    what: "expiry",
+                                    value: v.to_string(),
+                                })?);
+                            }
+                        }
+                        Ok(Command::InviteMint {
+                            scope,
+                            max_uses,
+                            expiry,
+                        })
+                    }
+                    "REVOKE" => Ok(Command::InviteRevoke {
+                        invite_id: args.req("invite-id")?.to_string(),
+                    }),
+                    "REDEEM" => Ok(Command::InviteRedeem {
+                        token: args.req("token")?.to_string(),
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "INVITE",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
+            "NS" => {
+                let mut args = Args::new(line, "NS");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "CREATE" => {
+                        let name = args.req("name")?.parse()?;
+                        // Default tier is `unlisted` (§6.2).
+                        let visibility = args
+                            .opt()
+                            .map(str::parse)
+                            .transpose()?
+                            .unwrap_or(Visibility::Unlisted);
+                        let root_key = line
+                            .tags
+                            .get("root")
+                            .filter(|v| !v.is_empty())
+                            .cloned()
+                            .ok_or(ParseError::MissingParam {
+                                verb: "NS",
+                                what: "root tag (namespace root pubkey)",
+                            })?;
+                        Ok(Command::NsCreate {
+                            name,
+                            visibility,
+                            root_key,
+                        })
+                    }
+                    "META" => Ok(Command::NsMeta {
+                        name: args.req("name")?.parse()?,
+                        key: args.req("key")?.to_string(),
+                        value: args.trailing_req("value")?.to_string(),
+                    }),
+                    "VISIBILITY" => Ok(Command::NsVisibility {
+                        name: args.req("name")?.parse()?,
+                        visibility: args.req("tier")?.parse()?,
+                    }),
+                    "DELEGATE" => {
+                        let name = args.req("name")?.parse()?;
+                        let subject = args.req("subject")?.to_string();
+                        let caps = args.req("caps")?.to_string();
+                        if !caps_ok(&caps) {
+                            return Err(ParseError::BadParam {
+                                verb: "NS",
+                                what: "caps",
+                                value: caps,
+                            });
+                        }
+                        Ok(Command::NsDelegate {
+                            name,
+                            subject,
+                            caps,
+                        })
+                    }
+                    "DELETE" => Ok(Command::NsDelete {
+                        name: args.req("name")?.parse()?,
+                        confirm: args.req("confirmation")?.parse()?,
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "NS",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
+            "DISCOVER" => Ok(Command::Discover {
+                cursor: Args::new(line, "DISCOVER").opt().map(str::to_string),
+            }),
             _ => Ok(Command::Unknown {
                 verb: verb.to_string(),
             }),
@@ -378,6 +664,149 @@ impl Command {
                     params.push(format!("thread={thread}"));
                 }
                 ("HISTORY", params, None)
+            }
+            Command::Grant {
+                subject,
+                scope,
+                caps,
+                expiry,
+            } => {
+                if !caps_ok(caps) {
+                    return Err(SerializeError::BadParam {
+                        param: caps.clone(),
+                        reason: "caps must be a non-empty space-free list",
+                    });
+                }
+                let mut params = vec![subject.clone(), scope.clone(), caps.clone()];
+                if let Some(expiry) = expiry {
+                    params.push(format!("expiry={expiry}"));
+                }
+                ("GRANT", params, None)
+            }
+            Command::Revoke {
+                subject,
+                scope,
+                caps,
+                epoch,
+            } => {
+                let mut params = vec![subject.clone(), scope.clone()];
+                if let Some(caps) = caps {
+                    params.push(format!("caps={caps}"));
+                }
+                if let Some(epoch) = epoch {
+                    params.push(epoch.to_string());
+                }
+                ("REVOKE", params, None)
+            }
+            Command::ChannelCreate { channel, policy } => {
+                let mut params = vec!["CREATE".to_string(), channel.to_string()];
+                if let Some(policy) = policy {
+                    params.push(policy.to_string());
+                }
+                ("CHANNEL", params, None)
+            }
+            Command::ChannelPolicy {
+                channel,
+                policy,
+                purge,
+            } => {
+                let mut params = vec![
+                    "POLICY".to_string(),
+                    channel.to_string(),
+                    policy.to_string(),
+                ];
+                if *purge {
+                    params.push("purge".to_string());
+                }
+                ("CHANNEL", params, None)
+            }
+            Command::ChannelMeta {
+                channel,
+                key,
+                value,
+            } => (
+                "CHANNEL",
+                vec!["META".to_string(), channel.to_string(), key.clone()],
+                Some(value.clone()),
+            ),
+            Command::ChannelDelete { channel, confirm } => (
+                "CHANNEL",
+                vec![
+                    "DELETE".to_string(),
+                    channel.to_string(),
+                    confirm.to_string(),
+                ],
+                None,
+            ),
+            Command::InviteMint {
+                scope,
+                max_uses,
+                expiry,
+            } => {
+                let mut params = vec!["MINT".to_string(), scope.clone()];
+                if let Some(max_uses) = max_uses {
+                    params.push(format!("max-uses={max_uses}"));
+                }
+                if let Some(expiry) = expiry {
+                    params.push(format!("expiry={expiry}"));
+                }
+                ("INVITE", params, None)
+            }
+            Command::InviteRevoke { invite_id } => (
+                "INVITE",
+                vec!["REVOKE".to_string(), invite_id.clone()],
+                None,
+            ),
+            Command::InviteRedeem { token } => {
+                ("INVITE", vec!["REDEEM".to_string(), token.clone()], None)
+            }
+            Command::NsCreate {
+                name,
+                visibility,
+                root_key,
+            } => {
+                tags.insert("root".to_string(), root_key.clone());
+                (
+                    "NS",
+                    vec!["CREATE".to_string(), name.to_string(), visibility.to_string()],
+                    None,
+                )
+            }
+            Command::NsMeta { name, key, value } => (
+                "NS",
+                vec!["META".to_string(), name.to_string(), key.clone()],
+                Some(value.clone()),
+            ),
+            Command::NsVisibility { name, visibility } => (
+                "NS",
+                vec![
+                    "VISIBILITY".to_string(),
+                    name.to_string(),
+                    visibility.to_string(),
+                ],
+                None,
+            ),
+            Command::NsDelegate {
+                name,
+                subject,
+                caps,
+            } => (
+                "NS",
+                vec![
+                    "DELEGATE".to_string(),
+                    name.to_string(),
+                    subject.clone(),
+                    caps.clone(),
+                ],
+                None,
+            ),
+            Command::NsDelete { name, confirm } => (
+                "NS",
+                vec!["DELETE".to_string(), name.to_string(), confirm.to_string()],
+                None,
+            ),
+            Command::Discover { cursor } => {
+                ("DISCOVER", cursor.iter().cloned().collect(), None)
             }
             Command::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown command"));
@@ -660,6 +1089,165 @@ mod tests {
         assert_eq!(target.to_string(), "@ada");
 
         assert!(Request::parse("HISTORY #general limit=abc").is_err());
+    }
+
+    #[test]
+    fn grant_revoke_round_trip() {
+        round_trip(&Request::with_label(
+            Command::Grant {
+                subject: "ada".into(),
+                scope: "ns:gaming".into(),
+                caps: "ban,grant:send".into(),
+                expiry: Some(3600),
+            },
+            "g1",
+        ));
+        assert_eq!(
+            Request::new(Command::Grant {
+                subject: "B64KEY==".into(),
+                scope: "#general".into(),
+                caps: "send".into(),
+                expiry: None,
+            })
+            .serialize()
+            .unwrap(),
+            "GRANT B64KEY== #general send"
+        );
+        // Caps with a space are rejected both ways.
+        assert!(
+            Request::parse("GRANT ada * send react").is_err()
+                || matches!(
+                    Request::parse("GRANT ada * send react").unwrap().command,
+                    Command::Grant { caps, .. } if caps == "send"
+                )
+        );
+        // REVOKE: caps=list and a bare epoch, any order.
+        let parsed = Request::parse("REVOKE ada ns:x caps=ban,kick 7").unwrap();
+        let Command::Revoke { caps, epoch, .. } = parsed.command else {
+            panic!()
+        };
+        assert_eq!(caps.as_deref(), Some("ban,kick"));
+        assert_eq!(epoch, Some(7));
+        round_trip(&Request::new(Command::Revoke {
+            subject: "ada".into(),
+            scope: "#general".into(),
+            caps: None,
+            epoch: None,
+        }));
+    }
+
+    #[test]
+    fn channel_verbs_round_trip() {
+        round_trip(&Request::new(Command::ChannelCreate {
+            channel: "#new".parse().unwrap(),
+            policy: Some("retained:30d".parse().unwrap()),
+        }));
+        assert_eq!(
+            Request::new(Command::ChannelCreate {
+                channel: "#new".parse().unwrap(),
+                policy: None,
+            })
+            .serialize()
+            .unwrap(),
+            "CHANNEL CREATE #new"
+        );
+        round_trip(&Request::new(Command::ChannelPolicy {
+            channel: "#c".parse().unwrap(),
+            policy: "ephemeral".parse().unwrap(),
+            purge: true,
+        }));
+        round_trip(&Request::new(Command::ChannelMeta {
+            channel: "#c".parse().unwrap(),
+            key: "topic".into(),
+            value: "the new topic here".into(),
+        }));
+        round_trip(&Request::new(Command::ChannelDelete {
+            channel: "#c".parse().unwrap(),
+            confirm: "#c".parse().unwrap(),
+        }));
+        assert_eq!(
+            Request::parse("CHANNEL FROB #x"),
+            Err(ParseError::BadParam {
+                verb: "CHANNEL",
+                what: "subcommand",
+                value: "FROB".into()
+            })
+        );
+    }
+
+    #[test]
+    fn invite_verbs_round_trip() {
+        round_trip(&Request::with_label(
+            Command::InviteMint {
+                scope: "ns:gaming".into(),
+                max_uses: Some(10),
+                expiry: Some(86400),
+            },
+            "i1",
+        ));
+        round_trip(&Request::new(Command::InviteRevoke {
+            invite_id: "inv-abc".into(),
+        }));
+        round_trip(&Request::new(Command::InviteRedeem {
+            token: "B64TOKEN==".into(),
+        }));
+    }
+
+    #[test]
+    fn ns_verbs_round_trip() {
+        let create = Request::with_label(
+            Command::NsCreate {
+                name: "gaming".parse().unwrap(),
+                visibility: crate::types::Visibility::Public,
+                root_key: "B64ROOTKEY==".into(),
+            },
+            "n1",
+        );
+        let wire = create.serialize().unwrap();
+        assert!(wire.contains("root=B64ROOTKEY=="), "{wire}");
+        assert!(wire.contains("NS CREATE gaming public"), "{wire}");
+        round_trip(&create);
+        // Default tier is unlisted; root tag mandatory.
+        let parsed = Request::parse("@root=K== NS CREATE gaming").unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::NsCreate { visibility: crate::types::Visibility::Unlisted, .. }
+        ));
+        assert_eq!(
+            Request::parse("NS CREATE gaming"),
+            Err(ParseError::MissingParam { verb: "NS", what: "root tag (namespace root pubkey)" })
+        );
+
+        round_trip(&Request::new(Command::NsMeta {
+            name: "gaming".parse().unwrap(),
+            key: "title".into(),
+            value: "The Gaming Lounge".into(),
+        }));
+        round_trip(&Request::new(Command::NsVisibility {
+            name: "gaming".parse().unwrap(),
+            visibility: crate::types::Visibility::Private,
+        }));
+        round_trip(&Request::new(Command::NsDelegate {
+            name: "gaming".parse().unwrap(),
+            subject: "ada".into(),
+            caps: "ban,kick".into(),
+        }));
+        round_trip(&Request::new(Command::NsDelete {
+            name: "gaming".parse().unwrap(),
+            confirm: "gaming".parse().unwrap(),
+        }));
+        assert!(Request::parse("NS FROB x").is_err());
+    }
+
+    #[test]
+    fn discover_round_trips() {
+        round_trip(&Request::new(Command::Discover { cursor: None }));
+        round_trip(&Request::with_label(
+            Command::Discover {
+                cursor: Some("cur-42".into()),
+            },
+            "d1",
+        ));
     }
 
     #[test]

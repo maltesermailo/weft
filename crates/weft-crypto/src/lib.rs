@@ -13,11 +13,15 @@
 #![forbid(unsafe_code)]
 
 mod attestation;
+mod caps;
+mod captoken;
 mod challenge;
 mod keys;
 mod password;
 
 pub use attestation::Attestation;
+pub use caps::Capability;
+pub use captoken::{verify_chain, Grant, Subject, Token, TokenScope, Verified};
 pub use challenge::{sign_challenge, verify_challenge, CHALLENGE_NONCE_LEN};
 pub use keys::{signature_from_b64, signature_to_b64, Keypair, PublicKey, Signature};
 pub use password::PasswordHash;
@@ -45,6 +49,21 @@ pub enum CryptoError {
 
     #[error("malformed attestation")]
     BadAttestation,
+
+    #[error("unknown capability")]
+    BadCapability,
+
+    #[error("malformed capability token")]
+    BadToken,
+
+    /// A token in the chain was issued before its scope's current
+    /// revocation epoch (§10.4).
+    #[error("capability revoked")]
+    Revoked,
+
+    /// The chain does not authorize the requested capability/scope.
+    #[error("capability not authorized")]
+    Unauthorized,
 }
 
 /// Standard base64 for all wire-facing key/signature/attestation material.

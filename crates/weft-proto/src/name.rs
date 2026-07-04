@@ -117,6 +117,40 @@ impl fmt::Display for UserRef {
     }
 }
 
+/// Namespace name: one segment `[a-z0-9-_]+` (§2.3), no `#`, no `/`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NamespaceName(String);
+
+impl NamespaceName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for NamespaceName {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, ParseError> {
+        let folded = s.to_ascii_lowercase();
+        let ok = !folded.is_empty()
+            && folded.len() <= 64
+            && folded
+                .bytes()
+                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'));
+        if ok {
+            Ok(NamespaceName(folded))
+        } else {
+            Err(invalid("namespace", s))
+        }
+    }
+}
+
+impl fmt::Display for NamespaceName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Channel name with leading `#`: `#general` or `#ns/general` — one
 /// namespace level, no nesting; ≤200 bytes total; segments `[a-z0-9-_]+`
 /// (§2.1, §2.3).

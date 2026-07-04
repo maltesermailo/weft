@@ -79,6 +79,16 @@ wire_enum!(
     }
 );
 
+wire_enum!(
+    /// Namespace visibility tier (§2.2). `Private` is indistinguishable
+    /// from nonexistent to non-members (anti-enumeration).
+    Visibility, "visibility", {
+        Public => "public",
+        Unlisted => "unlisted",
+        Private => "private",
+    }
+);
+
 /// Metadata tags shared by `MSG` and `MESSAGE`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MsgMeta {

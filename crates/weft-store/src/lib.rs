@@ -25,8 +25,13 @@ pub use materialize::{materialize, HistoryItem, ReactionSummary, MAX_REACTION_AC
 pub use memory::MemoryStore;
 #[cfg(feature = "postgres")]
 pub use postgres::PgStore;
-pub use traits::{AccountStore, ChannelStore, EventStore};
-pub use types::{EventKind, EventRecord, Page, Scope, Verification};
+pub use traits::{
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, NamespaceStore,
+};
+pub use types::{
+    ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page,
+    RedeemOutcome, Scope, Verification,
+};
 
 use thiserror::Error;
 

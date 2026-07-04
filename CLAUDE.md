@@ -35,7 +35,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```
 
-Toolchain: MSRV 1.75, no nightly. Deps so far (workspace-pinned): thiserror, ulid, tokio, tokio-util, futures-util, quinn, rustls (**ring provider only** — a second provider makes the process default ambiguous), rustls-pki-types, rcgen (ring), tokio-tungstenite, tracing(+subscriber), serde, toml, anyhow, ed25519-dalek, ciborium, base64, rand, argon2, async-trait, axum, rustls-pemfile, sqlx (postgres, runtime queries only — no compile-time DB).
+Toolchain: MSRV 1.75, no nightly. Deps so far (workspace-pinned): thiserror, ulid, tokio, tokio-util, futures-util, quinn, rustls (**ring provider only** — a second provider makes the process default ambiguous), rustls-pki-types, rcgen (ring), tokio-tungstenite, tracing(+subscriber), serde, toml, anyhow, ed25519-dalek, ciborium, base64, rand, argon2, sha2, subtle→(dropped), async-trait, axum, rustls-pemfile, sqlx (postgres, runtime queries only).
 
 ## Conventions
 
@@ -73,11 +73,13 @@ Actor-per-channel, task-per-connection, `tokio::mpsc` inboxes + `broadcast` fan-
 - **M2 ✅** identity: weft-crypto (Ed25519 keys, deterministic-CBOR attestations, challenge proofs, constant-time password hashes), REGISTER/AUTH PASSWORD/AUTH KEY/AUTH PROOF/AUTH ENROLL with uniform AUTH-FAILED, in-memory account registry (traits + persistence = M3), `/.well-known/weft` (axum), operator PEM certs + persisted signing key. 101 tests green workspace-wide.
 - **M3a ✅** persistence, memory path: weft-store (EventStore/AccountStore traits, memory backend, **§12.1 materialization as one shared pure fn**), per-channel retention config, EDIT/DELETE/REACT (+UNREACT) with origin/author checks, HISTORY/BATCH (compacted wire form, honest `truncated` via purge watermark), argon2 PHC password hashes. 134 tests green.
 - **M3b ✅** persistence, durable path: sqlx **PostgreSQL** backend behind the weft-store traits (one shared contract suite runs against both backends; PG tests gate on `WEFT_TEST_DATABASE_URL`), **channels load from the store at boot** (config = seed data — the substrate for M4's CHANNEL CREATE), maintenance task (retention purge + §12.1 compaction via one shared pure `compaction_plan`), MARK sync + §9.7 MARKED snapshot, DMs via the account directory actor, verification-claims infrastructure (email/age/... — store level only, wire flow needs spec design). 146 tests green.
-- **M4** capabilities: token mint/verify chains, GRANT/REVOKE, revocation epochs, NS verbs **incl. recovery ladder (NS RECOVERY SET / RECOVER / RECOVERY CANCEL, delay windows, root-history)**, CHANNEL verbs, INVITE lifecycle, view gating, DISCOVER, REPORT/REPORTS verbs + retention holds (§6.7, §12.1).
+- **M4a ✅** capabilities foundation: weft-crypto capability tokens (signed CBOR, delegation-chain verify, revocation epochs — 29 tests), M4 verb/event codec, weft-store grants+epochs+invites+channel-meta (mem+PG shared contract), enforcement in weft-core (invariant 4: caps precede side effects) — GRANT/REVOKE, CHANNEL CREATE/POLICY/META/DELETE (registry now mutable, lazy actor spawn), INVITE MINT/REVOKE/REDEEM, view gating (invariant 1). Operator accounts (config `operators`) bootstrap the grant chain. 184 tests green.
+- **M4b** namespaces + recovery: NS CREATE/META/VISIBILITY/DELEGATE/TRANSFER/DELETE, visibility tiers, DISCOVER, ns-scope grants/invites, and the recovery ladder (RECOVERY SET/RECOVER/CANCEL, delay windows, root-history — invariant 9).
+- **M4c** moderation: REPORT/REPORTS + content states + retention holds (invariant 11) + reporter confidentiality (invariant 12).
 - **M5** federation: BRIDGE manifest state machine, remote ingestion, strictest-policy negotiation, backfill (§11.7), NETBLOCK, REPORT-FORWARD (§11.9).
 - **M6+** media (BLAKE3 content addressing, STREAM, mirroring §11.8), threads filter, E2EE (openmls, feature `e2ee`), WEFT-RT voice, WEFT-IRC gateway (a third `ControlStream` impl in its own crate).
 
-Current focus: **M4** (capabilities).
+Current focus: **M4b** (namespaces + recovery ladder). M4a (capability foundation + GRANT/CHANNEL/INVITE + view gating) is complete.
 
 Parked owner requests (need spec design before implementation — §18 territory): email/age verification **wire flow** (store infrastructure exists: `weft_store::Verification`, claim→confirm lifecycle); web admin panel (would ride the axum surface in weftd).
 

@@ -81,6 +81,11 @@ enum Cmd {
         session: SessionId,
         state: TypingState,
     },
+    /// §6.3 CHANNEL POLICY: change the live actor's retention + tell members.
+    SetPolicy {
+        session: SessionId,
+        policy: RetentionPolicy,
+    },
     /// §6.1 PRESENCE: relayed to co-members, never stored, never bridged.
     Presence {
         session: SessionId,
@@ -158,6 +163,10 @@ impl ChannelHandle {
 
     pub async fn presence(&self, session: SessionId, status: weft_proto::PresenceStatus) {
         let _ = self.inbox.send(Cmd::Presence { session, status }).await;
+    }
+
+    pub async fn set_policy(&self, session: SessionId, policy: RetentionPolicy) {
+        let _ = self.inbox.send(Cmd::SetPolicy { session, policy }).await;
     }
 }
 
@@ -377,6 +386,20 @@ impl Actor {
                 if let Some(user) = self.member(session) {
                     self.broadcast(session, Event::Presence { user, status });
                 }
+            }
+            Cmd::SetPolicy { session, policy } => {
+                self.policy = policy;
+                // Members learn the new retention (§5.2: policy visible);
+                // the actor's own sender skips this copy (POLICY isn't an
+                // echo type), so the acting session gets its labeled ack
+                // from the session layer instead.
+                self.broadcast(
+                    session,
+                    Event::Policy {
+                        channel: self.name.clone(),
+                        policy,
+                    },
+                );
             }
         }
     }

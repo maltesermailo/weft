@@ -666,16 +666,20 @@ impl App {
             }
             // Unknown account on this server: register it once (dev flow;
             // REGISTER doubles as auth, so WELCOME lands in this same arm).
+            // The triggering AUTH-FAILED is an internal probe step, not a
+            // real error — swallow it (no scary red line) and note the
+            // registration instead.
             (Phase::AuthSent, Event::Err(err))
                 if err.code == ErrCode::AuthFailed && !self.tried_register =>
             {
                 self.tried_register = true;
-                self.note("account unknown here — registering");
+                self.note(&format!("new account — registering '{}'", self.account));
                 let account = self.account.clone();
                 self.send_command(Command::Register {
                     account: account.parse().expect("validated in main"),
                     password: self.password.clone(),
                 });
+                return; // don't log the probe's AUTH-FAILED
             }
             // Auth failed AND the register fallback hit a taken name: the
             // account exists with a different password than the one this
@@ -880,6 +884,11 @@ mod tests {
         assert_eq!(
             out.try_recv().unwrap(),
             format!("@label=t3 REGISTER ada :{PASSWORD}")
+        );
+        // The probe's AUTH-FAILED is swallowed — no scary red line logged.
+        assert!(
+            !app.log.iter().any(|e| e.raw.contains("AUTH-FAILED")),
+            "the auto-register probe error must not surface"
         );
         // A second failure (e.g. CONFLICT-adjacent race) must not loop.
         feed(&mut app, "@label=t3 ERR AUTH-FAILED :authentication failed");
