@@ -198,6 +198,33 @@ pub enum Command {
         name: NamespaceName,
         confirm: NamespaceName,
     },
+    /// `NS TRANSFER <name> <account>` with `@sig=<b64>` — rung-1 succession,
+    /// signed by the current root (§2.4).
+    NsTransfer {
+        name: NamespaceName,
+        new_owner: Account,
+        signature: String,
+    },
+    /// `NS RECOVERY SET <name> <m> <key1,key2,...>` — designate the M-of-N
+    /// recovery quorum (§2.4). Root only.
+    NsRecoverySet {
+        name: NamespaceName,
+        m: u32,
+        keys: String,
+    },
+    /// `NS RECOVER <name> <b64-rotation-record>` — submit a quorum-signed
+    /// (rung 2) or operator-signed (rung 3) rotation; starts the delay
+    /// window (§2.4).
+    NsRecover {
+        name: NamespaceName,
+        rotation: String,
+    },
+    /// `NS RECOVERY CANCEL <name>` with `@sig=<b64>` — the current root
+    /// vetoes a pending recovery (§2.4).
+    NsRecoveryCancel {
+        name: NamespaceName,
+        signature: String,
+    },
     /// `DISCOVER [cursor]` — public namespace directory (§6.2).
     Discover { cursor: Option<String> },
     /// `CHANNELS <ns>` — the ordered channel layout of a namespace (spec
@@ -210,6 +237,18 @@ pub enum Command {
 /// Comma-separated cap list as a middle param (no spaces).
 fn caps_ok(caps: &str) -> bool {
     !caps.is_empty() && !caps.contains(' ')
+}
+
+/// Read the mandatory `@sig=` tag for signed NS verbs (§2.4).
+fn ns_sig_tag(line: &Line) -> Result<String, ParseError> {
+    line.tags
+        .get("sig")
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .ok_or(ParseError::MissingParam {
+            verb: "NS",
+            what: "sig tag (root signature)",
+        })
 }
 
 /// Scan middle params for an optional `key=<u64>`.
@@ -567,6 +606,49 @@ impl Command {
                         name: args.req("name")?.parse()?,
                         confirm: args.req("confirmation")?.parse()?,
                     }),
+                    "TRANSFER" => {
+                        let name = args.req("name")?.parse()?;
+                        let new_owner = args.req("account")?.parse()?;
+                        let signature = ns_sig_tag(line)?;
+                        Ok(Command::NsTransfer {
+                            name,
+                            new_owner,
+                            signature,
+                        })
+                    }
+                    "RECOVER" => Ok(Command::NsRecover {
+                        name: args.req("name")?.parse()?,
+                        rotation: args.req("rotation-record")?.to_string(),
+                    }),
+                    // Three-word: NS RECOVERY SET | NS RECOVERY CANCEL.
+                    "RECOVERY" => {
+                        let action = args.req("action")?.to_ascii_uppercase();
+                        match action.as_str() {
+                            "SET" => {
+                                let name = args.req("name")?.parse()?;
+                                let m = args.req("m")?;
+                                let m = m.parse().map_err(|_| ParseError::BadParam {
+                                    verb: "NS",
+                                    what: "m",
+                                    value: m.to_string(),
+                                })?;
+                                let keys = args.req("keys")?.to_string();
+                                Ok(Command::NsRecoverySet { name, m, keys })
+                            }
+                            "CANCEL" => {
+                                let name = args.req("name")?.parse()?;
+                                Ok(Command::NsRecoveryCancel {
+                                    name,
+                                    signature: ns_sig_tag(line)?,
+                                })
+                            }
+                            _ => Err(ParseError::BadParam {
+                                verb: "NS",
+                                what: "recovery action",
+                                value: action,
+                            }),
+                        }
+                    }
                     _ => Err(ParseError::BadParam {
                         verb: "NS",
                         what: "subcommand",
@@ -815,6 +897,50 @@ impl Command {
                 vec!["DELETE".to_string(), name.to_string(), confirm.to_string()],
                 None,
             ),
+            Command::NsTransfer {
+                name,
+                new_owner,
+                signature,
+            } => {
+                tags.insert("sig".to_string(), signature.clone());
+                (
+                    "NS",
+                    vec![
+                        "TRANSFER".to_string(),
+                        name.to_string(),
+                        new_owner.to_string(),
+                    ],
+                    None,
+                )
+            }
+            Command::NsRecoverySet { name, m, keys } => (
+                "NS",
+                vec![
+                    "RECOVERY".to_string(),
+                    "SET".to_string(),
+                    name.to_string(),
+                    m.to_string(),
+                    keys.clone(),
+                ],
+                None,
+            ),
+            Command::NsRecover { name, rotation } => (
+                "NS",
+                vec!["RECOVER".to_string(), name.to_string(), rotation.clone()],
+                None,
+            ),
+            Command::NsRecoveryCancel { name, signature } => {
+                tags.insert("sig".to_string(), signature.clone());
+                (
+                    "NS",
+                    vec![
+                        "RECOVERY".to_string(),
+                        "CANCEL".to_string(),
+                        name.to_string(),
+                    ],
+                    None,
+                )
+            }
             Command::Discover { cursor } => ("DISCOVER", cursor.iter().cloned().collect(), None),
             Command::Channels { namespace } => ("CHANNELS", vec![namespace.to_string()], None),
             Command::Unknown { .. } => {
@@ -1252,6 +1378,46 @@ mod tests {
             confirm: "gaming".parse().unwrap(),
         }));
         assert!(Request::parse("NS FROB x").is_err());
+    }
+
+    #[test]
+    fn ns_recovery_verbs_round_trip() {
+        let transfer = Request::with_label(
+            Command::NsTransfer {
+                name: "gaming".parse().unwrap(),
+                new_owner: "bob".parse().unwrap(),
+                signature: "B64SIG==".into(),
+            },
+            "t1",
+        );
+        assert!(transfer.serialize().unwrap().contains("sig=B64SIG=="));
+        round_trip(&transfer);
+        assert_eq!(
+            Request::parse("NS TRANSFER gaming bob"),
+            Err(ParseError::MissingParam {
+                verb: "NS",
+                what: "sig tag (root signature)"
+            })
+        );
+
+        round_trip(&Request::new(Command::NsRecoverySet {
+            name: "gaming".parse().unwrap(),
+            m: 2,
+            keys: "K1==,K2==,K3==".into(),
+        }));
+        round_trip(&Request::new(Command::NsRecover {
+            name: "gaming".parse().unwrap(),
+            rotation: "B64ROTATION==".into(),
+        }));
+        round_trip(&Request::with_label(
+            Command::NsRecoveryCancel {
+                name: "gaming".parse().unwrap(),
+                signature: "B64SIG==".into(),
+            },
+            "c1",
+        ));
+        // NS RECOVERY FROB is a bad recovery action.
+        assert!(Request::parse("NS RECOVERY FROB gaming").is_err());
     }
 
     #[test]

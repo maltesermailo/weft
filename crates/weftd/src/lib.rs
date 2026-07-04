@@ -325,9 +325,11 @@ where
         ns_creation_open,
         ns_quota,
     ));
-    let events: Arc<dyn EventStore> = store;
+    let events: Arc<dyn EventStore> = store.clone();
+    let namespaces: Arc<dyn weft_store::NamespaceStore> = store;
     let tasks = vec![weft_core::spawn_maintenance(
         events,
+        namespaces,
         channels.clone(),
         dm_policy,
         maintenance,

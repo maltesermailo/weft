@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use weft_proto::{ChannelName, RetentionPolicy};
-use weft_store::{EventStore, Scope};
+use weft_store::{EventStore, NamespaceStore, Scope};
 
 #[derive(Debug, Clone)]
 pub struct MaintenanceConfig {
@@ -27,9 +27,12 @@ impl Default for MaintenanceConfig {
     }
 }
 
-/// Spawn the maintenance loop over the (static) channel set.
+/// Spawn the maintenance loop over the (static) channel set. Also drives
+/// the §2.4 recovery scheduler: pending recoveries whose delay window has
+/// elapsed are applied on each tick.
 pub fn spawn_maintenance(
     store: Arc<dyn EventStore>,
+    namespaces: Arc<dyn NamespaceStore>,
     channels: Vec<(ChannelName, RetentionPolicy)>,
     dm_policy: RetentionPolicy,
     config: MaintenanceConfig,
@@ -41,8 +44,50 @@ pub fn spawn_maintenance(
         loop {
             interval.tick().await;
             run_pass(&store, &channels, dm_policy, config.compact_after).await;
+            let applied = apply_due_recoveries(&namespaces, unix_now_ms()).await;
+            if applied > 0 {
+                info!(applied, "namespace recoveries applied (§2.4)");
+            }
         }
     })
+}
+
+/// Apply every pending recovery whose delay window has elapsed: rotate the
+/// root key + owner and record it in `root-history` (rung 3 marked
+/// operator-initiated forever). Idempotent per tick; returns the count.
+/// Split out so it is unit-testable without waiting real days.
+pub async fn apply_due_recoveries(namespaces: &Arc<dyn NamespaceStore>, now_ms: u64) -> u64 {
+    let due = match namespaces.due_recoveries(now_ms).await {
+        Ok(due) => due,
+        Err(e) => {
+            error!("recovery scan failed: {e}");
+            return 0;
+        }
+    };
+    let mut applied = 0;
+    for ns in due {
+        let Some(pending) = ns.pending_recovery else {
+            continue;
+        };
+        let operator_initiated = pending.rung == 3;
+        match namespaces
+            .rotate_root(
+                &ns.name,
+                &pending.new_owner,
+                &pending.new_root_key,
+                operator_initiated,
+                now_ms,
+            )
+            .await
+        {
+            Ok(()) => {
+                applied += 1;
+                debug!(namespace = %ns.name, rung = pending.rung, "recovery applied");
+            }
+            Err(e) => error!(namespace = %ns.name, "recovery apply failed: {e}"),
+        }
+    }
+    applied
 }
 
 async fn run_pass(

@@ -161,6 +161,32 @@ pub struct NamespaceRecord {
     pub title: Option<String>,
     pub description: Option<String>,
     pub icon: Option<String>,
+    /// §2.4 recovery quorum: `(m, [b64 pubkey, …])` when designated.
+    pub recovery_set: Option<(u32, Vec<String>)>,
+    /// A recovery in its delay window (§2.4).
+    pub pending_recovery: Option<PendingRecovery>,
+}
+
+/// A recovery in flight: rotates to `new_root_key` + `new_owner` at `eta_ms`
+/// unless the current root cancels first (§2.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRecovery {
+    pub new_root_key: String,
+    pub new_owner: String,
+    /// Unix ms when the rotation applies.
+    pub eta_ms: u64,
+    /// 2 = social quorum, 3 = operator last resort.
+    pub rung: u8,
+}
+
+/// One entry of a namespace's `root-history` (§2.4) — an append-only audit
+/// of every root rotation. `operator_initiated` marks rung-3 forever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootHistoryEntry {
+    pub root_key: String,
+    pub owner: String,
+    pub at_ms: u64,
+    pub operator_initiated: bool,
 }
 
 /// Result of an atomic redeem attempt.

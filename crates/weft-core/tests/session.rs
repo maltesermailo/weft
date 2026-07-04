@@ -1453,3 +1453,220 @@ async fn channel_categories_and_ordering() {
         Event::ChannelLayout { .. }
     ));
 }
+
+// ---- M4c: namespace recovery ladder (§2.4, invariant 9) ----
+
+/// Create a namespace owned by `owner`, returning its root Keypair (held
+/// client-side) so tests can sign transfer/recovery/cancel statements.
+async fn make_namespace(ctx: &Arc<ServerCtx>, owner: &str, name: &str) -> (Client, Keypair) {
+    let root = Keypair::generate();
+    let mut client = ready(ctx, owner).await;
+    client.send(
+        &format!("root={} NS CREATE {name} unlisted", root.public().to_b64())
+            .replace("root=", "@root="),
+    );
+    assert!(matches!(client.recv().await.event, Event::NsMeta { .. }));
+    (client, root)
+}
+
+#[tokio::test]
+async fn ns_transfer_is_root_signed_rung_one() {
+    let ctx = ctx(&[]);
+    let (mut ada, root) = make_namespace(&ctx, "ada", "gaming").await;
+
+    // A forged signature is FORBIDDEN.
+    ada.send("@sig=Zm9yZ2Vk NS TRANSFER gaming bob");
+    let reply = ada.expect_err(ErrCode::Forbidden).await;
+    let Event::Err(err) = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(err.context.as_deref(), Some("signature"));
+
+    // A real root signature transfers ownership immediately (no delay).
+    let sig = weft_crypto::sign_transfer(&root, "gaming", "bob");
+    ada.send(&format!(
+        "@sig={} NS TRANSFER gaming bob",
+        weft_crypto::signature_to_b64(&sig)
+    ));
+    let reply = ada.recv().await;
+    assert!(matches!(&reply.event, Event::NsMeta { owner: Some(o), .. } if o == "bob"));
+
+    // Bob is now the owner: he can administer, ada can't.
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("NS META gaming title :Bob's Lounge");
+    assert!(matches!(bob.recv().await.event, Event::NsMeta { .. }));
+    ada.send("NS META gaming title :ada's");
+    ada.expect_err(ErrCode::CapRequired).await;
+}
+
+#[tokio::test]
+async fn recovery_rung_two_quorum_then_cancel() {
+    let ctx = ctx(&[]);
+    let (mut ada, root) = make_namespace(&ctx, "ada", "gaming").await;
+    // Designate a 2-of-3 quorum.
+    let (q1, q2, q3) = (
+        Keypair::generate(),
+        Keypair::generate(),
+        Keypair::generate(),
+    );
+    let keys = format!(
+        "{},{},{}",
+        q1.public().to_b64(),
+        q2.public().to_b64(),
+        q3.public().to_b64()
+    );
+    ada.send(&format!("NS RECOVERY SET gaming 2 {keys}"));
+    let reply = ada.recv().await;
+    assert!(matches!(
+        &reply.event,
+        Event::NsMeta {
+            recovery_set: true,
+            ..
+        }
+    ));
+
+    // Two quorum members co-sign a rotation to a new root/owner.
+    let new_root = Keypair::generate();
+    let record = weft_crypto::RotationRecord {
+        namespace: "gaming".into(),
+        new_root_key: new_root.public(),
+        new_owner: "carol".into(),
+    };
+    let signed = weft_crypto::SignedRotation {
+        record: record.clone(),
+        signatures: vec![record.sign(&q1), record.sign(&q2)],
+    };
+    ada.send(&format!("NS RECOVER gaming {}", signed.to_b64()));
+    let reply = ada.recv().await;
+    let Event::NsMeta {
+        recovery_pending: Some((_, rung)),
+        ..
+    } = &reply.event
+    else {
+        panic!("expected recovery=pending, got {reply:?}");
+    };
+    assert_eq!(*rung, 2, "quorum → rung 2");
+
+    // A second RECOVER while one is pending → CONFLICT.
+    ada.send(&format!("NS RECOVER gaming {}", signed.to_b64()));
+    ada.expect_err(ErrCode::Conflict).await;
+
+    // The live root cancels it (a live root always wins, §2.4).
+    let cancel = weft_crypto::sign_cancel(&root, "gaming");
+    ada.send(&format!(
+        "@sig={} NS RECOVERY CANCEL gaming",
+        weft_crypto::signature_to_b64(&cancel)
+    ));
+    let reply = ada.recv().await;
+    assert!(matches!(
+        &reply.event,
+        Event::NsMeta {
+            recovery_pending: None,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn recovery_rejects_insufficient_or_wrong_signatures() {
+    let ctx = ctx(&[]);
+    let (mut ada, _root) = make_namespace(&ctx, "ada", "gaming").await;
+    let (q1, q2) = (Keypair::generate(), Keypair::generate());
+    ada.send(&format!(
+        "NS RECOVERY SET gaming 2 {},{}",
+        q1.public().to_b64(),
+        q2.public().to_b64()
+    ));
+    ada.recv().await;
+
+    // Only one quorum signature (need 2), and not operator-signed → FORBIDDEN.
+    let new_root = Keypair::generate();
+    let record = weft_crypto::RotationRecord {
+        namespace: "gaming".into(),
+        new_root_key: new_root.public(),
+        new_owner: "carol".into(),
+    };
+    let under = weft_crypto::SignedRotation {
+        record: record.clone(),
+        signatures: vec![record.sign(&q1)],
+    };
+    ada.send(&format!("NS RECOVER gaming {}", under.to_b64()));
+    ada.expect_err(ErrCode::Forbidden).await;
+
+    // A rotation record for a *different* namespace is refused.
+    let wrong = weft_crypto::RotationRecord {
+        namespace: "other".into(),
+        new_root_key: new_root.public(),
+        new_owner: "carol".into(),
+    };
+    let wrong_signed = weft_crypto::SignedRotation {
+        record: wrong.clone(),
+        signatures: vec![wrong.sign(&q1), wrong.sign(&q2)],
+    };
+    ada.send(&format!("NS RECOVER gaming {}", wrong_signed.to_b64()));
+    ada.expect_err(ErrCode::Forbidden).await;
+}
+
+#[tokio::test]
+async fn recovery_applies_at_expiry_via_scheduler() {
+    use weft_core::{apply_due_recoveries, NamespaceStore};
+    // Build a ctx whose store we also hold, to drive the scheduler + inspect.
+    let store = Arc::new(MemoryStore::default());
+    let info = weft_core::ServerInfo {
+        network: "test.example".parse().unwrap(),
+        motd: None,
+        features: Vec::new(),
+    };
+    let ctx = Arc::new(ServerCtx::new(
+        info,
+        std::iter::empty(),
+        Keypair::generate(),
+        true,
+        Arc::clone(&store),
+        "permanent".parse().unwrap(),
+        std::iter::empty::<weft_proto::Account>(),
+        true,
+        10,
+    ));
+    let root = Keypair::generate();
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!(
+        "@root={} NS CREATE gaming unlisted",
+        root.public().to_b64()
+    ));
+    ada.recv().await;
+    let q1 = Keypair::generate();
+    ada.send(&format!(
+        "NS RECOVERY SET gaming 1 {}",
+        q1.public().to_b64()
+    ));
+    ada.recv().await;
+
+    let new_root = Keypair::generate();
+    let record = weft_crypto::RotationRecord {
+        namespace: "gaming".into(),
+        new_root_key: new_root.public(),
+        new_owner: "carol".into(),
+    };
+    let signed = weft_crypto::SignedRotation {
+        record: record.clone(),
+        signatures: vec![record.sign(&q1)],
+    };
+    ada.send(&format!("NS RECOVER gaming {}", signed.to_b64()));
+    ada.recv().await; // pending
+
+    let ns_name: weft_proto::NamespaceName = "gaming".parse().unwrap();
+    let ns_store: Arc<dyn NamespaceStore> = store;
+    // Not due yet (7-day window).
+    assert_eq!(apply_due_recoveries(&ns_store, 0).await, 0);
+    // Far-future now: the rotation applies.
+    assert_eq!(apply_due_recoveries(&ns_store, u64::MAX).await, 1);
+    let applied = ns_store.namespace(&ns_name).await.unwrap().unwrap();
+    assert_eq!(applied.owner.as_str(), "carol");
+    assert_eq!(applied.root_key, new_root.public().to_b64());
+    assert!(applied.pending_recovery.is_none());
+    // root-history records the rung-2 rotation (not operator-initiated).
+    let history = ns_store.root_history(&ns_name).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert!(!history[0].operator_initiated);
+}

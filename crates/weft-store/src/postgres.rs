@@ -18,7 +18,7 @@ use crate::traits::{
 };
 use crate::types::{
     ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page,
-    RedeemOutcome, Scope, Verification,
+    PendingRecovery, RedeemOutcome, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 
@@ -940,10 +940,158 @@ impl NamespaceStore for PgStore {
             .map_err(backend_err)?;
         Ok(result.rows_affected() == 1)
     }
+
+    async fn rotate_root(
+        &self,
+        name: &NamespaceName,
+        new_owner: &str,
+        new_root_key: &str,
+        operator_initiated: bool,
+        at_ms: u64,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            UPDATE weft_namespaces
+            SET owner = $2, root_key = $3,
+                pending_root_key = NULL, pending_owner = NULL,
+                pending_eta_ms = NULL, pending_rung = NULL
+            WHERE name = $1
+            "#,
+        )
+        .bind(name.as_str())
+        .bind(new_owner)
+        .bind(new_root_key)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        sqlx::query(
+            "INSERT INTO weft_root_history (namespace, at_ms, root_key, owner, operator_initiated) VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(name.as_str())
+        .bind(at_ms as i64)
+        .bind(new_root_key)
+        .bind(new_owner)
+        .bind(operator_initiated)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn set_recovery_set(
+        &self,
+        name: &NamespaceName,
+        m: u32,
+        keys: &[String],
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE weft_namespaces SET recovery_m = $2, recovery_keys = $3 WHERE name = $1",
+        )
+        .bind(name.as_str())
+        .bind(m as i32)
+        .bind(keys.join(","))
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn set_pending_recovery(
+        &self,
+        name: &NamespaceName,
+        pending: PendingRecovery,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            UPDATE weft_namespaces
+            SET pending_root_key = $2, pending_owner = $3, pending_eta_ms = $4, pending_rung = $5
+            WHERE name = $1
+            "#,
+        )
+        .bind(name.as_str())
+        .bind(&pending.new_root_key)
+        .bind(&pending.new_owner)
+        .bind(pending.eta_ms as i64)
+        .bind(pending.rung as i16)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn clear_pending_recovery(&self, name: &NamespaceName) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            UPDATE weft_namespaces
+            SET pending_root_key = NULL, pending_owner = NULL, pending_eta_ms = NULL, pending_rung = NULL
+            WHERE name = $1
+            "#,
+        )
+        .bind(name.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn due_recoveries(&self, now_ms: u64) -> Result<Vec<NamespaceRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM weft_namespaces WHERE pending_eta_ms IS NOT NULL AND pending_eta_ms <= $1",
+        )
+        .bind(now_ms as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.iter().map(namespace_from_row).collect()
+    }
+
+    async fn root_history(
+        &self,
+        name: &NamespaceName,
+    ) -> Result<Vec<RootHistoryEntry>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT root_key, owner, at_ms, operator_initiated FROM weft_root_history WHERE namespace = $1 ORDER BY at_ms",
+        )
+        .bind(name.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(rows
+            .iter()
+            .map(|row| RootHistoryEntry {
+                root_key: row.get("root_key"),
+                owner: row.get("owner"),
+                at_ms: row.get::<i64, _>("at_ms") as u64,
+                operator_initiated: row.get("operator_initiated"),
+            })
+            .collect())
+    }
 }
 
 fn namespace_from_row(row: &sqlx::postgres::PgRow) -> Result<NamespaceRecord, StoreError> {
     let corrupt = || StoreError::Backend("corrupt namespace row".to_string());
+    let recovery_set = row.get::<Option<i32>, _>("recovery_m").map(|m| {
+        let keys = row
+            .get::<Option<String>, _>("recovery_keys")
+            .unwrap_or_default();
+        (
+            m as u32,
+            keys.split(',')
+                .filter(|k| !k.is_empty())
+                .map(str::to_string)
+                .collect(),
+        )
+    });
+    let pending_recovery = row
+        .get::<Option<String>, _>("pending_root_key")
+        .map(|root| PendingRecovery {
+            new_root_key: root,
+            new_owner: row
+                .get::<Option<String>, _>("pending_owner")
+                .unwrap_or_default(),
+            eta_ms: row.get::<Option<i64>, _>("pending_eta_ms").unwrap_or(0) as u64,
+            rung: row.get::<Option<i16>, _>("pending_rung").unwrap_or(0) as u8,
+        });
     Ok(NamespaceRecord {
         name: row.get::<&str, _>("name").parse().map_err(|_| corrupt())?,
         owner: row.get::<&str, _>("owner").parse().map_err(|_| corrupt())?,
@@ -952,6 +1100,8 @@ fn namespace_from_row(row: &sqlx::postgres::PgRow) -> Result<NamespaceRecord, St
         title: row.get("title"),
         description: row.get("description"),
         icon: row.get("icon"),
+        recovery_set,
+        pending_recovery,
     })
 }
 

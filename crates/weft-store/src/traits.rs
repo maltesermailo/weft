@@ -7,8 +7,8 @@ use weft_proto::{Account, ChannelName, MsgId, RetentionPolicy, Ulid};
 use weft_proto::NamespaceName;
 
 use crate::types::{
-    ChannelRecord, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page, RedeemOutcome,
-    Scope, Verification,
+    ChannelRecord, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page, PendingRecovery,
+    RedeemOutcome, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 
@@ -233,4 +233,42 @@ pub trait NamespaceStore: Send + Sync {
 
     /// NS DELETE. False = no such namespace.
     async fn delete_namespace(&self, name: &NamespaceName) -> Result<bool, StoreError>;
+
+    // ---- §2.4 recovery ladder ----
+
+    /// Change ownership (NS TRANSFER, rung 1) and/or rotate the root key
+    /// (recovery application). Appends a `root-history` entry.
+    async fn rotate_root(
+        &self,
+        name: &NamespaceName,
+        new_owner: &str,
+        new_root_key: &str,
+        operator_initiated: bool,
+        at_ms: u64,
+    ) -> Result<(), StoreError>;
+
+    /// NS RECOVERY SET — designate the M-of-N quorum.
+    async fn set_recovery_set(
+        &self,
+        name: &NamespaceName,
+        m: u32,
+        keys: &[String],
+    ) -> Result<(), StoreError>;
+
+    /// Begin a recovery's delay window (NS RECOVER).
+    async fn set_pending_recovery(
+        &self,
+        name: &NamespaceName,
+        pending: PendingRecovery,
+    ) -> Result<(), StoreError>;
+
+    /// Clear a pending recovery (NS RECOVERY CANCEL, or after it applies).
+    async fn clear_pending_recovery(&self, name: &NamespaceName) -> Result<(), StoreError>;
+
+    /// Every namespace with a pending recovery whose `eta_ms <= now_ms` —
+    /// the ones the scheduler must apply.
+    async fn due_recoveries(&self, now_ms: u64) -> Result<Vec<NamespaceRecord>, StoreError>;
+
+    async fn root_history(&self, name: &NamespaceName)
+        -> Result<Vec<RootHistoryEntry>, StoreError>;
 }

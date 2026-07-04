@@ -13,8 +13,8 @@ use crate::traits::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, NamespaceStore,
 };
 use crate::types::{
-    ChannelRecord, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page, RedeemOutcome,
-    Scope, Verification,
+    ChannelRecord, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page, PendingRecovery,
+    RedeemOutcome, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 
@@ -49,6 +49,8 @@ struct Inner {
     invites: HashMap<String, InviteRecord>,
     /// namespace name → record.
     namespaces: HashMap<NamespaceName, NamespaceRecord>,
+    /// namespace name → append-only root rotation audit (§2.4).
+    root_history: HashMap<NamespaceName, Vec<RootHistoryEntry>>,
 }
 
 #[derive(Default)]
@@ -625,6 +627,90 @@ impl NamespaceStore for MemoryStore {
     async fn delete_namespace(&self, name: &NamespaceName) -> Result<bool, StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         Ok(inner.namespaces.remove(name).is_some())
+    }
+
+    async fn rotate_root(
+        &self,
+        name: &NamespaceName,
+        new_owner: &str,
+        new_root_key: &str,
+        operator_initiated: bool,
+        at_ms: u64,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(ns) = inner.namespaces.get_mut(name) {
+            if let Ok(owner) = new_owner.parse() {
+                ns.owner = owner;
+                ns.root_key = new_root_key.to_string();
+                ns.pending_recovery = None;
+            }
+        }
+        inner
+            .root_history
+            .entry(name.clone())
+            .or_default()
+            .push(RootHistoryEntry {
+                root_key: new_root_key.to_string(),
+                owner: new_owner.to_string(),
+                at_ms,
+                operator_initiated,
+            });
+        Ok(())
+    }
+
+    async fn set_recovery_set(
+        &self,
+        name: &NamespaceName,
+        m: u32,
+        keys: &[String],
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(ns) = inner.namespaces.get_mut(name) {
+            ns.recovery_set = Some((m, keys.to_vec()));
+        }
+        Ok(())
+    }
+
+    async fn set_pending_recovery(
+        &self,
+        name: &NamespaceName,
+        pending: PendingRecovery,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(ns) = inner.namespaces.get_mut(name) {
+            ns.pending_recovery = Some(pending);
+        }
+        Ok(())
+    }
+
+    async fn clear_pending_recovery(&self, name: &NamespaceName) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(ns) = inner.namespaces.get_mut(name) {
+            ns.pending_recovery = None;
+        }
+        Ok(())
+    }
+
+    async fn due_recoveries(&self, now_ms: u64) -> Result<Vec<NamespaceRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .namespaces
+            .values()
+            .filter(|ns| {
+                ns.pending_recovery
+                    .as_ref()
+                    .is_some_and(|p| p.eta_ms <= now_ms)
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn root_history(
+        &self,
+        name: &NamespaceName,
+    ) -> Result<Vec<RootHistoryEntry>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner.root_history.get(name).cloned().unwrap_or_default())
     }
 }
 

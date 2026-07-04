@@ -573,3 +573,48 @@ async fn dms_and_mark_sync_over_quic() {
     );
     server.shutdown().await;
 }
+
+// ---- M4c: namespace ownership + signed recovery over real QUIC ----
+
+#[tokio::test]
+async fn namespace_transfer_signed_over_quic() {
+    let server = start_server(&[]).await;
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+
+    // Create a namespace with a client-held root key.
+    let root = weft_crypto::Keypair::generate();
+    ada.send(&format!(
+        "@root={} NS CREATE gaming public",
+        root.public().to_b64()
+    ))
+    .await;
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+
+    // A forged transfer signature is FORBIDDEN.
+    ada.send("@sig=Zm9yZ2Vk NS TRANSFER gaming bob").await;
+    assert!(matches!(&ada.recv().await.event, Event::Err(e) if e.code == ErrCode::Forbidden));
+
+    // A real root signature over (namespace, new_owner) transfers ownership.
+    let sig = weft_crypto::sign_transfer(&root, "gaming", "bob");
+    ada.send(&format!(
+        "@sig={} NS TRANSFER gaming bob",
+        weft_crypto::signature_to_b64(&sig)
+    ))
+    .await;
+    let reply = ada.recv().await;
+    assert!(
+        matches!(&reply.event, Event::NsMeta { owner: Some(o), .. } if o == "bob"),
+        "transfer should hand ownership to bob, got {reply:?}"
+    );
+
+    // bob now administers; ada does not.
+    let mut bob = QuicClient::connect(server.quic_addr).await;
+    bob.ready("bob").await;
+    bob.send("NS VISIBILITY gaming unlisted").await;
+    assert!(matches!(bob.recv().await.event, Event::NsMeta { .. }));
+    ada.send("NS VISIBILITY gaming public").await;
+    assert!(matches!(&ada.recv().await.event, Event::Err(e) if e.code == ErrCode::CapRequired));
+
+    server.shutdown().await;
+}

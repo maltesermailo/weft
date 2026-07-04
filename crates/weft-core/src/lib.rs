@@ -22,11 +22,11 @@ mod stream;
 pub use accounts::Accounts;
 pub use channel::{ChannelEvent, ChannelHandle, JoinAck};
 pub use context::{ServerCtx, ServerInfo, PROTOCOL_VERSION};
-pub use maintenance::{spawn_maintenance, MaintenanceConfig};
+pub use maintenance::{apply_due_recoveries, spawn_maintenance, MaintenanceConfig};
 pub use registry::Registry;
 pub use session::{run_session, SessionId};
 pub use stream::ControlStream;
-pub use weft_store::{ChannelStore, MemoryStore, Scope};
+pub use weft_store::{ChannelStore, MemoryStore, NamespaceStore, Scope};
 
 // Consumers construct a ServerCtx with a signing key and verify attestations
 // against it — re-exported so they share one weft-crypto version.

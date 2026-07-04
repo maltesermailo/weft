@@ -41,6 +41,10 @@ const DEDUP_WINDOW: Duration = Duration::from_secs(300);
 /// §8: MALFORMED — close after 5 per 60 s.
 const MALFORMED_LIMIT: usize = 5;
 const MALFORMED_WINDOW: Duration = Duration::from_secs(60);
+/// §2.4 recovery delay windows: rung 2 (social quorum) 7 days, rung 3
+/// (operator last resort) 30 days.
+const RECOVERY_DELAY_RUNG2_SECS: u64 = 7 * 24 * 3600;
+const RECOVERY_DELAY_RUNG3_SECS: u64 = 30 * 24 * 3600;
 /// Bound on the session's event queue; overflow propagates to broadcast
 /// lag → `ERR SLOW`, never unbounded memory.
 const EVENT_QUEUE: usize = 256;
@@ -679,6 +683,24 @@ impl<S: ControlStream> Session<S> {
             }
             Command::Discover { cursor } => self.on_discover(label, cursor).await,
             Command::Channels { namespace } => self.on_channels(label, namespace).await,
+            // §2.4 succession + recovery ladder.
+            Command::NsTransfer {
+                name,
+                new_owner,
+                signature,
+            } => {
+                self.on_ns_transfer(label, name, new_owner, signature, account)
+                    .await
+            }
+            Command::NsRecoverySet { name, m, keys } => {
+                self.on_ns_recovery_set(label, name, m, keys, account).await
+            }
+            Command::NsRecover { name, rotation } => {
+                self.on_ns_recover(label, name, rotation).await
+            }
+            Command::NsRecoveryCancel { name, signature } => {
+                self.on_ns_recovery_cancel(label, name, signature).await
+            }
             Command::Hello { .. }
             | Command::AuthPassword { .. }
             | Command::AuthKey { .. }
@@ -1909,7 +1931,8 @@ impl<S: ControlStream> Session<S> {
         matches!(self.ctx.namespaces.namespace(&name).await, Ok(Some(_)))
     }
 
-    /// Build the NS-META reply for a namespace record.
+    /// Build the NS-META reply for a namespace record, including the §2.4
+    /// recovery announcement fields.
     fn ns_meta_event(record: &weft_store::NamespaceRecord) -> Event {
         Event::NsMeta {
             name: record.name.clone(),
@@ -1918,6 +1941,8 @@ impl<S: ControlStream> Session<S> {
             title: record.title.clone(),
             description: record.description.clone(),
             icon: record.icon.clone(),
+            recovery_set: record.recovery_set.is_some(),
+            recovery_pending: record.pending_recovery.as_ref().map(|p| (p.eta_ms, p.rung)),
         }
     }
 
@@ -1973,6 +1998,8 @@ impl<S: ControlStream> Session<S> {
             title: None,
             description: None,
             icon: None,
+            recovery_set: None,
+            pending_recovery: None,
         };
         match self.ctx.namespaces.create_namespace(record.clone()).await {
             Ok(true) => {
@@ -2128,6 +2155,8 @@ impl<S: ControlStream> Session<S> {
                 title: None,
                 description: Some("deleted".to_string()),
                 icon: None,
+                recovery_set: false,
+                recovery_pending: None,
             },
         )
         .await?;
@@ -2159,6 +2188,259 @@ impl<S: ControlStream> Session<S> {
         if let Some(cursor) = next_cursor {
             self.send_event(label, Event::More { cursor }).await?;
         }
+        Ok(Flow::Continue)
+    }
+
+    // ---- namespace recovery ladder (§2.4, invariant 9) ----
+
+    /// Load a namespace or answer NO-SUCH-TARGET.
+    async fn ns_or_absent(
+        &mut self,
+        label: Option<String>,
+        name: &weft_proto::NamespaceName,
+    ) -> io::Result<Option<weft_store::NamespaceRecord>> {
+        match self.ctx.namespaces.namespace(name).await {
+            Ok(Some(record)) => Ok(Some(record)),
+            Ok(None) => {
+                self.no_such_target(label).await?;
+                Ok(None)
+            }
+            Err(e) => {
+                self.internal(label, &e).await?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// NS TRANSFER (rung 1): hand ownership to `new_owner`, proven by a
+    /// signature from the current root key. No delay (§2.4).
+    async fn on_ns_transfer(
+        &mut self,
+        label: Option<String>,
+        name: weft_proto::NamespaceName,
+        new_owner: Account,
+        signature: String,
+        _account: Account,
+    ) -> io::Result<Flow> {
+        let Some(record) = self.ns_or_absent(label.clone(), &name).await? else {
+            return Ok(Flow::Continue);
+        };
+        let (Ok(root_key), Ok(sig)) = (
+            weft_crypto::PublicKey::from_b64(&record.root_key),
+            weft_crypto::signature_from_b64(&signature),
+        ) else {
+            return self.forbidden_sig(label).await;
+        };
+        // Authority is the root *key*, not the account — this is the one
+        // place same-network namespaces are cryptographically enforced.
+        if !weft_crypto::verify_transfer(&root_key, name.as_str(), new_owner.as_str(), &sig) {
+            return self.forbidden_sig(label).await;
+        }
+        // Succession keeps the root key, changes the owner.
+        if let Err(e) = self
+            .ctx
+            .namespaces
+            .rotate_root(
+                &name,
+                new_owner.as_str(),
+                &record.root_key,
+                false,
+                unix_now() * 1000,
+            )
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        debug!(%name, %new_owner, "namespace transferred (rung 1)");
+        let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
+        let event = updated
+            .as_ref()
+            .map(Self::ns_meta_event)
+            .unwrap_or_else(|| Self::ns_meta_event(&record));
+        self.send_event(label, event).await?;
+        Ok(Flow::Continue)
+    }
+
+    /// NS RECOVERY SET: designate the M-of-N quorum. Owner (root) only.
+    async fn on_ns_recovery_set(
+        &mut self,
+        label: Option<String>,
+        name: weft_proto::NamespaceName,
+        m: u32,
+        keys: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(record) = self.ns_or_absent(label.clone(), &name).await? else {
+            return Ok(Flow::Continue);
+        };
+        if record.owner != account {
+            return self.cap_required(label, "ns-admin").await;
+        }
+        let key_list: Vec<String> = keys
+            .split(',')
+            .filter(|k| !k.is_empty())
+            .map(str::to_string)
+            .collect();
+        // Every quorum key must be a real pubkey, and m sane.
+        if m == 0
+            || m as usize > key_list.len()
+            || key_list
+                .iter()
+                .any(|k| weft_crypto::PublicKey::from_b64(k).is_err())
+        {
+            self.send_err(
+                label,
+                ErrCode::Malformed,
+                None,
+                "bad quorum: m of valid keys required",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        if let Err(e) = self
+            .ctx
+            .namespaces
+            .set_recovery_set(&name, m, &key_list)
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
+        let event = updated
+            .as_ref()
+            .map(Self::ns_meta_event)
+            .unwrap_or_else(|| {
+                let mut r = record.clone();
+                r.recovery_set = Some((m, key_list));
+                Self::ns_meta_event(&r)
+            });
+        self.send_event(label, event).await?;
+        Ok(Flow::Continue)
+    }
+
+    /// NS RECOVER: submit a signed rotation; start the delay window. Rung 2
+    /// = quorum-signed (7 d), rung 3 = operator-signed (30 d). No silent
+    /// path — a rotation is only ever pending + announced here, or applied
+    /// by the scheduler, or vetoed (invariant 9).
+    async fn on_ns_recover(
+        &mut self,
+        label: Option<String>,
+        name: weft_proto::NamespaceName,
+        rotation: String,
+    ) -> io::Result<Flow> {
+        let Some(record) = self.ns_or_absent(label.clone(), &name).await? else {
+            return Ok(Flow::Continue);
+        };
+        if record.pending_recovery.is_some() {
+            self.send_err(
+                label,
+                ErrCode::Conflict,
+                None,
+                "a recovery is already pending",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        let Ok(signed) = weft_crypto::SignedRotation::from_b64(&rotation) else {
+            return self.forbidden_sig(label).await;
+        };
+        // The record must actually be for this namespace.
+        if signed.record.namespace != name.as_str() {
+            return self.forbidden_sig(label).await;
+        }
+        // Decide the rung by whose signatures verify.
+        let quorum: Vec<weft_crypto::PublicKey> = record
+            .recovery_set
+            .as_ref()
+            .map(|(_, keys)| {
+                keys.iter()
+                    .filter_map(|k| weft_crypto::PublicKey::from_b64(k).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let m = record
+            .recovery_set
+            .as_ref()
+            .map(|(m, _)| *m as usize)
+            .unwrap_or(0);
+        let rung = if m > 0 && signed.quorum_signers(&quorum) >= m {
+            2u8
+        } else if signed.signed_by(&self.ctx.identity_public()) {
+            3u8
+        } else {
+            return self.forbidden_sig(label).await;
+        };
+        let delay_secs = if rung == 2 {
+            RECOVERY_DELAY_RUNG2_SECS
+        } else {
+            RECOVERY_DELAY_RUNG3_SECS
+        };
+        let eta_ms = unix_now() * 1000 + delay_secs * 1000;
+        let pending = weft_store::PendingRecovery {
+            new_root_key: signed.record.new_root_key.to_b64(),
+            new_owner: signed.record.new_owner.clone(),
+            eta_ms,
+            rung,
+        };
+        if let Err(e) = self
+            .ctx
+            .namespaces
+            .set_pending_recovery(&name, pending)
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        debug!(%name, rung, "recovery pending (§2.4)");
+        // §2.4 announcement: NS-META with recovery=pending. (Same-network,
+        // it's reflected on any NS query; a push to all members needs an
+        // ns-member broadcast, a follow-up.)
+        let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
+        if let Some(record) = updated {
+            self.send_event(label, Self::ns_meta_event(&record)).await?;
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// NS RECOVERY CANCEL: the current root vetoes a pending recovery — a
+    /// live root always wins (§2.4). Root signature only.
+    async fn on_ns_recovery_cancel(
+        &mut self,
+        label: Option<String>,
+        name: weft_proto::NamespaceName,
+        signature: String,
+    ) -> io::Result<Flow> {
+        let Some(record) = self.ns_or_absent(label.clone(), &name).await? else {
+            return Ok(Flow::Continue);
+        };
+        let (Ok(root_key), Ok(sig)) = (
+            weft_crypto::PublicKey::from_b64(&record.root_key),
+            weft_crypto::signature_from_b64(&signature),
+        ) else {
+            return self.forbidden_sig(label).await;
+        };
+        if !weft_crypto::verify_cancel(&root_key, name.as_str(), &sig) {
+            return self.forbidden_sig(label).await;
+        }
+        if let Err(e) = self.ctx.namespaces.clear_pending_recovery(&name).await {
+            return self.internal(label, &e).await;
+        }
+        debug!(%name, "recovery cancelled by root veto");
+        let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
+        if let Some(record) = updated {
+            self.send_event(label, Self::ns_meta_event(&record)).await?;
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// §2.4 / §11.4: bad signatures on a recovery/transfer are FORBIDDEN.
+    async fn forbidden_sig(&mut self, label: Option<String>) -> io::Result<Flow> {
+        self.send_err(
+            label,
+            ErrCode::Forbidden,
+            Some("signature"),
+            "invalid signature",
+        )
+        .await?;
         Ok(Flow::Continue)
     }
 

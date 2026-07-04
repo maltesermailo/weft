@@ -214,8 +214,9 @@ pub enum Event {
         value: String,
     },
     /// `NS-META <ns> <visibility>` with optional `owner=`/`title=`/
-    /// `description=`/`icon=` tags (§7). Namespace state + DISCOVER entries;
-    /// recovery fields (§2.4) ride here in M4c.
+    /// `description=`/`icon=` tags, and the §2.4 recovery announcement
+    /// fields: `recovery-set=yes` (a quorum exists), `recovery=pending`
+    /// with `recovery-eta=<unix-ms>` + `recovery-rung=2|3` during a window.
     NsMeta {
         name: NamespaceName,
         visibility: Visibility,
@@ -223,6 +224,9 @@ pub enum Event {
         title: Option<String>,
         description: Option<String>,
         icon: Option<String>,
+        recovery_set: bool,
+        /// `Some((eta_ms, rung))` while a recovery is pending (§2.4).
+        recovery_pending: Option<(u64, u8)>,
     },
     /// `MORE <cursor>` — pagination continuation (DISCOVER, §6.2).
     More {
@@ -523,6 +527,14 @@ impl Event {
             "NS-META" => {
                 let mut args = Args::new(line, "NS-META");
                 let tag = |k: &str| line.tags.get(k).filter(|v| !v.is_empty()).cloned();
+                let recovery_pending =
+                    if line.tags.get("recovery").map(String::as_str) == Some("pending") {
+                        let eta = u64_tag(line, "recovery-eta", "NS-META")?.unwrap_or(0);
+                        let rung = u64_tag(line, "recovery-rung", "NS-META")?.unwrap_or(0) as u8;
+                        Some((eta, rung))
+                    } else {
+                        None
+                    };
                 Ok(Event::NsMeta {
                     name: args.req("name")?.parse()?,
                     visibility: args.req("visibility")?.parse()?,
@@ -530,6 +542,8 @@ impl Event {
                     title: tag("title"),
                     description: tag("description"),
                     icon: tag("icon"),
+                    recovery_set: line.tags.get("recovery-set").map(String::as_str) == Some("yes"),
+                    recovery_pending,
                 })
             }
             "MORE" => {
@@ -773,6 +787,8 @@ impl Event {
                 title,
                 description,
                 icon,
+                recovery_set,
+                recovery_pending,
             } => {
                 for (k, v) in [
                     ("owner", owner),
@@ -783,6 +799,14 @@ impl Event {
                     if let Some(v) = v {
                         tags.insert(k.to_string(), v.clone());
                     }
+                }
+                if *recovery_set {
+                    tags.insert("recovery-set".to_string(), "yes".to_string());
+                }
+                if let Some((eta, rung)) = recovery_pending {
+                    tags.insert("recovery".to_string(), "pending".to_string());
+                    tags.insert("recovery-eta".to_string(), eta.to_string());
+                    tags.insert("recovery-rung".to_string(), rung.to_string());
                 }
                 (
                     "NS-META",
@@ -1207,6 +1231,8 @@ mod tests {
                 title: Some("The Lounge".into()),
                 description: None,
                 icon: None,
+                recovery_set: true,
+                recovery_pending: Some((1_700_000_000_000, 2)),
             },
             "n1",
         ));
@@ -1218,6 +1244,8 @@ mod tests {
             title: None,
             description: None,
             icon: None,
+            recovery_set: false,
+            recovery_pending: None,
         }));
         round_trip(&Reply::new(Event::More {
             cursor: "next-page".into(),

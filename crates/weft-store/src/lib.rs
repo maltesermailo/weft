@@ -30,7 +30,7 @@ pub use traits::{
 };
 pub use types::{
     ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page,
-    RedeemOutcome, Scope, Verification,
+    PendingRecovery, RedeemOutcome, RootHistoryEntry, Scope, Verification,
 };
 
 use thiserror::Error;

@@ -8,7 +8,7 @@ use weft_proto::{Account, MsgId, MsgMeta, RetentionPolicy, Ulid, UserRef};
 use weft_store::{
     materialize, AccountStore, CapabilityStore, ChannelStore, EventKind, EventRecord, EventStore,
     HistoryItem, InviteRecord, InviteStore, MemoryStore, NamespaceRecord, NamespaceStore, Page,
-    RedeemOutcome, Scope,
+    PendingRecovery, RedeemOutcome, Scope,
 };
 
 fn user(name: &str) -> UserRef {
@@ -445,6 +445,8 @@ where
             title: None,
             description: None,
             icon: None,
+            recovery_set: None,
+            pending_recovery: None,
         })
         .await
         .unwrap());
@@ -458,6 +460,8 @@ where
             title: None,
             description: None,
             icon: None,
+            recovery_set: None,
+            pending_recovery: None,
         })
         .await
         .unwrap());
@@ -543,6 +547,88 @@ where
     );
     assert_eq!(ordered[1].1.category.as_deref(), Some("text"));
     assert_eq!(ordered[1].1.position, 0);
+
+    // -- recovery ladder state (§2.4) --
+    let rns: weft_proto::NamespaceName = format!("recov{tag}").parse().unwrap();
+    store
+        .create_namespace(NamespaceRecord {
+            name: rns.clone(),
+            owner: format!("owner-{tag}").parse().unwrap(),
+            root_key: "ROOT1==".into(),
+            visibility: "unlisted".into(),
+            title: None,
+            description: None,
+            icon: None,
+            recovery_set: None,
+            pending_recovery: None,
+        })
+        .await
+        .unwrap();
+    // Designate a 2-of-3 quorum.
+    store
+        .set_recovery_set(&rns, 2, &["K1==".into(), "K2==".into(), "K3==".into()])
+        .await
+        .unwrap();
+    let rec = store.namespace(&rns).await.unwrap().unwrap();
+    assert_eq!(
+        rec.recovery_set,
+        Some((2, vec!["K1==".into(), "K2==".into(), "K3==".into()]))
+    );
+
+    // Start a pending recovery with a future eta; it isn't due yet.
+    store
+        .set_pending_recovery(
+            &rns,
+            PendingRecovery {
+                new_root_key: "ROOT2==".into(),
+                new_owner: format!("carol-{tag}"),
+                eta_ms: 10_000,
+                rung: 2,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .due_recoveries(9_999)
+        .await
+        .unwrap()
+        .iter()
+        .all(|n| n.name != rns));
+    assert!(store
+        .due_recoveries(10_000)
+        .await
+        .unwrap()
+        .iter()
+        .any(|n| n.name == rns));
+
+    // Cancel clears it.
+    store.clear_pending_recovery(&rns).await.unwrap();
+    assert!(store
+        .namespace(&rns)
+        .await
+        .unwrap()
+        .unwrap()
+        .pending_recovery
+        .is_none());
+
+    // Apply a rotation: owner + root key change, root-history records it.
+    store
+        .rotate_root(&rns, &format!("carol-{tag}"), "ROOT2==", false, 10_000)
+        .await
+        .unwrap();
+    let rec = store.namespace(&rns).await.unwrap().unwrap();
+    assert_eq!(rec.owner.as_str(), format!("carol-{tag}"));
+    assert_eq!(rec.root_key, "ROOT2==");
+    // A rung-3 rotation is marked operator-initiated forever.
+    store
+        .rotate_root(&rns, &format!("dave-{tag}"), "ROOT3==", true, 20_000)
+        .await
+        .unwrap();
+    let history = store.root_history(&rns).await.unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(!history[0].operator_initiated);
+    assert!(history[1].operator_initiated);
+    assert_eq!(history[1].root_key, "ROOT3==");
 }
 
 #[tokio::test]
