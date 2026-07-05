@@ -143,91 +143,125 @@ Strictest-policy negotiation (bridges): `e2ee` > `ephemeral` > `retained(shorter
 
 ## 6. Command Reference
 
-Format: **Syntax · Args · Cap · Scope · Responses · Use**. Scope: **S**ession / **N**etwork / **NS** / **C**hannel / **F**ederation-operator. All commands accept `label`.
+Every command accepts a `label` tag (§3.5); the direct response — including `ERR` — echoes it. Each subsection is tagged with its scope: **S**ession · **N**etwork · **NS** namespace · **C** channel · **F** federation/operator. In the tables, the **Cap** column is the required capability (§10.4) — `—` means none — and **→** lists the success event(s) and notable error codes. `\|` separates alternatives.
 
 ### 6.1 Session & identity (S/N)
 
-**HELLO** `HELLO <version>` — §3.6.
-**REGISTER** `REGISTER <account> :<password>` — password ≥12 B; needs config `registration: open` else `FORBIDDEN`. → `WELCOME` | `CONFLICT` | `POLICY`.
-**AUTH PASSWORD** `AUTH PASSWORD <account> :<password>` — → `WELCOME` | `AUTH-FAILED` (constant-time).
-**AUTH KEY** (challenge-response, binds device key):
+| Command | Syntax | Cap | → Result / notes |
+|---|---|---|---|
+| `HELLO` | `HELLO <version>` | — | Negotiates the protocol (§3.6). |
+| `REGISTER` | `REGISTER <account> :<password>` | config | Password ≥ 12 B; needs `registration: open` else `FORBIDDEN`. Registration doubles as auth. → `WELCOME` \| `CONFLICT` \| `POLICY`. |
+| `AUTH PASSWORD` | `AUTH PASSWORD <account> :<password>` | — | → `WELCOME` \| `AUTH-FAILED` (constant-time, uniform). |
+| `AUTH KEY` | `AUTH KEY <account> <b64-ed25519-pubkey>` | — | Begins device-key challenge-response (flow below). → `CHALLENGE`. |
+| `AUTH PROOF` | `AUTH PROOF <b64-sig>` | — | Answers the challenge, signing `nonce ‖ network-name`. → `@attestation=<b64> WELCOME` \| `AUTH-FAILED`. |
+| `AUTH ENROLL` | `AUTH ENROLL <b64-pubkey>` | authed | Adds a device to the current account. → `@attestation=<b64> WELCOME`. |
+| `QUIT` | `QUIT [:reason]` | — | Graceful close. |
+| `PING` / `PONG` | `PING\|PONG [token]` | — | §3.4 keepalive; answering is mandatory. → `PONG`. |
+| `PRESENCE` | `PRESENCE <online\|away\|dnd\|invisible>` | — | Same-network visibility only; never bridged; `invisible` renders offline. |
+
+Device-key auth is a two-step challenge-response binding a device pubkey to the account; `nonce ‖ network-name` in the signed payload prevents cross-network replay:
 ```
 C: AUTH KEY <account> <b64-ed25519-pubkey>
 S: CHALLENGE <b64-nonce-32B>
 C: AUTH PROOF <b64-sig(nonce ‖ network-name)>
 S: @attestation=<b64> WELCOME hda.example
 ```
-`nonce‖network-name` prevents cross-network replay. `AUTH ENROLL <b64-pubkey>` (while authed) adds a device → `@attestation=<b64> WELCOME` carrying the new device's attestation (same success shape as AUTH KEY).
-**QUIT** `QUIT [:reason]`. **PING/PONG** §3.4.
-**PRESENCE** `PRESENCE <online|away|dnd|invisible>` — same-network visibility only; never bridged; `invisible` renders offline.
 
 ### 6.2 Namespace commands (NS)
 
-**NS CREATE** `NS CREATE <name> [public|unlisted|private]` — default `unlisted`. Cap: none (`open`, quota) / `ns-create` (`gated`). The client generates the **namespace root key** and submits its pubkey; the server records it as delegation root. → `NS-META` | `QUOTA` | `CONFLICT` | `FORBIDDEN`.
-**NS META** `NS META <name> <title|description|icon> :<value>` — Cap `ns-admin`.
-**NS VISIBILITY** `NS VISIBILITY <name> <tier>` — Cap `ns-admin`; → `private` applies anti-enumeration immediately.
-**NS DELEGATE** `NS DELEGATE <name> <account|pubkey> <cap>[,...]` — sugar for `GRANT` at `ns:` scope.
-**NS TRANSFER** `NS TRANSFER <name> <account>` — rung-1 succession; signed by current root.
-**NS RECOVERY SET** `NS RECOVERY SET <name> <m> <key1,key2,...>` — designate M-of-N quorum (§2.4). Cap: root only. → `NS-META` (`recovery-set=yes` visible to members).
-**NS RECOVER** `NS RECOVER <name> <b64-rotation-record>` — submit a quorum-signed (rung 2) or operator-signed (rung 3) rotation; starts the delay window. → `NS-META` announcement | `FORBIDDEN` (bad signatures) | `CONFLICT` (recovery already pending).
-**NS RECOVERY CANCEL** `NS RECOVERY CANCEL <name>` — current root vetoes a pending recovery. Root signature only.
-**NS DELETE** `NS DELETE <name> <name>` — confirmed; root or operator.
-**DISCOVER** `DISCOVER [cursor]` — public directory; `MORE <cursor>` pagination.
+Signed NS verbs (`TRANSFER`, `RECOVERY CANCEL`) carry the root signature in a `@sig=<b64>` tag; `NS CREATE` carries the new root pubkey in `@root=<b64>` (§2.4, §10.4).
+
+| Command | Syntax | Cap | → Result / notes |
+|---|---|---|---|
+| `NS CREATE` | `NS CREATE <name> [public\|unlisted\|private]` | none (`open`+quota) / `ns-create` (`gated`) | Default `unlisted`. Client generates the namespace **root key**, submits its pubkey (recorded as delegation root). → `NS-META` \| `QUOTA` \| `CONFLICT` \| `FORBIDDEN`. |
+| `NS META` | `NS META <name> <title\|description\|icon> :<value>` | `ns-admin` | → `NS-META`. |
+| `NS VISIBILITY` | `NS VISIBILITY <name> <tier>` | `ns-admin` | → `private` applies anti-enumeration immediately. → `NS-META`. |
+| `NS DELEGATE` | `NS DELEGATE <name> <account\|pubkey> <cap>[,…]` | grant chain | Sugar for `GRANT` at `ns:` scope. → `TOKEN`. |
+| `NS TRANSFER` | `NS TRANSFER <name> <account>` | root key | Rung-1 succession, root-signed. → `NS-META` (new owner). |
+| `NS RECOVERY SET` | `NS RECOVERY SET <name> <m> <key1,key2,…>` | root | Designate the M-of-N quorum (§2.4). → `NS-META` (`recovery-set=yes`). |
+| `NS RECOVER` | `NS RECOVER <name> <b64-rotation-record>` | quorum / operator sig | Rung 2 (quorum) or rung 3 (operator); starts the delay window. → `NS-META` \| `FORBIDDEN` (bad sig) \| `CONFLICT` (pending). |
+| `NS RECOVERY CANCEL` | `NS RECOVERY CANCEL <name>` | root key | Current root vetoes a pending recovery. |
+| `NS DELETE` | `NS DELETE <name> <name>` | `ns-admin` / operator | Confirmed by repetition. |
+| `DISCOVER` | `DISCOVER [cursor]` | — | Public namespace directory. → `NS-META` per ns + `MORE <cursor>`. |
+| `CHANNELS` | `CHANNELS <name>` | view | Ordered channel layout of a namespace (extension). → `CHANNEL-LAYOUT` per channel. |
 
 ### 6.3 Channel commands (C)
 
-**CHANNEL CREATE** `CHANNEL CREATE <#chan> [policy]` — default `retained:90d`. Cap: `chan-create` at `*` (root) / `ns-admin` or `chan-create` at `ns:`. **JOIN never auto-creates.**
-**CHANNEL POLICY** `CHANNEL POLICY <#chan> <policy> [purge]` — Cap `policy`. Tightening purges now; loosening applies to new events only; `e2ee` transitions need empty channel or `purge`.
-**CHANNEL META** `CHANNEL META <#chan> <topic|view-gated> :<value>` — Cap `pin` / `ns-admin`. → `CHANMETA`.
-**CHANNEL DELETE** `CHANNEL DELETE <#chan> <#chan>` — Cap `ns-admin`/operator.
-**JOIN** `JOIN <#chan> [invite-ref]` — → `MEMBER` + `POLICY` + `count=` | `NO-SUCH-TARGET` | `BANNED`.
-**PART** `PART <#chan> [:reason]`.
-**MEMBERS** `MEMBERS <#chan> [cursor]` — paginated; bridge peers see remote members only as they've appeared.
-**TYPING** `TYPING <#chan> <start|stop>` — Cap `send`; never stored; rate-limited (1/3 s RECOMMENDED); bridged only under manifest `typing: yes`.
-**MARK** `MARK <#chan> <msgid>` — account-scoped read marker, synced via `MARKED`; survives `ephemeral`.
+`CHANNEL CREATE`/`DELETE` are confirmed by repeating the name. **JOIN never auto-creates.**
+
+| Command | Syntax | Cap | → Result / notes |
+|---|---|---|---|
+| `CHANNEL CREATE` | `CHANNEL CREATE <#chan> [policy]` | `chan-create` (`*`) / `ns-admin`\|`chan-create` (`ns:`) | Default policy `retained:90d`. → `POLICY`. |
+| `CHANNEL POLICY` | `CHANNEL POLICY <#chan> <policy> [purge]` | `policy` | Tightening purges now; loosening applies to new events only; `e2ee` needs an empty channel or `purge`. → `POLICY`. |
+| `CHANNEL META` | `CHANNEL META <#chan> <topic\|view-gated\|category\|position> :<value>` | `pin` / `ns-admin` | `category`/`position` = the layout extension. → `CHANMETA`. |
+| `CHANNEL DELETE` | `CHANNEL DELETE <#chan> <#chan>` | `ns-admin` / operator | → `CHANMETA … deleted`. |
+| `JOIN` | `JOIN <#chan> [invite-ref]` | membership / invite | → `MEMBER` + `POLICY` + `count=` \| `NO-SUCH-TARGET` \| `BANNED`. |
+| `PART` | `PART <#chan> [:reason]` | — | → `MEMBER … part`. |
+| `MEMBERS` | `MEMBERS <#chan> [cursor]` | membership | Paginated; bridge peers see remote members only as they've appeared. |
+| `TYPING` | `TYPING <#chan> <start\|stop>` | `send` | Never stored; rate-limited (1/3 s RECOMMENDED); bridged only under manifest `typing: yes`. |
+| `MARK` | `MARK <#chan> <msgid>` | membership | Account-scoped read marker, synced via `MARKED`; survives `ephemeral`. |
 
 ### 6.4 Messaging (C)
 
-**MSG** `MSG <#chan|@user> [:body]` — tags `fmt=md`, `reply-to=`, `thread=`, `attach.N=` (≤10). Cap `send` (+`attach`). Empty body legal iff attachments. **Echo `MESSAGE` (with `msgid` + `label`) is the ack.** Errors: `CAP-REQUIRED`, `TOO-LARGE`, `THROTTLED` (`retry-after=`), `NO-SUCH-TARGET`.
-**EDIT** `EDIT <msgid> :<new>` — Cap `edit-own` only (no `edit-any`, deliberately). Accepted only at the msgid's origin network; elsewhere `FORBIDDEN origin`. → `EDITED` broadcast.
-**DELETE** `DELETE <msgid>` — Cap `delete-own` | `delete-any`. Tombstone. → `DELETED`.
-**REACT / UNREACT** `REACT <msgid> <emoji>` — Unicode emoji ≤32 B; shortcodes travel **bare** (a leading `:` collides with the §4 trailing marker — see §18 #8). Cap `react`. Idempotent. → `REACTION op=add|remove` (live).
-**HISTORY** `HISTORY <target> [before=<msgid>] [after=<msgid>] [limit=<≤500>] [thread=<msgid>]` — options are `key=value` middle params, any order, unknown keys ignored; target: channel or `@user`. Cap: membership / acked manifest bounded by `history` flag. → `BATCH START` … **compacted** events (§12.1) … `BATCH END [truncated]`. `truncated` marks retention gaps; silence about gaps is forbidden.
-**STREAM** `STREAM OFFER <media|backfill> <mime> <bytes>` → `STREAM ACCEPT <token>` → data-plane transfer. HISTORY switches to STREAM above ~200 events (RECOMMENDED).
+| Command | Syntax | Cap | → Result / notes |
+|---|---|---|---|
+| `MSG` | `MSG <#chan\|@user> [:body]` + tags `fmt=md` `reply-to=` `thread=` `attach.N=` (≤10) | `send` (+`attach`) | Empty body legal iff attachments. **The echoed `MESSAGE` (with `msgid` + `label`) is the ack.** → `MESSAGE`; errors `CAP-REQUIRED` `TOO-LARGE` `THROTTLED` (`retry-after=`) `NO-SUCH-TARGET`. |
+| `EDIT` | `EDIT <msgid> :<new>` | `edit-own` | No `edit-any` (deliberate). Honored only at the msgid's origin network; elsewhere `FORBIDDEN origin`. → `EDITED`. |
+| `DELETE` | `DELETE <msgid>` | `delete-own` \| `delete-any` | Tombstone. → `DELETED`. |
+| `REACT` / `UNREACT` | `REACT <msgid> <emoji>` | `react` | Unicode emoji ≤ 32 B; shortcodes travel **bare** (leading `:` collides with the §4 trailing marker — §18 #8). Idempotent. → `REACTION op=add\|remove` (live). |
+| `HISTORY` | `HISTORY <target> [before=] [after=] [limit=≤500] [thread=]` | membership / acked manifest | `key=value` middle params, any order, unknown keys ignored; target = channel or `@user`. → `BATCH START` … **compacted** events (§12.1) … `BATCH END [truncated]`. `truncated` marks gaps — silence about them is forbidden. |
+| `STREAM` | `STREAM OFFER <media\|backfill> <mime> <bytes>` | — | → `STREAM ACCEPT <token>` → data-plane transfer. HISTORY switches to STREAM above ~200 events (RECOMMENDED). |
 
-### 6.5 Capabilities & invites
+### 6.5 Capabilities & invites (§10.4)
 
-**GRANT** `GRANT <account|pubkey> <scope> <cap>[,...] [expiry=<s>]` — scope `<#chan>` | `ns:<name>` | `*`; requires matching `grant:<cap>` at equal-or-wider scope (chain rule, cryptographic). → `TOKEN`.
-**REVOKE** `REVOKE <account|pubkey> <scope> [caps] [epoch]` — stops refresh; `epoch` bumps the scope revocation epoch.
-**INVITE MINT** `INVITE MINT <scope> [max-uses=] [expiry=]` — → `INVITED` (`weft://<net>/i/<b64>` link). Cap `invite`.
-**INVITE REVOKE** `INVITE REVOKE <invite-id>` — closes counter; redeemed members unaffected.
-**INVITE REDEEM** `INVITE REDEEM <b64>` — verifies chain + counter, mints member token **bound to redeemer's key**, auto-joins default channel. Dead invites → `NO-SUCH-TARGET` (indistinct).
-Invite tokens = capability tokens with **unbound subject**: one object = single-use / expiring / vanity links; offline-verifiable authorization, never itself a membership credential.
+| Command | Syntax | Cap | → Result / notes |
+|---|---|---|---|
+| `GRANT` | `GRANT <account\|pubkey> <scope> <cap>[,…] [expiry=<s>]` | `grant:<cap>` at ≥ scope | Scope `<#chan>` \| `ns:<name>` \| `*`; the chain rule is cryptographic. → `TOKEN`. |
+| `REVOKE` | `REVOKE <account\|pubkey> <scope> [caps=<list>] [epoch]` | grant chain | Stops refresh; a bare `epoch` number bumps the scope revocation epoch. → `TOKEN` (remaining caps). |
+| `INVITE MINT` | `INVITE MINT <scope> [max-uses=] [expiry=]` | `invite` | → `INVITED` (`@token=`, `weft://<net>/i/<b64>` link). |
+| `INVITE REVOKE` | `INVITE REVOKE <invite-id>` | `invite` | Closes the counter; already-redeemed members unaffected. |
+| `INVITE REDEEM` | `INVITE REDEEM <b64>` | — | Verifies chain + counter, mints a member token **bound to the redeemer's key**, auto-joins the default channel. Dead invites → `NO-SUCH-TARGET` (indistinct). |
+
+Invite tokens are capability tokens with an **unbound subject**: one object serves single-use / expiring / vanity links — offline-verifiable authorization, never itself a membership credential.
 
 ### 6.6 Federation & operator (F)
 
-**BRIDGE PROPOSE** `BRIDGE PROPOSE <scope> <peer> [history=from-epoch|full] [media=mirror|mirror-max:<B>|none] [typing=yes|no]` — snapshot manifest v1. Cap ladder §11.3. Errors: `BLOCKED`, `CAP-REQUIRED`.
-**BRIDGE ACCEPT** `<peer> <version>` — live on mutual ack. **BRIDGE ADD** `<peer> <#chan>` — v+1, re-ack. **BRIDGE REMOVE** — v+1, unilateral, immediate. **BRIDGE SEVER** `<peer>` — unilateral teardown. All changes emit `MANIFEST` to affected members — mandatory.
-**NETBLOCK** `NETBLOCK ADD <network> [:reason]` / `REMOVE` / `LIST` — Cap `netblock` (`*` scope only). Effects §11.6.
-**VOICE** `VOICE JOIN|LEAVE <#chan>` / `VOICE DESC :<sdp>` — §16; feature-gated.
+Bridge sessions authenticate with `AUTH BRIDGE` (§11.2). Every bridge change emits `MANIFEST` to affected members — mandatory (§11.5). The proposing side carries the signed manifest in a `@manifest=<b64>` tag.
+
+| Command | Syntax | Cap | → Result / notes |
+|---|---|---|---|
+| `AUTH BRIDGE` | `AUTH BRIDGE <peer-network> <b64-pubkey>` | pinned / accept-any | Opens a bridge session — challenge-response as `AUTH KEY`, verified against the peer's network key (§11.2). |
+| `BRIDGE PROPOSE` | `BRIDGE PROPOSE <scope> <peer> [history=from-epoch\|full] [media=mirror\|mirror-max:<B>\|none] [typing=yes\|no]` | ladder §11.3 | Snapshot manifest v1. → `MANIFEST`; errors `BLOCKED` `CAP-REQUIRED`. |
+| `BRIDGE ACCEPT` | `BRIDGE ACCEPT <peer> <version>` | ladder | Live on mutual ack. |
+| `BRIDGE ADD` | `BRIDGE ADD <peer> <#chan>` | ladder | v+1, requires re-ack before forwarding. |
+| `BRIDGE REMOVE` | `BRIDGE REMOVE <peer> <#chan>` | ladder | v+1, unilateral, immediate. |
+| `BRIDGE SEVER` | `BRIDGE SEVER <peer>` | ladder | Unilateral teardown. |
+| `NETBLOCK` | `NETBLOCK ADD <network> [:reason]` / `REMOVE <network>` / `LIST` | `netblock` (`*` only) | Effects §11.6. → `NETBLOCKED`. |
+| `REPORT-FORWARD` | `REPORT-FORWARD <report-id> <msgid> <category> [:note]` | bridge session | Forward a report to the origin over the bridge; reporter identity stripped (§11.9). Bridge-session-only. |
+| `VOICE` | `VOICE JOIN\|LEAVE <#chan>` / `VOICE DESC :<sdp>` | feature-gated | §16. |
 
 
 ### 6.7 Moderation & reporting (C/NS/N)
 
-**REPORT** `REPORT <msgid> <category> [scope] [:note]`
-- **Args**: `msgid` — the reported message (local or bridged replica). `category` — normative set: `spam | harassment | violence | sexual | csam | illegal | self-harm | other` (extensible with `x-` prefix). `scope` — `ns` (namespace moderators, default) or `net` (network operator); categories `csam` and `illegal` are ALWAYS also routed to `net` regardless of scope, because the operator is the legally accountable party. `note` — optional free text ≤1024 B.
-- **Cap**: channel membership (you can only report what you can see — view-gating and anti-enumeration apply unchanged: reporting an invisible msgid returns `NO-SUCH-TARGET`).
-- **Routing**: the report goes to the **reporter's home network**, always — never directly to a remote network. Handlers are holders of the `reports` capability at the relevant scope (`ns:<name>` for ns-scope, `*` for net-scope); they receive a `REPORT-FILED` event.
-- **Responses**: `REPORTED <report-id>` ack to the reporter (with `label`). Errors: `NO-SUCH-TARGET`, `THROTTLED` (reports are rate-limited per account; RECOMMENDED 10/hour), `QUOTA`.
-- **Confidentiality**: the reported party is never notified by the protocol and MUST NOT be able to learn the reporter's identity from any protocol surface. Handlers see the reporter's account (accountability against report-flooding); network config MAY anonymize reporter identity toward ns-scope handlers while preserving it for the operator.
+| Command | Syntax | Cap | → Result / notes |
+|---|---|---|---|
+| `REPORT` | `REPORT <msgid> <category> [scope] [:note]` | membership | Routed to the reporter's home network. → `REPORTED <report-id>`; errors `NO-SUCH-TARGET` `THROTTLED` (10/hr RECOMMENDED) `QUOTA`. |
+| `REPORTS LIST` | `REPORTS LIST <scope> [status=open\|resolved] [cursor]` | `reports` at scope | The handler queue. → `REPORT-FILED` page + `MORE`. `scope` is the concrete cap scope (`ns:<name>` or `*`). |
+| `REPORTS RESOLVE` | `REPORTS RESOLVE <report-id> <action> [:note]` | `reports` | Releases the retention hold after a 7-day grace (RECOMMENDED). → `REPORT-RESOLVED`. |
 
-**Content states** (marked on the filed report, honestly):
-- `verified` — the server still holds the reported event; a **retention hold** is placed (§12.1).
-- `unverified` — the msgid is expired or the channel is `ephemeral`; nothing server-side confirms the content. The report is accepted and flagged; handlers weigh it accordingly.
-- `reporter-attested` — `e2ee` channel: the server holds only ciphertext. The reporter MAY voluntarily attach the plaintext they saw (`REPORT ... :note` + a data-plane attachment for longer content); it is marked as reporter-provided, not server-verified. This is the honest limit of reporting inside host-blind channels; the alternative (server-readable "reportable e2ee") would break §14's unrepresentability guarantee and is rejected.
+**`REPORT` arguments.** `category` — normative set `spam \| harassment \| violence \| sexual \| csam \| illegal \| self-harm \| other` (extensible with an `x-` prefix). `scope` — `ns` (namespace moderators, default) or `net` (network operator); `csam` and `illegal` are ALWAYS *also* routed to `net`, the legally accountable party. `note` — optional free text ≤ 1024 B. Membership-gated: you can only report what you can see — an invisible/absent msgid returns `NO-SUCH-TARGET` (anti-enumeration unchanged). Handlers are holders of the `reports` cap at the relevant scope (`ns:<name>` or `*`).
 
-**REPORTS LIST** `REPORTS LIST <scope> [status=open|resolved] [cursor]` — paginated queue for handlers. Cap: `reports` at the scope. → `REPORT-FILED` page + `MORE`.
-**REPORTS RESOLVE** `REPORTS RESOLVE <report-id> <action> [:note]` — `action`: `dismissed | content-removed | user-actioned | escalated`. Cap: `reports`. Resolving releases the retention hold (after a 7-day grace, RECOMMENDED). `escalated` re-routes an ns-scope report to net scope. → `REPORT-RESOLVED` to scope handlers; the reporter receives a minimal `REPORT-RESOLVED <report-id> <action>` (no handler identity, no note).
+**`REPORTS RESOLVE` actions.** `dismissed \| content-removed \| user-actioned \| escalated`; `escalated` re-routes an ns-scope report up to net scope (keeping it open, holds intact). Handlers get the full `REPORT-RESOLVED` (`by=` + `note=`); the reporter gets the minimal form — no handler identity, no note.
+
+**Content states** (marked honestly on the filed report):
+
+| State | Meaning |
+|---|---|
+| `verified` | The server still holds the reported event; a **retention hold** is placed (§12.1). |
+| `unverified` | The msgid is expired or the channel is `ephemeral` — nothing server-side confirms the content. Accepted and flagged; handlers weigh it accordingly. |
+| `reporter-attested` | `e2ee` channel: the server holds only ciphertext. The reporter MAY voluntarily attach the plaintext they saw (marked reporter-provided, not server-verified). The alternative — server-readable "reportable e2ee" — would break §14's unrepresentability guarantee and is rejected. |
+
+**Confidentiality.** The reported party is never notified and MUST NOT learn the reporter's identity from any protocol surface. Handlers see the reporter's account (accountability against report-flooding); a network MAY anonymize the reporter toward ns-scope handlers while preserving it for the operator.
 
 ---
 

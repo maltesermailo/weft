@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WEFT — network client</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root{
+            --bg-void:#14161c;
+            --bg-panel:#1b1e27;
+            --bg-panel-raised:#20232c;
+            --bg-hover:#262a34;
+            --border-hair:#2b2f3a;
+            --border-hair-strong:#363b48;
+            --text-primary:#e6e4de;
+            --text-muted:#8b8d97;
+            --text-faint:#5c5f6b;
+            --thread-amber:#e2a13d;
+            --thread-amber-dim:#7a5b28;
+            --signal-teal:#4fb0a5;
+            --signal-teal-dim:#2b5450;
+            --danger:#d9685f;
+            --ephemeral:#8b8d97;
+            --retained:#5b9bd9;
+            --permanent:#e2a13d;
+            --e2ee:#4fb0a5;
+            --font-mono:'IBM Plex Mono', ui-monospace, monospace;
+            --font-sans:'IBM Plex Sans', system-ui, sans-serif;
+            --radius-sm:3px;
+            --radius-md:6px;
+        }
+
+        *{box-sizing:border-box;}
+        html,body{height:100%;}
+        body{
+            margin:0;
+            background:var(--bg-void);
+            color:var(--text-primary);
+            font-family:var(--font-sans);
+            font-size:14px;
+            -webkit-font-smoothing:antialiased;
+            overflow:hidden;
+        }
+        ::selection{ background:var(--thread-amber-dim); color:var(--text-primary); }
+        *:focus-visible{ outline:2px solid var(--thread-amber); outline-offset:1px; }
+        ::-webkit-scrollbar{ width:8px; height:8px; }
+        ::-webkit-scrollbar-thumb{ background:var(--border-hair-strong); border-radius:4px; }
+        ::-webkit-scrollbar-track{ background:transparent; }
+
+        button{ font-family:inherit; cursor:pointer; }
+
+        .app{
+            display:grid;
+            grid-template-columns:72px 244px 1fr 232px;
+            height:100vh;
+            position:relative;
+        }
+        .app.members-collapsed{ grid-template-columns:72px 244px 1fr 0px; }
+        .app.sidebar-collapsed{ grid-template-columns:72px 0px 1fr 232px; }
+
+        /* ---------- COMMUNITY RAIL ---------- */
+        .warp-rail{
+            background:#101218;
+            border-right:1px solid var(--border-hair);
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            padding:12px 0;
+            position:relative;
+            z-index:2;
+        }
+
+        .rail-home{
+            width:40px; height:40px;
+            border-radius:50%;
+            background:var(--bg-panel-raised);
+            border:1px solid var(--border-hair-strong);
+            display:flex; align-items:center; justify-content:center;
+            margin-bottom:14px;
+            color:var(--text-muted);
+            flex-shrink:0;
+            transition:background .15s ease, color .15s ease;
+        }
+        .rail-home:hover{ background:var(--bg-hover); color:var(--text-primary); }
+
+        .rail-divider{
+            width:24px; height:1px; background:var(--border-hair-strong);
+            margin-bottom:14px; flex-shrink:0;
+        }
+
+        .rail-communities{
+            display:flex; flex-direction:column; gap:10px;
+            overflow-y:auto; flex:1; width:100%;
+            align-items:center;
+            padding-bottom:8px;
+        }
+        .comm-tile{
+            position:relative;
+            width:40px; height:40px;
+            flex-shrink:0;
+        }
+        .comm-tile button{
+            width:100%; height:100%;
+            border-radius:50%;
+            border:1px solid var(--border-hair-strong);
+            background:var(--bg-panel-raised);
+            color:var(--text-muted);
+            font-family:var(--font-mono);
+            font-weight:600;
+            font-size:12.5px;
+            display:flex; align-items:center; justify-content:center;
+            transition:background .15s ease, color .15s ease, border-color .15s ease;
+        }
+        .comm-tile button:hover{ background:var(--bg-hover); color:var(--text-primary); }
+        .comm-tile.active button{
+            background:var(--bg-hover);
+            color:var(--text-primary);
+            border-color:var(--thread-amber);
+        }
+        .trust-mark{
+            position:absolute;
+            right:-2px; bottom:-2px;
+            width:9px; height:9px;
+            border-radius:50%;
+            border:2px solid #101218;
+            pointer-events:none;
+        }
+        .trust-mark.signed{ background:var(--signal-teal); }
+        .trust-mark.bridged{ background:var(--text-faint); }
+        .rail-add{
+            width:40px; height:40px;
+            border-radius:50%;
+            background:transparent;
+            border:1px dashed var(--border-hair-strong);
+            color:var(--text-muted);
+            display:flex; align-items:center; justify-content:center;
+            margin-top:4px;
+            flex-shrink:0;
+            transition:color .15s ease, border-color .15s ease;
+        }
+        .rail-add:hover{ color:var(--text-primary); border-color:var(--text-muted); }
+
+        /* ---------- CHANNEL SIDEBAR ---------- */
+        .sidebar{
+            background:var(--bg-panel);
+            border-right:1px solid var(--border-hair);
+            display:flex; flex-direction:column;
+            min-width:0;
+            overflow:hidden;
+        }
+        .sidebar-header{
+            padding:14px 16px 12px;
+            border-bottom:1px solid var(--border-hair);
+            flex-shrink:0;
+        }
+        .sidebar-header .comm-name{
+            font-weight:600; font-size:15px; margin:0 0 3px;
+        }
+        .sidebar-header .comm-origin{
+            font-family:var(--font-mono);
+            font-size:11px;
+            color:var(--text-faint);
+            display:flex; align-items:center; gap:5px;
+        }
+        .origin-dot{ width:6px; height:6px; border-radius:50%; background:var(--signal-teal); flex-shrink:0; }
+        .origin-dot.bridge{ background:var(--text-faint); }
+
+        .channel-scroll{ flex:1; overflow-y:auto; padding:10px 8px; }
+        .retention-group{ margin-bottom:14px; }
+        .retention-label{
+            font-family:var(--font-mono);
+            font-size:10px;
+            letter-spacing:.09em;
+            text-transform:uppercase;
+            color:var(--text-faint);
+            padding:0 8px 6px;
+            display:flex; align-items:center; gap:6px;
+        }
+        .retention-label .dot{ width:5px; height:5px; border-radius:50%; }
+        .dot.ephemeral{ background:var(--ephemeral); }
+        .dot.retained{ background:var(--retained); }
+        .dot.permanent{ background:var(--permanent); }
+        .dot.e2ee{ background:var(--e2ee); }
+
+        .channel-item{
+            display:flex; align-items:center; gap:8px;
+            padding:6px 8px;
+            border-radius:var(--radius-sm);
+            color:var(--text-muted);
+            font-size:13.5px;
+            margin-bottom:1px;
+            border:none; background:transparent; width:100%;
+            text-align:left;
+        }
+        .channel-item:hover{ background:var(--bg-hover); color:var(--text-primary); }
+        .channel-item.active{
+            background:var(--bg-panel-raised);
+            color:var(--text-primary);
+            box-shadow:inset 2px 0 0 var(--thread-amber);
+        }
+        .channel-item svg{ flex-shrink:0; opacity:.8; }
+        .channel-item .unread{
+            margin-left:auto;
+            font-family:var(--font-mono);
+            font-size:10px;
+            color:var(--bg-void);
+            background:var(--thread-amber);
+            border-radius:4px;
+            padding:1px 6px;
+        }
+
+        .sidebar-user{
+            border-top:1px solid var(--border-hair);
+            padding:10px 12px;
+            display:flex; align-items:center; gap:9px;
+            flex-shrink:0;
+            background:var(--bg-panel-raised);
+        }
+        .avatar{
+            width:30px; height:30px;
+            border-radius:6px;
+            background:var(--bg-hover);
+            border:1px solid var(--border-hair-strong);
+            display:flex; align-items:center; justify-content:center;
+            font-family:var(--font-mono);
+            font-size:11.5px; font-weight:500;
+            flex-shrink:0;
+            color:var(--text-muted);
+        }
+        .sidebar-user .who{ min-width:0; flex:1; }
+        .sidebar-user .who .name{ font-size:13px; font-weight:500; line-height:1.3; }
+        .sidebar-user .who .key{
+            font-family:var(--font-mono); font-size:10.5px; color:var(--text-faint);
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+        }
+        .icon-btn{
+            width:26px; height:26px; border-radius:6px;
+            display:flex; align-items:center; justify-content:center;
+            background:transparent; border:none; color:var(--text-muted);
+            flex-shrink:0;
+        }
+        .icon-btn:hover{ background:var(--bg-hover); color:var(--text-primary); }
+
+        /* ---------- MAIN CHAT ---------- */
+        .main{
+            display:flex; flex-direction:column;
+            min-width:0;
+            background:var(--bg-void);
+        }
+        .chat-topbar{
+            height:52px; flex-shrink:0;
+            border-bottom:1px solid var(--border-hair);
+            display:flex; align-items:center;
+            padding:0 16px;
+            gap:12px;
+        }
+        .chat-topbar .chan-title{
+            font-weight:600; font-size:15px; display:flex; align-items:center; gap:7px;
+        }
+        .chat-topbar .topic{
+            color:var(--text-muted); font-size:12.5px;
+            border-left:1px solid var(--border-hair-strong);
+            padding-left:12px; margin-left:2px;
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+            flex:1; min-width:0;
+        }
+        .status-chip{
+            font-family:var(--font-mono);
+            font-size:10.5px;
+            letter-spacing:.04em;
+            padding:3px 8px;
+            border-radius:4px;
+            border:1px solid var(--border-hair-strong);
+            color:var(--text-muted);
+            display:flex; align-items:center; gap:5px;
+            flex-shrink:0;
+        }
+        .topbar-actions{ display:flex; gap:4px; margin-left:auto; flex-shrink:0; }
+
+        .message-scroll{ flex:1; overflow-y:auto; padding:14px 20px 6px; }
+
+        .day-sep{
+            display:flex; align-items:center; gap:10px;
+            color:var(--text-faint); font-family:var(--font-mono);
+            font-size:11px; margin:18px 0 14px;
+        }
+        .day-sep::before, .day-sep::after{ content:''; flex:1; height:1px; background:var(--border-hair); }
+
+        .msg-group{ display:flex; gap:12px; padding:4px 8px; border-radius:var(--radius-md); margin-bottom:2px; }
+        .msg-group:hover{ background:#191c24; }
+        .msg-group .avatar{ margin-top:2px; }
+        .msg-body{ min-width:0; flex:1; }
+        .msg-meta{ display:flex; align-items:baseline; gap:7px; margin-bottom:2px; flex-wrap:wrap; }
+        .msg-meta .author{ font-weight:600; font-size:14px; }
+        .msg-meta .time{ font-family:var(--font-mono); font-size:10.5px; color:var(--text-faint); }
+        .cap-badge{
+            font-family:var(--font-mono);
+            font-size:9.5px; letter-spacing:.03em;
+            padding:1px 5px;
+            border-radius:3px;
+            border:1px solid;
+            text-transform:uppercase;
+        }
+        .cap-badge.owner{ color:var(--thread-amber); border-color:var(--thread-amber-dim); }
+        .cap-badge.mod{ color:var(--signal-teal); border-color:var(--signal-teal-dim); }
+        .cap-badge.bridged{ color:var(--text-faint); border-color:var(--border-hair-strong); }
+
+        .msg-line{ line-height:1.5; color:var(--text-primary); word-wrap:break-word; }
+        .msg-line.system{ color:var(--text-muted); font-style:italic; font-size:13px; }
+
+        .reply-thread{
+            display:flex; align-items:flex-start; gap:6px;
+            color:var(--text-faint); font-size:12px; margin-bottom:3px;
+            font-family:var(--font-mono);
+        }
+        .reply-thread svg{ flex-shrink:0; width:13px; height:13px; margin-top:2px; }
+        .reply-thread .snippet{ color:var(--text-muted); font-style:normal; font-family:var(--font-sans); }
+
+        .reactions{ display:flex; gap:6px; margin-top:5px; flex-wrap:wrap; }
+        .reaction{
+            display:flex; align-items:center; gap:4px;
+            background:var(--bg-panel-raised);
+            border:1px solid var(--border-hair-strong);
+            border-radius:5px;
+            padding:2px 8px;
+            font-size:12px;
+        }
+        .reaction.mine{ border-color:var(--thread-amber-dim); background:rgba(226,161,61,.08); }
+        .reaction .count{ font-family:var(--font-mono); font-size:11px; color:var(--text-muted); }
+
+        .thread-link{
+            margin-top:5px;
+            display:inline-flex; align-items:center; gap:6px;
+            font-size:12px; color:var(--signal-teal);
+            background:none; border:none; padding:2px 4px; border-radius:4px;
+        }
+        .thread-link:hover{ background:var(--bg-hover); }
+
+        .composer-wrap{ padding:12px 20px 16px; flex-shrink:0; }
+        .composer{
+            background:var(--bg-panel-raised);
+            border:1px solid var(--border-hair-strong);
+            border-radius:var(--radius-md);
+            display:flex; align-items:flex-end;
+            padding:9px 10px;
+            gap:8px;
+        }
+        .composer:focus-within{ border-color:var(--thread-amber-dim); }
+        .composer textarea{
+            flex:1; background:none; border:none; resize:none;
+            color:var(--text-primary); font-family:var(--font-sans); font-size:14px;
+            max-height:140px; line-height:1.4; padding:3px 4px;
+        }
+        .composer textarea:focus{ outline:none; }
+        .composer-hint{
+            font-family:var(--font-mono); font-size:10.5px; color:var(--text-faint);
+            margin-top:6px; display:flex; gap:14px;
+        }
+        .composer-hint .k{ color:var(--text-muted); }
+
+        /* ---------- MEMBER RAIL ---------- */
+        .members{
+            background:var(--bg-panel);
+            border-left:1px solid var(--border-hair);
+            overflow-y:auto;
+            padding:16px 12px;
+        }
+        .member-group-label{
+            font-family:var(--font-mono); font-size:10px; letter-spacing:.09em;
+            text-transform:uppercase; color:var(--text-faint);
+            padding:0 4px 8px; margin-top:14px;
+        }
+        .member-group-label:first-child{ margin-top:0; }
+        .member-row{
+            display:flex; align-items:center; gap:9px;
+            padding:5px 4px; border-radius:var(--radius-sm);
+        }
+        .member-row:hover{ background:var(--bg-hover); }
+        .member-row .avatar{ width:26px; height:26px; font-size:11px; border-radius:7px; position:relative; }
+        .origin-flag{
+            position:absolute; bottom:-2px; right:-2px;
+            width:8px; height:8px; border-radius:50%;
+            border:1.5px solid var(--bg-panel);
+        }
+        .origin-flag.local{ background:var(--signal-teal); }
+        .origin-flag.federated{ background:var(--retained); }
+        .member-row .mname{ font-size:13px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+        /* ---------- responsive ---------- */
+        @media (max-width: 860px){
+            .app{ grid-template-columns:64px 0 1fr 0 !important; }
+            .sidebar, .members{ display:none; }
+        }
+
+        @media (prefers-reduced-motion: reduce){
+            *{ animation-duration: 0.01ms !important; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="app" id="app">
+
+    <!-- COMMUNITY RAIL -->
+    <nav class="warp-rail" aria-label="Communities">
+        <button class="rail-home" title="Direct messages" aria-label="Direct messages">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+        </button>
+        <div class="rail-divider"></div>
+        <div class="rail-communities" id="railCommunities"></div>
+        <button class="rail-add" title="Join or create a namespace" aria-label="Join or create a namespace">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+    </nav>
+
+    <!-- SIDEBAR -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <p class="comm-name" id="sbCommName">Kharak Duum</p>
+            <div class="comm-origin"><span class="origin-dot" id="sbOriginDot"></span><span id="sbOriginText">weft.kharak-duum.net · root-signed</span></div>
+        </div>
+        <div class="channel-scroll" id="channelScroll"></div>
+        <div class="sidebar-user">
+            <div class="avatar">NM</div>
+            <div class="who">
+                <div class="name">nightishaman</div>
+                <div class="key">ed25519:9f2a…c7e1</div>
+            </div>
+            <button class="icon-btn" title="Settings" aria-label="Settings">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+            </button>
+        </div>
+    </aside>
+
+    <!-- MAIN -->
+    <main class="main">
+        <div class="chat-topbar">
+            <div class="chan-title" id="chanTitle"></div>
+            <div class="topic" id="chanTopic"></div>
+            <div class="status-chip" id="retentionChip"></div>
+            <div class="topbar-actions">
+                <button class="icon-btn" id="toggleMembersBtn" title="Toggle member list" aria-label="Toggle member list">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                </button>
+            </div>
+        </div>
+
+        <div class="message-scroll" id="messageScroll"></div>
+
+        <div class="composer-wrap">
+            <div class="composer">
+                <textarea id="composerInput" rows="1" placeholder="Message this channel…"></textarea>
+                <button class="icon-btn" title="Send" id="sendBtn" aria-label="Send message">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg>
+                </button>
+            </div>
+            <div class="composer-hint">
+                <span><span class="k">Enter</span> send</span>
+                <span><span class="k">Shift+Enter</span> newline</span>
+            </div>
+        </div>
+    </main>
+
+    <!-- MEMBERS -->
+    <aside class="members" id="members"></aside>
+
+</div>
+
+<script>
+    /* -------------------------------------------------------------
+       Mock data model — shaped after WEFT's actual protocol nouns:
+       communities are namespaces, channels carry retention policy,
+       members carry capability chains, not flat roles.
+    ------------------------------------------------------------- */
+
+    const communities = [
+        {
+            id: 'kharak',
+            tag: 'KD',
+            name: 'Kharak Duum',
+            origin: 'weft.kharak-duum.net',
+            trust: 'signed',      // root-signed manifest
+            channels: [
+                { id:'general', name:'general', retention:'retained', unread:3, topic:'Underground cyber city planning · district layout & room placement' },
+                { id:'announcements', name:'announcements', retention:'permanent', topic:'Namespace-wide notices, signed by the root key' },
+                { id:'voice-test', name:'voice-test', retention:'ephemeral', topic:'Scratch space — nothing here survives a restart' },
+                { id:'ops-private', name:'ops-private', retention:'e2ee', topic:'MLS-encrypted · citadel infrastructure' },
+            ]
+        },
+        {
+            id: 'serverpanel',
+            tag: 'SP',
+            name: 'ServerPanel Dev',
+            origin: 'weft.serverpanel.dev',
+            trust: 'signed',
+            channels: [
+                { id:'general', name:'general', retention:'retained', topic:'Self-hosting control plane — general discussion' },
+                { id:'nixos', name:'nixos-modules', retention:'retained', unread:1, topic:'Packaging layer, sops-nix, Harmonia cache' },
+                { id:'incus', name:'incus-cluster', retention:'retained', topic:'Agentless mTLS cluster API' },
+            ]
+        },
+        {
+            id: 'sailfish',
+            tag: 'SF',
+            name: 'sailfishos-porters',
+            origin: 'irc.oftc.net',
+            trust: 'bridged',     // WEFT-IRC gateway, not a native manifest
+            channels: [
+                { id:'porters', name:'sailfishos-porters', retention:'ephemeral', unread:12, topic:'Bridged via WEFT-IRC gateway · irc.oftc.net' },
+            ]
+        }
+    ];
+
+    let activeCommunityId = 'kharak';
+    let activeChannelId = 'general';
+    let membersVisible = true;
+
+    const retentionMeta = {
+        ephemeral: { label:'Ephemeral', class:'ephemeral', icon:'<circle cx="12" cy="12" r="8" stroke-dasharray="3 3"/>' },
+        retained:  { label:'Retained',  class:'retained',  icon:'<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 10h16"/>' },
+        permanent: { label:'Permanent', class:'permanent', icon:'<rect x="4" y="4" width="16" height="16" rx="2" fill="currentColor" stroke="none"/>' },
+        e2ee:      { label:'E2EE · MLS', class:'e2ee',      icon:'<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>' },
+    };
+
+    const seedMessages = {
+        'kharak::general': [
+            { author:'threnody', avatar:'TH', cap:'owner', time:'14:02', text:'root-signed manifest for the citadel district went out an hour ago — everyone should have it via the next snapshot.' },
+            { author:'threnody', avatar:'TH', cap:'owner', time:'14:02', text:'22-block wall clearance held up on all 31 rooms, no overlaps this pass.' },
+            { author:'nightishaman', avatar:'NM', cap:null, time:'14:05', text:'good, the polygon match on the mountain boundary was the part I was worried about', reactions:[{e:'👍',c:2,mine:true},{e:'🏔️',c:1}] },
+            { author:'system', system:true, time:'14:06', text:'vex-9 joined via federated manifest from weft.holdfast.net' },
+            { author:'vex-9', avatar:'V9', cap:null, time:'14:07', text:'catching up on the upper city layout, is the citadel entrance still on the north face?', reply:{author:'threnody', snippet:'root-signed manifest for the citadel district…'} },
+        ],
+        'kharak::announcements': [
+            { author:'threnody', avatar:'TH', cap:'owner', time:'09:00', text:'Announcement channel is permanent retention — everything here is part of the namespace history and gets included in every snapshot, so keep it to things worth keeping.' },
+        ],
+        'kharak::voice-test': [
+            { author:'nightishaman', avatar:'NM', cap:null, time:'20:14', text:'testing the voice companion protocol handshake, ignore the noise in here' },
+        ],
+        'kharak::ops-private': [
+            { author:'threnody', avatar:'TH', cap:'owner', time:'11:40', text:'this channel is MLS end-to-end — even the home server only ever sees ciphertext blobs.' },
+        ],
+        'serverpanel::general': [
+            { author:'nightishaman', avatar:'NM', cap:'owner', time:'16:20', text:'settled on TypeScript + SvelteKit + Bun for the panel, Incus for the container substrate.' },
+        ],
+        'serverpanel::nixos-modules': [
+            { author:'nightishaman', avatar:'NM', cap:'owner', time:'17:02', text:'sops-nix wired up for secrets, Harmonia serving as the binary cache for the fleet.' },
+        ],
+        'serverpanel::incus-cluster': [
+            { author:'nightishaman', avatar:'NM', cap:'owner', time:'18:11', text:'cluster API stays agentless — mTLS straight to each host, no daemon to maintain.' },
+        ],
+        'sailfish::sailfishos-porters': [
+            { author:'system', system:true, time:'13:00', text:'bridged session established — messages in this channel mirror irc.oftc.net#sailfishos-porters' },
+            { author:'jusa', avatar:'JU', cap:'bridged', time:'13:14', text:'gsa authorization is still the blocker on exynos-coresight-etm, same as before' },
+            { author:'nightishaman', avatar:'NM', cap:'bridged', time:'13:16', text:'yeah, tracked that one back to the hang — no userspace progress on idle cores while it sits blocked' },
+        ],
+    };
+
+    function icon(svgInner, size=15){
+        return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">${svgInner}</svg>`;
+    }
+
+    function renderRail(){
+        const rail = document.getElementById('railCommunities');
+        rail.innerHTML = communities.map(c => `
+    <div class="comm-tile ${c.id===activeCommunityId?'active':''}" data-comm="${c.id}">
+      <button title="${c.name}">${c.tag}</button>
+      <span class="trust-mark ${c.trust==='signed'?'signed':'bridged'}" title="${c.trust==='signed'?'Root-signed manifest':'WEFT-IRC bridge'}"></span>
+    </div>
+  `).join('');
+        rail.querySelectorAll('.comm-tile').forEach(el=>{
+            el.addEventListener('click', ()=>{
+                activeCommunityId = el.dataset.comm;
+                const comm = communities.find(c=>c.id===activeCommunityId);
+                activeChannelId = comm.channels[0].id;
+                renderAll();
+            });
+        });
+    }
+
+    function renderSidebar(){
+        const comm = communities.find(c=>c.id===activeCommunityId);
+        document.getElementById('sbCommName').textContent = comm.name;
+        document.getElementById('sbOriginDot').className = 'origin-dot' + (comm.trust==='bridged' ? ' bridge' : '');
+        document.getElementById('sbOriginText').textContent =
+            comm.origin + (comm.trust==='signed' ? ' · root-signed' : ' · WEFT-IRC bridge');
+
+        const groups = {};
+        comm.channels.forEach(ch=>{
+            if(!groups[ch.retention]) groups[ch.retention] = [];
+            groups[ch.retention].push(ch);
+        });
+
+        const order = ['e2ee','permanent','retained','ephemeral'];
+        const scroll = document.getElementById('channelScroll');
+        scroll.innerHTML = order.filter(k=>groups[k]).map(k=>{
+            const meta = retentionMeta[k];
+            return `
+      <div class="retention-group">
+        <div class="retention-label"><span class="dot ${meta.class}"></span>${meta.label}</div>
+        ${groups[k].map(ch=>`
+          <button class="channel-item ${ch.id===activeChannelId?'active':''}" data-chan="${ch.id}">
+            ${icon('<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>', 14)}
+            <span>${ch.name}</span>
+            ${ch.unread ? `<span class="unread">${ch.unread}</span>` : ''}
+          </button>
+        `).join('')}
+      </div>
+    `;
+        }).join('');
+
+        scroll.querySelectorAll('.channel-item').forEach(el=>{
+            el.addEventListener('click', ()=>{
+                activeChannelId = el.dataset.chan;
+                renderAll();
+            });
+        });
+    }
+
+    function renderTopbar(){
+        const comm = communities.find(c=>c.id===activeCommunityId);
+        const chan = comm.channels.find(c=>c.id===activeChannelId);
+        const meta = retentionMeta[chan.retention];
+        document.getElementById('chanTitle').innerHTML =
+            icon('<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>', 16) + `<span>${chan.name}</span>`;
+        document.getElementById('chanTopic').textContent = chan.topic || '';
+        document.getElementById('retentionChip').innerHTML =
+            `<span style="display:flex;color:var(--${meta.class})">${icon(meta.icon,13)}</span>${meta.label}`;
+    }
+
+    function renderMessages(){
+        const key = `${activeCommunityId}::${activeChannelId}`;
+        const msgs = seedMessages[key] || [];
+        const scroll = document.getElementById('messageScroll');
+
+        scroll.innerHTML = `<div class="day-sep">TODAY</div>` + msgs.map(m=>{
+            if(m.system){
+                return `<div class="msg-group"><div style="width:34px;flex-shrink:0"></div>
+        <div class="msg-body"><div class="msg-line system">${m.text}</div></div></div>`;
+            }
+            const badge = m.cap ? `<span class="cap-badge ${m.cap==='bridged'?'bridged':m.cap}">${m.cap}</span>` : '';
+            const reply = m.reply ? `<div class="reply-thread">${icon('<path d="M9 17l-5-5 5-5M4 12h11a4 4 0 0 1 4 4v1"/>',13)}<span>${m.reply.author}</span><span class="snippet">${m.reply.snippet}</span></div>` : '';
+            const reactions = m.reactions ? `<div class="reactions">${m.reactions.map(r=>`<span class="reaction ${r.mine?'mine':''}"><span>${r.e}</span><span class="count">${r.c}</span></span>`).join('')}</div>` : '';
+            return `
+      <div class="msg-group">
+        <div class="avatar">${m.avatar}</div>
+        <div class="msg-body">
+          ${reply}
+          <div class="msg-meta">
+            <span class="author">${m.author}</span>
+            ${badge}
+            <span class="time">${m.time}</span>
+          </div>
+          <div class="msg-line">${m.text}</div>
+          ${reactions}
+        </div>
+      </div>
+    `;
+        }).join('');
+        scroll.scrollTop = scroll.scrollHeight;
+    }
+
+    function renderMembers(){
+        const comm = communities.find(c=>c.id===activeCommunityId);
+        const isBridge = comm.trust === 'bridged';
+        const panel = document.getElementById('members');
+
+        const groups = isBridge
+            ? { 'Bridged (IRC)': [
+                    {name:'jusa', avatar:'JU', origin:'federated'},
+                    {name:'nightishaman', avatar:'NM', origin:'local'},
+                    {name:'ghost-porter', avatar:'GP', origin:'federated'},
+                ]}
+            : {
+                'Root capability': [{name:'threnody', avatar:'TH', origin:'local'}],
+                'Delegated — moderate': [{name:'vex-9', avatar:'V9', origin:'federated'}],
+                'Members': [
+                    {name:'nightishaman', avatar:'NM', origin:'local'},
+                    {name:'holdfast-relay', avatar:'HR', origin:'federated'},
+                    {name:'quiet-loom', avatar:'QL', origin:'federated'},
+                ]
+            };
+
+        panel.innerHTML = Object.entries(groups).map(([label, members])=>`
+    <div class="member-group-label">${label} — ${members.length}</div>
+    ${members.map(m=>`
+      <div class="member-row">
+        <div class="avatar">${m.avatar}<span class="origin-flag ${m.origin}"></span></div>
+        <span class="mname">${m.name}</span>
+      </div>
+    `).join('')}
+  `).join('');
+    }
+
+    function renderAll(){
+        renderRail();
+        renderSidebar();
+        renderTopbar();
+        renderMessages();
+        renderMembers();
+    }
+
+    document.getElementById('toggleMembersBtn').addEventListener('click', ()=>{
+        membersVisible = !membersVisible;
+        document.getElementById('app').classList.toggle('members-collapsed', !membersVisible);
+    });
+
+    const input = document.getElementById('composerInput');
+    input.addEventListener('input', ()=>{
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+    });
+
+    function sendMessage(){
+        const text = input.value.trim();
+        if(!text) return;
+        const key = `${activeCommunityId}::${activeChannelId}`;
+        if(!seedMessages[key]) seedMessages[key] = [];
+        const now = new Date();
+        const time = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
+        seedMessages[key].push({ author:'nightishaman', avatar:'NM', cap:'owner', time, text });
+        input.value = '';
+        input.style.height = 'auto';
+        renderMessages();
+    }
+
+    document.getElementById('sendBtn').addEventListener('click', sendMessage);
+    input.addEventListener('keydown', (e)=>{
+        if(e.key === 'Enter' && !e.shiftKey){
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+
+    renderAll();
+</script>
+</body>
+</html>
