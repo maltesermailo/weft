@@ -76,6 +76,28 @@ pub(crate) async fn accept_quic(endpoint: quinn::Endpoint, ctx: Arc<ServerCtx>) 
     }
 }
 
+/// §17 WEFT-IRC gateway accept loop. `server_name` (this network's name)
+/// prefixes server-originated IRC lines. TLS termination, if any, is the
+/// operator's (a reverse proxy) — this listener is plaintext.
+pub(crate) async fn accept_irc(listener: TcpListener, ctx: Arc<ServerCtx>, server_name: String) {
+    loop {
+        let (tcp, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(e) => {
+                debug!("IRC accept error: {e}");
+                continue;
+            }
+        };
+        let ctx = Arc::clone(&ctx);
+        let server_name = server_name.clone();
+        tokio::spawn(async move {
+            info!(%peer, "IRC connection");
+            let _ = tcp.set_nodelay(true);
+            weft_core::run_session(weft_irc::IrcStream::new(tcp, server_name), ctx).await;
+        });
+    }
+}
+
 pub(crate) async fn accept_ws(listener: TcpListener, ctx: Arc<ServerCtx>) {
     loop {
         let (tcp, peer) = match listener.accept().await {

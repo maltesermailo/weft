@@ -32,6 +32,7 @@ async fn start_with(channels: &[&str], tweak: impl FnOnce(&mut Config)) -> weftd
             quic: "127.0.0.1:0".parse().unwrap(),
             ws: Some("127.0.0.1:0".parse().unwrap()),
             http: Some("127.0.0.1:0".parse().unwrap()),
+            irc: None,
         },
         identity: Identity { key_file: None }, // ephemeral key per test
         ..Config::default()
@@ -674,6 +675,101 @@ async fn report_file_list_resolve_over_quic() {
             }
         ),
         "reporter must get the minimal form, got {push:?}"
+    );
+
+    server.shutdown().await;
+}
+
+// ---- §17 WEFT-IRC gateway ----
+
+/// A raw IRC client over a real TCP socket.
+struct IrcClient {
+    reader: tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    writer: tokio::net::tcp::OwnedWriteHalf,
+}
+
+impl IrcClient {
+    async fn connect(addr: SocketAddr) -> Self {
+        let (r, w) = tokio::net::TcpStream::connect(addr)
+            .await
+            .unwrap()
+            .into_split();
+        Self {
+            reader: tokio::io::BufReader::new(r),
+            writer: w,
+        }
+    }
+
+    async fn send(&mut self, line: &str) {
+        use tokio::io::AsyncWriteExt;
+        self.writer.write_all(line.as_bytes()).await.unwrap();
+        self.writer.write_all(b"\r\n").await.unwrap();
+    }
+
+    async fn recv(&mut self) -> String {
+        use tokio::io::AsyncBufReadExt;
+        let mut buf = String::new();
+        tokio::time::timeout(Duration::from_secs(5), self.reader.read_line(&mut buf))
+            .await
+            .expect("timed out waiting for an IRC line")
+            .expect("IRC read error");
+        buf.trim_end_matches(['\r', '\n']).to_string()
+    }
+
+    /// Read until a line containing `needle`.
+    async fn recv_until(&mut self, needle: &str) -> String {
+        loop {
+            let line = self.recv().await;
+            if line.contains(needle) {
+                return line;
+            }
+        }
+    }
+
+    async fn register(&mut self, nick: &str) {
+        self.send(&format!("NICK {nick}")).await;
+        self.send(&format!("USER {nick} 0 * :{nick} tester")).await;
+        self.recv_until(" 001 ").await; // RPL_WELCOME → registered
+    }
+}
+
+#[tokio::test]
+async fn irc_gateway_register_join_namespace_and_chat() {
+    // A namespaced channel is seeded so it exists to be JOINed (§17: `JOIN
+    // #ns/chan` valid natively) — this is the "namespaces can be joined" path.
+    let server = start_with(&["#general", "#gaming/general"], |config| {
+        config.listen.irc = Some("127.0.0.1:0".parse().unwrap());
+    })
+    .await;
+    let irc_addr = server.irc_addr.expect("IRC gateway enabled");
+
+    // ada registers over IRC and joins the namespaced channel.
+    let mut ada = IrcClient::connect(irc_addr).await;
+    ada.register("ada").await;
+    ada.send("JOIN #gaming/general").await;
+    let joined = ada.recv_until("JOIN").await;
+    assert!(
+        joined.contains(":ada!ada@test.example JOIN #gaming/general"),
+        "own JOIN echo, got {joined:?}"
+    );
+    ada.recv_until(" 366 ").await; // end of NAMES
+
+    // bob registers and joins the same namespaced channel; ada sees him.
+    let mut bob = IrcClient::connect(irc_addr).await;
+    bob.register("bob").await;
+    bob.send("JOIN #gaming/general").await;
+    let seen = ada.recv_until("bob").await;
+    assert!(
+        seen.contains(":bob!bob@test.example JOIN #gaming/general"),
+        "ada should see bob join, got {seen:?}"
+    );
+
+    // bob speaks; ada receives it as a PRIVMSG (bob's own echo is suppressed).
+    bob.send("PRIVMSG #gaming/general :hello from irc").await;
+    let msg = ada.recv_until("PRIVMSG").await;
+    assert_eq!(
+        msg,
+        ":bob!bob@test.example PRIVMSG #gaming/general :hello from irc"
     );
 
     server.shutdown().await;

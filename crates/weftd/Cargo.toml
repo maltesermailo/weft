@@ -11,6 +11,7 @@ weft-proto = { path = "../weft-proto" }
 weft-core = { path = "../weft-core" }
 weft-store = { path = "../weft-store", features = ["postgres"] }
 weft-transport = { path = "../weft-transport" }
+weft-irc = { path = "../weft-irc" }
 tokio = { workspace = true }
 quinn = { workspace = true }
 rcgen = { workspace = true }
