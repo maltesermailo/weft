@@ -2,13 +2,16 @@
 //! behind `Arc<dyn …>` — weft-core stays non-generic over storage.
 
 use async_trait::async_trait;
-use weft_proto::{Account, ChannelName, MsgId, RetentionPolicy, Ulid};
+use weft_proto::{Account, ChannelName, MsgId, ReportStatus, RetentionPolicy, Ulid};
 
 use weft_proto::NamespaceName;
 
+use weft_proto::NetworkName;
+
 use crate::types::{
-    ChannelRecord, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page, PendingRecovery,
-    RedeemOutcome, RootHistoryEntry, Scope, Verification,
+    ChannelRecord, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, NetblockRecord, Page,
+    PeerRecord, PendingRecovery, RedeemOutcome, ReportRecord, ReportResolution, RootHistoryEntry,
+    Scope, Verification,
 };
 use crate::StoreError;
 
@@ -271,4 +274,85 @@ pub trait NamespaceStore: Send + Sync {
 
     async fn root_history(&self, name: &NamespaceName)
         -> Result<Vec<RootHistoryEntry>, StoreError>;
+}
+
+/// Report queue + retention holds (§6.7, §12.1, invariant 11). Holds live
+/// alongside events so `EventStore::purge_before` / `compact_before` skip
+/// held roots automatically — the two traits share a backend.
+#[async_trait]
+pub trait ReportStore: Send + Sync {
+    /// File a report. When `record.state == Verified`, places retention
+    /// holds on the reported root plus its context (±[`HOLD_RADIUS`]) so
+    /// purge and compaction skip them until resolution + grace.
+    async fn file_report(&self, record: ReportRecord) -> Result<(), StoreError>;
+
+    async fn report(&self, id: &str) -> Result<Option<ReportRecord>, StoreError>;
+
+    /// Reports listable at `scope` (present in `queue_scopes`), optionally
+    /// filtered by status, newest first. `after` is an exclusive report-id
+    /// cursor; `limit` caps the page.
+    async fn list_reports(
+        &self,
+        scope: &str,
+        status: Option<ReportStatus>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ReportRecord>, StoreError>;
+
+    /// Resolve an open report; schedules hold release after the grace
+    /// window. False = no such open report.
+    async fn resolve_report(
+        &self,
+        id: &str,
+        resolution: ReportResolution,
+    ) -> Result<bool, StoreError>;
+
+    /// ESCALATE (§6.7): add `*` (net) to an ns-scope report's queues, leaving
+    /// it open and its holds intact. False = no such open report.
+    async fn escalate_report(&self, id: &str) -> Result<bool, StoreError>;
+
+    /// Reports filed by `reporter` at or after `since_ms` — the THROTTLED
+    /// rate-limit check (§6.7).
+    async fn reports_by_since(&self, reporter: &Account, since_ms: u64) -> Result<u64, StoreError>;
+
+    /// Release holds for reports resolved past their grace window (§12.1).
+    /// Returns the number of reports whose holds were released. Idempotent —
+    /// the maintenance scheduler calls it each tick.
+    async fn release_due_holds(&self, now_ms: u64) -> Result<u64, StoreError>;
+}
+
+/// §12.1 recommended context radius: a verified report holds the reported
+/// message plus this many roots on each side.
+pub const HOLD_RADIUS: usize = 25;
+
+/// Bridge peerings + their signed manifests (§11.1). One record per peer
+/// network; the store keeps the manifest blobs opaque (weft-core signs and
+/// verifies them). Forwarding is gated on the acked-vs-current channel
+/// intersection (invariant 3), computed in core from these blobs.
+#[async_trait]
+pub trait PeerStore: Send + Sync {
+    /// Insert or replace a peering (PROPOSE/ADD/REMOVE bump `manifest`;
+    /// ACCEPT sets `acked_manifest`; SEVER sets `severed`).
+    async fn upsert_peer(&self, record: PeerRecord) -> Result<(), StoreError>;
+
+    async fn peer(&self, peer: &NetworkName) -> Result<Option<PeerRecord>, StoreError>;
+
+    async fn list_peers(&self) -> Result<Vec<PeerRecord>, StoreError>;
+
+    /// Hard-remove a peering. False = no such peer.
+    async fn remove_peer(&self, peer: &NetworkName) -> Result<bool, StoreError>;
+}
+
+/// Operator network blocklist (§11.6). Name-keyed (invariant 7).
+#[async_trait]
+pub trait NetblockStore: Send + Sync {
+    /// NETBLOCK ADD — idempotent; re-adding refreshes reason/actor/time.
+    async fn add_netblock(&self, record: NetblockRecord) -> Result<(), StoreError>;
+
+    /// NETBLOCK REMOVE. False = the network wasn't blocked.
+    async fn remove_netblock(&self, network: &NetworkName) -> Result<bool, StoreError>;
+
+    async fn is_netblocked(&self, network: &NetworkName) -> Result<bool, StoreError>;
+
+    async fn list_netblocks(&self) -> Result<Vec<NetblockRecord>, StoreError>;
 }

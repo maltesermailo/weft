@@ -7,7 +7,10 @@ use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
 use crate::name::{ChannelName, NamespaceName, NetworkName, Target, UserRef};
 use crate::policy::RetentionPolicy;
-use crate::types::{MemberAction, MsgMeta, PresenceStatus, ReactionOp, TypingState, Visibility};
+use crate::types::{
+    BridgeState, ContentState, HistoryMode, MediaMode, MemberAction, MsgMeta, PresenceStatus,
+    ReactionOp, ReportScope, ResolveAction, TypingState, Visibility,
+};
 
 /// An event plus its optional `label` echo (§3.5). Only direct responses
 /// carry a label; broadcast copies never do — that distinction is the
@@ -238,6 +241,51 @@ pub enum Event {
         channel: ChannelName,
         category: Option<String>,
         position: i64,
+    },
+    /// `REPORTED <report-id>` — ack to the reporter (§7); carries `label=`.
+    Reported {
+        report_id: String,
+    },
+    /// `REPORT-FILED <report-id> <msgid> <category>` with `state=`, `scope=`
+    /// and optional `reporter=` (per config anonymization, §6.7) — delivered
+    /// to `reports` cap holders and paged by `REPORTS LIST`.
+    ReportFiled {
+        report_id: String,
+        msgid: MsgId,
+        category: String,
+        state: ContentState,
+        scope: ReportScope,
+        reporter: Option<String>,
+    },
+    /// `REPORT-RESOLVED <report-id> <action>` (§7). Handlers get the full
+    /// form (optional `by=` handler + `note=`); the reporter gets the
+    /// minimal form (neither) — reporter never learns handler identity.
+    ReportResolved {
+        report_id: String,
+        action: ResolveAction,
+        by: Option<String>,
+        note: Option<String>,
+    },
+    /// `MANIFEST <peer> <version> <state>` with `channels=`/`history=`/
+    /// `media=`/`typing=` tags — broadcast to affected members on any manifest
+    /// change (§6.6, §11.5). The event payload was left "as v0.8" in the spec;
+    /// resolved here (§6.6 amendment). `channels` lists the acked snapshot for
+    /// `live`/`added`, or the affected channel for `removed`.
+    Manifest {
+        peer: NetworkName,
+        version: u64,
+        state: BridgeState,
+        channels: Vec<ChannelName>,
+        history: HistoryMode,
+        media: MediaMode,
+        typing: bool,
+    },
+    /// `NETBLOCKED <network> [:reason]` — sent to bridge owners when a manifest
+    /// is severed by a NETBLOCK (§11.6). Reason is included per the network's
+    /// `blocklist_visibility` config.
+    Netblocked {
+        network: NetworkName,
+        reason: Option<String>,
     },
     Err(ErrEvent),
     /// Any event outside the known set — MUST be ignored by clients.
@@ -567,6 +615,51 @@ impl Event {
                     position,
                 })
             }
+            "REPORTED" => {
+                let mut args = Args::new(line, "REPORTED");
+                Ok(Event::Reported {
+                    report_id: args.req("report-id")?.to_string(),
+                })
+            }
+            "REPORT-FILED" => {
+                let mut args = Args::new(line, "REPORT-FILED");
+                let report_id = args.req("report-id")?.to_string();
+                let msgid = args.req("msgid")?.parse()?;
+                let category = args.req("category")?.to_string();
+                let state = line
+                    .tags
+                    .get("state")
+                    .ok_or(ParseError::MissingParam {
+                        verb: "REPORT-FILED",
+                        what: "state tag",
+                    })?
+                    .parse()?;
+                let scope = line
+                    .tags
+                    .get("scope")
+                    .ok_or(ParseError::MissingParam {
+                        verb: "REPORT-FILED",
+                        what: "scope tag",
+                    })?
+                    .parse()?;
+                Ok(Event::ReportFiled {
+                    report_id,
+                    msgid,
+                    category,
+                    state,
+                    scope,
+                    reporter: line.tags.get("reporter").filter(|v| !v.is_empty()).cloned(),
+                })
+            }
+            "REPORT-RESOLVED" => {
+                let mut args = Args::new(line, "REPORT-RESOLVED");
+                Ok(Event::ReportResolved {
+                    report_id: args.req("report-id")?.to_string(),
+                    action: args.req("action")?.parse()?,
+                    by: line.tags.get("by").filter(|v| !v.is_empty()).cloned(),
+                    note: line.tags.get("note").filter(|v| !v.is_empty()).cloned(),
+                })
+            }
             "ERR" => {
                 let mut args = Args::new(line, "ERR");
                 Ok(Event::Err(ErrEvent {
@@ -576,6 +669,54 @@ impl Event {
                     retry_after: u64_tag(line, "retry-after", "ERR")?,
                     max: u64_tag(line, "max", "ERR")?,
                 }))
+            }
+            "MANIFEST" => {
+                let mut args = Args::new(line, "MANIFEST");
+                let peer = args.req("peer")?.parse()?;
+                let version = args.req("version")?;
+                let version = version.parse().map_err(|_| ParseError::BadParam {
+                    verb: "MANIFEST",
+                    what: "version",
+                    value: version.to_string(),
+                })?;
+                let state = args.req("state")?.parse()?;
+                let channels = line
+                    .tags
+                    .get("channels")
+                    .map(|v| {
+                        v.split(',')
+                            .filter(|c| !c.is_empty())
+                            .map(str::parse)
+                            .collect::<Result<Vec<ChannelName>, _>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                Ok(Event::Manifest {
+                    peer,
+                    version,
+                    state,
+                    channels,
+                    history: line
+                        .tags
+                        .get("history")
+                        .map(|v| v.parse())
+                        .transpose()?
+                        .unwrap_or(HistoryMode::FromEpoch),
+                    media: line
+                        .tags
+                        .get("media")
+                        .map(|v| v.parse())
+                        .transpose()?
+                        .unwrap_or(MediaMode::None),
+                    typing: line.tags.get("typing").map(String::as_str) == Some("yes"),
+                })
+            }
+            "NETBLOCKED" => {
+                let mut args = Args::new(line, "NETBLOCKED");
+                Ok(Event::Netblocked {
+                    network: args.req("network")?.parse()?,
+                    reason: args.trailing_opt(),
+                })
             }
             verb => Ok(Event::Unknown {
                 verb: verb.to_string(),
@@ -829,6 +970,44 @@ impl Event {
                     None,
                 )
             }
+            Event::Reported { report_id } => ("REPORTED", vec![report_id.clone()], None),
+            Event::ReportFiled {
+                report_id,
+                msgid,
+                category,
+                state,
+                scope,
+                reporter,
+            } => {
+                tags.insert("state".to_string(), state.to_string());
+                tags.insert("scope".to_string(), scope.to_string());
+                if let Some(reporter) = reporter {
+                    tags.insert("reporter".to_string(), reporter.clone());
+                }
+                (
+                    "REPORT-FILED",
+                    vec![report_id.clone(), msgid.to_string(), category.clone()],
+                    None,
+                )
+            }
+            Event::ReportResolved {
+                report_id,
+                action,
+                by,
+                note,
+            } => {
+                if let Some(by) = by {
+                    tags.insert("by".to_string(), by.clone());
+                }
+                if let Some(note) = note {
+                    tags.insert("note".to_string(), note.clone());
+                }
+                (
+                    "REPORT-RESOLVED",
+                    vec![report_id.clone(), action.to_string()],
+                    None,
+                )
+            }
             Event::Err(err) => {
                 if let Some(retry_after) = err.retry_after {
                     tags.insert("retry-after".to_string(), retry_after.to_string());
@@ -839,6 +1018,34 @@ impl Event {
                 let mut params = vec![err.code.to_string()];
                 params.extend(err.context.iter().cloned());
                 ("ERR", params, Some(err.text.clone()))
+            }
+            Event::Manifest {
+                peer,
+                version,
+                state,
+                channels,
+                history,
+                media,
+                typing,
+            } => {
+                if !channels.is_empty() {
+                    let list: Vec<String> = channels.iter().map(ChannelName::to_string).collect();
+                    tags.insert("channels".to_string(), list.join(","));
+                }
+                tags.insert("history".to_string(), history.to_string());
+                tags.insert("media".to_string(), media.to_string());
+                tags.insert(
+                    "typing".to_string(),
+                    if *typing { "yes" } else { "no" }.to_string(),
+                );
+                (
+                    "MANIFEST",
+                    vec![peer.to_string(), version.to_string(), state.to_string()],
+                    None,
+                )
+            }
+            Event::Netblocked { network, reason } => {
+                ("NETBLOCKED", vec![network.to_string()], reason.clone())
             }
             Event::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown event"));
@@ -1253,13 +1460,116 @@ mod tests {
     }
 
     #[test]
+    fn report_events_round_trip() {
+        round_trip(&Reply::with_label(
+            Event::Reported {
+                report_id: "rep-42".into(),
+            },
+            "r1",
+        ));
+        // Filed form to handlers: state/scope tags mandatory, reporter shown.
+        let filed = Reply::new(Event::ReportFiled {
+            report_id: "rep-42".into(),
+            msgid: MSGID.parse().unwrap(),
+            category: "harassment".into(),
+            state: crate::types::ContentState::Verified,
+            scope: crate::types::ReportScope::Ns,
+            reporter: Some("ada@hda.example".into()),
+        });
+        let wire = filed.serialize().unwrap();
+        assert!(wire.contains("state=verified"), "{wire}");
+        assert!(wire.contains("scope=ns"), "{wire}");
+        round_trip(&filed);
+        // Anonymized form (reporter omitted) still parses.
+        round_trip(&Reply::new(Event::ReportFiled {
+            report_id: "rep-9".into(),
+            msgid: MSGID.parse().unwrap(),
+            category: "csam".into(),
+            state: crate::types::ContentState::Unverified,
+            scope: crate::types::ReportScope::Net,
+            reporter: None,
+        }));
+        // state/scope are mandatory on the way in.
+        assert!(Reply::parse(&format!("REPORT-FILED rep-1 {MSGID} spam")).is_err());
+        // Handler resolution (full form) and reporter's minimal form.
+        round_trip(&Reply::new(Event::ReportResolved {
+            report_id: "rep-42".into(),
+            action: crate::types::ResolveAction::UserActioned,
+            by: Some("mod@hda.example".into()),
+            note: Some("banned 7d".into()),
+        }));
+        round_trip(&Reply::with_label(
+            Event::ReportResolved {
+                report_id: "rep-42".into(),
+                action: crate::types::ResolveAction::Dismissed,
+                by: None,
+                note: None,
+            },
+            "r1",
+        ));
+    }
+
+    #[test]
+    fn manifest_event_round_trips() {
+        let live = Reply::with_label(
+            Event::Manifest {
+                peer: "hda.example".parse().unwrap(),
+                version: 2,
+                state: BridgeState::Live,
+                channels: vec![
+                    "#general".parse().unwrap(),
+                    "#gaming/lobby".parse().unwrap(),
+                ],
+                history: HistoryMode::Full,
+                media: MediaMode::MirrorMax(1_000_000),
+                typing: true,
+            },
+            "m1",
+        );
+        let wire = live.serialize().unwrap();
+        assert!(wire.contains("channels=#general,#gaming/lobby"), "{wire}");
+        assert!(wire.contains("history=full"), "{wire}");
+        assert!(wire.contains("media=mirror-max:1000000"), "{wire}");
+        assert!(wire.contains("typing=yes"), "{wire}");
+        assert!(wire.contains("MANIFEST hda.example 2 live"), "{wire}");
+        round_trip(&live);
+
+        // Severed form: no channels, strictest defaults.
+        round_trip(&Reply::new(Event::Manifest {
+            peer: "peer.example".parse().unwrap(),
+            version: 5,
+            state: BridgeState::Severed,
+            channels: vec![],
+            history: HistoryMode::FromEpoch,
+            media: MediaMode::None,
+            typing: false,
+        }));
+        assert!(Reply::parse("MANIFEST hda.example notanumber live").is_err());
+    }
+
+    #[test]
+    fn netblocked_event_round_trips() {
+        round_trip(&Reply::with_label(
+            Event::Netblocked {
+                network: "evil.example".parse().unwrap(),
+                reason: Some("chronic abuse".into()),
+            },
+            "nb1",
+        ));
+        round_trip(&Reply::new(Event::Netblocked {
+            network: "evil.example".parse().unwrap(),
+            reason: None,
+        }));
+    }
+
+    #[test]
     fn unknown_event_is_ignored_not_error() {
-        // NETBLOCKED is a federation event (M5) — still unknown here.
-        let reply = Reply::parse("@label=l1 NETBLOCKED evil.example :severed").unwrap();
+        // STREAM is a media event (M6) — still unknown here.
+        let reply = Reply::parse("@label=l1 STREAM ACCEPT tok-9 :ready").unwrap();
         assert_eq!(
             reply.event,
             Event::Unknown {
-                verb: "NETBLOCKED".into()
+                verb: "STREAM".into()
             }
         );
         assert_eq!(reply.label.as_deref(), Some("l1")); // label still visible for correlation

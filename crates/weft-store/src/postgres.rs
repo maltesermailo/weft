@@ -10,15 +10,20 @@ use async_trait::async_trait;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
-use weft_proto::{Account, ChannelName, MsgId, MsgMeta, NamespaceName, RetentionPolicy, Ulid};
+use weft_proto::{
+    Account, ChannelName, ContentState, MsgId, MsgMeta, NamespaceName, NetworkName, ReportStatus,
+    RetentionPolicy, Ulid,
+};
 
 use crate::compact::compaction_plan;
 use crate::traits::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, NamespaceStore,
+    NetblockStore, PeerStore, ReportStore, HOLD_RADIUS,
 };
 use crate::types::{
-    ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page,
-    PendingRecovery, RedeemOutcome, RootHistoryEntry, Scope, Verification,
+    ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, NamespaceRecord,
+    NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome, ReportRecord,
+    ReportResolution, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 
@@ -104,6 +109,8 @@ impl PgStore {
             WITH expired AS (
                 SELECT ulid FROM weft_events
                 WHERE scope = $1 AND kind = 0 AND at_ms < $2
+                  -- Retention hold: held roots survive purge (invariant 11).
+                  AND ulid NOT IN (SELECT root_ulid FROM weft_holds WHERE scope = $1)
             ), gone AS (
                 DELETE FROM weft_events
                 WHERE scope = $1 AND root_ulid IN (SELECT ulid FROM expired)
@@ -308,13 +315,23 @@ impl EventStore for PgStore {
                 .iter()
                 .map(Self::record_from_row)
                 .collect::<Result<Vec<_>, _>>()?;
+            // Held roots are exempt from compaction (invariant 11).
+            let held: std::collections::HashSet<String> =
+                sqlx::query_scalar("SELECT root_ulid FROM weft_holds WHERE scope = $1")
+                    .bind(&scope)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(backend_err)?
+                    .into_iter()
+                    .collect();
             let mut families: HashMap<Ulid, Vec<EventRecord>> = HashMap::new();
             for record in records {
                 families.entry(record.root.ulid()).or_default().push(record);
             }
             let drops: Vec<String> = families
-                .values()
-                .flat_map(|family| compaction_plan(family, cutoff_ms))
+                .iter()
+                .filter(|(root, _)| !held.contains(&root.to_string()))
+                .flat_map(|(_, family)| compaction_plan(family, cutoff_ms))
                 .map(|ulid| ulid.to_string())
                 .collect();
             if drops.is_empty() {
@@ -1112,6 +1129,287 @@ fn split_caps(caps: String) -> Vec<String> {
         .collect()
 }
 
+fn report_from_row(row: &sqlx::postgres::PgRow) -> Result<ReportRecord, StoreError> {
+    let corrupt = |what: &str| StoreError::Backend(format!("corrupt report row: {what}"));
+    let scope = Scope::from_key(row.get::<&str, _>("scope")).ok_or_else(|| corrupt("scope"))?;
+    let msgid = format!(
+        "{}/{}",
+        row.get::<&str, _>("root_origin"),
+        row.get::<&str, _>("root_ulid")
+    )
+    .parse()
+    .map_err(|_| corrupt("msgid"))?;
+    let held_roots = row
+        .get::<&str, _>("held_roots")
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| Ulid::from_string(s).map_err(|_| corrupt("held root")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let resolution = row
+        .get::<Option<String>, _>("res_action")
+        .map(|action| -> Result<ReportResolution, StoreError> {
+            Ok(ReportResolution {
+                action: action.parse().map_err(|_| corrupt("res_action"))?,
+                note: row.get("res_note"),
+                resolved_by: row
+                    .get::<&str, _>("res_by")
+                    .parse()
+                    .map_err(|_| corrupt("res_by"))?,
+                at_ms: row.get::<Option<i64>, _>("res_at_ms").unwrap_or(0) as u64,
+                hold_release_at: row.get::<Option<i64>, _>("hold_release_at").unwrap_or(0) as u64,
+            })
+        })
+        .transpose()?;
+    Ok(ReportRecord {
+        id: row.get("id"),
+        msgid,
+        scope,
+        category: row.get("category"),
+        state: row
+            .get::<&str, _>("state")
+            .parse()
+            .map_err(|_| corrupt("state"))?,
+        reporter: row
+            .get::<&str, _>("reporter")
+            .parse()
+            .map_err(|_| corrupt("reporter"))?,
+        note: row.get("note"),
+        queue_scopes: row
+            .get::<&str, _>("queue_scopes")
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        status: row
+            .get::<&str, _>("status")
+            .parse()
+            .map_err(|_| corrupt("status"))?,
+        filed_at_ms: row.get::<i64, _>("filed_at_ms") as u64,
+        held_roots,
+        resolution,
+        holds_released: row.get("holds_released"),
+    })
+}
+
+#[async_trait]
+impl ReportStore for PgStore {
+    async fn file_report(&self, mut record: ReportRecord) -> Result<(), StoreError> {
+        let scope_key = record.scope.as_key();
+        // Verified reports hold the reported root + ±HOLD_RADIUS context.
+        if record.state == ContentState::Verified {
+            let target = record.msgid.ulid().to_string();
+            // Target + up to HOLD_RADIUS older roots, and up to HOLD_RADIUS newer.
+            let older: Vec<String> = sqlx::query_scalar(
+                "SELECT ulid FROM weft_events WHERE scope = $1 AND kind = 0 AND ulid <= $2 \
+                 ORDER BY ulid DESC LIMIT $3",
+            )
+            .bind(&scope_key)
+            .bind(&target)
+            .bind(HOLD_RADIUS as i64 + 1)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+            let newer: Vec<String> = sqlx::query_scalar(
+                "SELECT ulid FROM weft_events WHERE scope = $1 AND kind = 0 AND ulid > $2 \
+                 ORDER BY ulid ASC LIMIT $3",
+            )
+            .bind(&scope_key)
+            .bind(&target)
+            .bind(HOLD_RADIUS as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+            record.held_roots = older
+                .iter()
+                .chain(newer.iter())
+                .map(|s| Ulid::from_string(s).map_err(|_| backend_err("held root")))
+                .collect::<Result<Vec<_>, _>>()?;
+            for root in &record.held_roots {
+                sqlx::query(
+                    "INSERT INTO weft_holds (scope, root_ulid, refcount) VALUES ($1, $2, 1) \
+                     ON CONFLICT (scope, root_ulid) DO UPDATE \
+                     SET refcount = weft_holds.refcount + 1",
+                )
+                .bind(&scope_key)
+                .bind(root.to_string())
+                .execute(&self.pool)
+                .await
+                .map_err(backend_err)?;
+            }
+        }
+        let held_joined = record
+            .held_roots
+            .iter()
+            .map(Ulid::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        sqlx::query(
+            r#"
+            INSERT INTO weft_reports
+              (id, scope, root_ulid, root_origin, category, state, reporter, note,
+               queue_scopes, status, filed_at_ms, held_roots, holds_released)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,FALSE)
+            "#,
+        )
+        .bind(&record.id)
+        .bind(&scope_key)
+        .bind(record.msgid.ulid().to_string())
+        .bind(record.msgid.origin().as_str())
+        .bind(&record.category)
+        .bind(record.state.as_str())
+        .bind(record.reporter.as_str())
+        .bind(&record.note)
+        .bind(record.queue_scopes.join(","))
+        .bind(record.status.as_str())
+        .bind(record.filed_at_ms as i64)
+        .bind(held_joined)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn report(&self, id: &str) -> Result<Option<ReportRecord>, StoreError> {
+        let row = sqlx::query("SELECT * FROM weft_reports WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        row.as_ref().map(report_from_row).transpose()
+    }
+
+    async fn list_reports(
+        &self,
+        scope: &str,
+        status: Option<ReportStatus>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ReportRecord>, StoreError> {
+        // queue_scopes is a comma-joined list; membership via a wrapped match
+        // so `ns:g` never matches `ns:games`.
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM weft_reports
+            WHERE (',' || queue_scopes || ',') LIKE ('%,' || $1 || ',%')
+              AND ($2::text IS NULL OR status = $2)
+              AND ($3::text IS NULL OR id < $3)
+            ORDER BY id DESC
+            LIMIT $4
+            "#,
+        )
+        .bind(scope)
+        .bind(status.map(|s| s.as_str()))
+        .bind(after)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.iter().map(report_from_row).collect()
+    }
+
+    async fn resolve_report(
+        &self,
+        id: &str,
+        resolution: ReportResolution,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE weft_reports
+            SET status = 'resolved', res_action = $2, res_note = $3, res_by = $4,
+                res_at_ms = $5, hold_release_at = $6
+            WHERE id = $1 AND status = 'open'
+            "#,
+        )
+        .bind(id)
+        .bind(resolution.action.as_str())
+        .bind(&resolution.note)
+        .bind(resolution.resolved_by.as_str())
+        .bind(resolution.at_ms as i64)
+        .bind(resolution.hold_release_at as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn escalate_report(&self, id: &str) -> Result<bool, StoreError> {
+        // Append '*' to queue_scopes iff open and not already present.
+        let result = sqlx::query(
+            r#"
+            UPDATE weft_reports
+            SET queue_scopes = queue_scopes || ',*'
+            WHERE id = $1 AND status = 'open'
+              AND (',' || queue_scopes || ',') NOT LIKE '%,*,%'
+            "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        if result.rows_affected() == 1 {
+            return Ok(true);
+        }
+        // Distinguish "already had *" (still success) from "no such open report".
+        let open: Option<bool> =
+            sqlx::query_scalar("SELECT status = 'open' FROM weft_reports WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        Ok(open == Some(true))
+    }
+
+    async fn reports_by_since(&self, reporter: &Account, since_ms: u64) -> Result<u64, StoreError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM weft_reports WHERE reporter = $1 AND filed_at_ms >= $2",
+        )
+        .bind(reporter.as_str())
+        .bind(since_ms as i64)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(count as u64)
+    }
+
+    async fn release_due_holds(&self, now_ms: u64) -> Result<u64, StoreError> {
+        let due = sqlx::query(
+            "SELECT id, scope, held_roots FROM weft_reports \
+             WHERE status = 'resolved' AND holds_released = FALSE AND hold_release_at <= $1",
+        )
+        .bind(now_ms as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        let mut released = 0u64;
+        for row in &due {
+            let scope: &str = row.get("scope");
+            let held: &str = row.get("held_roots");
+            for root in held.split(',').filter(|s| !s.is_empty()) {
+                sqlx::query(
+                    "UPDATE weft_holds SET refcount = refcount - 1 WHERE scope = $1 AND root_ulid = $2",
+                )
+                .bind(scope)
+                .bind(root)
+                .execute(&self.pool)
+                .await
+                .map_err(backend_err)?;
+            }
+            sqlx::query("UPDATE weft_reports SET holds_released = TRUE WHERE id = $1")
+                .bind(row.get::<&str, _>("id"))
+                .execute(&self.pool)
+                .await
+                .map_err(backend_err)?;
+            released += 1;
+        }
+        // Drop fully-released holds so purge/compact stop skipping them.
+        sqlx::query("DELETE FROM weft_holds WHERE refcount <= 0")
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(released)
+    }
+}
+
 fn invite_from_row(row: &sqlx::postgres::PgRow) -> InviteRecord {
     InviteRecord {
         id: row.get("id"),
@@ -1119,5 +1417,142 @@ fn invite_from_row(row: &sqlx::postgres::PgRow) -> InviteRecord {
         caps: split_caps(row.get("caps")),
         uses_left: row.get::<Option<i32>, _>("uses_left").map(|u| u as u32),
         expiry: row.get::<Option<i64>, _>("expiry").map(|e| e as u64),
+    }
+}
+
+/// Parse a stored network name back into the validated type; a malformed row
+/// is corruption, not a normal outcome.
+fn network_from(value: &str) -> Result<NetworkName, StoreError> {
+    value
+        .parse()
+        .map_err(|_| StoreError::Backend(format!("corrupt row: network name {value:?}")))
+}
+
+#[async_trait]
+impl PeerStore for PgStore {
+    async fn upsert_peer(&self, record: PeerRecord) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO weft_peers
+                (peer, scope, manifest, version, acked_manifest, severed, created_ms, updated_ms)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            ON CONFLICT (peer) DO UPDATE SET
+                scope = EXCLUDED.scope,
+                manifest = EXCLUDED.manifest,
+                version = EXCLUDED.version,
+                acked_manifest = EXCLUDED.acked_manifest,
+                severed = EXCLUDED.severed,
+                updated_ms = EXCLUDED.updated_ms
+            "#,
+        )
+        .bind(record.peer.as_str())
+        .bind(&record.scope)
+        .bind(&record.manifest)
+        .bind(record.version as i64)
+        .bind(&record.acked_manifest)
+        .bind(record.severed)
+        .bind(record.created_ms as i64)
+        .bind(record.updated_ms as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn peer(&self, peer: &NetworkName) -> Result<Option<PeerRecord>, StoreError> {
+        let row = sqlx::query("SELECT * FROM weft_peers WHERE peer = $1")
+            .bind(peer.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        row.map(|row| peer_from_row(&row)).transpose()
+    }
+
+    async fn list_peers(&self) -> Result<Vec<PeerRecord>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM weft_peers ORDER BY peer")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter().map(peer_from_row).collect()
+    }
+
+    async fn remove_peer(&self, peer: &NetworkName) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM weft_peers WHERE peer = $1")
+            .bind(peer.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+fn peer_from_row(row: &sqlx::postgres::PgRow) -> Result<PeerRecord, StoreError> {
+    Ok(PeerRecord {
+        peer: network_from(row.get("peer"))?,
+        scope: row.get("scope"),
+        manifest: row.get("manifest"),
+        version: row.get::<i64, _>("version") as u64,
+        acked_manifest: row.get("acked_manifest"),
+        severed: row.get("severed"),
+        created_ms: row.get::<i64, _>("created_ms") as u64,
+        updated_ms: row.get::<i64, _>("updated_ms") as u64,
+    })
+}
+
+#[async_trait]
+impl NetblockStore for PgStore {
+    async fn add_netblock(&self, record: NetblockRecord) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO weft_netblocks (network, reason, added_ms, actor)
+            VALUES ($1,$2,$3,$4)
+            ON CONFLICT (network) DO UPDATE SET
+                reason = EXCLUDED.reason,
+                added_ms = EXCLUDED.added_ms,
+                actor = EXCLUDED.actor
+            "#,
+        )
+        .bind(record.network.as_str())
+        .bind(&record.reason)
+        .bind(record.added_ms as i64)
+        .bind(&record.actor)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn remove_netblock(&self, network: &NetworkName) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM weft_netblocks WHERE network = $1")
+            .bind(network.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn is_netblocked(&self, network: &NetworkName) -> Result<bool, StoreError> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM weft_netblocks WHERE network = $1)")
+            .bind(network.as_str())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(backend_err)
+    }
+
+    async fn list_netblocks(&self) -> Result<Vec<NetblockRecord>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM weft_netblocks ORDER BY network")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter()
+            .map(|row| {
+                Ok(NetblockRecord {
+                    network: network_from(row.get("network"))?,
+                    reason: row.get("reason"),
+                    added_ms: row.get::<i64, _>("added_ms") as u64,
+                    actor: row.get("actor"),
+                })
+            })
+            .collect()
     }
 }

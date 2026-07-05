@@ -618,3 +618,63 @@ async fn namespace_transfer_signed_over_quic() {
 
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn report_file_list_resolve_over_quic() {
+    // §6.7 end-to-end over real QUIC: file → operator queue → resolve, with
+    // the reporter kept blind to the handler on resolution (invariant 12).
+    let server = start_with(&["#general"], |config| {
+        config.operators = vec!["op".to_string()];
+    })
+    .await;
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#general").await;
+    ada.send("MSG #general :abuse").await;
+    let Event::Message(msg) = ada.recv().await.event else {
+        panic!("expected MESSAGE echo")
+    };
+    let mid = msg.msgid.to_string();
+
+    ada.send(&format!("@label=r1 REPORT {mid} harassment"))
+        .await;
+    let ack = ada.recv().await;
+    let Event::Reported { report_id } = ack.event else {
+        panic!("expected REPORTED, got {ack:?}")
+    };
+
+    // A default ns-scope report on a top-level channel routes to the
+    // operator (`*`) — an operator lists and resolves it.
+    let mut op = QuicClient::connect(server.quic_addr).await;
+    op.ready("op").await;
+    op.send("REPORTS LIST *").await;
+    let filed = op.recv().await;
+    assert!(
+        matches!(&filed.event, Event::ReportFiled { report_id: fid, .. } if *fid == report_id),
+        "operator queue should hold the report, got {filed:?}"
+    );
+
+    op.send(&format!("REPORTS RESOLVE {report_id} dismissed"))
+        .await;
+    let echo = op.recv().await;
+    assert!(matches!(
+        &echo.event,
+        Event::ReportResolved { by: Some(_), .. }
+    ));
+
+    // The reporter is pushed the minimal resolution (no handler identity).
+    let push = ada.recv().await;
+    assert!(
+        matches!(
+            &push.event,
+            Event::ReportResolved {
+                by: None,
+                note: None,
+                ..
+            }
+        ),
+        "reporter must get the minimal form, got {push:?}"
+    );
+
+    server.shutdown().await;
+}

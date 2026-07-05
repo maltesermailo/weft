@@ -56,6 +56,12 @@ enum Cmd {
     Part {
         session: SessionId,
     },
+    /// §11: subscribe to the broadcast without joining as a member — a bridge
+    /// session watches the channel to forward local events, but must not show
+    /// up in the member list or count.
+    Subscribe {
+        reply: oneshot::Sender<broadcast::Receiver<ChannelEvent>>,
+    },
     Publish {
         session: SessionId,
         body: String,
@@ -91,7 +97,27 @@ enum Cmd {
         session: SessionId,
         status: weft_proto::PresenceStatus,
     },
+    /// §11.4 remote ingestion: persist a bridged event under the local
+    /// (negotiated) policy **without minting a fresh msgid** — origin msgids
+    /// and their ULID order stay intact — and broadcast it to local members.
+    /// `origin` is the bridge session's id so its own forwarder skips the
+    /// echo (no loop back to the peer it arrived from).
+    Ingest {
+        origin: SessionId,
+        // Boxed: a stored record + wire event dwarf the other variants.
+        record: Box<EventRecord>,
+        event: Box<Event>,
+    },
+    /// §11.5 broadcast a notification event to members without storing it.
+    Announce {
+        origin: SessionId,
+        event: Box<Event>,
+    },
 }
+
+/// A broadcast origin no real session ever has (session ids start at 1), so an
+/// [`Cmd::Announce`] copy is delivered to every member.
+const SENTINEL_ORIGIN: SessionId = SessionId::MAX;
 
 /// Cheap handle to a channel actor. Mutations are fire-and-forget: the
 /// broadcast copy (echoed with the sender's label) is the ack (§9.2).
@@ -117,6 +143,13 @@ impl ChannelHandle {
 
     pub async fn part(&self, session: SessionId) {
         let _ = self.inbox.send(Cmd::Part { session }).await;
+    }
+
+    /// §11 subscribe a bridge session to the broadcast (no membership).
+    pub async fn subscribe(&self) -> Option<broadcast::Receiver<ChannelEvent>> {
+        let (reply, ack) = oneshot::channel();
+        self.inbox.send(Cmd::Subscribe { reply }).await.ok()?;
+        ack.await.ok()
     }
 
     pub async fn publish(&self, session: SessionId, body: String, meta: MsgMeta) {
@@ -167,6 +200,31 @@ impl ChannelHandle {
 
     pub async fn set_policy(&self, session: SessionId, policy: RetentionPolicy) {
         let _ = self.inbox.send(Cmd::SetPolicy { session, policy }).await;
+    }
+
+    /// §11.5/§6.6 broadcast a non-stored notification (e.g. `MANIFEST`) to
+    /// members. `SENTINEL_ORIGIN` marks it as no session's own event so every
+    /// member — including the acting bridge session — receives a copy.
+    pub async fn announce(&self, event: Event) {
+        let _ = self
+            .inbox
+            .send(Cmd::Announce {
+                origin: SENTINEL_ORIGIN,
+                event: Box::new(event),
+            })
+            .await;
+    }
+
+    /// §11.4 ingest a verified remote event (see [`Cmd::Ingest`]).
+    pub async fn ingest(&self, origin: SessionId, record: EventRecord, event: Event) {
+        let _ = self
+            .inbox
+            .send(Cmd::Ingest {
+                origin,
+                record: Box::new(record),
+                event: Box::new(event),
+            })
+            .await;
     }
 }
 
@@ -239,6 +297,9 @@ impl Actor {
                     count,
                     policy: self.policy,
                 });
+            }
+            Cmd::Subscribe { reply } => {
+                let _ = reply.send(self.events.subscribe());
             }
             Cmd::Part { session } => {
                 if let Some(account) = self.members.remove(&session) {
@@ -387,6 +448,18 @@ impl Actor {
                     self.broadcast(session, Event::Presence { user, status });
                 }
             }
+            Cmd::Ingest {
+                origin,
+                record,
+                event,
+            } => {
+                // Persist under the local (negotiated/strictest) policy, then
+                // fan out to local members. The msgid inside `record`/`event`
+                // is the remote origin's — never re-minted (§11.4, invariant 2).
+                self.persist(*record).await;
+                self.broadcast(origin, *event);
+            }
+            Cmd::Announce { origin, event } => self.broadcast(origin, *event),
             Cmd::SetPolicy { session, policy } => {
                 self.policy = policy;
                 // Members learn the new retention (§5.2: policy visible);

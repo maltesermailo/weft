@@ -1,6 +1,6 @@
 //! Shared server context handed to every session.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use weft_crypto::{Attestation, Capability, Grant, Keypair, PublicKey, Subject, T
 use weft_proto::{Account, ChannelName, NamespaceName, NetworkName, RetentionPolicy};
 use weft_store::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, NamespaceStore,
-    StoreError,
+    NetblockStore, PeerStore, ReportStore, StoreError,
 };
 
 use crate::accounts::Accounts;
@@ -31,6 +31,34 @@ pub struct ServerInfo {
     /// `features=` flags for WELCOME. Empty in M1 — media/voice/e2ee/
     /// backfill/presence all land in later milestones.
     pub features: Vec<String>,
+}
+
+/// §11 federation config: which peer networks this server will bridge with and
+/// how it treats incoming proposals.
+///
+/// Two trust modes for opening a bridge session (§11.2):
+/// - **Pinned** (default, closed): only peers in `peer_keys` may bridge, and
+///   only with the exact key pinned there — key rotation is a config change,
+///   not a bypass. The secure default.
+/// - **Accept-any** (`accept_any = true`, open federation): any non-blocked
+///   network may open a bridge by asserting a key and proving control of it
+///   (challenge/proof). The session is then bound to *that* key — a peer can
+///   only speak for the identity it holds a key for, but nothing external
+///   confirms the key really is that network's (no pin / well-known check), so
+///   this is trust-on-first-use. `NETBLOCK` is the escape hatch.
+///
+/// A pinned key always wins over accept-any for that network.
+#[derive(Debug, Clone, Default)]
+pub struct FederationConfig {
+    /// peer network → its pinned Ed25519 signing key.
+    pub peer_keys: HashMap<NetworkName, PublicKey>,
+    /// Accept a bridge from *any* non-blocked network (open federation),
+    /// trusting the key it proves control of. Pinned peers still take their
+    /// pinned key.
+    pub accept_any: bool,
+    /// Auto-accept incoming `BRIDGE PROPOSE` (reference convenience). When
+    /// false, an operator must `BRIDGE ACCEPT` explicitly.
+    pub auto_accept: bool,
 }
 
 /// Everything a session needs: identity, accounts, channels, events, and
@@ -56,6 +84,14 @@ pub struct ServerCtx {
     pub(crate) channel_store: Arc<dyn ChannelStore>,
     /// User-owned namespaces (§2.1).
     pub(crate) namespaces: Arc<dyn NamespaceStore>,
+    /// Report queue + retention holds (§6.7).
+    pub(crate) reports: Arc<dyn ReportStore>,
+    /// Bridge peerings + signed manifests (§11.1).
+    pub(crate) peers: Arc<dyn PeerStore>,
+    /// Operator network blocklist (§11.6).
+    pub(crate) netblocks: Arc<dyn NetblockStore>,
+    /// §11 federation config: pinned peer keys + auto-accept.
+    pub(crate) federation: FederationConfig,
     /// §2.2 namespace creation: `open` (any account, up to `ns_quota`) or
     /// gated (needs the `ns-create` cap).
     pub(crate) ns_creation_open: bool,
@@ -84,6 +120,7 @@ impl ServerCtx {
         operators: impl IntoIterator<Item = Account>,
         ns_creation_open: bool,
         ns_quota: u64,
+        federation: FederationConfig,
     ) -> Self
     where
         S: EventStore
@@ -92,6 +129,9 @@ impl ServerCtx {
             + ChannelStore
             + InviteStore
             + NamespaceStore
+            + ReportStore
+            + PeerStore
+            + NetblockStore
             + 'static,
     {
         let events: Arc<dyn EventStore> = store.clone();
@@ -99,6 +139,9 @@ impl ServerCtx {
         let caps: Arc<dyn CapabilityStore> = store.clone();
         let invites: Arc<dyn InviteStore> = store.clone();
         let channel_store: Arc<dyn ChannelStore> = store.clone();
+        let reports: Arc<dyn ReportStore> = store.clone();
+        let peers: Arc<dyn PeerStore> = store.clone();
+        let netblocks: Arc<dyn NetblockStore> = store.clone();
         let namespaces: Arc<dyn NamespaceStore> = store;
         let registry = Registry::spawn(channels, info.network.clone(), Arc::clone(&events));
         let directory = crate::directory::spawn(
@@ -119,12 +162,47 @@ impl ServerCtx {
             invites,
             channel_store,
             namespaces,
+            reports,
             ns_creation_open,
             ns_quota,
+            peers,
+            netblocks,
+            federation,
             operators: operators.into_iter().collect(),
             identity,
             next_session: AtomicU64::new(1),
         }
+    }
+
+    // ---- §11 federation ----
+
+    /// The pinned signing key for a configured peer network, if any. Bridge
+    /// sessions authenticate against this (§11.2).
+    pub(crate) fn peer_key(&self, network: &NetworkName) -> Option<&PublicKey> {
+        self.federation.peer_keys.get(network)
+    }
+
+    pub(crate) fn bridge_auto_accept(&self) -> bool {
+        self.federation.auto_accept
+    }
+
+    /// Open-federation mode: accept a bridge from any non-blocked network,
+    /// trusting the key it proves control of (§11.2, trust-on-first-use).
+    pub(crate) fn bridge_accept_any(&self) -> bool {
+        self.federation.accept_any
+    }
+
+    /// Sign a manifest with this network's key (§11.3). The §11.3 authority
+    /// ladder is enforced *locally* before calling this (does the operator
+    /// hold `bridge`/ns-owner/`*`?); the wire artifact is uniformly
+    /// network-key-signed so the peer can verify it against our well-known.
+    pub(crate) fn sign_manifest(&self, manifest: &weft_crypto::Manifest) -> String {
+        manifest.sign(&self.identity).to_b64()
+    }
+
+    /// Our own network name as the validated type (manifests name their peer).
+    pub(crate) fn network(&self) -> &NetworkName {
+        &self.info.network
     }
 
     // ---- capability enforcement (§10.4, invariant 4) ----
@@ -242,9 +320,26 @@ impl ServerCtx {
         self.info.network.as_str()
     }
 
+    /// Operator accounts — the net-scope (`*`) report handlers (§6.7).
+    pub(crate) fn operator_accounts(&self) -> Vec<Account> {
+        self.operators.iter().cloned().collect()
+    }
+
     pub(crate) fn next_session_id(&self) -> u64 {
         self.next_session.fetch_add(1, Ordering::Relaxed)
     }
+}
+
+/// The namespace a channel belongs to, if any (`#n/chan` → n). Top-level
+/// channels (`#general`) have none — they answer to the operator (§2.1).
+pub(crate) fn channel_namespace(channel: &ChannelName) -> Option<NamespaceName> {
+    channel
+        .as_str()
+        .strip_prefix('#')?
+        .split_once('/')?
+        .0
+        .parse()
+        .ok()
 }
 
 /// The namespace a scope belongs to, if any: `ns:<n>` → n; `#n/chan` → n

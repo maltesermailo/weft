@@ -4,8 +4,11 @@
 use crate::error::{ParseError, SerializeError};
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
-use crate::name::{Account, ChannelName, NamespaceName, Target};
-use crate::types::{MsgMeta, PresenceStatus, TypingState, Visibility};
+use crate::name::{Account, ChannelName, NamespaceName, NetworkName, Target};
+use crate::types::{
+    report_category_ok, HistoryMode, MediaMode, MsgMeta, PresenceStatus, ReportScope, ReportStatus,
+    ResolveAction, TypingState, Visibility,
+};
 
 /// A command plus its optional `label` (§3.5). The label is echoed on every
 /// direct response — including `ERR` — and never on broadcast copies.
@@ -230,8 +233,91 @@ pub enum Command {
     /// `CHANNELS <ns>` — the ordered channel layout of a namespace (spec
     /// extension: Discord-style categories + order).
     Channels { namespace: NamespaceName },
+    /// `REPORT <msgid> <category> [scope] [:note]` (§6.7). Routed to the
+    /// reporter's home network; `scope` defaults to `ns`.
+    Report {
+        msgid: MsgId,
+        category: String,
+        scope: ReportScope,
+        note: Option<String>,
+    },
+    /// `REPORTS LIST <scope> [status=open|resolved] [cursor]` (§6.7) — the
+    /// handler queue. `scope` is the concrete cap scope (`ns:<name>` or `*`),
+    /// not the ns/net routing hint. Cap: `reports` at that scope.
+    ReportsList {
+        scope: String,
+        status: Option<ReportStatus>,
+        cursor: Option<String>,
+    },
+    /// `REPORTS RESOLVE <report-id> <action> [:note]` (§6.7).
+    ReportsResolve {
+        report_id: String,
+        action: ResolveAction,
+        note: Option<String>,
+    },
+    /// `AUTH BRIDGE <peer-network> <b64-token>` — a peer network opens a
+    /// bridge session by presenting a `bridge` capability token (§11.2); the
+    /// server then challenges to prove control of the token's subject key,
+    /// reusing the §6.1 `CHALLENGE`/`AUTH PROOF` flow.
+    AuthBridge { network: NetworkName, token: String },
+    /// `BRIDGE PROPOSE <scope> <peer> [history=] [media=] [typing=]` with the
+    /// signed manifest in a `manifest=<b64>` tag (§6.6, §11.1). `scope` is
+    /// `#chan|ns:<name>|*`, validated by the capability layer.
+    BridgePropose {
+        scope: String,
+        peer: NetworkName,
+        history: HistoryMode,
+        media: MediaMode,
+        typing: bool,
+        manifest: Option<String>,
+    },
+    /// `BRIDGE ACCEPT <peer> <version>` — live on mutual ack (§6.6).
+    BridgeAccept { peer: NetworkName, version: u64 },
+    /// `BRIDGE ADD <peer> <#chan>` — amend, v+1, requires re-ack (§6.6).
+    BridgeAdd {
+        peer: NetworkName,
+        channel: ChannelName,
+    },
+    /// `BRIDGE REMOVE <peer> <#chan>` — v+1, unilateral, immediate (§6.6).
+    BridgeRemove {
+        peer: NetworkName,
+        channel: ChannelName,
+    },
+    /// `BRIDGE SEVER <peer>` — unilateral teardown (§6.6).
+    BridgeSever { peer: NetworkName },
+    /// `NETBLOCK ADD <network> [:reason]` (§6.6, §11.6). Cap `netblock` at `*`.
+    NetblockAdd {
+        network: NetworkName,
+        reason: Option<String>,
+    },
+    /// `NETBLOCK REMOVE <network>` — lifts the block.
+    NetblockRemove { network: NetworkName },
+    /// `NETBLOCK LIST` — the operator's blocklist (§11.6).
+    NetblockList,
+    /// `REPORT-FORWARD <report-id> <msgid> <category> [:note]` — bridge-session
+    /// only (§11.9). Reporter identity is stripped by the forwarder; the origin
+    /// treats it as a net-scope, `unverified` signal.
+    ReportForward {
+        report_id: String,
+        msgid: MsgId,
+        category: String,
+        note: Option<String>,
+    },
     /// Any verb outside the known set. Servers ignore it silently (§4).
     Unknown { verb: String },
+}
+
+/// Parse a `yes|no` flag value (manifest `typing=`).
+fn yes_no(verb: &'static str, what: &'static str, value: &str) -> Result<bool, ParseError> {
+    match value.to_ascii_lowercase().as_str() {
+        "yes" => Ok(true),
+        "no" => Ok(false),
+        _ => Err(ParseError::BadParam {
+            verb,
+            what,
+            value: value.to_string(),
+        }),
+    }
 }
 
 /// Comma-separated cap list as a middle param (no spaces).
@@ -307,6 +393,10 @@ impl Command {
                     }),
                     "ENROLL" => Ok(Command::AuthEnroll {
                         pubkey: args.req("pubkey")?.to_string(),
+                    }),
+                    "BRIDGE" => Ok(Command::AuthBridge {
+                        network: args.req("network")?.parse()?,
+                        token: args.req("token")?.to_string(),
                     }),
                     _ => Err(ParseError::BadParam {
                         verb: "AUTH",
@@ -662,6 +752,160 @@ impl Command {
             "CHANNELS" => Ok(Command::Channels {
                 namespace: Args::new(line, "CHANNELS").req("namespace")?.parse()?,
             }),
+            "REPORT" => {
+                let mut args = Args::new(line, "REPORT");
+                let msgid = args.req("msgid")?.parse()?;
+                let category = args.req("category")?.to_string();
+                if !report_category_ok(&category) {
+                    return Err(ParseError::BadParam {
+                        verb: "REPORT",
+                        what: "category",
+                        value: category,
+                    });
+                }
+                // Optional scope defaults to `ns` (§6.7).
+                let scope = args
+                    .opt()
+                    .map(str::parse)
+                    .transpose()?
+                    .unwrap_or(ReportScope::Ns);
+                Ok(Command::Report {
+                    msgid,
+                    category,
+                    scope,
+                    note: args.trailing_opt(),
+                })
+            }
+            "REPORTS" => {
+                let mut args = Args::new(line, "REPORTS");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "LIST" => {
+                        let scope = args.req("scope")?.to_string();
+                        // `status=` param and a bare cursor, any order.
+                        let mut status = None;
+                        let mut cursor = None;
+                        while let Some(param) = args.opt() {
+                            if let Some(v) = param.strip_prefix("status=") {
+                                status = Some(v.parse()?);
+                            } else {
+                                cursor = Some(param.to_string());
+                            }
+                        }
+                        Ok(Command::ReportsList {
+                            scope,
+                            status,
+                            cursor,
+                        })
+                    }
+                    "RESOLVE" => Ok(Command::ReportsResolve {
+                        report_id: args.req("report-id")?.to_string(),
+                        action: args.req("action")?.parse()?,
+                        note: args.trailing_opt(),
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "REPORTS",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
+            "BRIDGE" => {
+                let mut args = Args::new(line, "BRIDGE");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "PROPOSE" => {
+                        let scope = args.req("scope")?.to_string();
+                        let peer = args.req("peer")?.parse()?;
+                        // Strictest-safe defaults (§11.1): no history, no media,
+                        // no typing unless the proposal opts in.
+                        let mut history = HistoryMode::FromEpoch;
+                        let mut media = MediaMode::None;
+                        let mut typing = false;
+                        while let Some(param) = args.opt() {
+                            if let Some(v) = param.strip_prefix("history=") {
+                                history = v.parse()?;
+                            } else if let Some(v) = param.strip_prefix("media=") {
+                                media = v.parse()?;
+                            } else if let Some(v) = param.strip_prefix("typing=") {
+                                typing = yes_no("BRIDGE", "typing", v)?;
+                            }
+                        }
+                        Ok(Command::BridgePropose {
+                            scope,
+                            peer,
+                            history,
+                            media,
+                            typing,
+                            manifest: line.tags.get("manifest").filter(|v| !v.is_empty()).cloned(),
+                        })
+                    }
+                    "ACCEPT" => {
+                        let peer = args.req("peer")?.parse()?;
+                        let version = args.req("version")?;
+                        let version = version.parse().map_err(|_| ParseError::BadParam {
+                            verb: "BRIDGE",
+                            what: "version",
+                            value: version.to_string(),
+                        })?;
+                        Ok(Command::BridgeAccept { peer, version })
+                    }
+                    "ADD" => Ok(Command::BridgeAdd {
+                        peer: args.req("peer")?.parse()?,
+                        channel: args.req("channel")?.parse()?,
+                    }),
+                    "REMOVE" => Ok(Command::BridgeRemove {
+                        peer: args.req("peer")?.parse()?,
+                        channel: args.req("channel")?.parse()?,
+                    }),
+                    "SEVER" => Ok(Command::BridgeSever {
+                        peer: args.req("peer")?.parse()?,
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "BRIDGE",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
+            "NETBLOCK" => {
+                let mut args = Args::new(line, "NETBLOCK");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "ADD" => Ok(Command::NetblockAdd {
+                        network: args.req("network")?.parse()?,
+                        reason: args.trailing_opt(),
+                    }),
+                    "REMOVE" => Ok(Command::NetblockRemove {
+                        network: args.req("network")?.parse()?,
+                    }),
+                    "LIST" => Ok(Command::NetblockList),
+                    _ => Err(ParseError::BadParam {
+                        verb: "NETBLOCK",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
+            "REPORT-FORWARD" => {
+                let mut args = Args::new(line, "REPORT-FORWARD");
+                let report_id = args.req("report-id")?.to_string();
+                let msgid = args.req("msgid")?.parse()?;
+                let category = args.req("category")?.to_string();
+                if !report_category_ok(&category) {
+                    return Err(ParseError::BadParam {
+                        verb: "REPORT-FORWARD",
+                        what: "category",
+                        value: category,
+                    });
+                }
+                Ok(Command::ReportForward {
+                    report_id,
+                    msgid,
+                    category,
+                    note: args.trailing_opt(),
+                })
+            }
             _ => Ok(Command::Unknown {
                 verb: verb.to_string(),
             }),
@@ -943,6 +1187,126 @@ impl Command {
             }
             Command::Discover { cursor } => ("DISCOVER", cursor.iter().cloned().collect(), None),
             Command::Channels { namespace } => ("CHANNELS", vec![namespace.to_string()], None),
+            Command::Report {
+                msgid,
+                category,
+                scope,
+                note,
+            } => {
+                if !report_category_ok(category) {
+                    return Err(SerializeError::BadParam {
+                        param: category.clone(),
+                        reason: "category must be normative or x- prefixed, no spaces",
+                    });
+                }
+                // `ns` is the default — emit it only when it differs, so the
+                // canonical form of a bare report stays minimal (and a note
+                // never gets mistaken for the optional scope on re-parse).
+                let mut params = vec![msgid.to_string(), category.clone()];
+                if *scope != ReportScope::Ns || note.is_some() {
+                    params.push(scope.to_string());
+                }
+                ("REPORT", params, note.clone())
+            }
+            Command::ReportsList {
+                scope,
+                status,
+                cursor,
+            } => {
+                let mut params = vec!["LIST".to_string(), scope.clone()];
+                if let Some(status) = status {
+                    params.push(format!("status={status}"));
+                }
+                if let Some(cursor) = cursor {
+                    params.push(cursor.clone());
+                }
+                ("REPORTS", params, None)
+            }
+            Command::ReportsResolve {
+                report_id,
+                action,
+                note,
+            } => (
+                "REPORTS",
+                vec!["RESOLVE".to_string(), report_id.clone(), action.to_string()],
+                note.clone(),
+            ),
+            Command::AuthBridge { network, token } => (
+                "AUTH",
+                vec!["BRIDGE".to_string(), network.to_string(), token.clone()],
+                None,
+            ),
+            Command::BridgePropose {
+                scope,
+                peer,
+                history,
+                media,
+                typing,
+                manifest,
+            } => {
+                if let Some(manifest) = manifest {
+                    tags.insert("manifest".to_string(), manifest.clone());
+                }
+                (
+                    "BRIDGE",
+                    vec![
+                        "PROPOSE".to_string(),
+                        scope.clone(),
+                        peer.to_string(),
+                        format!("history={history}"),
+                        format!("media={media}"),
+                        format!("typing={}", if *typing { "yes" } else { "no" }),
+                    ],
+                    None,
+                )
+            }
+            Command::BridgeAccept { peer, version } => (
+                "BRIDGE",
+                vec!["ACCEPT".to_string(), peer.to_string(), version.to_string()],
+                None,
+            ),
+            Command::BridgeAdd { peer, channel } => (
+                "BRIDGE",
+                vec!["ADD".to_string(), peer.to_string(), channel.to_string()],
+                None,
+            ),
+            Command::BridgeRemove { peer, channel } => (
+                "BRIDGE",
+                vec!["REMOVE".to_string(), peer.to_string(), channel.to_string()],
+                None,
+            ),
+            Command::BridgeSever { peer } => {
+                ("BRIDGE", vec!["SEVER".to_string(), peer.to_string()], None)
+            }
+            Command::NetblockAdd { network, reason } => (
+                "NETBLOCK",
+                vec!["ADD".to_string(), network.to_string()],
+                reason.clone(),
+            ),
+            Command::NetblockRemove { network } => (
+                "NETBLOCK",
+                vec!["REMOVE".to_string(), network.to_string()],
+                None,
+            ),
+            Command::NetblockList => ("NETBLOCK", vec!["LIST".to_string()], None),
+            Command::ReportForward {
+                report_id,
+                msgid,
+                category,
+                note,
+            } => {
+                if !report_category_ok(category) {
+                    return Err(SerializeError::BadParam {
+                        param: category.clone(),
+                        reason: "category must be normative or x- prefixed, no spaces",
+                    });
+                }
+                (
+                    "REPORT-FORWARD",
+                    vec![report_id.clone(), msgid.to_string(), category.clone()],
+                    note.clone(),
+                )
+            }
             Command::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown command"));
             }
@@ -1428,6 +1792,70 @@ mod tests {
     }
 
     #[test]
+    fn report_round_trips() {
+        // Bare report: scope defaults to ns, stays minimal on the wire.
+        let bare = Request::with_label(
+            Command::Report {
+                msgid: MSGID.parse().unwrap(),
+                category: "harassment".into(),
+                scope: ReportScope::Ns,
+                note: None,
+            },
+            "r1",
+        );
+        assert_eq!(
+            bare.serialize().unwrap(),
+            format!("@label=r1 REPORT {MSGID} harassment")
+        );
+        round_trip(&bare);
+        // Net scope + note round-trips; note travels in the trailing.
+        round_trip(&Request::new(Command::Report {
+            msgid: MSGID.parse().unwrap(),
+            category: "csam".into(),
+            scope: ReportScope::Net,
+            note: Some("see the attached screenshot".into()),
+        }));
+        // ns-scope report *with* a note: scope must be emitted so the note
+        // is not re-parsed as the optional scope.
+        round_trip(&Request::new(Command::Report {
+            msgid: MSGID.parse().unwrap(),
+            category: "x-doxxing".into(),
+            scope: ReportScope::Ns,
+            note: Some("posted my address".into()),
+        }));
+        // Unknown category rejected both ways.
+        assert!(Request::parse(&format!("REPORT {MSGID} slander")).is_err());
+    }
+
+    #[test]
+    fn reports_list_resolve_round_trip() {
+        round_trip(&Request::with_label(
+            Command::ReportsList {
+                scope: "ns:gaming".into(),
+                status: Some(ReportStatus::Open),
+                cursor: Some("cur-9".into()),
+            },
+            "l1",
+        ));
+        round_trip(&Request::new(Command::ReportsList {
+            scope: "*".into(),
+            status: None,
+            cursor: None,
+        }));
+        round_trip(&Request::new(Command::ReportsResolve {
+            report_id: "rep-42".into(),
+            action: ResolveAction::ContentRemoved,
+            note: Some("removed and warned".into()),
+        }));
+        round_trip(&Request::new(Command::ReportsResolve {
+            report_id: "rep-7".into(),
+            action: ResolveAction::Dismissed,
+            note: None,
+        }));
+        assert!(Request::parse("REPORTS FROB ns").is_err());
+    }
+
+    #[test]
     fn discover_round_trips() {
         round_trip(&Request::new(Command::Discover { cursor: None }));
         round_trip(&Request::with_label(
@@ -1436,6 +1864,123 @@ mod tests {
             },
             "d1",
         ));
+    }
+
+    #[test]
+    fn auth_bridge_round_trips() {
+        round_trip(&Request::new(Command::AuthBridge {
+            network: "hda.example".parse().unwrap(),
+            token: "B64BRIDGETOKEN==".into(),
+        }));
+        assert_eq!(
+            Request::new(Command::AuthBridge {
+                network: "hda.example".parse().unwrap(),
+                token: "T==".into(),
+            })
+            .serialize()
+            .unwrap(),
+            "AUTH BRIDGE hda.example T=="
+        );
+    }
+
+    #[test]
+    fn bridge_verbs_round_trip() {
+        let propose = Request::with_label(
+            Command::BridgePropose {
+                scope: "#general".into(),
+                peer: "hda.example".parse().unwrap(),
+                history: HistoryMode::Full,
+                media: MediaMode::MirrorMax(1_048_576),
+                typing: true,
+                manifest: Some("B64MANIFEST==".into()),
+            },
+            "b1",
+        );
+        let wire = propose.serialize().unwrap();
+        assert!(wire.contains("manifest=B64MANIFEST=="), "{wire}");
+        assert!(
+            wire.contains("BRIDGE PROPOSE #general hda.example history=full media=mirror-max:1048576 typing=yes"),
+            "{wire}"
+        );
+        round_trip(&propose);
+
+        // Minimal propose: strictest-safe defaults, no manifest tag.
+        let minimal = Request::parse("BRIDGE PROPOSE ns:gaming peer.example").unwrap();
+        assert_eq!(
+            minimal.command,
+            Command::BridgePropose {
+                scope: "ns:gaming".into(),
+                peer: "peer.example".parse().unwrap(),
+                history: HistoryMode::FromEpoch,
+                media: MediaMode::None,
+                typing: false,
+                manifest: None,
+            }
+        );
+
+        round_trip(&Request::new(Command::BridgeAccept {
+            peer: "hda.example".parse().unwrap(),
+            version: 3,
+        }));
+        round_trip(&Request::new(Command::BridgeAdd {
+            peer: "hda.example".parse().unwrap(),
+            channel: "#gaming/lobby".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::BridgeRemove {
+            peer: "hda.example".parse().unwrap(),
+            channel: "#general".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::BridgeSever {
+            peer: "hda.example".parse().unwrap(),
+        }));
+        assert!(Request::parse("BRIDGE FROB peer.example").is_err());
+        assert!(Request::parse("BRIDGE ACCEPT peer.example notanumber").is_err());
+    }
+
+    #[test]
+    fn netblock_verbs_round_trip() {
+        round_trip(&Request::with_label(
+            Command::NetblockAdd {
+                network: "evil.example".parse().unwrap(),
+                reason: Some("spam floods".into()),
+            },
+            "n1",
+        ));
+        assert_eq!(
+            Request::new(Command::NetblockAdd {
+                network: "evil.example".parse().unwrap(),
+                reason: None,
+            })
+            .serialize()
+            .unwrap(),
+            "NETBLOCK ADD evil.example"
+        );
+        round_trip(&Request::new(Command::NetblockRemove {
+            network: "evil.example".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::NetblockList));
+        assert!(Request::parse("NETBLOCK FROB x.example").is_err());
+    }
+
+    #[test]
+    fn report_forward_round_trips() {
+        round_trip(&Request::with_label(
+            Command::ReportForward {
+                report_id: "rep-42".into(),
+                msgid: MSGID.parse().unwrap(),
+                category: "harassment".into(),
+                note: Some("forwarded from hda.example".into()),
+            },
+            "f1",
+        ));
+        round_trip(&Request::new(Command::ReportForward {
+            report_id: "rep-9".into(),
+            msgid: MSGID.parse().unwrap(),
+            category: "csam".into(),
+            note: None,
+        }));
+        // Unknown category rejected both ways.
+        assert!(Request::parse(&format!("REPORT-FORWARD rep-1 {MSGID} slander")).is_err());
     }
 
     #[test]

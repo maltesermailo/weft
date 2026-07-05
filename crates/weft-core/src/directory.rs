@@ -88,6 +88,10 @@ enum Cmd {
         channel: ChannelName,
         msgid: MsgId,
     },
+    /// Push an account-addressed event to every live session of `account`
+    /// (§6.7 report delivery to a known handler/reporter). Fire-and-forget —
+    /// offline accounts fetch via REPORTS LIST on reconnect.
+    Notify { account: Account, event: Event },
 }
 
 impl Directory {
@@ -109,6 +113,11 @@ impl Directory {
 
     pub(crate) async fn deregister(&self, account: Account, session: SessionId) {
         let _ = self.inbox.send(Cmd::Deregister { account, session }).await;
+    }
+
+    /// Push `event` to every live session of `account` (§6.7). Best-effort.
+    pub(crate) async fn notify(&self, account: Account, event: Event) {
+        let _ = self.inbox.send(Cmd::Notify { account, event }).await;
     }
 
     /// False = recipient does not exist (→ NO-SUCH-TARGET).
@@ -418,6 +427,19 @@ impl Actor {
                                 channel: channel.clone(),
                                 msgid: msgid.clone(),
                             },
+                        },
+                    );
+                }
+            }
+            Cmd::Notify { account, event } => {
+                // origin 0 is never a real session id (they start at 1), so
+                // on_direct delivers this as a plain, unlabeled event.
+                for (_, queue) in self.sessions.get(&account).into_iter().flatten() {
+                    push(
+                        queue,
+                        DirectEvent {
+                            origin: 0,
+                            event: event.clone(),
                         },
                     );
                 }

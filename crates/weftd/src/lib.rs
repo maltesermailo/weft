@@ -117,6 +117,13 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         interval: std::time::Duration::from_secs(config.storage.maintenance_interval_secs),
         compact_after: std::time::Duration::from_secs(config.storage.compact_after_hours * 3600),
     };
+    // §11 inbound bridge policy. Peer key pinning arrives with the M5d dialer;
+    // for now `accept_any` (open federation) is the configurable knob.
+    let federation = weft_core::FederationConfig {
+        peer_keys: std::collections::HashMap::new(),
+        accept_any: config.federation.accept_any,
+        auto_accept: config.federation.auto_accept,
+    };
     let (ctx, channels, mut tasks) = match config.storage.backend {
         config::StorageBackend::Memory => {
             boot(
@@ -130,6 +137,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 operators.clone(),
                 ns_creation_open,
                 ns_quota,
+                federation.clone(),
             )
             .await?
         }
@@ -153,6 +161,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 operators.clone(),
                 ns_creation_open,
                 ns_quota,
+                federation.clone(),
             )
             .await?
         }
@@ -290,6 +299,7 @@ async fn boot<S>(
     operators: Vec<weft_proto::Account>,
     ns_creation_open: bool,
     ns_quota: u64,
+    federation: weft_core::FederationConfig,
 ) -> anyhow::Result<(
     Arc<ServerCtx>,
     Vec<(weft_proto::ChannelName, weft_proto::RetentionPolicy)>,
@@ -302,6 +312,9 @@ where
         + CapabilityStore
         + InviteStore
         + weft_store::NamespaceStore
+        + weft_store::ReportStore
+        + weft_store::PeerStore
+        + weft_store::NetblockStore
         + 'static,
 {
     for (name, policy) in seed {
@@ -324,12 +337,16 @@ where
         operators,
         ns_creation_open,
         ns_quota,
+        // §11 inbound bridge policy; peer *pinning* + the outbound dialer are M5d.
+        federation,
     ));
     let events: Arc<dyn EventStore> = store.clone();
+    let reports: Arc<dyn weft_store::ReportStore> = store.clone();
     let namespaces: Arc<dyn weft_store::NamespaceStore> = store;
     let tasks = vec![weft_core::spawn_maintenance(
         events,
         namespaces,
+        reports,
         channels.clone(),
         dm_policy,
         maintenance,

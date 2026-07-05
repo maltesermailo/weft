@@ -2716,6 +2716,7 @@ dependencies = [
  "quinn",
  "ratatui",
  "tokio",
+ "weft-crypto",
  "weft-proto",
  "weft-transport",
 ]

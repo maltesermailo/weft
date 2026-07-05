@@ -102,6 +102,17 @@ fn short(msgid: &weft_proto::MsgId) -> String {
     format!("…{}", &s[s.len().saturating_sub(6)..])
 }
 
+/// Base64 tokens/links are long; show a recognizable tail for eyeballing.
+fn tail(blob: &str) -> String {
+    // Slice on a char boundary so multi-byte input can't panic.
+    let cut = blob.len().saturating_sub(8);
+    let start = (0..=cut)
+        .rev()
+        .find(|i| blob.is_char_boundary(*i))
+        .unwrap_or(0);
+    format!("…{}", &blob[start..])
+}
+
 pub fn note_entry(text: &str) -> LogEntry {
     LogEntry {
         raw: format!("* {text}"),
@@ -298,6 +309,142 @@ pub fn reply_entry(raw: String, reply: &Reply, me: &str) -> LogEntry {
             format!("● {} is {status}{label}", user.account),
             Style::new().fg(account_color(user.account.as_str())),
         ),
+        // ---- M4a: capability + channel-admin acks ----
+        Event::Token {
+            subject,
+            scope,
+            token,
+            expiry,
+        } => {
+            let expiry = expiry
+                .map(|s| format!(" · expires in {s}s"))
+                .unwrap_or_default();
+            Line::styled(
+                format!(
+                    "🔑 token for {subject} @ {scope} ({}){expiry}{label}",
+                    tail(token)
+                ),
+                Style::new().fg(Color::Green),
+            )
+        }
+        Event::Invited {
+            scope,
+            invite_id,
+            token,
+            link,
+            max_uses,
+            expiry,
+        } => {
+            let mut extra = Vec::new();
+            if let Some(n) = max_uses {
+                extra.push(format!("{n} uses"));
+            }
+            if let Some(s) = expiry {
+                extra.push(format!("{s}s"));
+            }
+            let extra = if extra.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", extra.join(", "))
+            };
+            let target = link.clone().unwrap_or_else(|| tail(token));
+            Line::styled(
+                format!("✉ invite {invite_id} for {scope}{extra} → {target}{label}"),
+                Style::new().fg(Color::Green),
+            )
+        }
+        Event::Chanmeta {
+            channel,
+            key,
+            value,
+        } => Line::styled(format!("{channel} ✦ {key}: {value}{label}"), DIM),
+        // ---- M4b: namespaces + discovery ----
+        Event::NsMeta {
+            name,
+            visibility,
+            owner,
+            title,
+            recovery_set,
+            recovery_pending,
+            ..
+        } => {
+            let owner = owner
+                .as_deref()
+                .map(|o| format!(" owner={o}"))
+                .unwrap_or_default();
+            let title = title
+                .as_deref()
+                .map(|t| format!(" “{t}”"))
+                .unwrap_or_default();
+            let mut recovery = String::new();
+            if let Some((eta, rung)) = recovery_pending {
+                recovery = format!(" ⚠ recovery pending (rung {rung}, eta {eta})");
+            } else if *recovery_set {
+                recovery = " · recovery quorum set".to_string();
+            }
+            Line::styled(
+                format!("🌐 ns {name} [{visibility}]{owner}{title}{recovery}{label}"),
+                Style::new().fg(Color::Cyan),
+            )
+        }
+        Event::ChannelLayout {
+            channel,
+            category,
+            position,
+        } => {
+            let category = category
+                .as_deref()
+                .map(|c| format!("{c}/"))
+                .unwrap_or_default();
+            Line::styled(format!("  {category}{channel} @{position}{label}"), DIM)
+        }
+        Event::More { cursor } => {
+            Line::styled(format!("… more available (cursor {cursor}){label}"), DIM)
+        }
+        // ---- M4c: moderation ----
+        Event::Reported { report_id } => Line::styled(
+            format!("⚑ report filed: {report_id}{label}"),
+            Style::new().fg(Color::Yellow),
+        ),
+        Event::ReportFiled {
+            report_id,
+            msgid,
+            category,
+            state,
+            scope,
+            reporter,
+        } => {
+            let reporter = reporter
+                .as_deref()
+                .map(|r| format!(" by {r}"))
+                .unwrap_or_else(|| " (anon)".to_string());
+            Line::styled(
+                format!(
+                    "⚑ {report_id} {category} [{scope}/{state}] on {}{reporter}{label}",
+                    short(msgid)
+                ),
+                Style::new().fg(Color::Yellow),
+            )
+        }
+        Event::ReportResolved {
+            report_id,
+            action,
+            by,
+            note,
+        } => {
+            let by = by
+                .as_deref()
+                .map(|h| format!(" by {h}"))
+                .unwrap_or_default();
+            let note = note
+                .as_deref()
+                .map(|n| format!(" — {n}"))
+                .unwrap_or_default();
+            Line::styled(
+                format!("✓ report {report_id} {action}{by}{note}{label}"),
+                Style::new().fg(Color::Green),
+            )
+        }
         // Not expected from an M1 server, but render something sane.
         other => Line::styled(format!("? {other:?}"), DIM),
     };

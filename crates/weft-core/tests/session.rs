@@ -111,6 +111,7 @@ fn ctx_full(
         operators.iter().map(|o| o.parse().unwrap()),
         true, // §2.2 namespace creation open
         10,   // quota
+        weft_core::FederationConfig::default(),
     ))
 }
 
@@ -1375,6 +1376,7 @@ async fn namespace_quota_is_enforced_when_open() {
         std::iter::empty::<weft_proto::Account>(),
         true, // open
         1,    // quota of 1
+        weft_core::FederationConfig::default(),
     ));
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@root={} NS CREATE first", root_key_b64()));
@@ -1627,6 +1629,7 @@ async fn recovery_applies_at_expiry_via_scheduler() {
         std::iter::empty::<weft_proto::Account>(),
         true,
         10,
+        weft_core::FederationConfig::default(),
     ));
     let root = Keypair::generate();
     let mut ada = ready(&ctx, "ada").await;
@@ -1669,4 +1672,530 @@ async fn recovery_applies_at_expiry_via_scheduler() {
     let history = ns_store.root_history(&ns_name).await.unwrap();
     assert_eq!(history.len(), 1);
     assert!(!history[0].operator_initiated);
+}
+
+// ---- §6.7 reporting + retention holds ----
+
+#[tokio::test]
+async fn report_flow_ack_queue_resolve_and_confidentiality() {
+    let ctx = ctx_ops(&["#general"], &["op"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+
+    ada.send("MSG #general :something bad");
+    let Event::Message(msg) = ada.recv().await.event else {
+        panic!("expected MESSAGE echo")
+    };
+    let mid = msg.msgid.to_string();
+
+    // Reporter files (net scope) and gets a labeled REPORTED ack.
+    ada.send(&format!("@label=r1 REPORT {mid} harassment net"));
+    let ack = ada.recv().await;
+    assert_eq!(ack.label.as_deref(), Some("r1"));
+    let Event::Reported { report_id } = ack.event else {
+        panic!("expected REPORTED, got {ack:?}")
+    };
+
+    // Operator connects afterwards and pulls the queue (§6.7).
+    let mut op = ready(&ctx, "op").await;
+    op.send("REPORTS LIST *");
+    let filed = op.recv().await;
+    let Event::ReportFiled {
+        report_id: fid,
+        reporter,
+        state,
+        ..
+    } = &filed.event
+    else {
+        panic!("expected REPORT-FILED, got {filed:?}")
+    };
+    assert_eq!(fid, &report_id);
+    // Handlers see the reporter (accountability, §6.7).
+    assert_eq!(reporter.as_deref(), Some("ada"));
+    assert_eq!(*state, weft_proto::ContentState::Verified);
+
+    // Resolve: the handler's echo is the FULL form; the reporter's push is
+    // the MINIMAL form — no handler identity, no note (§6.7 confidentiality).
+    op.send(&format!(
+        "REPORTS RESOLVE {report_id} user-actioned :banned 7d"
+    ));
+    let op_echo = op.recv().await;
+    let Event::ReportResolved {
+        by: Some(by),
+        note: Some(note),
+        ..
+    } = &op_echo.event
+    else {
+        panic!("expected full REPORT-RESOLVED, got {op_echo:?}")
+    };
+    assert_eq!(by, "op");
+    assert_eq!(note, "banned 7d");
+
+    let ada_push = ada.recv().await;
+    let Event::ReportResolved {
+        report_id: rid,
+        action,
+        by,
+        note,
+    } = &ada_push.event
+    else {
+        panic!("expected REPORT-RESOLVED push, got {ada_push:?}")
+    };
+    assert_eq!(rid, &report_id);
+    assert_eq!(*action, weft_proto::ResolveAction::UserActioned);
+    assert_eq!(*by, None, "reporter must not learn the handler");
+    assert_eq!(*note, None, "reporter must not see the resolution note");
+}
+
+#[tokio::test]
+async fn report_unseen_message_is_no_such_target() {
+    // Anti-enumeration (invariant 1): you can only report what you can see.
+    let ctx = ctx(&["#general", "#secret"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bob = joined(&ctx, "bob", "#secret").await;
+
+    bob.send("MSG #secret :hidden");
+    let Event::Message(msg) = bob.recv().await.event else {
+        panic!()
+    };
+    let mid = msg.msgid.to_string();
+
+    // ada is not a member of #secret.
+    ada.send(&format!("REPORT {mid} spam"));
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+    // A msgid that never existed is indistinguishable.
+    ada.send("REPORT test.example/01ARZ3NDEKTSV4RRFFQ69G5FAV spam");
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn reports_queue_requires_reports_cap() {
+    let ctx = ctx(&["#general"]); // no operators
+    let mut ada = ready(&ctx, "ada").await;
+
+    // No `reports` cap at `*` → CAP-REQUIRED naming the cap.
+    ada.send("REPORTS LIST *");
+    let err = ada.expect_err(ErrCode::CapRequired).await;
+    let Event::Err(e) = &err.event else { panic!() };
+    assert_eq!(e.context.as_deref(), Some("reports"));
+
+    // Resolving an unknown report answers NO-SUCH-TARGET (the fetch fails
+    // before the cap check — anti-enumeration).
+    ada.send("REPORTS RESOLVE nope dismissed");
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+// ---- §11 federation: bridge sessions (M5b) ----
+
+/// A ctx trusting one peer network with a pinned key, auto-accepting its
+/// proposals. Optional operators hold the `netblock` cap at `*`.
+fn ctx_bridged(
+    channels: &[&str],
+    operators: &[&str],
+    peer: &str,
+    peer_key: &weft_core::PublicKey,
+) -> Arc<ServerCtx> {
+    let chans: Vec<(&str, &str)> = channels.iter().map(|c| (*c, "retained:90d")).collect();
+    let info = ServerInfo {
+        network: "test.example".parse().unwrap(),
+        motd: None,
+        features: Vec::new(),
+    };
+    let mut peer_keys = std::collections::HashMap::new();
+    peer_keys.insert(peer.parse().unwrap(), *peer_key);
+    Arc::new(ServerCtx::new(
+        info,
+        chans
+            .iter()
+            .map(|(c, p)| (c.parse().unwrap(), p.parse::<RetentionPolicy>().unwrap())),
+        Keypair::generate(),
+        true,
+        Arc::new(MemoryStore::default()),
+        "permanent".parse().unwrap(),
+        operators.iter().map(|o| o.parse().unwrap()),
+        true,
+        10,
+        weft_core::FederationConfig {
+            peer_keys,
+            accept_any: false,
+            auto_accept: true,
+        },
+    ))
+}
+
+/// An open-federation ctx: no pinned peers, accepts a bridge from any network
+/// (trust-on-first-use). Optional operators hold the `netblock` cap.
+fn ctx_open_federation(channels: &[&str], operators: &[&str]) -> Arc<ServerCtx> {
+    let chans: Vec<(&str, &str)> = channels.iter().map(|c| (*c, "retained:90d")).collect();
+    let info = ServerInfo {
+        network: "test.example".parse().unwrap(),
+        motd: None,
+        features: Vec::new(),
+    };
+    Arc::new(ServerCtx::new(
+        info,
+        chans
+            .iter()
+            .map(|(c, p)| (c.parse().unwrap(), p.parse::<RetentionPolicy>().unwrap())),
+        Keypair::generate(),
+        true,
+        Arc::new(MemoryStore::default()),
+        "permanent".parse().unwrap(),
+        operators.iter().map(|o| o.parse().unwrap()),
+        true,
+        10,
+        weft_core::FederationConfig {
+            peer_keys: std::collections::HashMap::new(),
+            accept_any: true,
+            auto_accept: true,
+        },
+    ))
+}
+
+/// Drive a session to `State::Bridge` as `peer`, proving control of `key`.
+async fn bridged_peer(ctx: &Arc<ServerCtx>, peer: &str, key: &Keypair) -> Client {
+    let mut c = connect(ctx);
+    c.send("HELLO weft/1");
+    assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+    c.send(&format!("AUTH BRIDGE {peer} {}", key.public().to_b64()));
+    let Event::Challenge { nonce } = c.recv().await.event else {
+        panic!("expected CHALLENGE");
+    };
+    let nonce = weft_crypto::b64::decode(&nonce).unwrap();
+    let sig = weft_crypto::sign_challenge(key, &nonce, "test.example");
+    c.send(&format!(
+        "AUTH PROOF {}",
+        weft_crypto::signature_to_b64(&sig)
+    ));
+    assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+    c
+}
+
+/// A v1 manifest for `channels`, signed by the peer key, naming us as peer.
+fn peer_manifest(key: &Keypair, channels: &[&str]) -> String {
+    weft_core::Manifest {
+        peer: "test.example".to_string(),
+        version: 1,
+        channels: channels.iter().map(|c| c.to_string()).collect(),
+        history: "from-epoch".to_string(),
+        media: "none".to_string(),
+        typing: false,
+        created: 0,
+        updated: 0,
+    }
+    .sign(key)
+    .to_b64()
+}
+
+/// Propose + auto-ack `channels`; returns after reading the `BRIDGE ACCEPT`.
+async fn propose(bridge: &mut Client, key: &Keypair, channels: &[&str]) {
+    let chan = channels[0];
+    bridge.send(&format!(
+        "@manifest={} BRIDGE PROPOSE {chan} test.example",
+        peer_manifest(key, channels)
+    ));
+    let ack = bridge.recv_raw().await;
+    assert!(ack.contains("BRIDGE ACCEPT test.example 1"), "{ack}");
+}
+
+#[tokio::test]
+async fn bridge_auth_rejects_unknown_or_mismatched_key() {
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&[], &[], "peer.example", &peer_key.public());
+    // Unknown peer network → AUTH-FAILED (no existence oracle).
+    let mut c = connect(&ctx);
+    c.send("HELLO weft/1");
+    c.recv().await;
+    c.send(&format!(
+        "AUTH BRIDGE stranger.example {}",
+        peer_key.public().to_b64()
+    ));
+    c.expect_err(ErrCode::AuthFailed).await;
+    // Known peer but a key that isn't the pinned one → AUTH-FAILED.
+    c.send(&format!(
+        "AUTH BRIDGE peer.example {}",
+        Keypair::generate().public().to_b64()
+    ));
+    c.expect_err(ErrCode::AuthFailed).await;
+}
+
+#[tokio::test]
+async fn bridge_ingests_remote_message_with_origin_msgid_intact() {
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    // The audience change reaches local members (§6.6 MANIFEST, mandatory).
+    assert!(matches!(ada.recv().await.event, Event::Manifest { .. }));
+
+    let mid = "peer.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    bridge.send(&format!(
+        "@msgid={mid} MESSAGE #general bob@peer.example :hi from afar"
+    ));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("expected ingested MESSAGE");
+    };
+    assert_eq!(m.msgid.to_string(), mid, "origin msgid preserved (§11.4)");
+    assert_eq!(m.sender.to_string(), "bob@peer.example");
+    assert_eq!(m.body, "hi from afar");
+}
+
+#[tokio::test]
+async fn bridge_forwards_local_messages_to_peer() {
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    let ada = joined(&ctx, "ada", "#general").await;
+    ada.send("MSG #general :hello peers");
+    // The local-origin message is forwarded verbatim over the bridge.
+    loop {
+        let line = bridge.recv_raw().await;
+        if line.contains("MESSAGE #general ada@test.example") {
+            assert!(line.contains("hello peers"), "{line}");
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn bridge_drops_foreign_origin_events() {
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    assert!(matches!(ada.recv().await.event, Event::Manifest { .. }));
+    // An event whose origin isn't the authenticated peer is dropped (inv. 2).
+    bridge.send(
+        "@msgid=other.example/01ARZ3NDEKTSV4RRFFQ69G5FAV MESSAGE #general eve@other.example :spoofed",
+    );
+    // A legitimate peer message follows; it's the first thing ada sees.
+    let mid = "peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB0";
+    bridge.send(&format!(
+        "@msgid={mid} MESSAGE #general bob@peer.example :real"
+    ));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("expected MESSAGE");
+    };
+    assert_eq!(m.msgid.to_string(), mid, "the spoofed event never arrived");
+    assert_eq!(m.body, "real");
+}
+
+#[tokio::test]
+async fn bridge_gates_ingest_on_acked_manifest() {
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(
+        &["#general", "#secret"],
+        &[],
+        "peer.example",
+        &peer_key.public(),
+    );
+    let mut ada = joined(&ctx, "ada", "#secret").await;
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    // Only #general is bridged; #secret is not in the manifest.
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    // A remote message aimed at the un-bridged channel must be dropped (inv. 3).
+    bridge.send(
+        "@msgid=peer.example/01ARZ3NDEKTSV4RRFFQ69G5FAV MESSAGE #secret bob@peer.example :leak",
+    );
+    // ada's own echo is the next thing she sees — the leak never landed.
+    ada.send("MSG #secret :ping");
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("expected own echo");
+    };
+    assert_eq!(m.body, "ping", "un-bridged ingest must not reach members");
+}
+
+#[tokio::test]
+async fn netblock_add_list_remove_gated_on_cap() {
+    let ctx = ctx_ops(&[], &["op"]);
+    let mut op = ready(&ctx, "op").await;
+    op.send("@label=n1 NETBLOCK ADD evil.example :spam floods");
+    let reply = op.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("n1"));
+    assert!(
+        matches!(&reply.event, Event::Netblocked { network, .. } if network.as_str() == "evil.example")
+    );
+
+    op.send("NETBLOCK LIST");
+    let listed = op.recv().await;
+    assert!(
+        matches!(&listed.event, Event::Netblocked { network, reason } if network.as_str() == "evil.example" && reason.as_deref() == Some("spam floods"))
+    );
+
+    // A non-operator lacks the `netblock` cap (§10.4, `*`-only).
+    let mut mallory = ready(&ctx, "mallory").await;
+    mallory.send("NETBLOCK ADD good.example");
+    let err = mallory.expect_err(ErrCode::CapRequired).await;
+    let Event::Err(e) = err.event else { panic!() };
+    assert_eq!(e.context.as_deref(), Some("netblock")); // §8 names the cap
+
+    op.send("NETBLOCK REMOVE evil.example");
+    assert!(matches!(op.recv().await.event, Event::Netblocked { .. }));
+    op.send("NETBLOCK REMOVE evil.example");
+    op.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+// ---- §11 federation: backfill, report-forward, netblock effects (M5c) ----
+
+#[tokio::test]
+async fn bridge_backfill_serves_acked_channel_history() {
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    // Local history, drained so it's persisted before the backfill.
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    ada.send("MSG #general :first");
+    assert!(matches!(ada.recv().await.event, Event::Message(_)));
+    ada.send("MSG #general :second");
+    assert!(matches!(ada.recv().await.event, Event::Message(_)));
+
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    bridge.send("HISTORY #general limit=10");
+    assert!(matches!(
+        bridge.recv().await.event,
+        Event::BatchStart { .. }
+    ));
+    let Event::Message(m1) = bridge.recv().await.event else {
+        panic!("expected first backfilled MESSAGE");
+    };
+    assert_eq!(m1.body, "first");
+    let Event::Message(m2) = bridge.recv().await.event else {
+        panic!("expected second backfilled MESSAGE");
+    };
+    assert_eq!(m2.body, "second");
+    let Event::BatchEnd { compacted, .. } = bridge.recv().await.event else {
+        panic!("expected BATCH END");
+    };
+    assert!(
+        compacted,
+        "backfill serves the compacted materialization (§11.7)"
+    );
+}
+
+#[tokio::test]
+async fn bridge_backfill_refuses_unbridged_channel() {
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(
+        &["#general", "#secret"],
+        &[],
+        "peer.example",
+        &peer_key.public(),
+    );
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await; // only #general
+    bridge.send("HISTORY #secret limit=10");
+    // An un-bridged channel yields an empty batch — no history leak (inv. 3).
+    assert!(matches!(
+        bridge.recv().await.event,
+        Event::BatchStart { .. }
+    ));
+    assert!(matches!(bridge.recv().await.event, Event::BatchEnd { .. }));
+}
+
+#[tokio::test]
+async fn forwarded_report_files_unverified_stripping_reporter() {
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &["op"], "peer.example", &peer_key.public());
+    // A local message that a remote user will report.
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    ada.send("MSG #general :something reportable");
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("expected echo");
+    };
+    let mid = m.msgid.to_string();
+
+    // An operator is connected to receive the live REPORT-FILED push.
+    let mut op = ready(&ctx, "op").await;
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    bridge.send(&format!(
+        "REPORT-FORWARD rep-remote-1 {mid} harassment :their user complained"
+    ));
+    let filed = op.recv().await;
+    let Event::ReportFiled {
+        state,
+        reporter,
+        scope,
+        category,
+        ..
+    } = filed.event
+    else {
+        panic!("expected REPORT-FILED, got {filed:?}");
+    };
+    assert_eq!(state, weft_proto::ContentState::Unverified); // §11.9
+    assert_eq!(reporter, None, "reporter identity stripped (invariant 12)");
+    assert!(matches!(scope, weft_proto::ReportScope::Net));
+    assert_eq!(category, "harassment");
+}
+
+#[tokio::test]
+async fn netblock_stops_ingestion_from_blocked_peer() {
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &["op"], "peer.example", &peer_key.public());
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    assert!(matches!(ada.recv().await.event, Event::Manifest { .. }));
+    // Before the block, ingestion works.
+    bridge.send(
+        "@msgid=peer.example/01ARZ3NDEKTSV4RRFFQ69G5FAV MESSAGE #general bob@peer.example :before",
+    );
+    assert!(matches!(ada.recv().await.event, Event::Message(_)));
+
+    // Operator blocks the peer (invariant 7). The block is committed once the
+    // NETBLOCKED ack returns.
+    let mut op = ready(&ctx, "op").await;
+    op.send("NETBLOCK ADD peer.example :abuse");
+    assert!(matches!(op.recv().await.event, Event::Netblocked { .. }));
+
+    // A subsequent event from the now-blocked peer is dropped at ingestion.
+    bridge.send(
+        "@msgid=peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB0 MESSAGE #general bob@peer.example :after",
+    );
+    ada.send("MSG #general :ping");
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("expected own echo");
+    };
+    assert_eq!(m.body, "ping", "blocked peer's event must not arrive");
+}
+
+// ---- §11 open federation (accept-any) ----
+
+#[tokio::test]
+async fn open_federation_accepts_unpinned_peer_and_ingests() {
+    let ctx = ctx_open_federation(&["#general"], &[]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    // A network with no pinned key brings its own and bridges (trust-on-first-use).
+    let peer_key = Keypair::generate();
+    let mut bridge = bridged_peer(&ctx, "newcomer.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    assert!(matches!(ada.recv().await.event, Event::Manifest { .. }));
+    bridge.send(
+        "@msgid=newcomer.example/01ARZ3NDEKTSV4RRFFQ69G5FAV MESSAGE #general zoe@newcomer.example :hi",
+    );
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("expected ingested MESSAGE");
+    };
+    assert_eq!(m.sender.to_string(), "zoe@newcomer.example");
+    assert_eq!(m.body, "hi");
+}
+
+#[tokio::test]
+async fn open_federation_still_honors_netblock() {
+    let ctx = ctx_open_federation(&["#general"], &["op"]);
+    let mut op = ready(&ctx, "op").await;
+    op.send("NETBLOCK ADD evil.example :known bad");
+    assert!(matches!(op.recv().await.event, Event::Netblocked { .. }));
+    // Even accept-any refuses a blocked network's bridge (invariant 7).
+    let evil_key = Keypair::generate();
+    let mut c = connect(&ctx);
+    c.send("HELLO weft/1");
+    c.recv().await;
+    c.send(&format!(
+        "AUTH BRIDGE evil.example {}",
+        evil_key.public().to_b64()
+    ));
+    c.expect_err(ErrCode::AuthFailed).await;
 }

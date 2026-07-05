@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 use weft_proto::{ChannelName, RetentionPolicy};
-use weft_store::{EventStore, NamespaceStore, Scope};
+use weft_store::{EventStore, NamespaceStore, ReportStore, Scope};
 
 #[derive(Debug, Clone)]
 pub struct MaintenanceConfig {
@@ -30,9 +30,11 @@ impl Default for MaintenanceConfig {
 /// Spawn the maintenance loop over the (static) channel set. Also drives
 /// the §2.4 recovery scheduler: pending recoveries whose delay window has
 /// elapsed are applied on each tick.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_maintenance(
     store: Arc<dyn EventStore>,
     namespaces: Arc<dyn NamespaceStore>,
+    reports: Arc<dyn ReportStore>,
     channels: Vec<(ChannelName, RetentionPolicy)>,
     dm_policy: RetentionPolicy,
     config: MaintenanceConfig,
@@ -47,6 +49,14 @@ pub fn spawn_maintenance(
             let applied = apply_due_recoveries(&namespaces, unix_now_ms()).await;
             if applied > 0 {
                 info!(applied, "namespace recoveries applied (§2.4)");
+            }
+            // §12.1: release retention holds whose report has resolved past
+            // its grace window, so purge/compaction can resume on that
+            // content (invariant 11).
+            match reports.release_due_holds(unix_now_ms()).await {
+                Ok(n) if n > 0 => info!(released = n, "retention holds released (§12.1)"),
+                Ok(_) => {}
+                Err(e) => error!("hold release failed: {e}"),
             }
         }
     })

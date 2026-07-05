@@ -16,16 +16,22 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, error, info, info_span, warn, Instrument};
-use weft_crypto::{Capability, PublicKey, Subject, TokenScope};
+use weft_crypto::{Capability, PublicKey, SignedManifest, Subject, TokenScope};
 use weft_proto::{
-    Account, ChannelName, Command, ErrCode, ErrEvent, Event, Line, MemberAction, MsgId, MsgMeta,
-    ParseError, Reply, Request, RetentionPolicy, Target, UserRef, Visibility, MAX_LABEL_BYTES,
+    Account, BridgeState, ChannelName, Command, ContentState, ErrCode, ErrEvent, Event,
+    HistoryMode, Line, MediaMode, MemberAction, MsgId, MsgMeta, NetworkName, ParseError, Reply,
+    ReportScope, ReportStatus, Request, ResolveAction, RetentionPolicy, Target, Ulid, UserRef,
+    Visibility, MAX_LABEL_BYTES,
 };
 
-use weft_store::{InviteRecord, RedeemOutcome, Scope};
+use weft_store::{
+    EventKind, EventRecord, InviteRecord, NetblockRecord, PeerRecord, RedeemOutcome, ReportRecord,
+    ReportResolution, Scope,
+};
 
+use crate::bridge;
 use crate::channel::{ChannelEvent, ChannelHandle};
-use crate::context::{ServerCtx, PROTOCOL_VERSION};
+use crate::context::{channel_namespace, ServerCtx, PROTOCOL_VERSION};
 use crate::directory::DirectEvent;
 use crate::stream::ControlStream;
 
@@ -45,6 +51,11 @@ const MALFORMED_WINDOW: Duration = Duration::from_secs(60);
 /// (operator last resort) 30 days.
 const RECOVERY_DELAY_RUNG2_SECS: u64 = 7 * 24 * 3600;
 const RECOVERY_DELAY_RUNG3_SECS: u64 = 30 * 24 * 3600;
+/// §6.7 report rate limit: RECOMMENDED 10 per rolling hour, per account.
+const REPORT_RATE_LIMIT: u64 = 10;
+const REPORT_RATE_WINDOW_MS: u64 = 3600 * 1000;
+/// §12.1 grace: retention holds survive a resolution by this window.
+const REPORT_HOLD_GRACE_MS: u64 = 7 * 24 * 3600 * 1000;
 /// Bound on the session's event queue; overflow propagates to broadcast
 /// lag → `ERR SLOW`, never unbounded memory.
 const EVENT_QUEUE: usize = 256;
@@ -69,20 +80,43 @@ pub async fn run_session<S: ControlStream>(stream: S, ctx: Arc<ServerCtx>) {
     .await;
 }
 
-/// AUTH KEY state between CHALLENGE and PROOF (§6.1). One per session;
-/// a new AUTH KEY replaces it, any PROOF consumes it.
+/// AUTH KEY / AUTH BRIDGE state between CHALLENGE and PROOF (§6.1, §11.2).
+/// One per session; a new challenge replaces it, any PROOF consumes it.
 #[derive(Debug, Clone)]
 struct PendingChallenge {
-    account: Account,
+    /// The key being proven — a device key (account auth) or the peer's
+    /// network signing key (bridge auth).
     device: weft_crypto::PublicKey,
     nonce: [u8; weft_crypto::CHALLENGE_NONCE_LEN],
+    subject: ChallengeSubject,
+}
+
+/// What a successful PROOF authenticates.
+#[derive(Debug, Clone)]
+enum ChallengeSubject {
+    /// §6.1 device-key auth for an account.
+    Device { account: Account },
+    /// §11.2 bridge auth: the connecting party is the peer network.
+    Bridge { peer: NetworkName },
 }
 
 #[derive(Debug, Clone)]
 enum State {
     Negotiating,
-    Unauthed { challenge: Option<PendingChallenge> },
-    Ready { account: Account },
+    Unauthed {
+        challenge: Option<PendingChallenge>,
+    },
+    Ready {
+        account: Account,
+    },
+    /// §11.2 an authenticated bridge session with a peer network. Carries the
+    /// events of that network; forwards our local-origin events to it. `key`
+    /// is the signing key the peer proved control of (pinned or accept-any);
+    /// signed manifests on this session verify against it.
+    Bridge {
+        peer: NetworkName,
+        key: PublicKey,
+    },
 }
 
 enum Flow {
@@ -152,6 +186,9 @@ struct Session<S> {
     registered: Option<Account>,
     /// label → serialized echo, replayed verbatim on MSG retry (§9.2).
     dedup: HashMap<String, DedupEntry>,
+    /// §11: channels this (bridge) session forwards local-origin events on.
+    /// One broadcast forwarder per bridged channel; empty for client sessions.
+    bridged: HashMap<ChannelName, JoinHandle<()>>,
     /// HISTORY batch id counter (per session, opaque to clients).
     batches: u64,
     malformed_strikes: Vec<Instant>,
@@ -183,6 +220,7 @@ impl<S: ControlStream> Session<S> {
             pending_direct: VecDeque::new(),
             registered: None,
             dedup: HashMap::new(),
+            bridged: HashMap::new(),
             batches: 0,
             malformed_strikes: Vec::new(),
             last_inbound: Instant::now(),
@@ -228,6 +266,9 @@ impl<S: ControlStream> Session<S> {
             joined.forwarder.abort();
             joined.handle.part(self.id).await;
         }
+        for (_, forwarder) in self.bridged.drain() {
+            forwarder.abort();
+        }
         if let Some(account) = self.registered.take() {
             self.ctx.directory.deregister(account, self.id).await;
         }
@@ -240,6 +281,12 @@ impl<S: ControlStream> Session<S> {
             Ok(line) => line,
             Err(e) => return self.on_malformed(None, &e).await,
         };
+        // A bridge session's inbound stream is mostly *events* (a peer's
+        // MESSAGE/EDITED/… for ingestion), which are not Commands — route
+        // them before the Command decode that would treat them as Unknown.
+        if let State::Bridge { peer, key } = self.state.clone() {
+            return self.on_bridge_line(peer, key, &line).await;
+        }
         let request = match Request::from_line(&line) {
             Ok(request) => request,
             Err(e) => {
@@ -285,6 +332,8 @@ impl<S: ControlStream> Session<S> {
             State::Negotiating => self.on_negotiating(label, cmd).await,
             State::Unauthed { challenge } => self.on_unauthed(label, cmd, challenge).await,
             State::Ready { account } => self.on_ready(label, cmd, account).await,
+            // Bridge lines are intercepted in `on_line` before Command decode.
+            State::Bridge { .. } => Ok(Flow::Continue),
         }
     }
 
@@ -374,12 +423,19 @@ impl<S: ControlStream> Session<S> {
                 // A second AUTH KEY replaces any pending challenge.
                 self.state = State::Unauthed {
                     challenge: Some(PendingChallenge {
-                        account,
                         device,
                         nonce,
+                        subject: ChallengeSubject::Device { account },
                     }),
                 };
                 Ok(Flow::Continue)
+            }
+            // §11.2 open a bridge session: the peer proves control of its
+            // network signing key. Only *configured* peers with a matching
+            // pinned key are challenged; unknown peers or key mismatches take
+            // the uniform AUTH-FAILED path (no peer-existence oracle).
+            Command::AuthBridge { network, token } => {
+                self.on_auth_bridge(label, network, token).await
             }
             // §6.1 step 2: verify sig(nonce ‖ network-name) and enrollment.
             Command::AuthProof { signature } => {
@@ -400,25 +456,41 @@ impl<S: ControlStream> Session<S> {
                     self.ctx.network_name(),
                     &signature,
                 );
-                let enrolled = match self
-                    .ctx
-                    .accounts
-                    .device_enrolled(&pending.account, &pending.device)
-                    .await
-                {
-                    Ok(enrolled) => enrolled,
-                    Err(e) => return self.internal(label, &e).await,
-                };
-                if proof_ok && enrolled {
-                    info!(account = %pending.account, "authenticated (device key)");
-                    let attestation =
-                        self.ctx
-                            .mint_attestation(&pending.account, pending.device, unix_now());
-                    self.welcome_authed(label, pending.account, Some(attestation.to_b64()))
-                        .await
-                } else {
-                    debug!(account = %pending.account, proof_ok, enrolled, "key auth rejected");
-                    self.auth_failed(label).await
+                match pending.subject {
+                    ChallengeSubject::Device { account } => {
+                        let enrolled = match self
+                            .ctx
+                            .accounts
+                            .device_enrolled(&account, &pending.device)
+                            .await
+                        {
+                            Ok(enrolled) => enrolled,
+                            Err(e) => return self.internal(label, &e).await,
+                        };
+                        if proof_ok && enrolled {
+                            info!(%account, "authenticated (device key)");
+                            let attestation =
+                                self.ctx
+                                    .mint_attestation(&account, pending.device, unix_now());
+                            self.welcome_authed(label, account, Some(attestation.to_b64()))
+                                .await
+                        } else {
+                            debug!(%account, proof_ok, enrolled, "key auth rejected");
+                            self.auth_failed(label).await
+                        }
+                    }
+                    // §11.2 bridge PROOF: the key was resolved (pinned or
+                    // accept-any) at AUTH BRIDGE, so a valid proof of control
+                    // establishes the bridge session, bound to that key.
+                    ChallengeSubject::Bridge { peer } => {
+                        if proof_ok {
+                            info!(%peer, "bridge session authenticated");
+                            self.welcome_bridge(label, peer, pending.device).await
+                        } else {
+                            debug!(%peer, "bridge auth rejected");
+                            self.auth_failed(label).await
+                        }
+                    }
                 }
             }
             Command::Ping { token } => {
@@ -700,6 +772,69 @@ impl<S: ControlStream> Session<S> {
             }
             Command::NsRecoveryCancel { name, signature } => {
                 self.on_ns_recovery_cancel(label, name, signature).await
+            }
+            // §6.7 moderation & reporting.
+            Command::Report {
+                msgid,
+                category,
+                scope,
+                note,
+            } => {
+                self.on_report(label, msgid, category, scope, note, account)
+                    .await
+            }
+            Command::ReportsList {
+                scope,
+                status,
+                cursor,
+            } => {
+                self.on_reports_list(label, scope, status, cursor, account)
+                    .await
+            }
+            Command::ReportsResolve {
+                report_id,
+                action,
+                note,
+            } => {
+                self.on_reports_resolve(label, report_id, action, note, account)
+                    .await
+            }
+            // §11 federation — operator-facing management (§6.6).
+            Command::BridgePropose {
+                scope,
+                peer,
+                history,
+                media,
+                typing,
+                ..
+            } => {
+                self.on_bridge_propose(label, scope, peer, history, media, typing, account)
+                    .await
+            }
+            Command::BridgeAccept { peer, version } => {
+                self.on_bridge_accept_op(label, peer, version, account)
+                    .await
+            }
+            Command::BridgeSever { peer } => self.on_bridge_sever_op(label, peer, account).await,
+            // BRIDGE ADD/REMOVE amend an existing manifest; the reference
+            // server manages the channel set through PROPOSE + the auto-acked
+            // handshake, so these acknowledge without a separate op path yet.
+            Command::BridgeAdd { .. } | Command::BridgeRemove { .. } => {
+                self.unsupported(label, "BRIDGE ADD/REMOVE: manage via PROPOSE (M5)")
+                    .await
+            }
+            Command::NetblockAdd { network, reason } => {
+                self.on_netblock_add(label, network, reason, account).await
+            }
+            Command::NetblockRemove { network } => {
+                self.on_netblock_remove(label, network, account).await
+            }
+            Command::NetblockList => self.on_netblock_list(label, account).await,
+            // `AUTH BRIDGE` belongs in UNAUTHED; `REPORT-FORWARD` is
+            // bridge-session-only (§11.9) — neither is valid from a client.
+            Command::AuthBridge { .. } | Command::ReportForward { .. } => {
+                self.not_authed(label, "not valid on a client session")
+                    .await
             }
             Command::Hello { .. }
             | Command::AuthPassword { .. }
@@ -1175,9 +1310,22 @@ impl<S: ControlStream> Session<S> {
             (items, truncated)
         };
 
+        self.emit_batch(label, &target, items, truncated).await?;
+        Ok(Flow::Continue)
+    }
+
+    /// Emit a `BATCH START` … events … `BATCH END` page (§7, §12.1). The wire
+    /// form is always the compacted materialization; every line echoes the
+    /// request label (§3.5). Shared by HISTORY and federated backfill (§11.7).
+    async fn emit_batch(
+        &mut self,
+        label: Option<String>,
+        target: &Target,
+        items: Vec<weft_store::HistoryItem>,
+        truncated: bool,
+    ) -> io::Result<()> {
         self.batches += 1;
         let id = format!("b{}", self.batches);
-        // §3.5: batches are data pages — every line echoes the label.
         self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
             .await?;
         for item in items {
@@ -1230,19 +1378,16 @@ impl<S: ControlStream> Session<S> {
                 }
             }
         }
-        debug!(target = %target, truncated, "HISTORY served");
+        debug!(target = %target, truncated, "batch served");
         self.send_event(
             label,
             Event::BatchEnd {
                 id,
                 truncated,
-                // §12.1: the wire form is always the compacted
-                // materialization, whatever the storage still holds.
                 compacted: true,
             },
         )
-        .await?;
-        Ok(Flow::Continue)
+        .await
     }
 
     /// §6.3 MARK: persist the read marker, echo MARKED (the direct
@@ -2444,6 +2589,341 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    // ---- §6.7 moderation & reporting ----
+
+    /// The honest content state of a reported message (§6.7). Reaching this
+    /// with a stored root means the content exists: `Verified` (a hold is
+    /// placed) unless the channel is `e2ee`, where the server holds only
+    /// ciphertext → `reporter-attested`. `unverified` is unreachable on the
+    /// same-network path — anything the server can't find is
+    /// indistinguishable from nonexistent (invariant 1) and already answered
+    /// NO-SUCH-TARGET; the state exists for bridged replicas (M5).
+    async fn content_state(&self, scope: &Scope) -> ContentState {
+        if let Scope::Channel(channel) = scope {
+            if let Ok(Some(record)) = self.ctx.channel_store.channel(channel).await {
+                if record.policy == RetentionPolicy::E2ee {
+                    return ContentState::ReporterAttested;
+                }
+            }
+        }
+        ContentState::Verified
+    }
+
+    /// Deliver a filed/resolved report event to a queue's live default
+    /// handlers: the namespace owner for `ns:<name>`, every operator for `*`
+    /// (§6.7). Delegated `reports` holders fetch via REPORTS LIST — there is
+    /// no reverse index from cap to account for a live fan-out (same
+    /// pull-not-push limit as the §2.4 recovery announcement).
+    async fn notify_queue_handlers(&self, queue: &str, event: Event) {
+        if queue == "*" {
+            for op in self.ctx.operator_accounts() {
+                self.ctx.directory.notify(op, event.clone()).await;
+            }
+        } else if let Some(name) = queue.strip_prefix("ns:") {
+            if let Ok(ns_name) = name.parse() {
+                if let Ok(Some(ns)) = self.ctx.namespaces.namespace(&ns_name).await {
+                    self.ctx.directory.notify(ns.owner, event).await;
+                }
+            }
+        }
+    }
+
+    async fn on_report(
+        &mut self,
+        label: Option<String>,
+        msgid: MsgId,
+        category: String,
+        scope: ReportScope,
+        note: Option<String>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        // §6.7 rate limit — per account, rolling hour.
+        let now_ms = unix_now_ms();
+        match self
+            .ctx
+            .reports
+            .reports_by_since(&account, now_ms.saturating_sub(REPORT_RATE_WINDOW_MS))
+            .await
+        {
+            Ok(count) if count >= REPORT_RATE_LIMIT => {
+                let mut err = ErrEvent::new(ErrCode::Throttled, "report rate limit");
+                err.retry_after = Some(REPORT_RATE_WINDOW_MS / 1000);
+                return self
+                    .send_event(label, Event::Err(err))
+                    .await
+                    .map(|_| Flow::Continue);
+            }
+            Ok(_) => {}
+            Err(e) => return self.internal(label, &e).await,
+        }
+
+        // Resolve the reported message. Anything not found or not visible to
+        // the reporter answers NO-SUCH-TARGET (invariant 1: you can only
+        // report what you can see).
+        let root = match self.ctx.events.find_root(msgid.ulid()).await {
+            Ok(Some(root)) => root,
+            Ok(None) => return self.no_such_target(label).await,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        match &root.scope {
+            Scope::Channel(channel) => {
+                if !self.joined.contains_key(channel)
+                    || self.view_gated_denied(channel, &account).await
+                {
+                    return self.no_such_target(label).await;
+                }
+            }
+            Scope::Dm(a, b) => {
+                if account != *a && account != *b {
+                    return self.no_such_target(label).await;
+                }
+            }
+        }
+
+        // Routing (§6.7): ns → the channel's namespace owner (or the operator
+        // for a top-level channel / DM); net → the operator. `csam`/`illegal`
+        // always ALSO reach the operator, who is the legally accountable party.
+        let ns = match &root.scope {
+            Scope::Channel(c) => channel_namespace(c),
+            Scope::Dm(..) => None,
+        };
+        let mut queue_scopes: Vec<String> = Vec::new();
+        match scope {
+            ReportScope::Net => queue_scopes.push("*".into()),
+            ReportScope::Ns => match &ns {
+                Some(name) => queue_scopes.push(format!("ns:{name}")),
+                None => queue_scopes.push("*".into()),
+            },
+        }
+        if matches!(category.as_str(), "csam" | "illegal") && !queue_scopes.iter().any(|q| q == "*")
+        {
+            queue_scopes.push("*".into());
+        }
+
+        let state = self.content_state(&root.scope).await;
+        let report_id = Ulid::new().to_string();
+        let record = ReportRecord {
+            id: report_id.clone(),
+            msgid: msgid.clone(),
+            scope: root.scope.clone(),
+            category: category.clone(),
+            state,
+            reporter: account.clone(),
+            note,
+            queue_scopes: queue_scopes.clone(),
+            status: ReportStatus::Open,
+            filed_at_ms: now_ms,
+            held_roots: vec![],
+            resolution: None,
+            holds_released: false,
+        };
+        if let Err(e) = self.ctx.reports.file_report(record).await {
+            return self.internal(label, &e).await;
+        }
+
+        // Live push to each queue's default handlers (§6.7). The reporter's
+        // identity travels to handlers (accountability), never to the
+        // reported party (invariant 12: they receive nothing).
+        for queue in &queue_scopes {
+            let filed = Event::ReportFiled {
+                report_id: report_id.clone(),
+                msgid: msgid.clone(),
+                category: category.clone(),
+                state,
+                scope: if queue == "*" {
+                    ReportScope::Net
+                } else {
+                    ReportScope::Ns
+                },
+                reporter: Some(account.to_string()),
+            };
+            self.notify_queue_handlers(queue, filed).await;
+        }
+
+        self.send_event(label, Event::Reported { report_id })
+            .await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_reports_list(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        status: Option<ReportStatus>,
+        cursor: Option<String>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        const PAGE: usize = 50;
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::Reports, &token_scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "reports").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        let page = match self
+            .ctx
+            .reports
+            .list_reports(&scope, status, cursor.as_deref(), PAGE)
+            .await
+        {
+            Ok(page) => page,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let next_cursor = (page.len() == PAGE)
+            .then(|| page.last().map(|r| r.id.clone()))
+            .flatten();
+        let is_net = scope == "*";
+        for report in &page {
+            self.send_event(
+                label.clone(),
+                Event::ReportFiled {
+                    report_id: report.id.clone(),
+                    msgid: report.msgid.clone(),
+                    category: report.category.clone(),
+                    state: report.state,
+                    scope: if is_net {
+                        ReportScope::Net
+                    } else {
+                        ReportScope::Ns
+                    },
+                    reporter: Some(report.reporter.to_string()),
+                },
+            )
+            .await?;
+        }
+        if let Some(cursor) = next_cursor {
+            self.send_event(label, Event::More { cursor }).await?;
+        }
+        Ok(Flow::Continue)
+    }
+
+    async fn on_reports_resolve(
+        &mut self,
+        label: Option<String>,
+        report_id: String,
+        action: ResolveAction,
+        note: Option<String>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let report = match self.ctx.reports.report(&report_id).await {
+            Ok(Some(report)) => report,
+            Ok(None) => return self.no_such_target(label).await,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        // Invariant 4: authority before any state change. The resolver must
+        // hold `reports` at one of the report's queue scopes.
+        let now = unix_now();
+        let mut authorized = false;
+        for queue in &report.queue_scopes {
+            let Some(qscope) = TokenScope::parse(queue) else {
+                continue;
+            };
+            match self
+                .ctx
+                .account_has_cap(&account, &Capability::Reports, &qscope, now)
+                .await
+            {
+                Ok(true) => {
+                    authorized = true;
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => return self.internal(label, &e).await,
+            }
+        }
+        if !authorized {
+            return self.cap_required(label, "reports").await;
+        }
+
+        // ESCALATE re-routes an ns report up to net, leaving it open and its
+        // holds intact (§6.7); it is not a resolution.
+        if action == ResolveAction::Escalated {
+            match self.ctx.reports.escalate_report(&report_id).await {
+                Ok(true) => {}
+                Ok(false) => return self.no_such_target(label).await,
+                Err(e) => return self.internal(label, &e).await,
+            }
+            self.notify_queue_handlers(
+                "*",
+                Event::ReportFiled {
+                    report_id: report.id.clone(),
+                    msgid: report.msgid.clone(),
+                    category: report.category.clone(),
+                    state: report.state,
+                    scope: ReportScope::Net,
+                    reporter: Some(report.reporter.to_string()),
+                },
+            )
+            .await;
+            return self
+                .send_event(
+                    label,
+                    Event::ReportResolved {
+                        report_id,
+                        action,
+                        by: Some(account.to_string()),
+                        note,
+                    },
+                )
+                .await
+                .map(|_| Flow::Continue);
+        }
+
+        let now_ms = unix_now_ms();
+        let resolution = ReportResolution {
+            action,
+            note: note.clone(),
+            resolved_by: account.clone(),
+            at_ms: now_ms,
+            hold_release_at: now_ms + REPORT_HOLD_GRACE_MS,
+        };
+        match self
+            .ctx
+            .reports
+            .resolve_report(&report_id, resolution)
+            .await
+        {
+            Ok(true) => {}
+            // Already resolved / gone — indistinct (anti-enumeration).
+            Ok(false) => return self.no_such_target(label).await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+
+        // The reporter gets the MINIMAL form — no handler identity, no note
+        // (§6.7 confidentiality; invariant 12 protects the reported party,
+        // this clause protects the handler toward the reporter).
+        self.ctx
+            .directory
+            .notify(
+                report.reporter.clone(),
+                Event::ReportResolved {
+                    report_id: report_id.clone(),
+                    action,
+                    by: None,
+                    note: None,
+                },
+            )
+            .await;
+        // The resolver's echo carries the full form.
+        self.send_event(
+            label,
+            Event::ReportResolved {
+                report_id,
+                action,
+                by: Some(account.to_string()),
+                note,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
     /// The ordered channel layout of a namespace (spec extension). A
     /// non-member of a `private` namespace can't observe it (invariant 1).
     async fn on_channels(
@@ -2496,7 +2976,877 @@ impl<S: ControlStream> Session<S> {
 
     // ---- channel events ----
 
+    // ---- §11 federation: bridge sessions ----
+
+    /// §11.2 AUTH BRIDGE: resolve the key the peer must prove control of —
+    /// the pinned key (which the asserted key must match), or, in accept-any
+    /// mode, the asserted key itself. A blocked network, an unknown network in
+    /// pinned-only mode, or a pin mismatch all funnel to the uniform
+    /// AUTH-FAILED (no peer-existence oracle, invariant 1 discipline).
+    async fn on_auth_bridge(
+        &mut self,
+        label: Option<String>,
+        network: NetworkName,
+        token: String,
+    ) -> io::Result<Flow> {
+        let asserted = PublicKey::from_b64(&token).ok();
+        let blocked = self
+            .ctx
+            .netblocks
+            .is_netblocked(&network)
+            .await
+            .unwrap_or(false);
+        let device = if blocked {
+            None
+        } else if let Some(pinned) = self.ctx.peer_key(&network).copied() {
+            (asserted == Some(pinned)).then_some(pinned)
+        } else if self.ctx.bridge_accept_any() {
+            asserted
+        } else {
+            None
+        };
+        let Some(device) = device else {
+            return self.auth_failed(label).await;
+        };
+        let nonce: [u8; weft_crypto::CHALLENGE_NONCE_LEN] = rand::random();
+        self.send_event(
+            label,
+            Event::Challenge {
+                nonce: weft_crypto::b64::encode(nonce),
+            },
+        )
+        .await?;
+        self.state = State::Unauthed {
+            challenge: Some(PendingChallenge {
+                device,
+                nonce,
+                subject: ChallengeSubject::Bridge { peer: network },
+            }),
+        };
+        Ok(Flow::Continue)
+    }
+
+    /// Bridge PROOF verified: enter the bridge state and resume forwarding any
+    /// previously-acked channels.
+    async fn welcome_bridge(
+        &mut self,
+        label: Option<String>,
+        peer: NetworkName,
+        key: PublicKey,
+    ) -> io::Result<Flow> {
+        self.send_event(
+            label,
+            Event::Welcome {
+                network: self.ctx.info.network.clone(),
+                features: vec!["bridge".to_string()],
+                attestation: None,
+                motd: None,
+            },
+        )
+        .await?;
+        self.state = State::Bridge {
+            peer: peer.clone(),
+            key,
+        };
+        if let Ok(Some(record)) = self.ctx.peers.peer(&peer).await {
+            self.sync_bridge_forwarders(&record).await;
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// Route a line arriving on a bridge session: peer *events* ingest; peer
+    /// *commands* drive the manifest state machine (§11.1) + backfill (§11.7).
+    async fn on_bridge_line(
+        &mut self,
+        peer: NetworkName,
+        key: PublicKey,
+        line: &Line,
+    ) -> io::Result<Flow> {
+        match line.verb.as_str() {
+            "MESSAGE" | "EDITED" | "DELETED" | "REACTION" => self.on_ingest(&peer, line).await,
+            // Remote membership / typing / presence / marks are informational;
+            // not stored, not re-broadcast in M5b.
+            "MEMBER" | "TYPING" | "PRESENCE" | "MARKED" | "POLICY" => Ok(Flow::Continue),
+            _ => match Request::from_line(line) {
+                Ok(req) => self.on_bridge_cmd(peer, key, req.label, req.command).await,
+                Err(_) => Ok(Flow::Continue), // tolerate noise on a bridge
+            },
+        }
+    }
+
+    async fn on_bridge_cmd(
+        &mut self,
+        peer: NetworkName,
+        key: PublicKey,
+        label: Option<String>,
+        cmd: Command,
+    ) -> io::Result<Flow> {
+        match cmd {
+            Command::BridgePropose {
+                scope,
+                history,
+                media,
+                typing,
+                manifest,
+                ..
+            } => {
+                self.on_bridge_propose_in(peer, key, scope, history, media, typing, manifest)
+                    .await
+            }
+            Command::BridgeAccept { version, .. } => self.on_bridge_accept_in(peer, version).await,
+            Command::BridgeSever { .. } => self.on_bridge_sever_in(peer).await,
+            // §11.7 federated backfill: the peer pulls history over the bridge.
+            Command::History {
+                target,
+                before,
+                after,
+                limit,
+                ..
+            } => {
+                self.on_bridge_backfill(peer, label, target, before, after, limit)
+                    .await
+            }
+            // §11.9 a forwarded report from the reporter's home network.
+            Command::ReportForward {
+                report_id,
+                msgid,
+                category,
+                note,
+            } => {
+                self.on_report_forward_in(peer, report_id, msgid, category, note)
+                    .await
+            }
+            Command::Ping { token } => {
+                self.send_event(label, Event::Pong { token }).await?;
+                Ok(Flow::Continue)
+            }
+            Command::Quit { .. } => Ok(Flow::Close),
+            _ => Ok(Flow::Continue),
+        }
+    }
+
+    /// A peer sent us a signed manifest (§11.1). Verify it against the peer's
+    /// pinned key, store it, and (auto-accept path) ack + start forwarding.
+    #[allow(clippy::too_many_arguments)]
+    async fn on_bridge_propose_in(
+        &mut self,
+        peer: NetworkName,
+        key: PublicKey,
+        scope: String,
+        _history: HistoryMode,
+        _media: MediaMode,
+        _typing: bool,
+        manifest: Option<String>,
+    ) -> io::Result<Flow> {
+        let Some(blob) = manifest else {
+            return Ok(Flow::Continue);
+        };
+        let Ok(signed) = SignedManifest::from_b64(&blob) else {
+            return Ok(Flow::Continue);
+        };
+        // Verify against the key this session authenticated with (pinned or
+        // accept-any) — not a fresh config lookup, so open federation works.
+        if !bridge::verify_incoming(&signed, &key, self.ctx.network()) {
+            debug!(%peer, "rejected bridge proposal: bad manifest signature/peer");
+            return Ok(Flow::Continue);
+        }
+        let now = unix_now_ms();
+        let version = signed.manifest.version;
+        let auto = self.ctx.bridge_auto_accept();
+        let record = PeerRecord {
+            peer: peer.clone(),
+            scope,
+            manifest: blob.clone(),
+            version,
+            acked_manifest: auto.then(|| blob.clone()),
+            severed: false,
+            created_ms: now,
+            updated_ms: now,
+        };
+        if let Err(e) = self.ctx.peers.upsert_peer(record.clone()).await {
+            return self.internal(None, &e).await;
+        }
+        if auto {
+            let ack = Request::new(Command::BridgeAccept {
+                peer: self.ctx.network().clone(),
+                version,
+            });
+            if let Ok(line) = ack.serialize() {
+                self.stream.send_line(&line).await?;
+            }
+            self.sync_bridge_forwarders(&record).await;
+            self.announce_manifest(&record, BridgeState::Live).await;
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// The peer acked our manifest at `version` → live. Mark it and forward.
+    async fn on_bridge_accept_in(&mut self, peer: NetworkName, version: u64) -> io::Result<Flow> {
+        let Ok(Some(mut record)) = self.ctx.peers.peer(&peer).await else {
+            return Ok(Flow::Continue);
+        };
+        if record.version != version {
+            debug!(%peer, record.version, version, "bridge ack version mismatch");
+            return Ok(Flow::Continue);
+        }
+        record.acked_manifest = Some(record.manifest.clone());
+        record.updated_ms = unix_now_ms();
+        if let Err(e) = self.ctx.peers.upsert_peer(record.clone()).await {
+            return self.internal(None, &e).await;
+        }
+        self.sync_bridge_forwarders(&record).await;
+        self.announce_manifest(&record, BridgeState::Live).await;
+        Ok(Flow::Continue)
+    }
+
+    /// The peer tore the bridge down (§11.6/§6.6). Stop forwarding.
+    async fn on_bridge_sever_in(&mut self, peer: NetworkName) -> io::Result<Flow> {
+        if let Ok(Some(mut record)) = self.ctx.peers.peer(&peer).await {
+            record.severed = true;
+            record.updated_ms = unix_now_ms();
+            let _ = self.ctx.peers.upsert_peer(record.clone()).await;
+            self.announce_manifest(&record, BridgeState::Severed).await;
+        }
+        for (_, forwarder) in self.bridged.drain() {
+            forwarder.abort();
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// §11.7 federated backfill: serve a bridged channel's history to the peer
+    /// over the bridge session. Gated on the acked manifest (invariant 3) and
+    /// the manifest `history` flag (`from-epoch` = nothing before the
+    /// manifest's `created` ULID timestamp); origin retention is enforced by
+    /// the store (purged rows never return, `truncated` is set honestly).
+    async fn on_bridge_backfill(
+        &mut self,
+        peer: NetworkName,
+        label: Option<String>,
+        target: Target,
+        before: Option<MsgId>,
+        after: Option<MsgId>,
+        limit: Option<u32>,
+    ) -> io::Result<Flow> {
+        let Target::Channel(channel) = target.clone() else {
+            return Ok(Flow::Continue); // DMs never bridge (§9.5)
+        };
+        let Some(record) = self.ctx.peers.peer(&peer).await.ok().flatten() else {
+            return Ok(Flow::Continue);
+        };
+        if !bridge::is_forwardable(&record, channel.as_str()) {
+            debug!(%peer, %channel, "backfill refused: channel not in acked manifest");
+            return self
+                .emit_batch(label, &target, Vec::new(), false)
+                .await
+                .map(|_| Flow::Continue);
+        }
+        // `from-epoch` lower bound = the manifest's `created` timestamp.
+        let (history, created) = SignedManifest::from_b64(&record.manifest)
+            .map(|s| (s.manifest.history, s.manifest.created))
+            .unwrap_or_default();
+        let manifest_floor = if history == "full" { 0 } else { created };
+        let after_floor = after.as_ref().map(|m| m.timestamp_ms()).unwrap_or(0);
+        // Respect an explicit `after` exclusivity when it's already past the
+        // manifest floor; otherwise clamp up to the floor.
+        let after_ulid = if after_floor >= manifest_floor {
+            after.as_ref().map(|m| m.ulid())
+        } else if manifest_floor > 0 {
+            Some(Ulid::from_parts(manifest_floor, 0))
+        } else {
+            None
+        };
+        let scope = Scope::Channel(channel);
+        let policy = self
+            .ctx
+            .channel_store
+            .channel(match &scope {
+                Scope::Channel(c) => c,
+                _ => unreachable!(),
+            })
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.policy)
+            .unwrap_or(RetentionPolicy::Permanent);
+        let limit = limit.unwrap_or(100).clamp(1, weft_proto::MAX_HISTORY_LIMIT) as usize;
+
+        let (items, truncated) = if policy == RetentionPolicy::Ephemeral {
+            (Vec::new(), true)
+        } else {
+            let page = weft_store::Page {
+                before: before.as_ref().map(|m| m.ulid()),
+                after: after_ulid,
+                limit,
+            };
+            let roots = match self.ctx.events.roots(&scope, page).await {
+                Ok(roots) => roots,
+                Err(e) => return self.internal(label, &e).await,
+            };
+            let root_ulids: Vec<_> = roots.iter().map(|r| r.msgid.ulid()).collect();
+            let children = match self.ctx.events.children(&scope, &root_ulids).await {
+                Ok(children) => children,
+                Err(e) => return self.internal(label, &e).await,
+            };
+            let watermark = self.ctx.events.purged_before(&scope).await.ok().flatten();
+            let items = weft_store::materialize(roots, children);
+            let floor_ms = manifest_floor.max(after_floor);
+            let truncated = items.len() < limit && watermark.is_some_and(|w| floor_ms < w);
+            (items, truncated)
+        };
+        self.emit_batch(label, &target, items, truncated).await?;
+        Ok(Flow::Continue)
+    }
+
+    /// §11.9 a forwarded report arriving over the bridge from a reporter's home
+    /// network. We're the origin of the reported msgid; treat it as a
+    /// net-scope, `unverified` signal with the reporter stripped, and drop it
+    /// into the operator queue. Report queues/holds never replicate — a fresh
+    /// local id, no hold (unverified places none).
+    async fn on_report_forward_in(
+        &mut self,
+        _peer: NetworkName,
+        _report_id: String,
+        msgid: MsgId,
+        category: String,
+        note: Option<String>,
+    ) -> io::Result<Flow> {
+        if msgid.origin().as_str() != self.ctx.network_name() {
+            return Ok(Flow::Continue); // not ours to act on
+        }
+        let Ok(Some(root)) = self.ctx.events.find_root(msgid.ulid()).await else {
+            return Ok(Flow::Continue); // content gone — nothing to file against
+        };
+        let report_id = Ulid::new().to_string();
+        let record = ReportRecord {
+            id: report_id.clone(),
+            msgid: msgid.clone(),
+            scope: root.scope.clone(),
+            category: category.clone(),
+            state: ContentState::Unverified, // §11.9 unverified-at-minimum
+            reporter: forwarded_reporter(),
+            note,
+            queue_scopes: vec!["*".to_string()], // net scope → operator
+            status: ReportStatus::Open,
+            filed_at_ms: unix_now_ms(),
+            held_roots: vec![],
+            resolution: None,
+            holds_released: false,
+        };
+        if let Err(e) = self.ctx.reports.file_report(record).await {
+            error!("forwarded report not filed: {e}");
+            return Ok(Flow::Continue);
+        }
+        // Notify operators — reporter stripped (§11.9, invariant 12).
+        self.notify_queue_handlers(
+            "*",
+            Event::ReportFiled {
+                report_id,
+                msgid,
+                category,
+                state: ContentState::Unverified,
+                scope: ReportScope::Net,
+                reporter: None,
+            },
+        )
+        .await;
+        Ok(Flow::Continue)
+    }
+
+    /// Ingest a bridged event (§11.4): the origin must be the authenticated
+    /// peer (invariant 2), and the channel must be in the acked manifest
+    /// (invariant 3). Persisted with its origin msgid intact.
+    async fn on_ingest(&mut self, peer: &NetworkName, line: &Line) -> io::Result<Flow> {
+        // §11.6 effect 3: a blocked network's events are rejected at ingestion
+        // (a mid-session block takes effect at once, not just at auth).
+        if self
+            .ctx
+            .netblocks
+            .is_netblocked(peer)
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(Flow::Continue);
+        }
+        let Ok(reply) = Reply::from_line(line) else {
+            return Ok(Flow::Continue);
+        };
+        let Some((channel, record)) = self.ingest_record(peer, &reply.event) else {
+            return Ok(Flow::Continue);
+        };
+        let gated = self
+            .ctx
+            .peers
+            .peer(peer)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| bridge::is_forwardable(&p, channel.as_str()))
+            .unwrap_or(false);
+        if !gated {
+            debug!(%peer, %channel, "dropped ingest: channel not in acked manifest");
+            return Ok(Flow::Continue);
+        }
+        if let Some(handle) = self.ctx.registry.get(&channel) {
+            handle.ingest(self.id, record, reply.event).await;
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// Map a bridged event to its storage record, enforcing origin authority
+    /// (invariant 2): the event and its root must originate on `peer`.
+    fn ingest_record(
+        &self,
+        peer: &NetworkName,
+        event: &Event,
+    ) -> Option<(ChannelName, EventRecord)> {
+        let channel_of = |t: &Target| match t {
+            Target::Channel(c) => Some(c.clone()),
+            _ => None, // DMs never bridge (§9.5)
+        };
+        let from_peer = |id: &MsgId| id.origin().as_str() == peer.as_str();
+        match event {
+            Event::Message(m) => {
+                let channel = channel_of(&m.target)?;
+                if !from_peer(&m.msgid) || m.sender.network.as_str() != peer.as_str() {
+                    return None;
+                }
+                let record = EventRecord {
+                    scope: Scope::Channel(channel.clone()),
+                    msgid: m.msgid.clone(),
+                    root: m.msgid.clone(),
+                    sender: m.sender.clone(),
+                    kind: EventKind::Message {
+                        body: m.body.clone(),
+                        meta: m.meta.clone(),
+                    },
+                };
+                Some((channel, record))
+            }
+            Event::Edited {
+                target,
+                user,
+                msgid,
+                edit_of,
+                body,
+            } => {
+                let channel = channel_of(target)?;
+                // The edit and the message it edits both belong to the origin.
+                if !from_peer(msgid) || !from_peer(edit_of) {
+                    return None;
+                }
+                let record = EventRecord {
+                    scope: Scope::Channel(channel.clone()),
+                    msgid: msgid.clone(),
+                    root: edit_of.clone(),
+                    sender: user.clone(),
+                    kind: EventKind::Edit { body: body.clone() },
+                };
+                Some((channel, record))
+            }
+            Event::Deleted { target, msgid, by } => {
+                let channel = channel_of(target)?;
+                if !from_peer(msgid) {
+                    return None;
+                }
+                let sender = by
+                    .clone()
+                    .unwrap_or_else(|| UserRef::new(deleted_placeholder(), peer.clone()));
+                let record = EventRecord {
+                    // A replica delete row needs its own id; the tombstone is
+                    // keyed on the root (`msgid`), which is what materialize
+                    // uses — this id is local bookkeeping only.
+                    scope: Scope::Channel(channel.clone()),
+                    msgid: MsgId::new(peer.clone(), Ulid::new()),
+                    root: msgid.clone(),
+                    sender,
+                    kind: EventKind::Delete,
+                };
+                Some((channel, record))
+            }
+            Event::Reaction {
+                target,
+                msgid,
+                emoji,
+                op,
+                by,
+            } => {
+                let channel = channel_of(target)?;
+                if !from_peer(msgid) {
+                    return None;
+                }
+                let record = EventRecord {
+                    scope: Scope::Channel(channel.clone()),
+                    msgid: MsgId::new(peer.clone(), Ulid::new()),
+                    root: msgid.clone(),
+                    sender: by.clone(),
+                    kind: EventKind::React {
+                        emoji: emoji.clone(),
+                        add: matches!(op, weft_proto::ReactionOp::Add),
+                    },
+                };
+                Some((channel, record))
+            }
+            _ => None,
+        }
+    }
+
+    /// Subscribe the bridge session to exactly the forwardable channels
+    /// (invariant 3); tear down forwarders for channels no longer bridged.
+    async fn sync_bridge_forwarders(&mut self, record: &PeerRecord) {
+        let want: Vec<ChannelName> = bridge::forwardable_channels(record)
+            .iter()
+            .filter_map(|c| c.parse().ok())
+            .collect();
+        let stale: Vec<ChannelName> = self
+            .bridged
+            .keys()
+            .filter(|c| !want.contains(c))
+            .cloned()
+            .collect();
+        for channel in stale {
+            if let Some(forwarder) = self.bridged.remove(&channel) {
+                forwarder.abort();
+            }
+        }
+        for channel in want {
+            if self.bridged.contains_key(&channel) {
+                continue;
+            }
+            if let Some(handle) = self.ctx.registry.get(&channel) {
+                if let Some(rx) = handle.subscribe().await {
+                    let forwarder = spawn_forwarder(channel.clone(), rx, self.events_tx.clone());
+                    self.bridged.insert(channel, forwarder);
+                }
+            }
+        }
+    }
+
+    /// §6.6 MANIFEST-to-members: broadcast the change into each affected
+    /// channel so local members learn of the audience change (mandatory).
+    async fn announce_manifest(&self, record: &PeerRecord, state: BridgeState) {
+        let channels = bridge::forwardable_channels(record);
+        for channel in &channels {
+            if let Ok(chan) = channel.parse::<ChannelName>() {
+                if let Some(handle) = self.ctx.registry.get(&chan) {
+                    handle
+                        .announce(manifest_event(record, state, &channels))
+                        .await;
+                }
+            }
+        }
+    }
+
+    /// A bridge session's channel events: forward only *local-origin*
+    /// message-plane events to the peer (one hop, §11.4 — received events are
+    /// never re-forwarded because their origin != our network).
+    async fn on_bridge_event(&mut self, _peer: NetworkName, event: SessionEvent) -> io::Result<()> {
+        let SessionEvent::Channel { event, .. } = event else {
+            return Ok(()); // Lagged: a real bridge would resync (M5c)
+        };
+        let ours = |id: &MsgId| id.origin().as_str() == self.ctx.network_name();
+        let forward = match &event.event {
+            Event::Message(m) => ours(&m.msgid),
+            Event::Edited { msgid, .. } => ours(msgid),
+            Event::Deleted { msgid, .. } => ours(msgid),
+            Event::Reaction { msgid, .. } => ours(msgid),
+            _ => false, // MEMBER/TYPING/POLICY/MANIFEST not forwarded in M5b
+        };
+        if forward {
+            if let Ok(line) = Reply::new(event.event).serialize() {
+                self.stream.send_line(&line).await?;
+            }
+        }
+        Ok(())
+    }
+
+    // ---- §11 federation: operator-facing management (§6.6) ----
+
+    /// §6.6/§11.3 BRIDGE PROPOSE from an operator: check the scope authority,
+    /// compile + sign a v1 manifest, and store it. Transmission to the peer
+    /// over the bridge session is the dialer's job (M5d).
+    #[allow(clippy::too_many_arguments)]
+    async fn on_bridge_propose(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        peer: NetworkName,
+        history: HistoryMode,
+        media: MediaMode,
+        typing: bool,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if self
+            .ctx
+            .netblocks
+            .is_netblocked(&peer)
+            .await
+            .unwrap_or(false)
+        {
+            self.send_err(label, ErrCode::Blocked, None, "peer network is blocked")
+                .await?;
+            return Ok(Flow::Continue);
+        }
+        let Some(tscope) = TokenScope::parse(&scope) else {
+            return self.no_such_target(label).await;
+        };
+        // §11.3 ladder: `bridge` cap at the scope (operators/ns-owners implied).
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::Bridge, &tscope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "bridge").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        let channels = self.scope_channels(&tscope).await;
+        let now = unix_now_ms();
+        let manifest =
+            bridge::build_manifest(&peer, 1, &channels, history, media, typing, now, now);
+        let record = PeerRecord {
+            peer: peer.clone(),
+            scope,
+            manifest: self.ctx.sign_manifest(&manifest),
+            version: 1,
+            acked_manifest: None,
+            severed: false,
+            created_ms: now,
+            updated_ms: now,
+        };
+        if let Err(e) = self.ctx.peers.upsert_peer(record.clone()).await {
+            return self.internal(label, &e).await;
+        }
+        let channel_strs = bridge::forwardable_channels(&record);
+        self.send_event(
+            label,
+            manifest_event(&record, BridgeState::Added, &channel_strs),
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// §6.6 BRIDGE ACCEPT from an operator: mark a stored proposal live.
+    async fn on_bridge_accept_op(
+        &mut self,
+        label: Option<String>,
+        peer: NetworkName,
+        version: u64,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(mut record) = self.ctx.peers.peer(&peer).await.ok().flatten() else {
+            return self.no_such_target(label).await;
+        };
+        let tscope = TokenScope::parse(&record.scope).unwrap_or(TokenScope::Wildcard);
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::Bridge, &tscope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "bridge").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        if record.version != version {
+            self.send_err(label, ErrCode::Conflict, None, "manifest version race")
+                .await?;
+            return Ok(Flow::Continue);
+        }
+        record.acked_manifest = Some(record.manifest.clone());
+        record.updated_ms = unix_now_ms();
+        if let Err(e) = self.ctx.peers.upsert_peer(record.clone()).await {
+            return self.internal(label, &e).await;
+        }
+        let channel_strs = bridge::forwardable_channels(&record);
+        self.send_event(
+            label,
+            manifest_event(&record, BridgeState::Live, &channel_strs),
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// §6.6 BRIDGE SEVER from an operator: unilateral teardown.
+    async fn on_bridge_sever_op(
+        &mut self,
+        label: Option<String>,
+        peer: NetworkName,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(mut record) = self.ctx.peers.peer(&peer).await.ok().flatten() else {
+            return self.no_such_target(label).await;
+        };
+        let tscope = TokenScope::parse(&record.scope).unwrap_or(TokenScope::Wildcard);
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::Bridge, &tscope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "bridge").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        record.severed = true;
+        record.updated_ms = unix_now_ms();
+        if let Err(e) = self.ctx.peers.upsert_peer(record.clone()).await {
+            return self.internal(label, &e).await;
+        }
+        self.send_event(label, manifest_event(&record, BridgeState::Severed, &[]))
+            .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// Channels covered by a bridge scope, snapshotted at propose time (§11.1).
+    async fn scope_channels(&self, scope: &TokenScope) -> Vec<ChannelName> {
+        match scope {
+            TokenScope::Channel(c) => c.parse().ok().into_iter().collect(),
+            TokenScope::Namespace(n) => self
+                .ctx
+                .channel_store
+                .channels_in_namespace(n)
+                .await
+                .map(|v| v.into_iter().map(|(name, _)| name).collect())
+                .unwrap_or_default(),
+            TokenScope::Wildcard => self
+                .ctx
+                .channel_store
+                .list_channels()
+                .await
+                .map(|v| v.into_iter().map(|(name, _)| name).collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    // ---- §11.6 NETBLOCK ----
+
+    async fn on_netblock_add(
+        &mut self,
+        label: Option<String>,
+        network: NetworkName,
+        reason: Option<String>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        // `netblock` cap is `*`-scope only (§10.4).
+        match self
+            .ctx
+            .account_has_cap(
+                &account,
+                &Capability::Netblock,
+                &TokenScope::Wildcard,
+                unix_now(),
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "netblock").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        let record = NetblockRecord {
+            network: network.clone(),
+            reason,
+            added_ms: unix_now_ms(),
+            actor: account.to_string(),
+        };
+        if let Err(e) = self.ctx.netblocks.add_netblock(record).await {
+            return self.internal(label, &e).await;
+        }
+        // Effect 2 (§11.6): sever any existing manifest with this network.
+        if let Ok(Some(mut peer)) = self.ctx.peers.peer(&network).await {
+            peer.severed = true;
+            peer.updated_ms = unix_now_ms();
+            let _ = self.ctx.peers.upsert_peer(peer).await;
+        }
+        self.send_event(
+            label,
+            Event::Netblocked {
+                network,
+                reason: None,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    async fn on_netblock_remove(
+        &mut self,
+        label: Option<String>,
+        network: NetworkName,
+        account: Account,
+    ) -> io::Result<Flow> {
+        match self
+            .ctx
+            .account_has_cap(
+                &account,
+                &Capability::Netblock,
+                &TokenScope::Wildcard,
+                unix_now(),
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "netblock").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        match self.ctx.netblocks.remove_netblock(&network).await {
+            Ok(true) => {
+                self.send_event(
+                    label,
+                    Event::Netblocked {
+                        network,
+                        reason: None,
+                    },
+                )
+                .await?
+            }
+            Ok(false) => return self.no_such_target(label).await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        Ok(Flow::Continue)
+    }
+
+    async fn on_netblock_list(
+        &mut self,
+        label: Option<String>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        match self
+            .ctx
+            .account_has_cap(
+                &account,
+                &Capability::Netblock,
+                &TokenScope::Wildcard,
+                unix_now(),
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "netblock").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        let blocks = self
+            .ctx
+            .netblocks
+            .list_netblocks()
+            .await
+            .unwrap_or_default();
+        for (i, block) in blocks.iter().enumerate() {
+            // Echo the request label on the first line only (§3.5).
+            let lbl = (i == 0).then(|| label.clone()).flatten();
+            self.send_event(
+                lbl,
+                Event::Netblocked {
+                    network: block.network.clone(),
+                    reason: block.reason.clone(),
+                },
+            )
+            .await?;
+        }
+        Ok(Flow::Continue)
+    }
+
     async fn on_event(&mut self, event: SessionEvent) -> io::Result<()> {
+        if let State::Bridge { peer, .. } = self.state.clone() {
+            return self.on_bridge_event(peer, event).await;
+        }
         match event {
             SessionEvent::Lagged { channel } => {
                 // §9.2 backpressure: tell the client it lost events. The
@@ -2652,12 +4002,56 @@ impl<S: ControlStream> Session<S> {
     }
 }
 
+/// Build a `MANIFEST` event from a stored peering (§6.6). Decodes the current
+/// manifest blob for the history/media/typing bounds.
+fn manifest_event(record: &PeerRecord, state: BridgeState, channels: &[String]) -> Event {
+    let (history, media, typing) = SignedManifest::from_b64(&record.manifest)
+        .map(|s| {
+            (
+                s.manifest.history.parse().unwrap_or(HistoryMode::FromEpoch),
+                s.manifest.media.parse().unwrap_or(MediaMode::None),
+                s.manifest.typing,
+            )
+        })
+        .unwrap_or((HistoryMode::FromEpoch, MediaMode::None, false));
+    Event::Manifest {
+        peer: record.peer.clone(),
+        version: record.version,
+        state,
+        channels: channels.iter().filter_map(|c| c.parse().ok()).collect(),
+        history,
+        media,
+        typing,
+    }
+}
+
+/// Sender for a bridged `DELETED` that arrived without a `by=` — the tombstone
+/// is keyed on the root, so this only fills the delete row's `sender` column.
+fn deleted_placeholder() -> Account {
+    "unknown".parse().expect("valid account literal")
+}
+
+/// Placeholder reporter for a §11.9 forwarded report: the reporter's identity
+/// is stripped on the wire, so the local record carries a synthetic account and
+/// the emitted `REPORT-FILED` sets `reporter: None`.
+fn forwarded_reporter() -> Account {
+    "forwarded".parse().expect("valid account literal")
+}
+
 /// Unix seconds — server-stamped time (§9.6); client clocks are untrusted.
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0) // pre-1970 clock: expire everything rather than panic
+}
+
+/// Unix milliseconds — matches the store's hold/filing timestamps (§12.1).
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Parse a comma-separated cap list; `None` if any token is not a known

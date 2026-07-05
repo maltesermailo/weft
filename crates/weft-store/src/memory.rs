@@ -6,17 +6,20 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use weft_proto::{Account, ChannelName, MsgId, NamespaceName, RetentionPolicy, Ulid};
+use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, RetentionPolicy, Ulid};
 
 use crate::compact::compaction_plan;
 use crate::traits::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, NamespaceStore,
+    NetblockStore, PeerStore, ReportStore, HOLD_RADIUS,
 };
 use crate::types::{
-    ChannelRecord, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, Page, PendingRecovery,
-    RedeemOutcome, RootHistoryEntry, Scope, Verification,
+    ChannelRecord, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, NetblockRecord, Page,
+    PeerRecord, PendingRecovery, RedeemOutcome, ReportRecord, ReportResolution, RootHistoryEntry,
+    Scope, Verification,
 };
 use crate::StoreError;
+use weft_proto::{ContentState, ReportStatus};
 
 struct AccountRecord {
     password_phc: String,
@@ -51,6 +54,16 @@ struct Inner {
     namespaces: HashMap<NamespaceName, NamespaceRecord>,
     /// namespace name → append-only root rotation audit (§2.4).
     root_history: HashMap<NamespaceName, Vec<RootHistoryEntry>>,
+    /// report id → record (§6.7).
+    reports: HashMap<String, ReportRecord>,
+    /// (scope key, root ulid) → number of reports holding it. A root is
+    /// under a retention hold while its count > 0 — purge/compaction skip
+    /// it (invariant 11). Refcounting handles overlapping report contexts.
+    holds: HashMap<(String, Ulid), u32>,
+    /// peer network → bridge peering + signed manifests (§11.1).
+    peers: HashMap<NetworkName, PeerRecord>,
+    /// blocked network name → blocklist entry (§11.6, name-keyed).
+    netblocks: HashMap<NetworkName, NetblockRecord>,
 }
 
 #[derive(Default)]
@@ -170,7 +183,12 @@ impl EventStore for MemoryStore {
                 .push(record.clone());
         }
         let mut dropped = 0;
-        for ((scope, _), family) in families {
+        for ((scope, root), family) in families {
+            // Retention hold: a held message family is exempt from
+            // compaction until its report resolves + grace (invariant 11).
+            if inner.holds.contains_key(&(scope.clone(), root)) {
+                continue;
+            }
             for ulid in compaction_plan(&family, cutoff_ms) {
                 if inner.events.remove(&(scope.clone(), ulid)).is_some() {
                     dropped += 1;
@@ -191,6 +209,9 @@ impl Inner {
             .range(MemoryStore::scope_range(key))
             .map(|(_, r)| r)
             .filter(|r| r.is_root() && r.at_ms() < cutoff_ms)
+            // Retention hold: a held root survives purge until its report
+            // resolves + grace (invariant 11).
+            .filter(|r| !self.holds.contains_key(&(key.to_string(), r.msgid.ulid())))
             .map(|r| r.msgid.ulid())
             .collect();
         let doomed: Vec<(String, Ulid)> = self
@@ -209,6 +230,23 @@ impl Inner {
         let watermark = self.watermarks.entry(key.to_string()).or_insert(0);
         *watermark = (*watermark).max(cutoff_ms);
         expired.len() as u64
+    }
+
+    /// The reported root plus up to `radius` roots on each side, in the same
+    /// scope — the §12.1 hold context. Returns roots that actually exist
+    /// (an expired-context report simply holds fewer).
+    fn context_roots(&self, key: &str, root: Ulid, radius: usize) -> Vec<Ulid> {
+        let roots: Vec<Ulid> = self
+            .events
+            .range(MemoryStore::scope_range(key))
+            .map(|(_, r)| r)
+            .filter(|r| r.is_root())
+            .map(|r| r.msgid.ulid())
+            .collect();
+        match roots.iter().position(|u| *u == root) {
+            None => Vec::new(),
+            Some(i) => roots[i.saturating_sub(radius)..(i + radius + 1).min(roots.len())].to_vec(),
+        }
     }
 }
 
@@ -711,6 +749,186 @@ impl NamespaceStore for MemoryStore {
     ) -> Result<Vec<RootHistoryEntry>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner.root_history.get(name).cloned().unwrap_or_default())
+    }
+}
+
+#[async_trait]
+impl ReportStore for MemoryStore {
+    async fn file_report(&self, mut record: ReportRecord) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        // Verified reports place retention holds on the reported root + its
+        // context (invariant 11); other states hold nothing.
+        if record.state == ContentState::Verified {
+            let key = record.scope.as_key();
+            record.held_roots = inner.context_roots(&key, record.msgid.ulid(), HOLD_RADIUS);
+            for root in &record.held_roots {
+                *inner.holds.entry((key.clone(), *root)).or_insert(0) += 1;
+            }
+        }
+        inner.reports.insert(record.id.clone(), record);
+        Ok(())
+    }
+
+    async fn report(&self, id: &str) -> Result<Option<ReportRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner.reports.get(id).cloned())
+    }
+
+    async fn list_reports(
+        &self,
+        scope: &str,
+        status: Option<ReportStatus>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ReportRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut out: Vec<ReportRecord> = inner
+            .reports
+            .values()
+            .filter(|r| r.queue_scopes.iter().any(|s| s == scope))
+            .filter(|r| status.map_or(true, |want| r.status == want))
+            .cloned()
+            .collect();
+        // Newest first; ids are ULIDs so lexical desc = time desc.
+        out.sort_by(|a, b| b.id.cmp(&a.id));
+        if let Some(cursor) = after {
+            out.retain(|r| r.id.as_str() < cursor);
+        }
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    async fn resolve_report(
+        &self,
+        id: &str,
+        resolution: ReportResolution,
+    ) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let Some(report) = inner.reports.get_mut(id) else {
+            return Ok(false);
+        };
+        if report.status == ReportStatus::Resolved {
+            return Ok(false);
+        }
+        report.status = ReportStatus::Resolved;
+        report.resolution = Some(resolution);
+        Ok(true)
+    }
+
+    async fn escalate_report(&self, id: &str) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let Some(report) = inner.reports.get_mut(id) else {
+            return Ok(false);
+        };
+        if report.status == ReportStatus::Resolved {
+            return Ok(false);
+        }
+        if !report.queue_scopes.iter().any(|s| s == "*") {
+            report.queue_scopes.push("*".to_string());
+        }
+        Ok(true)
+    }
+
+    async fn reports_by_since(&self, reporter: &Account, since_ms: u64) -> Result<u64, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .reports
+            .values()
+            .filter(|r| &r.reporter == reporter && r.filed_at_ms >= since_ms)
+            .count() as u64)
+    }
+
+    async fn release_due_holds(&self, now_ms: u64) -> Result<u64, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        // Collect the (scope, root) decrements first — can't mutate `holds`
+        // while iterating `reports`.
+        let mut released_ids = Vec::new();
+        let mut decrements: Vec<(String, Ulid)> = Vec::new();
+        for report in inner.reports.values() {
+            let due = report
+                .resolution
+                .as_ref()
+                .is_some_and(|r| r.hold_release_at <= now_ms);
+            if report.status == ReportStatus::Resolved && !report.holds_released && due {
+                released_ids.push(report.id.clone());
+                let key = report.scope.as_key();
+                decrements.extend(report.held_roots.iter().map(|u| (key.clone(), *u)));
+            }
+        }
+        for slot in decrements {
+            if let Some(count) = inner.holds.get_mut(&slot) {
+                *count -= 1;
+                if *count == 0 {
+                    inner.holds.remove(&slot);
+                }
+            }
+        }
+        for id in &released_ids {
+            if let Some(report) = inner.reports.get_mut(id) {
+                report.holds_released = true;
+            }
+        }
+        Ok(released_ids.len() as u64)
+    }
+}
+
+#[async_trait]
+impl PeerStore for MemoryStore {
+    async fn upsert_peer(&self, record: PeerRecord) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.peers.insert(record.peer.clone(), record);
+        Ok(())
+    }
+
+    async fn peer(&self, peer: &NetworkName) -> Result<Option<PeerRecord>, StoreError> {
+        Ok(self.inner.lock().unwrap().peers.get(peer).cloned())
+    }
+
+    async fn list_peers(&self) -> Result<Vec<PeerRecord>, StoreError> {
+        let mut peers: Vec<PeerRecord> =
+            self.inner.lock().unwrap().peers.values().cloned().collect();
+        peers.sort_by(|a, b| a.peer.as_str().cmp(b.peer.as_str()));
+        Ok(peers)
+    }
+
+    async fn remove_peer(&self, peer: &NetworkName) -> Result<bool, StoreError> {
+        Ok(self.inner.lock().unwrap().peers.remove(peer).is_some())
+    }
+}
+
+#[async_trait]
+impl NetblockStore for MemoryStore {
+    async fn add_netblock(&self, record: NetblockRecord) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.netblocks.insert(record.network.clone(), record);
+        Ok(())
+    }
+
+    async fn remove_netblock(&self, network: &NetworkName) -> Result<bool, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .netblocks
+            .remove(network)
+            .is_some())
+    }
+
+    async fn is_netblocked(&self, network: &NetworkName) -> Result<bool, StoreError> {
+        Ok(self.inner.lock().unwrap().netblocks.contains_key(network))
+    }
+
+    async fn list_netblocks(&self) -> Result<Vec<NetblockRecord>, StoreError> {
+        let mut blocks: Vec<NetblockRecord> = self
+            .inner
+            .lock()
+            .unwrap()
+            .netblocks
+            .values()
+            .cloned()
+            .collect();
+        blocks.sort_by(|a, b| a.network.as_str().cmp(b.network.as_str()));
+        Ok(blocks)
     }
 }
 

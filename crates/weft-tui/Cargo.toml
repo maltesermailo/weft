@@ -8,6 +8,7 @@ description = "Terminal test client for the WEFT protocol: pretty event view wit
 
 [dependencies]
 weft-proto = { path = "../weft-proto" }
+weft-crypto = { path = "../weft-crypto" }
 weft-transport = { path = "../weft-transport", features = ["insecure-client"] }
 tokio = { workspace = true }
 quinn = { workspace = true }

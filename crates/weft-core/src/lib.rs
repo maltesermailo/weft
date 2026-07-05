@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod accounts;
+mod bridge;
 mod channel;
 mod context;
 mod directory;
@@ -21,7 +22,7 @@ mod stream;
 
 pub use accounts::Accounts;
 pub use channel::{ChannelEvent, ChannelHandle, JoinAck};
-pub use context::{ServerCtx, ServerInfo, PROTOCOL_VERSION};
+pub use context::{FederationConfig, ServerCtx, ServerInfo, PROTOCOL_VERSION};
 pub use maintenance::{apply_due_recoveries, spawn_maintenance, MaintenanceConfig};
 pub use registry::Registry;
 pub use session::{run_session, SessionId};
@@ -30,4 +31,4 @@ pub use weft_store::{ChannelStore, MemoryStore, NamespaceStore, Scope};
 
 // Consumers construct a ServerCtx with a signing key and verify attestations
 // against it — re-exported so they share one weft-crypto version.
-pub use weft_crypto::{Attestation, Keypair, PublicKey};
+pub use weft_crypto::{Attestation, Keypair, Manifest, PublicKey, SignedManifest};

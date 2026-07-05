@@ -4,11 +4,15 @@
 //! `postgres://postgres:weft@127.0.0.1:15432/postgres`) and skips silently
 //! when absent so `cargo test` needs no database.
 
-use weft_proto::{Account, MsgId, MsgMeta, RetentionPolicy, Ulid, UserRef};
+use weft_proto::{
+    Account, ContentState, MsgId, MsgMeta, NetworkName, ReportStatus, ResolveAction,
+    RetentionPolicy, Ulid, UserRef,
+};
 use weft_store::{
     materialize, AccountStore, CapabilityStore, ChannelStore, EventKind, EventRecord, EventStore,
-    HistoryItem, InviteRecord, InviteStore, MemoryStore, NamespaceRecord, NamespaceStore, Page,
-    PendingRecovery, RedeemOutcome, Scope,
+    HistoryItem, InviteRecord, InviteStore, MemoryStore, NamespaceRecord, NamespaceStore,
+    NetblockRecord, NetblockStore, Page, PeerRecord, PeerStore, PendingRecovery, RedeemOutcome,
+    ReportRecord, ReportResolution, ReportStore, Scope,
 };
 
 fn user(name: &str) -> UserRef {
@@ -56,7 +60,15 @@ fn page(limit: usize) -> Page {
 /// suite is re-runnable against a persistent database.
 async fn suite<S>(store: &S, tag: &str)
 where
-    S: EventStore + AccountStore + ChannelStore + CapabilityStore + InviteStore + NamespaceStore,
+    S: EventStore
+        + AccountStore
+        + ChannelStore
+        + CapabilityStore
+        + InviteStore
+        + NamespaceStore
+        + ReportStore
+        + PeerStore
+        + NetblockStore,
 {
     let chan: Scope = Scope::Channel(format!("#suite-{tag}").parse().unwrap());
     let ada: Account = format!("ada-{tag}").parse().unwrap();
@@ -629,6 +641,236 @@ where
     assert!(!history[0].operator_initiated);
     assert!(history[1].operator_initiated);
     assert_eq!(history[1].root_key, "ROOT3==");
+
+    // -- reports + retention holds (§6.7, §12.1, invariant 11) --
+    let rep_chan: Scope = Scope::Channel(format!("#rep-{tag}").parse().unwrap());
+    for at in 100_000..=100_010 {
+        store
+            .append(message(&rep_chan, at, &format!("r{at}")))
+            .await
+            .unwrap();
+    }
+    let reported = msgid(100_005);
+    let report = |id: &str, mid: &MsgId, state, note: Option<&str>, queues: &[&str]| ReportRecord {
+        id: id.to_string(),
+        msgid: mid.clone(),
+        scope: rep_chan.clone(),
+        category: "harassment".into(),
+        state,
+        reporter: ada.clone(),
+        note: note.map(str::to_string),
+        queue_scopes: queues.iter().map(|s| s.to_string()).collect(),
+        status: ReportStatus::Open,
+        filed_at_ms: 500_000,
+        held_roots: vec![],
+        resolution: None,
+        holds_released: false,
+    };
+    // Verified report places holds; ±HOLD_RADIUS covers all 11 roots here.
+    store
+        .file_report(report(
+            &format!("{tag}rep1"),
+            &reported,
+            ContentState::Verified,
+            Some("stop"),
+            &[&format!("ns:{tag}"), "*"],
+        ))
+        .await
+        .unwrap();
+    let held = store.report(&format!("{tag}rep1")).await.unwrap().unwrap();
+    assert_eq!(held.held_roots.len(), 11, "reported root + context held");
+    // Invariant 11: held content is exempt from purge.
+    assert_eq!(store.purge_before(&rep_chan, 200_000).await.unwrap(), 0);
+    assert_eq!(
+        store
+            .roots(
+                &rep_chan,
+                Page {
+                    before: None,
+                    after: None,
+                    limit: 50
+                }
+            )
+            .await
+            .unwrap()
+            .len(),
+        11
+    );
+
+    // Listed at both queue scopes; net-only query excludes an ns-only report.
+    // `*` is a GLOBAL scope — a persistent database carries other runs' net
+    // reports, so count only this run's (ids are tag-prefixed).
+    let ns_scope = format!("ns:{tag}");
+    let mine = |reports: Vec<ReportRecord>| {
+        reports
+            .into_iter()
+            .filter(|r| r.id.starts_with(tag))
+            .count()
+    };
+    assert_eq!(
+        store
+            .list_reports(&ns_scope, Some(ReportStatus::Open), None, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        mine(store.list_reports("*", None, None, 100).await.unwrap()),
+        1
+    );
+
+    // Unverified report holds nothing.
+    store
+        .file_report(report(
+            &format!("{tag}rep2"),
+            &msgid(100_006),
+            ContentState::Unverified,
+            None,
+            &[&ns_scope],
+        ))
+        .await
+        .unwrap();
+    assert!(store
+        .report(&format!("{tag}rep2"))
+        .await
+        .unwrap()
+        .unwrap()
+        .held_roots
+        .is_empty());
+
+    // Rate-limit counter sees both of ada's reports.
+    assert_eq!(store.reports_by_since(&ada, 400_000).await.unwrap(), 2);
+    assert_eq!(store.reports_by_since(&ada, 600_000).await.unwrap(), 0);
+
+    // Escalate the ns-only report → net queue gains it.
+    assert!(store.escalate_report(&format!("{tag}rep2")).await.unwrap());
+    assert_eq!(
+        mine(store.list_reports("*", None, None, 100).await.unwrap()),
+        2
+    );
+
+    // Resolve rep1; holds persist until the grace window passes.
+    let resolution = ReportResolution {
+        action: ResolveAction::UserActioned,
+        note: Some("banned".into()),
+        resolved_by: bob.clone(),
+        at_ms: 700_000,
+        hold_release_at: 700_000 + 7 * 24 * 3_600 * 1_000,
+    };
+    assert!(store
+        .resolve_report(&format!("{tag}rep1"), resolution)
+        .await
+        .unwrap());
+    // Double-resolve refused.
+    assert!(!store
+        .resolve_report(
+            &format!("{tag}rep1"),
+            ReportResolution {
+                action: ResolveAction::Dismissed,
+                note: None,
+                resolved_by: bob.clone(),
+                at_ms: 700_001,
+                hold_release_at: 700_001,
+            }
+        )
+        .await
+        .unwrap());
+    // Before grace: still held.
+    assert_eq!(store.release_due_holds(700_000).await.unwrap(), 0);
+    assert_eq!(store.purge_before(&rep_chan, 200_000).await.unwrap(), 0);
+    // After grace: holds released, content becomes purgeable.
+    let after_grace = 700_000 + 8 * 24 * 3_600 * 1_000;
+    assert_eq!(store.release_due_holds(after_grace).await.unwrap(), 1);
+    assert_eq!(store.release_due_holds(after_grace).await.unwrap(), 0); // idempotent
+    assert_eq!(store.purge_before(&rep_chan, 200_000).await.unwrap(), 11);
+    assert!(store
+        .roots(
+            &rep_chan,
+            Page {
+                before: None,
+                after: None,
+                limit: 50
+            }
+        )
+        .await
+        .unwrap()
+        .is_empty());
+
+    // ---- §11 federation: peers + netblocks ----
+    let peer: NetworkName = format!("peer-{tag}.example").parse().unwrap();
+    assert!(store.peer(&peer).await.unwrap().is_none());
+
+    // A fresh PROPOSE: manifest at v1, not yet acked.
+    store
+        .upsert_peer(PeerRecord {
+            peer: peer.clone(),
+            scope: "#general".to_string(),
+            manifest: "MANIFEST_V1".to_string(),
+            version: 1,
+            acked_manifest: None,
+            severed: false,
+            created_ms: 1_000,
+            updated_ms: 1_000,
+        })
+        .await
+        .unwrap();
+    let stored = store.peer(&peer).await.unwrap().unwrap();
+    assert_eq!(stored.version, 1);
+    assert_eq!(stored.acked_manifest, None);
+
+    // ACCEPT sets the acked manifest (upsert replaces).
+    store
+        .upsert_peer(PeerRecord {
+            acked_manifest: Some("MANIFEST_V1".to_string()),
+            updated_ms: 2_000,
+            ..stored
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store.peer(&peer).await.unwrap().unwrap().acked_manifest,
+        Some("MANIFEST_V1".to_string())
+    );
+    assert_eq!(store.list_peers().await.unwrap().len(), 1);
+    assert!(store.remove_peer(&peer).await.unwrap());
+    assert!(!store.remove_peer(&peer).await.unwrap());
+
+    // Netblocks are name-keyed and idempotent.
+    let evil: NetworkName = format!("evil-{tag}.example").parse().unwrap();
+    assert!(!store.is_netblocked(&evil).await.unwrap());
+    store
+        .add_netblock(NetblockRecord {
+            network: evil.clone(),
+            reason: Some("spam".to_string()),
+            added_ms: 5_000,
+            actor: "op".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(store.is_netblocked(&evil).await.unwrap());
+    // Re-adding refreshes rather than duplicating.
+    store
+        .add_netblock(NetblockRecord {
+            network: evil.clone(),
+            reason: Some("chronic abuse".to_string()),
+            added_ms: 6_000,
+            actor: "op".to_string(),
+        })
+        .await
+        .unwrap();
+    let blocks: Vec<_> = store
+        .list_netblocks()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|b| b.network == evil)
+        .collect();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].reason.as_deref(), Some("chronic abuse"));
+    assert!(store.remove_netblock(&evil).await.unwrap());
+    assert!(!store.is_netblocked(&evil).await.unwrap());
+    assert!(!store.remove_netblock(&evil).await.unwrap());
 }
 
 #[tokio::test]

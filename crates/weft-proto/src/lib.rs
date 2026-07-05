@@ -40,7 +40,10 @@ pub use line::{
 };
 pub use name::{Account, ChannelName, NamespaceName, NetworkName, Target, UserRef};
 pub use policy::{RetainedFor, RetentionPolicy, RetentionUnit};
-pub use types::{MemberAction, MsgMeta, PresenceStatus, ReactionOp, TypingState, Visibility};
+pub use types::{
+    report_category_ok, BridgeState, ContentState, HistoryMode, MediaMode, MemberAction, MsgMeta,
+    PresenceStatus, ReactionOp, ReportScope, ReportStatus, ResolveAction, TypingState, Visibility,
+};
 
 // Re-exported so consumers (weft-core mints ULIDs in channel actors) share
 // one ulid version without a direct dependency.

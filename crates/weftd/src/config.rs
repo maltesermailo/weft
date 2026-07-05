@@ -28,6 +28,8 @@ pub struct Config {
     pub dm_policy: String,
     /// §2.2 namespace creation policy.
     pub namespaces: Namespaces,
+    /// §11 federation policy (inbound bridge behavior).
+    pub federation: Federation,
     pub listen: Listen,
     pub identity: Identity,
     pub storage: Storage,
@@ -91,6 +93,21 @@ impl Default for Namespaces {
             quota: 10, // §2.2 default quota
         }
     }
+}
+
+/// §11 federation policy. Controls how this network treats *inbound* bridge
+/// sessions (the outbound dialer + peer pinning are M5d). By default a network
+/// bridges with nobody; `accept_any` opens it to any peer (trust-on-first-use,
+/// §11.2), and `auto_accept` skips the manual `BRIDGE ACCEPT` step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Federation {
+    /// Accept a bridge from any non-blocked network, trusting the key it
+    /// proves control of. `NETBLOCK` remains the escape hatch.
+    pub accept_any: bool,
+    /// Auto-accept incoming `BRIDGE PROPOSE` instead of requiring an operator
+    /// `BRIDGE ACCEPT`.
+    pub auto_accept: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -160,6 +177,7 @@ impl Default for Config {
             registration: Registration::Open,
             operators: Vec::new(),
             namespaces: Namespaces::default(),
+            federation: Federation::default(),
             dm_policy: "permanent".to_string(),
             listen: Listen::default(),
             identity: Identity::default(),

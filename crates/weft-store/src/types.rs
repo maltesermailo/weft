@@ -2,7 +2,8 @@
 //! are rows referencing the original message's msgid — never mutations.
 
 use weft_proto::{
-    Account, ChannelName, MsgId, MsgMeta, NamespaceName, RetentionPolicy, Ulid, UserRef,
+    Account, ChannelName, ContentState, MsgId, MsgMeta, NamespaceName, NetworkName, ReportStatus,
+    ResolveAction, RetentionPolicy, Ulid, UserRef,
 };
 
 /// Where events live: a channel, or a same-network DM pair (§9.5).
@@ -187,6 +188,85 @@ pub struct RootHistoryEntry {
     pub owner: String,
     pub at_ms: u64,
     pub operator_initiated: bool,
+}
+
+/// A filed report (§6.7). One row per `REPORT`; resolvable once. Holds on
+/// the reported content (`held_roots`) are placed at filing when the state
+/// is `Verified` and released a grace window after resolution (invariant 11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportRecord {
+    /// ULID string — sorts by filing time; also the cursor.
+    pub id: String,
+    /// The reported message (a root msgid).
+    pub msgid: MsgId,
+    /// Where the message lives — for hold placement and handler display.
+    pub scope: Scope,
+    pub category: String,
+    /// Honest content state (§6.7).
+    pub state: ContentState,
+    pub reporter: Account,
+    pub note: Option<String>,
+    /// Scope strings a handler lists this report under (`ns:<name>`, `*`).
+    /// `csam`/`illegal` carry both the ns scope and `*` (operator).
+    pub queue_scopes: Vec<String>,
+    pub status: ReportStatus,
+    pub filed_at_ms: u64,
+    /// Roots under retention hold for this report — populated by the store
+    /// at filing (empty unless `Verified`). Released after resolution+grace.
+    pub held_roots: Vec<Ulid>,
+    pub resolution: Option<ReportResolution>,
+    /// Set once the grace window passes and holds are released (idempotence).
+    pub holds_released: bool,
+}
+
+/// How a report was closed (§6.7). `hold_release_at` schedules the §12.1
+/// grace so held content survives resolution by the grace window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportResolution {
+    pub action: ResolveAction,
+    pub note: Option<String>,
+    pub resolved_by: Account,
+    pub at_ms: u64,
+    /// Unix ms after which the retention holds may be released.
+    pub hold_release_at: u64,
+}
+
+/// A bridge peering with a remote network (§11.1). Stores the current signed
+/// manifest and the last *mutually-acked* one so forwarding can be gated on
+/// their intersection (invariant 3): a channel is forwardable to `peer` iff it
+/// is present in **both** the acked snapshot (so the peer agreed to it) and the
+/// current snapshot (so a `BRIDGE REMOVE` stops it at once). `manifest` and
+/// `acked_manifest` are base64 [`weft_crypto::SignedManifest`] blobs — opaque
+/// to the store, decoded by weft-core.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerRecord {
+    pub peer: NetworkName,
+    /// The original `BRIDGE PROPOSE` scope (`#chan`|`ns:<name>`|`*`).
+    pub scope: String,
+    /// Current signed manifest (b64) — may be ahead of what the peer acked.
+    pub manifest: String,
+    pub version: u64,
+    /// Last mutually-acked signed manifest (b64); `None` until the first
+    /// `BRIDGE ACCEPT`. Forwarding reads its channel snapshot.
+    pub acked_manifest: Option<String>,
+    /// Torn down by `BRIDGE SEVER` or a NETBLOCK — kept for audit, never
+    /// forwarded from.
+    pub severed: bool,
+    pub created_ms: u64,
+    pub updated_ms: u64,
+}
+
+/// An operator blocklist entry (§11.6): `{network, private reason, added,
+/// actor}`. **Name-keyed** — the block is on the network *name*, so key
+/// rotation never evades it (invariant 7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetblockRecord {
+    pub network: NetworkName,
+    /// Operator-private reason; surfaced per `blocklist_visibility` config.
+    pub reason: Option<String>,
+    pub added_ms: u64,
+    /// The account (operator or `netblock`-cap holder) who added it.
+    pub actor: String,
 }
 
 /// Result of an atomic redeem attempt.
