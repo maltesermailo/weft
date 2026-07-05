@@ -1,0 +1,13 @@
+[package]
+name = "weft-irc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WEFT-IRC gateway (§17): an RFC 2812 front-end that translates IRC ↔ WEFT at the line boundary, exposed as a weft_core::ControlStream so the whole domain stack is reused."
+
+[dependencies]
+weft-proto = { path = "../weft-proto" }
+weft-core = { path = "../weft-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }

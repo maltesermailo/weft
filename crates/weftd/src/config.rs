@@ -119,6 +119,9 @@ pub struct Listen {
     pub ws: Option<SocketAddr>,
     /// HTTP for `/.well-known/weft` (§10.2); `None` disables it.
     pub http: Option<SocketAddr>,
+    /// WEFT-IRC gateway (§17); `None` disables it. Conventionally :6667
+    /// (plaintext) or :6697 (TLS — TLS termination is the operator's).
+    pub irc: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -193,6 +196,7 @@ impl Default for Listen {
             quic: ([127, 0, 0, 1], 4433).into(),
             ws: None,
             http: None,
+            irc: None,
         }
     }
 }

@@ -37,6 +37,8 @@ pub struct Server {
     pub ws_addr: Option<SocketAddr>,
     /// Actual HTTP address (`/.well-known/weft`), if enabled.
     pub http_addr: Option<SocketAddr>,
+    /// Actual WEFT-IRC gateway address (§17), if enabled.
+    pub irc_addr: Option<SocketAddr>,
     endpoint: quinn::Endpoint,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -214,10 +216,25 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         }
     };
 
+    let irc_addr = match config.listen.irc {
+        None => None,
+        Some(addr) => {
+            let listener = bind(addr, "IRC").await?;
+            let irc_addr = listener.local_addr()?;
+            tasks.push(tokio::spawn(acceptor::accept_irc(
+                listener,
+                Arc::clone(&ctx),
+                network.to_string(),
+            )));
+            Some(irc_addr)
+        }
+    };
+
     Ok(Server {
         quic_addr,
         ws_addr,
         http_addr,
+        irc_addr,
         endpoint,
         tasks,
     })

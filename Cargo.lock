@@ -2674,6 +2674,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "weft-irc"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tracing",
+ "weft-core",
+ "weft-proto",
+]
+
+[[package]]
 name = "weft-proto"
 version = "0.1.0"
 dependencies = [
@@ -2741,6 +2751,7 @@ dependencies = [
  "tracing-subscriber",
  "weft-core",
  "weft-crypto",
+ "weft-irc",
  "weft-proto",
  "weft-store",
  "weft-transport",

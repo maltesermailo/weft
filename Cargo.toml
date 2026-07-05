@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weftd", "crates/weft-tui"]
+members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weft-irc", "crates/weftd", "crates/weft-tui"]
 
 [workspace.package]
 version = "0.1.0"
