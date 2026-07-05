@@ -620,6 +620,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "tokio",
+ "weft-crypto",
  "weft-proto",
  "weft-transport",
 ]

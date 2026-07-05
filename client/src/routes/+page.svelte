@@ -48,6 +48,13 @@
     historyLoaded?: boolean;
     hasMore?: boolean; // older pages available upstream
     truncated?: boolean; // a retention gap at the top (§6.4)
+    /// Channel management + layout (Phase 6).
+    topic?: string;
+    unread?: boolean;
+    lastRead?: string; // newest msgid we've marked read
+    category?: string; // CHANNEL-LAYOUT grouping
+    position?: number;
+    rosterLoaded?: boolean; // MEMBERS snapshot fetched
   };
 
   let channels = $state<Record<string, Channel>>({});
@@ -56,12 +63,60 @@
   let composer = $state("");
   let membersVisible = $state(true);
   let scrollEl: HTMLDivElement | null = $state(null);
+  // ---- servers/namespaces as rail tiles (Phase 6, flavor A) ----
+  let activeServer = $state(""); // "" = network top-level channels; else a namespace
+  // "#gaming/general" → "gaming"; top-level "#general" → "".
+  const nsOf = (name: string) => name.match(/^#([^/]+)\//)?.[1] ?? "";
+  // Short channel label under a server tile: "#gaming/general" → "general".
+  const chanShort = (name: string) => name.replace(/^#[^/]+\//, "").replace(/^#/, "");
   // ---- DMs + presence (Phase 5) ----
   let homeView = $state(false); // sidebar shows DMs instead of channels
   let presence = $state<Record<string, string>>({}); // account → status
   let myStatus = $state("online");
   let statusMenu = $state(false);
   let dmInput = $state("");
+  // ---- discover dialog (Phase 6) ----
+  let discoverOpen = $state(false);
+  let discovered = $state<Record<string, Extract<weft.WeftEvent, { kind: "ns-meta" }>>>({});
+  let discoverCursor = $state<string | null>(null);
+  let discoverName = $state("");
+  let redeemInput = $state("");
+  let createName = $state("");
+  let createVis = $state("public");
+  // ---- roles / invites / reports (Phase 7) ----
+  const REPORT_CATEGORIES = [
+    "spam",
+    "harassment",
+    "violence",
+    "sexual",
+    "csam",
+    "illegal",
+    "self-harm",
+    "other",
+  ];
+  const CAPS = ["send", "react", "pin", "invite", "mute", "ban", "kick", "view", "reports"];
+  const RESOLVE_ACTIONS = ["dismissed", "content-removed", "user-actioned", "escalated"];
+  let reportTarget = $state<Msg | null>(null);
+  let reportCategory = $state("spam");
+  let reportNote = $state("");
+  let reportScope = $state("ns");
+  let reportsOpen = $state(false);
+  let reportQueue = $state<Record<string, Extract<weft.WeftEvent, { kind: "report-filed" }>>>({});
+  let rolesTarget = $state<string | null>(null);
+  let roleScope = $state("");
+  let roleCap = $state("send");
+  let inviteLink = $state<string | null>(null);
+  // ---- namespace admin panel (§6.2 / §2.4) ----
+  let nsSettingsOpen = $state(false);
+  let nsTitle = $state("");
+  let nsDesc = $state("");
+  let nsVis = $state("public");
+  let nsDelegSubject = $state("");
+  let nsDelegCaps = $state("mute,kick");
+  let nsNewOwner = $state("");
+  let nsRecM = $state(2);
+  let nsRecKeys = $state("");
+  let activeNsMeta = $derived(activeServer ? discovered[activeServer] : undefined);
 
   const retentionMeta: Record<string, { label: string; cls: string; icon: string }> = {
     ephemeral: { label: "Ephemeral", cls: "ephemeral", icon: '<circle cx="12" cy="12" r="8" stroke-dasharray="3 3"/>' },
@@ -134,14 +189,43 @@
 
   let activeChannel = $derived(active ? channels[active] : undefined);
   let activeIsDm = $derived(active.startsWith("@"));
-  let groupedChannels = $derived(
-    retentionOrder
-      .map((r) => ({
-        retention: r,
-        list: Object.values(channels).filter((c) => c.name.startsWith("#") && c.retention === r),
-      }))
-      .filter((g) => g.list.length),
+  // Namespaces we hold channels in — each becomes a rail tile (flavor A).
+  let serverNamespaces = $derived(
+    [
+      ...new Set(
+        Object.values(channels)
+          .filter((c) => c.name.startsWith("#"))
+          .map((c) => nsOf(c.name))
+          .filter(Boolean),
+      ),
+    ].sort(),
   );
+  // Discord-style grouping for the *active server*: by CHANNEL-LAYOUT category
+  // (position-ordered), uncategorized under "Channels".
+  let channelGroups = $derived.by(() => {
+    const groups = new Map<string, Channel[]>();
+    for (const c of Object.values(channels)) {
+      if (!c.name.startsWith("#") || nsOf(c.name) !== activeServer) continue;
+      const cat = c.category || "Channels";
+      if (!groups.has(cat)) groups.set(cat, []);
+      groups.get(cat)!.push(c);
+    }
+    for (const list of groups.values())
+      list.sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name));
+    return [...groups.entries()].map(([category, list]) => ({ category, list }));
+  });
+
+  function selectServer(ns: string) {
+    homeView = false;
+    activeServer = ns;
+    // Land on a channel in this server if the current one isn't in it.
+    if (!active.startsWith("#") || nsOf(active) !== ns) {
+      const first = Object.values(channels)
+        .filter((c) => c.name.startsWith("#") && nsOf(c.name) === ns)
+        .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name))[0];
+      active = first?.name ?? "";
+    }
+  }
   // DM conversations (keyed `@peer`), plus any peer we've opened a blank DM with.
   let dmList = $derived(Object.values(channels).filter((c) => c.name.startsWith("@")));
 
@@ -238,10 +322,51 @@
         // Dedupe: history backfill may re-deliver a live message.
         if (e.msgid && ch.messages.some((m) => m.msgid === e.msgid)) break;
         ch.messages.push(msg);
+        if (!e.own && key !== active) ch.unread = true;
         break;
       }
       case "presence":
         presence[e.user] = e.status;
+        break;
+      case "marked": {
+        // Read-marker sync from another device (§9.7).
+        const ch = channels[e.channel];
+        if (ch) {
+          ch.lastRead = e.msgid;
+          ch.unread = false;
+        }
+        break;
+      }
+      case "chanmeta":
+        if (e.key === "topic") ensureChannel(e.channel).topic = e.value;
+        break;
+      case "channel-layout": {
+        const ch = ensureChannel(e.channel);
+        ch.category = e.category ?? undefined;
+        ch.position = e.position;
+        break;
+      }
+      case "ns-meta":
+        discovered[e.name] = e;
+        break;
+      case "more":
+        discoverCursor = e.cursor;
+        break;
+      case "token":
+        sys(`✓ permissions updated for ${e.subject} @ ${e.scope}`);
+        break;
+      case "invited":
+        inviteLink = e.link ?? e.invite_id;
+        break;
+      case "reported":
+        sys(`✓ report filed (${e.report_id})`);
+        break;
+      case "report-filed":
+        reportQueue[e.report_id] = e;
+        break;
+      case "report-resolved":
+        delete reportQueue[e.report_id];
+        sys(`✓ report ${e.report_id} resolved: ${e.action}`);
         break;
       case "typing":
         if (e.user !== account) setTyping(e.channel, e.user, e.state === "start");
@@ -338,7 +463,7 @@
     if (raw.startsWith("#")) {
       weft.join(raw).catch((e) => (authError = String(e)));
     } else {
-      weft.nsJoin(raw.replace(/^ns:/, "")).catch((e) => (authError = String(e)));
+      joinNamespace(raw.replace(/^ns:/, ""));
     }
   }
 
@@ -374,10 +499,22 @@
         if (arg) weft.join(arg.startsWith("#") ? arg : `#${arg}`).catch(() => {});
         break;
       case "part":
-        if (active) weft.sendRaw(`PART ${active}`).catch(() => {});
+      case "leave":
+        if (active.startsWith("#")) weft.part(active).catch(() => {});
+        break;
+      case "create":
+        if (arg) weft.channelCreate(arg.startsWith("#") ? arg : `#${arg}`).catch(() => {});
+        break;
+      case "delete":
+        if (active.startsWith("#")) weft.channelDelete(active).catch(() => {});
+        break;
+      case "topic":
+        if (active.startsWith("#")) weft.channelMeta(active, "topic", arg).catch(() => {});
         break;
       case "help":
-        sys("/ban <user> · /kick <user> · /mute <user> · /unmute <user> · /join #chan · /part");
+        sys(
+          "/join #chan · /part · /create #chan · /delete · /topic <text> · /ban /kick /mute /unmute <user>",
+        );
         break;
       default:
         sys(`unknown command: /${cmd} (try /help)`);
@@ -583,7 +720,151 @@
     stickBottom = true;
     const ch = channels[a];
     if (ch && !ch.historyLoaded) loadHistory(a, true);
+    // Fetch the full roster once (MEMBERS folds in as MEMBER-join rows). The
+    // guard stops the self-row in the snapshot from re-triggering us.
+    if (ch && a.startsWith("#") && !ch.rosterLoaded) {
+      ch.rosterLoaded = true;
+      weft.members(a).catch(() => {});
+    }
   });
+
+  // Viewing a channel clears its unread badge and advances the read marker
+  // (MARK, synced across our devices — §9.7).
+  $effect(() => {
+    const ch = activeChannel;
+    if (!ch) return;
+    ch.unread = false;
+    if (!ch.name.startsWith("#")) return;
+    let newest: string | undefined;
+    for (let i = ch.messages.length - 1; i >= 0; i--)
+      if (ch.messages[i].msgid) {
+        newest = ch.messages[i].msgid;
+        break;
+      }
+    if (newest && newest !== ch.lastRead) {
+      ch.lastRead = newest;
+      weft.mark(ch.name, newest).catch(() => {});
+    }
+  });
+
+  // Opening a channel selects its server tile (keeps the rail in sync with
+  // auto-joins and sidebar clicks).
+  $effect(() => {
+    if (active.startsWith("#")) activeServer = nsOf(active);
+  });
+
+  // ---- discover + channel management (Phase 6) ----
+  function openDiscover() {
+    discoverOpen = true;
+    discovered = {};
+    discoverCursor = null;
+    weft.discover().catch(() => {});
+  }
+  function joinNamespace(name: string) {
+    weft.nsJoin(name).catch(() => {});
+    weft.channels(name).catch(() => {}); // fetch its category layout
+    discoverOpen = false;
+  }
+  function joinNamespaceInput() {
+    const n = discoverName.trim().replace(/^@?/, "");
+    discoverName = "";
+    if (n) joinNamespace(n);
+  }
+  function doRedeem() {
+    const t = redeemInput.trim();
+    redeemInput = "";
+    if (t) weft.inviteRedeem(t).catch(() => {});
+    discoverOpen = false;
+  }
+  async function createNamespace() {
+    const name = createName.trim().replace(/^@/, "");
+    if (!name) return;
+    createName = "";
+    try {
+      // Root keypair is generated + stored on-device (secret never leaves the
+      // backend); then a default channel so the namespace is usable at once.
+      await weft.nsCreate(network, name, createVis);
+      await weft.channelCreate(`#${name}/general`);
+      await weft.join(`#${name}/general`);
+      discoverOpen = false;
+    } catch (e) {
+      authError = String(e);
+    }
+  }
+
+  // Capability/invite scopes relevant to what's open: channel → its ns → net.
+  function scopesFor(): string[] {
+    const s: string[] = [];
+    if (active.startsWith("#")) s.push(active);
+    const ns = nsOf(active) || activeServer;
+    if (ns) s.push(`ns:${ns}`);
+    s.push("*");
+    return s;
+  }
+
+  // Reporting
+  function openReport(m: Msg) {
+    if (!m.msgid) return;
+    reportTarget = m;
+    reportCategory = "spam";
+    reportNote = "";
+    reportScope = nsOf(active) || activeServer ? "ns" : "net";
+  }
+  function submitReport() {
+    if (reportTarget?.msgid)
+      weft.report(reportTarget.msgid, reportCategory, reportScope, reportNote || undefined).catch(() => {});
+    reportTarget = null;
+  }
+  function openReports() {
+    reportsOpen = true;
+    reportQueue = {};
+    weft.reportsList(activeServer ? `ns:${activeServer}` : "*").catch(() => {});
+  }
+
+  // Roles
+  function openRoles(member: string) {
+    rolesTarget = member;
+    roleScope = scopesFor()[0];
+    roleCap = "send";
+  }
+
+  // Invites
+  function mintInvite() {
+    weft.inviteMint(scopesFor()[0]).catch(() => {});
+  }
+
+  // Namespace admin
+  function openNsSettings() {
+    const meta = discovered[activeServer];
+    nsTitle = meta?.title ?? "";
+    nsDesc = meta?.description ?? "";
+    nsVis = meta?.visibility ?? "public";
+    nsDelegSubject = "";
+    nsDelegCaps = "mute,kick";
+    nsNewOwner = "";
+    nsRecKeys = "";
+    nsSettingsOpen = true;
+  }
+  function saveNsMeta() {
+    if (nsTitle.trim()) weft.nsMeta(activeServer, "title", nsTitle.trim()).catch(() => {});
+    if (nsDesc.trim()) weft.nsMeta(activeServer, "description", nsDesc.trim()).catch(() => {});
+    weft.nsVisibility(activeServer, nsVis).catch(() => {});
+  }
+  function doDelegate() {
+    const s = nsDelegSubject.trim();
+    if (s && nsDelegCaps.trim()) weft.nsDelegate(activeServer, s, nsDelegCaps.trim()).catch(() => {});
+  }
+  function doTransfer() {
+    const o = nsNewOwner.trim();
+    if (o && confirm(`Transfer ownership of ${activeServer} to ${o}? This is signed by your root key and cannot be undone.`))
+      weft.nsTransfer(network, activeServer, o).catch((e) => (authError = String(e)));
+  }
+  function deleteNamespace() {
+    if (confirm(`Delete namespace ${activeServer}? This removes all its channels.`)) {
+      weft.nsDelete(activeServer).catch(() => {});
+      nsSettingsOpen = false;
+    }
+  }
 
   onMount(() => {
     const un = weft.onWeft(handle);
@@ -628,12 +909,17 @@
       </button>
       <div class="rail-divider"></div>
       <div class="rail-communities">
-        <div class="comm-tile" class:active={!homeView} title={network}>
-          <button onclick={() => (homeView = false)}>{initials(network)}</button>
+        <div class="comm-tile" class:active={!homeView && activeServer === ""} title={network}>
+          <button onclick={() => selectServer("")}>{initials(network)}</button>
           <span class="trust-mark signed" title="Connected network"></span>
         </div>
+        {#each serverNamespaces as ns (ns)}
+          <div class="comm-tile" class:active={!homeView && activeServer === ns} title={ns}>
+            <button onclick={() => selectServer(ns)}>{initials(ns)}</button>
+          </div>
+        {/each}
       </div>
-      <button class="rail-add" title="Join or create a network" aria-label="Join or create a network">
+      <button class="rail-add" title="Discover namespaces" aria-label="Discover namespaces" onclick={openDiscover}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14" /></svg>
       </button>
     </nav>
@@ -644,8 +930,16 @@
         {#if homeView}
           <p class="comm-name">Direct Messages</p>
         {:else}
-          <p class="comm-name">{network}</p>
-          <div class="comm-origin"><span class="origin-dot"></span><span>{network} · connected</span></div>
+          <p class="comm-name">{activeNsMeta?.title || activeServer || network}</p>
+          <div class="comm-origin">
+            <span class="origin-dot"></span>
+            <span>{activeServer ? `namespace · ${network}` : `${network} · connected`}</span>
+          </div>
+          {#if activeServer}
+            <button class="hdr-gear" title="Namespace settings" aria-label="Namespace settings" onclick={openNsSettings}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+            </button>
+          {/if}
         {/if}
       </div>
       {#if homeView}
@@ -670,19 +964,21 @@
         </div>
       {:else}
         <div class="channel-scroll">
-          {#each groupedChannels as group (group.retention)}
-            {@const meta = retentionMeta[group.retention]}
+          {#each channelGroups as group (group.category)}
             <div class="retention-group">
-              <div class="retention-label"><span class="dot {meta.cls}"></span>{meta.label}</div>
+              <div class="retention-label">{group.category}</div>
               {#each group.list as ch (ch.name)}
-                <button class="channel-item" class:active={ch.name === active} onclick={() => (active = ch.name)}>
+                {@const meta = retentionMeta[ch.retention]}
+                <button class="channel-item" class:active={ch.name === active} class:unread={ch.unread} onclick={() => (active = ch.name)}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" /></svg>
-                  <span>{ch.name.replace(/^#/, "")}</span>
+                  <span class="ci-name">{chanShort(ch.name)}</span>
+                  {#if ch.unread}<span class="unread-dot"></span>{/if}
+                  <span class="dot {meta.cls} chan-ret" title={meta.label}></span>
                 </button>
               {/each}
             </div>
           {/each}
-          {#if !groupedChannels.length}
+          {#if !channelGroups.length}
             <div class="empty-hint">No channels yet.<br />Join one below.</div>
           {/if}
         </div>
@@ -726,9 +1022,9 @@
           {@const meta = retentionMeta[activeChannel.retention]}
           <div class="chan-title">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" /></svg>
-            <span>{activeChannel.name.replace(/^#/, "")}</span>
+            <span>{chanShort(activeChannel.name)}</span>
           </div>
-          <div class="topic"></div>
+          <div class="topic">{activeChannel.topic ?? ""}</div>
           <div class="status-chip">
             <span style="display:flex;color:var(--{meta.cls})"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">{@html meta.icon}</svg></span>{meta.label}
           </div>
@@ -737,6 +1033,17 @@
           <div class="topic"></div>
         {/if}
         <div class="topbar-actions">
+          {#if activeChannel && !activeIsDm}
+            <button class="icon-btn" title="Invite" aria-label="Invite" onclick={mintInvite}>
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><line x1="19" y1="8" x2="19" y2="14" /><line x1="22" y1="11" x2="16" y2="11" /></svg>
+            </button>
+            <button class="icon-btn" title="Reports queue" aria-label="Reports queue" onclick={openReports}>
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" /><line x1="4" y1="22" x2="4" y2="15" /></svg>
+            </button>
+            <button class="icon-btn" title="Leave channel" aria-label="Leave channel" onclick={() => weft.part(active).catch(() => {})}>
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5" /><path d="M21 12H9" /></svg>
+            </button>
+          {/if}
           <button class="icon-btn" title="Toggle member list" aria-label="Toggle member list" onclick={() => (membersVisible = !membersVisible)}>
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
           </button>
@@ -808,6 +1115,10 @@
                       <button class="msg-act danger" title="Delete" aria-label="Delete" onclick={() => doDelete(m)}>
                         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>
                       </button>
+                    {:else}
+                      <button class="msg-act" title="Report" aria-label="Report" onclick={() => openReport(m)}>
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" /><line x1="4" y1="22" x2="4" y2="15" /></svg>
+                      </button>
                     {/if}
                   </div>
                   {#if pickerKey === m.key}
@@ -874,6 +1185,9 @@
                 <button class="mod-btn" title="Message {m.name}" aria-label="Message {m.name}" onclick={() => openDm(m.name)}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
                 </button>
+                <button class="mod-btn" title="Roles for {m.name}" aria-label="Roles for {m.name}" onclick={() => openRoles(m.name)}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+                </button>
                 <button class="mod-btn" title="Mute {m.name}" aria-label="Mute {m.name}" onclick={() => moderate("mute", m.name)}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M11 5 6 9H2v6h4l5 4V5z" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></svg>
                 </button>
@@ -886,5 +1200,229 @@
         {/each}
       {/if}
     </aside>
+
+    {#if discoverOpen}
+      <div class="modal-wrap">
+        <button class="modal-backdrop" aria-label="Close" onclick={() => (discoverOpen = false)}></button>
+        <div class="modal" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <h2>Discover namespaces</h2>
+            <button class="linkish" aria-label="Close" onclick={() => (discoverOpen = false)}>✕</button>
+          </div>
+          <div class="modal-join">
+            <input
+              bind:value={discoverName}
+              placeholder="join a namespace by name…"
+              onkeydown={(e) => e.key === "Enter" && joinNamespaceInput()}
+            />
+            <button onclick={joinNamespaceInput}>Join</button>
+          </div>
+          <div class="modal-join">
+            <input
+              bind:value={redeemInput}
+              placeholder="redeem an invite link…"
+              onkeydown={(e) => e.key === "Enter" && doRedeem()}
+            />
+            <button onclick={doRedeem}>Redeem</button>
+          </div>
+          <div class="modal-join">
+            <input
+              bind:value={createName}
+              placeholder="create a namespace…"
+              onkeydown={(e) => e.key === "Enter" && createNamespace()}
+            />
+            <select bind:value={createVis} aria-label="Visibility">
+              <option value="public">public</option>
+              <option value="unlisted">unlisted</option>
+              <option value="private">private</option>
+            </select>
+            <button onclick={createNamespace}>Create</button>
+          </div>
+          <div class="modal-list">
+            {#each Object.values(discovered) as ns (ns.name)}
+              <div class="ns-card">
+                <div class="ns-info">
+                  <div class="ns-name">{ns.title || ns.name}</div>
+                  <div class="ns-desc">
+                    {ns.description || `@${ns.name}`} · {ns.visibility}{ns.owner ? ` · ${ns.owner}` : ""}
+                  </div>
+                </div>
+                <button onclick={() => joinNamespace(ns.name)}>Join</button>
+              </div>
+            {:else}
+              <div class="empty-hint">No public namespaces found.</div>
+            {/each}
+            {#if discoverCursor}
+              <button class="linkish load-more" onclick={() => weft.discover(discoverCursor ?? undefined)}>Load more…</button>
+            {/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if reportTarget}
+      <div class="modal-wrap">
+        <button class="modal-backdrop" aria-label="Close" onclick={() => (reportTarget = null)}></button>
+        <div class="modal" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <h2>Report message</h2>
+            <button class="linkish" aria-label="Close" onclick={() => (reportTarget = null)}>✕</button>
+          </div>
+          <p class="modal-sub">from <b>{reportTarget.author}</b> — “{reportTarget.body.slice(0, 80)}”</p>
+          <label class="fld">Category
+            <select bind:value={reportCategory}>
+              {#each REPORT_CATEGORIES as c (c)}<option value={c}>{c}</option>{/each}
+            </select>
+          </label>
+          <label class="fld">Route to
+            <select bind:value={reportScope}>
+              <option value="ns">namespace moderators</option>
+              <option value="net">network operators</option>
+            </select>
+          </label>
+          <label class="fld">Note (optional)
+            <input bind:value={reportNote} placeholder="context for the moderators…" />
+          </label>
+          <div class="modal-actions">
+            <button class="linkish" onclick={() => (reportTarget = null)}>Cancel</button>
+            <button class="danger-btn" onclick={submitReport}>Submit report</button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if rolesTarget}
+      <div class="modal-wrap">
+        <button class="modal-backdrop" aria-label="Close" onclick={() => (rolesTarget = null)}></button>
+        <div class="modal" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <h2>Roles — {rolesTarget}</h2>
+            <button class="linkish" aria-label="Close" onclick={() => (rolesTarget = null)}>✕</button>
+          </div>
+          <label class="fld">Scope
+            <select bind:value={roleScope}>
+              {#each scopesFor() as s (s)}<option value={s}>{s}</option>{/each}
+            </select>
+          </label>
+          <label class="fld">Capability
+            <select bind:value={roleCap}>
+              {#each CAPS as c (c)}<option value={c}>{c}</option>{/each}
+            </select>
+          </label>
+          <div class="modal-actions">
+            <button class="danger-btn" onclick={() => rolesTarget && weft.revoke(rolesTarget, roleScope, roleCap).catch(() => {})}>Revoke</button>
+            <button class="ok-btn" onclick={() => rolesTarget && weft.grant(rolesTarget, roleScope, roleCap).catch(() => {})}>Grant</button>
+          </div>
+          <p class="modal-sub">Grants are additive; revoking bumps the scope's epoch.</p>
+        </div>
+      </div>
+    {/if}
+
+    {#if reportsOpen}
+      <div class="modal-wrap">
+        <button class="modal-backdrop" aria-label="Close" onclick={() => (reportsOpen = false)}></button>
+        <div class="modal" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <h2>Reports — {activeServer ? `ns:${activeServer}` : "network"}</h2>
+            <button class="linkish" aria-label="Close" onclick={() => (reportsOpen = false)}>✕</button>
+          </div>
+          <div class="modal-list">
+            {#each Object.values(reportQueue) as r (r.report_id)}
+              <div class="ns-card report-card">
+                <div class="ns-info">
+                  <div class="ns-name">{r.category} <span class="rep-state {r.state}">{r.state}</span></div>
+                  <div class="ns-desc">{r.report_id} · {r.msgid.slice(0, 16)}…{r.reporter ? ` · by ${r.reporter}` : ""}</div>
+                </div>
+                <select onchange={(e) => weft.reportsResolve(r.report_id, e.currentTarget.value).catch(() => {})}>
+                  <option value="">resolve…</option>
+                  {#each RESOLVE_ACTIONS as a (a)}<option value={a}>{a}</option>{/each}
+                </select>
+              </div>
+            {:else}
+              <div class="empty-hint">No open reports.</div>
+            {/each}
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if inviteLink}
+      <div class="modal-wrap">
+        <button class="modal-backdrop" aria-label="Close" onclick={() => (inviteLink = null)}></button>
+        <div class="modal" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <h2>Invite link</h2>
+            <button class="linkish" aria-label="Close" onclick={() => (inviteLink = null)}>✕</button>
+          </div>
+          <p class="modal-sub">Share this to let someone join:</p>
+          <div class="modal-join">
+            <input readonly value={inviteLink} />
+            <button onclick={() => navigator.clipboard?.writeText(inviteLink ?? "")}>Copy</button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if nsSettingsOpen}
+      <div class="modal-wrap">
+        <button class="modal-backdrop" aria-label="Close" onclick={() => (nsSettingsOpen = false)}></button>
+        <div class="modal ns-settings" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <h2>Namespace settings — {activeServer}</h2>
+            <button class="linkish" aria-label="Close" onclick={() => (nsSettingsOpen = false)}>✕</button>
+          </div>
+          <div class="modal-list">
+            {#if activeNsMeta?.recovery_eta}
+              <div class="ns-card recovery-pending">
+                <div class="ns-info">
+                  <div class="ns-name">⚠ Recovery pending (rung {activeNsMeta.recovery_rung})</div>
+                  <div class="ns-desc">A root rotation is scheduled. As the live owner you can veto it.</div>
+                </div>
+                <button class="danger-btn" onclick={() => weft.nsRecoveryCancel(network, activeServer).catch((e) => (authError = String(e)))}>Cancel recovery</button>
+              </div>
+            {/if}
+
+            <div class="settings-sec">
+              <h3>Profile</h3>
+              <label class="fld">Title <input bind:value={nsTitle} placeholder="display name" /></label>
+              <label class="fld">Description <input bind:value={nsDesc} placeholder="what's this namespace about" /></label>
+              <label class="fld">Visibility
+                <select bind:value={nsVis}>
+                  <option value="public">public</option>
+                  <option value="unlisted">unlisted</option>
+                  <option value="private">private</option>
+                </select>
+              </label>
+              <div class="modal-actions"><button class="ok-btn" onclick={saveNsMeta}>Save profile</button></div>
+            </div>
+
+            <div class="settings-sec">
+              <h3>Delegate roles</h3>
+              <label class="fld">Account <input bind:value={nsDelegSubject} placeholder="account" /></label>
+              <label class="fld">Capabilities <input bind:value={nsDelegCaps} placeholder="mute,kick,…" /></label>
+              <div class="modal-actions"><button class="ok-btn" onclick={doDelegate}>Delegate</button></div>
+            </div>
+
+            <div class="settings-sec">
+              <h3>Recovery quorum (§2.4)</h3>
+              <label class="fld">Threshold M <input type="number" min="1" bind:value={nsRecM} /></label>
+              <label class="fld">Quorum keys (comma-separated b64 pubkeys)
+                <input bind:value={nsRecKeys} placeholder="key1,key2,key3" />
+              </label>
+              <div class="modal-actions"><button class="ok-btn" onclick={() => nsRecKeys.trim() && weft.nsRecoverySet(activeServer, nsRecM, nsRecKeys.trim()).catch(() => {})}>Set recovery quorum</button></div>
+            </div>
+
+            <div class="settings-sec danger-sec">
+              <h3>Danger zone</h3>
+              <label class="fld">Transfer ownership to <input bind:value={nsNewOwner} placeholder="account" /></label>
+              <div class="modal-actions">
+                <button class="danger-btn" onclick={deleteNamespace}>Delete namespace</button>
+                <button class="danger-btn" onclick={doTransfer}>Transfer (root-signed)</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
   </div>
 {/if}

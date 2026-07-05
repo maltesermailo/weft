@@ -22,6 +22,34 @@ export type WeftEvent =
     }
   | { kind: "typing"; channel: string; user: string; state: string }
   | { kind: "presence"; user: string; status: string }
+  | { kind: "marked"; channel: string; msgid: string }
+  | { kind: "chanmeta"; channel: string; key: string; value: string }
+  | {
+      kind: "ns-meta";
+      name: string;
+      visibility: string;
+      owner: string | null;
+      title: string | null;
+      description: string | null;
+      recovery_set: boolean;
+      recovery_eta: number | null;
+      recovery_rung: number | null;
+    }
+  | { kind: "channel-layout"; channel: string; category: string | null; position: number }
+  | { kind: "more"; cursor: string }
+  | { kind: "token"; subject: string; scope: string }
+  | { kind: "invited"; scope: string; invite_id: string; link: string | null }
+  | { kind: "reported"; report_id: string }
+  | {
+      kind: "report-filed";
+      report_id: string;
+      msgid: string;
+      category: string;
+      state: string;
+      scope: string;
+      reporter: string | null;
+    }
+  | { kind: "report-resolved"; report_id: string; action: string; note: string | null }
   | { kind: "batch-start"; id: string }
   | { kind: "batch-end"; id: string; truncated: boolean }
   | {
@@ -69,6 +97,36 @@ export function nsJoin(name: string) {
   return invoke("ns_join", { name });
 }
 
+/// Create a namespace — the root keypair is generated + stored on-device;
+/// only the public key is sent (§6.2).
+export function nsCreate(network: string, name: string, visibility: string) {
+  return invoke("ns_create", { network, name, visibility });
+}
+
+// ---- namespace admin (§6.2 / §2.4) ----
+export function nsMeta(name: string, key: string, value: string) {
+  return invoke("ns_meta", { name, key, value });
+}
+export function nsVisibility(name: string, visibility: string) {
+  return invoke("ns_visibility", { name, visibility });
+}
+export function nsDelegate(name: string, subject: string, caps: string) {
+  return invoke("ns_delegate", { name, subject, caps });
+}
+export function nsDelete(name: string) {
+  return invoke("ns_delete", { name });
+}
+export function nsRecoverySet(name: string, m: number, keys: string) {
+  return invoke("ns_recovery_set", { name, m, keys });
+}
+/// Root-signed (loads the stored key in the backend).
+export function nsTransfer(network: string, name: string, newOwner: string) {
+  return invoke("ns_transfer", { network, name, newOwner });
+}
+export function nsRecoveryCancel(network: string, name: string) {
+  return invoke("ns_recovery_cancel", { network, name });
+}
+
 /// Request a page of history for `target`, older than `before` if given.
 export function history(target: string, before?: string) {
   return invoke("history", { target, before: before ?? null });
@@ -100,6 +158,66 @@ export function typing(channel: string, active: boolean) {
 
 export function presence(status: string) {
   return invoke("presence", { status });
+}
+
+export function mark(channel: string, msgid: string) {
+  return invoke("mark", { channel, msgid });
+}
+
+export function members(channel: string) {
+  return invoke("members", { channel });
+}
+
+export function grant(subject: string, scope: string, caps: string) {
+  return invoke("grant", { subject, scope, caps });
+}
+
+export function revoke(subject: string, scope: string, caps: string) {
+  return invoke("revoke", { subject, scope, caps });
+}
+
+export function inviteMint(scope: string) {
+  return invoke("invite_mint", { scope });
+}
+
+export function inviteRedeem(token: string) {
+  return invoke("invite_redeem", { token });
+}
+
+export function report(msgid: string, category: string, scope: string, note?: string) {
+  return invoke("report", { msgid, category, scope, note: note ?? null });
+}
+
+export function reportsList(scope: string, status?: string) {
+  return invoke("reports_list", { scope, status: status ?? null });
+}
+
+export function reportsResolve(reportId: string, action: string, note?: string) {
+  return invoke("reports_resolve", { reportId, action, note: note ?? null });
+}
+
+export function part(channel: string) {
+  return invoke("part", { channel });
+}
+
+export function channelCreate(channel: string) {
+  return invoke("channel_create", { channel });
+}
+
+export function channelDelete(channel: string) {
+  return invoke("channel_delete", { channel });
+}
+
+export function channelMeta(channel: string, key: string, value: string) {
+  return invoke("channel_meta", { channel, key, value });
+}
+
+export function discover(cursor?: string) {
+  return invoke("discover", { cursor: cursor ?? null });
+}
+
+export function channels(namespace: string) {
+  return invoke("channels", { namespace });
 }
 
 export function sendRaw(line: string) {

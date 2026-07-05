@@ -205,6 +205,7 @@ button {
   overflow: hidden;
 }
 .sidebar-header {
+  position: relative;
   padding: 14px 16px 12px;
   border-bottom: 1px solid var(--border-hair);
   flex-shrink: 0;
@@ -692,6 +693,232 @@ button {
 .composer-hint .typing {
   color: var(--text-secondary, #b8bcc8);
   font-style: italic;
+}
+
+/* unread channels + per-item retention dot (Phase 6) */
+.channel-item .ci-name {
+  flex: 1;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.channel-item.unread .ci-name {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.channel-item .chan-ret {
+  width: 5px;
+  height: 5px;
+  opacity: 0.7;
+}
+.unread-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  flex-shrink: 0;
+}
+
+/* modal (discover dialog) */
+.modal-wrap {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  cursor: default;
+}
+.modal {
+  position: relative;
+  width: min(520px, 92vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel, #16181f);
+  border: 1px solid var(--border-hair-strong, #2a2e3a);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  padding: 18px;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.modal-head h2 {
+  font-size: 16px;
+  font-weight: 650;
+}
+.modal-join {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.modal-join input {
+  flex: 1;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border-hair-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  font: inherit;
+}
+.modal-join button,
+.ns-card button {
+  background: var(--accent, #5865f2);
+  border: none;
+  border-radius: var(--radius-md);
+  color: #fff;
+  padding: 8px 14px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+}
+.modal-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ns-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border-hair-strong);
+  border-radius: var(--radius-md);
+}
+.ns-info {
+  flex: 1;
+  min-width: 0;
+}
+.ns-name {
+  font-weight: 600;
+}
+.ns-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.load-more {
+  align-self: center;
+  margin-top: 4px;
+}
+
+/* dialog form fields (Phase 7) */
+.modal-sub {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+.fld {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+.fld select,
+.fld input,
+.ns-card select {
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border-hair-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  font: inherit;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+.ok-btn,
+.danger-btn {
+  border: none;
+  border-radius: var(--radius-md);
+  color: #fff;
+  padding: 8px 16px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+}
+.ok-btn {
+  background: var(--accent, #5865f2);
+}
+.danger-btn {
+  background: #d83c3e;
+}
+.report-card .rep-state {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border-hair-strong);
+  color: var(--text-muted);
+  margin-left: 6px;
+}
+.rep-state.verified {
+  color: #3ba55d;
+  border-color: #3ba55d;
+}
+.rep-state.unverified,
+.rep-state.reporter-attested {
+  color: var(--text-faint);
+}
+
+/* namespace settings panel */
+.hdr-gear {
+  position: absolute;
+  top: 14px;
+  right: 12px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+}
+.hdr-gear:hover {
+  color: var(--text-primary);
+}
+.ns-settings {
+  width: min(560px, 94vw);
+}
+.settings-sec {
+  padding: 14px 0;
+  border-top: 1px solid var(--border-hair-strong, #2a2e3a);
+}
+.settings-sec:first-child {
+  border-top: none;
+}
+.settings-sec h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  margin-bottom: 10px;
+}
+.danger-sec h3 {
+  color: #e06c6c;
+}
+.recovery-pending {
+  border-color: #d8a13c;
+  background: color-mix(in srgb, #d8a13c 12%, transparent);
 }
 
 /* hover actions on own messages */

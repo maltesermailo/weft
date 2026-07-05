@@ -115,36 +115,67 @@ change status — a proper roster+presence store is Phase 6 / server work.
 **Acceptance met:** DM a user both ways; set status and see dots; type-checks,
 builds, clippy-clean.
 
-## Phase 6 — servers, channels, membership (the "join dialog" phase)
+## Phase 6 — servers, channels, membership (the "join dialog" phase) 🟡 mostly done
 
-- **Multi-server rail** — support several concurrent connections; one tile per
-  network/namespace; switch active. *(Backend: connection registry keyed by id
-  instead of a single `Conn`.)*
-- **Join / discover dialog** — **verbs** `DISCOVER [cursor]`, `NS JOIN <name>`.
-  "Add a server" modal: browse public namespaces (`NS-META` + `MORE`), join by
-  name, or connect to a new network. Replaces the bare join box.
-- **Category layout** — **verbs** `CHANNELS <ns>` → `CHANNEL-LAYOUT` (category +
-  position). Group the sidebar by **category** (Discord), fall back to retention
-  when none.
-- **Unread state** — **verbs** `MARK`/`MARKED`. Bold unread channels, unread
-  divider, badges.
-- **Channel management** — `CHANNEL CREATE/META/POLICY/DELETE`; topic in the
-  topbar; right-click menu; leave via `PART`.
-- **Members** — ⚠ needs the **`MEMBERS`** verb (server work) for a full roster;
-  until then keep the observed-joins list. Group by role; profile popover;
-  `display=` names.
+- [x] **Join / discover dialog** — `DISCOVER [cursor]` + `NS JOIN`. Rail "+"
+  opens an "Discover namespaces" modal: browse public namespaces (`NS-META` +
+  `MORE` paging), join by name, join a card. Joining also fetches the layout.
+- [x] **Category layout** — `CHANNELS <ns>` → `CHANNEL-LAYOUT`; sidebar groups
+  by **category** (position-ordered), uncategorized under "Channels", retention
+  shown as a per-item dot.
+- [x] **Unread state** — `MARK`/`MARKED`. A message in a non-active channel
+  bolds it + shows an unread dot; viewing a channel clears it and advances the
+  read marker (synced across devices via `MARKED`).
+- [x] **Channel management** — topic in the topbar (`CHANMETA`); leave button +
+  `/part`; `/create #chan`, `/delete`, `/topic <text>` (backend commands
+  `part/channel_create/channel_delete/channel_meta`).
+- [x] **Server tiles (flavor A)** — namespaces render as rail tiles alongside the
+  network tile; selecting one filters the sidebar to that namespace's channels
+  (grouped by category), keeps the active tile in sync with the open channel,
+  and shows short channel names. *One connection* — a regrouping of existing
+  data, not the heavy multi-network refactor.
+- [x] **Members roster** — the **`MEMBERS` verb** (proto + core + spec amendment,
+  8 new tests): a membership-gated `BATCH` of `MEMBER … join` rows. The client
+  requests it once per channel on open, folding the full roster in.
+- [ ] **Multiple networks (flavor B)** — *still deferred*: N concurrent QUIC
+  connections needs the `Conn`→registry backend refactor + per-server state.
+- [ ] **Roster polish** — role grouping, profile popover, `display=` names,
+  server-side presence store (fixes the Phase 5 default-dot limitation).
 
-**Acceptance:** open the join dialog, discover + join a namespace, channels show
-under categories, unread marks work.
+**Done:** discover/join, category layout, unread, channel mgmt, **namespace
+server tiles**, and a **real member roster** — all build clean. **Remaining:**
+flavor-B multi-network + roster polish.
 
-## Phase 7 — roles · moderation · admin
+## Phase 7 — roles · moderation · admin ✅ (2 multi-party/server items deferred)
 
-- **Roles** — `GRANT`/`REVOKE` UI; capability badges on messages.
-- **Invites** — `INVITE MINT/REVOKE/REDEEM`; invite links + redeem-on-join.
-- **Reporting** — `REPORT` (message right-click); mod queue `REPORTS LIST/RESOLVE`.
-- **Moderation UI** — reason dialogs, ban/mute list, restricted-posting toggle.
-- **Namespace admin** — `NS META/VISIBILITY/DELEGATE/DELETE`; `NS CREATE` with
-  client-side Ed25519 root keypair generation.
+- [x] **Reporting** — a report (flag) action on others' messages opens a dialog
+  (category · route ns/net · note) → `REPORT`; a topbar **Reports queue** runs
+  `REPORTS LIST` and shows filed reports with a resolve dropdown (`REPORTS
+  RESOLVE`), honest `state=` badges (verified/unverified/reporter-attested).
+- [x] **Roles** — a member-row roles dialog grants/revokes a capability at a
+  chosen scope (`#chan` · `ns:` · `*`) via `GRANT`/`REVOKE`; `TOKEN` confirms.
+- [x] **Invites** — a topbar invite button mints a shareable link (`INVITE
+  MINT` → `INVITED`), shown in a copy dialog; a redeem field in the discover
+  modal runs `INVITE REDEEM` (accepts a full `weft://…/i/…` link or bare token).
+- [x] **`NS CREATE` with on-device root key** — `weft-crypto` keypair generated
+  in the Tauri backend, secret stored `0600` in the app-data dir (`keys.rs`,
+  keyed by network+namespace), only the pubkey sent via `@root=`. Create row in
+  the discover dialog auto-makes `#<ns>/general` + joins. `load_ns_key` is the
+  hook for future TRANSFER/RECOVERY signing (weftd's recovery ladder is already
+  fully implemented + tested server-side).
+- [x] **Namespace admin panel** — a gear in the sidebar header (for a namespace
+  you're in) opens settings: **profile** (`NS META` title/description +
+  `NS VISIBILITY`), **delegate roles** (`NS DELEGATE`), **recovery quorum**
+  (`NS RECOVERY SET` M-of-N), and a **danger zone** — `NS DELETE` and **root-
+  signed `NS TRANSFER`** (backend loads the stored key + `weft-crypto::
+  sign_transfer`). A **recovery-pending banner** (from `NS-META` recovery fields)
+  offers a root-signed **`NS RECOVERY CANCEL`** veto.
+- [ ] **`NS RECOVER`** (quorum rung) — *deferred*: needs the quorum members'
+  keys + a co-signed `RotationRecord` (multi-party flow, not single-owner).
+- [ ] **Capability badges on messages** — *deferred*: needs a caps-query verb
+  (the client can't know who holds what without one).
+
+Phase 7 is complete except the two multi-party/server-verb items above.
 
 ## Phase 8 — account & platform polish
 
@@ -157,7 +188,7 @@ under categories, unread marks work.
 
 ## Server-side prerequisites (schedule before the client phase that needs them)
 
-- **`MEMBERS <#chan>` verb** (proto + core) — blocks the full member roster (Phase 6).
+- ~~**`MEMBERS <#chan>` verb**~~ ✅ shipped — roster snapshot as a `MEMBER … join` batch.
 - **`PIN`/`UNPIN` verb** — the `pin` cap exists but no verb; blocks pinned messages.
 - **Media** (`STREAM`, BLAKE3) and **voice** (WEFT-RT) — M6, block attachments / voice.
 - **Search** — no verb; needs a HISTORY scan or a new command.

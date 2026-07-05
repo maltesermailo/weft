@@ -78,6 +78,69 @@ pub enum WeftEvent {
         user: String,
         status: String,
     },
+    /// `MARKED <#chan> <msgid>` — read-marker sync across own devices (§9.7).
+    Marked {
+        channel: String,
+        msgid: String,
+    },
+    /// `CHANMETA <#chan> <key> <value>` — topic / posting / … (§7).
+    Chanmeta {
+        channel: String,
+        key: String,
+        value: String,
+    },
+    /// `NS-META` — a namespace descriptor (DISCOVER result / ns update, §7).
+    NsMeta {
+        name: String,
+        visibility: String,
+        owner: Option<String>,
+        title: Option<String>,
+        description: Option<String>,
+        /// §2.4 recovery ladder announcement fields.
+        recovery_set: bool,
+        recovery_eta: Option<u64>,
+        recovery_rung: Option<u8>,
+    },
+    /// `CHANNEL-LAYOUT <#chan> <position>` with optional `category=` (§7).
+    ChannelLayout {
+        channel: String,
+        category: Option<String>,
+        position: i64,
+    },
+    /// `MORE <cursor>` — DISCOVER pagination continuation (§7).
+    More {
+        cursor: String,
+    },
+    /// `TOKEN <subject> <scope>` — a GRANT/REVOKE landed (§7).
+    Token {
+        subject: String,
+        scope: String,
+    },
+    /// `INVITED <scope> <invite-id> :<link>` — a freshly minted invite (§7).
+    Invited {
+        scope: String,
+        invite_id: String,
+        link: Option<String>,
+    },
+    /// `REPORTED <report-id>` — ack to the reporter (§7).
+    Reported {
+        report_id: String,
+    },
+    /// `REPORT-FILED …` — a queue entry for `reports` holders (§7).
+    ReportFiled {
+        report_id: String,
+        msgid: String,
+        category: String,
+        state: String,
+        scope: String,
+        reporter: Option<String>,
+    },
+    /// `REPORT-RESOLVED <report-id> <action>` (§7).
+    ReportResolved {
+        report_id: String,
+        action: String,
+        note: Option<String>,
+    },
     /// `BATCH START` — a `HISTORY` page begins (§7).
     BatchStart {
         id: String,
@@ -371,6 +434,106 @@ fn on_line(
                 status: status.to_string(),
             },
         ),
+        Event::Marked { channel, msgid } => emit(
+            app,
+            WeftEvent::Marked {
+                channel: channel.to_string(),
+                msgid: msgid.to_string(),
+            },
+        ),
+        Event::Chanmeta {
+            channel,
+            key,
+            value,
+        } => emit(
+            app,
+            WeftEvent::Chanmeta {
+                channel: channel.to_string(),
+                key,
+                value,
+            },
+        ),
+        Event::NsMeta {
+            name,
+            visibility,
+            owner,
+            title,
+            description,
+            recovery_set,
+            recovery_pending,
+            ..
+        } => emit(
+            app,
+            WeftEvent::NsMeta {
+                name: name.to_string(),
+                visibility: visibility.to_string(),
+                owner,
+                title,
+                description,
+                recovery_set,
+                recovery_eta: recovery_pending.map(|(eta, _)| eta),
+                recovery_rung: recovery_pending.map(|(_, rung)| rung),
+            },
+        ),
+        Event::ChannelLayout {
+            channel,
+            category,
+            position,
+        } => emit(
+            app,
+            WeftEvent::ChannelLayout {
+                channel: channel.to_string(),
+                category,
+                position,
+            },
+        ),
+        Event::More { cursor } => emit(app, WeftEvent::More { cursor }),
+        Event::Token { subject, scope, .. } => emit(app, WeftEvent::Token { subject, scope }),
+        Event::Invited {
+            scope,
+            invite_id,
+            link,
+            ..
+        } => emit(
+            app,
+            WeftEvent::Invited {
+                scope,
+                invite_id,
+                link,
+            },
+        ),
+        Event::Reported { report_id } => emit(app, WeftEvent::Reported { report_id }),
+        Event::ReportFiled {
+            report_id,
+            msgid,
+            category,
+            state,
+            scope,
+            reporter,
+        } => emit(
+            app,
+            WeftEvent::ReportFiled {
+                report_id,
+                msgid: msgid.to_string(),
+                category,
+                state: state.to_string(),
+                scope: scope.to_string(),
+                reporter,
+            },
+        ),
+        Event::ReportResolved {
+            report_id,
+            action,
+            note,
+            ..
+        } => emit(
+            app,
+            WeftEvent::ReportResolved {
+                report_id,
+                action: action.to_string(),
+                note,
+            },
+        ),
         Event::Edited {
             target,
             user,
@@ -509,7 +672,10 @@ pub fn password_or_default(password: &str) -> String {
 pub fn build_msg(target: &str, body: &str, reply_to: Option<String>) -> Result<String, String> {
     let target: Target = target.parse().map_err(|_| "bad target".to_string())?;
     let reply_to = match reply_to.filter(|r| !r.is_empty()) {
-        Some(r) => Some(r.parse::<MsgId>().map_err(|_| "bad reply-to msgid".to_string())?),
+        Some(r) => Some(
+            r.parse::<MsgId>()
+                .map_err(|_| "bad reply-to msgid".to_string())?,
+        ),
         None => None,
     };
     let meta = weft_proto::MsgMeta {
@@ -529,9 +695,193 @@ pub fn build_msg(target: &str, body: &str, reply_to: Option<String>) -> Result<S
 
 /// `PRESENCE <status>` — set own status (§6.1). `invisible` renders offline.
 pub fn build_presence(status: &str) -> Result<String, String> {
-    let status: weft_proto::PresenceStatus =
-        status.parse().map_err(|_| "bad presence status".to_string())?;
+    let status: weft_proto::PresenceStatus = status
+        .parse()
+        .map_err(|_| "bad presence status".to_string())?;
     Request::new(Command::Presence { status })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `GRANT <subject> <scope> <caps> [expiry=]` — delegate capabilities (§6.5).
+pub fn build_grant(subject: &str, scope: &str, caps: &str) -> Result<String, String> {
+    Request::new(Command::Grant {
+        subject: subject.to_string(),
+        scope: scope.to_string(),
+        caps: caps.to_string(),
+        expiry: None,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `REVOKE <subject> <scope> [caps=]` — withdraw capabilities (§6.5).
+pub fn build_revoke(subject: &str, scope: &str, caps: &str) -> Result<String, String> {
+    Request::new(Command::Revoke {
+        subject: subject.to_string(),
+        scope: scope.to_string(),
+        caps: (!caps.is_empty()).then(|| caps.to_string()),
+        epoch: None,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `INVITE MINT <scope>` — shareable invite for a channel/namespace (§6.5).
+pub fn build_invite_mint(scope: &str) -> Result<String, String> {
+    Request::new(Command::InviteMint {
+        scope: scope.to_string(),
+        max_uses: None,
+        expiry: None,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `INVITE REDEEM <b64>` — redeem an invite token (§6.5).
+pub fn build_invite_redeem(token: &str) -> Result<String, String> {
+    // Accept a full `weft://<net>/i/<b64>` link or a bare token.
+    let token = token.rsplit('/').next().unwrap_or(token).to_string();
+    Request::new(Command::InviteRedeem { token })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `REPORT <msgid> <category> [scope] [:note]` — flag a message (§6.7).
+pub fn build_report(
+    msgid: &str,
+    category: &str,
+    scope: &str,
+    note: Option<String>,
+) -> Result<String, String> {
+    let msgid: MsgId = msgid.parse().map_err(|_| "bad msgid".to_string())?;
+    let scope: weft_proto::ReportScope = scope.parse().map_err(|_| "bad scope".to_string())?;
+    Request::new(Command::Report {
+        msgid,
+        category: category.to_string(),
+        scope,
+        note: note.filter(|n| !n.is_empty()),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `REPORTS LIST <scope> [status=]` — the handler queue (§6.7).
+pub fn build_reports_list(scope: &str, status: Option<String>) -> Result<String, String> {
+    let status = match status.filter(|s| !s.is_empty()) {
+        Some(s) => Some(s.parse().map_err(|_| "bad status".to_string())?),
+        None => None,
+    };
+    Request::new(Command::ReportsList {
+        scope: scope.to_string(),
+        status,
+        cursor: None,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `REPORTS RESOLVE <report-id> <action> [:note]` (§6.7).
+pub fn build_reports_resolve(
+    report_id: &str,
+    action: &str,
+    note: Option<String>,
+) -> Result<String, String> {
+    let action: weft_proto::ResolveAction = action.parse().map_err(|_| "bad action".to_string())?;
+    Request::new(Command::ReportsResolve {
+        report_id: report_id.to_string(),
+        action,
+        note: note.filter(|n| !n.is_empty()),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `MARK <#chan> <msgid>` — read marker, synced across own devices (§6.3).
+pub fn build_mark(channel: &str, msgid: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    let msgid: MsgId = msgid.parse().map_err(|_| "bad msgid".to_string())?;
+    Request::new(Command::Mark { channel, msgid })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `MEMBERS <#chan>` — request the roster snapshot (§6.3).
+pub fn build_members(channel: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::Members {
+        channel,
+        cursor: None,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `PART <#chan>` — leave a channel (§6.3).
+pub fn build_part(channel: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::Part {
+        channel,
+        reason: None,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `CHANNEL CREATE <#chan>` — default retention (§6.3).
+pub fn build_channel_create(channel: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::ChannelCreate {
+        channel,
+        policy: None,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `CHANNEL DELETE <#chan> <#chan>` — confirmed by repetition (§6.3).
+pub fn build_channel_delete(channel: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::ChannelDelete {
+        channel: channel.clone(),
+        confirm: channel,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `CHANNEL META <#chan> <key> :<value>` — topic/view-gated/posting/… (§6.3).
+pub fn build_channel_meta(channel: &str, key: &str, value: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::ChannelMeta {
+        channel,
+        key: key.to_string(),
+        value: value.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `DISCOVER [cursor]` — public namespace directory (§6.2).
+pub fn build_discover(cursor: Option<String>) -> Result<String, String> {
+    Request::new(Command::Discover {
+        cursor: cursor.filter(|c| !c.is_empty()),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `CHANNELS <ns>` — a namespace's ordered channel layout (§6.2).
+pub fn build_channels(namespace: &str) -> Result<String, String> {
+    let namespace: weft_proto::NamespaceName =
+        namespace.parse().map_err(|_| "bad namespace".to_string())?;
+    Request::new(Command::Channels { namespace })
         .serialize()
         .map_err(|e| e.to_string())
 }
@@ -597,7 +947,10 @@ pub fn build_react(msgid: &str, emoji: &str, add: bool) -> Result<String, String
 pub fn build_history(target: &str, before: Option<String>) -> Result<String, String> {
     let target: Target = target.parse().map_err(|_| "bad target".to_string())?;
     let before = match before.filter(|b| !b.is_empty()) {
-        Some(b) => Some(b.parse::<MsgId>().map_err(|_| "bad before msgid".to_string())?),
+        Some(b) => Some(
+            b.parse::<MsgId>()
+                .map_err(|_| "bad before msgid".to_string())?,
+        ),
         None => None,
     };
     Request::new(Command::History {
@@ -606,6 +959,99 @@ pub fn build_history(target: &str, before: Option<String>) -> Result<String, Str
         after: None,
         limit: Some(50),
         thread: None,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NS CREATE <name> <tier>` with `@root=<b64-pubkey>` (§6.2). The keypair is
+/// generated + stored by [`crate::keys`]; only the public key rides the wire.
+pub fn build_ns_create(name: &str, visibility: &str, root_key: &str) -> Result<String, String> {
+    let name: weft_proto::NamespaceName =
+        name.parse().map_err(|_| "bad namespace name".to_string())?;
+    let visibility: weft_proto::Visibility =
+        visibility.parse().map_err(|_| "bad visibility".to_string())?;
+    Request::new(Command::NsCreate {
+        name,
+        visibility,
+        root_key: root_key.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NS META <name> <key> :<value>` — title/description/icon (§6.2).
+pub fn build_ns_meta(name: &str, key: &str, value: &str) -> Result<String, String> {
+    Request::new(Command::NsMeta {
+        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        key: key.to_string(),
+        value: value.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NS VISIBILITY <name> <tier>` (§6.2).
+pub fn build_ns_visibility(name: &str, visibility: &str) -> Result<String, String> {
+    Request::new(Command::NsVisibility {
+        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        visibility: visibility.parse().map_err(|_| "bad visibility".to_string())?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NS DELEGATE <name> <subject> <caps>` — delegate ns caps (§6.2).
+pub fn build_ns_delegate(name: &str, subject: &str, caps: &str) -> Result<String, String> {
+    Request::new(Command::NsDelegate {
+        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        subject: subject.to_string(),
+        caps: caps.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NS DELETE <name> <name>` — confirmed by repetition (§6.2).
+pub fn build_ns_delete(name: &str) -> Result<String, String> {
+    let name: weft_proto::NamespaceName =
+        name.parse().map_err(|_| "bad namespace".to_string())?;
+    Request::new(Command::NsDelete {
+        name: name.clone(),
+        confirm: name,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NS TRANSFER <name> <account>` with `@sig=` — root-signed succession (§2.4).
+/// The signature is produced from the stored root key by the caller.
+pub fn build_ns_transfer(name: &str, new_owner: &str, signature: &str) -> Result<String, String> {
+    Request::new(Command::NsTransfer {
+        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        new_owner: new_owner.parse().map_err(|_| "bad account".to_string())?,
+        signature: signature.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NS RECOVERY SET <name> <m> <keys>` — designate the M-of-N quorum (§2.4).
+pub fn build_ns_recovery_set(name: &str, m: u32, keys: &str) -> Result<String, String> {
+    Request::new(Command::NsRecoverySet {
+        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        m,
+        keys: keys.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NS RECOVERY CANCEL <name>` with `@sig=` — root veto of a pending recovery.
+pub fn build_ns_recovery_cancel(name: &str, signature: &str) -> Result<String, String> {
+    Request::new(Command::NsRecoveryCancel {
+        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        signature: signature.to_string(),
     })
     .serialize()
     .map_err(|e| e.to_string())

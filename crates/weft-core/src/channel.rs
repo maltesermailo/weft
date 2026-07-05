@@ -62,6 +62,10 @@ enum Cmd {
     Subscribe {
         reply: oneshot::Sender<broadcast::Receiver<ChannelEvent>>,
     },
+    /// §6.3 MEMBERS: snapshot the current roster (deduped accounts).
+    Roster {
+        reply: oneshot::Sender<Vec<Account>>,
+    },
     Publish {
         session: SessionId,
         body: String,
@@ -161,6 +165,16 @@ impl ChannelHandle {
         let (reply, ack) = oneshot::channel();
         self.inbox.send(Cmd::Subscribe { reply }).await.ok()?;
         ack.await.ok()
+    }
+
+    /// §6.3 MEMBERS: the current roster (deduped accounts). Empty if the actor
+    /// is gone.
+    pub async fn roster(&self) -> Vec<Account> {
+        let (reply, ack) = oneshot::channel();
+        if self.inbox.send(Cmd::Roster { reply }).await.is_err() {
+            return Vec::new();
+        }
+        ack.await.unwrap_or_default()
     }
 
     pub async fn publish(&self, session: SessionId, body: String, meta: MsgMeta) {
@@ -311,6 +325,17 @@ impl Actor {
             }
             Cmd::Subscribe { reply } => {
                 let _ = reply.send(self.events.subscribe());
+            }
+            Cmd::Roster { reply } => {
+                // Dedup: one account may hold several sessions/devices.
+                let mut seen = std::collections::HashSet::new();
+                let roster = self
+                    .members
+                    .values()
+                    .filter(|account| seen.insert((*account).clone()))
+                    .cloned()
+                    .collect();
+                let _ = reply.send(roster);
             }
             Cmd::Part { session } => {
                 if let Some(account) = self.members.remove(&session) {

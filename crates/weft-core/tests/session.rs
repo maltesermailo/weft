@@ -2361,3 +2361,54 @@ async fn ns_join_with_no_visible_channels_is_no_such_target() {
     let reply = bob.expect_err(ErrCode::NoSuchTarget).await;
     assert_eq!(reply.label.as_deref(), Some("j"));
 }
+
+// ---- §6.3 MEMBERS roster snapshot ----
+
+#[tokio::test]
+async fn members_returns_the_full_roster() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let _bob = joined(&ctx, "bob", "#general").await;
+    ada.recv().await; // bob's MEMBER join broadcast
+
+    ada.send("@label=m MEMBERS #general");
+    let start = ada.recv().await;
+    assert!(
+        matches!(start.event, Event::BatchStart { .. }),
+        "got {start:?}"
+    );
+    assert_eq!(start.label.as_deref(), Some("m"), "batch echoes the label");
+
+    let mut names = std::collections::HashSet::new();
+    loop {
+        let ev = ada.recv().await;
+        match ev.event {
+            Event::Member {
+                user,
+                action: MemberAction::Join,
+                count: Some(2),
+                ..
+            } => {
+                names.insert(user.account.as_str().to_string());
+            }
+            Event::BatchEnd { .. } => break,
+            other => panic!("unexpected in roster batch: {other:?}"),
+        }
+    }
+    assert_eq!(
+        names,
+        ["ada", "bob"].into_iter().map(String::from).collect()
+    );
+}
+
+#[tokio::test]
+async fn members_requires_membership() {
+    let ctx = ctx(&["#general"]);
+    let mut eve = ready(&ctx, "eve").await; // never joined
+    eve.send("@label=m MEMBERS #general");
+    // Same as MARK on a channel you're not in: join first (CAP-REQUIRED view).
+    let Event::Err(e) = eve.expect_err(ErrCode::CapRequired).await.event else {
+        panic!()
+    };
+    assert_eq!(e.context.as_deref(), Some("view"));
+}

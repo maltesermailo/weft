@@ -682,6 +682,9 @@ impl<S: ControlStream> Session<S> {
                 Ok(Flow::Continue)
             }
             Command::Mark { channel, msgid } => self.on_mark(label, channel, msgid, account).await,
+            // Pagination (`cursor`) isn't needed at reference channel sizes —
+            // the roster is served in one batch.
+            Command::Members { channel, .. } => self.on_members(label, channel).await,
             // §6.5 / §6.3 capability verbs.
             Command::Grant {
                 subject,
@@ -1514,6 +1517,49 @@ impl<S: ControlStream> Session<S> {
             },
         )
         .await
+    }
+
+    /// §6.3 MEMBERS: a roster snapshot for a member. Framed as a `BATCH` of
+    /// `MEMBER … join` (reusing the join event — the client folds each into its
+    /// roster). Membership-gated; a hidden channel stays `NO-SUCH-TARGET`.
+    async fn on_members(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+    ) -> io::Result<Flow> {
+        let Some(joined) = self.joined.get(&channel) else {
+            return self.not_member_cap(label, &channel, "view").await;
+        };
+        let roster = joined.handle.roster().await;
+        let count = roster.len() as u64;
+        self.batches += 1;
+        let id = format!("m{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for account in roster {
+            let user = UserRef::new(account, self.ctx.info.network.clone());
+            self.send_event(
+                None,
+                Event::Member {
+                    channel: channel.clone(),
+                    user,
+                    action: MemberAction::Join,
+                    display: None,
+                    count: Some(count),
+                },
+            )
+            .await?;
+        }
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+                compacted: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
     }
 
     /// §6.3 MARK: persist the read marker, echo MARKED (the direct

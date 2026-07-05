@@ -96,6 +96,11 @@ pub enum Command {
     },
     /// `MARK <#chan> <msgid>` — read marker (§6.3).
     Mark { channel: ChannelName, msgid: MsgId },
+    /// `MEMBERS <#chan> [cursor]` — roster snapshot (§6.3), membership-gated.
+    Members {
+        channel: ChannelName,
+        cursor: Option<String>,
+    },
     /// `MSG <#chan|@user> [:body]` — empty body legal iff attachments (§6.4;
     /// enforced by the session layer, not the codec).
     Msg {
@@ -473,6 +478,13 @@ impl Command {
                 Ok(Command::Mark {
                     channel: args.req("channel")?.parse()?,
                     msgid: args.req("msgid")?.parse()?,
+                })
+            }
+            "MEMBERS" => {
+                let mut args = Args::new(line, "MEMBERS");
+                Ok(Command::Members {
+                    channel: args.req("channel")?.parse()?,
+                    cursor: args.opt().map(str::to_string),
                 })
             }
             "MSG" => {
@@ -1019,6 +1031,13 @@ impl Command {
             Command::Mark { channel, msgid } => {
                 ("MARK", vec![channel.to_string(), msgid.to_string()], None)
             }
+            Command::Members { channel, cursor } => (
+                "MEMBERS",
+                std::iter::once(channel.to_string())
+                    .chain(cursor.clone())
+                    .collect(),
+                None,
+            ),
             Command::Msg { target, body, meta } => {
                 meta.write_tags(&mut tags)?;
                 ("MSG", vec![target.to_string()], body.clone())
@@ -1533,6 +1552,14 @@ mod tests {
         round_trip(&Request::new(Command::Mark {
             channel: "#general".parse().unwrap(),
             msgid: MSGID.parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::Members {
+            channel: "#general".parse().unwrap(),
+            cursor: None,
+        }));
+        round_trip(&Request::new(Command::Members {
+            channel: "#general".parse().unwrap(),
+            cursor: Some("c2".to_string()),
         }));
         assert_eq!(
             Request::parse("JOIN"),
