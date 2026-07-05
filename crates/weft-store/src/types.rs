@@ -111,6 +111,9 @@ pub struct ChannelRecord {
     pub policy: RetentionPolicy,
     pub topic: Option<String>,
     pub view_gated: bool,
+    /// `restricted` posting mode (§6.7): when set, `MSG` requires the `send`
+    /// capability (grant/revoke governs who may post). Default `false` = open.
+    pub restricted: bool,
     /// Category name (a free label) grouping channels in a namespace.
     pub category: Option<String>,
     /// Sort order within the (namespace, category); default 0.
@@ -254,6 +257,37 @@ pub struct PeerRecord {
     pub severed: bool,
     pub created_ms: u64,
     pub updated_ms: u64,
+}
+
+/// A moderation deny (§6.7): a mute or ban on `account` at `scope`
+/// (`#chan|ns:<name>|*`). A mute denies `send`; a ban also denies `JOIN`.
+/// Enforced against the channel's covering scopes (channel, its namespace,
+/// `*`), so a `*`-scope record is a network-wide (global-moderator) action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModRecord {
+    pub scope: String,
+    pub account: Account,
+    pub kind: ModKind,
+    /// The moderator who set it.
+    pub actor: String,
+    pub reason: Option<String>,
+    pub at_ms: u64,
+}
+
+/// The two persistent moderation states (kick is transient — no record).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModKind {
+    Mute,
+    Ban,
+}
+
+impl ModKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ModKind::Mute => "mute",
+            ModKind::Ban => "ban",
+        }
+    }
 }
 
 /// An operator blocklist entry (§11.6): `{network, private reason, added,

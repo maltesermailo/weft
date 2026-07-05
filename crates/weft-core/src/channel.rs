@@ -113,6 +113,12 @@ enum Cmd {
         origin: SessionId,
         event: Box<Event>,
     },
+    /// §6.7 force-remove an account's session(s) (kick/ban). Broadcasts a
+    /// `MEMBER part`; the ejected session cleans itself up when it sees its
+    /// own part.
+    Eject {
+        account: Account,
+    },
 }
 
 /// A broadcast origin no real session ever has (session ids start at 1), so an
@@ -143,6 +149,11 @@ impl ChannelHandle {
 
     pub async fn part(&self, session: SessionId) {
         let _ = self.inbox.send(Cmd::Part { session }).await;
+    }
+
+    /// §6.7 kick/ban: force-remove an account's session(s) from the channel.
+    pub async fn eject(&self, account: Account) {
+        let _ = self.inbox.send(Cmd::Eject { account }).await;
     }
 
     /// §11 subscribe a bridge session to the broadcast (no membership).
@@ -460,6 +471,28 @@ impl Actor {
                 self.broadcast(origin, *event);
             }
             Cmd::Announce { origin, event } => self.broadcast(origin, *event),
+            Cmd::Eject { account } => {
+                let sessions: Vec<SessionId> = self
+                    .members
+                    .iter()
+                    .filter(|(_, a)| **a == account)
+                    .map(|(session, _)| *session)
+                    .collect();
+                if sessions.is_empty() {
+                    return;
+                }
+                let user = self.user(&account);
+                for session in sessions {
+                    self.members.remove(&session);
+                }
+                let count = self.members.len() as u64;
+                // SENTINEL origin so every member — including the ejected
+                // session and the acting moderator — receives the part.
+                self.broadcast(
+                    SENTINEL_ORIGIN,
+                    member_event(&self.name, user, MemberAction::Part, count),
+                );
+            }
             Cmd::SetPolicy { session, policy } => {
                 self.policy = policy;
                 // Members learn the new retention (§5.2: policy visible);

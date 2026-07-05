@@ -17,13 +17,13 @@ use weft_proto::{
 
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, NamespaceStore,
-    NetblockStore, PeerStore, ReportStore, HOLD_RADIUS,
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, ModerationStore,
+    NamespaceStore, NetblockStore, PeerStore, ReportStore, HOLD_RADIUS,
 };
 use crate::types::{
-    ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, NamespaceRecord,
-    NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome, ReportRecord,
-    ReportResolution, RootHistoryEntry, Scope, Verification,
+    ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord,
+    NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome,
+    ReportRecord, ReportResolution, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 
@@ -578,6 +578,20 @@ impl ChannelStore for PgStore {
         Ok(())
     }
 
+    async fn set_channel_restricted(
+        &self,
+        name: &ChannelName,
+        restricted: bool,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE weft_channels SET restricted = $2 WHERE name = $1")
+            .bind(name.as_str())
+            .bind(restricted)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
     async fn delete_channel(&self, name: &ChannelName) -> Result<bool, StoreError> {
         let result = sqlx::query("DELETE FROM weft_channels WHERE name = $1")
             .bind(name.as_str())
@@ -638,6 +652,7 @@ fn channel_from_row(row: &sqlx::postgres::PgRow) -> Result<ChannelRecord, StoreE
             .map_err(|_| StoreError::Backend("corrupt channel policy".to_string()))?,
         topic: row.get("topic"),
         view_gated: row.get("view_gated"),
+        restricted: row.get("restricted"),
         category: row.get("category"),
         position: row.get::<Option<i64>, _>("position").unwrap_or(0),
     })
@@ -1497,6 +1512,95 @@ fn peer_from_row(row: &sqlx::postgres::PgRow) -> Result<PeerRecord, StoreError> 
         created_ms: row.get::<i64, _>("created_ms") as u64,
         updated_ms: row.get::<i64, _>("updated_ms") as u64,
     })
+}
+
+#[async_trait]
+impl ModerationStore for PgStore {
+    async fn set_moderation(&self, record: ModRecord) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO weft_moderation (scope, account, kind, actor, reason, at_ms)
+            VALUES ($1,$2,$3,$4,$5,$6)
+            ON CONFLICT (scope, account, kind) DO UPDATE SET
+                actor = EXCLUDED.actor, reason = EXCLUDED.reason, at_ms = EXCLUDED.at_ms
+            "#,
+        )
+        .bind(&record.scope)
+        .bind(record.account.as_str())
+        .bind(record.kind.as_str())
+        .bind(&record.actor)
+        .bind(&record.reason)
+        .bind(record.at_ms as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn clear_moderation(
+        &self,
+        scope: &str,
+        account: &Account,
+        kind: ModKind,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "DELETE FROM weft_moderation WHERE scope = $1 AND account = $2 AND kind = $3",
+        )
+        .bind(scope)
+        .bind(account.as_str())
+        .bind(kind.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn is_moderated(
+        &self,
+        account: &Account,
+        scopes: &[String],
+        kind: ModKind,
+    ) -> Result<bool, StoreError> {
+        if scopes.is_empty() {
+            return Ok(false);
+        }
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM weft_moderation WHERE account = $1 AND kind = $2 AND scope = ANY($3))",
+        )
+        .bind(account.as_str())
+        .bind(kind.as_str())
+        .bind(scopes)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend_err)
+    }
+
+    async fn list_moderation(&self, scope: &str) -> Result<Vec<ModRecord>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM weft_moderation WHERE scope = $1 ORDER BY account")
+            .bind(scope)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter()
+            .map(|row| {
+                let kind = match row.get::<&str, _>("kind") {
+                    "ban" => ModKind::Ban,
+                    _ => ModKind::Mute,
+                };
+                Ok(ModRecord {
+                    scope: row.get("scope"),
+                    account: row
+                        .get::<&str, _>("account")
+                        .parse()
+                        .map_err(|_| StoreError::Backend("corrupt row: account".to_string()))?,
+                    kind,
+                    actor: row.get("actor"),
+                    reason: row.get("reason"),
+                    at_ms: row.get::<i64, _>("at_ms") as u64,
+                })
+            })
+            .collect()
+    }
 }
 
 #[async_trait]

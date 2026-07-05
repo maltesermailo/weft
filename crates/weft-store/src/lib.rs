@@ -26,13 +26,13 @@ pub use memory::MemoryStore;
 #[cfg(feature = "postgres")]
 pub use postgres::PgStore;
 pub use traits::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, NamespaceStore,
-    NetblockStore, PeerStore, ReportStore, HOLD_RADIUS,
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, ModerationStore,
+    NamespaceStore, NetblockStore, PeerStore, ReportStore, HOLD_RADIUS,
 };
 pub use types::{
-    ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, NamespaceRecord,
-    NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome, ReportRecord,
-    ReportResolution, RootHistoryEntry, Scope, Verification,
+    ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord,
+    NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome,
+    ReportRecord, ReportResolution, RootHistoryEntry, Scope, Verification,
 };
 
 use thiserror::Error;

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use weft_crypto::{Attestation, Capability, Grant, Keypair, PublicKey, Subject, TokenScope};
 use weft_proto::{Account, ChannelName, NamespaceName, NetworkName, RetentionPolicy};
 use weft_store::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, NamespaceStore,
-    NetblockStore, PeerStore, ReportStore, StoreError,
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, ModerationStore,
+    NamespaceStore, NetblockStore, PeerStore, ReportStore, StoreError,
 };
 
 use crate::accounts::Accounts;
@@ -90,6 +90,8 @@ pub struct ServerCtx {
     pub(crate) peers: Arc<dyn PeerStore>,
     /// Operator network blocklist (§11.6).
     pub(crate) netblocks: Arc<dyn NetblockStore>,
+    /// Mute/ban deny-list (§6.7).
+    pub(crate) moderation: Arc<dyn ModerationStore>,
     /// §11 federation config: pinned peer keys + auto-accept.
     pub(crate) federation: FederationConfig,
     /// §2.2 namespace creation: `open` (any account, up to `ns_quota`) or
@@ -132,6 +134,7 @@ impl ServerCtx {
             + ReportStore
             + PeerStore
             + NetblockStore
+            + ModerationStore
             + 'static,
     {
         let events: Arc<dyn EventStore> = store.clone();
@@ -142,6 +145,7 @@ impl ServerCtx {
         let reports: Arc<dyn ReportStore> = store.clone();
         let peers: Arc<dyn PeerStore> = store.clone();
         let netblocks: Arc<dyn NetblockStore> = store.clone();
+        let moderation: Arc<dyn ModerationStore> = store.clone();
         let namespaces: Arc<dyn NamespaceStore> = store;
         let registry = Registry::spawn(channels, info.network.clone(), Arc::clone(&events));
         let directory = crate::directory::spawn(
@@ -167,6 +171,7 @@ impl ServerCtx {
             ns_quota,
             peers,
             netblocks,
+            moderation,
             federation,
             operators: operators.into_iter().collect(),
             identity,
@@ -328,6 +333,19 @@ impl ServerCtx {
     pub(crate) fn next_session_id(&self) -> u64 {
         self.next_session.fetch_add(1, Ordering::Relaxed)
     }
+}
+
+/// The scopes a channel's moderation checks consult, widest-covering last: the
+/// channel itself, its namespace (if any), and `*`. A mute/ban at any of these
+/// covers the channel, so a `*`-scope record is a network-wide action and an
+/// `ns:` one is namespace-wide (§6.7).
+pub(crate) fn covering_scopes(channel: &ChannelName) -> Vec<String> {
+    let mut scopes = vec![channel.to_string()];
+    if let Some(ns) = channel_namespace(channel) {
+        scopes.push(format!("ns:{ns}"));
+    }
+    scopes.push("*".to_string());
+    scopes
 }
 
 /// The namespace a channel belongs to, if any (`#n/chan` → n). Top-level

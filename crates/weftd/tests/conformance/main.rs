@@ -774,3 +774,36 @@ async fn irc_gateway_register_join_namespace_and_chat() {
 
     server.shutdown().await;
 }
+
+// ---- §6.7 moderation ----
+
+#[tokio::test]
+async fn moderation_mute_refuses_send_over_quic() {
+    let server = start_with(&["#general"], |config| {
+        config.operators = vec!["op".to_string()];
+    })
+    .await;
+    let mut bob = QuicClient::connect(server.quic_addr).await;
+    bob.ready("bob").await;
+    bob.join("#general").await;
+
+    // An operator (global moderator) mutes bob.
+    let mut op = QuicClient::connect(server.quic_addr).await;
+    op.ready("op").await;
+    op.send("@label=m MUTE #general bob :spamming").await;
+    let reply = op.recv().await;
+    assert!(
+        matches!(&reply.event, Event::Moderated { action, .. } if *action == weft_proto::ModAction::Mute),
+        "moderator gets MODERATED, got {reply:?}"
+    );
+
+    // bob's next message is refused with FORBIDDEN muted.
+    bob.send("MSG #general :hello").await;
+    let err = bob.recv().await;
+    assert!(
+        matches!(&err.event, Event::Err(e) if e.code == ErrCode::Forbidden && e.context.as_deref() == Some("muted")),
+        "muted send must be refused, got {err:?}"
+    );
+
+    server.shutdown().await;
+}

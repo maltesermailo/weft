@@ -79,6 +79,14 @@ pub enum WeftEvent {
         target: String,
         msgid: String,
     },
+    /// §6.7 a moderation action (mute/ban/kick) landed.
+    Moderated {
+        scope: String,
+        account: String,
+        action: String,
+        by: Option<String>,
+        reason: Option<String>,
+    },
     Error {
         code: String,
         text: String,
@@ -188,7 +196,12 @@ fn on_line(
     let reply = match Reply::parse(raw) {
         Ok(reply) => reply,
         Err(_) => {
-            emit(app, WeftEvent::Raw { line: raw.to_string() });
+            emit(
+                app,
+                WeftEvent::Raw {
+                    line: raw.to_string(),
+                },
+            );
             return None;
         }
     };
@@ -287,6 +300,22 @@ fn on_line(
                 msgid: msgid.to_string(),
             },
         ),
+        Event::Moderated {
+            scope,
+            account,
+            action,
+            by,
+            reason,
+        } => emit(
+            app,
+            WeftEvent::Moderated {
+                scope,
+                account: account.to_string(),
+                action: action.to_string(),
+                by: by.map(|a| a.to_string()),
+                reason,
+            },
+        ),
         Event::Err(e) => emit(
             app,
             WeftEvent::Error {
@@ -295,7 +324,12 @@ fn on_line(
             },
         ),
         // Batches, reactions, presence, etc. — surfaced raw for now.
-        _ => emit(app, WeftEvent::Raw { line: raw.to_string() }),
+        _ => emit(
+            app,
+            WeftEvent::Raw {
+                line: raw.to_string(),
+            },
+        ),
     }
     None
 }
@@ -304,7 +338,12 @@ async fn send(stream: &mut QuicControlStream, app: &AppHandle, line: &str) -> Re
     match stream.send_line(line).await {
         Ok(()) => Ok(()),
         Err(e) => {
-            emit(app, WeftEvent::Closed { reason: format!("send failed: {e}") });
+            emit(
+                app,
+                WeftEvent::Closed {
+                    reason: format!("send failed: {e}"),
+                },
+            );
             Err(())
         }
     }

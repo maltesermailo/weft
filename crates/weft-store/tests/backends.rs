@@ -10,9 +10,9 @@ use weft_proto::{
 };
 use weft_store::{
     materialize, AccountStore, CapabilityStore, ChannelStore, EventKind, EventRecord, EventStore,
-    HistoryItem, InviteRecord, InviteStore, MemoryStore, NamespaceRecord, NamespaceStore,
-    NetblockRecord, NetblockStore, Page, PeerRecord, PeerStore, PendingRecovery, RedeemOutcome,
-    ReportRecord, ReportResolution, ReportStore, Scope,
+    HistoryItem, InviteRecord, InviteStore, MemoryStore, ModKind, ModRecord, ModerationStore,
+    NamespaceRecord, NamespaceStore, NetblockRecord, NetblockStore, Page, PeerRecord, PeerStore,
+    PendingRecovery, RedeemOutcome, ReportRecord, ReportResolution, ReportStore, Scope,
 };
 
 fn user(name: &str) -> UserRef {
@@ -68,7 +68,8 @@ where
         + NamespaceStore
         + ReportStore
         + PeerStore
-        + NetblockStore,
+        + NetblockStore
+        + ModerationStore,
 {
     let chan: Scope = Scope::Channel(format!("#suite-{tag}").parse().unwrap());
     let ada: Account = format!("ada-{tag}").parse().unwrap();
@@ -871,6 +872,60 @@ where
     assert!(store.remove_netblock(&evil).await.unwrap());
     assert!(!store.is_netblocked(&evil).await.unwrap());
     assert!(!store.remove_netblock(&evil).await.unwrap());
+
+    // ---- §6.7 moderation deny-list ----
+    let bob: Account = format!("bob-{tag}").parse().unwrap();
+    let chan_scope = format!("#suite-{tag}");
+    let ns_scope = format!("ns:suite-{tag}");
+    // Covering scopes a channel MSG checks against.
+    let covering = vec![chan_scope.clone(), ns_scope.clone(), "*".to_string()];
+
+    assert!(!store
+        .is_moderated(&bob, &covering, ModKind::Mute)
+        .await
+        .unwrap());
+    // A namespace-scope mute covers the channel (a namespace moderator).
+    store
+        .set_moderation(ModRecord {
+            scope: ns_scope.clone(),
+            account: bob.clone(),
+            kind: ModKind::Mute,
+            actor: "mod".to_string(),
+            reason: Some("spam".to_string()),
+            at_ms: 1_000,
+        })
+        .await
+        .unwrap();
+    assert!(store
+        .is_moderated(&bob, &covering, ModKind::Mute)
+        .await
+        .unwrap());
+    // A mute is not a ban.
+    assert!(!store
+        .is_moderated(&bob, &covering, ModKind::Ban)
+        .await
+        .unwrap());
+    // Listing by the exact scope.
+    let list = store.list_moderation(&ns_scope).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].reason.as_deref(), Some("spam"));
+    // Clearing at the channel scope doesn't touch the ns-scope mute.
+    assert!(!store
+        .clear_moderation(&chan_scope, &bob, ModKind::Mute)
+        .await
+        .unwrap());
+    assert!(store
+        .is_moderated(&bob, &covering, ModKind::Mute)
+        .await
+        .unwrap());
+    assert!(store
+        .clear_moderation(&ns_scope, &bob, ModKind::Mute)
+        .await
+        .unwrap());
+    assert!(!store
+        .is_moderated(&bob, &covering, ModKind::Mute)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]

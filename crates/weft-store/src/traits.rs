@@ -9,9 +9,9 @@ use weft_proto::NamespaceName;
 use weft_proto::NetworkName;
 
 use crate::types::{
-    ChannelRecord, EventRecord, GrantRecord, InviteRecord, NamespaceRecord, NetblockRecord, Page,
-    PeerRecord, PendingRecovery, RedeemOutcome, ReportRecord, ReportResolution, RootHistoryEntry,
-    Scope, Verification,
+    ChannelRecord, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord, NamespaceRecord,
+    NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome, ReportRecord,
+    ReportResolution, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 
@@ -126,6 +126,13 @@ pub trait ChannelStore: Send + Sync {
         &self,
         name: &ChannelName,
         gated: bool,
+    ) -> Result<(), StoreError>;
+
+    /// CHANNEL META posting (§6.7) — `restricted` requires the `send` cap.
+    async fn set_channel_restricted(
+        &self,
+        name: &ChannelName,
+        restricted: bool,
     ) -> Result<(), StoreError>;
 
     /// CHANNEL DELETE. False = no such channel.
@@ -341,6 +348,34 @@ pub trait PeerStore: Send + Sync {
 
     /// Hard-remove a peering. False = no such peer.
     async fn remove_peer(&self, peer: &NetworkName) -> Result<bool, StoreError>;
+}
+
+/// Moderation deny-list (§6.7): mutes + bans keyed by `(scope, account)`.
+#[async_trait]
+pub trait ModerationStore: Send + Sync {
+    /// Set (or refresh) a mute/ban. Replaces any existing record for the same
+    /// `(scope, account, kind)`.
+    async fn set_moderation(&self, record: ModRecord) -> Result<(), StoreError>;
+
+    /// Clear a mute/ban. False = there was none.
+    async fn clear_moderation(
+        &self,
+        scope: &str,
+        account: &Account,
+        kind: ModKind,
+    ) -> Result<bool, StoreError>;
+
+    /// Is `account` under a record of `kind` at any of `scopes` (the covering
+    /// set: channel, its namespace, `*`)?
+    async fn is_moderated(
+        &self,
+        account: &Account,
+        scopes: &[String],
+        kind: ModKind,
+    ) -> Result<bool, StoreError>;
+
+    /// All active records at a scope (for a moderation list).
+    async fn list_moderation(&self, scope: &str) -> Result<Vec<ModRecord>, StoreError>;
 }
 
 /// Operator network blocklist (§11.6). Name-keyed (invariant 7).

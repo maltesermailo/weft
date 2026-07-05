@@ -27,6 +27,14 @@ export type WeftEvent =
   | { kind: "policy"; channel: string; policy: string }
   | { kind: "edited"; target: string; sender: string; msgid: string; body: string }
   | { kind: "deleted"; target: string; msgid: string }
+  | {
+      kind: "moderated";
+      scope: string;
+      account: string;
+      action: string;
+      by: string | null;
+      reason: string | null;
+    }
   | { kind: "error"; code: string; text: string }
   | { kind: "closed"; reason: string }
   | { kind: "raw"; line: string };

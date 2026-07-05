@@ -127,6 +127,14 @@
           });
         }
         break;
+      case "moderated": {
+        // Surface the action as a system line in the affected channel.
+        const ch = e.scope.startsWith("#") ? ensureChannel(e.scope) : activeChannel;
+        const who = e.by ? ` by ${e.by}` : "";
+        const why = e.reason ? ` (${e.reason})` : "";
+        ch?.messages.push({ author: "", body: `${e.account} ${e.action}d${who} — ${e.scope}${why}`, time: clock(), own: false, system: true });
+        break;
+      }
       case "error":
         if (activeChannel) activeChannel.messages.push({ author: "", body: `${e.code}: ${e.text}`, time: clock(), own: false, system: true });
         break;

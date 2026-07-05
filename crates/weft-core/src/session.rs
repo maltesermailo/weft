@@ -19,19 +19,19 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use weft_crypto::{Capability, PublicKey, SignedManifest, Subject, TokenScope};
 use weft_proto::{
     Account, BridgeState, ChannelName, Command, ContentState, ErrCode, ErrEvent, Event,
-    HistoryMode, Line, MediaMode, MemberAction, MsgId, MsgMeta, NetworkName, ParseError, Reply,
-    ReportScope, ReportStatus, Request, ResolveAction, RetentionPolicy, Target, Ulid, UserRef,
-    Visibility, MAX_LABEL_BYTES,
+    HistoryMode, Line, MediaMode, MemberAction, ModAction, MsgId, MsgMeta, NetworkName, ParseError,
+    Reply, ReportScope, ReportStatus, Request, ResolveAction, RetentionPolicy, Target, Ulid,
+    UserRef, Visibility, MAX_LABEL_BYTES,
 };
 
 use weft_store::{
-    EventKind, EventRecord, InviteRecord, NetblockRecord, PeerRecord, RedeemOutcome, ReportRecord,
-    ReportResolution, Scope,
+    EventKind, EventRecord, InviteRecord, ModKind, ModRecord, NetblockRecord, PeerRecord,
+    RedeemOutcome, ReportRecord, ReportResolution, Scope,
 };
 
 use crate::bridge;
 use crate::channel::{ChannelEvent, ChannelHandle};
-use crate::context::{channel_namespace, ServerCtx, PROTOCOL_VERSION};
+use crate::context::{channel_namespace, covering_scopes, ServerCtx, PROTOCOL_VERSION};
 use crate::directory::DirectEvent;
 use crate::stream::ControlStream;
 
@@ -799,6 +799,42 @@ impl<S: ControlStream> Session<S> {
                 self.on_reports_resolve(label, report_id, action, note, account)
                     .await
             }
+            // §6.7 moderation. `account` here is the acting moderator.
+            Command::Mute {
+                scope,
+                account: target,
+                reason,
+            } => {
+                self.on_moderate(label, scope, target, ModKind::Mute, true, reason, account)
+                    .await
+            }
+            Command::Unmute {
+                scope,
+                account: target,
+            } => {
+                self.on_moderate(label, scope, target, ModKind::Mute, false, None, account)
+                    .await
+            }
+            Command::Ban {
+                scope,
+                account: target,
+                reason,
+            } => {
+                self.on_moderate(label, scope, target, ModKind::Ban, true, reason, account)
+                    .await
+            }
+            Command::Unban {
+                scope,
+                account: target,
+            } => {
+                self.on_moderate(label, scope, target, ModKind::Ban, false, None, account)
+                    .await
+            }
+            Command::Kick {
+                channel,
+                account: target,
+                reason,
+            } => self.on_kick(label, channel, target, reason, account).await,
             // §11 federation — operator-facing management (§6.6).
             Command::BridgePropose {
                 scope,
@@ -871,6 +907,18 @@ impl<S: ControlStream> Session<S> {
         // channel that does not exist (invariant 1).
         if self.view_gated_denied(&channel, &account).await {
             return self.no_such_target(label).await;
+        }
+        // §6.7 a ban at the channel / its namespace / `*` refuses the join.
+        if self
+            .ctx
+            .moderation
+            .is_moderated(&account, &covering_scopes(&channel), ModKind::Ban)
+            .await
+            .unwrap_or(false)
+        {
+            self.send_err(label, ErrCode::Banned, None, "you are banned")
+                .await?;
+            return Ok(Flow::Continue);
         }
         let Some(ack) = handle.join(self.id, account.clone()).await else {
             self.send_err(label, ErrCode::Internal, None, "channel unavailable")
@@ -1010,6 +1058,20 @@ impl<S: ControlStream> Session<S> {
             Target::Channel(channel) => {
                 if !self.joined.contains_key(&channel) {
                     return self.not_member(label, &channel).await;
+                }
+                // §6.7 posting gate: not banned, not muted, and (open channel
+                // or holds `send`).
+                let State::Ready { account } = self.state.clone() else {
+                    unreachable!("on_msg only dispatched in READY");
+                };
+                match self.can_post(&channel, &account).await {
+                    Ok(None) => {}
+                    Ok(Some((code, context))) => {
+                        self.send_err(label, code, Some(context), "cannot post to this channel")
+                            .await?;
+                        return Ok(Flow::Continue);
+                    }
+                    Err(e) => return self.internal(label, &e).await,
                 }
                 let joined = self
                     .joined
@@ -1807,6 +1869,14 @@ impl<S: ControlStream> Session<S> {
                     .set_channel_view_gated(&channel, gated)
                     .await
             }
+            // §6.7 posting mode: `restricted` requires the `send` cap to post.
+            "posting" => {
+                let restricted = matches!(value.as_str(), "restricted" | "locked");
+                self.ctx
+                    .channel_store
+                    .set_channel_restricted(&channel, restricted)
+                    .await
+            }
             // Layout (spec extension): category groups channels, position
             // orders them. Both read the current record to preserve the
             // other field.
@@ -1837,7 +1907,7 @@ impl<S: ControlStream> Session<S> {
                     label,
                     ErrCode::Policy,
                     None,
-                    "meta key must be topic|view-gated|category|position",
+                    "meta key must be topic|view-gated|posting|category|position",
                 )
                 .await?;
                 return Ok(Flow::Continue);
@@ -3843,6 +3913,170 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    // ---- §6.7 moderation ----
+
+    /// The §6.7 posting gate: `None` = may post; `Some((code, context))` = the
+    /// refusal. Checks ban → mute → (restricted ⇒ `send` cap), against the
+    /// channel's covering scopes.
+    async fn can_post(
+        &self,
+        channel: &ChannelName,
+        account: &Account,
+    ) -> Result<Option<(ErrCode, &'static str)>, weft_store::StoreError> {
+        let scopes = covering_scopes(channel);
+        if self
+            .ctx
+            .moderation
+            .is_moderated(account, &scopes, ModKind::Ban)
+            .await?
+        {
+            return Ok(Some((ErrCode::Forbidden, "banned")));
+        }
+        if self
+            .ctx
+            .moderation
+            .is_moderated(account, &scopes, ModKind::Mute)
+            .await?
+        {
+            return Ok(Some((ErrCode::Forbidden, "muted")));
+        }
+        let restricted = self
+            .ctx
+            .channel_store
+            .channel(channel)
+            .await?
+            .map(|c| c.restricted)
+            .unwrap_or(false);
+        if restricted {
+            let scope = TokenScope::Channel(channel.to_string());
+            if !self
+                .ctx
+                .account_has_cap(account, &Capability::Send, &scope, unix_now())
+                .await?
+            {
+                return Ok(Some((ErrCode::CapRequired, "send")));
+            }
+        }
+        Ok(None)
+    }
+
+    /// `MUTE`/`UNMUTE`/`BAN`/`UNBAN` (§6.7): cap-check the moderator, record or
+    /// clear the deny, eject on a fresh channel-scope ban, and echo `MODERATED`.
+    #[allow(clippy::too_many_arguments)]
+    async fn on_moderate(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        target: Account,
+        kind: ModKind,
+        add: bool,
+        reason: Option<String>,
+        actor: Account,
+    ) -> io::Result<Flow> {
+        let Some(tscope) = TokenScope::parse(&scope) else {
+            return self.no_such_target(label).await;
+        };
+        let (cap, cap_str) = match kind {
+            ModKind::Mute => (Capability::Mute, "mute"),
+            ModKind::Ban => (Capability::Ban, "ban"),
+        };
+        match self
+            .ctx
+            .account_has_cap(&actor, &cap, &tscope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, cap_str).await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        let outcome = if add {
+            self.ctx
+                .moderation
+                .set_moderation(ModRecord {
+                    scope: scope.clone(),
+                    account: target.clone(),
+                    kind,
+                    actor: actor.to_string(),
+                    reason: reason.clone(),
+                    at_ms: unix_now_ms(),
+                })
+                .await
+        } else {
+            self.ctx
+                .moderation
+                .clear_moderation(&scope, &target, kind)
+                .await
+                .map(|_| ())
+        };
+        if let Err(e) = outcome {
+            return self.internal(label, &e).await;
+        }
+        // A fresh channel-scope ban force-parts the target.
+        if add && kind == ModKind::Ban {
+            if let Ok(channel) = scope.parse::<ChannelName>() {
+                if let Some(handle) = self.ctx.registry.get(&channel) {
+                    handle.eject(target.clone()).await;
+                }
+            }
+        }
+        let action = match (kind, add) {
+            (ModKind::Mute, true) => ModAction::Mute,
+            (ModKind::Mute, false) => ModAction::Unmute,
+            (ModKind::Ban, true) => ModAction::Ban,
+            (ModKind::Ban, false) => ModAction::Unban,
+        };
+        self.send_event(
+            label,
+            Event::Moderated {
+                scope,
+                account: target,
+                action,
+                by: Some(actor),
+                reason,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// `KICK` (§6.7): cap-check `kick`, force-part the target (no persistent
+    /// state — they may rejoin), echo `MODERATED`.
+    async fn on_kick(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        target: Account,
+        reason: Option<String>,
+        actor: Account,
+    ) -> io::Result<Flow> {
+        let scope = TokenScope::Channel(channel.to_string());
+        match self
+            .ctx
+            .account_has_cap(&actor, &Capability::Kick, &scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "kick").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        let Some(handle) = self.ctx.registry.get(&channel) else {
+            return self.no_such_target(label).await;
+        };
+        handle.eject(target.clone()).await;
+        self.send_event(
+            label,
+            Event::Moderated {
+                scope: channel.to_string(),
+                account: target,
+                action: ModAction::Kick,
+                by: Some(actor),
+                reason,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
     async fn on_event(&mut self, event: SessionEvent) -> io::Result<()> {
         if let State::Bridge { peer, .. } = self.state.clone() {
             return self.on_bridge_event(peer, event).await;
@@ -3861,6 +4095,22 @@ impl<S: ControlStream> Session<S> {
             }
             SessionEvent::Channel { channel, event } => {
                 if event.origin != self.id {
+                    // §6.7: a MEMBER part naming *me* on a channel I still hold
+                    // is a forced removal (kick/ban) — drop the membership and
+                    // its forwarder, then still deliver the event so the client
+                    // sees it.
+                    if let (State::Ready { account }, Event::Member { user, action, .. }) =
+                        (&self.state, &event.event)
+                    {
+                        if *action == MemberAction::Part
+                            && user.account == *account
+                            && self.joined.contains_key(&channel)
+                        {
+                            if let Some(joined) = self.joined.remove(&channel) {
+                                joined.forwarder.abort();
+                            }
+                        }
+                    }
                     // Broadcast copies never carry a label (§3.5).
                     return self.send_event(None, event.event).await;
                 }

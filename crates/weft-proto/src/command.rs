@@ -311,10 +311,7 @@ pub enum Command {
         reason: Option<String>,
     },
     /// `UNMUTE <scope> <account>` — lift a mute.
-    Unmute {
-        scope: String,
-        account: Account,
-    },
+    Unmute { scope: String, account: Account },
     /// `BAN <scope> <account> [:reason]` — deny join + send at a scope. Cap `ban`.
     Ban {
         scope: String,
@@ -322,10 +319,7 @@ pub enum Command {
         reason: Option<String>,
     },
     /// `UNBAN <scope> <account>` — lift a ban.
-    Unban {
-        scope: String,
-        account: Account,
-    },
+    Unban { scope: String, account: Account },
     /// `KICK <#chan> <account> [:reason]` — force-part (no persistent state).
     /// Channel-only. Cap `kick`.
     Kick {
@@ -1380,11 +1374,9 @@ impl Command {
                 vec![scope.clone(), account.to_string()],
                 reason.clone(),
             ),
-            Command::Unmute { scope, account } => (
-                "UNMUTE",
-                vec![scope.clone(), account.to_string()],
-                None,
-            ),
+            Command::Unmute { scope, account } => {
+                ("UNMUTE", vec![scope.clone(), account.to_string()], None)
+            }
             Command::Ban {
                 scope,
                 account,
@@ -2080,6 +2072,46 @@ mod tests {
         }));
         // Unknown category rejected both ways.
         assert!(Request::parse(&format!("REPORT-FORWARD rep-1 {MSGID} slander")).is_err());
+    }
+
+    #[test]
+    fn moderation_verbs_round_trip() {
+        round_trip(&Request::with_label(
+            Command::Mute {
+                scope: "#general".into(),
+                account: "bob".parse().unwrap(),
+                reason: Some("spamming".into()),
+            },
+            "m1",
+        ));
+        assert_eq!(
+            Request::new(Command::Mute {
+                scope: "ns:gaming".into(),
+                account: "bob".parse().unwrap(),
+                reason: None,
+            })
+            .serialize()
+            .unwrap(),
+            "MUTE ns:gaming bob"
+        );
+        round_trip(&Request::new(Command::Unmute {
+            scope: "*".into(),
+            account: "bob".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::Ban {
+            scope: "*".into(),
+            account: "eve".parse().unwrap(),
+            reason: Some("raid".into()),
+        }));
+        round_trip(&Request::new(Command::Unban {
+            scope: "#general".into(),
+            account: "eve".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::Kick {
+            channel: "#general".parse().unwrap(),
+            account: "eve".parse().unwrap(),
+            reason: None,
+        }));
     }
 
     #[test]

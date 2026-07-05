@@ -728,6 +728,24 @@ impl Event {
                     reason: args.trailing_opt(),
                 })
             }
+            "MODERATED" => {
+                let mut args = Args::new(line, "MODERATED");
+                let scope = args.req("scope")?.to_string();
+                let account = args.req("account")?.parse()?;
+                let action = args.req("action")?.parse()?;
+                Ok(Event::Moderated {
+                    scope,
+                    account,
+                    action,
+                    by: line
+                        .tags
+                        .get("by")
+                        .filter(|v| !v.is_empty())
+                        .map(|v| v.parse())
+                        .transpose()?,
+                    reason: line.tags.get("reason").filter(|v| !v.is_empty()).cloned(),
+                })
+            }
             verb => Ok(Event::Unknown {
                 verb: verb.to_string(),
             }),
@@ -1056,6 +1074,25 @@ impl Event {
             }
             Event::Netblocked { network, reason } => {
                 ("NETBLOCKED", vec![network.to_string()], reason.clone())
+            }
+            Event::Moderated {
+                scope,
+                account,
+                action,
+                by,
+                reason,
+            } => {
+                if let Some(by) = by {
+                    tags.insert("by".to_string(), by.to_string());
+                }
+                if let Some(reason) = reason {
+                    tags.insert("reason".to_string(), reason.clone());
+                }
+                (
+                    "MODERATED",
+                    vec![scope.clone(), account.to_string(), action.to_string()],
+                    None,
+                )
             }
             Event::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown event"));
@@ -1568,6 +1605,32 @@ mod tests {
         ));
         round_trip(&Reply::new(Event::Netblocked {
             network: "evil.example".parse().unwrap(),
+            reason: None,
+        }));
+    }
+
+    #[test]
+    fn moderated_event_round_trips() {
+        let full = Reply::with_label(
+            Event::Moderated {
+                scope: "#general".into(),
+                account: "bob".parse().unwrap(),
+                action: crate::types::ModAction::Mute,
+                by: Some("mod".parse().unwrap()),
+                reason: Some("spamming".into()),
+            },
+            "m1",
+        );
+        let wire = full.serialize().unwrap();
+        assert!(wire.contains("by=mod"), "{wire}");
+        assert!(wire.contains("MODERATED #general bob mute"), "{wire}");
+        round_trip(&full);
+        // Minimal form (broadcast, no by/reason).
+        round_trip(&Reply::new(Event::Moderated {
+            scope: "*".into(),
+            account: "eve".parse().unwrap(),
+            action: crate::types::ModAction::Ban,
+            by: None,
             reason: None,
         }));
     }

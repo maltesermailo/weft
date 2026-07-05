@@ -332,6 +332,7 @@ where
         + weft_store::ReportStore
         + weft_store::PeerStore
         + weft_store::NetblockStore
+        + weft_store::ModerationStore
         + 'static,
 {
     for (name, policy) in seed {

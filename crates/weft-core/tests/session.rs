@@ -2199,3 +2199,118 @@ async fn open_federation_still_honors_netblock() {
     ));
     c.expect_err(ErrCode::AuthFailed).await;
 }
+
+// ---- §6.7 moderation (M7) ----
+
+#[tokio::test]
+async fn mute_denies_send_and_unmute_restores() {
+    let ctx = ctx_ops(&["#general"], &["mod"]);
+    let mut bob = joined(&ctx, "bob", "#general").await;
+    let mut op = ready(&ctx, "mod").await;
+
+    op.send("@label=x MUTE #general bob :spamming");
+    let reply = op.recv().await;
+    assert!(
+        matches!(&reply.event, Event::Moderated { action, .. } if *action == weft_proto::ModAction::Mute),
+        "moderator gets a MODERATED echo, got {reply:?}"
+    );
+
+    bob.send("MSG #general :hello");
+    let Event::Err(e) = bob.expect_err(ErrCode::Forbidden).await.event else {
+        panic!()
+    };
+    assert_eq!(e.context.as_deref(), Some("muted"));
+
+    op.send("UNMUTE #general bob");
+    op.recv().await;
+    bob.send("MSG #general :hi again");
+    assert!(
+        matches!(bob.recv().await.event, Event::Message(_)),
+        "unmuted → can post"
+    );
+}
+
+#[tokio::test]
+async fn ns_scope_mute_covers_a_namespaced_channel() {
+    let ctx = ctx_ops(&["#gaming/general"], &["mod"]);
+    let mut bob = joined(&ctx, "bob", "#gaming/general").await;
+    let mut op = ready(&ctx, "mod").await;
+    // A namespace-wide mute (a namespace moderator) covers the channel.
+    op.send("MUTE ns:gaming bob");
+    op.recv().await;
+    bob.send("MSG #gaming/general :hi");
+    let Event::Err(e) = bob.expect_err(ErrCode::Forbidden).await.event else {
+        panic!()
+    };
+    assert_eq!(e.context.as_deref(), Some("muted"));
+}
+
+#[tokio::test]
+async fn ban_ejects_and_blocks_rejoin() {
+    let ctx = ctx_ops(&["#general"], &["mod"]);
+    let mut bob = joined(&ctx, "bob", "#general").await;
+    let mut op = ready(&ctx, "mod").await;
+
+    op.send("BAN #general bob :raid");
+    op.recv().await; // MODERATED
+                     // bob is force-parted (kicked out).
+    let ev = bob.recv().await;
+    assert!(
+        matches!(&ev.event, Event::Member { action: MemberAction::Part, user, .. } if user.account.as_str() == "bob"),
+        "banned member is ejected, got {ev:?}"
+    );
+    // …and cannot rejoin.
+    bob.send("JOIN #general");
+    bob.expect_err(ErrCode::Banned).await;
+    // Unban restores access.
+    op.send("UNBAN #general bob");
+    op.recv().await;
+    bob.send("JOIN #general");
+    assert!(matches!(bob.recv().await.event, Event::Member { .. }));
+}
+
+#[tokio::test]
+async fn moderation_requires_the_cap() {
+    let ctx = ctx_ops(&["#general"], &["mod"]);
+    let mut mallory = joined(&ctx, "mallory", "#general").await;
+    mallory.send("MUTE #general bob");
+    let Event::Err(e) = mallory.expect_err(ErrCode::CapRequired).await.event else {
+        panic!()
+    };
+    assert_eq!(e.context.as_deref(), Some("mute"));
+}
+
+#[tokio::test]
+async fn restricted_channel_gates_posting_on_send_cap() {
+    // A runtime-created channel lands in the channel store (where the
+    // `restricted` flag lives); the real server seeds config channels there too.
+    let ctx = ctx_ops(&[], &["mod"]);
+    let mut op = ready(&ctx, "mod").await;
+    op.send("CHANNEL CREATE #locked");
+    op.recv().await; // POLICY (create ack)
+    op.send("JOIN #locked");
+    op.recv().await; // MEMBER
+    op.recv().await; // POLICY
+    op.send("CHANNEL META #locked posting :restricted");
+    op.recv().await; // CHANMETA
+
+    // A normal member (no send grant) can't post in a restricted channel.
+    let mut bob = joined(&ctx, "bob", "#locked").await;
+    op.recv().await; // bob's MEMBER join broadcast
+    bob.send("MSG #locked :hello");
+    let Event::Err(e) = bob.expect_err(ErrCode::CapRequired).await.event else {
+        panic!()
+    };
+    assert_eq!(e.context.as_deref(), Some("send"));
+
+    // The grant path (the "both" story): granting `send` lets them post — and
+    // REVOKE would take it away again.
+    op.send("GRANT bob #locked send");
+    op.recv().await; // TOKEN
+    bob.send("MSG #locked :now i can");
+    loop {
+        if matches!(bob.recv().await.event, Event::Message(ref m) if m.body == "now i can") {
+            break;
+        }
+    }
+}
