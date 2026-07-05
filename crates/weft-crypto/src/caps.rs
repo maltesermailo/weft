@@ -22,6 +22,8 @@ pub enum Capability {
     Invite,
     Kick,
     Ban,
+    /// Deny `send` to an account at a scope (a persistent mute, §6.7).
+    Mute,
     Policy,
     View,
     Attach,
@@ -37,7 +39,7 @@ pub enum Capability {
 
 impl Capability {
     /// The standard set, sans `grant:` (which composes over these).
-    pub const STANDARD: [Capability; 18] = [
+    pub const STANDARD: [Capability; 19] = [
         Capability::Send,
         Capability::EditOwn,
         Capability::DeleteOwn,
@@ -47,6 +49,7 @@ impl Capability {
         Capability::Invite,
         Capability::Kick,
         Capability::Ban,
+        Capability::Mute,
         Capability::Policy,
         Capability::View,
         Capability::Attach,
@@ -69,6 +72,7 @@ impl Capability {
             Capability::Invite => "invite",
             Capability::Kick => "kick",
             Capability::Ban => "ban",
+            Capability::Mute => "mute",
             Capability::Policy => "policy",
             Capability::View => "view",
             Capability::Attach => "attach",

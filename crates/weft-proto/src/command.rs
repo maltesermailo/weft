@@ -303,6 +303,36 @@ pub enum Command {
         category: String,
         note: Option<String>,
     },
+    /// `MUTE <scope> <account> [:reason]` — deny `send` to an account at a
+    /// scope (`#chan|ns:<name>|*`, §6.7). Cap `mute` at the scope.
+    Mute {
+        scope: String,
+        account: Account,
+        reason: Option<String>,
+    },
+    /// `UNMUTE <scope> <account>` — lift a mute.
+    Unmute {
+        scope: String,
+        account: Account,
+    },
+    /// `BAN <scope> <account> [:reason]` — deny join + send at a scope. Cap `ban`.
+    Ban {
+        scope: String,
+        account: Account,
+        reason: Option<String>,
+    },
+    /// `UNBAN <scope> <account>` — lift a ban.
+    Unban {
+        scope: String,
+        account: Account,
+    },
+    /// `KICK <#chan> <account> [:reason]` — force-part (no persistent state).
+    /// Channel-only. Cap `kick`.
+    Kick {
+        channel: ChannelName,
+        account: Account,
+        reason: Option<String>,
+    },
     /// Any verb outside the known set. Servers ignore it silently (§4).
     Unknown { verb: String },
 }
@@ -887,6 +917,40 @@ impl Command {
                     }),
                 }
             }
+            "MUTE" | "UNMUTE" | "BAN" | "UNBAN" => {
+                let verb = match verb {
+                    "MUTE" => "MUTE",
+                    "UNMUTE" => "UNMUTE",
+                    "BAN" => "BAN",
+                    _ => "UNBAN",
+                };
+                let mut args = Args::new(line, verb);
+                let scope = args.req("scope")?.to_string();
+                let account = args.req("account")?.parse()?;
+                let reason = args.trailing_opt();
+                Ok(match verb {
+                    "MUTE" => Command::Mute {
+                        scope,
+                        account,
+                        reason,
+                    },
+                    "UNMUTE" => Command::Unmute { scope, account },
+                    "BAN" => Command::Ban {
+                        scope,
+                        account,
+                        reason,
+                    },
+                    _ => Command::Unban { scope, account },
+                })
+            }
+            "KICK" => {
+                let mut args = Args::new(line, "KICK");
+                Ok(Command::Kick {
+                    channel: args.req("channel")?.parse()?,
+                    account: args.req("account")?.parse()?,
+                    reason: args.trailing_opt(),
+                })
+            }
             "REPORT-FORWARD" => {
                 let mut args = Args::new(line, "REPORT-FORWARD");
                 let report_id = args.req("report-id")?.to_string();
@@ -1307,6 +1371,41 @@ impl Command {
                     note.clone(),
                 )
             }
+            Command::Mute {
+                scope,
+                account,
+                reason,
+            } => (
+                "MUTE",
+                vec![scope.clone(), account.to_string()],
+                reason.clone(),
+            ),
+            Command::Unmute { scope, account } => (
+                "UNMUTE",
+                vec![scope.clone(), account.to_string()],
+                None,
+            ),
+            Command::Ban {
+                scope,
+                account,
+                reason,
+            } => (
+                "BAN",
+                vec![scope.clone(), account.to_string()],
+                reason.clone(),
+            ),
+            Command::Unban { scope, account } => {
+                ("UNBAN", vec![scope.clone(), account.to_string()], None)
+            }
+            Command::Kick {
+                channel,
+                account,
+                reason,
+            } => (
+                "KICK",
+                vec![channel.to_string(), account.to_string()],
+                reason.clone(),
+            ),
             Command::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown command"));
             }

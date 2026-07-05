@@ -1,0 +1,363 @@
+//! The WEFT connection bridge: one QUIC control connection to a weftd,
+//! driving the §3.3 handshake (HELLO → AUTH, auto-registering an unknown
+//! account like weft-tui) and relaying between the frontend and the server.
+//!
+//! Inbound server lines are parsed and re-emitted to the webview as
+//! structured `weft` events; outbound command lines from the frontend are
+//! buffered until the session is READY, then written to the stream.
+
+use std::net::SocketAddr;
+
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
+use tokio::sync::mpsc;
+use weft_proto::{Event, Reply, Target};
+use weft_transport::QuicControlStream;
+
+/// Default credential when the user leaves the password blank (≥12 bytes per
+/// §6.1) — a dev convenience, mirroring weft-tui.
+const DEFAULT_PASSWORD: &str = "weft-client-dev-pw";
+
+/// Which credential flow the connect screen requested (§6.1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// AUTH PASSWORD against an existing account; a failure is surfaced, never
+    /// silently turned into a registration.
+    Login,
+    /// REGISTER a new account (which doubles as authentication).
+    Register,
+}
+
+impl Mode {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "login" => Ok(Mode::Login),
+            "register" => Ok(Mode::Register),
+            other => Err(format!("unknown mode {other:?}")),
+        }
+    }
+}
+
+/// Structured events pushed to the webview under the `weft` channel.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WeftEvent {
+    Connected {
+        network: String,
+        account: String,
+    },
+    /// Login/registration failed — the connect screen stays up with `reason`.
+    AuthFailed {
+        reason: String,
+    },
+    Message {
+        target: String,
+        sender: String,
+        network: String,
+        msgid: String,
+        body: String,
+        own: bool,
+    },
+    Member {
+        channel: String,
+        user: String,
+        network: String,
+        action: String,
+        count: Option<u64>,
+    },
+    Policy {
+        channel: String,
+        policy: String,
+    },
+    Edited {
+        target: String,
+        sender: String,
+        msgid: String,
+        body: String,
+    },
+    Deleted {
+        target: String,
+        msgid: String,
+    },
+    Error {
+        code: String,
+        text: String,
+    },
+    Closed {
+        reason: String,
+    },
+    /// Anything not specially modelled — surfaced for debugging.
+    Raw {
+        line: String,
+    },
+}
+
+fn emit(app: &AppHandle, event: WeftEvent) {
+    let _ = app.emit("weft", event);
+}
+
+/// Resolve `host:port` to a socket address plus the server name for QUIC SNI.
+pub async fn resolve(host: &str) -> Result<(SocketAddr, String), String> {
+    let (name, _) = host.rsplit_once(':').ok_or("target must be host:port")?;
+    let addr = tokio::net::lookup_host(host)
+        .await
+        .map_err(|e| format!("resolving {host}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("no address for {host}"))?;
+    Ok((addr, name.to_string()))
+}
+
+/// Drive one connection to completion. Emits `Connected` once authed, then
+/// relays until the stream closes or the app drops the outbound sender.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_connection(
+    app: AppHandle,
+    addr: SocketAddr,
+    server_name: String,
+    account: String,
+    password: String,
+    mode: Mode,
+    mut outbound: mpsc::UnboundedReceiver<String>,
+) {
+    let mut stream = match connect(addr, &server_name).await {
+        Ok(stream) => stream,
+        Err(e) => return emit(&app, WeftEvent::Closed { reason: e }),
+    };
+
+    let mut phase = Phase::HelloSent;
+    // Frontend commands that arrive before READY wait here.
+    let mut buffered: Vec<String> = Vec::new();
+
+    if send(&mut stream, &app, "HELLO weft/1").await.is_err() {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            line = stream.recv_line() => match line {
+                Ok(Some(raw)) => {
+                    let mut close = false;
+                    if let Some(out) = on_line(&app, &account, &password, mode, &mut phase, &mut close, &raw) {
+                        if send(&mut stream, &app, &out).await.is_err() { return; }
+                    }
+                    if close {
+                        // Auth failed — tear down; the connect screen retries.
+                        let _ = stream.finish().await;
+                        return;
+                    }
+                    // Flush buffered commands the moment we reach READY.
+                    if phase == Phase::Ready && !buffered.is_empty() {
+                        for cmd in std::mem::take(&mut buffered) {
+                            if send(&mut stream, &app, &cmd).await.is_err() { return; }
+                        }
+                    }
+                }
+                Ok(None) => return emit(&app, WeftEvent::Closed { reason: "server closed the connection".into() }),
+                Err(e) => return emit(&app, WeftEvent::Closed { reason: format!("connection lost: {e}") }),
+            },
+            cmd = outbound.recv() => match cmd {
+                Some(cmd) if phase == Phase::Ready => {
+                    if send(&mut stream, &app, &cmd).await.is_err() { return; }
+                }
+                Some(cmd) => buffered.push(cmd), // not yet authed
+                None => { let _ = stream.finish().await; return; } // app gone
+            },
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Phase {
+    HelloSent,
+    AuthSent,
+    Ready,
+}
+
+/// Process one inbound line: advance the handshake, emit structured events,
+/// and return an outbound line to send in response (if any).
+#[allow(clippy::too_many_arguments)]
+fn on_line(
+    app: &AppHandle,
+    account: &str,
+    password: &str,
+    mode: Mode,
+    phase: &mut Phase,
+    close: &mut bool,
+    raw: &str,
+) -> Option<String> {
+    let reply = match Reply::parse(raw) {
+        Ok(reply) => reply,
+        Err(_) => {
+            emit(app, WeftEvent::Raw { line: raw.to_string() });
+            return None;
+        }
+    };
+    // §3.3 handshake progression — the auth verb depends on the chosen mode.
+    match (*phase, &reply.event) {
+        (Phase::HelloSent, Event::Welcome { .. }) => {
+            *phase = Phase::AuthSent;
+            return Some(match mode {
+                Mode::Login => format!("AUTH PASSWORD {account} :{password}"),
+                Mode::Register => format!("REGISTER {account} :{password}"),
+            });
+        }
+        (Phase::AuthSent, Event::Welcome { network, .. }) => {
+            *phase = Phase::Ready;
+            emit(
+                app,
+                WeftEvent::Connected {
+                    network: network.to_string(),
+                    account: account.to_string(),
+                },
+            );
+            return None;
+        }
+        // Login/registration rejected — surface a friendly reason and close.
+        (Phase::AuthSent, Event::Err(e)) => {
+            let reason = match (mode, e.code) {
+                (Mode::Login, weft_proto::ErrCode::AuthFailed) => {
+                    "authentication failed — check the account name and password".to_string()
+                }
+                (Mode::Register, weft_proto::ErrCode::Conflict) => {
+                    "that account name is already taken".to_string()
+                }
+                _ => e.text.clone(),
+            };
+            emit(app, WeftEvent::AuthFailed { reason });
+            *close = true;
+            return None;
+        }
+        _ => {}
+    }
+    // Steady-state events → structured pushes.
+    match reply.event {
+        Event::Message(m) => emit(
+            app,
+            WeftEvent::Message {
+                target: m.target.to_string(),
+                sender: m.sender.account.to_string(),
+                network: m.sender.network.to_string(),
+                msgid: m.msgid.to_string(),
+                body: m.body,
+                own: m.sender.account.as_str() == account,
+            },
+        ),
+        Event::Member {
+            channel,
+            user,
+            action,
+            count,
+            ..
+        } => emit(
+            app,
+            WeftEvent::Member {
+                channel: channel.to_string(),
+                user: user.account.to_string(),
+                network: user.network.to_string(),
+                action: action.to_string(),
+                count,
+            },
+        ),
+        Event::Policy { channel, policy } => emit(
+            app,
+            WeftEvent::Policy {
+                channel: channel.to_string(),
+                policy: policy.to_string(),
+            },
+        ),
+        Event::Edited {
+            target,
+            user,
+            msgid,
+            body,
+            ..
+        } => emit(
+            app,
+            WeftEvent::Edited {
+                target: target.to_string(),
+                sender: user.account.to_string(),
+                msgid: msgid.to_string(),
+                body,
+            },
+        ),
+        Event::Deleted { target, msgid, .. } => emit(
+            app,
+            WeftEvent::Deleted {
+                target: target.to_string(),
+                msgid: msgid.to_string(),
+            },
+        ),
+        Event::Err(e) => emit(
+            app,
+            WeftEvent::Error {
+                code: e.code.to_string(),
+                text: e.text,
+            },
+        ),
+        // Batches, reactions, presence, etc. — surfaced raw for now.
+        _ => emit(app, WeftEvent::Raw { line: raw.to_string() }),
+    }
+    None
+}
+
+async fn send(stream: &mut QuicControlStream, app: &AppHandle, line: &str) -> Result<(), ()> {
+    match stream.send_line(line).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            emit(app, WeftEvent::Closed { reason: format!("send failed: {e}") });
+            Err(())
+        }
+    }
+}
+
+async fn connect(addr: SocketAddr, server_name: &str) -> Result<QuicControlStream, String> {
+    let endpoint = weft_transport::insecure::client_endpoint(weft_transport::ALPN)
+        .map_err(|e| format!("endpoint: {e}"))?;
+    let connection = endpoint
+        .connect(addr, server_name)
+        .map_err(|e| format!("connect: {e}"))?
+        .await
+        .map_err(|e| format!("handshake: {e}"))?;
+    let stream = QuicControlStream::open(&connection)
+        .await
+        .map_err(|e| format!("control stream: {e}"))?;
+    // Keep the connection (and endpoint) alive for the stream's lifetime.
+    tokio::spawn(async move {
+        let _endpoint = endpoint;
+        connection.closed().await;
+    });
+    Ok(stream)
+}
+
+/// The default password used when the user leaves it blank.
+pub fn password_or_default(password: &str) -> String {
+    if password.is_empty() {
+        DEFAULT_PASSWORD.to_string()
+    } else {
+        password.to_string()
+    }
+}
+
+/// Build a WEFT command line for the frontend's high-level intents, validated
+/// through the proto codec so we never emit something our own parser rejects.
+pub fn build_msg(target: &str, body: &str) -> Result<String, String> {
+    let target: Target = target.parse().map_err(|_| "bad target".to_string())?;
+    weft_proto::Request::new(weft_proto::Command::Msg {
+        target,
+        body: Some(body.to_string()),
+        meta: weft_proto::MsgMeta::default(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+pub fn build_join(channel: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    weft_proto::Request::new(weft_proto::Command::Join {
+        channel,
+        invite: None,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}

@@ -5,11 +5,11 @@ use crate::errcode::ErrCode;
 use crate::error::{ParseError, SerializeError};
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
-use crate::name::{ChannelName, NamespaceName, NetworkName, Target, UserRef};
+use crate::name::{Account, ChannelName, NamespaceName, NetworkName, Target, UserRef};
 use crate::policy::RetentionPolicy;
 use crate::types::{
-    BridgeState, ContentState, HistoryMode, MediaMode, MemberAction, MsgMeta, PresenceStatus,
-    ReactionOp, ReportScope, ResolveAction, TypingState, Visibility,
+    BridgeState, ContentState, HistoryMode, MediaMode, MemberAction, ModAction, MsgMeta,
+    PresenceStatus, ReactionOp, ReportScope, ResolveAction, TypingState, Visibility,
 };
 
 /// An event plus its optional `label` echo (§3.5). Only direct responses
@@ -285,6 +285,16 @@ pub enum Event {
     /// `blocklist_visibility` config.
     Netblocked {
         network: NetworkName,
+        reason: Option<String>,
+    },
+    /// `MODERATED <scope> <account> <action>` with `by=`/`reason=` tags (§6.7)
+    /// — a moderation state change (mute/ban/kick), broadcast to a channel's
+    /// members and echoed to the acting moderator.
+    Moderated {
+        scope: String,
+        account: Account,
+        action: ModAction,
+        by: Option<Account>,
         reason: Option<String>,
     },
     Err(ErrEvent),

@@ -131,6 +131,19 @@ wire_enum!(
 );
 
 wire_enum!(
+    /// `MODERATED <scope> <account> <action>` (§6.7) — a moderation state
+    /// change. `Mute`/`Unmute` toggle the `send` denial; `Ban`/`Unban` toggle
+    /// join+send denial; `Kick` is a one-shot force-part (no persistent state).
+    ModAction, "moderation action", {
+        Mute => "mute",
+        Unmute => "unmute",
+        Ban => "ban",
+        Unban => "unban",
+        Kick => "kick",
+    }
+);
+
+wire_enum!(
     /// Manifest `history` bound (§11.1, §11.7). `FromEpoch` = serve nothing
     /// before the manifest's `created` ULID timestamp; `Full` = no lower
     /// bound (a §11.7 amendment that requires a version bump + re-ack).
