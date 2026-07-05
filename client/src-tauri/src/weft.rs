@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
-use weft_proto::{Event, Reply, Target};
+use weft_proto::{Command, Event, MsgId, Reply, Request, Target};
 use weft_transport::QuicControlStream;
 
 /// Default credential when the user leaves the password blank (≥12 bytes per
@@ -57,6 +57,18 @@ pub enum WeftEvent {
         msgid: String,
         body: String,
         own: bool,
+        /// True when this arrived inside a `HISTORY` batch (older messages to
+        /// prepend), false for live traffic to append.
+        history: bool,
+    },
+    /// `BATCH START` — a `HISTORY` page begins (§7).
+    BatchStart {
+        id: String,
+    },
+    /// `BATCH END` — page done; `truncated` marks a retention gap (§6.4).
+    BatchEnd {
+        id: String,
+        truncated: bool,
     },
     Member {
         channel: String,
@@ -78,6 +90,22 @@ pub enum WeftEvent {
     Deleted {
         target: String,
         msgid: String,
+    },
+    /// §7 a live reaction add/remove.
+    Reaction {
+        target: String,
+        msgid: String,
+        emoji: String,
+        op: String,
+        by: String,
+    },
+    /// §12.1 a compacted reaction summary (from history batches).
+    Reactions {
+        target: String,
+        msgid: String,
+        emoji: String,
+        count: u64,
+        by: Vec<String>,
     },
     /// §6.7 a moderation action (mute/ban/kick) landed.
     Moderated {
@@ -133,6 +161,8 @@ pub async fn run_connection(
     };
 
     let mut phase = Phase::HelloSent;
+    // Whether we're inside a HISTORY BATCH (messages then are older history).
+    let mut in_batch = false;
     // Frontend commands that arrive before READY wait here.
     let mut buffered: Vec<String> = Vec::new();
 
@@ -140,12 +170,23 @@ pub async fn run_connection(
         return;
     }
 
+    // §3.4 keepalive: the server closes silent sessions (~30 s) and QUIC has
+    // its own idle timeout, so PING on a cadence well under both.
+    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(10));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    keepalive.tick().await; // the first tick fires immediately — skip it
+
     loop {
         tokio::select! {
+            _ = keepalive.tick() => {
+                if send(&mut stream, &app, "PING keepalive").await.is_err() {
+                    return;
+                }
+            }
             line = stream.recv_line() => match line {
                 Ok(Some(raw)) => {
                     let mut close = false;
-                    if let Some(out) = on_line(&app, &account, &password, mode, &mut phase, &mut close, &raw) {
+                    if let Some(out) = on_line(&app, &account, &password, mode, &mut phase, &mut in_batch, &mut close, &raw) {
                         if send(&mut stream, &app, &out).await.is_err() { return; }
                     }
                     if close {
@@ -190,6 +231,7 @@ fn on_line(
     password: &str,
     mode: Mode,
     phase: &mut Phase,
+    in_batch: &mut bool,
     close: &mut bool,
     raw: &str,
 ) -> Option<String> {
@@ -244,6 +286,16 @@ fn on_line(
     }
     // Steady-state events → structured pushes.
     match reply.event {
+        // §7 HISTORY framing — toggle the batch flag so the messages between
+        // are tagged as older history for the frontend to prepend.
+        Event::BatchStart { id } => {
+            *in_batch = true;
+            emit(app, WeftEvent::BatchStart { id });
+        }
+        Event::BatchEnd { id, truncated, .. } => {
+            *in_batch = false;
+            emit(app, WeftEvent::BatchEnd { id, truncated });
+        }
         Event::Message(m) => emit(
             app,
             WeftEvent::Message {
@@ -253,6 +305,7 @@ fn on_line(
                 msgid: m.msgid.to_string(),
                 body: m.body,
                 own: m.sender.account.as_str() == account,
+                history: *in_batch,
             },
         ),
         Event::Member {
@@ -300,6 +353,38 @@ fn on_line(
                 msgid: msgid.to_string(),
             },
         ),
+        Event::Reaction {
+            target,
+            msgid,
+            emoji,
+            op,
+            by,
+        } => emit(
+            app,
+            WeftEvent::Reaction {
+                target: target.to_string(),
+                msgid: msgid.to_string(),
+                emoji,
+                op: op.to_string(),
+                by: by.account.to_string(),
+            },
+        ),
+        Event::Reactions {
+            target,
+            msgid,
+            emoji,
+            count,
+            by,
+        } => emit(
+            app,
+            WeftEvent::Reactions {
+                target: target.to_string(),
+                msgid: msgid.to_string(),
+                emoji,
+                count,
+                by: by.iter().map(|u| u.account.to_string()).collect(),
+            },
+        ),
         Event::Moderated {
             scope,
             account,
@@ -323,6 +408,8 @@ fn on_line(
                 text: e.text,
             },
         ),
+        // Keepalive answers are internal — never shown.
+        Event::Pong { .. } => {}
         // Batches, reactions, presence, etc. — surfaced raw for now.
         _ => emit(
             app,
@@ -399,4 +486,32 @@ pub fn build_join(channel: &str) -> Result<String, String> {
     })
     .serialize()
     .map_err(|e| e.to_string())
+}
+
+/// `HISTORY <target> [before=] limit=50` — a backfill page (§6.4). `before` is
+/// the oldest msgid already held, for scroll-up paging.
+pub fn build_history(target: &str, before: Option<String>) -> Result<String, String> {
+    let target: Target = target.parse().map_err(|_| "bad target".to_string())?;
+    let before = match before.filter(|b| !b.is_empty()) {
+        Some(b) => Some(b.parse::<MsgId>().map_err(|_| "bad before msgid".to_string())?),
+        None => None,
+    };
+    Request::new(Command::History {
+        target,
+        before,
+        after: None,
+        limit: Some(50),
+        thread: None,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NS JOIN <name>` — auto-join every visible channel in the namespace (§6.2).
+pub fn build_ns_join(name: &str) -> Result<String, String> {
+    let name: weft_proto::NamespaceName =
+        name.parse().map_err(|_| "bad namespace name".to_string())?;
+    weft_proto::Request::new(weft_proto::Command::NsJoin { name })
+        .serialize()
+        .map_err(|e| e.to_string())
 }

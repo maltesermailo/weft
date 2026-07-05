@@ -63,6 +63,18 @@ fn join(conn: State<'_, Conn>, channel: String) -> Result<(), String> {
     conn.send(weft::build_join(&channel)?)
 }
 
+/// Join every visible channel in a namespace (§6.2 `NS JOIN`).
+#[tauri::command]
+fn ns_join(conn: State<'_, Conn>, name: String) -> Result<(), String> {
+    conn.send(weft::build_ns_join(&name)?)
+}
+
+/// Request a page of history for `target`, older than `before` if given (§6.4).
+#[tauri::command]
+fn history(conn: State<'_, Conn>, target: String, before: Option<String>) -> Result<(), String> {
+    conn.send(weft::build_history(&target, before)?)
+}
+
 #[tauri::command]
 fn send_message(conn: State<'_, Conn>, target: String, body: String) -> Result<(), String> {
     conn.send(weft::build_msg(&target, &body)?)
@@ -82,6 +94,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             connect,
             join,
+            ns_join,
+            history,
             send_message,
             send_raw
         ])

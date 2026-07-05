@@ -9,6 +9,15 @@ edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
 
+# Tauri client release optimization. Cargo honors profiles only at the
+# workspace root, and per-package overrides can't set `lto`/`panic` (those are
+# whole-artifact settings) — so the client keeps opt-level/codegen-units/strip
+# here and forgoes LTO. This leaves the server crates' release builds untouched.
+[profile.release.package.client]
+opt-level = 3
+codegen-units = 1
+strip = true
+
 [workspace.dependencies]
 thiserror = "1"
 ulid = "1"

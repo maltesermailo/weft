@@ -17,17 +17,29 @@
   // ---- live data ----
   type Member = { name: string; origin: "local" | "federated" };
   type Msg = {
+    /// Stable render key (msgids aren't on system lines, and prepending
+    /// history shifts array indices — so keying by index would misrender).
+    key: number;
     author: string;
     body: string;
     time: string;
     own: boolean;
     system?: boolean;
+    /// Origin msgid — the target for edit / delete / react / reply. Absent on
+    /// system lines.
+    msgid?: string;
   };
+  let msgSeq = 0;
+  const mkMsg = (m: Omit<Msg, "key">): Msg => ({ ...m, key: msgSeq++ });
   type Channel = {
     name: string;
     retention: string;
     messages: Msg[];
     members: Member[];
+    /// History backfill (Phase 1).
+    historyLoaded?: boolean;
+    hasMore?: boolean; // older pages available upstream
+    truncated?: boolean; // a retention gap at the top (§6.4)
   };
 
   let channels = $state<Record<string, Channel>>({});
@@ -46,10 +58,25 @@
   const retentionOrder = ["e2ee", "permanent", "retained", "ephemeral"];
 
   const initials = (s: string) => s.replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "··";
-  const clock = () => {
-    const d = new Date();
-    return `${`${d.getHours()}`.padStart(2, "0")}:${`${d.getMinutes()}`.padStart(2, "0")}`;
-  };
+  const hhmm = (d: Date) =>
+    `${`${d.getHours()}`.padStart(2, "0")}:${`${d.getMinutes()}`.padStart(2, "0")}`;
+  const clock = () => hhmm(new Date());
+
+  // A msgid is `network/<ULID>`; the ULID's first 10 Crockford-base32 chars
+  // encode its 48-bit ms timestamp. Gives correct times for backfilled history
+  // (Phase 1), not just live arrival.
+  const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  function msgTime(msgid: string): string {
+    const ulid = msgid.split("/").pop() ?? "";
+    if (ulid.length < 10) return clock();
+    let ms = 0;
+    for (let i = 0; i < 10; i++) {
+      const v = CROCKFORD.indexOf(ulid[i].toUpperCase());
+      if (v < 0) return clock();
+      ms = ms * 32 + v;
+    }
+    return hhmm(new Date(ms));
+  }
   const retentionOf = (policy: string) => {
     if (policy.startsWith("retained")) return "retained";
     if (["ephemeral", "permanent", "e2ee"].includes(policy)) return policy;
@@ -61,6 +88,33 @@
       channels[name] = { name, retention: "retained", messages: [], members: [] };
     }
     return channels[name];
+  }
+
+  // ---- history / scrollback (Phase 1) ----
+  const HISTORY_LIMIT = 50;
+  let loadingHistory = $state<string | null>(null); // channel being backfilled
+  let stickBottom = $state(true); // is the view pinned to the newest message?
+  let loadingInitial = false; // this in-flight load is the first page
+  let historyBuf: Msg[] = []; // batch messages, buffered until BATCH END
+  let preScrollHeight = 0; // scrollHeight before a scroll-up prepend
+
+  const oldestMsgid = (ch?: Channel) => ch?.messages.find((m) => m.msgid)?.msgid;
+
+  function loadHistory(target: string, initial: boolean) {
+    if (loadingHistory || !target.startsWith("#")) return; // one at a time
+    loadingHistory = target;
+    loadingInitial = initial;
+    historyBuf = [];
+    const before = initial ? undefined : oldestMsgid(channels[target]);
+    if (!initial) preScrollHeight = scrollEl?.scrollHeight ?? 0;
+    weft.history(target, before).catch(() => (loadingHistory = null));
+  }
+
+  function onScroll() {
+    if (!scrollEl) return;
+    stickBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 60;
+    // Near the top with more upstream → page older.
+    if (scrollEl.scrollTop < 80 && activeChannel?.hasMore) loadHistory(active, false);
   }
 
   let activeChannel = $derived(active ? channels[active] : undefined);
@@ -109,22 +163,60 @@
       }
       case "message": {
         if (!e.target.startsWith("#")) break; // DMs land later
-        ensureChannel(e.target).messages.push({
+        const msg = mkMsg({
           author: e.sender,
           body: e.body,
-          time: clock(),
+          time: msgTime(e.msgid),
           own: e.own,
+          msgid: e.msgid,
         });
+        // History-batch messages buffer until BATCH END, then prepend in order.
+        if (e.history) {
+          historyBuf.push(msg);
+          break;
+        }
+        const ch = ensureChannel(e.target);
+        // Dedupe: history backfill may re-deliver a live message.
+        if (e.msgid && ch.messages.some((m) => m.msgid === e.msgid)) break;
+        ch.messages.push(msg);
+        break;
+      }
+      case "batch-start":
+        break; // messages between here and batch-end are buffered above
+      case "batch-end": {
+        const target = loadingHistory;
+        if (!target) break;
+        const ch = ensureChannel(target);
+        const seen = new Set(ch.messages.map((m) => m.msgid).filter(Boolean));
+        const older = historyBuf.filter((m) => !m.msgid || !seen.has(m.msgid));
+        ch.messages = [...older, ...ch.messages];
+        ch.historyLoaded = true;
+        ch.truncated = e.truncated;
+        ch.hasMore = !e.truncated && historyBuf.length >= HISTORY_LIMIT;
+        const initial = loadingInitial;
+        const prev = preScrollHeight;
+        historyBuf = [];
+        loadingHistory = null;
+        // Restore scroll after the DOM re-renders: bottom on first load, or
+        // keep the reader's position when paging older.
+        queueMicrotask(() => {
+          if (!scrollEl) return;
+          if (initial) scrollEl.scrollTop = scrollEl.scrollHeight;
+          else scrollEl.scrollTop += scrollEl.scrollHeight - prev;
+        });
+        break;
+      }
+      case "deleted": {
+        // §7 tombstone — drop the message so it doesn't linger.
+        const ch = channels[e.target];
+        if (ch) ch.messages = ch.messages.filter((m) => m.msgid !== e.msgid);
         break;
       }
       case "edited":
         if (channels[e.target]) {
-          ensureChannel(e.target).messages.push({
-            author: e.sender,
-            body: `(edited) ${e.body}`,
-            time: clock(),
-            own: false,
-          });
+          ensureChannel(e.target).messages.push(
+            mkMsg({ author: e.sender, body: `(edited) ${e.body}`, time: clock(), own: false }),
+          );
         }
         break;
       case "moderated": {
@@ -132,11 +224,11 @@
         const ch = e.scope.startsWith("#") ? ensureChannel(e.scope) : activeChannel;
         const who = e.by ? ` by ${e.by}` : "";
         const why = e.reason ? ` (${e.reason})` : "";
-        ch?.messages.push({ author: "", body: `${e.account} ${e.action}d${who} — ${e.scope}${why}`, time: clock(), own: false, system: true });
+        ch?.messages.push(mkMsg({ author: "", body: `${e.account} ${e.action}d${who} — ${e.scope}${why}`, time: clock(), own: false, system: true }));
         break;
       }
       case "error":
-        if (activeChannel) activeChannel.messages.push({ author: "", body: `${e.code}: ${e.text}`, time: clock(), own: false, system: true });
+        if (activeChannel) activeChannel.messages.push(mkMsg({ author: "", body: `${e.code}: ${e.text}`, time: clock(), own: false, system: true }));
         break;
     }
   }
@@ -155,15 +247,21 @@
   }
 
   function doJoin() {
-    let name = joinInput.trim();
-    if (!name) return;
-    if (!name.startsWith("#")) name = `#${name}`;
-    weft.join(name).catch((e) => (authError = String(e)));
+    const raw = joinInput.trim();
+    if (!raw) return;
     joinInput = "";
+    // `#chan` joins one channel; a bare name (or `ns:name`) joins the whole
+    // namespace — the server auto-joins every channel we're allowed to see.
+    if (raw.startsWith("#")) {
+      weft.join(raw).catch((e) => (authError = String(e)));
+    } else {
+      weft.nsJoin(raw.replace(/^ns:/, "")).catch((e) => (authError = String(e)));
+    }
   }
 
   function sys(body: string) {
-    if (activeChannel) activeChannel.messages.push({ author: "", body, time: clock(), own: false, system: true });
+    if (activeChannel)
+      activeChannel.messages.push(mkMsg({ author: "", body, time: clock(), own: false, system: true }));
   }
 
   /// A capability-gated moderation action (§10.4). These are **server-side**:
@@ -223,11 +321,22 @@
     }
   }
 
-  // Auto-scroll to the newest message when the active channel changes/grows.
+  // Keep the newest message in view only while pinned to the bottom — a
+  // history prepend (reader scrolled up) must not yank them down.
   $effect(() => {
     activeChannel?.messages.length;
-    active;
-    if (scrollEl) queueMicrotask(() => (scrollEl!.scrollTop = scrollEl!.scrollHeight));
+    if (scrollEl && stickBottom) {
+      queueMicrotask(() => (scrollEl!.scrollTop = scrollEl!.scrollHeight));
+    }
+  });
+
+  // On opening a channel, pin to bottom and backfill its first page once.
+  $effect(() => {
+    const a = active;
+    if (!a) return;
+    stickBottom = true;
+    const ch = channels[a];
+    if (ch && !ch.historyLoaded) loadHistory(a, true);
   });
 
   onMount(() => {
@@ -309,7 +418,7 @@
       <div class="sidebar-join">
         <input
           bind:value={joinInput}
-          placeholder="join #channel…"
+          placeholder="join #channel or namespace…"
           onkeydown={(e) => e.key === "Enter" && doJoin()}
         />
       </div>
@@ -346,10 +455,16 @@
         </div>
       </div>
 
-      <div class="message-scroll" bind:this={scrollEl}>
+      <div class="message-scroll" bind:this={scrollEl} onscroll={onScroll}>
         {#if activeChannel}
-          <div class="day-sep">TODAY</div>
-          {#each activeChannel.messages as m, i (i)}
+          {#if loadingHistory === active}
+            <div class="day-sep">loading history…</div>
+          {:else if activeChannel.truncated}
+            <div class="day-sep">older messages have expired</div>
+          {:else if activeChannel.historyLoaded && !activeChannel.hasMore}
+            <div class="day-sep">beginning of {activeChannel.name}</div>
+          {/if}
+          {#each activeChannel.messages as m (m.key)}
             {#if m.system}
               <div class="msg-group"><div style="width:34px;flex-shrink:0"></div><div class="msg-body"><div class="msg-line system">{m.body}</div></div></div>
             {:else}

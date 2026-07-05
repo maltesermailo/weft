@@ -19,9 +19,9 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use weft_crypto::{Capability, PublicKey, SignedManifest, Subject, TokenScope};
 use weft_proto::{
     Account, BridgeState, ChannelName, Command, ContentState, ErrCode, ErrEvent, Event,
-    HistoryMode, Line, MediaMode, MemberAction, ModAction, MsgId, MsgMeta, NetworkName, ParseError,
-    Reply, ReportScope, ReportStatus, Request, ResolveAction, RetentionPolicy, Target, Ulid,
-    UserRef, Visibility, MAX_LABEL_BYTES,
+    HistoryMode, Line, MediaMode, MemberAction, ModAction, MsgId, MsgMeta, NamespaceName,
+    NetworkName, ParseError, Reply, ReportScope, ReportStatus, Request, ResolveAction,
+    RetentionPolicy, Target, Ulid, UserRef, Visibility, MAX_LABEL_BYTES,
 };
 
 use weft_store::{
@@ -122,6 +122,18 @@ enum State {
 enum Flow {
     Continue,
     Close,
+}
+
+/// The outcome of an attempted channel join (shared by `JOIN` / `NS JOIN`).
+enum JoinResult {
+    Joined,
+    /// No such channel actor.
+    Missing,
+    /// View-gated and the caller lacks `view`.
+    Hidden,
+    Banned,
+    /// The channel actor was unreachable (raced teardown).
+    Unavailable,
 }
 
 /// Events flowing from channel forwarders into the session task. Variant
@@ -753,6 +765,7 @@ impl<S: ControlStream> Session<S> {
             Command::NsDelete { name, confirm } => {
                 self.on_ns_delete(label, name, confirm, account).await
             }
+            Command::NsJoin { name } => self.on_ns_join(label, name, account).await,
             Command::Discover { cursor } => self.on_discover(label, cursor).await,
             Command::Channels { namespace } => self.on_channels(label, namespace).await,
             // §2.4 succession + recovery ladder.
@@ -897,37 +910,89 @@ impl<S: ControlStream> Session<S> {
                 .unsupported(label, "use INVITE REDEEM to redeem an invite")
                 .await;
         }
-        let Some(handle) = self.ctx.registry.get(&channel) else {
-            // §2.2 anti-enumeration: unknown and hidden channels share this
-            // one code.
-            return self.no_such_target(label).await;
+        match self.join_one(&channel, &account, label.clone()).await? {
+            JoinResult::Joined => Ok(Flow::Continue),
+            JoinResult::Banned => {
+                self.send_err(label, ErrCode::Banned, None, "you are banned")
+                    .await?;
+                Ok(Flow::Continue)
+            }
+            // §2.2 anti-enumeration: unknown and hidden collapse to one code.
+            JoinResult::Missing | JoinResult::Hidden => self.no_such_target(label).await,
+            JoinResult::Unavailable => {
+                self.send_err(label, ErrCode::Internal, None, "channel unavailable")
+                    .await?;
+                Ok(Flow::Continue)
+            }
+        }
+    }
+
+    /// §6.2 `NS JOIN <name>`: join every channel in the namespace the caller
+    /// can see, skipping view-gated and banned ones ("not hidden by
+    /// permissions"). No visible channel — nonexistent, private, or fully
+    /// gated — answers `NO-SUCH-TARGET` (one code, anti-enumeration).
+    async fn on_ns_join(
+        &mut self,
+        label: Option<String>,
+        name: NamespaceName,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let channels = match self
+            .ctx
+            .channel_store
+            .channels_in_namespace(name.as_str())
+            .await
+        {
+            Ok(list) => list,
+            Err(e) => return self.internal(label, &e).await,
         };
-        // §6.3 view gating: a view-gated channel is invisible to a
-        // non-member without the `view` cap — same NO-SUCH-TARGET as a
-        // channel that does not exist (invariant 1).
-        if self.view_gated_denied(&channel, &account).await {
+        let mut joined_any = false;
+        for (channel, _record) in channels {
+            // Per-channel joins are unlabeled (a bulk membership burst); the
+            // client processes each MEMBER/POLICY as it arrives.
+            if matches!(
+                self.join_one(&channel, &account, None).await?,
+                JoinResult::Joined
+            ) {
+                joined_any = true;
+            }
+        }
+        if !joined_any {
             return self.no_such_target(label).await;
         }
-        // §6.7 a ban at the channel / its namespace / `*` refuses the join.
+        Ok(Flow::Continue)
+    }
+
+    /// Join one channel: registry lookup, view-gate + ban checks, subscribe,
+    /// and emit the §6.3 `MEMBER` + `POLICY` response (with `label`). Shared by
+    /// `JOIN` and `NS JOIN`; the caller maps the non-`Joined` results to errors.
+    async fn join_one(
+        &mut self,
+        channel: &ChannelName,
+        account: &Account,
+        label: Option<String>,
+    ) -> io::Result<JoinResult> {
+        let Some(handle) = self.ctx.registry.get(channel) else {
+            return Ok(JoinResult::Missing);
+        };
+        if self.view_gated_denied(channel, account).await {
+            return Ok(JoinResult::Hidden);
+        }
         if self
             .ctx
             .moderation
-            .is_moderated(&account, &covering_scopes(&channel), ModKind::Ban)
+            .is_moderated(account, &covering_scopes(channel), ModKind::Ban)
             .await
             .unwrap_or(false)
         {
-            self.send_err(label, ErrCode::Banned, None, "you are banned")
-                .await?;
-            return Ok(Flow::Continue);
+            return Ok(JoinResult::Banned);
         }
         let Some(ack) = handle.join(self.id, account.clone()).await else {
-            self.send_err(label, ErrCode::Internal, None, "channel unavailable")
-                .await?;
-            return Ok(Flow::Continue);
+            return Ok(JoinResult::Unavailable);
         };
-        // Re-JOIN replaces the subscription. Pending echo labels die with
-        // the old receiver (their broadcasts went there), so drop them too.
-        if let Some(old) = self.joined.remove(&channel) {
+        // Re-JOIN replaces the subscription; pending echo labels die with the
+        // old receiver (their broadcasts went there), so drop them too.
+        if let Some(old) = self.joined.remove(channel) {
             old.forwarder.abort();
         }
         let forwarder = spawn_forwarder(channel.clone(), ack.events, self.events_tx.clone());
@@ -941,8 +1006,7 @@ impl<S: ControlStream> Session<S> {
             },
         );
         debug!(%channel, members = ack.count, "joined");
-        // §6.3 direct response: MEMBER (with count=) + POLICY, both labeled.
-        let me = UserRef::new(account, self.ctx.info.network.clone());
+        let me = UserRef::new(account.clone(), self.ctx.info.network.clone());
         self.send_event(
             label.clone(),
             Event::Member {
@@ -957,12 +1021,12 @@ impl<S: ControlStream> Session<S> {
         self.send_event(
             label,
             Event::Policy {
-                channel,
+                channel: channel.clone(),
                 policy: ack.policy,
             },
         )
         .await?;
-        Ok(Flow::Continue)
+        Ok(JoinResult::Joined)
     }
 
     async fn on_part(&mut self, label: Option<String>, channel: ChannelName) -> io::Result<Flow> {

@@ -2314,3 +2314,50 @@ async fn restricted_channel_gates_posting_on_send_cap() {
         }
     }
 }
+
+// ---- §6.2 NS JOIN (auto-join a namespace's visible channels) ----
+
+#[tokio::test]
+async fn ns_join_auto_joins_visible_channels_only() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    // Owner creates three channels; one is view-gated (hidden by permissions).
+    for c in ["#gaming/general", "#gaming/lounge", "#gaming/secret"] {
+        ada.send(&format!("CHANNEL CREATE {c}"));
+        assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
+    }
+    ada.send("CHANNEL META #gaming/secret view-gated :yes");
+    assert!(matches!(ada.recv().await.event, Event::Chanmeta { .. }));
+
+    // A regular user joins the namespace → auto-joins the two visible channels.
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("NS JOIN gaming");
+    let mut joined = std::collections::HashSet::new();
+    for _ in 0..4 {
+        // Two channels × (MEMBER + POLICY).
+        match bob.recv().await.event {
+            Event::Member { channel, .. } => {
+                joined.insert(channel.to_string());
+            }
+            Event::Policy { .. } => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(joined.contains("#gaming/general"));
+    assert!(joined.contains("#gaming/lounge"));
+    assert!(
+        !joined.contains("#gaming/secret"),
+        "a view-gated channel must not be auto-joined"
+    );
+}
+
+#[tokio::test]
+async fn ns_join_with_no_visible_channels_is_no_such_target() {
+    let ctx = ctx(&[]);
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("@label=j NS JOIN nope");
+    let reply = bob.expect_err(ErrCode::NoSuchTarget).await;
+    assert_eq!(reply.label.as_deref(), Some("j"));
+}

@@ -201,6 +201,9 @@ pub enum Command {
         name: NamespaceName,
         confirm: NamespaceName,
     },
+    /// `NS JOIN <name>` — join every channel in the namespace the caller can
+    /// see (§6.2); view-gated and banned channels are skipped.
+    NsJoin { name: NamespaceName },
     /// `NS TRANSFER <name> <account>` with `@sig=<b64>` — rung-1 succession,
     /// signed by the current root (§2.4).
     NsTransfer {
@@ -720,6 +723,9 @@ impl Command {
                         name: args.req("name")?.parse()?,
                         confirm: args.req("confirmation")?.parse()?,
                     }),
+                    "JOIN" => Ok(Command::NsJoin {
+                        name: args.req("name")?.parse()?,
+                    }),
                     "TRANSFER" => {
                         let name = args.req("name")?.parse()?;
                         let new_owner = args.req("account")?.parse()?;
@@ -1199,6 +1205,7 @@ impl Command {
                 vec!["DELETE".to_string(), name.to_string(), confirm.to_string()],
                 None,
             ),
+            Command::NsJoin { name } => ("NS", vec!["JOIN".to_string(), name.to_string()], None),
             Command::NsTransfer {
                 name,
                 new_owner,
@@ -1831,6 +1838,9 @@ mod tests {
         round_trip(&Request::new(Command::NsDelete {
             name: "gaming".parse().unwrap(),
             confirm: "gaming".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::NsJoin {
+            name: "gaming".parse().unwrap(),
         }));
         assert!(Request::parse("NS FROB x").is_err());
     }

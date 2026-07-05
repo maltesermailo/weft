@@ -26,11 +26,7 @@ weft-proto = { path = "../../crates/weft-proto" }
 weft-transport = { path = "../../crates/weft-transport", features = ["insecure-client"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util"] }
 
-
-# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = 3
-panic = "abort"
-strip = true
+# Release optimization lives at the workspace root as a per-package override
+# ([profile.release.package.client]) — Cargo ignores profiles in a non-root
+# member. `lto`/`panic` can't be set per-package, so they're omitted; if the
+# smallest possible bundle is wanted, make this crate its own [workspace].

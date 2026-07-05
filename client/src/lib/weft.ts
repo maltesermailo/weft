@@ -15,7 +15,10 @@ export type WeftEvent =
       msgid: string;
       body: string;
       own: boolean;
+      history: boolean;
     }
+  | { kind: "batch-start"; id: string }
+  | { kind: "batch-end"; id: string; truncated: boolean }
   | {
       kind: "member";
       channel: string;
@@ -27,6 +30,15 @@ export type WeftEvent =
   | { kind: "policy"; channel: string; policy: string }
   | { kind: "edited"; target: string; sender: string; msgid: string; body: string }
   | { kind: "deleted"; target: string; msgid: string }
+  | { kind: "reaction"; target: string; msgid: string; emoji: string; op: string; by: string }
+  | {
+      kind: "reactions";
+      target: string;
+      msgid: string;
+      emoji: string;
+      count: number;
+      by: string[];
+    }
   | {
       kind: "moderated";
       scope: string;
@@ -45,6 +57,16 @@ export function connect(host: string, account: string, password: string, mode: M
 
 export function join(channel: string) {
   return invoke("join", { channel });
+}
+
+/// Auto-join every visible channel in a namespace (§6.2 NS JOIN).
+export function nsJoin(name: string) {
+  return invoke("ns_join", { name });
+}
+
+/// Request a page of history for `target`, older than `before` if given.
+export function history(target: string, before?: string) {
+  return invoke("history", { target, before: before ?? null });
 }
 
 export function sendMessage(target: string, body: string) {
