@@ -76,8 +76,38 @@ fn history(conn: State<'_, Conn>, target: String, before: Option<String>) -> Res
 }
 
 #[tauri::command]
-fn send_message(conn: State<'_, Conn>, target: String, body: String) -> Result<(), String> {
-    conn.send(weft::build_msg(&target, &body)?)
+fn edit(conn: State<'_, Conn>, msgid: String, body: String) -> Result<(), String> {
+    conn.send(weft::build_edit(&msgid, &body)?)
+}
+
+#[tauri::command]
+fn delete(conn: State<'_, Conn>, msgid: String) -> Result<(), String> {
+    conn.send(weft::build_delete(&msgid)?)
+}
+
+#[tauri::command]
+fn react(conn: State<'_, Conn>, msgid: String, emoji: String, add: bool) -> Result<(), String> {
+    conn.send(weft::build_react(&msgid, &emoji, add)?)
+}
+
+#[tauri::command]
+fn send_message(
+    conn: State<'_, Conn>,
+    target: String,
+    body: String,
+    reply_to: Option<String>,
+) -> Result<(), String> {
+    conn.send(weft::build_msg(&target, &body, reply_to)?)
+}
+
+#[tauri::command]
+fn typing(conn: State<'_, Conn>, channel: String, active: bool) -> Result<(), String> {
+    conn.send(weft::build_typing(&channel, active)?)
+}
+
+#[tauri::command]
+fn presence(conn: State<'_, Conn>, status: String) -> Result<(), String> {
+    conn.send(weft::build_presence(&status)?)
 }
 
 /// Escape hatch — send a raw wire line (netcat-debuggable control plane).
@@ -96,6 +126,11 @@ pub fn run() {
             join,
             ns_join,
             history,
+            edit,
+            delete,
+            react,
+            typing,
+            presence,
             send_message,
             send_raw
         ])

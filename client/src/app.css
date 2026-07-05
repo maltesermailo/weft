@@ -268,6 +268,105 @@ button {
 .dot.e2ee {
   background: var(--e2ee);
 }
+/* presence dots (Phase 5) */
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot.online {
+  background: #3ba55d;
+}
+.dot.away {
+  background: #faa61a;
+}
+.dot.dnd {
+  background: #ed4245;
+}
+.dot.invisible,
+.dot.offline {
+  background: #747f8d;
+}
+.dot.corner {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--bg-panel, #16181f);
+}
+
+/* status menu on the user footer */
+.sidebar-user {
+  position: relative;
+}
+.status-avatar {
+  position: relative;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+.status-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 10px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 130px;
+  padding: 4px;
+  background: var(--bg-elevated, #1b1e27);
+  border: 1px solid var(--border-hair-strong, #2a2e3a);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.status-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--text-secondary, #b8bcc8);
+  cursor: pointer;
+  text-transform: capitalize;
+  font: inherit;
+}
+.status-menu button:hover {
+  background: #232733;
+  color: var(--text-primary);
+}
+
+/* DM list items + clickable member names */
+.channel-item.dm .avatar.sm {
+  width: 22px;
+  height: 22px;
+  font-size: 9px;
+  border-radius: 50%;
+}
+.channel-item.dm > span:nth-child(2) {
+  flex: 1;
+  text-align: left;
+}
+.mname.mlink {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  text-align: left;
+}
+.mname.mlink:hover {
+  color: var(--text-primary);
+}
 .channel-item {
   display: flex;
   align-items: center;
@@ -457,6 +556,7 @@ button {
   background: var(--border-hair);
 }
 .msg-group {
+  position: relative;
   display: flex;
   gap: 12px;
   padding: 4px 8px;
@@ -521,6 +621,147 @@ button {
   font-style: italic;
   font-size: 13px;
 }
+.edited-tag {
+  margin-left: 6px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+/* markdown inline */
+.msg-line code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: #12141a;
+  border: 1px solid var(--border-hair-strong, #2a2e3a);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.msg-line a {
+  color: var(--accent, #7aa2f7);
+  text-decoration: none;
+}
+.msg-line a:hover {
+  text-decoration: underline;
+}
+
+/* reply quote above a message */
+.reply-quote {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  margin-bottom: 2px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  overflow: hidden;
+}
+.reply-quote:hover .rq-body {
+  color: var(--text-primary);
+}
+.reply-quote .rq-author {
+  color: var(--text-secondary, #b8bcc8);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.reply-quote .rq-body {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-faint);
+}
+
+/* reply-compose banner */
+.reply-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 12px;
+  margin-bottom: 6px;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border-hair-strong, #2a2e3a);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.composer-hint .typing {
+  color: var(--text-secondary, #b8bcc8);
+  font-style: italic;
+}
+
+/* hover actions on own messages */
+.msg-actions {
+  position: absolute;
+  top: -10px;
+  right: 10px;
+  display: none;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-elevated, #1b1e27);
+  border: 1px solid var(--border-hair-strong, #2a2e3a);
+  border-radius: var(--radius-md);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.msg-group:hover .msg-actions {
+  display: flex;
+}
+.msg-act {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.msg-act:hover {
+  background: #232733;
+  color: var(--text-primary);
+}
+.msg-act.danger:hover {
+  color: #f16a6a;
+}
+
+/* inline editor */
+.edit-box {
+  width: 100%;
+  resize: none;
+  background: #1b1e27;
+  border: 1px solid var(--border-hair-strong, #2a2e3a);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  font: inherit;
+  line-height: 1.5;
+}
+.edit-box:focus {
+  outline: none;
+  border-color: var(--accent, #5865f2);
+}
+.edit-hint {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  margin-top: 3px;
+}
+.linkish {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent, #7aa2f7);
+  cursor: pointer;
+  font: inherit;
+}
+.linkish:hover {
+  text-decoration: underline;
+}
 .reactions {
   display: flex;
   gap: 6px;
@@ -536,11 +777,50 @@ button {
   border-radius: 5px;
   padding: 2px 8px;
   font-size: 12px;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+.reaction:hover {
+  border-color: var(--text-faint);
+}
+.reaction.mine {
+  background: color-mix(in srgb, var(--accent, #5865f2) 22%, transparent);
+  border-color: var(--accent, #5865f2);
 }
 .reaction .count {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-muted);
+}
+.reaction.mine .count {
+  color: var(--text-primary);
+}
+
+/* quick-emoji picker popover */
+.emoji-picker {
+  position: absolute;
+  top: 18px;
+  right: 10px;
+  z-index: 5;
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  background: var(--bg-elevated, #1b1e27);
+  border: 1px solid var(--border-hair-strong, #2a2e3a);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.emoji-opt {
+  border: none;
+  background: transparent;
+  border-radius: 5px;
+  padding: 4px 6px;
+  font-size: 17px;
+  cursor: pointer;
+  line-height: 1;
+}
+.emoji-opt:hover {
+  background: #232733;
 }
 .composer-wrap {
   padding: 12px 20px 16px;

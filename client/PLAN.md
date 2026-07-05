@@ -46,47 +46,74 @@ Turns a live-only stream into a real chat log.
 **Acceptance met:** default `#general` is `retained:90d`, so opening it backfills
 prior traffic and scrolling up pages older; client type-checks, builds, clippy-clean.
 
-## Phase 2 — message actions (edit / delete)
+## Phase 2 — message actions (edit / delete) ✅
 
-- **verbs** `EDIT <msgid> :<new>`, `DELETE <msgid>`.
-- **backend** `edit(msgid, body)`, `delete(msgid)` commands.
-- **frontend** hover toolbar on own messages (edit, delete, more); up-arrow in
-  the composer edits the last own message; render `edited ×N`; delete →
-  tombstone via the Phase 0 `deleted` handler.
+- [x] **backend** `edit(msgid, body)` → `EDIT <msgid> :<body>`, `delete(msgid)`
+  → `DELETE <msgid>`. `Message` now forwards an `edited` flag (batch form);
+  `Edited` forwards `edit_of` so the client can update in place.
+- [x] **frontend** hover toolbar on own messages (edit ✎ / delete 🗑); up-arrow
+  in an empty composer edits the last own message; inline editor (Enter save,
+  Esc cancel, caret-at-end autofocus); optimistic update + `EDITED` echo
+  updates the original in place (no more duplicate line); delete → the Phase 0
+  `deleted` handler drops it.
+- [x] **`(edited)` marker** rendered from live `EDITED` and from history
+  (`MessageEvent.edited`).
 
-**Acceptance:** edit and delete your own messages; both reflect live.
+**Acceptance met:** edit and delete your own messages live; client type-checks,
+builds, clippy-clean.
 
-## Phase 3 — reactions
+## Phase 3 — reactions ✅
 
-- **verbs** `REACT <msgid> <emoji>`, `UNREACT <msgid> <emoji>` → `REACTION op=` (live), `REACTIONS` (history summary).
-- **backend** `react(msgid, emoji, add)` command; the `reaction`/`reactions`
-  events from Phase 0.
-- **frontend** reaction pills under messages (design `.reaction` CSS exists),
-  toggle own reaction, add-reaction button + emoji picker. Aggregate counts;
-  mark `mine`.
+- [x] **backend** `react(msgid, emoji, add)` → `REACT`/`UNREACT <msgid> <emoji>`.
+  The `reaction`/`reactions` events were plumbed in Phase 0.
+- [x] **frontend** reaction pills under messages (aggregate `count`, `.mine`
+  highlight, click to toggle); a react button in the hover toolbar opens a
+  quick-emoji picker popover. `findMsg` also searches the batch buffer so
+  history `REACTIONS` summaries attach to still-buffered messages.
+- [x] **non-optimistic + correct** — toggling sends `REACT`/`UNREACT` and the
+  server echoes our own `REACTION` back (like a MSG ack), so counts can't
+  double; other users' reactions and history summaries fold into the same
+  aggregate.
 
-**Acceptance:** react/unreact, counts update live and survive a history reload.
+**Acceptance met:** react/unreact toggles live and survives a history reload;
+client type-checks, builds, clippy-clean.
 
-## Phase 4 — replies · markdown · typing
+## Phase 4 — replies · markdown · typing ✅
 
-- **Replies** — **verbs** `MSG … reply-to=<msgid>`. Reply affordance on hover;
-  quoted-snippet render (design `.reply-thread`); click to jump.
-- **Markdown** — render `fmt=md` (bold/italic/code/links); send `fmt=md`. Use a
-  small sanitizing MD renderer (inline only to start).
-- **Typing** — **verbs** `TYPING <#chan> start|stop` on composer input
-  (debounced); render "X, Y are typing…" from `TYPING` events.
+- [x] **Replies** — `send_message` carries `reply-to=<msgid>`; hover reply
+  button sets a compose banner; each message renders a clickable quote snippet
+  (author + preview) that scrolls to the original (`id="msg-<key>"` + `jumpTo`).
+- [x] **Markdown** — client sends `fmt=md`; bodies render via an inline,
+  escape-first `renderMd` (bold/italic/code/strikethrough/links, safe for
+  `{@html}`). Non-`md` messages stay plain (Svelte auto-escape).
+- [x] **Typing** — `typing(channel, active)` → `TYPING start|stop`, sent
+  debounced on composer input (4 s idle stop, stop on send/channel-switch);
+  incoming `TYPING` shows "X is typing…" / "X and Y…" / "several people…" with a
+  6 s fallback expiry. Server broadcasts + `meta` preservation verified.
 
-**Acceptance:** reply with a quote, formatted text renders, typing shows.
+**Acceptance met:** reply with a quote, markdown renders, typing shows; client
+type-checks, builds, clippy-clean.
 
-## Phase 5 — direct messages · presence
+## Phase 5 — direct messages · presence ✅
 
-- **DMs** — **verbs** `MSG @user`. DM list in the left rail (the "home" button),
-  DM conversations keyed by peer, open-DM from a member/profile. Route incoming
-  `@user` messages to the DM view (backend already tags them).
-- **Presence** — **verbs** `PRESENCE <status>` (self) + `PRESENCE` events
-  (others). Status menu on the user footer; status dots on members/DMs.
+- [x] **DMs** — a DM `MESSAGE` carries `target=@recipient` + `sender`, so the
+  conversation is keyed by the *peer* (`own ? target : sender`), landing both
+  sides in one thread. The rail "home" button flips the sidebar to a DM list;
+  click a member (name or ✉ button) to open/create a DM; `@user` input starts
+  one. DMs reuse the whole message pipeline (history, edit/delete, react,
+  reply); DM scrollback works (`HISTORY` supports `Target::User`).
+- [x] **Presence** — `presence(status)` → `PRESENCE`; a status menu on the user
+  footer (online/away/dnd/invisible) with a corner dot; incoming `PRESENCE`
+  drives status dots on members, the DM list, and DM headers. We re-announce
+  our status on each channel join (the server only broadcasts presence to
+  shared channels).
 
-**Acceptance:** DM a user both ways; set status and see others' dots.
+**Limitation:** presence is broadcast-only (no server store), so a member who
+was already in a channel before you joined shows a default dot until they next
+change status — a proper roster+presence store is Phase 6 / server work.
+
+**Acceptance met:** DM a user both ways; set status and see dots; type-checks,
+builds, clippy-clean.
 
 ## Phase 6 — servers, channels, membership (the "join dialog" phase)
 

@@ -16,7 +16,12 @@ export type WeftEvent =
       body: string;
       own: boolean;
       history: boolean;
+      edited: boolean;
+      reply_to: string | null;
+      md: boolean;
     }
+  | { kind: "typing"; channel: string; user: string; state: string }
+  | { kind: "presence"; user: string; status: string }
   | { kind: "batch-start"; id: string }
   | { kind: "batch-end"; id: string; truncated: boolean }
   | {
@@ -28,7 +33,7 @@ export type WeftEvent =
       count: number | null;
     }
   | { kind: "policy"; channel: string; policy: string }
-  | { kind: "edited"; target: string; sender: string; msgid: string; body: string }
+  | { kind: "edited"; target: string; sender: string; edit_of: string; body: string }
   | { kind: "deleted"; target: string; msgid: string }
   | { kind: "reaction"; target: string; msgid: string; emoji: string; op: string; by: string }
   | {
@@ -69,8 +74,32 @@ export function history(target: string, before?: string) {
   return invoke("history", { target, before: before ?? null });
 }
 
-export function sendMessage(target: string, body: string) {
-  return invoke("send_message", { target, body });
+export function edit(msgid: string, body: string) {
+  return invoke("edit", { msgid, body });
+}
+
+export function del(msgid: string) {
+  return invoke("delete", { msgid });
+}
+
+export function react(msgid: string, emoji: string) {
+  return invoke("react", { msgid, emoji, add: true });
+}
+
+export function unreact(msgid: string, emoji: string) {
+  return invoke("react", { msgid, emoji, add: false });
+}
+
+export function sendMessage(target: string, body: string, replyTo?: string) {
+  return invoke("send_message", { target, body, replyTo: replyTo ?? null });
+}
+
+export function typing(channel: string, active: boolean) {
+  return invoke("typing", { channel, active });
+}
+
+export function presence(status: string) {
+  return invoke("presence", { status });
 }
 
 export function sendRaw(line: string) {

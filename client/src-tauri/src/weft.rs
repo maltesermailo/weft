@@ -60,6 +60,23 @@ pub enum WeftEvent {
         /// True when this arrived inside a `HISTORY` batch (older messages to
         /// prepend), false for live traffic to append.
         history: bool,
+        /// Batch form: the message already carries collapsed edits.
+        edited: bool,
+        /// `reply-to=` — the msgid this replies to (§9.3), if any.
+        reply_to: Option<String>,
+        /// `fmt=md` — render the body as markdown (§9.4).
+        md: bool,
+    },
+    /// `TYPING <#chan> start|stop` from another member (§7).
+    Typing {
+        channel: String,
+        user: String,
+        state: String,
+    },
+    /// `PRESENCE <user> <status>` from a shared-channel member (§7).
+    Presence {
+        user: String,
+        status: String,
     },
     /// `BATCH START` — a `HISTORY` page begins (§7).
     BatchStart {
@@ -84,7 +101,8 @@ pub enum WeftEvent {
     Edited {
         target: String,
         sender: String,
-        msgid: String,
+        /// The original message this edit replaces (§7 `edit-of=`).
+        edit_of: String,
         body: String,
     },
     Deleted {
@@ -303,9 +321,12 @@ fn on_line(
                 sender: m.sender.account.to_string(),
                 network: m.sender.network.to_string(),
                 msgid: m.msgid.to_string(),
-                body: m.body,
                 own: m.sender.account.as_str() == account,
                 history: *in_batch,
+                edited: m.edited.is_some(),
+                reply_to: m.meta.reply_to.as_ref().map(|r| r.to_string()),
+                md: m.meta.fmt.as_deref() == Some("md"),
+                body: m.body,
             },
         ),
         Event::Member {
@@ -331,10 +352,29 @@ fn on_line(
                 policy: policy.to_string(),
             },
         ),
+        Event::Typing {
+            channel,
+            user,
+            state,
+        } => emit(
+            app,
+            WeftEvent::Typing {
+                channel: channel.to_string(),
+                user: user.account.to_string(),
+                state: state.to_string(),
+            },
+        ),
+        Event::Presence { user, status } => emit(
+            app,
+            WeftEvent::Presence {
+                user: user.account.to_string(),
+                status: status.to_string(),
+            },
+        ),
         Event::Edited {
             target,
             user,
-            msgid,
+            edit_of,
             body,
             ..
         } => emit(
@@ -342,7 +382,7 @@ fn on_line(
             WeftEvent::Edited {
                 target: target.to_string(),
                 sender: user.account.to_string(),
-                msgid: msgid.to_string(),
+                edit_of: edit_of.to_string(),
                 body,
             },
         ),
@@ -466,15 +506,48 @@ pub fn password_or_default(password: &str) -> String {
 
 /// Build a WEFT command line for the frontend's high-level intents, validated
 /// through the proto codec so we never emit something our own parser rejects.
-pub fn build_msg(target: &str, body: &str) -> Result<String, String> {
+pub fn build_msg(target: &str, body: &str, reply_to: Option<String>) -> Result<String, String> {
     let target: Target = target.parse().map_err(|_| "bad target".to_string())?;
+    let reply_to = match reply_to.filter(|r| !r.is_empty()) {
+        Some(r) => Some(r.parse::<MsgId>().map_err(|_| "bad reply-to msgid".to_string())?),
+        None => None,
+    };
+    let meta = weft_proto::MsgMeta {
+        // The client composes in markdown; tag it so peers render it (§9.4).
+        fmt: Some("md".to_string()),
+        reply_to,
+        ..Default::default()
+    };
     weft_proto::Request::new(weft_proto::Command::Msg {
         target,
         body: Some(body.to_string()),
-        meta: weft_proto::MsgMeta::default(),
+        meta,
     })
     .serialize()
     .map_err(|e| e.to_string())
+}
+
+/// `PRESENCE <status>` — set own status (§6.1). `invisible` renders offline.
+pub fn build_presence(status: &str) -> Result<String, String> {
+    let status: weft_proto::PresenceStatus =
+        status.parse().map_err(|_| "bad presence status".to_string())?;
+    Request::new(Command::Presence { status })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `TYPING <#chan> start|stop` (§6.3).
+pub fn build_typing(channel: &str, active: bool) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    let state = if active {
+        weft_proto::TypingState::Start
+    } else {
+        weft_proto::TypingState::Stop
+    };
+    Request::new(Command::Typing { channel, state })
+        .serialize()
+        .map_err(|e| e.to_string())
 }
 
 pub fn build_join(channel: &str) -> Result<String, String> {
@@ -486,6 +559,37 @@ pub fn build_join(channel: &str) -> Result<String, String> {
     })
     .serialize()
     .map_err(|e| e.to_string())
+}
+
+/// `EDIT <msgid> :<body>` — replace an own message's text (§6.4).
+pub fn build_edit(msgid: &str, body: &str) -> Result<String, String> {
+    let msgid: MsgId = msgid.parse().map_err(|_| "bad msgid".to_string())?;
+    Request::new(Command::Edit {
+        msgid,
+        body: body.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `DELETE <msgid>` — tombstone an own message (§6.4).
+pub fn build_delete(msgid: &str) -> Result<String, String> {
+    let msgid: MsgId = msgid.parse().map_err(|_| "bad msgid".to_string())?;
+    Request::new(Command::Delete { msgid })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `REACT`/`UNREACT <msgid> <emoji>` — toggle a reaction (§6.4, idempotent).
+pub fn build_react(msgid: &str, emoji: &str, add: bool) -> Result<String, String> {
+    let msgid: MsgId = msgid.parse().map_err(|_| "bad msgid".to_string())?;
+    let emoji = emoji.to_string();
+    let cmd = if add {
+        Command::React { msgid, emoji }
+    } else {
+        Command::Unreact { msgid, emoji }
+    };
+    Request::new(cmd).serialize().map_err(|e| e.to_string())
 }
 
 /// `HISTORY <target> [before=] limit=50` — a backfill page (§6.4). `before` is
