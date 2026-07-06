@@ -1,0 +1,20 @@
+# WEFT desktop client — optional configuration.
+#
+# The client VERIFIES the server's TLS certificate by default (bundled Mozilla
+# roots), which is what you want for a real server with a real cert. This file
+# is only needed to change that — e.g. to reach a dev / LAN / self-signed server.
+#
+# Place it (create the folder if needed) at your OS app-config dir, using your
+# tauri.conf.json `identifier` (default: dev.teamnight.weft.client):
+#
+#   macOS    ~/Library/Application Support/<identifier>/client.toml
+#   Linux    ~/.config/<identifier>/client.toml
+#   Windows  %APPDATA%\<identifier>\client.toml
+
+# Accept self-signed / unverified server certificates. OFF by default. Only
+# enable for a server you control — an insecure client on a public network is
+# MITM-able. The connect screen shows a warning while this is on.
+allow_insecure = false
+
+# Optional: prefill the connect screen's "Network" field.
+# default_host = "weft.example.com:4433"
