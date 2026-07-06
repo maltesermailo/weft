@@ -37,7 +37,11 @@ fn sanitize(s: &str) -> String {
 
 /// A flat, filesystem-safe path per `(network, namespace)`.
 fn key_path(app: &AppHandle, network: &str, namespace: &str) -> Result<PathBuf, String> {
-    Ok(keys_dir(app)?.join(format!("{}__{}.key", sanitize(network), sanitize(namespace))))
+    Ok(keys_dir(app)?.join(format!(
+        "{}__{}.key",
+        sanitize(network),
+        sanitize(namespace)
+    )))
 }
 
 /// Device signing keys (§10.2), one per `(host, account)`, in their own dir.
@@ -83,24 +87,60 @@ fn write_secret(path: &Path, seed_b64: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Generate a fresh namespace root keypair, persist the secret locally, and
-/// return the base64 **public** key for the `@root=` tag. Refuses to clobber
-/// an existing key (that would orphan the namespace).
+/// The namespace root key's base64 **public** key for the `@root=` tag,
+/// generating + persisting it on first use. Reuses an existing local key (the
+/// key *is* the namespace's identity), so retrying a create that failed
+/// server-side works.
 pub fn generate_ns_key(app: &AppHandle, network: &str, namespace: &str) -> Result<String, String> {
     let path = key_path(app, network, namespace)?;
-    if path.exists() {
-        return Err(format!(
-            "a root key for '{namespace}' already exists on this device"
-        ));
+    if let Ok(seed) = fs::read_to_string(&path) {
+        if let Ok(kp) = Keypair::from_seed_b64(seed.trim()) {
+            return Ok(kp.public().to_b64());
+        }
     }
     let keypair = Keypair::generate();
     write_secret(&path, &keypair.seed_b64())?;
     Ok(keypair.public().to_b64())
 }
 
+/// Overwrite the stored namespace root key (used after a successful recovery
+/// installs a *new* root). The caller owns the new key material.
+pub fn store_ns_key(
+    app: &AppHandle,
+    network: &str,
+    namespace: &str,
+    seed_b64: &str,
+) -> Result<(), String> {
+    write_secret(&key_path(app, network, namespace)?, seed_b64)
+}
+
+/// A per-namespace *recovery* keypair for a quorum member (§2.4). Generated on
+/// first use and reused; the member shares its pubkey with the owner to be
+/// included in `NS RECOVERY SET`.
+pub fn recovery_key(app: &AppHandle, network: &str, namespace: &str) -> Result<Keypair, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?
+        .join("recovery-keys");
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let path = dir.join(format!(
+        "{}__{}.key",
+        sanitize(network),
+        sanitize(namespace)
+    ));
+    if let Ok(seed) = fs::read_to_string(&path) {
+        if let Ok(kp) = Keypair::from_seed_b64(seed.trim()) {
+            return Ok(kp);
+        }
+    }
+    let keypair = Keypair::generate();
+    write_secret(&path, &keypair.seed_b64())?;
+    Ok(keypair)
+}
+
 /// Load a stored namespace root keypair for signing (future TRANSFER/RECOVERY).
 /// The secret never leaves this process.
-#[allow(dead_code)]
 pub fn load_ns_key(app: &AppHandle, network: &str, namespace: &str) -> Result<Keypair, String> {
     let path = key_path(app, network, namespace)?;
     let seed = fs::read_to_string(&path)

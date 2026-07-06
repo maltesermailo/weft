@@ -7,6 +7,29 @@ concrete steps per phase. Each phase ships independently.
 Legend per item: **verbs** (WEFT wire) · **backend** (Tauri command / event
 emit) · **frontend** (Svelte) · **⚠ server** (needs weft-core/proto work first).
 
+## Polish + server-verbs batch ✅ (2026-07-06)
+
+Cleared the deferred backlog ≤ M5 plus the two selected extras:
+
+- **`PIN`/`UNPIN`/`PINS`** server verb (proto + `PinStore` mem/PG + core + spec,
+  migration 0010) → client **pins panel** + pin/unpin actions.
+- **`CAPS <account> <scope>`** verb (public) → client **capability badges**
+  (owner / moderator / bridged) on messages, members, profiles. *Role-name*
+  badges still need a server role model — not built.
+- **In-memory presence** served with `MEMBERS` → correct roster dots (§6.1
+  never-stored honoured).
+- **Client polish**: curated emoji picker, **Ctrl+K** quick switcher,
+  **right-click context menus** (message/channel/member), **light theme + toggle**.
+- **Pings**: @mention pills, message highlight, channel mention badge,
+  `@`-autocomplete, `@everyone`/`@here` (+ the earlier desktop notification).
+- **Device-key auth**: enroll in Settings + passwordless `AUTH KEY/PROOF` login
+  (device key stored on-device in `keys.rs`).
+- **NS RECOVER quorum UI**: per-namespace recovery keypair, start/co-sign a
+  `RotationRecord`, submit `NS RECOVER` (multi-party b64 exchange).
+
+Not done (out of scope / still deferred): flavor-B multi-network, media/voice/
+threads/E2EE (M6+), message search, role-name definitions.
+
 ---
 
 ## Phase 0 — plumbing the client already needs ✅

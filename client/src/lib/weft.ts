@@ -7,7 +7,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 
-export type Mode = "login" | "register";
+export type Mode = "login" | "register" | "key";
 
 export type WeftEvent =
   | { kind: "connected"; network: string; account: string }
@@ -101,6 +101,16 @@ export function disconnect() {
   return invoke("disconnect");
 }
 
+/// Enroll a device key for passwordless login next time (while authed).
+export function enrollDevice(host: string, account: string) {
+  return invoke("enroll_device", { host, account });
+}
+
+/// Is a device key enrolled locally for this host + account?
+export function hasDeviceKey(host: string, account: string): Promise<boolean> {
+  return invoke("has_device_key", { host, account });
+}
+
 /// Fire a desktop notification (requests permission on first use).
 export async function notify(title: string, body: string) {
   let ok = await isPermissionGranted();
@@ -145,6 +155,19 @@ export function nsTransfer(network: string, name: string, newOwner: string) {
 }
 export function nsRecoveryCancel(network: string, name: string) {
   return invoke("ns_recovery_cancel", { network, name });
+}
+/// §2.4 recovery quorum flow.
+export function recoveryPubkey(network: string, name: string): Promise<string> {
+  return invoke("recovery_pubkey", { network, name });
+}
+export function recoveryStart(network: string, name: string, newOwner: string): Promise<string> {
+  return invoke("recovery_start", { network, name, newOwner });
+}
+export function recoveryCosign(network: string, name: string, rotation: string): Promise<string> {
+  return invoke("recovery_cosign", { network, name, rotation });
+}
+export function nsRecover(name: string, rotation: string) {
+  return invoke("ns_recover", { name, rotation });
 }
 
 /// Request a page of history for `target`, older than `before` if given.

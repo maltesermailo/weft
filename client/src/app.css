@@ -932,6 +932,30 @@ button {
   gap: 10px;
   margin-top: 4px;
 }
+.cap-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.cap-chip {
+  padding: 4px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border-hair-strong);
+  background: var(--bg-panel-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.cap-chip:hover {
+  color: var(--text-primary);
+}
+.cap-chip.on {
+  background: color-mix(in srgb, var(--accent, #5865f2) 22%, transparent);
+  border-color: var(--accent, #5865f2);
+  color: var(--text-primary);
+}
 .ok-btn,
 .danger-btn {
   border: none;
@@ -1098,6 +1122,14 @@ button {
 }
 
 /* right-click context menu */
+.ctx-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 399;
+  border: none;
+  background: transparent;
+  cursor: default;
+}
 .ctx-menu {
   position: fixed;
   z-index: 400;
@@ -1130,6 +1162,22 @@ button {
 }
 .ctx-item.danger:hover {
   background: rgba(216, 60, 62, 0.15);
+}
+
+.key-login {
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px;
+  background: none;
+  border: 1px solid var(--border-hair-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+}
+.key-login:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
 }
 .logout-item {
   border-top: 1px solid var(--border-hair-strong, #2a2e3a);
@@ -1192,18 +1240,65 @@ button {
 }
 
 /* settings rows */
+.settings-modal {
+  width: min(480px, 94vw);
+  padding: 20px 22px;
+}
 .set-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 5px 0;
+  gap: 12px;
+  padding: 9px 0;
   font-size: 13px;
   color: var(--text-muted);
+}
+.set-row + .set-row {
+  border-top: 1px solid color-mix(in srgb, var(--border-hair-strong) 45%, transparent);
 }
 .set-row b {
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: 12px;
+}
+.status-inline {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.chip-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 13px;
+  border: 1px solid var(--border-hair-strong);
+  background: var(--bg-panel-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-transform: capitalize;
+}
+.chip-btn.on {
+  border-color: var(--accent, #5865f2);
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--accent, #5865f2) 18%, transparent);
+}
+.set-btn {
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-hair-strong);
+  background: var(--bg-panel-raised);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.set-btn:hover {
+  border-color: var(--accent, #5865f2);
+  color: var(--text-primary);
 }
 
 /* hover actions on own messages */
@@ -1457,6 +1552,26 @@ button {
   gap: 9px;
   padding: 5px 4px;
   border-radius: var(--radius-sm);
+}
+.member-row:hover {
+  background: var(--bg-hover);
+}
+.member-id {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.member-id:hover .mname {
+  color: var(--text-primary);
 }
 .member-row:hover {
   background: var(--bg-hover);

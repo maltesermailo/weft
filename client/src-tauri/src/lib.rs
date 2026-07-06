@@ -172,6 +172,61 @@ fn ns_transfer(
     conn.send(weft::build_ns_transfer(&name, &new_owner, &sig)?)
 }
 
+/// §2.4 the quorum member's recovery pubkey — share it with the owner to be
+/// included in `NS RECOVERY SET`. Generated + stored on first call.
+#[tauri::command]
+fn recovery_pubkey(app: AppHandle, network: String, name: String) -> Result<String, String> {
+    Ok(keys::recovery_key(&app, &network, &name)?.public().to_b64())
+}
+
+/// §2.4 start a recovery: mint a fresh root key (held locally by the initiator,
+/// the new owner), build a rotation record, and sign it with our recovery key.
+/// Returns the b64 record to pass to the other quorum members for co-signing.
+#[tauri::command]
+fn recovery_start(
+    app: AppHandle,
+    network: String,
+    name: String,
+    new_owner: String,
+) -> Result<String, String> {
+    let recovery = keys::recovery_key(&app, &network, &name)?;
+    let new_root = weft_crypto::Keypair::generate();
+    keys::store_ns_key(&app, &network, &name, &new_root.seed_b64())?;
+    let record = weft_crypto::RotationRecord {
+        namespace: name,
+        new_root_key: new_root.public(),
+        new_owner,
+    };
+    let sig = record.sign(&recovery);
+    let signed = weft_crypto::SignedRotation {
+        record,
+        signatures: vec![sig],
+    };
+    Ok(signed.to_b64())
+}
+
+/// §2.4 add our recovery signature to an in-progress rotation record.
+#[tauri::command]
+fn recovery_cosign(
+    app: AppHandle,
+    network: String,
+    name: String,
+    rotation: String,
+) -> Result<String, String> {
+    let recovery = keys::recovery_key(&app, &network, &name)?;
+    let mut signed = weft_crypto::SignedRotation::from_b64(&rotation)
+        .map_err(|_| "bad rotation record".to_string())?;
+    let sig = signed.record.sign(&recovery);
+    signed.signatures.push(sig);
+    Ok(signed.to_b64())
+}
+
+/// §2.4 submit a co-signed rotation to the server (`NS RECOVER`).
+#[tauri::command]
+fn ns_recover(conn: State<'_, Conn>, name: String, rotation: String) -> Result<(), String> {
+    conn.send(weft::build_ns_recover(&name, &rotation)?)
+}
+
 /// §2.4 root veto of a pending recovery — root-signed locally.
 #[tauri::command]
 fn ns_recovery_cancel(
@@ -373,6 +428,10 @@ pub fn run() {
             ns_recovery_set,
             ns_transfer,
             ns_recovery_cancel,
+            recovery_pubkey,
+            recovery_start,
+            recovery_cosign,
+            ns_recover,
             history,
             edit,
             delete,

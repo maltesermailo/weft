@@ -588,6 +588,16 @@ impl<S: ControlStream> Session<S> {
             Err(e) => error!("marks snapshot failed: {e}"),
         }
         self.registered = Some(account.clone());
+        // §6.3 restore persistent channel memberships — the client's channels
+        // (and namespace tiles) reappear without re-joining.
+        match self.ctx.memberships.memberships(&account).await {
+            Ok(channels) => {
+                for channel in channels {
+                    self.join_one(&channel, &account, None).await?;
+                }
+            }
+            Err(e) => error!("membership restore failed: {e}"),
+        }
         self.state = State::Ready { account };
         Ok(Flow::Continue)
     }
@@ -1046,6 +1056,10 @@ impl<S: ControlStream> Session<S> {
             },
         )
         .await?;
+        // §6.3 persist membership for auto-rejoin on the next auth.
+        if let Err(e) = self.ctx.memberships.set_membership(account, channel).await {
+            error!("persist membership failed: {e}");
+        }
         Ok(JoinResult::Joined)
     }
 
@@ -1058,6 +1072,15 @@ impl<S: ControlStream> Session<S> {
             Some(joined) => {
                 joined.forwarder.abort();
                 joined.handle.part(self.id).await;
+                // §6.3 drop the persistent membership — no auto-rejoin.
+                if let Err(e) = self
+                    .ctx
+                    .memberships
+                    .clear_membership(&account, &channel)
+                    .await
+                {
+                    error!("clear membership failed: {e}");
+                }
                 // Direct ack mirrors the JOIN response shape; the broadcast
                 // copy goes to remaining members only.
                 let me = UserRef::new(account, self.ctx.info.network.clone());
@@ -1573,7 +1596,8 @@ impl<S: ControlStream> Session<S> {
             )
             .await?;
             if let Some(status) = status {
-                self.send_event(None, Event::Presence { user, status }).await?;
+                self.send_event(None, Event::Presence { user, status })
+                    .await?;
             }
         }
         self.send_event(
@@ -4364,19 +4388,31 @@ impl<S: ControlStream> Session<S> {
             SessionEvent::Channel { channel, event } => {
                 if event.origin != self.id {
                     // §6.7: a MEMBER part naming *me* on a channel I still hold
-                    // is a forced removal (kick/ban) — drop the membership and
-                    // its forwarder, then still deliver the event so the client
-                    // sees it.
-                    if let (State::Ready { account }, Event::Member { user, action, .. }) =
-                        (&self.state, &event.event)
-                    {
-                        if *action == MemberAction::Part
-                            && user.account == *account
-                            && self.joined.contains_key(&channel)
+                    // is a forced removal (kick/ban) — drop the membership + its
+                    // forwarder, then still deliver the event so the client sees.
+                    let forced =
+                        if let (State::Ready { account }, Event::Member { user, action, .. }) =
+                            (&self.state, &event.event)
                         {
-                            if let Some(joined) = self.joined.remove(&channel) {
-                                joined.forwarder.abort();
-                            }
+                            (*action == MemberAction::Part
+                                && user.account == *account
+                                && self.joined.contains_key(&channel))
+                            .then(|| account.clone())
+                        } else {
+                            None
+                        };
+                    if let Some(account) = forced {
+                        if let Some(joined) = self.joined.remove(&channel) {
+                            joined.forwarder.abort();
+                        }
+                        // Force-part clears the persistent membership (no auto-rejoin).
+                        if let Err(e) = self
+                            .ctx
+                            .memberships
+                            .clear_membership(&account, &channel)
+                            .await
+                        {
+                            error!("clear membership failed: {e}");
                         }
                     }
                     // Broadcast copies never carry a label (§3.5).

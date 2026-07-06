@@ -10,10 +10,10 @@ use weft_proto::{
 };
 use weft_store::{
     materialize, AccountStore, CapabilityStore, ChannelStore, EventKind, EventRecord, EventStore,
-    HistoryItem, InviteRecord, InviteStore, MemoryStore, ModKind, ModRecord, ModerationStore,
-    PinStore,
-    NamespaceRecord, NamespaceStore, NetblockRecord, NetblockStore, Page, PeerRecord, PeerStore,
-    PendingRecovery, RedeemOutcome, ReportRecord, ReportResolution, ReportStore, Scope,
+    HistoryItem, InviteRecord, InviteStore, MembershipStore, MemoryStore, ModKind, ModRecord,
+    ModerationStore, NamespaceRecord, NamespaceStore, NetblockRecord, NetblockStore, Page,
+    PeerRecord, PeerStore, PendingRecovery, PinStore, RedeemOutcome, ReportRecord,
+    ReportResolution, ReportStore, Scope,
 };
 
 fn user(name: &str) -> UserRef {
@@ -71,7 +71,8 @@ where
         + PeerStore
         + NetblockStore
         + ModerationStore
-        + PinStore,
+        + PinStore
+        + MembershipStore,
 {
     let chan: Scope = Scope::Channel(format!("#suite-{tag}").parse().unwrap());
     let ada: Account = format!("ada-{tag}").parse().unwrap();
@@ -943,6 +944,20 @@ where
     );
     store.set_pin(&pin_chan, &m1, false).await.unwrap();
     assert_eq!(store.pins(&pin_chan).await.unwrap(), vec![m2]);
+
+    // ---- §6.3 persistent membership ----
+    let acct: Account = format!("mem-{tag}").parse().unwrap();
+    let mc1: weft_proto::ChannelName = format!("#m1-{tag}").parse().unwrap();
+    let mc2: weft_proto::ChannelName = format!("#m2-{tag}").parse().unwrap();
+    assert!(store.memberships(&acct).await.unwrap().is_empty());
+    store.set_membership(&acct, &mc1).await.unwrap();
+    store.set_membership(&acct, &mc2).await.unwrap();
+    store.set_membership(&acct, &mc1).await.unwrap(); // idempotent
+    let mut m = store.memberships(&acct).await.unwrap();
+    m.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    assert_eq!(m, vec![mc1.clone(), mc2.clone()]);
+    store.clear_membership(&acct, &mc1).await.unwrap();
+    assert_eq!(store.memberships(&acct).await.unwrap(), vec![mc2]);
 }
 
 #[tokio::test]

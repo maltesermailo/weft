@@ -17,8 +17,8 @@ use weft_proto::{
 
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, ModerationStore,
-    NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, HOLD_RADIUS,
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MembershipStore,
+    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, HOLD_RADIUS,
 };
 use crate::types::{
     ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord,
@@ -1702,6 +1702,55 @@ impl PinStore for PgStore {
                 r.get::<&str, _>("msgid")
                     .parse()
                     .map_err(|_| StoreError::Backend("corrupt pin msgid".to_string()))
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl MembershipStore for PgStore {
+    async fn set_membership(
+        &self,
+        account: &Account,
+        channel: &ChannelName,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO weft_memberships (account, channel) VALUES ($1,$2) \
+             ON CONFLICT (account, channel) DO NOTHING",
+        )
+        .bind(account.as_str())
+        .bind(channel.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn clear_membership(
+        &self,
+        account: &Account,
+        channel: &ChannelName,
+    ) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM weft_memberships WHERE account = $1 AND channel = $2")
+            .bind(account.as_str())
+            .bind(channel.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn memberships(&self, account: &Account) -> Result<Vec<ChannelName>, StoreError> {
+        let rows = sqlx::query("SELECT channel FROM weft_memberships WHERE account = $1")
+            .bind(account.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter()
+            .map(|r| {
+                r.get::<&str, _>("channel")
+                    .parse()
+                    .map_err(|_| StoreError::Backend("corrupt membership channel".to_string()))
             })
             .collect()
     }

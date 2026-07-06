@@ -331,7 +331,6 @@ enum Phase {
 /// Process one inbound line: advance the handshake, emit structured events,
 /// and return an outbound line to send in response (if any).
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn on_line(
     app: &AppHandle,
     account: &str,
@@ -367,7 +366,12 @@ fn on_line(
                 Mode::Key => match device {
                     Some(kp) => format!("AUTH KEY {account} {}", kp.public().to_b64()),
                     None => {
-                        emit(app, WeftEvent::AuthFailed { reason: "no device key on this device".into() });
+                        emit(
+                            app,
+                            WeftEvent::AuthFailed {
+                                reason: "no device key on this device".into(),
+                            },
+                        );
                         *close = true;
                         return None;
                     }
@@ -377,7 +381,12 @@ fn on_line(
         // §6.1 device-key challenge → sign `nonce ‖ network` and prove.
         (Phase::AuthSent, Event::Challenge { nonce }) => {
             let (Some(kp), Ok(nonce_bytes)) = (device, weft_crypto::b64::decode(nonce)) else {
-                emit(app, WeftEvent::AuthFailed { reason: "bad device-key challenge".into() });
+                emit(
+                    app,
+                    WeftEvent::AuthFailed {
+                        reason: "bad device-key challenge".into(),
+                    },
+                );
                 *close = true;
                 return None;
             };
@@ -1160,6 +1169,16 @@ pub fn build_ns_recovery_set(name: &str, m: u32, keys: &str) -> Result<String, S
         name: name.parse().map_err(|_| "bad namespace".to_string())?,
         m,
         keys: keys.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NS RECOVER <name> <b64-rotation-record>` — submit a co-signed rotation.
+pub fn build_ns_recover(name: &str, rotation: &str) -> Result<String, String> {
+    Request::new(Command::NsRecover {
+        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        rotation: rotation.to_string(),
     })
     .serialize()
     .map_err(|e| e.to_string())

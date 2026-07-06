@@ -992,8 +992,14 @@ async fn mark_syncs_across_devices_and_snapshots_on_login() {
     let echo = ada.recv().await;
     assert_eq!(echo.label.as_deref(), Some("k1"));
     assert!(matches!(&echo.event, Event::Marked { .. }));
-    // The other device gets the sync copy.
-    let sync = ada2.recv().await;
+    // The other device gets the sync copy (after its auto-rejoin MEMBER/POLICY,
+    // §6.3 — ada2 is restored into #general on login).
+    let sync = loop {
+        let ev = ada2.recv().await;
+        if matches!(&ev.event, Event::Marked { .. }) {
+            break ev;
+        }
+    };
     assert!(
         matches!(&sync.event, Event::Marked { msgid: m, .. } if m.to_string() == msgid),
         "got {sync:?}"
@@ -2435,7 +2441,10 @@ async fn pin_list_and_unpin() {
         matches!(&ev.event, Event::Pinned { by: Some(a), .. } if a.as_str() == "mod"),
         "got {ev:?}"
     );
-    assert!(matches!(ada.recv().await.event, Event::Pinned { .. }), "ada sees the pin");
+    assert!(
+        matches!(ada.recv().await.event, Event::Pinned { .. }),
+        "ada sees the pin"
+    );
 
     // PINS returns the pinned message as a batch.
     op.send("PINS #general");
@@ -2453,7 +2462,10 @@ async fn pin_list_and_unpin() {
     ada.recv().await; // ada sees the unpin
     op.send("PINS #general");
     assert!(matches!(op.recv().await.event, Event::BatchStart { .. }));
-    assert!(matches!(op.recv().await.event, Event::BatchEnd { .. }), "no pins left");
+    assert!(
+        matches!(op.recv().await.event, Event::BatchEnd { .. }),
+        "no pins left"
+    );
 }
 
 #[tokio::test]
@@ -2523,5 +2535,72 @@ async fn members_carries_stored_presence() {
             _ => {}
         }
     }
-    assert_eq!(ada_status.as_deref(), Some("away"), "presence rides with MEMBERS");
+    assert_eq!(
+        ada_status.as_deref(),
+        Some("away"),
+        "presence rides with MEMBERS"
+    );
+}
+
+// ---- §6.3 persistent membership (auto-rejoin on auth) ----
+
+#[tokio::test]
+async fn membership_is_restored_on_a_new_session() {
+    let ctx = ctx(&["#general"]);
+    let _ada = joined(&ctx, "ada", "#general").await; // registers ada + joins #general
+
+    // A fresh session for ada authenticates — the server auto-rejoins her
+    // persisted channels, so the client's tiles reappear without re-joining.
+    let mut second = helloed(&ctx).await;
+    second.send(&format!("@label=a AUTH PASSWORD ada :{PASSWORD}"));
+    assert!(matches!(second.recv().await.event, Event::Welcome { .. }));
+
+    let mut rejoined = false;
+    for _ in 0..4 {
+        match second.recv().await.event {
+            Event::Member {
+                channel,
+                action: MemberAction::Join,
+                ..
+            } if channel.as_str() == "#general" => {
+                rejoined = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(rejoined, "the new session is auto-rejoined to #general");
+}
+
+#[tokio::test]
+async fn parting_stops_auto_rejoin() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    ada.send("PART #general");
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::Member {
+            action: MemberAction::Part,
+            ..
+        }
+    ));
+
+    // A new session must NOT be auto-rejoined to the parted channel.
+    let mut second = helloed(&ctx).await;
+    second.send(&format!("@label=a AUTH PASSWORD ada :{PASSWORD}"));
+    assert!(matches!(second.recv().await.event, Event::Welcome { .. }));
+    second.send("@label=p PING x");
+    // Only PONG should arrive — no MEMBER rejoin before it.
+    loop {
+        match second.recv().await.event {
+            Event::Pong { .. } => break,
+            Event::Member {
+                action: MemberAction::Join,
+                ..
+            } => {
+                panic!("parted channel should not be auto-rejoined")
+            }
+            _ => {}
+        }
+    }
 }

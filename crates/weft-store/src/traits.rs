@@ -407,3 +407,26 @@ pub trait PinStore: Send + Sync {
     /// The pinned msgids for a channel, oldest-first.
     async fn pins(&self, channel: &ChannelName) -> Result<Vec<MsgId>, StoreError>;
 }
+
+/// §6.3 persistent channel membership. Unlike the live channel-actor roster
+/// (session-scoped), this survives reconnects: a client is auto-rejoined to
+/// these channels on auth, so its tiles reappear (the Discord model).
+#[async_trait]
+pub trait MembershipStore: Send + Sync {
+    /// Record that `account` is a member of `channel`. Idempotent.
+    async fn set_membership(
+        &self,
+        account: &Account,
+        channel: &ChannelName,
+    ) -> Result<(), StoreError>;
+
+    /// Drop a membership (PART / kick / ban). Idempotent.
+    async fn clear_membership(
+        &self,
+        account: &Account,
+        channel: &ChannelName,
+    ) -> Result<(), StoreError>;
+
+    /// Every channel `account` is a member of, for auto-rejoin.
+    async fn memberships(&self, account: &Account) -> Result<Vec<ChannelName>, StoreError>;
+}

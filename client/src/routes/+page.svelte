@@ -49,6 +49,8 @@
       pinsOpen = false;
       discoverOpen = false;
       settingsOpen = false;
+      profileTarget = null;
+      ctxMenu = null;
     }
   }
   // ---- right-click context menus ----
@@ -236,7 +238,9 @@
   let reportQueue = $state<Record<string, Extract<weft.WeftEvent, { kind: "report-filed" }>>>({});
   let rolesTarget = $state<string | null>(null);
   let roleScope = $state("");
-  let roleCap = $state("send");
+  let roleCaps = $state<string[]>([]);
+  const toggleRoleCap = (c: string) =>
+    (roleCaps = roleCaps.includes(c) ? roleCaps.filter((x) => x !== c) : [...roleCaps, c]);
   let profileTarget = $state<string | null>(null); // member profile popout
   let inviteLink = $state<string | null>(null);
   // ---- pins (§6.4) ----
@@ -265,11 +269,40 @@
   let nsDesc = $state("");
   let nsVis = $state("public");
   let nsDelegSubject = $state("");
-  let nsDelegCaps = $state("mute,kick");
+  let nsDelegCaps = $state<string[]>(["mute", "kick"]);
+  const toggleDelegCap = (c: string) =>
+    (nsDelegCaps = nsDelegCaps.includes(c) ? nsDelegCaps.filter((x) => x !== c) : [...nsDelegCaps, c]);
   let nsNewOwner = $state("");
   let nsRecM = $state(2);
   let nsRecKeys = $state("");
+  let myRecoveryKey = $state("");
+  let recoveryDoc = $state("");
   let activeNsMeta = $derived(activeServer ? discovered[activeServer] : undefined);
+  function showRecoveryKey() {
+    weft
+      .recoveryPubkey(network, activeServer)
+      .then((k) => (myRecoveryKey = k))
+      .catch((e) => toast(String(e), "error"));
+  }
+  function startRecovery() {
+    weft
+      .recoveryStart(network, activeServer, account)
+      .then((doc) => {
+        recoveryDoc = doc;
+        toast("Recovery started — share this record with your quorum to co-sign");
+      })
+      .catch((e) => toast(String(e), "error"));
+  }
+  function cosignRecovery() {
+    if (!recoveryDoc.trim()) return;
+    weft
+      .recoveryCosign(network, activeServer, recoveryDoc.trim())
+      .then((doc) => (recoveryDoc = doc))
+      .catch((e) => toast(String(e), "error"));
+  }
+  function submitRecovery() {
+    if (recoveryDoc.trim()) weft.nsRecover(activeServer, recoveryDoc.trim()).catch((e) => toast(String(e), "error"));
+  }
 
   const retentionMeta: Record<string, { label: string; cls: string; icon: string }> = {
     ephemeral: { label: "Ephemeral", cls: "ephemeral", icon: '<circle cx="12" cy="12" r="8" stroke-dasharray="3 3"/>' },
@@ -424,7 +457,9 @@
         } catch {
           /* storage unavailable */
         }
-        if (!channels["#general"]) weft.join("#general"); // default landing channel
+        // A new account lands in #general; a returning session is auto-rejoined
+        // to its channels by the server (persistent membership, §6.3).
+        if (mode === "register") weft.join("#general").catch(() => {});
         break;
       case "auth-failed":
         reconnecting = false;
@@ -667,6 +702,29 @@
   }
 
   // ---- actions ----
+  // Device-key login availability (checked as host/account change).
+  let deviceKeyAvailable = $state(false);
+  $effect(() => {
+    const h = host.trim();
+    const a = formAccount.trim();
+    if (h && a)
+      weft
+        .hasDeviceKey(h, a)
+        .then((v) => (deviceKeyAvailable = v))
+        .catch(() => (deviceKeyAvailable = false));
+    else deviceKeyAvailable = false;
+  });
+  function keyLogin() {
+    mode = "key";
+    doConnect();
+  }
+  function enrollThisDevice() {
+    weft
+      .enrollDevice(host.trim(), account)
+      .then(() => toast("Device key enrolled — passwordless login is on for next time"))
+      .catch((e) => toast(String(e), "error"));
+  }
+
   async function doConnect() {
     if (!formAccount.trim()) return;
     authError = "";
@@ -1072,8 +1130,9 @@
       await weft.channelCreate(`#${name}/general`);
       await weft.join(`#${name}/general`);
       discoverOpen = false;
+      toast(`Namespace ${name} created`);
     } catch (e) {
-      authError = String(e);
+      toast(String(e), "error");
     }
   }
 
@@ -1110,7 +1169,7 @@
   function openRoles(member: string) {
     rolesTarget = member;
     roleScope = scopesFor()[0];
-    roleCap = "send";
+    roleCaps = [];
   }
 
   // Invites
@@ -1139,7 +1198,7 @@
     nsDesc = meta?.description ?? "";
     nsVis = meta?.visibility ?? "public";
     nsDelegSubject = "";
-    nsDelegCaps = "mute,kick";
+    nsDelegCaps = ["mute", "kick"];
     nsNewOwner = "";
     nsRecKeys = "";
     nsSettingsOpen = true;
@@ -1151,7 +1210,7 @@
   }
   function doDelegate() {
     const s = nsDelegSubject.trim();
-    if (s && nsDelegCaps.trim()) weft.nsDelegate(activeServer, s, nsDelegCaps.trim()).catch(() => {});
+    if (s && nsDelegCaps.length) weft.nsDelegate(activeServer, s, nsDelegCaps.join(",")).catch(() => {});
   }
   function doTransfer() {
     const o = nsNewOwner.trim();
@@ -1196,7 +1255,7 @@
   });
 </script>
 
-<svelte:window onkeydown={globalKey} onclick={() => (ctxMenu = null)} />
+<svelte:window onkeydown={globalKey} />
 
 {#if status !== "online"}
   <!-- ================= CONNECT / LOGIN / REGISTER ================= -->
@@ -1218,8 +1277,11 @@
       <input id="pw" type="password" bind:value={formPassword} placeholder={mode === "register" ? "min 12 characters" : "your password"} autocomplete="off" />
 
       <button type="submit" disabled={status === "connecting" || !formAccount.trim()}>
-        {status === "connecting" ? "connecting…" : mode === "login" ? "Log in" : "Create account"}
+        {status === "connecting" ? "connecting…" : mode === "register" ? "Create account" : "Log in"}
       </button>
+      {#if deviceKeyAvailable && mode !== "register"}
+        <button type="button" class="key-login" onclick={keyLogin}>🔑 Log in with device key</button>
+      {/if}
       {#if authError}<div class="err">{authError}</div>{/if}
     </form>
   </div>
@@ -1234,9 +1296,10 @@
     {/each}
   </div>
   {#if ctxMenu}
+    <button class="ctx-backdrop" aria-label="Close menu" onclick={() => (ctxMenu = null)}></button>
     <div class="ctx-menu" style="left:{ctxMenu.x}px; top:{ctxMenu.y}px">
       {#each ctxMenu.items as it (it.label)}
-        <button class="ctx-item" class:danger={it.danger} onclick={it.run}>{it.label}</button>
+        <button class="ctx-item" class:danger={it.danger} onclick={() => { it.run(); ctxMenu = null; }}>{it.label}</button>
       {/each}
     </div>
   {/if}
@@ -1580,15 +1643,13 @@
         <div class="member-group-label">Members — {activeChannel.members.length}</div>
         {#each activeChannel.members as m (m.name)}
           <div class="member-row" role="listitem" oncontextmenu={(e) => memberCtx(e, m.name)}>
-            <div class="avatar">{initials(m.name)}<span class="origin-flag {m.origin}"></span></div>
-            {#if m.name !== account}
-              <button class="mname mlink" onclick={() => openProfile(m.name)}><span class={dotClass(m.name)}></span>{m.name}</button>
-            {:else}
-              <span class="mname"><span class="dot {myStatus}"></span>{m.name}</span>
-            {/if}
-            {#if badgeFor(m.name, active)?.owner}<span class="cap-badge owner">owner</span>
-            {:else if badgeFor(m.name, active)?.mod}<span class="cap-badge mod">mod</span>{/if}
-            {#if m.origin === "federated"}<span class="cap-badge bridged">br</span>{/if}
+            <button class="member-id" onclick={() => openProfile(m.name)}>
+              <div class="avatar">{initials(m.name)}<span class="origin-flag {m.origin}"></span></div>
+              <span class="mname"><span class={m.name !== account ? dotClass(m.name) : `dot ${myStatus}`}></span>{m.name}</span>
+              {#if badgeFor(m.name, active)?.owner}<span class="cap-badge owner">owner</span>
+              {:else if badgeFor(m.name, active)?.mod}<span class="cap-badge mod">mod</span>{/if}
+              {#if m.origin === "federated"}<span class="cap-badge bridged">br</span>{/if}
+            </button>
             {#if m.name !== account}
               <div class="member-actions">
                 <button class="mod-btn" title="Message {m.name}" aria-label="Message {m.name}" onclick={() => openDm(m.name)}>
@@ -1713,16 +1774,23 @@
               {#each scopesFor() as s (s)}<option value={s}>{s}</option>{/each}
             </select>
           </label>
-          <label class="fld">Capability
-            <select bind:value={roleCap}>
-              {#each CAPS as c (c)}<option value={c}>{c}</option>{/each}
-            </select>
-          </label>
-          <div class="modal-actions">
-            <button class="danger-btn" onclick={() => rolesTarget && weft.revoke(rolesTarget, roleScope, roleCap).catch(() => {})}>Revoke</button>
-            <button class="ok-btn" onclick={() => rolesTarget && weft.grant(rolesTarget, roleScope, roleCap).catch(() => {})}>Grant</button>
+          <div class="fld">
+            Capabilities
+            <div class="cap-chips">
+              {#each CAPS as c (c)}
+                <button
+                  type="button"
+                  class="cap-chip"
+                  class:on={roleCaps.includes(c)}
+                  onclick={() => toggleRoleCap(c)}>{c}</button>
+              {/each}
+            </div>
           </div>
-          <p class="modal-sub">Grants are additive; revoking bumps the scope's epoch.</p>
+          <div class="modal-actions">
+            <button class="danger-btn" disabled={!roleCaps.length} onclick={() => rolesTarget && weft.revoke(rolesTarget, roleScope, roleCaps.join(",")).catch(() => {})}>Revoke</button>
+            <button class="ok-btn" disabled={!roleCaps.length} onclick={() => rolesTarget && weft.grant(rolesTarget, roleScope, roleCaps.join(",")).catch(() => {})}>Grant</button>
+          </div>
+          <p class="modal-sub">Select one or more caps. Grants are additive; revoking bumps the scope's epoch.</p>
         </div>
       </div>
     {/if}
@@ -1830,30 +1898,42 @@
     {#if settingsOpen}
       <div class="modal-wrap">
         <button class="modal-backdrop" aria-label="Close" onclick={() => (settingsOpen = false)}></button>
-        <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal settings-modal" role="dialog" aria-modal="true">
           <div class="modal-head">
             <h2>Settings</h2>
-            <button class="linkish" aria-label="Close" onclick={() => (settingsOpen = false)}>✕</button>
+            <button class="icon-btn" aria-label="Close" onclick={() => (settingsOpen = false)}>✕</button>
           </div>
           <div class="settings-sec">
             <h3>Account</h3>
             <div class="set-row"><span>Identity</span><b>{account}@{network}</b></div>
-            <div class="set-row"><span>Status</span><b>{myStatus}</b></div>
+            <div class="set-row">
+              <span>Status</span>
+              <div class="status-inline">
+                {#each ["online", "away", "dnd", "invisible"] as s (s)}
+                  <button class="chip-btn" class:on={myStatus === s} onclick={() => setStatus(s)}><span class="dot {s}"></span>{s}</button>
+                {/each}
+              </div>
+            </div>
           </div>
           <div class="settings-sec">
             <h3>Appearance</h3>
             <div class="set-row">
               <span>Theme</span>
-              <button class="linkish" onclick={toggleTheme}>{theme === "dark" ? "Dark" : "Light"} — switch</button>
+              <div class="status-inline">
+                <button class="chip-btn" class:on={theme === "dark"} onclick={() => theme !== "dark" && toggleTheme()}>Dark</button>
+                <button class="chip-btn" class:on={theme === "light"} onclick={() => theme !== "light" && toggleTheme()}>Light</button>
+              </div>
             </div>
           </div>
           <div class="settings-sec">
-            <h3>Connection</h3>
-            <div class="set-row"><span>Server</span><b>{host}</b></div>
-            <div class="set-row"><span>State</span><b>{reconnecting ? "reconnecting…" : "connected"}</b></div>
+            <h3>Device &amp; connection</h3>
+            <div class="set-row"><span>Server</span><b>{host}{reconnecting ? " · reconnecting…" : ""}</b></div>
+            <div class="set-row">
+              <span>Passwordless login on this device</span>
+              <button class="set-btn" onclick={enrollThisDevice}>Enroll device key</button>
+            </div>
           </div>
           <div class="settings-sec danger-sec">
-            <h3>Session</h3>
             <div class="modal-actions"><button class="danger-btn" onclick={logout}>Log out</button></div>
           </div>
         </div>
@@ -1896,7 +1976,14 @@
             <div class="settings-sec">
               <h3>Delegate roles</h3>
               <label class="fld">Account <input bind:value={nsDelegSubject} placeholder="account" /></label>
-              <label class="fld">Capabilities <input bind:value={nsDelegCaps} placeholder="mute,kick,…" /></label>
+              <div class="fld">
+                Capabilities
+                <div class="cap-chips">
+                  {#each CAPS as c (c)}
+                    <button type="button" class="cap-chip" class:on={nsDelegCaps.includes(c)} onclick={() => toggleDelegCap(c)}>{c}</button>
+                  {/each}
+                </div>
+              </div>
               <div class="modal-actions"><button class="ok-btn" onclick={doDelegate}>Delegate</button></div>
             </div>
 
@@ -1907,6 +1994,22 @@
                 <input bind:value={nsRecKeys} placeholder="key1,key2,key3" />
               </label>
               <div class="modal-actions"><button class="ok-btn" onclick={() => nsRecKeys.trim() && weft.nsRecoverySet(activeServer, nsRecM, nsRecKeys.trim()).catch(() => {})}>Set recovery quorum</button></div>
+
+              <div class="set-row">
+                <span>My recovery key (share for the quorum)</span>
+                <button class="linkish" onclick={showRecoveryKey}>Reveal</button>
+              </div>
+              {#if myRecoveryKey}
+                <div class="modal-join"><input readonly value={myRecoveryKey} /><button onclick={() => navigator.clipboard?.writeText(myRecoveryKey)}>Copy</button></div>
+              {/if}
+              <label class="fld">Rotation record (co-sign or submit)
+                <textarea class="edit-box" rows="2" bind:value={recoveryDoc} placeholder="paste a record to co-sign, or Start one below"></textarea>
+              </label>
+              <div class="modal-actions">
+                <button class="linkish" onclick={startRecovery}>Start (recover to me)</button>
+                <button class="linkish" onclick={cosignRecovery}>Co-sign</button>
+                <button class="ok-btn" onclick={submitRecovery}>Submit</button>
+              </div>
             </div>
 
             <div class="settings-sec danger-sec">

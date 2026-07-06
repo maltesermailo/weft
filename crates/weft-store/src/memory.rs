@@ -10,8 +10,8 @@ use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, Retent
 
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, ModerationStore,
-    NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, HOLD_RADIUS,
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MembershipStore,
+    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, HOLD_RADIUS,
 };
 use crate::types::{
     ChannelRecord, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord, NamespaceRecord,
@@ -68,6 +68,8 @@ struct Inner {
     moderation: HashMap<(String, Account, ModKind), ModRecord>,
     /// channel → pinned msgids, ordered by ULID (§6.4).
     pins: HashMap<ChannelName, std::collections::BTreeMap<Ulid, MsgId>>,
+    /// account → channels it's a member of (§6.3 persistent membership).
+    memberships: HashMap<Account, std::collections::HashSet<ChannelName>>,
 }
 
 #[derive(Default)]
@@ -988,6 +990,44 @@ impl PinStore for MemoryStore {
             .pins
             .get(channel)
             .map(|set| set.values().cloned().collect())
+            .unwrap_or_default())
+    }
+}
+
+#[async_trait]
+impl MembershipStore for MemoryStore {
+    async fn set_membership(
+        &self,
+        account: &Account,
+        channel: &ChannelName,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        inner
+            .memberships
+            .entry(account.clone())
+            .or_default()
+            .insert(channel.clone());
+        Ok(())
+    }
+
+    async fn clear_membership(
+        &self,
+        account: &Account,
+        channel: &ChannelName,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(set) = inner.memberships.get_mut(account) {
+            set.remove(channel);
+        }
+        Ok(())
+    }
+
+    async fn memberships(&self, account: &Account) -> Result<Vec<ChannelName>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .memberships
+            .get(account)
+            .map(|set| set.iter().cloned().collect())
             .unwrap_or_default())
     }
 }
