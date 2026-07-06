@@ -12,6 +12,7 @@ weft-core = { path = "../weft-core" }
 weft-store = { path = "../weft-store", features = ["postgres"] }
 weft-transport = { path = "../weft-transport" }
 weft-irc = { path = "../weft-irc" }
+weft-admin = { path = "../weft-admin" }
 tokio = { workspace = true }
 quinn = { workspace = true }
 rcgen = { workspace = true }
@@ -23,6 +24,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 axum = { workspace = true }
 rustls-pemfile = { workspace = true }
+# Built-in ACME (Let's Encrypt). Cert-file hot-reload just polls the mtime.
+instant-acme = "0.7"
+serde_json = "1"
+async-trait = { workspace = true }
 
 [dev-dependencies]
 weft-transport = { path = "../weft-transport", features = ["insecure-client"] }

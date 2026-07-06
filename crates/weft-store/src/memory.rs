@@ -73,6 +73,8 @@ struct Inner {
     memberships: HashMap<Account, std::collections::HashSet<ChannelName>>,
     /// scope → role name → (color, caps) (§6.5 role definitions).
     roles: HashMap<String, std::collections::BTreeMap<String, (String, Vec<String>)>>,
+    /// Explicit role membership: (scope, role name, account).
+    role_assignments: HashSet<(String, String, Account)>,
 }
 
 #[derive(Default)]
@@ -286,6 +288,13 @@ impl AccountStore for MemoryStore {
             .map(|record| record.password_phc.clone()))
     }
 
+    async fn list_accounts(&self) -> Result<Vec<Account>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut names: Vec<Account> = inner.accounts.keys().cloned().collect();
+        names.sort();
+        Ok(names)
+    }
+
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         match inner.accounts.get_mut(account) {
@@ -465,6 +474,116 @@ impl ChannelStore for MemoryStore {
         Ok(inner.channels.remove(name).is_some())
     }
 
+    async fn rename_channel(
+        &self,
+        old: &ChannelName,
+        new: &ChannelName,
+    ) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        // Old must exist; new must be free.
+        if !inner.channels.contains_key(old) || inner.channels.contains_key(new) {
+            return Ok(false);
+        }
+        let ok = old.to_string();
+        let nk = new.to_string();
+
+        // 1. channel record (the name is the map key only; no inner field).
+        if let Some(rec) = inner.channels.remove(old) {
+            inner.channels.insert(new.clone(), rec);
+        }
+        // 2. events — re-scope every (scope, ulid) entry.
+        let ev: Vec<(String, Ulid)> =
+            inner.events.keys().filter(|(s, _)| *s == ok).cloned().collect();
+        for k in ev {
+            if let Some(v) = inner.events.remove(&k) {
+                inner.events.insert((nk.clone(), k.1), v);
+            }
+        }
+        // 3. root index — value carries the scope key.
+        for (s, _) in inner.roots.values_mut() {
+            if *s == ok {
+                *s = nk.clone();
+            }
+        }
+        // 4. tombstoned roots.
+        let del: Vec<(String, Ulid)> =
+            inner.deleted.iter().filter(|(s, _)| *s == ok).cloned().collect();
+        for k in del {
+            inner.deleted.remove(&k);
+            inner.deleted.insert((nk.clone(), k.1));
+        }
+        // 5. purge watermark.
+        if let Some(w) = inner.watermarks.remove(&ok) {
+            inner.watermarks.insert(nk.clone(), w);
+        }
+        // 6. capability grants (key scope + record scope).
+        let gk: Vec<(String, String)> =
+            inner.grants.keys().filter(|(_, s)| *s == ok).cloned().collect();
+        for k in gk {
+            if let Some(mut rec) = inner.grants.remove(&k) {
+                rec.scope = nk.clone();
+                inner.grants.insert((k.0, nk.clone()), rec);
+            }
+        }
+        // 7. revocation epoch.
+        if let Some(e) = inner.epochs.remove(&ok) {
+            inner.epochs.insert(nk.clone(), e);
+        }
+        // 8. retention holds (invariant 11 — they follow the content).
+        let hk: Vec<(String, Ulid)> =
+            inner.holds.keys().filter(|(s, _)| *s == ok).cloned().collect();
+        for k in hk {
+            if let Some(v) = inner.holds.remove(&k) {
+                inner.holds.insert((nk.clone(), k.1), v);
+            }
+        }
+        // 9. moderation deny-list (key scope + record scope).
+        let mk: Vec<(String, Account, ModKind)> = inner
+            .moderation
+            .keys()
+            .filter(|(s, _, _)| *s == ok)
+            .cloned()
+            .collect();
+        for k in mk {
+            if let Some(mut rec) = inner.moderation.remove(&k) {
+                rec.scope = nk.clone();
+                inner.moderation.insert((nk.clone(), k.1, k.2), rec);
+            }
+        }
+        // 10. pins.
+        if let Some(p) = inner.pins.remove(old) {
+            inner.pins.insert(new.clone(), p);
+        }
+        // 11. memberships (per account).
+        for set in inner.memberships.values_mut() {
+            if set.remove(old) {
+                set.insert(new.clone());
+            }
+        }
+        // 12. channel-scoped role definitions.
+        if let Some(r) = inner.roles.remove(&ok) {
+            inner.roles.insert(nk.clone(), r);
+        }
+        // 13. channel-scoped role assignments.
+        let ra: Vec<(String, String, Account)> = inner
+            .role_assignments
+            .iter()
+            .filter(|(s, _, _)| *s == ok)
+            .cloned()
+            .collect();
+        for k in ra {
+            inner.role_assignments.remove(&k);
+            inner.role_assignments.insert((nk.clone(), k.1, k.2));
+        }
+        // 14. per-account read markers (§6.3 MARK).
+        for acct in inner.accounts.values_mut() {
+            if let Some(m) = acct.marks.remove(&ok) {
+                acct.marks.insert(nk.clone(), m);
+            }
+        }
+        Ok(true)
+    }
+
     async fn set_channel_layout(
         &self,
         name: &ChannelName,
@@ -531,6 +650,16 @@ impl CapabilityStore for MemoryStore {
             .grants
             .values()
             .filter(|g| g.subject == subject)
+            .cloned()
+            .collect())
+    }
+
+    async fn grants_at_scope(&self, scope: &str) -> Result<Vec<GrantRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .grants
+            .values()
+            .filter(|g| g.scope == scope)
             .cloned()
             .collect())
     }
@@ -661,11 +790,17 @@ impl NamespaceStore for MemoryStore {
     ) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         if let Some(ns) = inner.namespaces.get_mut(name) {
-            let value = Some(value.to_string());
             match key {
-                "title" => ns.title = value,
-                "description" => ns.description = value,
-                "icon" => ns.icon = value,
+                "title" => ns.title = Some(value.to_string()),
+                "description" => ns.description = Some(value.to_string()),
+                "icon" => ns.icon = Some(value.to_string()),
+                "categories" => {
+                    ns.categories = value
+                        .split(',')
+                        .filter(|c| !c.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                }
                 _ => {}
             }
         }
@@ -1058,6 +1193,9 @@ impl RoleStore for MemoryStore {
         if let Some(defs) = inner.roles.get_mut(scope) {
             defs.remove(name);
         }
+        inner
+            .role_assignments
+            .retain(|(s, n, _)| !(s == scope && n == name));
         Ok(())
     }
 
@@ -1076,6 +1214,52 @@ impl RoleStore for MemoryStore {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    async fn assign_role(
+        &self,
+        scope: &str,
+        name: &str,
+        account: &Account,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        inner
+            .role_assignments
+            .insert((scope.to_string(), name.to_string(), account.clone()));
+        Ok(())
+    }
+
+    async fn unassign_role(
+        &self,
+        scope: &str,
+        name: &str,
+        account: &Account,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        inner
+            .role_assignments
+            .remove(&(scope.to_string(), name.to_string(), account.clone()));
+        Ok(())
+    }
+
+    async fn roles_of(&self, scope: &str, account: &Account) -> Result<Vec<String>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .role_assignments
+            .iter()
+            .filter(|(s, _, a)| s == scope && a == account)
+            .map(|(_, n, _)| n.clone())
+            .collect())
+    }
+
+    async fn role_members(&self, scope: &str, name: &str) -> Result<Vec<Account>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .role_assignments
+            .iter()
+            .filter(|(s, n, _)| s == scope && n == name)
+            .map(|(_, _, a)| a.clone())
+            .collect())
     }
 }
 

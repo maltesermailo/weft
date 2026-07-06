@@ -1,0 +1,123 @@
+# weftd — example configuration
+#
+# Run with:  weftd /etc/weft/weftd.toml
+# With no argument, weftd starts a localhost dev network (#general, in-memory,
+# QUIC on 127.0.0.1:4433) — good for trying it out, nothing persists.
+#
+# Every field below has a default; delete anything you don't need to change.
+# `deny_unknown_fields` is on, so a typo'd key is a hard error (a feature).
+
+# ── identity ────────────────────────────────────────────────────────────────
+# The network's DNS name. EVERYTHING is scoped to this: user IDs are
+# `account@<network>`, /.well-known/weft advertises it, and federation peers
+# key their trust + NETBLOCKs by it. Use the real hostname you serve on.
+network = "weft.example.com"
+
+# WELCOME banner shown to clients on connect (§3.6). Optional.
+motd = "Welcome to weft.example.com"
+
+# ── accounts & operators ─────────────────────────────────────────────────────
+# `open`  — anyone may REGISTER (§6.1).
+# `closed` — REGISTER is refused; provision accounts out of band.
+registration = "open"
+
+# Operator accounts hold EVERY capability at `*` — the network-key authority
+# that bootstraps the whole grant chain (§11.3), and what unlocks the client's
+# Federation panel. These accounts must REGISTER (or already exist); listing a
+# name here grants it operator authority, it does not create the account.
+operators = ["admin"]
+
+# ── channels ─────────────────────────────────────────────────────────────────
+# The seed channel set. Channels also get created at runtime (CHANNEL CREATE),
+# so this is just what exists at first boot. A bare string uses the default
+# policy `retained:90d`; the table form sets an explicit retention policy
+# (`ephemeral` | `retained:<n>d|h|s` | `permanent` | `e2ee`).
+channels = [
+  "#general",
+  "#random",
+  { name = "#announcements", policy = "permanent" },
+  { name = "#scratch", policy = "ephemeral" },
+]
+
+# One retention policy for all direct messages (§9.5).
+dm_policy = "permanent"
+
+# ── namespaces (user-owned Discord-style servers, §2.2) ──────────────────────
+[namespaces]
+# `open` — any account may create namespaces (up to `quota`).
+# `gated` — creating one requires the `ns-create` capability.
+creation = "open"
+quota = 10          # max namespaces per account
+
+# ── listeners ────────────────────────────────────────────────────────────────
+[listen]
+# QUIC — the native transport (ALPN `weft/1`). Bind to all interfaces in prod.
+quic = "0.0.0.0:4433"
+# WebSocket fallback for networks that block QUIC/UDP. Omit to disable.
+ws = "0.0.0.0:4434"
+# HTTP server for /.well-known/weft (§10.2) — needed for discovery + federation.
+# Terminate real TLS in front of this (nginx/caddy) in production.
+http = "0.0.0.0:8080"
+# WEFT-IRC gateway (§17). Omit to disable. :6667 plaintext / :6697 you TLS-front.
+irc = "0.0.0.0:6667"
+
+# ── network signing key ──────────────────────────────────────────────────────
+[identity]
+# Ed25519 network key (base64 seed, one line). Created on first boot if missing.
+# BACK THIS UP — it is your network's cryptographic identity. Omit for an
+# ephemeral key (dev/test only; federation + attestations reset each restart).
+key_file = "/var/lib/weft/weftd.key"
+
+# ── storage ──────────────────────────────────────────────────────────────────
+[storage]
+# `memory`  — nothing survives a restart (dev/test).
+# `postgres` — durable; the chosen production engine.
+backend = "postgres"
+url = "postgres://weft:CHANGE_ME@127.0.0.1:5432/weft"
+# Retention purge + §12.1 compaction cadence.
+maintenance_interval_secs = 300
+# §12.1 audit window before events are compacted into batch form.
+compact_after_hours = 24
+
+# ── TLS for QUIC ─────────────────────────────────────────────────────────────
+# QUIC can't be reverse-proxied, so weftd holds the cert itself. Three modes:
+#
+#  1. Built-in ACME — weftd gets + renews its own Let's Encrypt cert. See [acme].
+#  2. Cert file [tls] — a PEM cert weftd HOT-RELOADS when it changes on disk, so
+#     a certbot/Caddy renewal applies with no restart. (This block.)
+#  3. Neither — a fresh self-signed cert each boot (DEV ONLY; clients must opt
+#     into insecure mode).
+#
+# See deploy/README.md for the full picture. Use ONE of [tls] or [acme].
+[tls]
+cert = "/etc/weft/fullchain.pem"
+key = "/etc/weft/privkey.pem"
+
+# ── Built-in ACME (Let's Encrypt) ────────────────────────────────────────────
+# Uncomment to have weftd obtain + auto-renew its own cert (no proxy needed).
+# Takes precedence over [tls]. Validation is HTTP-01, so [listen] http must be
+# reachable by the CA on port 80.
+# [acme]
+# enabled   = true
+# domains   = ["weft.example.com"]
+# email     = "admin@example.com"
+# staging   = false          # true while testing (untrusted certs, high limits)
+# cache_dir = "/var/lib/weft/acme"
+
+# ── operator web admin panel ─────────────────────────────────────────────────
+# When enabled, weftd serves the operator admin panel on the HTTP listener: the
+# SPA at /admin and its JSON API at /admin/api/* (operators = the [operators]
+# list above; they log in with their account password). Needs [listen] http;
+# front with Caddy for HTTPS. See docs/web-admin-panel-plan.md.
+[admin]
+enabled = false
+
+# ── federation (§11) ─────────────────────────────────────────────────────────
+# How this network treats INBOUND bridge sessions. Default: bridge with nobody
+# (peers must be explicitly configured — the outbound dialer is M5d).
+[federation]
+# Accept a bridge from ANY non-blocked network, trusting the key it proves
+# (trust-on-first-use). NETBLOCK is the escape hatch. Leave false to stay closed.
+accept_any = false
+# Skip the manual operator `BRIDGE ACCEPT` and auto-ack inbound proposals.
+auto_accept = false

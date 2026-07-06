@@ -715,6 +715,31 @@ async fn deleted_messages_tombstone_and_reject_further_mutation() {
 }
 
 #[tokio::test]
+async fn admin_delete_tombstones_without_membership() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let msgid = say(&mut ada, "#general", "regrettable").await;
+
+    // Operator delete-any via the channel handle — no session, and the actor
+    // (the "root" moderator) is not a member. The admin panel's path.
+    let channel: weft_proto::ChannelName = "#general".parse().unwrap();
+    let moderator: weft_proto::Account = "root".parse().unwrap();
+    ctx.registry
+        .get(&channel)
+        .unwrap()
+        .admin_delete(msgid.parse().unwrap(), moderator)
+        .await;
+
+    // The member sees the tombstone, attributed to a moderator.
+    let ev = ada.recv().await;
+    assert!(matches!(&ev.event, Event::Deleted { msgid: m, by: Some(_), .. } if m.to_string() == msgid));
+
+    // The message is gone — further mutation is NoSuchTarget (§2.2).
+    ada.send(&format!("EDIT {msgid} :necromancy"));
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
 async fn reactions_relay_live() {
     let ctx = ctx(&["#general"]);
     let mut ada = joined(&ctx, "ada", "#general").await;
@@ -1426,18 +1451,19 @@ async fn channel_categories_and_ordering() {
     // Read the layout back, ordered.
     ada.send("@label=cl CHANNELS team");
     let mut layout = Vec::new();
-    for _ in 0..3 {
+    while layout.len() < 3 {
         let reply = ada.recv().await;
         assert_eq!(reply.label.as_deref(), Some("cl"));
-        let Event::ChannelLayout {
-            channel,
-            category,
-            position,
-        } = reply.event
-        else {
-            panic!("expected CHANNEL-LAYOUT");
-        };
-        layout.push((channel.to_string(), category, position));
+        // The response leads with the namespace's NS-META (categories, …).
+        match reply.event {
+            Event::ChannelLayout {
+                channel,
+                category,
+                position,
+            } => layout.push((channel.to_string(), category, position)),
+            Event::NsMeta { .. } => {}
+            other => panic!("expected CHANNEL-LAYOUT or NS-META, got {other:?}"),
+        }
     }
     // voice (uncategorized) first, then text by position: random(-1) before general(0).
     assert_eq!(layout[0].0, "#team/voice");
@@ -1454,8 +1480,9 @@ async fn channel_categories_and_ordering() {
     let mut eve = ready(&ctx, "eve").await;
     eve.send("CHANNEL META #team/general category :hijack");
     eve.expect_err(ErrCode::CapRequired).await;
-    // ...but can read a public/unlisted namespace's layout.
+    // ...but can read a public/unlisted namespace's layout (NS-META, then layout).
     eve.send("CHANNELS team");
+    assert!(matches!(eve.recv().await.event, Event::NsMeta { .. }));
     assert!(matches!(
         eve.recv().await.event,
         Event::ChannelLayout { .. }
@@ -2661,4 +2688,111 @@ async fn role_management_needs_admin_authority() {
         unreachable!()
     };
     assert_eq!(err.context.as_deref(), Some("ns-admin"));
+}
+
+async fn drain_until_label(c: &mut Client, label: &str) -> Reply {
+    loop {
+        let r = c.recv().await;
+        if r.label.as_deref() == Some(label) {
+            return r;
+        }
+    }
+}
+
+#[tokio::test]
+async fn assigning_a_namespace_role_grants_its_channel_permissions() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let _bob = ready(&ctx, "bob").await;
+    let root = root_key_b64();
+
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
+    drain_until_label(&mut ada, "n").await;
+    ada.send("@label=c CHANNEL CREATE #gaming/stage");
+    drain_until_label(&mut ada, "c").await;
+
+    // A namespace role (react) plus a same-named *channel* role (send) — the
+    // channel role is the role's per-channel permission.
+    ada.send("@label=r1 ROLE CREATE ns:gaming #e8b93d react :Speaker");
+    drain_until_label(&mut ada, "r1").await;
+    ada.send("@label=r2 ROLE CREATE #gaming/stage #e8b93d send :Speaker");
+    drain_until_label(&mut ada, "r2").await;
+
+    // Assigning the namespace role should propagate the channel permission.
+    ada.send("@label=a ROLE ASSIGN ns:gaming bob :Speaker");
+    drain_until_label(&mut ada, "a").await;
+
+    ada.send("@label=q CAPS bob #gaming/stage");
+    let ev = drain_until_label(&mut ada, "q").await;
+    let Event::Caps { caps, .. } = &ev.event else {
+        panic!("expected CAPS, got {ev:?}");
+    };
+    assert!(
+        caps.contains("send"),
+        "bob gains send in the channel via the namespace role, got {caps}"
+    );
+}
+
+#[tokio::test]
+async fn adding_a_channel_permission_propagates_to_existing_holders() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let _bob = ready(&ctx, "bob").await;
+    let root = root_key_b64();
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
+    drain_until_label(&mut ada, "n").await;
+    ada.send("@label=c CHANNEL CREATE #gaming/stage");
+    drain_until_label(&mut ada, "c").await;
+    ada.send("@label=r1 ROLE CREATE ns:gaming #e8b93d react :Speaker");
+    drain_until_label(&mut ada, "r1").await;
+
+    // Assign the role FIRST (bob holds react at ns:gaming, no channel perm yet).
+    ada.send("@label=a ROLE ASSIGN ns:gaming bob :Speaker");
+    drain_until_label(&mut ada, "a").await;
+
+    // THEN add the channel permission — it must reach bob with no re-assignment.
+    ada.send("@label=r2 ROLE CREATE #gaming/stage #e8b93d send :Speaker");
+    drain_until_label(&mut ada, "r2").await;
+
+    ada.send("@label=q CAPS bob #gaming/stage");
+    let ev = drain_until_label(&mut ada, "q").await;
+    let Event::Caps { caps, .. } = &ev.event else {
+        panic!("expected CAPS, got {ev:?}");
+    };
+    assert!(
+        caps.contains("send"),
+        "an already-assigned holder gains a newly-added channel permission, got {caps}"
+    );
+}
+
+#[tokio::test]
+async fn roles_are_explicit_membership_not_derived() {
+    let ctx = ctx_ops(&["#general"], &["root"]);
+    let mut root = ready(&ctx, "root").await;
+    let _bob = ready(&ctx, "bob").await;
+
+    root.send("@label=c ROLE CREATE * #e8b93d mute,ban :Mod");
+    drain_until_label(&mut root, "c").await;
+
+    // bob holds no roles yet, even though the operator implicitly has every cap.
+    root.send("@label=q1 ROLES-OF * bob");
+    let ev = drain_until_label(&mut root, "q1").await;
+    assert!(matches!(&ev.event, Event::RoleMember { roles, .. } if roles.is_empty()));
+
+    // Assign, then it shows; unassign, then it's gone.
+    root.send("@label=a ROLE ASSIGN * bob :Mod");
+    drain_until_label(&mut root, "a").await;
+    root.send("@label=q2 ROLES-OF * bob");
+    let ev = drain_until_label(&mut root, "q2").await;
+    assert!(
+        matches!(&ev.event, Event::RoleMember { roles, .. } if roles == "Mod"),
+        "got {ev:?}"
+    );
+
+    root.send("@label=u ROLE UNASSIGN * bob :Mod");
+    let ev = drain_until_label(&mut root, "u").await; // UNASSIGN → ROLE-MEMBER
+    assert!(
+        matches!(&ev.event, Event::RoleMember { roles, .. } if roles.is_empty()),
+        "got {ev:?}"
+    );
 }

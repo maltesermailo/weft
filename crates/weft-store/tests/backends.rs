@@ -5,7 +5,7 @@
 //! when absent so `cargo test` needs no database.
 
 use weft_proto::{
-    Account, ContentState, MsgId, MsgMeta, NetworkName, ReportStatus, ResolveAction,
+    Account, ChannelName, ContentState, MsgId, MsgMeta, NetworkName, ReportStatus, ResolveAction,
     RetentionPolicy, Ulid, UserRef,
 };
 use weft_store::{
@@ -259,6 +259,8 @@ where
         Some("phc-string-ada")
     );
     assert_eq!(store.password_phc(&bob).await.unwrap(), None);
+    // list_accounts (admin surface) includes registered accounts, sorted.
+    assert!(store.list_accounts().await.unwrap().contains(&ada));
 
     let device = [7u8; 32];
     assert!(!store.device_enrolled(&ada, &device).await.unwrap());
@@ -464,6 +466,7 @@ where
             icon: None,
             recovery_set: None,
             pending_recovery: None,
+            categories: Vec::new(),
         })
         .await
         .unwrap());
@@ -479,6 +482,7 @@ where
             icon: None,
             recovery_set: None,
             pending_recovery: None,
+            categories: Vec::new(),
         })
         .await
         .unwrap());
@@ -578,6 +582,7 @@ where
             icon: None,
             recovery_set: None,
             pending_recovery: None,
+            categories: Vec::new(),
         })
         .await
         .unwrap();
@@ -997,6 +1002,91 @@ where
     let roles = store.roles(&rscope).await.unwrap();
     assert_eq!(roles.len(), 1);
     assert_eq!(roles[0].name, "Moderator");
+
+    // ---- §6.5 explicit role membership ----
+    let racct: Account = format!("racct-{tag}").parse().unwrap();
+    assert!(store.roles_of(&rscope, &racct).await.unwrap().is_empty());
+    store
+        .assign_role(&rscope, "Moderator", &racct)
+        .await
+        .unwrap();
+    store
+        .assign_role(&rscope, "Moderator", &racct)
+        .await
+        .unwrap(); // idempotent
+    assert_eq!(
+        store.roles_of(&rscope, &racct).await.unwrap(),
+        vec!["Moderator".to_string()]
+    );
+    assert_eq!(
+        store.role_members(&rscope, "Moderator").await.unwrap(),
+        vec![racct.clone()]
+    );
+    store
+        .unassign_role(&rscope, "Moderator", &racct)
+        .await
+        .unwrap();
+    assert!(store.roles_of(&rscope, &racct).await.unwrap().is_empty());
+    // Deleting a role drops its assignments.
+    store
+        .assign_role(&rscope, "Moderator", &racct)
+        .await
+        .unwrap();
+    store.delete_role(&rscope, "Moderator").await.unwrap();
+    assert!(store.roles_of(&rscope, &racct).await.unwrap().is_empty());
+
+    // -- CHANNEL RENAME: re-key everything scoped to the channel name --
+    let old: ChannelName = format!("#rn-{tag}/old").parse().unwrap();
+    let new: ChannelName = format!("#rn-{tag}/new").parse().unwrap();
+    let old_scope = Scope::Channel(old.clone());
+    let new_scope = Scope::Channel(new.clone());
+    store
+        .upsert_channel(&old, RetentionPolicy::Permanent)
+        .await
+        .unwrap();
+    store
+        .append(message(&old_scope, 7_000, "history"))
+        .await
+        .unwrap();
+    store
+        .record_grant("rn-mod", &old.to_string(), &["send".into()], 0, None)
+        .await
+        .unwrap();
+    store.set_membership(&ada, &old).await.unwrap();
+    store
+        .set_role(&old.to_string(), "Voice", "#fff", &["react".into()])
+        .await
+        .unwrap();
+
+    assert!(store.rename_channel(&old, &new).await.unwrap());
+
+    // The old identity is gone everywhere; the new one carries it all.
+    assert!(store.channel(&old).await.unwrap().is_none());
+    assert!(store.channel(&new).await.unwrap().is_some());
+    let p10 = Page { before: None, after: None, limit: 10 };
+    assert!(store.roots(&old_scope, p10).await.unwrap().is_empty());
+    assert_eq!(store.roots(&new_scope, p10).await.unwrap().len(), 1);
+    assert!(store
+        .grants_at_scope(&old.to_string())
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store.grants_at_scope(&new.to_string()).await.unwrap().len(),
+        1
+    );
+    let mships = store.memberships(&ada).await.unwrap();
+    assert!(mships.contains(&new) && !mships.contains(&old));
+    assert!(store.roles(&old.to_string()).await.unwrap().is_empty());
+    assert_eq!(store.roles(&new.to_string()).await.unwrap().len(), 1);
+
+    // Guards: absent old, or already-taken new → false, no mutation.
+    assert!(!store.rename_channel(&old, &new).await.unwrap()); // old now absent
+    store
+        .upsert_channel(&old, RetentionPolicy::Ephemeral)
+        .await
+        .unwrap();
+    assert!(!store.rename_channel(&old, &new).await.unwrap()); // new taken
 }
 
 #[tokio::test]

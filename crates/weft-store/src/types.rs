@@ -180,6 +180,10 @@ pub struct NamespaceRecord {
     pub recovery_set: Option<(u32, Vec<String>)>,
     /// A recovery in its delay window (§2.4).
     pub pending_recovery: Option<PendingRecovery>,
+    /// Ordered channel categories (Discord-style groups). Stored on the
+    /// namespace so *empty* categories survive server-side — the client keeps
+    /// no category state of its own.
+    pub categories: Vec<String>,
 }
 
 /// A recovery in flight: rotates to `new_root_key` + `new_owner` at `eta_ms`

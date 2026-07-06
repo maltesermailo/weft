@@ -161,6 +161,13 @@ pub enum Event {
         caps: String,
         name: String,
     },
+    /// `ROLE-MEMBER <scope> <account> :<roles>` — the roles an account is
+    /// explicitly assigned at a scope, comma-separated (§6.5). Empty = none.
+    RoleMember {
+        scope: String,
+        account: Account,
+        roles: String,
+    },
     /// `PRESENCE <user@net> <status>` — never bridged.
     Presence {
         user: UserRef,
@@ -257,6 +264,9 @@ pub enum Event {
         recovery_set: bool,
         /// `Some((eta_ms, rung))` while a recovery is pending (§2.4).
         recovery_pending: Option<(u64, u8)>,
+        /// Ordered channel categories (`cats=` tag), server-authoritative so
+        /// empty categories persist without any client state.
+        categories: Vec<String>,
     },
     /// `MORE <cursor>` — pagination continuation (DISCOVER, §6.2).
     More {
@@ -268,6 +278,12 @@ pub enum Event {
         channel: ChannelName,
         category: Option<String>,
         position: i64,
+    },
+    /// `CHANNEL-RENAMED <#old> <#new>` — a channel changed identity (§6.3);
+    /// announced to members so clients re-key their local channel state.
+    ChannelRenamed {
+        old: ChannelName,
+        new: ChannelName,
     },
     /// `REPORTED <report-id>` — ack to the reporter (§7); carries `label=`.
     Reported {
@@ -445,6 +461,14 @@ impl Event {
                     color: args.req("color")?.to_string(),
                     caps: args.req("caps")?.to_string(),
                     name: line.trailing.clone().unwrap_or_default(),
+                })
+            }
+            "ROLE-MEMBER" => {
+                let mut args = Args::new(line, "ROLE-MEMBER");
+                Ok(Event::RoleMember {
+                    scope: args.req("scope")?.to_string(),
+                    account: args.req("account")?.parse()?,
+                    roles: line.trailing.clone().unwrap_or_default(),
                 })
             }
             "MARKED" => {
@@ -661,6 +685,16 @@ impl Event {
                     icon: tag("icon"),
                     recovery_set: line.tags.get("recovery-set").map(String::as_str) == Some("yes"),
                     recovery_pending,
+                    categories: line
+                        .tags
+                        .get("cats")
+                        .map(|s| {
+                            s.split(',')
+                                .filter(|c| !c.is_empty())
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 })
             }
             "MORE" => {
@@ -682,6 +716,13 @@ impl Event {
                     channel,
                     category: line.tags.get("category").filter(|v| !v.is_empty()).cloned(),
                     position,
+                })
+            }
+            "CHANNEL-RENAMED" => {
+                let mut args = Args::new(line, "CHANNEL-RENAMED");
+                Ok(Event::ChannelRenamed {
+                    old: args.req("old")?.parse()?,
+                    new: args.req("new")?.parse()?,
                 })
             }
             "REPORTED" => {
@@ -911,6 +952,15 @@ impl Event {
                 vec![scope.clone(), color.clone(), caps.clone()],
                 Some(name.clone()),
             ),
+            Event::RoleMember {
+                scope,
+                account,
+                roles,
+            } => (
+                "ROLE-MEMBER",
+                vec![scope.clone(), account.to_string()],
+                Some(roles.clone()),
+            ),
             Event::Presence { user, status } => {
                 ("PRESENCE", vec![user.to_string(), status.to_string()], None)
             }
@@ -1047,6 +1097,7 @@ impl Event {
                 icon,
                 recovery_set,
                 recovery_pending,
+                categories,
             } => {
                 for (k, v) in [
                     ("owner", owner),
@@ -1065,6 +1116,9 @@ impl Event {
                     tags.insert("recovery".to_string(), "pending".to_string());
                     tags.insert("recovery-eta".to_string(), eta.to_string());
                     tags.insert("recovery-rung".to_string(), rung.to_string());
+                }
+                if !categories.is_empty() {
+                    tags.insert("cats".to_string(), categories.join(","));
                 }
                 (
                     "NS-META",
@@ -1087,6 +1141,11 @@ impl Event {
                     None,
                 )
             }
+            Event::ChannelRenamed { old, new } => (
+                "CHANNEL-RENAMED",
+                vec![old.to_string(), new.to_string()],
+                None,
+            ),
             Event::Reported { report_id } => ("REPORTED", vec![report_id.clone()], None),
             Event::ReportFiled {
                 report_id,
@@ -1345,6 +1404,11 @@ mod tests {
             caps: "mute,ban,kick,pin".to_string(),
             name: "Head Moderator".to_string(),
         }));
+        round_trip(&Reply::new(Event::RoleMember {
+            scope: "ns:gaming".to_string(),
+            account: "bob".parse().unwrap(),
+            roles: "Head Moderator,Speaker".to_string(),
+        }));
         round_trip(&Reply::new(Event::Presence {
             user: "ada@hda.example".parse().unwrap(),
             status: PresenceStatus::Away,
@@ -1590,6 +1654,17 @@ mod tests {
     }
 
     #[test]
+    fn channel_renamed_round_trips() {
+        round_trip(&Reply::with_label(
+            Event::ChannelRenamed {
+                old: "#gaming/old".parse().unwrap(),
+                new: "#gaming/new".parse().unwrap(),
+            },
+            "r1",
+        ));
+    }
+
+    #[test]
     fn ns_meta_and_more_round_trip() {
         round_trip(&Reply::with_label(
             Event::NsMeta {
@@ -1601,6 +1676,7 @@ mod tests {
                 icon: None,
                 recovery_set: true,
                 recovery_pending: Some((1_700_000_000_000, 2)),
+                categories: vec!["Text".into(), "Voice".into()],
             },
             "n1",
         ));
@@ -1614,6 +1690,7 @@ mod tests {
             icon: None,
             recovery_set: false,
             recovery_pending: None,
+            categories: Vec::new(),
         }));
         round_trip(&Reply::new(Event::More {
             cursor: "next-page".into(),

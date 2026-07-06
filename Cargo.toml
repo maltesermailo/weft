@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weft-irc", "crates/weftd", "crates/weft-tui", "client/src-tauri"]
-default-members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weft-irc", "crates/weftd"]
+members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weft-irc", "crates/weft-admin", "crates/weftd", "crates/weft-tui", "client/src-tauri"]
+default-members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weft-irc", "crates/weft-admin", "crates/weftd"]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,7 +28,7 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 # ring only — a second provider (aws-lc-rs) would make rustls's process-default ambiguous.
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pki-types = "1"
-rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
 tokio-tungstenite = "0.24"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

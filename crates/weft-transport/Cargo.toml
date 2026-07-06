@@ -20,4 +20,8 @@ futures-util = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
+# Bundled Mozilla root store for verifying a real server's TLS certificate.
+webpki-roots = "0.26"
+# Lock-free cert hot-swap for reloadable/ACME server certs.
+arc-swap = "1"
 tokio-tungstenite = { workspace = true }

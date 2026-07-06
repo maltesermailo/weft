@@ -83,6 +83,66 @@ body {
 button {
   font-family: inherit;
   cursor: pointer;
+  /* Consistent, snappy feedback for every button. Specific rules that set
+     their own `transition` still win for those elements. */
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    opacity 0.15s ease,
+    transform 0.08s ease;
+}
+/* Tactile press — a subtle squish on every enabled button. Excludes the
+   full-screen backdrop/overlay buttons (scaling those shrinks the whole shade)
+   and the large container buttons (a scale distorts their layout). */
+button:active:not(:disabled):not(.channel-item):not(.sidebar-user):not(.comm-name-btn):not(.modal-backdrop):not(.ctx-backdrop):not(.modal-wrap) {
+  transform: scale(0.96);
+}
+button:disabled {
+  cursor: default;
+}
+/* Solid call-to-action buttons lift + brighten on hover, squish on press. */
+.ok-btn,
+.danger-btn,
+.modal-join button,
+.set-btn,
+.pf-primary,
+.key-login {
+  transition:
+    filter 0.15s ease,
+    box-shadow 0.15s ease,
+    transform 0.08s ease;
+}
+.ok-btn:hover:not(:disabled),
+.danger-btn:hover:not(:disabled),
+.modal-join button:hover:not(:disabled),
+.set-btn:hover:not(:disabled),
+.pf-primary:hover:not(:disabled),
+.key-login:hover:not(:disabled) {
+  filter: brightness(1.08);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.28);
+  transform: translateY(-1px);
+}
+.ok-btn:active:not(:disabled),
+.danger-btn:active:not(:disabled),
+.modal-join button:active:not(:disabled),
+.set-btn:active:not(:disabled),
+.pf-primary:active:not(:disabled),
+.key-login:active:not(:disabled) {
+  transform: translateY(0) scale(0.97);
+  box-shadow: none;
+}
+/* Icon buttons get a livelier hover (the background is handled per-class). */
+.icon-btn:hover:not(:disabled),
+.msg-act:hover:not(:disabled),
+.mod-btn:hover:not(:disabled) {
+  transform: scale(1.12);
+}
+.icon-btn:active:not(:disabled),
+.msg-act:active:not(:disabled),
+.mod-btn:active:not(:disabled) {
+  transform: scale(0.94);
 }
 
 .app {
@@ -179,6 +239,35 @@ button {
   color: var(--text-primary);
   border-color: var(--thread-amber);
 }
+.tile-badge {
+  position: absolute;
+  left: -4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  pointer-events: none;
+}
+.tile-badge.mention {
+  left: auto;
+  right: -3px;
+  bottom: -3px;
+  top: auto;
+  transform: none;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--danger, #d83c3e);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #101218;
+}
 .trust-mark {
   position: absolute;
   right: -2px;
@@ -244,6 +333,87 @@ button {
   align-items: center;
   gap: 5px;
 }
+/* clickable server-name header → dropdown */
+.comm-name-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  margin: -4px -6px;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+.comm-name-btn:hover,
+.comm-name-btn.open {
+  background: var(--bg-hover);
+}
+.comm-head {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.comm-name-btn .comm-name {
+  display: block;
+  margin: 0;
+}
+.hdr-chev {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  transition: transform 0.15s ease;
+}
+.comm-name-btn.open .hdr-chev {
+  transform: rotate(180deg);
+}
+.server-menu {
+  position: absolute;
+  top: calc(100% - 4px);
+  left: 8px;
+  right: 8px;
+  z-index: 401;
+  padding: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hair-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.sm-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 9px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13.5px;
+  border-radius: 4px;
+  text-align: left;
+}
+.sm-item:hover {
+  background: var(--accent, #5865f2);
+  color: #fff;
+}
+.sm-item svg {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+.sm-sep {
+  height: 1px;
+  background: var(--border-hair-strong);
+  margin: 5px 4px;
+}
 .origin-dot {
   width: 6px;
   height: 6px;
@@ -258,9 +428,65 @@ button {
   flex: 1;
   overflow-y: auto;
   padding: 10px 8px;
+  animation: weft-view-in 0.18s ease; /* fades in on server/home switch */
 }
 .retention-group {
   margin-bottom: 14px;
+  border-radius: var(--radius-md);
+}
+.retention-group.drop-target {
+  outline: 1px dashed var(--border-hair-strong);
+  outline-offset: 2px;
+}
+.cat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.cat-add {
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.retention-group:hover .cat-add {
+  opacity: 1;
+}
+.cat-add:hover {
+  color: var(--text-primary);
+}
+.channel-item[draggable="true"] {
+  cursor: pointer;
+}
+.channel-item.dragging {
+  opacity: 0.5;
+}
+/* Discord-style drop indicator line while dragging a channel */
+.channel-item.drop-before,
+.channel-item.drop-after {
+  position: relative;
+}
+.channel-item.drop-before::before,
+.channel-item.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent, #5865f2);
+  pointer-events: none;
+}
+.channel-item.drop-before::before {
+  top: -1px;
+}
+.channel-item.drop-after::after {
+  bottom: -1px;
 }
 .retention-label {
   font-family: var(--font-mono);
@@ -390,6 +616,7 @@ button {
   color: var(--text-primary);
 }
 .channel-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -402,6 +629,22 @@ button {
   background: transparent;
   width: 100%;
   text-align: left;
+}
+/* Discord-style unread pill on the left edge (clears when marked read). */
+.channel-item.unread::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px;
+  height: 8px;
+  border-radius: 0 3px 3px 0;
+  background: var(--text-primary);
+}
+.channel-item.mention::before {
+  height: 16px;
+  background: var(--danger, #d83c3e);
 }
 .channel-item:hover {
   background: var(--bg-hover);
@@ -445,6 +688,8 @@ button {
   border-color: var(--thread-amber-dim);
 }
 .sidebar-user {
+  width: 100%;
+  border: none;
   border-top: 1px solid var(--border-hair);
   padding: 10px 12px;
   display: flex;
@@ -452,8 +697,24 @@ button {
   gap: 9px;
   flex-shrink: 0;
   background: var(--bg-panel-raised);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.sidebar-user:hover {
+  background: var(--bg-hover);
+}
+.user-gear {
+  color: var(--text-faint);
+  flex-shrink: 0;
+  transition: color 0.12s ease;
+}
+.sidebar-user:hover .user-gear {
+  color: var(--text-primary);
 }
 .avatar {
+  position: relative;
   width: 30px;
   height: 30px;
   border-radius: 6px;
@@ -471,6 +732,8 @@ button {
 .sidebar-user .who {
   min-width: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
 }
 .sidebar-user .who .name {
   font-size: 13px;
@@ -794,7 +1057,13 @@ button {
 .channel-item .chan-ret {
   width: 5px;
   height: 5px;
-  opacity: 0.7;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+/* Retention indicator only on hover/active — it's not an unread badge. */
+.channel-item:hover .chan-ret,
+.channel-item.active .chan-ret {
+  opacity: 0.6;
 }
 .unread-dot {
   width: 7px;
@@ -812,6 +1081,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 16px; /* keep the modal off the viewport edges on small windows */
 }
 .modal-backdrop {
   position: absolute;
@@ -822,8 +1092,9 @@ button {
 }
 .modal {
   position: relative;
-  width: min(520px, 92vw);
-  max-height: 80vh;
+  width: min(520px, 100%);
+  max-height: 100%; /* fill the padded wrap; scroll internally when taller */
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   background: var(--bg-panel, #16181f);
@@ -831,6 +1102,14 @@ button {
   border-radius: 12px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
   padding: 18px;
+}
+/* Keep the title + close button in view while the body scrolls. */
+.modal-head {
+  position: sticky;
+  top: -18px;
+  margin: -18px -18px 14px;
+  padding: 18px 18px 0;
+  background: var(--bg-panel, #16181f);
 }
 .modal-head {
   display: flex;
@@ -872,6 +1151,41 @@ button {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+/* federation panel */
+.modal.wide {
+  width: min(620px, 100%);
+}
+.fed-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.fed-propose {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.fed-propose select {
+  flex: 1;
+  min-width: 130px;
+  background: var(--bg-void);
+  border: 1px solid var(--border-hair-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  padding: 8px;
+}
+.fed-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 .ns-card {
   display: flex;
@@ -937,6 +1251,37 @@ button {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 4px;
+}
+.role-perm-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  flex-wrap: wrap;
+}
+.role-perm-row .role-pill {
+  flex-shrink: 0;
+  min-width: 96px;
+}
+.role-perm-row + .role-perm-row {
+  border-top: 1px solid color-mix(in srgb, var(--border-hair-strong) 40%, transparent);
+}
+.cap-chip.sm {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.check-row input {
+  margin-top: 2px;
+  flex-shrink: 0;
 }
 .cap-chip {
   padding: 4px 10px;
@@ -1066,6 +1411,10 @@ button {
 .toast.error {
   border-color: #d83c3e;
   color: #f2a3a4;
+}
+.toast.success {
+  border-color: var(--signal-teal, #4fb0a5);
+  color: #8fd6cd;
 }
 
 /* quick switcher (Ctrl+K) */
@@ -1319,6 +1668,14 @@ button {
   color: var(--text-secondary);
   margin: 0 0 8px;
 }
+/* Namespace/# prefix shown before an editable channel slug. */
+.chan-prefix {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 14px;
+  white-space: nowrap;
+}
 .text-input {
   width: 100%;
   background: var(--bg-void);
@@ -1404,11 +1761,29 @@ button {
 }
 .role-pill.clickable {
   cursor: pointer;
-  border: none;
   font: inherit;
 }
 .role-pill.clickable:hover {
   background: color-mix(in srgb, var(--role) 28%, transparent);
+}
+/* in the profile card: unheld = faint outline, held = filled with an ✕ */
+.role-pill.clickable:not(.held) {
+  background: transparent;
+  opacity: 0.6;
+}
+.role-pill.clickable:not(.held):hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--role) 16%, transparent);
+}
+.pill-x {
+  margin-left: 3px;
+  opacity: 0.7;
+  font-weight: 700;
+}
+.role-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 5px;
 }
 
 /* Discord-style profile popover */
@@ -1533,6 +1908,41 @@ button {
 }
 .pf-secondary.danger {
   color: var(--danger, #d83c3e);
+}
+/* moderation controls in the profile card */
+.pf-mod {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-hair);
+}
+.pf-mod-inputs {
+  display: flex;
+  gap: 8px;
+}
+.pf-mod-inputs select,
+.pf-mod-inputs input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-void);
+  border: 1px solid var(--border-hair-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+.pf-mod-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pf-mod-actions .pf-secondary {
+  flex: 1 1 30%;
+  padding: 7px 8px;
+  font-size: 12px;
 }
 
 /* settings rows */
@@ -2008,6 +2418,16 @@ button {
   margin-top: 12px;
   font-family: var(--font-mono);
 }
+.connect-card .insecure-note {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--permanent, #e2a13d);
+  background: rgba(226, 161, 61, 0.08);
+  color: var(--permanent, #e2a13d);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
 
 /* ---------- responsive ---------- */
 @media (max-width: 860px) {
@@ -2019,8 +2439,90 @@ button {
     display: none;
   }
 }
+/* Very small windows: shrink the full-page namespace-settings overlay so its
+   nav doesn't crowd out the content, and trim heavy paddings. */
+@media (max-width: 560px) {
+  .settings-overlay {
+    grid-template-columns: minmax(120px, 0.9fr) minmax(0, 2fr);
+  }
+  .so-main {
+    padding: 44px 18px 40px;
+  }
+  .so-nav {
+    padding-top: 44px;
+  }
+  .modal {
+    padding: 14px;
+  }
+  .modal-head {
+    top: -14px;
+    margin: -14px -14px 12px;
+    padding: 14px 14px 0;
+  }
+}
+/* Guard against any child forcing the app wider than the viewport. */
+.app,
+.main,
+.settings-overlay {
+  min-width: 0;
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+/* ---------- entrance animations (polish) ---------- */
+@keyframes weft-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes weft-pop-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes weft-menu-in {
+  from { opacity: 0; transform: translateY(-6px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes weft-view-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes weft-toast-in {
+  from { opacity: 0; transform: translateX(16px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Modals, overlays + the profile card animate in AND out via Svelte
+   transitions (see the components) so closing is as fluid as opening. */
+/* Dropdowns, popovers + the command palette drop in. */
+.server-menu,
+.ctx-menu,
+.status-menu,
+.emoji-picker,
+.mention-pop,
+.switcher-wrap {
+  animation: weft-menu-in 0.14s ease;
+}
+/* Switching channel/DM fades the message view in (keyed on `active`). */
+.view-fade {
+  animation: weft-view-in 0.18s ease;
+}
+.toast {
+  animation: weft-toast-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
 @media (prefers-reduced-motion: reduce) {
-  * {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  button:active:not(:disabled),
+  .icon-btn:hover,
+  .msg-act:hover,
+  .mod-btn:hover,
+  .ok-btn:hover,
+  .danger-btn:hover {
+    transform: none !important;
   }
 }

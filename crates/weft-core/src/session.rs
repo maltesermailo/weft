@@ -62,9 +62,30 @@ const EVENT_QUEUE: usize = 256;
 
 /// Drive one connection to completion. This is weftd's entire per-connection
 /// entry point: wrap the transport in a [`ControlStream`] and call this.
+/// Increments `ctx.connections` for the lifetime of a session; decrements on
+/// drop (every exit path). Powers the admin panel's live-connection count.
+struct ConnectionGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl ConnectionGuard {
+    fn enter(ctx: &ServerCtx) -> Self {
+        ctx.connections
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(Arc::clone(&ctx.connections))
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub async fn run_session<S: ControlStream>(stream: S, ctx: Arc<ServerCtx>) {
     let id = ctx.next_session_id();
     let span = info_span!("session", id);
+    // Count this live connection for the whole session; the guard decrements on
+    // any exit path (error, close, panic-unwind).
+    let _conn = ConnectionGuard::enter(&ctx);
     async move {
         let mut session = Session::new(id, stream, ctx);
         match session.run().await {
@@ -752,7 +773,19 @@ impl<S: ControlStream> Session<S> {
                 self.on_role_assign(label, scope, subject, name, account)
                     .await
             }
+            Command::RoleUnassign {
+                scope,
+                account: subject,
+                name,
+            } => {
+                self.on_role_unassign(label, scope, subject, name, account)
+                    .await
+            }
             Command::RolesList { scope } => self.on_roles_list(label, scope).await,
+            Command::RolesOf {
+                scope,
+                account: subject,
+            } => self.on_roles_of(label, scope, subject).await,
             Command::ChannelCreate { channel, policy } => {
                 self.on_channel_create(label, channel, policy, account)
                     .await
@@ -775,6 +808,10 @@ impl<S: ControlStream> Session<S> {
             }
             Command::ChannelDelete { channel, confirm } => {
                 self.on_channel_delete(label, channel, confirm, account)
+                    .await
+            }
+            Command::ChannelRename { channel, new_name } => {
+                self.on_channel_rename(label, channel, new_name, account)
                     .await
             }
             Command::InviteMint {
@@ -1810,7 +1847,47 @@ impl<S: ControlStream> Session<S> {
         {
             return self.internal(label, &e).await;
         }
+        // §6.5 always-propagate: a *channel* role-permission is granted to
+        // everyone who currently holds the same-named namespace role, so the
+        // permission applies immediately — no re-assignment needed.
+        if let Some((ns, _)) = scope.strip_prefix('#').and_then(|s| s.split_once('/')) {
+            self.propagate_channel_role(ns, &scope, &name, &cap_strings, &account)
+                .await?;
+        }
         self.on_roles_list(label, scope).await
+    }
+
+    /// Grant a channel role's caps to every **explicitly assigned** holder of
+    /// the same-named namespace role — so editing a channel permission reaches
+    /// existing members with no re-assignment (§6.5, "always propagate").
+    async fn propagate_channel_role(
+        &mut self,
+        ns: &str,
+        channel_scope: &str,
+        role_name: &str,
+        caps: &[String],
+        actor: &Account,
+    ) -> io::Result<()> {
+        let ns_scope = format!("ns:{ns}");
+        let members = self
+            .ctx
+            .roles
+            .role_members(&ns_scope, role_name)
+            .await
+            .unwrap_or_default();
+        let caps_csv = caps.join(",");
+        for member in members {
+            self.on_grant(
+                None,
+                member.to_string(),
+                channel_scope.to_string(),
+                caps_csv.clone(),
+                None,
+                actor.clone(),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// §6.5 ROLE DELETE (scope admin only) → updated `ROLES` batch.
@@ -1859,9 +1936,144 @@ impl<S: ControlStream> Session<S> {
         let Some(role) = roles.into_iter().find(|r| r.name == name) else {
             return self.no_such_target(label).await;
         };
-        let caps = role.caps.join(",");
-        self.on_grant(label, subject.to_string(), scope, caps, None, account)
+        // Record explicit membership — a role is held because it was assigned,
+        // never inferred from caps (§6.5).
+        if let Err(e) = self.ctx.roles.assign_role(&scope, &name, &subject).await {
+            return self.internal(label, &e).await;
+        }
+        // Grant the role's own bundle at its scope (the labeled response).
+        self.on_grant(
+            label,
+            subject.to_string(),
+            scope.clone(),
+            role.caps.join(","),
+            None,
+            account.clone(),
+        )
+        .await?;
+        // §6.5 role channel-permissions: assigning a *namespace* role also
+        // grants any same-named channel role's caps on every channel in that
+        // namespace — so "give role X send in #chan" follows the assignment.
+        if let Some(ns) = scope.strip_prefix("ns:") {
+            for (cscope, caps) in self.channel_role_caps(ns, &name).await {
+                self.on_grant(
+                    None,
+                    subject.to_string(),
+                    cscope,
+                    caps,
+                    None,
+                    account.clone(),
+                )
+                .await?;
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// §6.5 ROLE UNASSIGN: drop explicit membership and revoke the role's caps
+    /// (its bundle at the scope + any same-named channel roles' caps).
+    async fn on_role_unassign(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        subject: Account,
+        name: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        let now = unix_now();
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::NsAdmin, &token_scope, now)
             .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "ns-admin").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        let role = self
+            .ctx
+            .roles
+            .roles(&scope)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| r.name == name);
+        if let Err(e) = self.ctx.roles.unassign_role(&scope, &name, &subject).await {
+            return self.internal(label, &e).await;
+        }
+        // Revoke the role's own caps, then any channel-role caps in the ns.
+        if let Some(role) = role {
+            let _ = self
+                .ctx
+                .caps
+                .revoke_grants(subject.as_str(), &scope, Some(&role.caps))
+                .await;
+        }
+        if let Some(ns) = scope.strip_prefix("ns:") {
+            for (cscope, caps) in self.channel_role_caps(ns, &name).await {
+                let caps: Vec<String> = caps.split(',').map(str::to_string).collect();
+                let _ = self
+                    .ctx
+                    .caps
+                    .revoke_grants(subject.as_str(), &cscope, Some(&caps))
+                    .await;
+            }
+        }
+        self.on_roles_of(label, scope, subject).await
+    }
+
+    /// §6.5 ROLES-OF: the roles an account is explicitly assigned at a scope.
+    async fn on_roles_of(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let names = self
+            .ctx
+            .roles
+            .roles_of(&scope, &account)
+            .await
+            .unwrap_or_default();
+        self.send_event(
+            label,
+            Event::RoleMember {
+                scope,
+                account,
+                roles: names.join(","),
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// `(channel-scope, caps-csv)` for every channel in `ns` that defines a
+    /// role named `name` — the role's per-channel permissions (§6.5).
+    async fn channel_role_caps(&self, ns: &str, name: &str) -> Vec<(String, String)> {
+        let prefix = format!("#{ns}/");
+        let channels = self
+            .ctx
+            .channel_store
+            .list_channels()
+            .await
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for (chan, _) in channels {
+            if !chan.as_str().starts_with(&prefix) {
+                continue;
+            }
+            let cscope = chan.to_string();
+            let croles = self.ctx.roles.roles(&cscope).await.unwrap_or_default();
+            if let Some(crole) = croles.into_iter().find(|r| r.name == name) {
+                if !crole.caps.is_empty() {
+                    out.push((cscope, crole.caps.join(",")));
+                }
+            }
+        }
+        out
     }
 
     /// §6.5 ROLES: the role definitions at a scope, as a `BATCH` of `ROLE`.
@@ -2362,6 +2574,22 @@ impl<S: ControlStream> Session<S> {
         if let Err(e) = result {
             return self.internal(label, &e).await;
         }
+        // Layout changes broadcast to the channel's members so every client
+        // re-renders from server state (no client-only ordering).
+        if key == "category" || key == "position" {
+            if let (Ok(Some(rec)), Some(handle)) = (
+                self.ctx.channel_store.channel(&channel).await,
+                self.ctx.registry.get(&channel),
+            ) {
+                handle
+                    .announce(Event::ChannelLayout {
+                        channel: channel.clone(),
+                        category: rec.category,
+                        position: rec.position,
+                    })
+                    .await;
+            }
+        }
         self.send_event(
             label,
             Event::Chanmeta {
@@ -2416,6 +2644,106 @@ impl<S: ControlStream> Session<S> {
                 channel,
                 key: "deleted".to_string(),
                 value: String::new(),
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// CHANNEL RENAME — change a channel's identity within its namespace (§6.3),
+    /// re-keying every scoped record (invariant 4: cap first). The store move is
+    /// atomic; the actor is respawned under the new name and members are told
+    /// via `CHANNEL-RENAMED` so their clients re-join the new identity.
+    async fn on_channel_rename(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        new_name: ChannelName,
+        account: Account,
+    ) -> io::Result<Flow> {
+        // A rename stays within one namespace (moving across namespaces would
+        // change ownership/authority — that's not a rename).
+        if channel.namespace() != new_name.namespace() {
+            self.send_err(
+                label,
+                ErrCode::Policy,
+                None,
+                "rename must stay within the same namespace",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        if channel == new_name {
+            return self.send_event(label, Event::ChannelRenamed { old: channel.clone(), new: new_name }).await.map(|()| Flow::Continue);
+        }
+        // Anti-enumeration: absent source is indistinguishable from unauthorized.
+        if !self.ctx.registry.exists(&channel) {
+            return self.no_such_target(label).await;
+        }
+        // Invariant 4: verify the cap before any mutation. ns-admin covers a
+        // namespace's channels (operators cover all) — same authority as DELETE.
+        let scope = TokenScope::Channel(channel.to_string());
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::NsAdmin, &scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "ns-admin").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        if self.ctx.registry.exists(&new_name) {
+            self.send_err(
+                label,
+                ErrCode::Conflict,
+                None,
+                "target channel name already exists",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        // Policy needed to respawn the actor under the new name.
+        let policy = match self.ctx.channel_store.channel(&channel).await {
+            Ok(Some(record)) => record.policy,
+            Ok(None) => return self.no_such_target(label).await,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        // Re-key the store atomically (grants, membership, roles, holds, pins,
+        // history — invariants 4 & 11 preserved because the scope moves whole).
+        match self
+            .ctx
+            .channel_store
+            .rename_channel(&channel, &new_name)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                self.send_err(label, ErrCode::Conflict, None, "rename failed")
+                    .await?;
+                return Ok(Flow::Continue);
+            }
+            Err(e) => return self.internal(label, &e).await,
+        }
+        // Tell current members via the OLD actor's broadcast BEFORE swapping —
+        // buffered broadcasts still drain to their forwarders after the drop.
+        if let Some(handle) = self.ctx.registry.get(&channel) {
+            handle
+                .announce(Event::ChannelRenamed {
+                    old: channel.clone(),
+                    new: new_name.clone(),
+                })
+                .await;
+        }
+        self.ctx
+            .registry
+            .rename(&channel, new_name.clone(), policy);
+        debug!(%channel, %new_name, "channel renamed");
+        // Direct (labeled) ack to the initiator.
+        self.send_event(
+            label,
+            Event::ChannelRenamed {
+                old: channel,
+                new: new_name,
             },
         )
         .await?;
@@ -2604,6 +2932,7 @@ impl<S: ControlStream> Session<S> {
             icon: record.icon.clone(),
             recovery_set: record.recovery_set.is_some(),
             recovery_pending: record.pending_recovery.as_ref().map(|p| (p.eta_ms, p.rung)),
+            categories: record.categories.clone(),
         }
     }
 
@@ -2661,6 +2990,7 @@ impl<S: ControlStream> Session<S> {
             icon: None,
             recovery_set: None,
             pending_recovery: None,
+            categories: Vec::new(),
         };
         match self.ctx.namespaces.create_namespace(record.clone()).await {
             Ok(true) => {
@@ -2722,12 +3052,15 @@ impl<S: ControlStream> Session<S> {
         value: String,
         account: Account,
     ) -> io::Result<Flow> {
-        if !matches!(key.as_str(), "title" | "description" | "icon") {
+        if !matches!(
+            key.as_str(),
+            "title" | "description" | "icon" | "categories"
+        ) {
             self.send_err(
                 label,
                 ErrCode::Policy,
                 None,
-                "meta key must be title|description|icon",
+                "meta key must be title|description|icon|categories",
             )
             .await?;
             return Ok(Flow::Continue);
@@ -2747,6 +3080,13 @@ impl<S: ControlStream> Session<S> {
             "title" => record.title = Some(value),
             "description" => record.description = Some(value),
             "icon" => record.icon = Some(value),
+            "categories" => {
+                record.categories = value
+                    .split(',')
+                    .filter(|c| !c.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            }
             _ => {}
         }
         self.send_event(label, Self::ns_meta_event(&record)).await?;
@@ -2818,6 +3158,7 @@ impl<S: ControlStream> Session<S> {
                 icon: None,
                 recovery_set: false,
                 recovery_pending: None,
+                categories: Vec::new(),
             },
         )
         .await?;
@@ -3467,6 +3808,10 @@ impl<S: ControlStream> Session<S> {
                 return self.no_such_target(label).await;
             }
         }
+        // The layout fetch also carries the namespace meta (categories, title,
+        // …) so the client renders category groups purely from server state.
+        self.send_event(label.clone(), Self::ns_meta_event(&record))
+            .await?;
         let channels = match self
             .ctx
             .channel_store

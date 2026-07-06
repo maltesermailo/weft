@@ -33,8 +33,53 @@ pub struct Config {
     pub listen: Listen,
     pub identity: Identity,
     pub storage: Storage,
-    /// TLS identity for QUIC. Absent → fresh self-signed (dev only).
+    /// TLS identity for QUIC. Absent → fresh self-signed (dev only). A file
+    /// cert is hot-reloaded when it changes on disk (renewals apply without a
+    /// restart) — pair it with a front proxy / certbot that renews the file.
     pub tls: Option<Tls>,
+    /// Built-in ACME (Let's Encrypt). When enabled, weftd obtains + renews its
+    /// own certificate and uses it for QUIC — no front proxy needed. Takes
+    /// precedence over `[tls]`.
+    pub acme: Acme,
+    /// Operator web admin panel. When enabled, weftd mounts the `weft-admin`
+    /// API on the HTTP listener (`/admin/api/*`); operators are `[operators]`.
+    pub admin: Admin,
+}
+
+/// Embedded admin panel toggle. (Standalone `weft-admin` has its own config.)
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Admin {
+    pub enabled: bool,
+}
+
+/// §10.2 built-in ACME. Validates over HTTP-01, so the HTTP listener
+/// (`[listen] http`) must be reachable by the CA on port 80.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Acme {
+    pub enabled: bool,
+    /// Certificate domains (SANs). The first is the primary.
+    pub domains: Vec<String>,
+    /// Contact email for the ACME account (recommended).
+    pub email: Option<String>,
+    /// Use Let's Encrypt's staging endpoint (untrusted certs, high rate
+    /// limits) while testing.
+    pub staging: bool,
+    /// Directory caching the ACME account key + issued cert/key.
+    pub cache_dir: PathBuf,
+}
+
+impl Default for Acme {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            domains: Vec::new(),
+            email: None,
+            staging: false,
+            cache_dir: PathBuf::from("acme"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -186,6 +231,8 @@ impl Default for Config {
             identity: Identity::default(),
             storage: Storage::default(),
             tls: None,
+            acme: Acme::default(),
+            admin: Admin::default(),
         }
     }
 }
@@ -214,4 +261,15 @@ pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Config> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
     toml::from_str(&raw).with_context(|| format!("parsing config {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    /// The shipped example config must always parse against the live schema
+    /// (`deny_unknown_fields` makes any drift a hard failure).
+    #[test]
+    fn example_config_parses() {
+        let raw = include_str!("../../../weftd.example.toml");
+        toml::from_str::<super::Config>(raw).expect("weftd.example.toml must parse");
+    }
 }

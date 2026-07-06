@@ -32,6 +32,7 @@ export type WeftEvent =
   | { kind: "unpinned"; channel: string; msgid: string }
   | { kind: "caps"; account: string; scope: string; caps: string }
   | { kind: "role"; scope: string; color: string; caps: string; name: string }
+  | { kind: "role-member"; scope: string; account: string; roles: string }
   | { kind: "chanmeta"; channel: string; key: string; value: string }
   | {
       kind: "ns-meta";
@@ -43,11 +44,24 @@ export type WeftEvent =
       recovery_set: boolean;
       recovery_eta: number | null;
       recovery_rung: number | null;
+      categories: string[];
     }
   | { kind: "channel-layout"; channel: string; category: string | null; position: number }
+  | { kind: "channel-renamed"; old: string; new: string }
+  | {
+      kind: "manifest";
+      peer: string;
+      version: number;
+      state: string;
+      channels: string[];
+      history: string;
+      media: string;
+      typing: boolean;
+    }
+  | { kind: "netblocked"; network: string; reason: string | null }
   | { kind: "more"; cursor: string }
   | { kind: "token"; subject: string; scope: string }
-  | { kind: "invited"; scope: string; invite_id: string; link: string | null }
+  | { kind: "invited"; scope: string; invite_id: string; link: string | null; max_uses: number | null }
   | { kind: "reported"; report_id: string }
   | {
       kind: "report-filed";
@@ -95,6 +109,13 @@ export type WeftEvent =
 
 export function connect(host: string, account: string, password: string, mode: Mode) {
   return invoke("connect", { host, account, password, mode });
+}
+
+export type ClientConfig = { allow_insecure: boolean; default_host: string | null; config_path: string | null };
+
+/// The active client.toml settings (TLS mode + prefill host + file path).
+export function clientConfig(): Promise<ClientConfig> {
+  return invoke("client_config");
 }
 
 /// Tear down the current connection (logout / switch account).
@@ -245,6 +266,13 @@ export function roleDelete(scope: string, name: string) {
 export function roleAssign(scope: string, account: string, name: string) {
   return invoke("role_assign", { scope, account, name });
 }
+export function roleUnassign(scope: string, account: string, name: string) {
+  return invoke("role_unassign", { scope, account, name });
+}
+/// Query an account's explicitly-assigned roles at a scope → a `role-member` event.
+export function rolesOfAccount(scope: string, account: string) {
+  return invoke("roles_of", { scope, account });
+}
 
 export function inviteMint(scope: string) {
   return invoke("invite_mint", { scope });
@@ -252,6 +280,38 @@ export function inviteMint(scope: string) {
 
 export function inviteRedeem(token: string) {
   return invoke("invite_redeem", { token });
+}
+
+/// Close an outstanding invite (§6.5).
+export function inviteRevoke(inviteId: string) {
+  return invoke("invite_revoke", { inviteId });
+}
+
+/// Moderation (§6.7). `verb` = mute|unmute|ban|unban|kick. `scope` is a channel
+/// (`#chan`), namespace (`ns:<name>`) or `*`; for `kick` it must be a channel.
+export function moderate(verb: string, scope: string, account: string, reason?: string) {
+  return invoke("moderate", { verb, scope, account, reason: reason ?? null });
+}
+
+// ---- federation (§11): netblocks + bridges (operator) ----
+export function netblockAdd(network: string, reason?: string) {
+  return invoke("netblock_add", { network, reason: reason ?? null });
+}
+export function netblockRemove(network: string) {
+  return invoke("netblock_remove", { network });
+}
+export function netblockList() {
+  return invoke("netblock_list");
+}
+/// `history` = from-epoch|full; `media` = mirror|mirror-max:<bytes>|none.
+export function bridgePropose(scope: string, peer: string, history: string, media: string, typing: boolean) {
+  return invoke("bridge_propose", { scope, peer, history, media, typing });
+}
+export function bridgeAccept(peer: string, version: number) {
+  return invoke("bridge_accept", { peer, version });
+}
+export function bridgeSever(peer: string) {
+  return invoke("bridge_sever", { peer });
 }
 
 export function report(msgid: string, category: string, scope: string, note?: string) {
@@ -270,8 +330,20 @@ export function part(channel: string) {
   return invoke("part", { channel });
 }
 
-export function channelCreate(channel: string) {
-  return invoke("channel_create", { channel });
+export function channelCreate(channel: string, policy?: string) {
+  return invoke("channel_create", { channel, policy: policy ?? null });
+}
+
+/// Change an existing channel's retention (§6.3). `purge` is required for some
+/// e2ee transitions (invariant 8).
+export function channelPolicy(channel: string, policy: string, purge = false) {
+  return invoke("channel_policy", { channel, policy, purge });
+}
+
+/// Change a channel's identity (§6.3). Re-keys everything server-side; the
+/// server replies with a `channel-renamed` event.
+export function channelRename(old: string, next: string) {
+  return invoke("channel_rename", { old, new: next });
 }
 
 export function channelDelete(channel: string) {

@@ -1,4 +1,4 @@
--- §6.5 role definitions: named, colored capability-token bundles per scope.
+-- §6.6 role definitions: named, colored capability-token bundles per scope.
 CREATE TABLE weft_roles (
     scope TEXT NOT NULL,
     name  TEXT NOT NULL,

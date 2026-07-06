@@ -372,6 +372,15 @@ impl AccountStore for PgStore {
             .map_err(backend_err)
     }
 
+    async fn list_accounts(&self) -> Result<Vec<Account>, StoreError> {
+        let names: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM weft_accounts ORDER BY name")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        Ok(names.into_iter().filter_map(|n| n.parse().ok()).collect())
+    }
+
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError> {
         let exists: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM weft_accounts WHERE name = $1)")
@@ -602,6 +611,61 @@ impl ChannelStore for PgStore {
         Ok(result.rows_affected() == 1)
     }
 
+    async fn rename_channel(
+        &self,
+        old: &ChannelName,
+        new: &ChannelName,
+    ) -> Result<bool, StoreError> {
+        let ok = old.as_str();
+        let nk = new.as_str();
+        let mut tx = self.pool.begin().await.map_err(backend_err)?;
+
+        // Old must exist; new must be free.
+        let old_exists: Option<String> =
+            sqlx::query_scalar("SELECT name FROM weft_channels WHERE name = $1")
+                .bind(ok)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(backend_err)?;
+        let new_exists: Option<String> =
+            sqlx::query_scalar("SELECT name FROM weft_channels WHERE name = $1")
+                .bind(nk)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(backend_err)?;
+        if old_exists.is_none() || new_exists.is_some() {
+            tx.rollback().await.map_err(backend_err)?;
+            return Ok(false);
+        }
+
+        // Re-key every channel-scoped row atomically. `weft_events` also covers
+        // root/tombstone rows (they're events, not separate tables).
+        for sql in [
+            "UPDATE weft_channels         SET name    = $2 WHERE name    = $1",
+            "UPDATE weft_events           SET scope   = $2 WHERE scope   = $1",
+            "UPDATE weft_watermarks       SET scope   = $2 WHERE scope   = $1",
+            "UPDATE weft_marks            SET target  = $2 WHERE target  = $1",
+            "UPDATE weft_grants           SET scope   = $2 WHERE scope   = $1",
+            "UPDATE weft_epochs           SET scope   = $2 WHERE scope   = $1",
+            "UPDATE weft_holds            SET scope   = $2 WHERE scope   = $1",
+            "UPDATE weft_moderation       SET scope   = $2 WHERE scope   = $1",
+            "UPDATE weft_pins             SET channel = $2 WHERE channel = $1",
+            "UPDATE weft_memberships      SET channel = $2 WHERE channel = $1",
+            "UPDATE weft_roles            SET scope   = $2 WHERE scope   = $1",
+            "UPDATE weft_role_assignments SET scope   = $2 WHERE scope   = $1",
+        ] {
+            sqlx::query(sql)
+                .bind(ok)
+                .bind(nk)
+                .execute(&mut *tx)
+                .await
+                .map_err(backend_err)?;
+        }
+
+        tx.commit().await.map_err(backend_err)?;
+        Ok(true)
+    }
+
     async fn set_channel_layout(
         &self,
         name: &ChannelName,
@@ -693,6 +757,26 @@ impl CapabilityStore for PgStore {
             "SELECT subject, scope, caps, epoch, expiry FROM weft_grants WHERE subject = $1",
         )
         .bind(subject)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(rows
+            .iter()
+            .map(|row| GrantRecord {
+                subject: row.get("subject"),
+                scope: row.get("scope"),
+                caps: split_caps(row.get("caps")),
+                epoch: row.get::<i64, _>("epoch") as u64,
+                expiry: row.get::<Option<i64>, _>("expiry").map(|e| e as u64),
+            })
+            .collect())
+    }
+
+    async fn grants_at_scope(&self, scope: &str) -> Result<Vec<GrantRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT subject, scope, caps, epoch, expiry FROM weft_grants WHERE scope = $1",
+        )
+        .bind(scope)
         .fetch_all(&self.pool)
         .await
         .map_err(backend_err)?;
@@ -938,6 +1022,7 @@ impl NamespaceStore for PgStore {
             "title" => "title",
             "description" => "description",
             "icon" => "icon",
+            "categories" => "categories",
             _ => return Ok(()),
         };
         sqlx::query(&format!(
@@ -1135,6 +1220,13 @@ fn namespace_from_row(row: &sqlx::postgres::PgRow) -> Result<NamespaceRecord, St
         icon: row.get("icon"),
         recovery_set,
         pending_recovery,
+        categories: row
+            .get::<Option<String>, _>("categories")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|c| !c.is_empty())
+            .map(str::to_string)
+            .collect(),
     })
 }
 
@@ -1787,6 +1879,12 @@ impl RoleStore for PgStore {
             .execute(&self.pool)
             .await
             .map_err(backend_err)?;
+        sqlx::query("DELETE FROM weft_role_assignments WHERE scope = $1 AND name = $2")
+            .bind(scope)
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
         Ok(())
     }
 
@@ -1812,5 +1910,74 @@ impl RoleStore for PgStore {
                 }
             })
             .collect())
+    }
+
+    async fn assign_role(
+        &self,
+        scope: &str,
+        name: &str,
+        account: &Account,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO weft_role_assignments (scope, name, account) VALUES ($1,$2,$3) \
+             ON CONFLICT (scope, name, account) DO NOTHING",
+        )
+        .bind(scope)
+        .bind(name)
+        .bind(account.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn unassign_role(
+        &self,
+        scope: &str,
+        name: &str,
+        account: &Account,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "DELETE FROM weft_role_assignments WHERE scope = $1 AND name = $2 AND account = $3",
+        )
+        .bind(scope)
+        .bind(name)
+        .bind(account.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn roles_of(&self, scope: &str, account: &Account) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT name FROM weft_role_assignments WHERE scope = $1 AND account = $2 ORDER BY name",
+        )
+        .bind(scope)
+        .bind(account.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(rows
+            .iter()
+            .map(|r| r.get::<&str, _>("name").to_string())
+            .collect())
+    }
+
+    async fn role_members(&self, scope: &str, name: &str) -> Result<Vec<Account>, StoreError> {
+        let rows =
+            sqlx::query("SELECT account FROM weft_role_assignments WHERE scope = $1 AND name = $2")
+                .bind(scope)
+                .bind(name)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        rows.iter()
+            .map(|r| {
+                r.get::<&str, _>("account")
+                    .parse()
+                    .map_err(|_| StoreError::Backend("corrupt role member".to_string()))
+            })
+            .collect()
     }
 }

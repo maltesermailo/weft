@@ -8,8 +8,9 @@ use std::sync::Arc;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
-use tokio::net::TcpListener;
 use weft_core::ServerCtx;
+
+use crate::tls::Challenges;
 
 #[derive(Debug, Clone, Serialize)]
 struct WellKnownDoc {
@@ -20,23 +21,35 @@ struct WellKnownDoc {
     signing_key: String,
 }
 
-pub(crate) fn router(ctx: &ServerCtx) -> Router {
+pub(crate) fn router(ctx: &ServerCtx, challenges: Challenges) -> Router {
     let doc = WellKnownDoc {
         protocol: weft_core::PROTOCOL_VERSION,
         network: ctx.info.network.to_string(),
         signing_key: ctx.identity_public().to_b64(),
     };
-    Router::new().route(
-        "/.well-known/weft",
-        get(move || {
-            let doc = doc.clone();
-            async move { Json(doc) }
-        }),
-    )
+    Router::new()
+        .route(
+            "/.well-known/weft",
+            get(move || {
+                let doc = doc.clone();
+                async move { Json(doc) }
+            }),
+        )
+        // ACME HTTP-01 validation (built-in Let's Encrypt). Empty unless ACME is
+        // running, in which case the challenge task fills `challenges`.
+        .route(
+            "/.well-known/acme-challenge/:token",
+            get(move |axum::extract::Path(token): axum::extract::Path<String>| {
+                let challenges = Arc::clone(&challenges);
+                async move {
+                    challenges
+                        .read()
+                        .expect("challenges lock")
+                        .get(&token)
+                        .cloned()
+                        .ok_or(axum::http::StatusCode::NOT_FOUND)
+                }
+            }),
+        )
 }
 
-pub(crate) async fn serve(listener: TcpListener, ctx: Arc<ServerCtx>) {
-    if let Err(e) = axum::serve(listener, router(&ctx)).await {
-        tracing::error!("well-known server failed: {e}");
-    }
-}

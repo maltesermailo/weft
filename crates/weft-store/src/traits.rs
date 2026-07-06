@@ -60,6 +60,10 @@ pub trait AccountStore: Send + Sync {
 
     async fn password_phc(&self, account: &Account) -> Result<Option<String>, StoreError>;
 
+    /// Every registered account, sorted by name. The operator admin surface —
+    /// the wire protocol never enumerates accounts network-wide.
+    async fn list_accounts(&self) -> Result<Vec<Account>, StoreError>;
+
     /// Idempotent; false iff the account is unknown.
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError>;
 
@@ -138,6 +142,17 @@ pub trait ChannelStore: Send + Sync {
     /// CHANNEL DELETE. False = no such channel.
     async fn delete_channel(&self, name: &ChannelName) -> Result<bool, StoreError>;
 
+    /// CHANNEL RENAME — re-key EVERYTHING scoped to the channel name (§6.3):
+    /// the channel record, history/events, capability grants + scope epochs,
+    /// moderation, pins, memberships, roles + assignments, and retention-hold
+    /// scoping. Atomic (single transaction on durable backends). Returns
+    /// `Ok(false)` if `old` is absent or `new` already exists.
+    async fn rename_channel(
+        &self,
+        old: &ChannelName,
+        new: &ChannelName,
+    ) -> Result<bool, StoreError>;
+
     /// Set a channel's layout within its namespace (category + position) —
     /// the Discord-style ordering (spec extension).
     async fn set_channel_layout(
@@ -173,6 +188,10 @@ pub trait CapabilityStore: Send + Sync {
 
     /// All grants held by a subject (account or pubkey).
     async fn grants_for(&self, subject: &str) -> Result<Vec<GrantRecord>, StoreError>;
+
+    /// Every grant recorded *at* a scope, across subjects. Used to find who
+    /// holds a role (§6.5) so a channel role-permission can propagate to them.
+    async fn grants_at_scope(&self, scope: &str) -> Result<Vec<GrantRecord>, StoreError>;
 
     /// REVOKE: drop grants for (subject, scope); `caps = None` drops all.
     /// Returns the number removed.
@@ -431,9 +450,11 @@ pub trait MembershipStore: Send + Sync {
     async fn memberships(&self, account: &Account) -> Result<Vec<ChannelName>, StoreError>;
 }
 
-/// §6.5 role definitions: named, colored capability-token bundles per scope.
-/// Pure metadata — enforcement stays token-based ("no role tables"); a role
-/// resolves to its caps on assign, and display maps caps back to role names.
+/// §6.5 role definitions + assignments. Definitions are named, colored
+/// capability-token bundles per scope; assignments are **explicit** (an account
+/// holds a role because it was assigned, recorded here — not because its caps
+/// happen to match). Enforcement stays token-based (assigning grants the caps);
+/// this store is the source of truth for *membership* (who wears which role).
 #[async_trait]
 pub trait RoleStore: Send + Sync {
     /// Define or replace a role at a scope. Idempotent on `(scope, name)`.
@@ -445,9 +466,31 @@ pub trait RoleStore: Send + Sync {
         caps: &[String],
     ) -> Result<(), StoreError>;
 
-    /// Remove a role definition. Idempotent.
+    /// Remove a role definition (and every assignment of it). Idempotent.
     async fn delete_role(&self, scope: &str, name: &str) -> Result<(), StoreError>;
 
     /// All role definitions at a scope.
     async fn roles(&self, scope: &str) -> Result<Vec<RoleDef>, StoreError>;
+
+    /// Record that `account` holds role `name` at `scope`. Idempotent.
+    async fn assign_role(
+        &self,
+        scope: &str,
+        name: &str,
+        account: &Account,
+    ) -> Result<(), StoreError>;
+
+    /// Drop an assignment. Idempotent.
+    async fn unassign_role(
+        &self,
+        scope: &str,
+        name: &str,
+        account: &Account,
+    ) -> Result<(), StoreError>;
+
+    /// The role names `account` holds at `scope` (explicit membership).
+    async fn roles_of(&self, scope: &str, account: &Account) -> Result<Vec<String>, StoreError>;
+
+    /// The accounts holding role `name` at `scope` — for propagation (§6.5).
+    async fn role_members(&self, scope: &str, name: &str) -> Result<Vec<Account>, StoreError>;
 }

@@ -14,7 +14,13 @@ pub mod insecure;
 mod quic;
 mod ws;
 
-pub use quic::{server_config, server_endpoint, QuicControlStream, ALPN};
+pub use quic::{
+    certified_key, client_endpoint, server_config, server_config_resolving, server_endpoint,
+    QuicControlStream, ReloadableCert, ALPN,
+};
+/// The resolver's hot-swap unit — re-exported so consumers (weftd) don't need a
+/// direct rustls dependency.
+pub use rustls::sign::CertifiedKey;
 pub use ws::WsControlStream;
 
 use thiserror::Error;

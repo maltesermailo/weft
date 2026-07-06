@@ -164,9 +164,15 @@ pub enum Command {
     /// `ROLE DELETE <scope> :<name>` — remove a role definition (§6.5).
     RoleDelete { scope: String, name: String },
     /// `ROLE ASSIGN <scope> <account> :<name>` — grant the role's token bundle
-    /// to an account (§6.5). Enforcement stays token-based; the role resolves
-    /// to its caps.
+    /// to an account and record explicit membership (§6.5).
     RoleAssign {
+        scope: String,
+        account: Account,
+        name: String,
+    },
+    /// `ROLE UNASSIGN <scope> <account> :<name>` — drop membership + revoke the
+    /// role's caps (§6.5).
+    RoleUnassign {
         scope: String,
         account: Account,
         name: String,
@@ -174,6 +180,9 @@ pub enum Command {
     /// `ROLES <scope>` — list the role definitions at a scope (§6.5) → a BATCH
     /// of `ROLE` events.
     RolesList { scope: String },
+    /// `ROLES-OF <scope> <account>` — the roles an account is assigned at a
+    /// scope (§6.5) → a `ROLE-MEMBER` event.
+    RolesOf { scope: String, account: Account },
     /// `CHANNEL CREATE <#chan> [policy]` — default `retained:90d` (§6.3).
     ChannelCreate {
         channel: ChannelName,
@@ -195,6 +204,14 @@ pub enum Command {
     ChannelDelete {
         channel: ChannelName,
         confirm: ChannelName,
+    },
+    /// `CHANNEL RENAME <#old> <#new>` — change a channel's identity within its
+    /// namespace (§6.3). The server re-keys everything scoped to the name
+    /// (grants, membership, roles, holds, pins, history) and emits
+    /// `CHANNEL-RENAMED` to members.
+    ChannelRename {
+        channel: ChannelName,
+        new_name: ChannelName,
     },
     /// `INVITE MINT <scope> [max-uses=] [expiry=]` (§6.5) → `INVITED`.
     InviteMint {
@@ -695,6 +712,20 @@ impl Command {
                             what: "name",
                         })?,
                     }),
+                    "UNASSIGN" => Ok(Command::RoleUnassign {
+                        scope: args.req("scope")?.to_string(),
+                        account: args.req("account")?.parse().map_err(|_| {
+                            ParseError::BadParam {
+                                verb: "ROLE",
+                                what: "account",
+                                value: String::new(),
+                            }
+                        })?,
+                        name: line.trailing.clone().ok_or(ParseError::MissingParam {
+                            verb: "ROLE",
+                            what: "name",
+                        })?,
+                    }),
                     other => Ok(Command::Unknown {
                         verb: format!("ROLE {other}"),
                     }),
@@ -704,6 +735,20 @@ impl Command {
                 let mut args = Args::new(line, "ROLES");
                 Ok(Command::RolesList {
                     scope: args.req("scope")?.to_string(),
+                })
+            }
+            "ROLES-OF" => {
+                let mut args = Args::new(line, "ROLES-OF");
+                Ok(Command::RolesOf {
+                    scope: args.req("scope")?.to_string(),
+                    account: args
+                        .req("account")?
+                        .parse()
+                        .map_err(|_| ParseError::BadParam {
+                            verb: "ROLES-OF",
+                            what: "account",
+                            value: String::new(),
+                        })?,
                 })
             }
             "CHANNEL" => {
@@ -733,6 +778,10 @@ impl Command {
                     "DELETE" => Ok(Command::ChannelDelete {
                         channel: args.req("channel")?.parse()?,
                         confirm: args.req("confirmation")?.parse()?,
+                    }),
+                    "RENAME" => Ok(Command::ChannelRename {
+                        channel: args.req("channel")?.parse()?,
+                        new_name: args.req("new-name")?.parse()?,
                     }),
                     _ => Err(ParseError::BadParam {
                         verb: "CHANNEL",
@@ -1261,7 +1310,19 @@ impl Command {
                 vec!["ASSIGN".to_string(), scope.clone(), account.to_string()],
                 Some(name.clone()),
             ),
+            Command::RoleUnassign {
+                scope,
+                account,
+                name,
+            } => (
+                "ROLE",
+                vec!["UNASSIGN".to_string(), scope.clone(), account.to_string()],
+                Some(name.clone()),
+            ),
             Command::RolesList { scope } => ("ROLES", vec![scope.clone()], None),
+            Command::RolesOf { scope, account } => {
+                ("ROLES-OF", vec![scope.clone(), account.to_string()], None)
+            }
             Command::ChannelCreate { channel, policy } => {
                 let mut params = vec!["CREATE".to_string(), channel.to_string()];
                 if let Some(policy) = policy {
@@ -1299,6 +1360,15 @@ impl Command {
                     "DELETE".to_string(),
                     channel.to_string(),
                     confirm.to_string(),
+                ],
+                None,
+            ),
+            Command::ChannelRename { channel, new_name } => (
+                "CHANNEL",
+                vec![
+                    "RENAME".to_string(),
+                    channel.to_string(),
+                    new_name.to_string(),
                 ],
                 None,
             ),
@@ -1738,8 +1808,17 @@ mod tests {
             account: "bob".parse().unwrap(),
             name: "Head Moderator".to_string(),
         }));
+        round_trip(&Request::new(Command::RoleUnassign {
+            scope: "ns:gaming".to_string(),
+            account: "bob".parse().unwrap(),
+            name: "Head Moderator".to_string(),
+        }));
         round_trip(&Request::new(Command::RolesList {
             scope: "ns:gaming".to_string(),
+        }));
+        round_trip(&Request::new(Command::RolesOf {
+            scope: "ns:gaming".to_string(),
+            account: "bob".parse().unwrap(),
         }));
         assert_eq!(
             Request::parse("JOIN"),
@@ -1969,6 +2048,17 @@ mod tests {
             channel: "#c".parse().unwrap(),
             confirm: "#c".parse().unwrap(),
         }));
+        round_trip(&Request::new(Command::ChannelRename {
+            channel: "#ns/old".parse().unwrap(),
+            new_name: "#ns/new".parse().unwrap(),
+        }));
+        assert_eq!(
+            Request::parse("CHANNEL RENAME #ns/old #ns/new").unwrap().command,
+            Command::ChannelRename {
+                channel: "#ns/old".parse().unwrap(),
+                new_name: "#ns/new".parse().unwrap(),
+            }
+        );
         assert_eq!(
             Request::parse("CHANNEL FROB #x"),
             Err(ParseError::BadParam {

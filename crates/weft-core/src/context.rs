@@ -118,6 +118,9 @@ pub struct ServerCtx {
     /// capability tokens rooted at `*`/`#chan` scope (§11.3).
     identity: Keypair,
     next_session: AtomicU64,
+    /// Live session count — inc/dec per connection in `run_session`. Read by the
+    /// admin panel's `/stats`; never affects protocol behavior.
+    pub connections: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ServerCtx {
@@ -198,6 +201,7 @@ impl ServerCtx {
             operators: operators.into_iter().collect(),
             identity,
             next_session: AtomicU64::new(1),
+            connections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 

@@ -111,6 +111,12 @@ pub enum WeftEvent {
         caps: String,
         name: String,
     },
+    /// `ROLE-MEMBER <scope> <account> :<roles>` — an account's assigned roles.
+    RoleMember {
+        scope: String,
+        account: String,
+        roles: String,
+    },
     /// `CHANMETA <#chan> <key> <value>` — topic / posting / … (§7).
     Chanmeta {
         channel: String,
@@ -128,12 +134,34 @@ pub enum WeftEvent {
         recovery_set: bool,
         recovery_eta: Option<u64>,
         recovery_rung: Option<u8>,
+        /// Server-authoritative channel categories (§6.3 layout).
+        categories: Vec<String>,
     },
     /// `CHANNEL-LAYOUT <#chan> <position>` with optional `category=` (§7).
     ChannelLayout {
         channel: String,
         category: Option<String>,
         position: i64,
+    },
+    /// `CHANNEL-RENAMED <#old> <#new>` — a channel changed identity (§6.3).
+    ChannelRenamed {
+        old: String,
+        new: String,
+    },
+    /// `MANIFEST <peer> <version> <state>` — a bridge's channel set/state (§11).
+    Manifest {
+        peer: String,
+        version: u64,
+        state: String,
+        channels: Vec<String>,
+        history: String,
+        media: String,
+        typing: bool,
+    },
+    /// `NETBLOCKED <network> [:reason]` — a blocked network (§11.6).
+    Netblocked {
+        network: String,
+        reason: Option<String>,
     },
     /// `MORE <cursor>` — DISCOVER pagination continuation (§7).
     More {
@@ -149,6 +177,8 @@ pub enum WeftEvent {
         scope: String,
         invite_id: String,
         link: Option<String>,
+        /// `0` marks a revoked/closed invite (§6.5).
+        max_uses: Option<u32>,
     },
     /// `REPORTED <report-id>` — ack to the reporter (§7).
     Reported {
@@ -263,9 +293,10 @@ pub async fn run_connection(
     password: String,
     mode: Mode,
     device: Option<Keypair>,
+    allow_insecure: bool,
     mut outbound: mpsc::UnboundedReceiver<String>,
 ) {
-    let mut stream = match connect(addr, &server_name).await {
+    let mut stream = match connect(addr, &server_name, allow_insecure).await {
         Ok(stream) => stream,
         Err(e) => return emit(&app, WeftEvent::Closed { reason: e }),
     };
@@ -548,6 +579,18 @@ fn on_line(
                 name,
             },
         ),
+        Event::RoleMember {
+            scope,
+            account,
+            roles,
+        } => emit(
+            app,
+            WeftEvent::RoleMember {
+                scope,
+                account: account.to_string(),
+                roles,
+            },
+        ),
         Event::Chanmeta {
             channel,
             key,
@@ -568,6 +611,7 @@ fn on_line(
             description,
             recovery_set,
             recovery_pending,
+            categories,
             ..
         } => emit(
             app,
@@ -580,6 +624,7 @@ fn on_line(
                 recovery_set,
                 recovery_eta: recovery_pending.map(|(eta, _)| eta),
                 recovery_rung: recovery_pending.map(|(_, rung)| rung),
+                categories,
             },
         ),
         Event::ChannelLayout {
@@ -594,12 +639,20 @@ fn on_line(
                 position,
             },
         ),
+        Event::ChannelRenamed { old, new } => emit(
+            app,
+            WeftEvent::ChannelRenamed {
+                old: old.to_string(),
+                new: new.to_string(),
+            },
+        ),
         Event::More { cursor } => emit(app, WeftEvent::More { cursor }),
         Event::Token { subject, scope, .. } => emit(app, WeftEvent::Token { subject, scope }),
         Event::Invited {
             scope,
             invite_id,
             link,
+            max_uses,
             ..
         } => emit(
             app,
@@ -607,6 +660,7 @@ fn on_line(
                 scope,
                 invite_id,
                 link,
+                max_uses,
             },
         ),
         Event::Reported { report_id } => emit(app, WeftEvent::Reported { report_id }),
@@ -718,6 +772,34 @@ fn on_line(
                 text: e.text,
             },
         ),
+        // Federation (§11): bridge manifests + netblock notifications.
+        Event::Manifest {
+            peer,
+            version,
+            state,
+            channels,
+            history,
+            media,
+            typing,
+        } => emit(
+            app,
+            WeftEvent::Manifest {
+                peer: peer.to_string(),
+                version,
+                state: state.to_string(),
+                channels: channels.iter().map(|c| c.to_string()).collect(),
+                history: history.to_string(),
+                media: media.to_string(),
+                typing,
+            },
+        ),
+        Event::Netblocked { network, reason } => emit(
+            app,
+            WeftEvent::Netblocked {
+                network: network.to_string(),
+                reason,
+            },
+        ),
         // Keepalive answers are internal — never shown.
         Event::Pong { .. } => {}
         // Batches, reactions, presence, etc. — surfaced raw for now.
@@ -746,9 +828,19 @@ async fn send(stream: &mut QuicControlStream, app: &AppHandle, line: &str) -> Re
     }
 }
 
-async fn connect(addr: SocketAddr, server_name: &str) -> Result<QuicControlStream, String> {
-    let endpoint = weft_transport::insecure::client_endpoint(weft_transport::ALPN)
-        .map_err(|e| format!("endpoint: {e}"))?;
+async fn connect(
+    addr: SocketAddr,
+    server_name: &str,
+    allow_insecure: bool,
+) -> Result<QuicControlStream, String> {
+    // Verified by default (bundled Mozilla roots); `allow_insecure` opts into the
+    // cert-blind endpoint for dev / self-signed servers (client.toml).
+    let endpoint = if allow_insecure {
+        weft_transport::insecure::client_endpoint(weft_transport::ALPN)
+    } else {
+        weft_transport::client_endpoint(weft_transport::ALPN)
+    }
+    .map_err(|e| format!("endpoint: {e}"))?;
     let connection = endpoint
         .connect(addr, server_name)
         .map_err(|e| format!("connect: {e}"))?
@@ -852,6 +944,110 @@ pub fn build_invite_redeem(token: &str) -> Result<String, String> {
     Request::new(Command::InviteRedeem { token })
         .serialize()
         .map_err(|e| e.to_string())
+}
+
+/// `INVITE REVOKE <invite-id>` — close an outstanding invite (§6.5).
+pub fn build_invite_revoke(invite_id: &str) -> Result<String, String> {
+    Request::new(Command::InviteRevoke {
+        invite_id: invite_id.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+// ---- federation (§11): netblocks + bridges (operator surface) ----
+
+/// `NETBLOCK ADD <network> [:reason]` (§11.6). Cap `netblock` at `*`.
+pub fn build_netblock_add(network: &str, reason: Option<&str>) -> Result<String, String> {
+    let network: weft_proto::NetworkName = network.parse().map_err(|_| "bad network".to_string())?;
+    Request::new(Command::NetblockAdd {
+        network,
+        reason: reason.filter(|r| !r.is_empty()).map(String::from),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NETBLOCK REMOVE <network>` (§11.6).
+pub fn build_netblock_remove(network: &str) -> Result<String, String> {
+    let network: weft_proto::NetworkName = network.parse().map_err(|_| "bad network".to_string())?;
+    Request::new(Command::NetblockRemove { network })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `NETBLOCK LIST` (§11.6) → a `NETBLOCKED` per blocked network.
+pub fn build_netblock_list() -> Result<String, String> {
+    Request::new(Command::NetblockList)
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `BRIDGE PROPOSE <scope> <peer> …` (§11.1) — sign + store a peering manifest.
+/// `history` = from-epoch|full, `media` = mirror|mirror-max:<bytes>|none.
+pub fn build_bridge_propose(
+    scope: &str,
+    peer: &str,
+    history: &str,
+    media: &str,
+    typing: bool,
+) -> Result<String, String> {
+    let peer: weft_proto::NetworkName = peer.parse().map_err(|_| "bad peer network".to_string())?;
+    let history: weft_proto::HistoryMode =
+        history.parse().map_err(|_| "bad history mode".to_string())?;
+    let media: weft_proto::MediaMode = media.parse().map_err(|_| "bad media mode".to_string())?;
+    Request::new(Command::BridgePropose {
+        scope: scope.to_string(),
+        peer,
+        history,
+        media,
+        typing,
+        manifest: None,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `BRIDGE ACCEPT <peer> <version>` (§11.1) — ack a proposed manifest version.
+pub fn build_bridge_accept(peer: &str, version: u64) -> Result<String, String> {
+    let peer: weft_proto::NetworkName = peer.parse().map_err(|_| "bad peer network".to_string())?;
+    Request::new(Command::BridgeAccept { peer, version })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `BRIDGE SEVER <peer>` (§11.1) — tear down a bridge.
+pub fn build_bridge_sever(peer: &str) -> Result<String, String> {
+    let peer: weft_proto::NetworkName = peer.parse().map_err(|_| "bad peer network".to_string())?;
+    Request::new(Command::BridgeSever { peer })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// Moderation (§6.7): `MUTE`/`UNMUTE`/`BAN`/`UNBAN` `<scope> <account> [:reason]`
+/// or `KICK <#chan> <account> [:reason]`. For `kick`, `scope` is the channel.
+pub fn build_moderation(
+    verb: &str,
+    scope: &str,
+    account: &str,
+    reason: Option<&str>,
+) -> Result<String, String> {
+    let acct: weft_proto::Account = account.parse().map_err(|_| "bad account".to_string())?;
+    let scope = scope.to_string();
+    let reason = reason.filter(|r| !r.is_empty()).map(String::from);
+    let cmd = match verb {
+        "mute" => Command::Mute { scope, account: acct, reason },
+        "unmute" => Command::Unmute { scope, account: acct },
+        "ban" => Command::Ban { scope, account: acct, reason },
+        "unban" => Command::Unban { scope, account: acct },
+        "kick" => Command::Kick {
+            channel: scope.parse().map_err(|_| "bad channel".to_string())?,
+            account: acct,
+            reason,
+        },
+        _ => return Err(format!("unknown moderation verb: {verb}")),
+    };
+    Request::new(cmd).serialize().map_err(|e| e.to_string())
 }
 
 /// `REPORT <msgid> <category> [scope] [:note]` — flag a message (§6.7).
@@ -988,6 +1184,25 @@ pub fn build_role_assign(scope: &str, account: &str, name: &str) -> Result<Strin
     .map_err(|e| e.to_string())
 }
 
+pub fn build_role_unassign(scope: &str, account: &str, name: &str) -> Result<String, String> {
+    Request::new(Command::RoleUnassign {
+        scope: scope.to_string(),
+        account: account.parse().map_err(|_| "bad account".to_string())?,
+        name: name.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+pub fn build_roles_of(scope: &str, account: &str) -> Result<String, String> {
+    Request::new(Command::RolesOf {
+        scope: scope.to_string(),
+        account: account.parse().map_err(|_| "bad account".to_string())?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
 /// `PINS <#chan>` — list pinned messages (§6.4).
 pub fn build_pins(channel: &str) -> Result<String, String> {
     let channel: weft_proto::ChannelName =
@@ -1021,16 +1236,45 @@ pub fn build_part(channel: &str) -> Result<String, String> {
     .map_err(|e| e.to_string())
 }
 
-/// `CHANNEL CREATE <#chan>` — default retention (§6.3).
-pub fn build_channel_create(channel: &str) -> Result<String, String> {
+/// `CHANNEL CREATE <#chan> [policy]` — optional retention, else server default (§6.3).
+pub fn build_channel_create(channel: &str, policy: Option<&str>) -> Result<String, String> {
     let channel: weft_proto::ChannelName =
         channel.parse().map_err(|_| "bad channel".to_string())?;
-    Request::new(Command::ChannelCreate {
+    let policy = match policy {
+        Some(p) if !p.is_empty() => {
+            Some(p.parse::<weft_proto::RetentionPolicy>().map_err(|_| "bad policy".to_string())?)
+        }
+        _ => None,
+    };
+    Request::new(Command::ChannelCreate { channel, policy })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `CHANNEL POLICY <#chan> <policy> [purge]` — change an existing channel's
+/// retention (§6.3). `purge` is required for some e2ee transitions (invariant 8).
+pub fn build_channel_policy(channel: &str, policy: &str, purge: bool) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    let policy = policy
+        .parse::<weft_proto::RetentionPolicy>()
+        .map_err(|_| "bad policy".to_string())?;
+    Request::new(Command::ChannelPolicy {
         channel,
-        policy: None,
+        policy,
+        purge,
     })
     .serialize()
     .map_err(|e| e.to_string())
+}
+
+/// `CHANNEL RENAME <#old> <#new>` — change a channel's identity (§6.3).
+pub fn build_channel_rename(old: &str, new: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName = old.parse().map_err(|_| "bad channel".to_string())?;
+    let new_name: weft_proto::ChannelName = new.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::ChannelRename { channel, new_name })
+        .serialize()
+        .map_err(|e| e.to_string())
 }
 
 /// `CHANNEL DELETE <#chan> <#chan>` — confirmed by repetition (§6.3).

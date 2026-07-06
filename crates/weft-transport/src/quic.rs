@@ -40,14 +40,71 @@ pub(crate) fn transport_config(keep_alive: Option<Duration>) -> TransportConfig 
     transport
 }
 
-/// Build the QUIC server config: TLS with the given identity, ALPN pinned.
+/// Build the QUIC server config from a fixed identity (ALPN pinned). A thin
+/// wrapper over [`server_config_resolving`] with a non-swapping resolver.
 pub fn server_config(
     cert_chain: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> Result<quinn::ServerConfig, TransportError> {
+    server_config_resolving(ReloadableCert::new(certified_key(cert_chain, key)?))
+}
+
+/// Assemble a rustls [`CertifiedKey`](rustls::sign::CertifiedKey) from a PEM
+/// chain + private key — the unit a [`ReloadableCert`] swaps.
+pub fn certified_key(
+    cert_chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<Arc<rustls::sign::CertifiedKey>, TransportError> {
+    let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
+        .map_err(|_| TransportError::NoTls13)?;
+    Ok(Arc::new(rustls::sign::CertifiedKey::new(
+        cert_chain,
+        signing_key,
+    )))
+}
+
+/// A hot-swappable server certificate. rustls calls [`resolve`] on every
+/// ClientHello, so `store`-ing a new key rotates the cert for all *new*
+/// connections without dropping live ones — the basis for both cert-file
+/// hot-reload and built-in ACME renewal.
+///
+/// [`resolve`]: rustls::server::ResolvesServerCert::resolve
+#[derive(Debug)]
+pub struct ReloadableCert {
+    current: arc_swap::ArcSwap<rustls::sign::CertifiedKey>,
+}
+
+impl ReloadableCert {
+    pub fn new(key: Arc<rustls::sign::CertifiedKey>) -> Arc<Self> {
+        Arc::new(Self {
+            current: arc_swap::ArcSwap::from(key),
+        })
+    }
+
+    /// Swap in a freshly-issued/renewed certificate.
+    pub fn store(&self, key: Arc<rustls::sign::CertifiedKey>) {
+        self.current.store(key);
+    }
+}
+
+impl rustls::server::ResolvesServerCert for ReloadableCert {
+    fn resolve(
+        &self,
+        _hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        Some(self.current.load_full())
+    }
+}
+
+/// Build the QUIC server config from a hot-swappable cert resolver (file
+/// hot-reload or ACME). Cert rotations via [`ReloadableCert::store`] take
+/// effect for subsequent connections; this config is built once.
+pub fn server_config_resolving(
+    resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+) -> Result<quinn::ServerConfig, TransportError> {
     let mut tls = rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(cert_chain, key)?;
+        .with_cert_resolver(resolver);
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let quic_tls = QuicServerConfig::try_from(tls).map_err(|_| TransportError::NoTls13)?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(quic_tls));
@@ -61,6 +118,27 @@ pub fn server_endpoint(
     addr: SocketAddr,
 ) -> io::Result<quinn::Endpoint> {
     quinn::Endpoint::server(config, addr)
+}
+
+/// A **verified** QUIC client endpoint: the server's certificate is checked
+/// against the bundled Mozilla root store. This is the default for real
+/// clients; `insecure::client_endpoint` (feature `insecure-client`) is the
+/// dev-only escape hatch for self-signed servers.
+pub fn client_endpoint(alpn: &[u8]) -> io::Result<quinn::Endpoint> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut tls = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![alpn.to_vec()];
+    let quic_tls =
+        quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(io::Error::other)?;
+    let mut endpoint = quinn::Endpoint::client(([0, 0, 0, 0], 0).into())?;
+    let mut config = quinn::ClientConfig::new(Arc::new(quic_tls));
+    // §3.4: QUIC keepalive substitutes for client PINGs.
+    config.transport_config(Arc::new(transport_config(Some(Duration::from_secs(15)))));
+    endpoint.set_default_client_config(config);
+    Ok(endpoint)
 }
 
 /// The control stream of one QUIC connection: line-framed with the §4

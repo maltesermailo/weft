@@ -92,4 +92,31 @@ impl Registry {
     pub(crate) fn remove(&self, name: &ChannelName) -> Option<ChannelHandle> {
         self.channels.write().expect("registry lock").remove(name)
     }
+
+    /// Move a channel actor to a new name (CHANNEL RENAME). The old actor is
+    /// dropped and a fresh one spawned under `new` — history is served from the
+    /// store, which the caller re-keys first, so the new actor sees it all.
+    /// Returns `false` if `old` is absent or `new` already taken (announce the
+    /// rename to members via the OLD handle *before* calling this, so the
+    /// broadcast reaches them before their forwarders close).
+    pub(crate) fn rename(
+        &self,
+        old: &ChannelName,
+        new: ChannelName,
+        policy: RetentionPolicy,
+    ) -> bool {
+        let mut channels = self.channels.write().expect("registry lock");
+        if !channels.contains_key(old) || channels.contains_key(&new) {
+            return false;
+        }
+        channels.remove(old);
+        let handle = channel::spawn(
+            new.clone(),
+            self.network.clone(),
+            policy,
+            Arc::clone(&self.store),
+        );
+        channels.insert(new, handle);
+        true
+    }
 }

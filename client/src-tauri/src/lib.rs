@@ -1,6 +1,7 @@
 //! Tauri glue: managed connection state + the commands the Svelte frontend
 //! invokes. All WEFT protocol logic lives in [`weft`].
 
+mod config;
 mod keys;
 mod weft;
 
@@ -56,6 +57,8 @@ async fn connect(
         None
     };
 
+    let allow_insecure = config::load(&app).allow_insecure;
+
     let (tx, rx) = mpsc::unbounded_channel();
     *conn.tx.lock().unwrap() = Some(tx);
     tauri::async_runtime::spawn(weft::run_connection(
@@ -66,9 +69,22 @@ async fn connect(
         password,
         parsed_mode,
         device,
+        allow_insecure,
         rx,
     ));
     Ok(())
+}
+
+/// The active client config (TLS mode + prefill host) + where the file lives,
+/// so the UI can show whether it's in secure or insecure mode.
+#[tauri::command]
+fn client_config(app: AppHandle) -> serde_json::Value {
+    let cfg = config::load(&app);
+    serde_json::json!({
+        "allow_insecure": cfg.allow_insecure,
+        "default_host": cfg.default_host,
+        "config_path": config::path(&app).map(|p| p.display().to_string()),
+    })
 }
 
 /// Generate + enroll a device key for `(host, account)` while authed, so the
@@ -317,6 +333,60 @@ fn invite_redeem(conn: State<'_, Conn>, token: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn invite_revoke(conn: State<'_, Conn>, invite_id: String) -> Result<(), String> {
+    conn.send(weft::build_invite_revoke(&invite_id)?)
+}
+
+#[tauri::command]
+fn moderate(
+    conn: State<'_, Conn>,
+    verb: String,
+    scope: String,
+    account: String,
+    reason: Option<String>,
+) -> Result<(), String> {
+    conn.send(weft::build_moderation(&verb, &scope, &account, reason.as_deref())?)
+}
+
+// ---- federation (operator) ----
+#[tauri::command]
+fn netblock_add(conn: State<'_, Conn>, network: String, reason: Option<String>) -> Result<(), String> {
+    conn.send(weft::build_netblock_add(&network, reason.as_deref())?)
+}
+
+#[tauri::command]
+fn netblock_remove(conn: State<'_, Conn>, network: String) -> Result<(), String> {
+    conn.send(weft::build_netblock_remove(&network)?)
+}
+
+#[tauri::command]
+fn netblock_list(conn: State<'_, Conn>) -> Result<(), String> {
+    conn.send(weft::build_netblock_list()?)
+}
+
+#[tauri::command]
+fn bridge_propose(
+    conn: State<'_, Conn>,
+    scope: String,
+    peer: String,
+    history: String,
+    media: String,
+    typing: bool,
+) -> Result<(), String> {
+    conn.send(weft::build_bridge_propose(&scope, &peer, &history, &media, typing)?)
+}
+
+#[tauri::command]
+fn bridge_accept(conn: State<'_, Conn>, peer: String, version: u64) -> Result<(), String> {
+    conn.send(weft::build_bridge_accept(&peer, version)?)
+}
+
+#[tauri::command]
+fn bridge_sever(conn: State<'_, Conn>, peer: String) -> Result<(), String> {
+    conn.send(weft::build_bridge_sever(&peer)?)
+}
+
+#[tauri::command]
 fn report(
     conn: State<'_, Conn>,
     msgid: String,
@@ -394,6 +464,21 @@ fn role_assign(
 }
 
 #[tauri::command]
+fn role_unassign(
+    conn: State<'_, Conn>,
+    scope: String,
+    account: String,
+    name: String,
+) -> Result<(), String> {
+    conn.send(weft::build_role_unassign(&scope, &account, &name)?)
+}
+
+#[tauri::command]
+fn roles_of(conn: State<'_, Conn>, scope: String, account: String) -> Result<(), String> {
+    conn.send(weft::build_roles_of(&scope, &account)?)
+}
+
+#[tauri::command]
 fn members(conn: State<'_, Conn>, channel: String) -> Result<(), String> {
     conn.send(weft::build_members(&channel)?)
 }
@@ -404,8 +489,27 @@ fn part(conn: State<'_, Conn>, channel: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn channel_create(conn: State<'_, Conn>, channel: String) -> Result<(), String> {
-    conn.send(weft::build_channel_create(&channel)?)
+fn channel_create(
+    conn: State<'_, Conn>,
+    channel: String,
+    policy: Option<String>,
+) -> Result<(), String> {
+    conn.send(weft::build_channel_create(&channel, policy.as_deref())?)
+}
+
+#[tauri::command]
+fn channel_policy(
+    conn: State<'_, Conn>,
+    channel: String,
+    policy: String,
+    purge: bool,
+) -> Result<(), String> {
+    conn.send(weft::build_channel_policy(&channel, &policy, purge)?)
+}
+
+#[tauri::command]
+fn channel_rename(conn: State<'_, Conn>, old: String, new: String) -> Result<(), String> {
+    conn.send(weft::build_channel_rename(&old, &new)?)
 }
 
 #[tauri::command]
@@ -447,6 +551,7 @@ pub fn run() {
         .manage(Conn::default())
         .invoke_handler(tauri::generate_handler![
             connect,
+            client_config,
             disconnect,
             enroll_device,
             has_device_key,
@@ -468,6 +573,8 @@ pub fn run() {
             role_create,
             role_delete,
             role_assign,
+            role_unassign,
+            roles_of,
             history,
             edit,
             delete,
@@ -479,6 +586,14 @@ pub fn run() {
             revoke,
             invite_mint,
             invite_redeem,
+            invite_revoke,
+            moderate,
+            netblock_add,
+            netblock_remove,
+            netblock_list,
+            bridge_propose,
+            bridge_accept,
+            bridge_sever,
             report,
             reports_list,
             reports_resolve,
@@ -488,6 +603,8 @@ pub fn run() {
             caps,
             part,
             channel_create,
+            channel_policy,
+            channel_rename,
             channel_delete,
             channel_meta,
             discover,

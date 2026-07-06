@@ -1,0 +1,25 @@
+# Caddy fronts the WEFT *HTTP* surface (the /.well-known/weft discovery doc, and
+# later the web control panel) with automatic Let's Encrypt.
+#
+# IMPORTANT: QUIC is NOT proxied here. weftd's native transport is QUIC (UDP +
+# TLS 1.3, end-to-end) — a reverse proxy cannot terminate it. weftd holds the
+# QUIC certificate itself: either built-in ACME (`[acme]` in weftd.toml) or a
+# shared cert file (see deploy/README.md). Caddy only handles TCP/HTTP.
+
+weft.example.com {
+	# The network discovery document (§10.2) — weftd serves it on its HTTP
+	# listener ([listen] http = "127.0.0.1:8080").
+	handle /.well-known/weft {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# (Future) web control panel, once weftd serves it at /admin.
+	handle /admin* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# Everything else: 404 (or add your own site here).
+	handle {
+		respond 404
+	}
+}

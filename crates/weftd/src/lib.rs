@@ -10,16 +10,15 @@
 mod acceptor;
 pub mod config;
 pub mod telemetry;
+mod tls;
 mod wellknown;
 
 use std::fs;
-use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tracing::info;
@@ -126,7 +125,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         accept_any: config.federation.accept_any,
         auto_accept: config.federation.auto_accept,
     };
-    let (ctx, channels, mut tasks) = match config.storage.backend {
+    let (ctx, channels, mut tasks, admin_router) = match config.storage.backend {
         config::StorageBackend::Memory => {
             boot(
                 info,
@@ -140,6 +139,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 ns_creation_open,
                 ns_quota,
                 federation.clone(),
+                config.admin.enabled,
             )
             .await?
         }
@@ -164,6 +164,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 ns_creation_open,
                 ns_quota,
                 federation.clone(),
+                config.admin.enabled,
             )
             .await?
         }
@@ -176,14 +177,14 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         "channel registry loaded from store"
     );
 
-    // TLS identity: operator-provided PEM ("real certs"), else a fresh
-    // self-signed one — fine for dev, unverifiable by design.
-    let (cert_chain, key) = match &config.tls {
-        Some(tls) => load_tls(tls)?,
-        None => self_signed(&network)?,
-    };
+    // TLS: one hot-swappable resolver, fed from ACME / a PEM file / self-signed.
+    let challenges = tls::Challenges::default();
+    let (cert_resolver, tls_task) = tls::setup(&config, &network, Arc::clone(&challenges)).await?;
+    if let Some(task) = tls_task {
+        tasks.push(task);
+    }
 
-    let server_config = weft_transport::server_config(cert_chain, key)?;
+    let server_config = weft_transport::server_config_resolving(cert_resolver)?;
     let endpoint = weft_transport::server_endpoint(server_config, config.listen.quic)
         .context("binding QUIC endpoint")?;
     let quic_addr = endpoint.local_addr()?;
@@ -211,7 +212,16 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         Some(addr) => {
             let listener = bind(addr, "HTTP").await?;
             let http_addr = listener.local_addr()?;
-            tasks.push(tokio::spawn(wellknown::serve(listener, Arc::clone(&ctx))));
+            let mut app = wellknown::router(&ctx, Arc::clone(&challenges));
+            if let Some(admin) = admin_router {
+                app = app.merge(admin);
+                info!("admin panel mounted at /admin/api");
+            }
+            tasks.push(tokio::spawn(async move {
+                if let Err(e) = axum::serve(listener, app).await {
+                    tracing::error!("HTTP server failed: {e}");
+                }
+            }));
             Some(http_addr)
         }
     };
@@ -262,44 +272,39 @@ fn load_or_generate_key(path: &Path) -> anyhow::Result<Keypair> {
     }
 }
 
-fn load_tls(
-    tls: &config::Tls,
-) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-    let mut reader = BufReader::new(
-        fs::File::open(&tls.cert)
-            .with_context(|| format!("opening certificate {}", tls.cert.display()))?,
-    );
-    let certs = rustls_pemfile::certs(&mut reader)
-        .collect::<Result<Vec<_>, _>>()
-        .context("parsing certificate PEM")?;
-    anyhow::ensure!(
-        !certs.is_empty(),
-        "no certificates in {}",
-        tls.cert.display()
-    );
-
-    let mut reader = BufReader::new(
-        fs::File::open(&tls.key)
-            .with_context(|| format!("opening private key {}", tls.key.display()))?,
-    );
-    let key = rustls_pemfile::private_key(&mut reader)
-        .context("parsing private key PEM")?
-        .with_context(|| format!("no private key in {}", tls.key.display()))?;
-    Ok((certs, key))
+/// Adapter implementing the admin panel's live-server actions over the channel
+/// registry (embedded mode). Kick / channel-scope-ban force-part the target.
+struct LiveRegistry {
+    ctx: Arc<ServerCtx>,
 }
 
-fn self_signed(
-    network: &weft_proto::NetworkName,
-) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-    let cert = rcgen::generate_simple_self_signed(vec![
-        network.as_str().to_string(),
-        "localhost".to_string(),
-    ])
-    .context("generating self-signed certificate")?;
-    Ok((
-        vec![cert.cert.der().clone()],
-        PrivateKeyDer::Pkcs8(cert.key_pair.serialize_der().into()),
-    ))
+#[async_trait::async_trait]
+impl weft_admin::Live for LiveRegistry {
+    async fn eject(&self, channel: &weft_proto::ChannelName, account: &weft_proto::Account) {
+        if let Some(handle) = self.ctx.registry.get(channel) {
+            handle.eject(account.clone()).await;
+        }
+    }
+
+    async fn delete_message(
+        &self,
+        msgid: &weft_proto::MsgId,
+        by: &weft_proto::Account,
+    ) -> bool {
+        // Resolve which channel owns the message, then tell its actor to
+        // tombstone it (the actor is the single ULID writer, §9.1).
+        let Ok(Some(root)) = self.ctx.events.find_root(msgid.ulid()).await else {
+            return false;
+        };
+        let weft_store::Scope::Channel(channel) = root.scope else {
+            return false; // DMs / non-channel scopes aren't live actors here
+        };
+        let Some(handle) = self.ctx.registry.get(&channel) else {
+            return false;
+        };
+        handle.admin_delete(msgid.clone(), by.clone()).await;
+        true
+    }
 }
 
 /// Seed config channels into the store, load the full channel set back
@@ -317,10 +322,12 @@ async fn boot<S>(
     ns_creation_open: bool,
     ns_quota: u64,
     federation: weft_core::FederationConfig,
+    admin_enabled: bool,
 ) -> anyhow::Result<(
     Arc<ServerCtx>,
     Vec<(weft_proto::ChannelName, weft_proto::RetentionPolicy)>,
     Vec<JoinHandle<()>>,
+    Option<axum::Router>,
 )>
 where
     S: EventStore
@@ -348,6 +355,14 @@ where
         .list_channels()
         .await
         .map_err(|e| anyhow::anyhow!("loading channels: {e}"))?;
+
+    // The admin API shares this process's store + registry. Capture the cookie
+    // ingredients (server-only network seed, operators, network) before `info`/
+    // `identity`/`operators` are consumed by ServerCtx; wire the live actions
+    // over the registry once `ctx` exists.
+    let admin_ingredients = admin_enabled
+        .then(|| (identity.seed_b64().into_bytes(), operators.clone(), info.network.to_string()));
+
     let ctx = Arc::new(ServerCtx::new(
         info,
         channels.iter().cloned(),
@@ -361,6 +376,18 @@ where
         // §11 inbound bridge policy; peer *pinning* + the outbound dialer are M5d.
         federation,
     ));
+    let admin_router = admin_ingredients.map(|(secret, ops, network)| {
+        let auth = weft_admin::auth::config(secret, ops);
+        let live: Arc<dyn weft_admin::Live> = Arc::new(LiveRegistry {
+            ctx: Arc::clone(&ctx),
+        });
+        weft_admin::router(
+            weft_admin::AdminState::from_store(Arc::clone(&store), auth, network)
+                .with_live(live)
+                .with_live_connections(Arc::clone(&ctx.connections)),
+        )
+    });
+
     let events: Arc<dyn EventStore> = store.clone();
     let reports: Arc<dyn weft_store::ReportStore> = store.clone();
     let namespaces: Arc<dyn weft_store::NamespaceStore> = store;
@@ -372,5 +399,5 @@ where
         dm_policy,
         maintenance,
     )];
-    Ok((ctx, channels, tasks))
+    Ok((ctx, channels, tasks, admin_router))
 }

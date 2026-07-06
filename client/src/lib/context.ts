@@ -1,0 +1,239 @@
+// Shared app context (Svelte 5 + context API).
+//
+// `+page.svelte` is the single stateful container. It builds an `AppCtx`
+// object — reactive state exposed via getters/setters, actions + helpers as
+// plain function refs (they close over the container's state) — and provides
+// it with `setContext(APP, ctx)`. Components read it with `getApp()`.
+//
+// The interface grows as components are extracted; keep it in sync with the
+// object built in the container (TypeScript enforces that the container
+// provides everything components consume).
+
+import { getContext, setContext } from "svelte";
+import type { Channel, Msg, Member, CtxItem, RoleDefC } from "./types";
+
+export type RetentionMeta = { cls: string; label: string; icon: string };
+export type Badge = { owner: boolean; mod: boolean; list: string[] };
+
+export interface AppCtx {
+  // ---- identity / connection ----
+  readonly network: string;
+  readonly account: string;
+  readonly myStatus: string;
+
+  // ---- navigation ----
+  readonly homeView: boolean;
+  readonly activeServer: string;
+  readonly active: string;
+  readonly activeChannel: Channel | undefined;
+  readonly activeIsDm: boolean;
+  readonly serverNamespaces: string[];
+  readonly channelGroups: { category: string; list: Channel[] }[];
+  readonly dmList: Channel[];
+  readonly activeNsMeta:
+    | { title?: string | null; recovery_eta?: number | null; recovery_rung?: number | null }
+    | undefined;
+  goHome(): void;
+  selectServer(ns: string): void;
+  open(name: string): void; // set active + mark read
+  openDiscover(): void;
+
+  // ---- data ----
+  readonly channels: Record<string, Channel>;
+  readonly presence: Record<string, string>;
+  readonly unreadMap: Record<string, boolean>;
+  readonly mentionMap: Record<string, boolean>;
+  readonly discovered: Record<
+    string,
+    {
+      name: string;
+      title?: string | null;
+      description?: string | null;
+      visibility: string;
+      owner?: string | null;
+      categories?: string[];
+    }
+  >;
+  readonly discoverCursor: string | null;
+  scopesFor(): string[];
+  markRead(name: string): void;
+
+  // ---- drag/drop (channel move) ----
+  draggingChan: string | null;
+  dropTarget: { name: string; after: boolean } | null;
+  moveChannel(dragName: string, targetCat: string, anchorName?: string, after?: boolean): void;
+
+  // ---- helpers ----
+  initials(n: string): string;
+  chanShort(n: string): string;
+  peerOf(n: string): string;
+  dotClass(acct: string): string;
+  nsOf(n: string): string;
+  badgeFor(account: string, scope: string): Badge | undefined;
+  serverUnread(ns: string): boolean;
+  serverMention(ns: string): boolean;
+  retentionMeta: Record<string, RetentionMeta>;
+
+  // ---- context menus ----
+  chanCtx(e: MouseEvent, ch: Channel): void;
+  memberCtx(e: MouseEvent, name: string): void;
+  catCtx(e: MouseEvent, cat: string): void;
+
+  // ---- server menu / creation ----
+  serverMenu: boolean;
+  openCreateChannel(prefill?: string): void;
+  openCreateChannelInCat(cat: string): void;
+  openNsSettings(): void;
+  mintInvite(): void;
+  newCat(): void; // open the create-category modal
+
+  // ---- members ----
+  openProfile(name: string, e?: MouseEvent): void;
+  openDm(name: string): void;
+  openRoles(name: string): void;
+  moderate(kind: string, name: string, scope?: string, reason?: string): void;
+
+  // ---- user footer ----
+  openSettings(): void;
+
+  // ---- misc shared ----
+  toast(text: string, kind?: string): void;
+  /// Register a server-confirmed success toast: fires when the matching
+  /// confirming event lands (not on send), so cap failures never show success.
+  expectSuccess(key: string, message: string): void;
+  readonly reportQueue: Record<
+    string,
+    { report_id: string; msgid: string; category: string; state: string; reporter?: string | null }
+  >;
+  readonly pinsList: Msg[];
+  readonly resolveActions: string[];
+
+  // ---- chat topbar ----
+  membersVisible: boolean;
+  openPins(): void;
+  openReports(): void;
+  partActive(): void;
+
+  // ---- message list / items ----
+  readonly loadingHistory: string | null;
+  editingKey: number | null;
+  editDraft: string;
+  pickerKey: number | null;
+  replyTo: Msg | null;
+  startEdit(m: Msg): void;
+  saveEdit(m: Msg): void;
+  cancelEdit(): void;
+  editKey(e: KeyboardEvent, m: Msg): void;
+  doDelete(m: Msg): void;
+  openReport(m: Msg): void;
+  togglePin(m: Msg): void;
+  toggleReaction(m: Msg, emoji: string): void;
+  jumpTo(msgid?: string): void;
+  msgCtx(e: MouseEvent, m: Msg): void;
+  renderMd(body: string): string;
+  mentionsMe(body: string): boolean;
+
+  // ---- composer ----
+  composer: string;
+  composerKey(e: KeyboardEvent): void;
+  onComposerInput(): void;
+  doSend(): void;
+  pickMention(name: string): void;
+  readonly mentionQuery: string | null;
+  readonly mentionMatches: string[];
+  readonly typingLabel: string;
+
+  // ---- roles (ProfileCard) ----
+  readonly rolesByScope: Record<string, RoleDefC[]>;
+  rolesOf(account: string, scope: string): RoleDefC[];
+  roleScopeOf(channel: string): string;
+  isOwnerAt(account: string, scope: string): boolean;
+  assignRoleTo(acct: string, role: RoleDefC): void;
+  unassignRoleFrom(acct: string, role: RoleDefC): void;
+
+  // ---- channel permissions (ChannelPermissions modal) ----
+  permSubject: string;
+  readonly permCaps: string[];
+  togglePermCap(c: string): void;
+  chanNsScope(): string;
+  chanRoleCaps(name: string): string[];
+  toggleChanRoleCap(role: RoleDefC, cap: string): void;
+  toggleRestricted(): void;
+  grantChanCaps(): void;
+  revokeChanCaps(): void;
+
+  // ---- federation (§11, operator) ----
+  readonly isOperator: boolean;
+  readonly netblocks: Record<string, string | null>;
+  readonly manifests: Record<
+    string,
+    {
+      peer: string;
+      version: number;
+      state: string;
+      channels: string[];
+      history: string;
+      media: string;
+      typing: boolean;
+    }
+  >;
+  openFederation(): void;
+  refreshNetblocks(): void;
+  netblockAdd(network: string, reason?: string): void;
+  netblockRemove(network: string): void;
+  bridgePropose(scope: string, peer: string, history: string, media: string, typing: boolean): void;
+  bridgeAccept(peer: string, version: number): void;
+  bridgeSever(peer: string): void;
+
+  // ---- user settings ----
+  readonly theme: string;
+  readonly host: string;
+  readonly reconnecting: boolean;
+  setStatus(s: string): void;
+  toggleTheme(): void;
+  enrollThisDevice(): void;
+  logout(): void;
+
+  // ---- server settings (ns overlay) ----
+  nsTab: "overview" | "roles" | "members" | "recovery" | "danger";
+  nsTitle: string;
+  nsDesc: string;
+  nsVis: string;
+  newRoleName: string;
+  newRoleColor: string;
+  readonly newRoleCaps: string[];
+  toggleNewRoleCap(c: string): void;
+  nsDelegSubject: string;
+  readonly nsDelegCaps: string[];
+  toggleDelegCap(c: string): void;
+  nsNewOwner: string;
+  nsRecM: number;
+  nsRecKeys: string;
+  readonly myRecoveryKey: string;
+  recoveryDoc: string;
+  nsRoleScope(): string;
+  saveNsMeta(): void;
+  createRole(): void;
+  deleteRole(name: string): void;
+  assignRole(name: string): void;
+  doDelegate(): void;
+  showRecoveryKey(): void;
+  startRecovery(): void;
+  cosignRecovery(): void;
+  submitRecovery(): void;
+  doTransfer(): void;
+  deleteNamespace(): void;
+}
+
+const APP = Symbol("weft-app");
+
+export function provideApp(ctx: AppCtx): void {
+  setContext(APP, ctx);
+}
+
+export function getApp(): AppCtx {
+  return getContext(APP);
+}
+
+// Re-export commonly used types for component convenience.
+export type { Channel, Msg, Member, CtxItem, RoleDefC };

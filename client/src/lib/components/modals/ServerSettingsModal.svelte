@@ -1,0 +1,141 @@
+<script lang="ts">
+  import { fade } from "svelte/transition";
+  import { getApp } from "$lib/context";
+  import * as weft from "$lib/weft";
+  import { CAPS, ROLE_COLORS } from "$lib/constants";
+  const app = getApp();
+  let { onclose }: { onclose: () => void } = $props();
+</script>
+
+<div class="settings-overlay" role="dialog" aria-modal="true" transition:fade|global={{ duration: 150 }}>
+  <nav class="so-nav">
+    <div class="so-nav-inner">
+      <div class="so-heading">{app.activeServer}</div>
+      <button class="so-navitem" class:active={app.nsTab === "overview"} onclick={() => (app.nsTab = "overview")}>Overview</button>
+      <button class="so-navitem" class:active={app.nsTab === "roles"} onclick={() => (app.nsTab = "roles")}>Roles</button>
+      <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => (app.nsTab = "members")}>Members &amp; roles</button>
+      <div class="so-heading">Security</div>
+      <button class="so-navitem" class:active={app.nsTab === "recovery"} onclick={() => (app.nsTab = "recovery")}>Recovery</button>
+      <button class="so-navitem danger" class:active={app.nsTab === "danger"} onclick={() => (app.nsTab = "danger")}>Danger zone</button>
+    </div>
+  </nav>
+  <main class="so-main">
+    <button class="so-close" aria-label="Close settings" onclick={onclose}>✕<span>ESC</span></button>
+    <div class="so-content">
+      {#if app.activeNsMeta?.recovery_eta}
+        <div class="ns-card recovery-pending">
+          <div class="ns-info">
+            <div class="ns-name">⚠ Recovery pending (rung {app.activeNsMeta.recovery_rung})</div>
+            <div class="ns-desc">A root rotation is scheduled. As the live owner you can veto it.</div>
+          </div>
+          <button class="danger-btn" onclick={() => weft.nsRecoveryCancel(app.network, app.activeServer).catch((e) => app.toast(String(e), "error"))}>Cancel recovery</button>
+        </div>
+      {/if}
+
+      {#if app.nsTab === "overview"}
+        <h1>Overview</h1>
+        <p class="so-sub">How this namespace appears in invites and, if listed, in Discover.</p>
+        <div class="field-label">Name</div>
+        <input class="text-input" bind:value={app.nsTitle} placeholder="display name" />
+        <div class="section-sep"></div>
+        <div class="field-label">Description</div>
+        <input class="text-input" bind:value={app.nsDesc} placeholder="what's this namespace about" />
+        <div class="section-sep"></div>
+        <div class="field-label">Visibility</div>
+        <select class="text-input" bind:value={app.nsVis}>
+          <option value="public">public</option>
+          <option value="unlisted">unlisted</option>
+          <option value="private">private</option>
+        </select>
+        <div class="modal-actions"><button class="ok-btn" onclick={app.saveNsMeta}>Save changes</button></div>
+      {:else if app.nsTab === "roles"}
+        <h1>Roles</h1>
+        <p class="so-sub">Named capability bundles. Assigning a role grants its tokens — enforcement stays token-based.</p>
+        <div class="role-list">
+          {#each app.rolesByScope[app.nsRoleScope()] ?? [] as r (r.name)}
+            <div class="role-row">
+              <span class="role-swatch" style="background:{r.color}"></span>
+              <div class="role-meta">
+                <div class="role-title">{r.name}</div>
+                <div class="role-caps">{r.caps.join(" · ")}</div>
+              </div>
+              <button class="mini-danger" onclick={() => app.deleteRole(r.name)}>Delete</button>
+            </div>
+          {:else}
+            <div class="empty-hint">No roles yet — create one below.</div>
+          {/each}
+        </div>
+        <div class="section-sep"></div>
+        <div class="field-label">Create a role</div>
+        <input class="text-input" bind:value={app.newRoleName} placeholder="Role name (e.g. Moderator)" />
+        <div class="color-row">
+          {#each ROLE_COLORS as c (c)}
+            <button class="color-dot" class:on={app.newRoleColor === c} style="background:{c}" aria-label="color {c}" onclick={() => (app.newRoleColor = c)}></button>
+          {/each}
+        </div>
+        <div class="cap-chips">
+          {#each CAPS as c (c)}
+            <button type="button" class="cap-chip" class:on={app.newRoleCaps.includes(c)} onclick={() => app.toggleNewRoleCap(c)}>{c}</button>
+          {/each}
+        </div>
+        <div class="modal-actions"><button class="ok-btn" disabled={!app.newRoleName.trim() || !app.newRoleCaps.length} onclick={app.createRole}>Create role</button></div>
+      {:else if app.nsTab === "members"}
+        <h1>Members &amp; roles</h1>
+        <p class="so-sub">Assign a role (grants its token bundle) or delegate individual capabilities.</p>
+        <div class="field-label">Account</div>
+        <input class="text-input" bind:value={app.nsDelegSubject} placeholder="account" />
+        <div class="section-sep"></div>
+        <div class="field-label">Assign a role</div>
+        <div class="role-pick">
+          {#each app.rolesByScope[app.nsRoleScope()] ?? [] as r (r.name)}
+            <button class="role-pill clickable" style="--role:{r.color}" onclick={() => app.assignRole(r.name)}><span class="role-dot"></span>{r.name}</button>
+          {:else}
+            <div class="empty-hint">No roles defined — create some in the Roles tab.</div>
+          {/each}
+        </div>
+        <div class="section-sep"></div>
+        <div class="field-label">Or delegate individual capabilities</div>
+        <div class="cap-chips">
+          {#each CAPS as c (c)}
+            <button type="button" class="cap-chip" class:on={app.nsDelegCaps.includes(c)} onclick={() => app.toggleDelegCap(c)}>{c}</button>
+          {/each}
+        </div>
+        <div class="modal-actions"><button class="ok-btn" onclick={app.doDelegate}>Grant capabilities</button></div>
+      {:else if app.nsTab === "recovery"}
+        <h1>Recovery quorum</h1>
+        <p class="so-sub">§2.4 M-of-N root recovery. Share your recovery key, or co-sign and submit a rotation.</p>
+        <div class="field-label">Threshold M</div>
+        <input class="text-input" type="number" min="1" bind:value={app.nsRecM} />
+        <div class="section-sep"></div>
+        <div class="field-label">Quorum keys (comma-separated b64 pubkeys)</div>
+        <input class="text-input" bind:value={app.nsRecKeys} placeholder="key1,key2,key3" />
+        <div class="modal-actions"><button class="ok-btn" onclick={() => app.nsRecKeys.trim() && weft.nsRecoverySet(app.activeServer, app.nsRecM, app.nsRecKeys.trim()).catch((e) => app.toast(String(e), "error"))}>Set recovery quorum</button></div>
+        <div class="section-sep"></div>
+        <div class="set-row">
+          <span>My recovery key (share for the quorum)</span>
+          <button class="set-btn" onclick={app.showRecoveryKey}>Reveal</button>
+        </div>
+        {#if app.myRecoveryKey}
+          <div class="modal-join"><input readonly value={app.myRecoveryKey} /><button onclick={() => navigator.clipboard?.writeText(app.myRecoveryKey)}>Copy</button></div>
+        {/if}
+        <div class="field-label">Rotation record (co-sign or submit)</div>
+        <textarea class="text-input" rows="2" bind:value={app.recoveryDoc} placeholder="paste a record to co-sign, or Start one below"></textarea>
+        <div class="modal-actions">
+          <button class="set-btn" onclick={app.startRecovery}>Start (recover to me)</button>
+          <button class="set-btn" onclick={app.cosignRecovery}>Co-sign</button>
+          <button class="ok-btn" onclick={app.submitRecovery}>Submit</button>
+        </div>
+      {:else if app.nsTab === "danger"}
+        <h1>Danger zone</h1>
+        <p class="so-sub">Irreversible actions. Transfer is root-key-signed on this device.</p>
+        <div class="field-label">Transfer ownership to</div>
+        <input class="text-input" bind:value={app.nsNewOwner} placeholder="account" />
+        <div class="modal-actions">
+          <button class="danger-btn" onclick={app.doTransfer}>Transfer (root-signed)</button>
+        </div>
+        <div class="section-sep"></div>
+        <div class="modal-actions"><button class="danger-btn" onclick={app.deleteNamespace}>Delete namespace</button></div>
+      {/if}
+    </div>
+  </main>
+</div>

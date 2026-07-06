@@ -81,6 +81,12 @@ enum Cmd {
         session: SessionId,
         root: MsgId,
     },
+    /// Operator delete-any (admin panel): no session, attributed to `by`. The
+    /// caller is responsible for the authority check (a `*`/ns/channel cap).
+    SystemDelete {
+        root: MsgId,
+        by: Account,
+    },
     React {
         session: SessionId,
         root: MsgId,
@@ -201,6 +207,12 @@ impl ChannelHandle {
 
     pub async fn delete(&self, session: SessionId, root: MsgId) {
         let _ = self.inbox.send(Cmd::Delete { session, root }).await;
+    }
+
+    /// Operator delete-any (admin panel) — no session; the tombstone is
+    /// attributed to `by`. Authority is enforced by the caller.
+    pub async fn admin_delete(&self, root: MsgId, by: Account) {
+        let _ = self.inbox.send(Cmd::SystemDelete { root, by }).await;
     }
 
     pub async fn react(&self, session: SessionId, root: MsgId, emoji: String, add: bool) {
@@ -433,6 +445,28 @@ impl Actor {
                 .await;
                 self.broadcast(
                     session,
+                    Event::Deleted {
+                        target: Target::Channel(self.name.clone()),
+                        msgid: root,
+                        by: Some(user),
+                    },
+                );
+            }
+            Cmd::SystemDelete { root, by } => {
+                // Admin delete-any: attributed to the moderator, no member
+                // check. SENTINEL origin so every member sees the tombstone.
+                let user = self.user(&by);
+                let msgid = self.mint();
+                self.persist(EventRecord {
+                    scope: self.scope.clone(),
+                    msgid,
+                    root: root.clone(),
+                    sender: user.clone(),
+                    kind: EventKind::Delete,
+                })
+                .await;
+                self.broadcast(
+                    SENTINEL_ORIGIN,
                     Event::Deleted {
                         target: Target::Channel(self.name.clone()),
                         msgid: root,

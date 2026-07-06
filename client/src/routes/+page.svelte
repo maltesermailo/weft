@@ -1,6 +1,35 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import * as weft from "$lib/weft";
+  import type { Msg, Channel, CtxItem, RoleDefC } from "$lib/types";
+  import { provideApp } from "$lib/context";
+  import ConnectScreen from "$lib/components/ConnectScreen.svelte";
+  import Toasts from "$lib/components/Toasts.svelte";
+  import ContextMenu from "$lib/components/ContextMenu.svelte";
+  import QuickSwitcher from "$lib/components/QuickSwitcher.svelte";
+  import CommunityRail from "$lib/components/CommunityRail.svelte";
+  import MemberList from "$lib/components/MemberList.svelte";
+  import ChannelList from "$lib/components/sidebar/ChannelList.svelte";
+  import SidebarHeader from "$lib/components/sidebar/SidebarHeader.svelte";
+  import DmList from "$lib/components/sidebar/DmList.svelte";
+  import UserFooter from "$lib/components/sidebar/UserFooter.svelte";
+  import SidebarInput from "$lib/components/sidebar/SidebarInput.svelte";
+  import ChatTopbar from "$lib/components/chat/ChatTopbar.svelte";
+  import MessageList from "$lib/components/chat/MessageList.svelte";
+  import Composer from "$lib/components/chat/Composer.svelte";
+  import CreateChannelModal from "$lib/components/modals/CreateChannelModal.svelte";
+  import CreateCategoryModal from "$lib/components/modals/CreateCategoryModal.svelte";
+  import ReportsQueueModal from "$lib/components/modals/ReportsQueueModal.svelte";
+  import InviteLinkModal from "$lib/components/modals/InviteLinkModal.svelte";
+  import PinsModal from "$lib/components/modals/PinsModal.svelte";
+  import DiscoverModal from "$lib/components/modals/DiscoverModal.svelte";
+  import ReportModal from "$lib/components/modals/ReportModal.svelte";
+  import RolesDialog from "$lib/components/modals/RolesDialog.svelte";
+  import ChannelSettings from "$lib/components/modals/ChannelSettings.svelte";
+  import ProfileCard from "$lib/components/modals/ProfileCard.svelte";
+  import UserSettingsModal from "$lib/components/modals/UserSettingsModal.svelte";
+  import FederationPanel from "$lib/components/modals/FederationPanel.svelte";
+  import ServerSettingsModal from "$lib/components/modals/ServerSettingsModal.svelte";
 
   // ---- connection + form state ----
   type Status = "connect" | "connecting" | "online";
@@ -13,6 +42,8 @@
   let host = $state("127.0.0.1:4433");
   let formAccount = $state("");
   let formPassword = $state("");
+  // client.toml: TLS mode (verified by default) + optional prefill host.
+  let insecureMode = $state(false);
 
   // ---- session lifecycle (Phase 8) ----
   const SAVED_KEY = "weft:last-connect";
@@ -52,10 +83,13 @@
       nsSettingsOpen = false;
       profileTarget = null;
       ctxMenu = null;
+      serverMenu = false;
+      newChanOpen = false;
+      newCatOpen = false;
+      chanPermsCh = null;
     }
   }
   // ---- right-click context menus ----
-  type CtxItem = { label: string; danger?: boolean; run: () => void };
   let ctxMenu = $state<{ x: number; y: number; items: CtxItem[] } | null>(null);
   function openCtx(e: MouseEvent, items: CtxItem[]) {
     e.preventDefault();
@@ -80,7 +114,8 @@
   }
   function chanCtx(e: MouseEvent, ch: Channel) {
     openCtx(e, [
-      { label: "Mark as read", run: () => (ch.unread = false) },
+      { label: "Mark as read", run: () => markRead(ch.name) },
+      { label: "Permissions", run: () => openChanPerms(ch.name) },
       { label: "Copy name", run: () => navigator.clipboard?.writeText(ch.name) },
       { label: "Leave", danger: true, run: () => weft.part(ch.name).catch(() => {}) },
     ]);
@@ -110,6 +145,26 @@
     const id = toastSeq++;
     toasts = [...toasts, { id, text, kind }];
     setTimeout(() => (toasts = toasts.filter((t) => t.id !== id)), 4500);
+  }
+
+  // ---- server-confirmed success toasts ----
+  // A weft call resolves on *send*, not on server confirmation, so we can't
+  // toast success in `.then()` (a missing-cap failure arrives later as an ERR
+  // event). Instead an action registers an expected key here; when the matching
+  // confirming event lands, `confirmSuccess` fires the toast. Unmatched keys
+  // simply expire — a failure just never confirms (and its ERR toasts).
+  let pendingSuccess = $state<Record<string, string>>({});
+  function expectSuccess(key: string, message: string) {
+    pendingSuccess[key] = message;
+    // Don't leave a stale expectation if the action silently fails.
+    setTimeout(() => delete pendingSuccess[key], 6000);
+  }
+  function confirmSuccess(key: string) {
+    const m = pendingSuccess[key];
+    if (m) {
+      delete pendingSuccess[key];
+      toast(m, "success");
+    }
   }
 
   function attemptReconnect() {
@@ -145,54 +200,45 @@
     status = "connect";
   }
 
-  // ---- live data ----
-  type Member = { name: string; origin: "local" | "federated" };
-  type Msg = {
-    /// Stable render key (msgids aren't on system lines, and prepending
-    /// history shifts array indices — so keying by index would misrender).
-    key: number;
-    author: string;
-    body: string;
-    time: string;
-    own: boolean;
-    system?: boolean;
-    /// Origin msgid — the target for edit / delete / react / reply. Absent on
-    /// system lines.
-    msgid?: string;
-    /// Shows the "(edited)" marker.
-    edited?: boolean;
-    /// emoji → aggregate count + whether *I* reacted.
-    reactions?: Record<string, { count: number; mine: boolean }>;
-    /// Render body as markdown (§9.4 `fmt=md`).
-    md?: boolean;
-    /// msgid this replies to (§9.3).
-    replyTo?: string;
-    /// Sender is from a federated peer network.
-    bridged?: boolean;
-  };
+  // ---- live data (types in $lib/types) ----
   let msgSeq = 0;
   const mkMsg = (m: Omit<Msg, "key">): Msg => ({ ...m, key: msgSeq++ });
-  type Channel = {
-    name: string;
-    retention: string;
-    messages: Msg[];
-    members: Member[];
-    /// History backfill (Phase 1).
-    historyLoaded?: boolean;
-    hasMore?: boolean; // older pages available upstream
-    truncated?: boolean; // a retention gap at the top (§6.4)
-    /// Channel management + layout (Phase 6).
-    topic?: string;
-    unread?: boolean;
-    mentioned?: boolean; // has an unread @mention of me
-    lastRead?: string; // newest msgid we've marked read
-    category?: string; // CHANNEL-LAYOUT grouping
-    position?: number;
-    rosterLoaded?: boolean; // MEMBERS snapshot fetched
-    pinnedIds?: string[]; // pinned msgids (§6.4)
-  };
 
   let channels = $state<Record<string, Channel>>({});
+
+  // ---- layout cache (server-authoritative, cached for instant reload) ----
+  // Per namespace: the category list + each channel's category/position. The
+  // server is the source of truth; this is a cache shown immediately on reload
+  // (Discord-style) and refreshed by the CHANNELS fetch.
+  type NsLayout = { cats: string[]; chans: Record<string, { category?: string; position?: number }> };
+  let layoutCache = $state<Record<string, NsLayout>>({});
+  function saveLayoutCache() {
+    try {
+      localStorage.setItem("weft:layout", JSON.stringify(layoutCache));
+    } catch {
+      /* ignore */
+    }
+  }
+  function cacheNsCats(ns: string, cats: string[]) {
+    (layoutCache[ns] ??= { cats: [], chans: {} }).cats = cats;
+    saveLayoutCache();
+  }
+  function cacheChanLayout(chanName: string, category: string | undefined, position: number) {
+    const ns = nsOf(chanName);
+    if (!ns) return;
+    ((layoutCache[ns] ??= { cats: [], chans: {} }).chans[chanName] = { category, position });
+    saveLayoutCache();
+  }
+
+  // Unread / mention state kept in top-level reactive maps (keyed by channel
+  // name) rather than per-channel fields — guarantees the sidebar re-renders
+  // when a badge clears, independent of the channelGroups derivation.
+  let unreadMap = $state<Record<string, boolean>>({});
+  let mentionMap = $state<Record<string, boolean>>({});
+  function markRead(name: string) {
+    if (unreadMap[name]) unreadMap[name] = false;
+    if (mentionMap[name]) mentionMap[name] = false;
+  }
   let active = $state("");
   let joinInput = $state("");
   let composer = $state("");
@@ -214,39 +260,47 @@
   let discoverOpen = $state(false);
   let discovered = $state<Record<string, Extract<weft.WeftEvent, { kind: "ns-meta" }>>>({});
   let discoverCursor = $state<string | null>(null);
-  let discoverName = $state("");
-  let redeemInput = $state("");
-  let createName = $state("");
-  let createVis = $state("public");
   // ---- roles / invites / reports (Phase 7) ----
-  const REPORT_CATEGORIES = [
-    "spam",
-    "harassment",
-    "violence",
-    "sexual",
-    "csam",
-    "illegal",
-    "self-harm",
-    "other",
-  ];
-  const CAPS = [
-    "send", "react", "attach", "edit-own", "delete-own", "delete-any", "pin", "invite",
-    "mute", "ban", "kick", "policy", "view", "chan-create", "reports", "ns-admin",
-  ];
   const RESOLVE_ACTIONS = ["dismissed", "content-removed", "user-actioned", "escalated"];
-  let reportTarget = $state<Msg | null>(null);
-  let reportCategory = $state("spam");
-  let reportNote = $state("");
-  let reportScope = $state("ns");
+  let reportTarget = $state<Msg | null>(null); // message being reported (ReportModal)
   let reportsOpen = $state(false);
   let reportQueue = $state<Record<string, Extract<weft.WeftEvent, { kind: "report-filed" }>>>({});
-  let rolesTarget = $state<string | null>(null);
-  let roleScope = $state("");
-  let roleCaps = $state<string[]>([]);
-  const toggleRoleCap = (c: string) =>
-    (roleCaps = roleCaps.includes(c) ? roleCaps.filter((x) => x !== c) : [...roleCaps, c]);
+  let rolesTarget = $state<string | null>(null); // member for the RolesDialog
   let profileTarget = $state<string | null>(null); // member profile popout
   let inviteLink = $state<string | null>(null);
+  let inviteId = $state<string | null>(null); // for INVITE REVOKE
+  // ---- federation (§11, operator) ----
+  let federationOpen = $state(false);
+  let netblocks = $state<Record<string, string | null>>({}); // network → reason
+  let manifests = $state<Record<string, Extract<weft.WeftEvent, { kind: "manifest" }>>>({});
+  function refreshNetblocks() {
+    netblocks = {};
+    weft.netblockList().catch((e) => toast(String(e), "error"));
+  }
+  function openFederation() {
+    federationOpen = true;
+    settingsOpen = false;
+    refreshNetblocks();
+  }
+  function netblockAdd(nw: string, reason?: string) {
+    weft
+      .netblockAdd(nw, reason)
+      .then(() => setTimeout(refreshNetblocks, 200))
+      .catch((e) => toast(String(e), "error"));
+  }
+  function netblockRemove(nw: string) {
+    delete netblocks[nw];
+    weft.netblockRemove(nw).catch((e) => toast(String(e), "error"));
+  }
+  function bridgePropose(scope: string, peer: string, history: string, media: string, typing: boolean) {
+    weft.bridgePropose(scope, peer, history, media, typing).catch((e) => toast(String(e), "error"));
+  }
+  function bridgeAccept(peer: string, version: number) {
+    weft.bridgeAccept(peer, version).catch((e) => toast(String(e), "error"));
+  }
+  function bridgeSever(peer: string) {
+    weft.bridgeSever(peer).catch((e) => toast(String(e), "error"));
+  }
   // ---- pins (§6.4) ----
   let pinsOpen = $state(false);
   let pinsList = $state<Msg[]>([]);
@@ -265,6 +319,7 @@
   const ensureCaps = (account: string, channel: string) =>
     channel.startsWith("#") && ensureCapsAt(account, channel);
   const badgeFor = (account: string, channel: string) => capsFor[`${account}|${channel}`];
+  const isOperator = $derived(capsFor[`${account}|*`]?.owner ?? false);
   /// The role/authority scope for the active view: the namespace if we're in
   /// one, else global.
   const roleScopeOf = (channel: string) => {
@@ -272,36 +327,85 @@
     return ns ? `ns:${ns}` : "*";
   };
 
-  // ---- §6.6 named roles (capability-token bundles), keyed by scope ----
-  type RoleDefC = { name: string; color: string; caps: string[] };
+  // ---- §6.5 named roles (capability-token bundles), keyed by scope ----
   let rolesByScope = $state<Record<string, RoleDefC[]>>({});
   let roleBuf: RoleDefC[] = [];
-  let expectingRolesScope: string | null = null;
+  // Roles arrive in `r…`-id BATCHes; a queue tracks which scope each answers,
+  // so several scopes can be fetched at once (e.g. ns + channel).
+  let roleFetchQueue: string[] = [];
+  let currentBatchId = "";
   function fetchRoles(scope: string) {
     if (!scope) return;
-    expectingRolesScope = scope;
-    roleBuf = [];
-    weft.roles(scope).catch(() => {});
+    roleFetchQueue.push(scope);
+    weft.roles(scope).catch(() => roleFetchQueue.pop());
   }
-  /// Roles an account satisfies at a scope: its caps ⊇ the role's caps.
+  function createRoleAt(scope: string, name: string, color: string, caps: string) {
+    roleFetchQueue.push(scope);
+    return weft.roleCreate(scope, color, caps, name);
+  }
+  function deleteRoleAt(scope: string, name: string) {
+    roleFetchQueue.push(scope);
+    return weft.roleDelete(scope, name);
+  }
+  /// Is this account the owner/operator at the scope (implicit all-caps)?
+  const isOwnerAt = (account: string, scope: string) =>
+    capsFor[`${account}|${scope}`]?.owner ?? false;
+  // Explicit role membership (§6.5) keyed `account|scope`, from ROLE-MEMBER —
+  // a role is worn because it was assigned, never inferred from caps.
+  let memberRoles = $state<Record<string, string[]>>({});
+  function fetchMemberRoles(account: string, scope: string) {
+    weft.rolesOfAccount(scope, account).catch(() => {});
+  }
+  /// The role definitions an account is assigned at a scope.
   function rolesOf(account: string, scope: string): RoleDefC[] {
-    const defs = rolesByScope[scope] ?? [];
-    const held = new Set(capsFor[`${account}|${scope}`]?.list ?? []);
-    return defs.filter((r) => r.caps.length > 0 && r.caps.every((c) => held.has(c)));
+    const names = new Set(memberRoles[`${account}|${scope}`] ?? []);
+    return (rolesByScope[scope] ?? []).filter((r) => names.has(r.name));
   }
 
-  function openProfile(account: string) {
+  let profilePos = $state<{ left: number; top: number } | null>(null);
+  function openProfile(account: string, e?: MouseEvent) {
     profileTarget = account;
+    // Anchor the card next to the clicked row (Discord-style); centered fallback.
+    const POP_W = 340;
+    const POP_H = 360;
+    if (e?.currentTarget instanceof HTMLElement) {
+      const r = e.currentTarget.getBoundingClientRect();
+      let left = r.left - POP_W - 12; // prefer to the left of the row
+      if (left < 8) left = r.right + 12; // flip right if no room
+      left = Math.max(8, Math.min(left, window.innerWidth - POP_W - 8));
+      const top = Math.max(8, Math.min(r.top - 8, window.innerHeight - POP_H - 8));
+      profilePos = { left, top };
+    } else {
+      profilePos = null;
+    }
     const scope = roleScopeOf(active);
     ensureCaps(account, active); // channel-scope owner/mod badges
-    ensureCapsAt(account, scope); // ns/global-scope caps for role pills
-    fetchRoles(scope);
+    ensureCapsAt(account, scope); // for the owner check
+    fetchRoles(scope); // role definitions (names + colors)
+    fetchMemberRoles(account, scope); // this member's assigned roles
+  }
+  function assignRoleTo(acct: string, role: RoleDefC) {
+    const scope = roleScopeOf(active);
+    // Success is confirmed by the resulting ROLE-MEMBER event (see
+    // `expectSuccess`); a missing-cap failure never confirms and its ERR toasts.
+    expectSuccess(`roles:${acct}|${scope}`, `Roles updated for ${acct}`);
+    weft
+      .roleAssign(scope, acct, role.name)
+      .then(() => fetchMemberRoles(acct, scope)) // ROLES-OF queues after ASSIGN → fresh list
+      .catch((e) => toast(String(e), "error"));
+  }
+  function unassignRoleFrom(acct: string, role: RoleDefC) {
+    const scope = roleScopeOf(active);
+    expectSuccess(`roles:${acct}|${scope}`, `Roles updated for ${acct}`);
+    weft
+      .roleUnassign(scope, acct, role.name)
+      .then(() => fetchMemberRoles(acct, scope))
+      .catch((e) => toast(String(e), "error"));
   }
   // ---- namespace admin panel (§6.2 / §2.4 / §6.6) ----
   let nsSettingsOpen = $state(false);
   let nsTab = $state<"overview" | "roles" | "members" | "recovery" | "danger">("overview");
   // Role editor (§6.6). Roles live at the namespace scope.
-  const ROLE_COLORS = ["#e0679a", "#e8b93d", "#5865f2", "#3ba55d", "#e8654f", "#9d6fc4", "#4fb0a5", "#87898c"];
   let newRoleName = $state("");
   let newRoleColor = $state("#5865f2");
   let newRoleCaps = $state<string[]>([]);
@@ -310,21 +414,15 @@
   const nsRoleScope = () => (activeServer ? `ns:${activeServer}` : "*");
   function createRole() {
     if (!newRoleName.trim() || !newRoleCaps.length) return;
-    expectingRolesScope = nsRoleScope();
-    roleBuf = [];
-    weft
-      .roleCreate(nsRoleScope(), newRoleColor, newRoleCaps.join(","), newRoleName.trim())
+    createRoleAt(nsRoleScope(), newRoleName.trim(), newRoleColor, newRoleCaps.join(","))
       .then(() => {
         newRoleName = "";
         newRoleCaps = [];
-        toast("Role created");
       })
       .catch((e) => toast(String(e), "error"));
   }
   function deleteRole(name: string) {
-    expectingRolesScope = nsRoleScope();
-    roleBuf = [];
-    weft.roleDelete(nsRoleScope(), name).catch((e) => toast(String(e), "error"));
+    deleteRoleAt(nsRoleScope(), name).catch((e) => toast(String(e), "error"));
   }
   function assignRole(name: string) {
     const who = nsDelegSubject.trim();
@@ -332,10 +430,9 @@
       toast("Enter an account first", "error");
       return;
     }
-    weft
-      .roleAssign(nsRoleScope(), who, name)
-      .then(() => toast(`Assigned ${name} to ${who}`))
-      .catch((e) => toast(String(e), "error"));
+    // Confirmed by the ROLE-MEMBER event; a cap failure never confirms.
+    expectSuccess(`roles:${who}|${nsRoleScope()}`, `Roles updated for ${who}`);
+    weft.roleAssign(nsRoleScope(), who, name).catch((e) => toast(String(e), "error"));
   }
   let nsTitle = $state("");
   let nsDesc = $state("");
@@ -413,6 +510,13 @@
   function ensureChannel(name: string): Channel {
     if (!channels[name]) {
       channels[name] = { name, retention: "retained", messages: [], members: [] };
+      // Seed layout from the cache so groups/order render instantly on reload.
+      const ns = nsOf(name);
+      const cached = ns ? layoutCache[ns]?.chans[name] : undefined;
+      if (cached) {
+        channels[name].category = cached.category;
+        channels[name].position = cached.position;
+      }
     }
     return channels[name];
   }
@@ -458,10 +562,18 @@
       ),
     ].sort(),
   );
+  // Server-tile unread/mention rollups (so unread in other servers is visible).
+  const serverUnread = (ns: string) =>
+    Object.keys(unreadMap).some((n) => unreadMap[n] && nsOf(n) === ns && n !== active);
+  const serverMention = (ns: string) =>
+    Object.keys(mentionMap).some((n) => mentionMap[n] && nsOf(n) === ns && n !== active);
   // Discord-style grouping for the *active server*: by CHANNEL-LAYOUT category
   // (position-ordered), uncategorized under "Channels".
   let channelGroups = $derived.by(() => {
     const groups = new Map<string, Channel[]>();
+    // Empty categories the admin created (client-side) show up too.
+    for (const cat of discovered[activeServer]?.categories ?? layoutCache[activeServer]?.cats ?? [])
+      groups.set(cat, []);
     for (const c of Object.values(channels)) {
       if (!c.name.startsWith("#") || nsOf(c.name) !== activeServer) continue;
       const cat = c.category || "Channels";
@@ -484,6 +596,17 @@
       active = first?.name ?? "";
     }
   }
+  // Fetch a namespace's layout + categories from the server whenever it
+  // becomes active (covers reload — the client keeps no category state).
+  const layoutFetched = new Set<string>();
+  $effect(() => {
+    const s = activeServer;
+    if (s && !layoutFetched.has(s)) {
+      layoutFetched.add(s);
+      weft.channels(s).catch(() => layoutFetched.delete(s));
+    }
+  });
+
   // DM conversations (keyed `@peer`), plus any peer we've opened a blank DM with.
   let dmList = $derived(Object.values(channels).filter((c) => c.name.startsWith("@")));
 
@@ -518,6 +641,7 @@
         authError = "";
         reconnecting = false;
         reconnectAttempts = 0;
+        ensureCapsAt(account, "*"); // learn operator status (federation gating)
         // Remember creds so the next launch logs straight back in. NOTE: this
         // includes the password in localStorage — a dev convenience; the
         // hardening is OS-keychain storage in the backend.
@@ -554,6 +678,7 @@
         break;
       case "policy":
         ensureChannel(e.channel).retention = retentionOf(e.policy);
+        confirmSuccess(`policy:${e.channel}`);
         break;
       case "member": {
         const ch = ensureChannel(e.channel);
@@ -614,8 +739,8 @@
         if (key.startsWith("#")) ensureCaps(e.sender, key); // for the author badge
         const pinged = !e.own && mentionsMe(e.body);
         if (!e.own && key !== active) {
-          ch.unread = true;
-          if (pinged) ch.mentioned = true;
+          unreadMap[key] = true;
+          if (pinged) mentionMap[key] = true;
         }
         // Desktop notification for a DM or a mention while unfocused.
         if (!e.own && !document.hasFocus()) {
@@ -634,15 +759,19 @@
       case "marked": {
         // Read-marker sync from another device (§9.7).
         const ch = channels[e.channel];
-        if (ch) {
-          ch.lastRead = e.msgid;
-          ch.unread = false;
-        }
+        if (ch) ch.lastRead = e.msgid;
+        markRead(e.channel);
         break;
       }
-      case "chanmeta":
-        if (e.key === "topic") ensureChannel(e.channel).topic = e.value;
+      case "chanmeta": {
+        const c = ensureChannel(e.channel);
+        if (e.key === "topic") c.topic = e.value;
+        else if (e.key === "posting") c.restricted = e.value === "restricted";
+        else if (e.key === "category") c.category = e.value || undefined;
+        else if (e.key === "position") c.position = parseInt(e.value, 10) || 0;
+        if (e.key === "category" || e.key === "position") cacheChanLayout(e.channel, c.category, c.position ?? 0);
         break;
+      }
       case "pinned": {
         const ch = ensureChannel(e.channel);
         ch.pinnedIds = [...(ch.pinnedIds ?? []).filter((id) => id !== e.msgid), e.msgid];
@@ -663,28 +792,75 @@
           list: set,
         };
         capsInflight.delete(`${e.account}|${e.scope}`);
+        confirmSuccess(`caps:${e.account}|${e.scope}`);
         break;
       }
       case "role":
         roleBuf.push({ name: e.name, color: e.color, caps: e.caps ? e.caps.split(",") : [] });
         break;
+      case "role-member":
+        memberRoles[`${e.account}|${e.scope}`] = e.roles ? e.roles.split(",") : [];
+        confirmSuccess(`roles:${e.account}|${e.scope}`);
+        break;
       case "channel-layout": {
         const ch = ensureChannel(e.channel);
         ch.category = e.category ?? undefined;
         ch.position = e.position;
+        cacheChanLayout(e.channel, ch.category, e.position);
+        break;
+      }
+      case "channel-renamed": {
+        // Re-key local state to the new identity (idempotent — this arrives as
+        // a broadcast plus a labeled copy to the initiator).
+        const cur = channels[e.old];
+        if (cur) {
+          cur.name = e.new;
+          channels[e.new] = cur;
+          delete channels[e.old];
+          for (const map of [unreadMap, mentionMap] as Record<string, boolean>[]) {
+            if (map[e.old] !== undefined) {
+              map[e.new] = map[e.old];
+              delete map[e.old];
+            }
+          }
+          cacheChanLayout(e.new, cur.category, cur.position ?? 0);
+          if (active === e.old) active = e.new;
+          if (chanPermsCh === e.old) chanPermsCh = e.new;
+          // The actor was respawned under the new name — re-subscribe.
+          weft.join(e.new).catch(() => {});
+        }
+        confirmSuccess(`rename:${e.new}`);
         break;
       }
       case "ns-meta":
         discovered[e.name] = e;
+        cacheNsCats(e.name, e.categories ?? []);
         break;
       case "more":
         discoverCursor = e.cursor;
+        break;
+      case "manifest":
+        // A bridge's channel set/state (§11). `severed`/`removed` drops it.
+        if (e.state === "severed" || e.state === "removed") delete manifests[e.peer];
+        else manifests[e.peer] = e;
+        break;
+      case "netblocked":
+        netblocks[e.network] = e.reason;
         break;
       case "token":
         sys(`✓ permissions updated for ${e.subject} @ ${e.scope}`);
         break;
       case "invited":
-        inviteLink = e.link ?? e.invite_id;
+        if (e.max_uses === 0) {
+          // A revoke echo (INVITED … max-uses=0) — close, don't reopen.
+          if (inviteId === e.invite_id) {
+            inviteLink = null;
+            inviteId = null;
+          }
+        } else {
+          inviteLink = e.link ?? e.invite_id;
+          inviteId = e.invite_id;
+        }
         break;
       case "reported":
         sys(`✓ report filed (${e.report_id})`);
@@ -716,12 +892,14 @@
         break;
       }
       case "batch-start":
+        currentBatchId = e.id; // `r…` = a ROLES batch (see below)
         break; // messages between here and batch-end are buffered above
       case "batch-end": {
-        if (expectingRolesScope !== null) {
-          rolesByScope[expectingRolesScope] = roleBuf;
+        if (currentBatchId.startsWith("r")) {
+          const scope = roleFetchQueue.shift();
+          if (scope) rolesByScope[scope] = roleBuf;
           roleBuf = [];
-          expectingRolesScope = null;
+          currentBatchId = "";
           break;
         }
         if (loadingPins) {
@@ -823,6 +1001,10 @@
     }
   }
 
+  function joinNamespace(name: string) {
+    weft.nsJoin(name).catch(() => {});
+    weft.channels(name).catch(() => {}); // fetch its category layout
+  }
   function doJoin() {
     const raw = joinInput.trim();
     if (!raw) return;
@@ -845,11 +1027,14 @@
   /// the client sends the wire intent and weftd enforces it (BAN/KICK/MUTE are
   /// wired here frontend-first; the weftd verbs land later). Shared by the
   /// slash commands and the member-row buttons.
-  function moderate(verb: string, user: string) {
-    if (!user) return sys(`usage: /${verb} <account>`);
-    if (!active) return sys("join a channel first");
-    weft.sendRaw(`${verb.toUpperCase()} ${active} ${user}`).catch(() => {});
-    sys(`${verb} requested for ${user} on ${active} (pending server support)`);
+  // §6.7 moderation. `scope` defaults to the active channel; ban/mute also
+  // accept `ns:<name>` or `*` (network). Confirmation arrives as a MODERATED
+  // event; a missing-cap failure surfaces as an ERR.
+  function moderate(verb: string, user: string, scope?: string, reason?: string) {
+    if (!user) return;
+    const s = scope ?? active;
+    if (!s) return sys("join a channel first");
+    weft.moderate(verb, s, user, reason).catch((e) => toast(String(e), "error"));
   }
 
   /// Slash commands — the primary control surface in the composer.
@@ -859,6 +1044,7 @@
     const arg = rest.join(" ").trim();
     switch (cmd) {
       case "ban":
+      case "unban":
       case "kick":
       case "mute":
       case "unmute":
@@ -882,7 +1068,7 @@
         break;
       case "help":
         sys(
-          "/join #chan · /part · /create #chan · /delete · /topic <text> · /ban /kick /mute /unmute <user>",
+          "/join #chan · /part · /create #chan · /delete · /topic <text> · /ban /unban /kick /mute /unmute <user>",
         );
         break;
       default:
@@ -952,10 +1138,6 @@
     editDraft = "";
   }
   // Focus the inline editor and put the caret at the end.
-  function autofocus(node: HTMLTextAreaElement | HTMLInputElement) {
-    node.focus();
-    node.selectionStart = node.selectionEnd = node.value.length;
-  }
   function saveEdit(m: Msg) {
     const body = editDraft.trim();
     if (body && m.msgid && body !== m.body) {
@@ -981,13 +1163,6 @@
 
   // ---- reactions (Phase 3) ----
   // Curated emoji, categorized (§ Phase 8 polish).
-  const EMOJI: Record<string, string[]> = {
-    Smileys: "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😋 😛 😜 🤪 🤨 🧐 🤓 😎 🥳 😏 😒 😔 🙁 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 🤗 🤔 🤭 🤫 🤥 😐 😑 😬 🙄 😮 😲 🥱 😴 🤤 🤢 🤮 🤧 😷 🤒 🤕".split(" "),
-    Gestures: "👍 👎 👌 🤌 🤏 ✌️ 🤞 🫰 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👋 🤚 🖐️ ✋ 🖖 👏 🙌 🫶 👐 🤲 🤝 🙏 ✍️ 💪 👊 🤛 🤜 ✊".split(" "),
-    Hearts: "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 ♥️".split(" "),
-    Objects: "🔥 ⭐ 🌟 ✨ 💫 ⚡ 💥 💯 ✅ ❌ ❓ ❗ 💤 🎉 🎊 🎈 🎁 🏆 🥇 🎯 🚀 💡 🔔 📌 📍 🔗 💬 👀 🧠 🎵 🎶 ☕ 🍕 🍺 🌈 ☀️ 🌙 ⏰ 💰 🔒 🔑".split(" "),
-  };
-  const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "😮", "😢", "🔥", "👀"];
   let pickerKey = $state<number | null>(null); // message whose picker is open
 
   // Search the batch buffer first (target may not be committed yet), then the
@@ -1157,8 +1332,7 @@
   $effect(() => {
     const ch = activeChannel;
     if (!ch) return;
-    ch.unread = false;
-    ch.mentioned = false;
+    markRead(ch.name);
     if (!ch.name.startsWith("#")) return;
     let newest: string | undefined;
     for (let i = ch.messages.length - 1; i >= 0; i--)
@@ -1185,38 +1359,6 @@
     discoverCursor = null;
     weft.discover().catch(() => {});
   }
-  function joinNamespace(name: string) {
-    weft.nsJoin(name).catch(() => {});
-    weft.channels(name).catch(() => {}); // fetch its category layout
-    discoverOpen = false;
-  }
-  function joinNamespaceInput() {
-    const n = discoverName.trim().replace(/^@?/, "");
-    discoverName = "";
-    if (n) joinNamespace(n);
-  }
-  function doRedeem() {
-    const t = redeemInput.trim();
-    redeemInput = "";
-    if (t) weft.inviteRedeem(t).catch(() => {});
-    discoverOpen = false;
-  }
-  async function createNamespace() {
-    const name = createName.trim().replace(/^@/, "");
-    if (!name) return;
-    createName = "";
-    try {
-      // Root keypair is generated + stored on-device (secret never leaves the
-      // backend); then a default channel so the namespace is usable at once.
-      await weft.nsCreate(network, name, createVis);
-      await weft.channelCreate(`#${name}/general`);
-      await weft.join(`#${name}/general`);
-      discoverOpen = false;
-      toast(`Namespace ${name} created`);
-    } catch (e) {
-      toast(String(e), "error");
-    }
-  }
 
   // Capability/invite scopes relevant to what's open: channel → its ns → net.
   function scopesFor(): string[] {
@@ -1228,18 +1370,9 @@
     return s;
   }
 
-  // Reporting
+  // Reporting (ReportModal owns its form + submit)
   function openReport(m: Msg) {
-    if (!m.msgid) return;
-    reportTarget = m;
-    reportCategory = "spam";
-    reportNote = "";
-    reportScope = nsOf(active) || activeServer ? "ns" : "net";
-  }
-  function submitReport() {
-    if (reportTarget?.msgid)
-      weft.report(reportTarget.msgid, reportCategory, reportScope, reportNote || undefined).catch(() => {});
-    reportTarget = null;
+    if (m.msgid) reportTarget = m;
   }
   function openReports() {
     reportsOpen = true;
@@ -1247,16 +1380,169 @@
     weft.reportsList(activeServer ? `ns:${activeServer}` : "*").catch(() => {});
   }
 
-  // Roles
+  // Roles (RolesDialog owns its form)
   function openRoles(member: string) {
     rolesTarget = member;
-    roleScope = scopesFor()[0];
-    roleCaps = [];
   }
 
   // Invites
   function mintInvite() {
     weft.inviteMint(scopesFor()[0]).catch(() => {});
+  }
+
+  // ---- server dropdown (Discord-style header menu) ----
+  let serverMenu = $state(false);
+  let newChanOpen = $state(false);
+  let newChanName = $state("");
+  let newChanCategory = $state("");
+  let newChanAnnounce = $state(false);
+  let newChanRet = $state(""); // "" = server default; else a RETENTION_OPTIONS value
+  function openCreateChannel(prefillName = "") {
+    newChanName = prefillName;
+    newChanCategory = "";
+    newChanAnnounce = false;
+    newChanRet = "";
+    newChanOpen = true;
+    serverMenu = false;
+  }
+  function createChannel() {
+    const slug = newChanName.trim().replace(/^#/, "").replace(/\s+/g, "-").toLowerCase();
+    if (!slug) return;
+    const full = activeServer ? `#${activeServer}/${slug}` : `#${slug}`;
+    const cat = newChanCategory.trim();
+    weft
+      .channelCreate(full, newChanRet || undefined)
+      .then(() => weft.join(full))
+      .then(() => (cat ? weft.channelMeta(full, "category", cat) : undefined))
+      // Announcement channel: everyone can view, only members with the `send`
+      // capability may post (§6.7 restricted posting).
+      .then(() => (newChanAnnounce ? weft.channelMeta(full, "posting", "restricted") : undefined))
+      .then(() => (newChanOpen = false))
+      .catch((e) => toast(String(e), "error"));
+  }
+
+  // ---- categories (Discord-style groupings) ----
+  // A category is just a label channels carry (§6.3 CHANNEL META category). An
+  // *empty* category has no channel yet, so we remember it client-side (per
+  // server) until a channel is dragged in — then the server persists it.
+  let newCatOpen = $state(false);
+  let newCatName = $state("");
+  // Categories are server state (§6.3, on the namespace) — no client copy.
+  const nsCategories = () => discovered[activeServer]?.categories ?? [];
+  function setCategories(list: string[]) {
+    if (activeServer) weft.nsMeta(activeServer, "categories", list.join(",")).catch((e) => toast(String(e), "error"));
+  }
+  function createCategory() {
+    const n = newCatName.trim();
+    if (!n || !activeServer) return;
+    if (!nsCategories().includes(n)) setCategories([...nsCategories(), n]);
+    newCatName = "";
+    newCatOpen = false;
+  }
+  function openCreateChannelInCat(cat: string) {
+    newChanName = "";
+    newChanCategory = cat === "Channels" ? "" : cat;
+    newChanAnnounce = false;
+    newChanRet = "";
+    newChanOpen = true;
+  }
+  function deleteCategory(cat: string) {
+    // Move its channels back to the default group, then drop the category.
+    for (const c of Object.values(channels)) {
+      if (c.name.startsWith("#") && nsOf(c.name) === activeServer && (c.category || "Channels") === cat) {
+        c.category = undefined;
+        weft.channelMeta(c.name, "category", "").catch(() => {});
+      }
+    }
+    setCategories(nsCategories().filter((x) => x !== cat));
+  }
+  function catCtx(e: MouseEvent, cat: string) {
+    if (cat === "Channels") return; // the default group isn't deletable
+    openCtx(e, [
+      { label: "Create channel here", run: () => openCreateChannelInCat(cat) },
+      { label: "Delete category", danger: true, run: () => deleteCategory(cat) },
+    ]);
+  }
+
+  // ---- per-channel permissions (§6.5 grants at #chan scope, §6.7 restricted) ----
+  let chanPermsCh = $state<string | null>(null);
+  let permSubject = $state("");
+  let permCaps = $state<string[]>(["send"]);
+  const togglePermCap = (c: string) =>
+    (permCaps = permCaps.includes(c) ? permCaps.filter((x) => x !== c) : [...permCaps, c]);
+  function chanNsScope() {
+    const ns = nsOf(chanPermsCh ?? "");
+    return ns ? `ns:${ns}` : "*";
+  }
+  const chanRoleCaps = (name: string) =>
+    (rolesByScope[chanPermsCh ?? ""] ?? []).find((r) => r.name === name)?.caps ?? [];
+  function toggleChanRoleCap(role: RoleDefC, cap: string) {
+    if (!chanPermsCh) return;
+    const cur = chanRoleCaps(role.name);
+    const next = cur.includes(cap) ? cur.filter((c) => c !== cap) : [...cur, cap];
+    (next.length
+      ? createRoleAt(chanPermsCh, role.name, role.color, next.join(","))
+      : deleteRoleAt(chanPermsCh, role.name)
+    ).catch((e) => toast(String(e), "error"));
+  }
+  function openChanPerms(channel: string) {
+    chanPermsCh = channel;
+    permSubject = "";
+    permCaps = ["send"];
+    fetchRoles(chanNsScope()); // the namespace's roles
+    fetchRoles(channel); // this channel's role-permissions
+  }
+  function toggleRestricted() {
+    const ch = chanPermsCh ? channels[chanPermsCh] : undefined;
+    if (!ch || !chanPermsCh) return;
+    const next = !ch.restricted;
+    weft
+      .channelMeta(chanPermsCh, "posting", next ? "restricted" : "open")
+      .then(() => (ch.restricted = next))
+      .catch((e) => toast(String(e), "error"));
+  }
+  function grantChanCaps() {
+    if (!chanPermsCh || !permSubject.trim() || !permCaps.length) return;
+    // Confirmed by the CAPS event; a cap failure never confirms and its ERR toasts.
+    expectSuccess(`caps:${permSubject.trim()}|${chanPermsCh}`, `Permissions updated for ${permSubject.trim()}`);
+    weft.grant(permSubject.trim(), chanPermsCh, permCaps.join(",")).catch((e) => toast(String(e), "error"));
+  }
+  function revokeChanCaps() {
+    if (!chanPermsCh || !permSubject.trim() || !permCaps.length) return;
+    expectSuccess(`caps:${permSubject.trim()}|${chanPermsCh}`, `Permissions updated for ${permSubject.trim()}`);
+    weft.revoke(permSubject.trim(), chanPermsCh, permCaps.join(",")).catch((e) => toast(String(e), "error"));
+  }
+
+  // ---- admin channel move (drag-and-drop) ----
+  let draggingChan = $state<string | null>(null);
+  let dropTarget = $state<{ name: string; after: boolean } | null>(null);
+  function moveChannel(dragName: string, targetCat: string, anchorName?: string, after = false) {
+    const dragged = channels[dragName];
+    if (!dragged) return;
+    // The default "Channels" group is uncategorized (empty category).
+    const storedCat = targetCat === "Channels" ? "" : targetCat;
+    dragged.category = storedCat || undefined; // optimistic
+    weft.channelMeta(dragName, "category", storedCat).catch((e) => toast(String(e), "error"));
+    // Renumber the target category so positions are stable + ordered.
+    const list = Object.values(channels)
+      .filter(
+        (c) =>
+          c.name.startsWith("#") &&
+          nsOf(c.name) === activeServer &&
+          (c.category || "Channels") === targetCat &&
+          c.name !== dragName,
+      )
+      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name));
+    let at = anchorName ? list.findIndex((c) => c.name === anchorName) : -1;
+    if (at < 0) at = list.length;
+    else if (after) at += 1;
+    list.splice(at, 0, dragged);
+    list.forEach((c, i) => {
+      if (c.position !== i) {
+        c.position = i;
+        weft.channelMeta(c.name, "position", String(i)).catch(() => {});
+      }
+    });
   }
 
   // Pins (§6.4)
@@ -1309,6 +1595,12 @@
   }
 
   onMount(() => {
+    // Restore the cached layout for instant render before the server refresh.
+    try {
+      layoutCache = JSON.parse(localStorage.getItem("weft:layout") ?? "{}");
+    } catch {
+      layoutCache = {};
+    }
     // Restore theme.
     try {
       if (localStorage.getItem("weft:theme") === "light") {
@@ -1319,6 +1611,14 @@
       /* ignore */
     }
     const un = weft.onWeft(handle);
+    // Load client.toml: TLS verification mode + optional default host.
+    weft
+      .clientConfig()
+      .then((c) => {
+        insecureMode = c.allow_insecure;
+        if (c.default_host && host === "127.0.0.1:4433") host = c.default_host;
+      })
+      .catch(() => {});
     // Restore the last session and log straight back in (login mode — the
     // account already exists).
     try {
@@ -1337,846 +1637,314 @@
       un.then((f) => f());
     };
   });
+
+  // ---- shared context for extracted components (state via getters, actions
+  // as refs). Grows as more components are extracted. ----
+  provideApp({
+    get network() { return network; },
+    get account() { return account; },
+    get myStatus() { return myStatus; },
+    get homeView() { return homeView; },
+    get activeServer() { return activeServer; },
+    get active() { return active; },
+    get activeChannel() { return activeChannel; },
+    get activeIsDm() { return activeIsDm; },
+    get serverNamespaces() { return serverNamespaces; },
+    get channelGroups() { return channelGroups; },
+    get dmList() { return dmList; },
+    get activeNsMeta() { return activeNsMeta; },
+    goHome: () => (homeView = true),
+    selectServer,
+    open: (name: string) => { active = name; markRead(name); },
+    openDiscover,
+    get channels() { return channels; },
+    get presence() { return presence; },
+    get unreadMap() { return unreadMap; },
+    get mentionMap() { return mentionMap; },
+    get discovered() { return discovered; },
+    get discoverCursor() { return discoverCursor; },
+    scopesFor,
+    markRead,
+    get draggingChan() { return draggingChan; },
+    set draggingChan(v: string | null) { draggingChan = v; },
+    get dropTarget() { return dropTarget; },
+    set dropTarget(v: { name: string; after: boolean } | null) { dropTarget = v; },
+    moveChannel,
+    initials,
+    chanShort,
+    peerOf,
+    dotClass,
+    nsOf,
+    badgeFor,
+    serverUnread,
+    serverMention,
+    retentionMeta,
+    chanCtx,
+    memberCtx,
+    catCtx,
+    get serverMenu() { return serverMenu; },
+    set serverMenu(v: boolean) { serverMenu = v; },
+    openCreateChannel,
+    openCreateChannelInCat,
+    openNsSettings,
+    mintInvite,
+    newCat: () => { newCatName = ""; newCatOpen = true; serverMenu = false; },
+    openProfile,
+    openDm,
+    openRoles,
+    moderate,
+    openSettings: () => (settingsOpen = true),
+    toast,
+    expectSuccess,
+    get reportQueue() { return reportQueue; },
+    get pinsList() { return pinsList; },
+    resolveActions: RESOLVE_ACTIONS,
+    // chat topbar
+    get membersVisible() { return membersVisible; },
+    set membersVisible(v: boolean) { membersVisible = v; },
+    openPins,
+    openReports,
+    partActive: () => weft.part(active).catch(() => {}),
+    // message list / items
+    get loadingHistory() { return loadingHistory; },
+    get editingKey() { return editingKey; },
+    set editingKey(v: number | null) { editingKey = v; },
+    get editDraft() { return editDraft; },
+    set editDraft(v: string) { editDraft = v; },
+    get pickerKey() { return pickerKey; },
+    set pickerKey(v: number | null) { pickerKey = v; },
+    get replyTo() { return replyTo; },
+    set replyTo(v: Msg | null) { replyTo = v; },
+    startEdit,
+    saveEdit,
+    cancelEdit,
+    editKey,
+    doDelete,
+    openReport,
+    togglePin,
+    toggleReaction,
+    jumpTo,
+    msgCtx,
+    renderMd,
+    mentionsMe,
+    // composer
+    get composer() { return composer; },
+    set composer(v: string) { composer = v; },
+    composerKey,
+    onComposerInput,
+    doSend,
+    pickMention,
+    get mentionQuery() { return mentionQuery; },
+    get mentionMatches() { return mentionMatches; },
+    get typingLabel() { return typingLabel; },
+    // roles (ProfileCard)
+    get rolesByScope() { return rolesByScope; },
+    rolesOf,
+    roleScopeOf,
+    isOwnerAt,
+    assignRoleTo,
+    unassignRoleFrom,
+    // channel permissions
+    get permSubject() { return permSubject; },
+    set permSubject(v: string) { permSubject = v; },
+    get permCaps() { return permCaps; },
+    togglePermCap,
+    chanNsScope,
+    chanRoleCaps,
+    toggleChanRoleCap,
+    toggleRestricted,
+    grantChanCaps,
+    revokeChanCaps,
+    // federation (operator)
+    get isOperator() { return isOperator; },
+    get netblocks() { return netblocks; },
+    get manifests() { return manifests; },
+    openFederation,
+    refreshNetblocks,
+    netblockAdd,
+    netblockRemove,
+    bridgePropose,
+    bridgeAccept,
+    bridgeSever,
+    // user settings
+    get theme() { return theme; },
+    get host() { return host; },
+    get reconnecting() { return reconnecting; },
+    setStatus,
+    toggleTheme,
+    enrollThisDevice: enrollThisDevice,
+    logout,
+    // server settings (ns overlay)
+    get nsTab() { return nsTab; },
+    set nsTab(v: "overview" | "roles" | "members" | "recovery" | "danger") { nsTab = v; },
+    get nsTitle() { return nsTitle; },
+    set nsTitle(v: string) { nsTitle = v; },
+    get nsDesc() { return nsDesc; },
+    set nsDesc(v: string) { nsDesc = v; },
+    get nsVis() { return nsVis; },
+    set nsVis(v: string) { nsVis = v; },
+    get newRoleName() { return newRoleName; },
+    set newRoleName(v: string) { newRoleName = v; },
+    get newRoleColor() { return newRoleColor; },
+    set newRoleColor(v: string) { newRoleColor = v; },
+    get newRoleCaps() { return newRoleCaps; },
+    toggleNewRoleCap,
+    get nsDelegSubject() { return nsDelegSubject; },
+    set nsDelegSubject(v: string) { nsDelegSubject = v; },
+    get nsDelegCaps() { return nsDelegCaps; },
+    toggleDelegCap,
+    get nsNewOwner() { return nsNewOwner; },
+    set nsNewOwner(v: string) { nsNewOwner = v; },
+    get nsRecM() { return nsRecM; },
+    set nsRecM(v: number) { nsRecM = v; },
+    get nsRecKeys() { return nsRecKeys; },
+    set nsRecKeys(v: string) { nsRecKeys = v; },
+    get myRecoveryKey() { return myRecoveryKey; },
+    get recoveryDoc() { return recoveryDoc; },
+    set recoveryDoc(v: string) { recoveryDoc = v; },
+    nsRoleScope,
+    saveNsMeta,
+    createRole,
+    deleteRole,
+    assignRole,
+    doDelegate,
+    showRecoveryKey,
+    startRecovery,
+    cosignRecovery,
+    submitRecovery,
+    doTransfer,
+    deleteNamespace,
+  });
 </script>
 
 <svelte:window onkeydown={globalKey} />
 
 {#if status !== "online"}
-  <!-- ================= CONNECT / LOGIN / REGISTER ================= -->
-  <div class="connect-screen">
-    <form class="connect-card" onsubmit={(e) => { e.preventDefault(); doConnect(); }}>
-      <h1>WEFT</h1>
-      <p class="sub">{mode === "login" ? "log in to a network" : "register a new account"}</p>
-
-      <div style="display:flex;gap:8px;margin-bottom:4px">
-        <button type="button" class="channel-item" style="justify-content:center;{mode === 'login' ? 'color:var(--text-primary);background:var(--bg-panel-raised)' : ''}" onclick={() => (mode = "login")}>Log in</button>
-        <button type="button" class="channel-item" style="justify-content:center;{mode === 'register' ? 'color:var(--text-primary);background:var(--bg-panel-raised)' : ''}" onclick={() => (mode = "register")}>Register</button>
-      </div>
-
-      <label for="host">Network</label>
-      <input id="host" bind:value={host} placeholder="127.0.0.1:4433" autocomplete="off" />
-      <label for="acct">Account</label>
-      <input id="acct" bind:value={formAccount} placeholder="ada" autocomplete="off" />
-      <label for="pw">Password</label>
-      <input id="pw" type="password" bind:value={formPassword} placeholder={mode === "register" ? "min 12 characters" : "your password"} autocomplete="off" />
-
-      <button type="submit" disabled={status === "connecting" || !formAccount.trim()}>
-        {status === "connecting" ? "connecting…" : mode === "register" ? "Create account" : "Log in"}
-      </button>
-      {#if deviceKeyAvailable && mode !== "register"}
-        <button type="button" class="key-login" onclick={keyLogin}>🔑 Log in with device key</button>
-      {/if}
-      {#if authError}<div class="err">{authError}</div>{/if}
-    </form>
-  </div>
+  <ConnectScreen
+    bind:mode
+    bind:host
+    bind:formAccount
+    bind:formPassword
+    {status}
+    {authError}
+    {deviceKeyAvailable}
+    insecure={insecureMode}
+    onconnect={doConnect}
+    onkeylogin={keyLogin}
+  />
 {:else}
   <!-- ================= MAIN APP ================= -->
   {#if reconnecting}
     <div class="reconnect-banner">Connection lost — reconnecting…</div>
   {/if}
-  <div class="toast-stack">
-    {#each toasts as t (t.id)}
-      <div class="toast {t.kind}">{t.text}</div>
-    {/each}
-  </div>
-  {#if ctxMenu}
-    <button class="ctx-backdrop" aria-label="Close menu" onclick={() => (ctxMenu = null)}></button>
-    <div class="ctx-menu" style="left:{ctxMenu.x}px; top:{ctxMenu.y}px">
-      {#each ctxMenu.items as it (it.label)}
-        <button class="ctx-item" class:danger={it.danger} onclick={() => { it.run(); ctxMenu = null; }}>{it.label}</button>
-      {/each}
-    </div>
-  {/if}
+  <Toasts {toasts} />
+  <ContextMenu menu={ctxMenu} onclose={() => (ctxMenu = null)} />
   {#if switcherOpen}
-    <div class="modal-wrap switcher-wrap">
-      <button class="modal-backdrop" aria-label="Close" onclick={() => (switcherOpen = false)}></button>
-      <div class="modal switcher" role="dialog" aria-modal="true">
-        <input
-          class="switcher-input"
-          bind:value={switcherQuery}
-          placeholder="Jump to a channel or DM…"
-          use:autofocus
-          onkeydown={(e) => {
-            if (e.key === "Enter" && switcherResults[0]) switchTo(switcherResults[0].name);
-          }}
-        />
-        <div class="switcher-list">
-          {#each switcherResults as c (c.name)}
-            <button class="switcher-item" onclick={() => switchTo(c.name)}>
-              <span class="si-sigil">{c.name.startsWith("@") ? "@" : "#"}</span>
-              <span>{c.name.startsWith("@") ? peerOf(c.name) : chanShort(c.name)}</span>
-              {#if c.unread}<span class="unread-dot"></span>{/if}
-            </button>
-          {:else}
-            <div class="empty-hint">No matches.</div>
-          {/each}
-        </div>
-      </div>
-    </div>
+    <QuickSwitcher
+      bind:query={switcherQuery}
+      results={switcherResults.map((c) => ({
+        name: c.name,
+        label: c.name.startsWith("@") ? peerOf(c.name) : chanShort(c.name),
+        sigil: c.name.startsWith("@") ? "@" : "#",
+        unread: !!unreadMap[c.name],
+      }))}
+      onselect={switchTo}
+      onclose={() => (switcherOpen = false)}
+    />
   {/if}
   <div class="app" class:members-collapsed={!membersVisible}>
     <!-- COMMUNITY RAIL -->
-    <nav class="warp-rail" aria-label="Networks">
-      <button class="rail-home" class:active={homeView} title="Direct messages" aria-label="Direct messages" onclick={() => (homeView = true)}>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" /></svg>
-      </button>
-      <div class="rail-divider"></div>
-      <div class="rail-communities">
-        <div class="comm-tile" class:active={!homeView && activeServer === ""} title={network}>
-          <button onclick={() => selectServer("")}>{initials(network)}</button>
-          <span class="trust-mark signed" title="Connected network"></span>
-        </div>
-        {#each serverNamespaces as ns (ns)}
-          <div class="comm-tile" class:active={!homeView && activeServer === ns} title={ns}>
-            <button onclick={() => selectServer(ns)}>{initials(ns)}</button>
-          </div>
-        {/each}
-      </div>
-      <button class="rail-add" title="Discover namespaces" aria-label="Discover namespaces" onclick={openDiscover}>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14" /></svg>
-      </button>
-    </nav>
+    <CommunityRail />
 
     <!-- SIDEBAR -->
     <aside class="sidebar">
-      <div class="sidebar-header">
-        {#if homeView}
-          <p class="comm-name">Direct Messages</p>
-        {:else}
-          <p class="comm-name">{activeNsMeta?.title || activeServer || network}</p>
-          <div class="comm-origin">
-            <span class="origin-dot"></span>
-            <span>{activeServer ? `namespace · ${network}` : `${network} · connected`}</span>
-          </div>
-          {#if activeServer}
-            <button class="hdr-gear" title="Namespace settings" aria-label="Namespace settings" onclick={openNsSettings}>
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
-            </button>
-          {/if}
-        {/if}
-      </div>
+      <SidebarHeader />
       {#if homeView}
-        <div class="channel-scroll">
-          {#each dmList as ch (ch.name)}
-            <button class="channel-item dm" class:active={ch.name === active} onclick={() => (active = ch.name)}>
-              <span class="avatar sm">{initials(peerOf(ch.name))}</span>
-              <span>{peerOf(ch.name)}</span>
-              <span class={dotClass(peerOf(ch.name))}></span>
-            </button>
-          {/each}
-          {#if !dmList.length}
-            <div class="empty-hint">No conversations yet.<br />Message someone below.</div>
-          {/if}
-        </div>
-        <div class="sidebar-join">
-          <input
-            bind:value={dmInput}
-            placeholder="message @user…"
-            onkeydown={(e) => e.key === "Enter" && startDm()}
-          />
-        </div>
+        <DmList />
+        <SidebarInput bind:value={dmInput} placeholder="message @user…" onenter={startDm} />
       {:else}
-        <div class="channel-scroll">
-          {#each channelGroups as group (group.category)}
-            <div class="retention-group">
-              <div class="retention-label">{group.category}</div>
-              {#each group.list as ch (ch.name)}
-                {@const meta = retentionMeta[ch.retention]}
-                <button class="channel-item" class:active={ch.name === active} class:unread={ch.unread} onclick={() => (active = ch.name)} oncontextmenu={(e) => chanCtx(e, ch)}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" /></svg>
-                  <span class="ci-name">{chanShort(ch.name)}</span>
-                  {#if ch.mentioned}<span class="mention-badge">@</span>{:else if ch.unread}<span class="unread-dot"></span>{/if}
-                  <span class="dot {meta.cls} chan-ret" title={meta.label}></span>
-                </button>
-              {/each}
-            </div>
-          {/each}
-          {#if !channelGroups.length}
-            <div class="empty-hint">No channels yet.<br />Join one below.</div>
-          {/if}
-        </div>
-        <div class="sidebar-join">
-          <input
-            bind:value={joinInput}
-            placeholder="join #channel or namespace…"
-            onkeydown={(e) => e.key === "Enter" && doJoin()}
-          />
-        </div>
+        {#key activeServer}
+          <ChannelList />
+        {/key}
+        <SidebarInput bind:value={joinInput} placeholder="join #channel or namespace…" onenter={doJoin} />
       {/if}
-      <div class="sidebar-user">
-        <button class="avatar status-avatar" title="Set status" onclick={() => (statusMenu = !statusMenu)}>
-          {initials(account)}
-          <span class="dot {myStatus} corner"></span>
-        </button>
-        <div class="who">
-          <div class="name">{account}</div>
-          <div class="key">{myStatus}</div>
-        </div>
-        {#if statusMenu}
-          <div class="status-menu">
-            {#each ["online", "away", "dnd", "invisible"] as s (s)}
-              <button onclick={() => setStatus(s)}><span class="dot {s}"></span>{s}</button>
-            {/each}
-            <button class="settings-item" onclick={() => { settingsOpen = true; statusMenu = false; }}>
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
-              settings
-            </button>
-            <button class="logout-item" onclick={logout}>
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5" /><path d="M21 12H9" /></svg>
-              log out
-            </button>
-          </div>
-        {/if}
-      </div>
+      <UserFooter />
     </aside>
 
     <!-- MAIN -->
     <main class="main">
-      <div class="chat-topbar">
-        {#if activeChannel && activeIsDm}
-          <div class="chan-title">
-            <span class={dotClass(peerOf(active))}></span>
-            <span>{peerOf(active)}</span>
-          </div>
-          <div class="topic">{presence[peerOf(active)] ?? "offline"}</div>
-        {:else if activeChannel}
-          {@const meta = retentionMeta[activeChannel.retention]}
-          <div class="chan-title">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" /></svg>
-            <span>{chanShort(activeChannel.name)}</span>
-          </div>
-          <div class="topic">{activeChannel.topic ?? ""}</div>
-          <div class="status-chip">
-            <span style="display:flex;color:var(--{meta.cls})"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">{@html meta.icon}</svg></span>{meta.label}
-          </div>
-        {:else}
-          <div class="chan-title"><span>no channel</span></div>
-          <div class="topic"></div>
-        {/if}
-        <div class="topbar-actions">
-          {#if activeChannel && !activeIsDm}
-            <button class="icon-btn" title="Pinned messages" aria-label="Pinned messages" onclick={openPins}>
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg>
-            </button>
-            <button class="icon-btn" title="Invite" aria-label="Invite" onclick={mintInvite}>
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><line x1="19" y1="8" x2="19" y2="14" /><line x1="22" y1="11" x2="16" y2="11" /></svg>
-            </button>
-            <button class="icon-btn" title="Reports queue" aria-label="Reports queue" onclick={openReports}>
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" /><line x1="4" y1="22" x2="4" y2="15" /></svg>
-            </button>
-            <button class="icon-btn" title="Leave channel" aria-label="Leave channel" onclick={() => weft.part(active).catch(() => {})}>
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5" /><path d="M21 12H9" /></svg>
-            </button>
-          {/if}
-          <button class="icon-btn" title="Toggle member list" aria-label="Toggle member list" onclick={() => (membersVisible = !membersVisible)}>
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
-          </button>
-        </div>
-      </div>
+      <ChatTopbar />
 
-      <div class="message-scroll" bind:this={scrollEl} onscroll={onScroll}>
-        {#if activeChannel}
-          {#if loadingHistory === active}
-            <div class="day-sep">loading history…</div>
-          {:else if activeChannel.truncated}
-            <div class="day-sep">older messages have expired</div>
-          {:else if activeChannel.historyLoaded && !activeChannel.hasMore}
-            <div class="day-sep">beginning of {activeChannel.name}</div>
-          {/if}
-          {#each activeChannel.messages as m (m.key)}
-            {#if m.system}
-              <div class="msg-group"><div style="width:34px;flex-shrink:0"></div><div class="msg-body"><div class="msg-line system">{m.body}</div></div></div>
-            {:else}
-              <div class="msg-group" class:mention-hit={!m.own && mentionsMe(m.body)} id="msg-{m.key}" role="article" oncontextmenu={(e) => msgCtx(e, m)}>
-                <div class="avatar">{initials(m.author)}</div>
-                <div class="msg-body">
-                  {#if m.replyTo}
-                    {@const rep = activeChannel.messages.find((x) => x.msgid === m.replyTo)}
-                    <button class="reply-quote" onclick={() => jumpTo(m.replyTo)}>
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 17 4 12l5-5" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg>
-                      {#if rep}<span class="rq-author">{rep.author}</span><span class="rq-body">{rep.body.slice(0, 90)}</span>{:else}<span class="rq-body">an earlier message</span>{/if}
-                    </button>
-                  {/if}
-                  <div class="msg-meta">
-                    <button class="author author-btn" onclick={() => openProfile(m.author)}>{m.author}</button>
-                    {#if badgeFor(m.author, active)?.owner}<span class="cap-badge owner">owner</span>
-                    {:else if badgeFor(m.author, active)?.mod}<span class="cap-badge mod">mod</span>{/if}
-                    {#if m.bridged}<span class="cap-badge bridged">bridged</span>{/if}
-                    {#if m.own}<span class="cap-badge owner">you</span>{/if}
-                    <span class="time">{m.time}</span>
-                  </div>
-                  {#if editingKey === m.key}
-                    <textarea
-                      class="edit-box"
-                      rows="1"
-                      bind:value={editDraft}
-                      onkeydown={(e) => editKey(e, m)}
-                      use:autofocus
-                    ></textarea>
-                    <div class="edit-hint">escape to <button class="linkish" onclick={cancelEdit}>cancel</button> · enter to <button class="linkish" onclick={() => saveEdit(m)}>save</button></div>
-                  {:else}
-                    <div class="msg-line">{#if m.md}{@html renderMd(m.body)}{:else}{m.body}{/if}{#if m.edited}<span class="edited-tag" title="edited">(edited)</span>{/if}</div>
-                  {/if}
-                  {#if m.reactions && Object.keys(m.reactions).length}
-                    <div class="reactions">
-                      {#each Object.entries(m.reactions) as [emoji, r] (emoji)}
-                        <button class="reaction" class:mine={r.mine} onclick={() => toggleReaction(m, emoji)}>
-                          <span>{emoji}</span><span class="count">{r.count}</span>
-                        </button>
-                      {/each}
-                    </div>
-                  {/if}
-                </div>
-                {#if m.msgid && editingKey !== m.key}
-                  <div class="msg-actions">
-                    <button class="msg-act" title="React" aria-label="React" onclick={() => (pickerKey = pickerKey === m.key ? null : m.key)}>
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><path d="M9 9h.01M15 9h.01" /></svg>
-                    </button>
-                    <button class="msg-act" title="Reply" aria-label="Reply" onclick={() => (replyTo = m)}>
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 17 4 12l5-5" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg>
-                    </button>
-                    {#if active.startsWith("#")}
-                      <button class="msg-act" class:on={activeChannel?.pinnedIds?.includes(m.msgid ?? "")} title={activeChannel?.pinnedIds?.includes(m.msgid ?? "") ? "Unpin" : "Pin"} aria-label="Pin" onclick={() => togglePin(m)}>
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg>
-                      </button>
-                    {/if}
-                    {#if m.own}
-                      <button class="msg-act" title="Edit" aria-label="Edit" onclick={() => startEdit(m)}>
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
-                      </button>
-                      <button class="msg-act danger" title="Delete" aria-label="Delete" onclick={() => doDelete(m)}>
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>
-                      </button>
-                    {:else}
-                      <button class="msg-act" title="Report" aria-label="Report" onclick={() => openReport(m)}>
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" /><line x1="4" y1="22" x2="4" y2="15" /></svg>
-                      </button>
-                    {/if}
-                  </div>
-                  {#if pickerKey === m.key}
-                    <div class="emoji-picker">
-                      <div class="emoji-quick">
-                        {#each QUICK_EMOJI as emoji (emoji)}
-                          <button class="emoji-opt" onclick={() => toggleReaction(m, emoji)}>{emoji}</button>
-                        {/each}
-                      </div>
-                      <div class="emoji-grid">
-                        {#each Object.entries(EMOJI) as [cat, list] (cat)}
-                          <div class="emoji-cat">{cat}</div>
-                          <div class="emoji-row">
-                            {#each list as emoji (emoji)}
-                              <button class="emoji-opt" onclick={() => toggleReaction(m, emoji)}>{emoji}</button>
-                            {/each}
-                          </div>
-                        {/each}
-                      </div>
-                    </div>
-                  {/if}
-                {/if}
-              </div>
-            {/if}
-          {/each}
-        {:else}
-          <div class="empty-hint">Join a channel to start talking.</div>
-        {/if}
-      </div>
-
-      <div class="composer-wrap">
-        {#if mentionQuery !== null && mentionMatches.length}
-          <div class="mention-pop">
-            {#each mentionMatches as name, i (name)}
-              <button class="mention-opt" class:first={i === 0} onclick={() => pickMention(name)}>
-                <span class="mention-sigil">@</span>{name}
-              </button>
-            {/each}
-          </div>
-        {/if}
-        {#if replyTo}
-          <div class="reply-bar">
-            <span>replying to <b>{replyTo.author}</b></span>
-            <button class="linkish" onclick={() => (replyTo = null)} aria-label="Cancel reply">✕</button>
-          </div>
-        {/if}
-        <div class="composer">
-          <textarea
-            rows="1"
-            placeholder={active ? `Message ${active}…` : "Join a channel first"}
-            disabled={!active}
-            bind:value={composer}
-            onkeydown={composerKey}
-            oninput={onComposerInput}
-          ></textarea>
-          <button class="icon-btn" title="Send" aria-label="Send message" onclick={doSend}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 2 11 13" /><path d="M22 2 15 22l-4-9-9-4 20-7z" /></svg>
-          </button>
-        </div>
-        <div class="composer-hint">
-          {#if typingLabel}
-            <span class="typing">{typingLabel}</span>
-          {:else}
-            <span><span class="k">Enter</span> send</span>
-            <span><span class="k">Shift+Enter</span> newline</span>
-          {/if}
-        </div>
-      </div>
+      <MessageList bind:scrollEl onscroll={onScroll} />
+      <Composer />
     </main>
 
     <!-- MEMBERS -->
     <aside class="members">
       {#if activeChannel && !activeIsDm}
-        <div class="member-group-label">Members — {activeChannel.members.length}</div>
-        {#each activeChannel.members as m (m.name)}
-          <div class="member-row" role="listitem" oncontextmenu={(e) => memberCtx(e, m.name)}>
-            <button class="member-id" onclick={() => openProfile(m.name)}>
-              <div class="avatar">{initials(m.name)}<span class="origin-flag {m.origin}"></span></div>
-              <span class="mname"><span class={m.name !== account ? dotClass(m.name) : `dot ${myStatus}`}></span>{m.name}</span>
-              {#if badgeFor(m.name, active)?.owner}<span class="cap-badge owner">owner</span>
-              {:else if badgeFor(m.name, active)?.mod}<span class="cap-badge mod">mod</span>{/if}
-              {#if m.origin === "federated"}<span class="cap-badge bridged">br</span>{/if}
-            </button>
-            {#if m.name !== account}
-              <div class="member-actions">
-                <button class="mod-btn" title="Message {m.name}" aria-label="Message {m.name}" onclick={() => openDm(m.name)}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
-                </button>
-                <button class="mod-btn" title="Roles for {m.name}" aria-label="Roles for {m.name}" onclick={() => openRoles(m.name)}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
-                </button>
-                <button class="mod-btn" title="Mute {m.name}" aria-label="Mute {m.name}" onclick={() => moderate("mute", m.name)}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M11 5 6 9H2v6h4l5 4V5z" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></svg>
-                </button>
-                <button class="mod-btn danger" title="Ban {m.name}" aria-label="Ban {m.name}" onclick={() => moderate("ban", m.name)}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10" /><line x1="4.9" y1="4.9" x2="19.1" y2="19.1" /></svg>
-                </button>
-              </div>
-            {/if}
-          </div>
-        {/each}
+        <MemberList />
       {/if}
     </aside>
 
     {#if discoverOpen}
-      <div class="modal-wrap">
-        <button class="modal-backdrop" aria-label="Close" onclick={() => (discoverOpen = false)}></button>
-        <div class="modal" role="dialog" aria-modal="true">
-          <div class="modal-head">
-            <h2>Discover namespaces</h2>
-            <button class="linkish" aria-label="Close" onclick={() => (discoverOpen = false)}>✕</button>
-          </div>
-          <div class="modal-join">
-            <input
-              bind:value={discoverName}
-              placeholder="join a namespace by name…"
-              onkeydown={(e) => e.key === "Enter" && joinNamespaceInput()}
-            />
-            <button onclick={joinNamespaceInput}>Join</button>
-          </div>
-          <div class="modal-join">
-            <input
-              bind:value={redeemInput}
-              placeholder="redeem an invite link…"
-              onkeydown={(e) => e.key === "Enter" && doRedeem()}
-            />
-            <button onclick={doRedeem}>Redeem</button>
-          </div>
-          <div class="modal-join">
-            <input
-              bind:value={createName}
-              placeholder="create a namespace…"
-              onkeydown={(e) => e.key === "Enter" && createNamespace()}
-            />
-            <select bind:value={createVis} aria-label="Visibility">
-              <option value="public">public</option>
-              <option value="unlisted">unlisted</option>
-              <option value="private">private</option>
-            </select>
-            <button onclick={createNamespace}>Create</button>
-          </div>
-          <div class="modal-list">
-            {#each Object.values(discovered) as ns (ns.name)}
-              <div class="ns-card">
-                <div class="ns-info">
-                  <div class="ns-name">{ns.title || ns.name}</div>
-                  <div class="ns-desc">
-                    {ns.description || `@${ns.name}`} · {ns.visibility}{ns.owner ? ` · ${ns.owner}` : ""}
-                  </div>
-                </div>
-                <button onclick={() => joinNamespace(ns.name)}>Join</button>
-              </div>
-            {:else}
-              <div class="empty-hint">No public namespaces found.</div>
-            {/each}
-            {#if discoverCursor}
-              <button class="linkish load-more" onclick={() => weft.discover(discoverCursor ?? undefined)}>Load more…</button>
-            {/if}
-          </div>
-        </div>
-      </div>
+      <DiscoverModal onclose={() => (discoverOpen = false)} />
     {/if}
 
     {#if reportTarget}
-      <div class="modal-wrap">
-        <button class="modal-backdrop" aria-label="Close" onclick={() => (reportTarget = null)}></button>
-        <div class="modal" role="dialog" aria-modal="true">
-          <div class="modal-head">
-            <h2>Report message</h2>
-            <button class="linkish" aria-label="Close" onclick={() => (reportTarget = null)}>✕</button>
-          </div>
-          <p class="modal-sub">from <b>{reportTarget.author}</b> — “{reportTarget.body.slice(0, 80)}”</p>
-          <label class="fld">Category
-            <select bind:value={reportCategory}>
-              {#each REPORT_CATEGORIES as c (c)}<option value={c}>{c}</option>{/each}
-            </select>
-          </label>
-          <label class="fld">Route to
-            <select bind:value={reportScope}>
-              <option value="ns">namespace moderators</option>
-              <option value="net">network operators</option>
-            </select>
-          </label>
-          <label class="fld">Note (optional)
-            <input bind:value={reportNote} placeholder="context for the moderators…" />
-          </label>
-          <div class="modal-actions">
-            <button class="linkish" onclick={() => (reportTarget = null)}>Cancel</button>
-            <button class="danger-btn" onclick={submitReport}>Submit report</button>
-          </div>
-        </div>
-      </div>
+      <ReportModal target={reportTarget} onclose={() => (reportTarget = null)} />
     {/if}
 
     {#if rolesTarget}
-      <div class="modal-wrap">
-        <button class="modal-backdrop" aria-label="Close" onclick={() => (rolesTarget = null)}></button>
-        <div class="modal" role="dialog" aria-modal="true">
-          <div class="modal-head">
-            <h2>Roles — {rolesTarget}</h2>
-            <button class="linkish" aria-label="Close" onclick={() => (rolesTarget = null)}>✕</button>
-          </div>
-          <label class="fld">Scope
-            <select bind:value={roleScope}>
-              {#each scopesFor() as s (s)}<option value={s}>{s}</option>{/each}
-            </select>
-          </label>
-          <div class="fld">
-            Capabilities
-            <div class="cap-chips">
-              {#each CAPS as c (c)}
-                <button
-                  type="button"
-                  class="cap-chip"
-                  class:on={roleCaps.includes(c)}
-                  onclick={() => toggleRoleCap(c)}>{c}</button>
-              {/each}
-            </div>
-          </div>
-          <div class="modal-actions">
-            <button class="danger-btn" disabled={!roleCaps.length} onclick={() => rolesTarget && weft.revoke(rolesTarget, roleScope, roleCaps.join(",")).catch(() => {})}>Revoke</button>
-            <button class="ok-btn" disabled={!roleCaps.length} onclick={() => rolesTarget && weft.grant(rolesTarget, roleScope, roleCaps.join(",")).catch(() => {})}>Grant</button>
-          </div>
-          <p class="modal-sub">Select one or more caps. Grants are additive; revoking bumps the scope's epoch.</p>
-        </div>
-      </div>
+      <RolesDialog target={rolesTarget} onclose={() => (rolesTarget = null)} />
     {/if}
 
     {#if reportsOpen}
-      <div class="modal-wrap">
-        <button class="modal-backdrop" aria-label="Close" onclick={() => (reportsOpen = false)}></button>
-        <div class="modal" role="dialog" aria-modal="true">
-          <div class="modal-head">
-            <h2>Reports — {activeServer ? `ns:${activeServer}` : "network"}</h2>
-            <button class="linkish" aria-label="Close" onclick={() => (reportsOpen = false)}>✕</button>
-          </div>
-          <div class="modal-list">
-            {#each Object.values(reportQueue) as r (r.report_id)}
-              <div class="ns-card report-card">
-                <div class="ns-info">
-                  <div class="ns-name">{r.category} <span class="rep-state {r.state}">{r.state}</span></div>
-                  <div class="ns-desc">{r.report_id} · {r.msgid.slice(0, 16)}…{r.reporter ? ` · by ${r.reporter}` : ""}</div>
-                </div>
-                <select onchange={(e) => weft.reportsResolve(r.report_id, e.currentTarget.value).catch(() => {})}>
-                  <option value="">resolve…</option>
-                  {#each RESOLVE_ACTIONS as a (a)}<option value={a}>{a}</option>{/each}
-                </select>
-              </div>
-            {:else}
-              <div class="empty-hint">No open reports.</div>
-            {/each}
-          </div>
-        </div>
-      </div>
+      <ReportsQueueModal onclose={() => (reportsOpen = false)} />
     {/if}
 
     {#if inviteLink}
-      <div class="modal-wrap">
-        <button class="modal-backdrop" aria-label="Close" onclick={() => (inviteLink = null)}></button>
-        <div class="modal" role="dialog" aria-modal="true">
-          <div class="modal-head">
-            <h2>Invite link</h2>
-            <button class="linkish" aria-label="Close" onclick={() => (inviteLink = null)}>✕</button>
-          </div>
-          <p class="modal-sub">Share this to let someone join:</p>
-          <div class="modal-join">
-            <input readonly value={inviteLink} />
-            <button onclick={() => navigator.clipboard?.writeText(inviteLink ?? "")}>Copy</button>
-          </div>
-        </div>
-      </div>
+      <InviteLinkModal link={inviteLink} id={inviteId} onclose={() => (inviteLink = null)} />
     {/if}
 
     {#if pinsOpen}
-      <div class="modal-wrap">
-        <button class="modal-backdrop" aria-label="Close" onclick={() => (pinsOpen = false)}></button>
-        <div class="modal" role="dialog" aria-modal="true">
-          <div class="modal-head">
-            <h2>Pinned — {chanShort(active)}</h2>
-            <button class="linkish" aria-label="Close" onclick={() => (pinsOpen = false)}>✕</button>
-          </div>
-          <div class="modal-list">
-            {#each pinsList as m (m.key)}
-              <div class="pin-card">
-                <div class="avatar sm">{initials(m.author)}</div>
-                <div class="pin-body">
-                  <div class="pin-meta"><b>{m.author}</b> <span class="time">{m.time}</span></div>
-                  <div class="msg-line">{#if m.md}{@html renderMd(m.body)}{:else}{m.body}{/if}</div>
-                </div>
-                <button class="linkish" title="Unpin" onclick={() => m.msgid && weft.pin(m.msgid, false).catch(() => {})}>unpin</button>
-              </div>
-            {:else}
-              <div class="empty-hint">No pinned messages.</div>
-            {/each}
-          </div>
-        </div>
-      </div>
+      <PinsModal onclose={() => (pinsOpen = false)} />
+    {/if}
+
+    {#if newChanOpen}
+      <CreateChannelModal
+        bind:name={newChanName}
+        bind:category={newChanCategory}
+        bind:announce={newChanAnnounce}
+        bind:retention={newChanRet}
+        {activeServer}
+        categories={channelGroups.map((g) => g.category)}
+        onclose={() => (newChanOpen = false)}
+        oncreate={createChannel}
+      />
+    {/if}
+
+    {#if newCatOpen}
+      <CreateCategoryModal bind:name={newCatName} onclose={() => (newCatOpen = false)} oncreate={createCategory} />
+    {/if}
+
+    {#if chanPermsCh}
+      <ChannelSettings channel={chanPermsCh} onclose={() => (chanPermsCh = null)} />
     {/if}
 
     {#if profileTarget}
-      {@const p = profileTarget}
-      {@const b = badgeFor(p, active)}
-      {@const pr = presence[p] ?? "offline"}
-      {@const myRoles = rolesOf(p, roleScopeOf(active))}
-      <div class="modal-wrap">
-        <button class="modal-backdrop" aria-label="Close" onclick={() => (profileTarget = null)}></button>
-        <div class="profile-pop" role="dialog" aria-modal="true">
-          <div class="profile-banner" style="--pf-accent: {myRoles[0]?.color ?? 'var(--accent, #5865f2)'}"></div>
-          <div class="profile-avwrap">
-            <div class="avatar xl" style="--pf-ring: {myRoles[0]?.color ?? 'var(--accent, #5865f2)'}">
-              {initials(p)}<span class="dot {pr} corner"></span>
-            </div>
-          </div>
-          <div class="profile-body">
-            <div class="profile-name-lg">
-              {p}
-              {#if b?.owner}<span class="cap-badge owner">owner</span>
-              {:else if b?.mod}<span class="cap-badge mod">mod</span>{/if}
-            </div>
-            <div class="profile-handle">{p}@{network} · <span class="pres-{pr}">{pr}</span></div>
-
-            {#if myRoles.length}
-              <div class="profile-divider"></div>
-              <div class="profile-section-label">Roles</div>
-              <div class="role-pills">
-                {#each myRoles as r (r.name)}
-                  <span class="role-pill" style="--role: {r.color}"><span class="role-dot"></span>{r.name}</span>
-                {/each}
-              </div>
-            {/if}
-
-            <div class="profile-divider"></div>
-            <div class="profile-actions">
-              {#if p !== account}
-                <button class="pf-primary" onclick={() => { openDm(p); profileTarget = null; }}>Message</button>
-                <div class="pf-row">
-                  <button class="pf-secondary" onclick={() => { openRoles(p); profileTarget = null; }}>Manage roles</button>
-                  <button class="pf-secondary" onclick={() => { moderate("mute", p); profileTarget = null; }}>Mute</button>
-                  <button class="pf-secondary danger" onclick={() => { moderate("ban", p); profileTarget = null; }}>Ban</button>
-                </div>
-              {/if}
-              <button class="pf-secondary" onclick={() => navigator.clipboard?.writeText(`${p}@${network}`)}>Copy ID</button>
-            </div>
-          </div>
-        </div>
-      </div>
+      <ProfileCard target={profileTarget} pos={profilePos} onclose={() => (profileTarget = null)} />
     {/if}
 
     {#if settingsOpen}
-      <div class="modal-wrap">
-        <button class="modal-backdrop" aria-label="Close" onclick={() => (settingsOpen = false)}></button>
-        <div class="modal settings-modal" role="dialog" aria-modal="true">
-          <div class="modal-head">
-            <h2>Settings</h2>
-            <button class="icon-btn" aria-label="Close" onclick={() => (settingsOpen = false)}>✕</button>
-          </div>
-          <div class="settings-sec">
-            <h3>Account</h3>
-            <div class="set-row"><span>Identity</span><b>{account}@{network}</b></div>
-            <div class="set-row">
-              <span>Status</span>
-              <div class="status-inline">
-                {#each ["online", "away", "dnd", "invisible"] as s (s)}
-                  <button class="chip-btn" class:on={myStatus === s} onclick={() => setStatus(s)}><span class="dot {s}"></span>{s}</button>
-                {/each}
-              </div>
-            </div>
-          </div>
-          <div class="settings-sec">
-            <h3>Appearance</h3>
-            <div class="set-row">
-              <span>Theme</span>
-              <div class="status-inline">
-                <button class="chip-btn" class:on={theme === "dark"} onclick={() => theme !== "dark" && toggleTheme()}>Dark</button>
-                <button class="chip-btn" class:on={theme === "light"} onclick={() => theme !== "light" && toggleTheme()}>Light</button>
-              </div>
-            </div>
-          </div>
-          <div class="settings-sec">
-            <h3>Device &amp; connection</h3>
-            <div class="set-row"><span>Server</span><b>{host}{reconnecting ? " · reconnecting…" : ""}</b></div>
-            <div class="set-row">
-              <span>Passwordless login on this device</span>
-              <button class="set-btn" onclick={enrollThisDevice}>Enroll device key</button>
-            </div>
-          </div>
-          <div class="settings-sec danger-sec">
-            <div class="modal-actions"><button class="danger-btn" onclick={logout}>Log out</button></div>
-          </div>
-        </div>
-      </div>
+      <UserSettingsModal onclose={() => (settingsOpen = false)} />
+    {/if}
+
+    {#if federationOpen}
+      <FederationPanel onclose={() => (federationOpen = false)} />
     {/if}
 
     {#if nsSettingsOpen}
-      <div class="settings-overlay" role="dialog" aria-modal="true">
-        <nav class="so-nav">
-          <div class="so-nav-inner">
-            <div class="so-heading">{activeServer}</div>
-            <button class="so-navitem" class:active={nsTab === "overview"} onclick={() => (nsTab = "overview")}>Overview</button>
-            <button class="so-navitem" class:active={nsTab === "roles"} onclick={() => (nsTab = "roles")}>Roles</button>
-            <button class="so-navitem" class:active={nsTab === "members"} onclick={() => (nsTab = "members")}>Members &amp; roles</button>
-            <div class="so-heading">Security</div>
-            <button class="so-navitem" class:active={nsTab === "recovery"} onclick={() => (nsTab = "recovery")}>Recovery</button>
-            <button class="so-navitem danger" class:active={nsTab === "danger"} onclick={() => (nsTab = "danger")}>Danger zone</button>
-          </div>
-        </nav>
-        <main class="so-main">
-          <button class="so-close" aria-label="Close settings" onclick={() => (nsSettingsOpen = false)}>✕<span>ESC</span></button>
-          <div class="so-content">
-            {#if activeNsMeta?.recovery_eta}
-              <div class="ns-card recovery-pending">
-                <div class="ns-info">
-                  <div class="ns-name">⚠ Recovery pending (rung {activeNsMeta.recovery_rung})</div>
-                  <div class="ns-desc">A root rotation is scheduled. As the live owner you can veto it.</div>
-                </div>
-                <button class="danger-btn" onclick={() => weft.nsRecoveryCancel(network, activeServer).catch((e) => toast(String(e), "error"))}>Cancel recovery</button>
-              </div>
-            {/if}
-
-            {#if nsTab === "overview"}
-              <h1>Overview</h1>
-              <p class="so-sub">How this namespace appears in invites and, if listed, in Discover.</p>
-              <div class="field-label">Name</div>
-              <input class="text-input" bind:value={nsTitle} placeholder="display name" />
-              <div class="section-sep"></div>
-              <div class="field-label">Description</div>
-              <input class="text-input" bind:value={nsDesc} placeholder="what's this namespace about" />
-              <div class="section-sep"></div>
-              <div class="field-label">Visibility</div>
-              <select class="text-input" bind:value={nsVis}>
-                <option value="public">public</option>
-                <option value="unlisted">unlisted</option>
-                <option value="private">private</option>
-              </select>
-              <div class="modal-actions"><button class="ok-btn" onclick={saveNsMeta}>Save changes</button></div>
-            {:else if nsTab === "roles"}
-              <h1>Roles</h1>
-              <p class="so-sub">Named capability bundles. Assigning a role grants its tokens — enforcement stays token-based.</p>
-              <div class="role-list">
-                {#each rolesByScope[nsRoleScope()] ?? [] as r (r.name)}
-                  <div class="role-row">
-                    <span class="role-swatch" style="background:{r.color}"></span>
-                    <div class="role-meta">
-                      <div class="role-title">{r.name}</div>
-                      <div class="role-caps">{r.caps.join(" · ")}</div>
-                    </div>
-                    <button class="mini-danger" onclick={() => deleteRole(r.name)}>Delete</button>
-                  </div>
-                {:else}
-                  <div class="empty-hint">No roles yet — create one below.</div>
-                {/each}
-              </div>
-              <div class="section-sep"></div>
-              <div class="field-label">Create a role</div>
-              <input class="text-input" bind:value={newRoleName} placeholder="Role name (e.g. Moderator)" />
-              <div class="color-row">
-                {#each ROLE_COLORS as c (c)}
-                  <button class="color-dot" class:on={newRoleColor === c} style="background:{c}" aria-label="color {c}" onclick={() => (newRoleColor = c)}></button>
-                {/each}
-              </div>
-              <div class="cap-chips">
-                {#each CAPS as c (c)}
-                  <button type="button" class="cap-chip" class:on={newRoleCaps.includes(c)} onclick={() => toggleNewRoleCap(c)}>{c}</button>
-                {/each}
-              </div>
-              <div class="modal-actions"><button class="ok-btn" disabled={!newRoleName.trim() || !newRoleCaps.length} onclick={createRole}>Create role</button></div>
-            {:else if nsTab === "members"}
-              <h1>Members &amp; roles</h1>
-              <p class="so-sub">Assign a role (grants its token bundle) or delegate individual capabilities.</p>
-              <div class="field-label">Account</div>
-              <input class="text-input" bind:value={nsDelegSubject} placeholder="account" />
-              <div class="section-sep"></div>
-              <div class="field-label">Assign a role</div>
-              <div class="role-pick">
-                {#each rolesByScope[nsRoleScope()] ?? [] as r (r.name)}
-                  <button class="role-pill clickable" style="--role:{r.color}" onclick={() => assignRole(r.name)}><span class="role-dot"></span>{r.name}</button>
-                {:else}
-                  <div class="empty-hint">No roles defined — create some in the Roles tab.</div>
-                {/each}
-              </div>
-              <div class="section-sep"></div>
-              <div class="field-label">Or delegate individual capabilities</div>
-              <div class="cap-chips">
-                {#each CAPS as c (c)}
-                  <button type="button" class="cap-chip" class:on={nsDelegCaps.includes(c)} onclick={() => toggleDelegCap(c)}>{c}</button>
-                {/each}
-              </div>
-              <div class="modal-actions"><button class="ok-btn" onclick={doDelegate}>Grant capabilities</button></div>
-            {:else if nsTab === "recovery"}
-              <h1>Recovery quorum</h1>
-              <p class="so-sub">§2.4 M-of-N root recovery. Share your recovery key, or co-sign and submit a rotation.</p>
-              <div class="field-label">Threshold M</div>
-              <input class="text-input" type="number" min="1" bind:value={nsRecM} />
-              <div class="section-sep"></div>
-              <div class="field-label">Quorum keys (comma-separated b64 pubkeys)</div>
-              <input class="text-input" bind:value={nsRecKeys} placeholder="key1,key2,key3" />
-              <div class="modal-actions"><button class="ok-btn" onclick={() => nsRecKeys.trim() && weft.nsRecoverySet(activeServer, nsRecM, nsRecKeys.trim()).catch((e) => toast(String(e), "error"))}>Set recovery quorum</button></div>
-              <div class="section-sep"></div>
-              <div class="set-row">
-                <span>My recovery key (share for the quorum)</span>
-                <button class="set-btn" onclick={showRecoveryKey}>Reveal</button>
-              </div>
-              {#if myRecoveryKey}
-                <div class="modal-join"><input readonly value={myRecoveryKey} /><button onclick={() => navigator.clipboard?.writeText(myRecoveryKey)}>Copy</button></div>
-              {/if}
-              <div class="field-label">Rotation record (co-sign or submit)</div>
-              <textarea class="text-input" rows="2" bind:value={recoveryDoc} placeholder="paste a record to co-sign, or Start one below"></textarea>
-              <div class="modal-actions">
-                <button class="set-btn" onclick={startRecovery}>Start (recover to me)</button>
-                <button class="set-btn" onclick={cosignRecovery}>Co-sign</button>
-                <button class="ok-btn" onclick={submitRecovery}>Submit</button>
-              </div>
-            {:else if nsTab === "danger"}
-              <h1>Danger zone</h1>
-              <p class="so-sub">Irreversible actions. Transfer is root-key-signed on this device.</p>
-              <div class="field-label">Transfer ownership to</div>
-              <input class="text-input" bind:value={nsNewOwner} placeholder="account" />
-              <div class="modal-actions">
-                <button class="danger-btn" onclick={doTransfer}>Transfer (root-signed)</button>
-              </div>
-              <div class="section-sep"></div>
-              <div class="modal-actions"><button class="danger-btn" onclick={deleteNamespace}>Delete namespace</button></div>
-            {/if}
-          </div>
-        </main>
-      </div>
+      <ServerSettingsModal onclose={() => (nsSettingsOpen = false)} />
     {/if}
   </div>
 {/if}

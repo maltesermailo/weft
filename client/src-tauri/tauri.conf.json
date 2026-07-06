@@ -14,7 +14,8 @@
       {
         "title": "WEFT",
         "width": 1180,
-        "height": 760
+        "height": 760,
+        "dragDropEnabled": false
       }
     ],
     "security": {
