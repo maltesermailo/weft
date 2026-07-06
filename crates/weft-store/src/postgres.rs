@@ -18,12 +18,13 @@ use weft_proto::{
 use crate::compact::compaction_plan;
 use crate::traits::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MembershipStore,
-    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, HOLD_RADIUS,
+    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, RoleStore,
+    HOLD_RADIUS,
 };
 use crate::types::{
     ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord,
     NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome,
-    ReportRecord, ReportResolution, RootHistoryEntry, Scope, Verification,
+    ReportRecord, ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 
@@ -1753,5 +1754,63 @@ impl MembershipStore for PgStore {
                     .map_err(|_| StoreError::Backend("corrupt membership channel".to_string()))
             })
             .collect()
+    }
+}
+
+#[async_trait]
+impl RoleStore for PgStore {
+    async fn set_role(
+        &self,
+        scope: &str,
+        name: &str,
+        color: &str,
+        caps: &[String],
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO weft_roles (scope, name, color, caps) VALUES ($1,$2,$3,$4) \
+             ON CONFLICT (scope, name) DO UPDATE SET color = EXCLUDED.color, caps = EXCLUDED.caps",
+        )
+        .bind(scope)
+        .bind(name)
+        .bind(color)
+        .bind(caps.join(","))
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn delete_role(&self, scope: &str, name: &str) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM weft_roles WHERE scope = $1 AND name = $2")
+            .bind(scope)
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn roles(&self, scope: &str) -> Result<Vec<RoleDef>, StoreError> {
+        let rows =
+            sqlx::query("SELECT name, color, caps FROM weft_roles WHERE scope = $1 ORDER BY name")
+                .bind(scope)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let caps: &str = r.get("caps");
+                RoleDef {
+                    name: r.get::<&str, _>("name").to_string(),
+                    color: r.get::<&str, _>("color").to_string(),
+                    caps: caps
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                }
+            })
+            .collect())
     }
 }

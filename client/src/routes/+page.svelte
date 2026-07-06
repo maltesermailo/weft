@@ -49,6 +49,7 @@
       pinsOpen = false;
       discoverOpen = false;
       settingsOpen = false;
+      nsSettingsOpen = false;
       profileTarget = null;
       ctxMenu = null;
     }
@@ -228,7 +229,10 @@
     "self-harm",
     "other",
   ];
-  const CAPS = ["send", "react", "pin", "invite", "mute", "ban", "kick", "view", "reports"];
+  const CAPS = [
+    "send", "react", "attach", "edit-own", "delete-own", "delete-any", "pin", "invite",
+    "mute", "ban", "kick", "policy", "view", "chan-create", "reports", "ns-admin",
+  ];
   const RESOLVE_ACTIONS = ["dismissed", "content-removed", "user-actioned", "escalated"];
   let reportTarget = $state<Msg | null>(null);
   let reportCategory = $state("spam");
@@ -249,22 +253,90 @@
   let loadingPins: string | null = null;
   let pinsBuf: Msg[] = [];
   // ---- capability badges (§10.4 CAPS), keyed `account|scope` ----
-  let capsFor = $state<Record<string, { owner: boolean; mod: boolean }>>({});
+  let capsFor = $state<Record<string, { owner: boolean; mod: boolean; list: string[] }>>({});
   const capsInflight = new Set<string>();
-  function ensureCaps(account: string, channel: string) {
-    if (!channel.startsWith("#") || !account) return;
-    const key = `${account}|${channel}`;
+  function ensureCapsAt(account: string, scope: string) {
+    if (!scope || !account) return;
+    const key = `${account}|${scope}`;
     if (key in capsFor || capsInflight.has(key)) return;
     capsInflight.add(key);
-    weft.caps(account, channel).catch(() => capsInflight.delete(key));
+    weft.caps(account, scope).catch(() => capsInflight.delete(key));
   }
+  const ensureCaps = (account: string, channel: string) =>
+    channel.startsWith("#") && ensureCapsAt(account, channel);
   const badgeFor = (account: string, channel: string) => capsFor[`${account}|${channel}`];
+  /// The role/authority scope for the active view: the namespace if we're in
+  /// one, else global.
+  const roleScopeOf = (channel: string) => {
+    const ns = nsOf(channel);
+    return ns ? `ns:${ns}` : "*";
+  };
+
+  // ---- §6.6 named roles (capability-token bundles), keyed by scope ----
+  type RoleDefC = { name: string; color: string; caps: string[] };
+  let rolesByScope = $state<Record<string, RoleDefC[]>>({});
+  let roleBuf: RoleDefC[] = [];
+  let expectingRolesScope: string | null = null;
+  function fetchRoles(scope: string) {
+    if (!scope) return;
+    expectingRolesScope = scope;
+    roleBuf = [];
+    weft.roles(scope).catch(() => {});
+  }
+  /// Roles an account satisfies at a scope: its caps ⊇ the role's caps.
+  function rolesOf(account: string, scope: string): RoleDefC[] {
+    const defs = rolesByScope[scope] ?? [];
+    const held = new Set(capsFor[`${account}|${scope}`]?.list ?? []);
+    return defs.filter((r) => r.caps.length > 0 && r.caps.every((c) => held.has(c)));
+  }
+
   function openProfile(account: string) {
     profileTarget = account;
-    ensureCaps(account, active);
+    const scope = roleScopeOf(active);
+    ensureCaps(account, active); // channel-scope owner/mod badges
+    ensureCapsAt(account, scope); // ns/global-scope caps for role pills
+    fetchRoles(scope);
   }
-  // ---- namespace admin panel (§6.2 / §2.4) ----
+  // ---- namespace admin panel (§6.2 / §2.4 / §6.6) ----
   let nsSettingsOpen = $state(false);
+  let nsTab = $state<"overview" | "roles" | "members" | "recovery" | "danger">("overview");
+  // Role editor (§6.6). Roles live at the namespace scope.
+  const ROLE_COLORS = ["#e0679a", "#e8b93d", "#5865f2", "#3ba55d", "#e8654f", "#9d6fc4", "#4fb0a5", "#87898c"];
+  let newRoleName = $state("");
+  let newRoleColor = $state("#5865f2");
+  let newRoleCaps = $state<string[]>([]);
+  const toggleNewRoleCap = (c: string) =>
+    (newRoleCaps = newRoleCaps.includes(c) ? newRoleCaps.filter((x) => x !== c) : [...newRoleCaps, c]);
+  const nsRoleScope = () => (activeServer ? `ns:${activeServer}` : "*");
+  function createRole() {
+    if (!newRoleName.trim() || !newRoleCaps.length) return;
+    expectingRolesScope = nsRoleScope();
+    roleBuf = [];
+    weft
+      .roleCreate(nsRoleScope(), newRoleColor, newRoleCaps.join(","), newRoleName.trim())
+      .then(() => {
+        newRoleName = "";
+        newRoleCaps = [];
+        toast("Role created");
+      })
+      .catch((e) => toast(String(e), "error"));
+  }
+  function deleteRole(name: string) {
+    expectingRolesScope = nsRoleScope();
+    roleBuf = [];
+    weft.roleDelete(nsRoleScope(), name).catch((e) => toast(String(e), "error"));
+  }
+  function assignRole(name: string) {
+    const who = nsDelegSubject.trim();
+    if (!who) {
+      toast("Enter an account first", "error");
+      return;
+    }
+    weft
+      .roleAssign(nsRoleScope(), who, name)
+      .then(() => toast(`Assigned ${name} to ${who}`))
+      .catch((e) => toast(String(e), "error"));
+  }
   let nsTitle = $state("");
   let nsDesc = $state("");
   let nsVis = $state("public");
@@ -588,10 +660,14 @@
         capsFor[`${e.account}|${e.scope}`] = {
           owner: set.includes("ns-admin") || set.includes("netblock"),
           mod: set.includes("mute") || set.includes("ban") || set.includes("kick"),
+          list: set,
         };
         capsInflight.delete(`${e.account}|${e.scope}`);
         break;
       }
+      case "role":
+        roleBuf.push({ name: e.name, color: e.color, caps: e.caps ? e.caps.split(",") : [] });
+        break;
       case "channel-layout": {
         const ch = ensureChannel(e.channel);
         ch.category = e.category ?? undefined;
@@ -642,6 +718,12 @@
       case "batch-start":
         break; // messages between here and batch-end are buffered above
       case "batch-end": {
+        if (expectingRolesScope !== null) {
+          rolesByScope[expectingRolesScope] = roleBuf;
+          roleBuf = [];
+          expectingRolesScope = null;
+          break;
+        }
         if (loadingPins) {
           const ch = channels[loadingPins];
           if (ch) ch.pinnedIds = pinsBuf.map((m) => m.msgid).filter(Boolean) as string[];
@@ -1201,7 +1283,9 @@
     nsDelegCaps = ["mute", "kick"];
     nsNewOwner = "";
     nsRecKeys = "";
+    nsTab = "overview";
     nsSettingsOpen = true;
+    fetchRoles(nsRoleScope());
   }
   function saveNsMeta() {
     if (nsTitle.trim()) weft.nsMeta(activeServer, "title", nsTitle.trim()).catch(() => {});
@@ -1868,28 +1952,48 @@
 
     {#if profileTarget}
       {@const p = profileTarget}
+      {@const b = badgeFor(p, active)}
+      {@const pr = presence[p] ?? "offline"}
+      {@const myRoles = rolesOf(p, roleScopeOf(active))}
       <div class="modal-wrap">
         <button class="modal-backdrop" aria-label="Close" onclick={() => (profileTarget = null)}></button>
-        <div class="modal profile-card" role="dialog" aria-modal="true">
-          <div class="profile-head">
-            <div class="avatar lg">{initials(p)}<span class="dot {presence[p] ?? 'offline'} corner"></span></div>
-            <div>
-              <div class="profile-name">
-                {p}
-                {#if badgeFor(p, active)?.owner}<span class="cap-badge owner">owner</span>
-                {:else if badgeFor(p, active)?.mod}<span class="cap-badge mod">mod</span>{/if}
-              </div>
-              <div class="profile-sub">{p}@{network} · {presence[p] ?? "offline"}</div>
+        <div class="profile-pop" role="dialog" aria-modal="true">
+          <div class="profile-banner" style="--pf-accent: {myRoles[0]?.color ?? 'var(--accent, #5865f2)'}"></div>
+          <div class="profile-avwrap">
+            <div class="avatar xl" style="--pf-ring: {myRoles[0]?.color ?? 'var(--accent, #5865f2)'}">
+              {initials(p)}<span class="dot {pr} corner"></span>
             </div>
           </div>
-          <div class="profile-actions">
-            {#if p !== account}
-              <button class="ok-btn" onclick={() => { openDm(p); profileTarget = null; }}>Message</button>
-              <button class="linkish" onclick={() => { openRoles(p); profileTarget = null; }}>Roles</button>
-              <button class="linkish" onclick={() => { moderate("mute", p); profileTarget = null; }}>Mute</button>
-              <button class="linkish" onclick={() => { moderate("ban", p); profileTarget = null; }}>Ban</button>
+          <div class="profile-body">
+            <div class="profile-name-lg">
+              {p}
+              {#if b?.owner}<span class="cap-badge owner">owner</span>
+              {:else if b?.mod}<span class="cap-badge mod">mod</span>{/if}
+            </div>
+            <div class="profile-handle">{p}@{network} · <span class="pres-{pr}">{pr}</span></div>
+
+            {#if myRoles.length}
+              <div class="profile-divider"></div>
+              <div class="profile-section-label">Roles</div>
+              <div class="role-pills">
+                {#each myRoles as r (r.name)}
+                  <span class="role-pill" style="--role: {r.color}"><span class="role-dot"></span>{r.name}</span>
+                {/each}
+              </div>
             {/if}
-            <button class="linkish" onclick={() => navigator.clipboard?.writeText(`${p}@${network}`)}>Copy ID</button>
+
+            <div class="profile-divider"></div>
+            <div class="profile-actions">
+              {#if p !== account}
+                <button class="pf-primary" onclick={() => { openDm(p); profileTarget = null; }}>Message</button>
+                <div class="pf-row">
+                  <button class="pf-secondary" onclick={() => { openRoles(p); profileTarget = null; }}>Manage roles</button>
+                  <button class="pf-secondary" onclick={() => { moderate("mute", p); profileTarget = null; }}>Mute</button>
+                  <button class="pf-secondary danger" onclick={() => { moderate("ban", p); profileTarget = null; }}>Ban</button>
+                </div>
+              {/if}
+              <button class="pf-secondary" onclick={() => navigator.clipboard?.writeText(`${p}@${network}`)}>Copy ID</button>
+            </div>
           </div>
         </div>
       </div>
@@ -1941,87 +2045,137 @@
     {/if}
 
     {#if nsSettingsOpen}
-      <div class="modal-wrap">
-        <button class="modal-backdrop" aria-label="Close" onclick={() => (nsSettingsOpen = false)}></button>
-        <div class="modal ns-settings" role="dialog" aria-modal="true">
-          <div class="modal-head">
-            <h2>Namespace settings — {activeServer}</h2>
-            <button class="linkish" aria-label="Close" onclick={() => (nsSettingsOpen = false)}>✕</button>
+      <div class="settings-overlay" role="dialog" aria-modal="true">
+        <nav class="so-nav">
+          <div class="so-nav-inner">
+            <div class="so-heading">{activeServer}</div>
+            <button class="so-navitem" class:active={nsTab === "overview"} onclick={() => (nsTab = "overview")}>Overview</button>
+            <button class="so-navitem" class:active={nsTab === "roles"} onclick={() => (nsTab = "roles")}>Roles</button>
+            <button class="so-navitem" class:active={nsTab === "members"} onclick={() => (nsTab = "members")}>Members &amp; roles</button>
+            <div class="so-heading">Security</div>
+            <button class="so-navitem" class:active={nsTab === "recovery"} onclick={() => (nsTab = "recovery")}>Recovery</button>
+            <button class="so-navitem danger" class:active={nsTab === "danger"} onclick={() => (nsTab = "danger")}>Danger zone</button>
           </div>
-          <div class="modal-list">
+        </nav>
+        <main class="so-main">
+          <button class="so-close" aria-label="Close settings" onclick={() => (nsSettingsOpen = false)}>✕<span>ESC</span></button>
+          <div class="so-content">
             {#if activeNsMeta?.recovery_eta}
               <div class="ns-card recovery-pending">
                 <div class="ns-info">
                   <div class="ns-name">⚠ Recovery pending (rung {activeNsMeta.recovery_rung})</div>
                   <div class="ns-desc">A root rotation is scheduled. As the live owner you can veto it.</div>
                 </div>
-                <button class="danger-btn" onclick={() => weft.nsRecoveryCancel(network, activeServer).catch((e) => (authError = String(e)))}>Cancel recovery</button>
+                <button class="danger-btn" onclick={() => weft.nsRecoveryCancel(network, activeServer).catch((e) => toast(String(e), "error"))}>Cancel recovery</button>
               </div>
             {/if}
 
-            <div class="settings-sec">
-              <h3>Profile</h3>
-              <label class="fld">Title <input bind:value={nsTitle} placeholder="display name" /></label>
-              <label class="fld">Description <input bind:value={nsDesc} placeholder="what's this namespace about" /></label>
-              <label class="fld">Visibility
-                <select bind:value={nsVis}>
-                  <option value="public">public</option>
-                  <option value="unlisted">unlisted</option>
-                  <option value="private">private</option>
-                </select>
-              </label>
-              <div class="modal-actions"><button class="ok-btn" onclick={saveNsMeta}>Save profile</button></div>
-            </div>
-
-            <div class="settings-sec">
-              <h3>Delegate roles</h3>
-              <label class="fld">Account <input bind:value={nsDelegSubject} placeholder="account" /></label>
-              <div class="fld">
-                Capabilities
-                <div class="cap-chips">
-                  {#each CAPS as c (c)}
-                    <button type="button" class="cap-chip" class:on={nsDelegCaps.includes(c)} onclick={() => toggleDelegCap(c)}>{c}</button>
-                  {/each}
-                </div>
+            {#if nsTab === "overview"}
+              <h1>Overview</h1>
+              <p class="so-sub">How this namespace appears in invites and, if listed, in Discover.</p>
+              <div class="field-label">Name</div>
+              <input class="text-input" bind:value={nsTitle} placeholder="display name" />
+              <div class="section-sep"></div>
+              <div class="field-label">Description</div>
+              <input class="text-input" bind:value={nsDesc} placeholder="what's this namespace about" />
+              <div class="section-sep"></div>
+              <div class="field-label">Visibility</div>
+              <select class="text-input" bind:value={nsVis}>
+                <option value="public">public</option>
+                <option value="unlisted">unlisted</option>
+                <option value="private">private</option>
+              </select>
+              <div class="modal-actions"><button class="ok-btn" onclick={saveNsMeta}>Save changes</button></div>
+            {:else if nsTab === "roles"}
+              <h1>Roles</h1>
+              <p class="so-sub">Named capability bundles. Assigning a role grants its tokens — enforcement stays token-based.</p>
+              <div class="role-list">
+                {#each rolesByScope[nsRoleScope()] ?? [] as r (r.name)}
+                  <div class="role-row">
+                    <span class="role-swatch" style="background:{r.color}"></span>
+                    <div class="role-meta">
+                      <div class="role-title">{r.name}</div>
+                      <div class="role-caps">{r.caps.join(" · ")}</div>
+                    </div>
+                    <button class="mini-danger" onclick={() => deleteRole(r.name)}>Delete</button>
+                  </div>
+                {:else}
+                  <div class="empty-hint">No roles yet — create one below.</div>
+                {/each}
               </div>
-              <div class="modal-actions"><button class="ok-btn" onclick={doDelegate}>Delegate</button></div>
-            </div>
-
-            <div class="settings-sec">
-              <h3>Recovery quorum (§2.4)</h3>
-              <label class="fld">Threshold M <input type="number" min="1" bind:value={nsRecM} /></label>
-              <label class="fld">Quorum keys (comma-separated b64 pubkeys)
-                <input bind:value={nsRecKeys} placeholder="key1,key2,key3" />
-              </label>
-              <div class="modal-actions"><button class="ok-btn" onclick={() => nsRecKeys.trim() && weft.nsRecoverySet(activeServer, nsRecM, nsRecKeys.trim()).catch(() => {})}>Set recovery quorum</button></div>
-
+              <div class="section-sep"></div>
+              <div class="field-label">Create a role</div>
+              <input class="text-input" bind:value={newRoleName} placeholder="Role name (e.g. Moderator)" />
+              <div class="color-row">
+                {#each ROLE_COLORS as c (c)}
+                  <button class="color-dot" class:on={newRoleColor === c} style="background:{c}" aria-label="color {c}" onclick={() => (newRoleColor = c)}></button>
+                {/each}
+              </div>
+              <div class="cap-chips">
+                {#each CAPS as c (c)}
+                  <button type="button" class="cap-chip" class:on={newRoleCaps.includes(c)} onclick={() => toggleNewRoleCap(c)}>{c}</button>
+                {/each}
+              </div>
+              <div class="modal-actions"><button class="ok-btn" disabled={!newRoleName.trim() || !newRoleCaps.length} onclick={createRole}>Create role</button></div>
+            {:else if nsTab === "members"}
+              <h1>Members &amp; roles</h1>
+              <p class="so-sub">Assign a role (grants its token bundle) or delegate individual capabilities.</p>
+              <div class="field-label">Account</div>
+              <input class="text-input" bind:value={nsDelegSubject} placeholder="account" />
+              <div class="section-sep"></div>
+              <div class="field-label">Assign a role</div>
+              <div class="role-pick">
+                {#each rolesByScope[nsRoleScope()] ?? [] as r (r.name)}
+                  <button class="role-pill clickable" style="--role:{r.color}" onclick={() => assignRole(r.name)}><span class="role-dot"></span>{r.name}</button>
+                {:else}
+                  <div class="empty-hint">No roles defined — create some in the Roles tab.</div>
+                {/each}
+              </div>
+              <div class="section-sep"></div>
+              <div class="field-label">Or delegate individual capabilities</div>
+              <div class="cap-chips">
+                {#each CAPS as c (c)}
+                  <button type="button" class="cap-chip" class:on={nsDelegCaps.includes(c)} onclick={() => toggleDelegCap(c)}>{c}</button>
+                {/each}
+              </div>
+              <div class="modal-actions"><button class="ok-btn" onclick={doDelegate}>Grant capabilities</button></div>
+            {:else if nsTab === "recovery"}
+              <h1>Recovery quorum</h1>
+              <p class="so-sub">§2.4 M-of-N root recovery. Share your recovery key, or co-sign and submit a rotation.</p>
+              <div class="field-label">Threshold M</div>
+              <input class="text-input" type="number" min="1" bind:value={nsRecM} />
+              <div class="section-sep"></div>
+              <div class="field-label">Quorum keys (comma-separated b64 pubkeys)</div>
+              <input class="text-input" bind:value={nsRecKeys} placeholder="key1,key2,key3" />
+              <div class="modal-actions"><button class="ok-btn" onclick={() => nsRecKeys.trim() && weft.nsRecoverySet(activeServer, nsRecM, nsRecKeys.trim()).catch((e) => toast(String(e), "error"))}>Set recovery quorum</button></div>
+              <div class="section-sep"></div>
               <div class="set-row">
                 <span>My recovery key (share for the quorum)</span>
-                <button class="linkish" onclick={showRecoveryKey}>Reveal</button>
+                <button class="set-btn" onclick={showRecoveryKey}>Reveal</button>
               </div>
               {#if myRecoveryKey}
                 <div class="modal-join"><input readonly value={myRecoveryKey} /><button onclick={() => navigator.clipboard?.writeText(myRecoveryKey)}>Copy</button></div>
               {/if}
-              <label class="fld">Rotation record (co-sign or submit)
-                <textarea class="edit-box" rows="2" bind:value={recoveryDoc} placeholder="paste a record to co-sign, or Start one below"></textarea>
-              </label>
+              <div class="field-label">Rotation record (co-sign or submit)</div>
+              <textarea class="text-input" rows="2" bind:value={recoveryDoc} placeholder="paste a record to co-sign, or Start one below"></textarea>
               <div class="modal-actions">
-                <button class="linkish" onclick={startRecovery}>Start (recover to me)</button>
-                <button class="linkish" onclick={cosignRecovery}>Co-sign</button>
+                <button class="set-btn" onclick={startRecovery}>Start (recover to me)</button>
+                <button class="set-btn" onclick={cosignRecovery}>Co-sign</button>
                 <button class="ok-btn" onclick={submitRecovery}>Submit</button>
               </div>
-            </div>
-
-            <div class="settings-sec danger-sec">
-              <h3>Danger zone</h3>
-              <label class="fld">Transfer ownership to <input bind:value={nsNewOwner} placeholder="account" /></label>
+            {:else if nsTab === "danger"}
+              <h1>Danger zone</h1>
+              <p class="so-sub">Irreversible actions. Transfer is root-key-signed on this device.</p>
+              <div class="field-label">Transfer ownership to</div>
+              <input class="text-input" bind:value={nsNewOwner} placeholder="account" />
               <div class="modal-actions">
-                <button class="danger-btn" onclick={deleteNamespace}>Delete namespace</button>
                 <button class="danger-btn" onclick={doTransfer}>Transfer (root-signed)</button>
               </div>
-            </div>
+              <div class="section-sep"></div>
+              <div class="modal-actions"><button class="danger-btn" onclick={deleteNamespace}>Delete namespace</button></div>
+            {/if}
           </div>
-        </div>
+        </main>
       </div>
     {/if}
   </div>

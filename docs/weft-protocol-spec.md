@@ -14,7 +14,7 @@
 | History | Per-channel retention; peer backfill gated by manifest `history` flag; **compacted materialized form on the wire** |
 | Wire format | Text control plane + binary data plane |
 | Identity | Network account + portable Ed25519 keypair attestation |
-| Permissions | Scoped capability tokens (signed CBOR, delegable, short-lived) — no role tables |
+| Permissions | Scoped capability tokens (signed CBOR, delegable, short-lived) — no role tables. Roles (§6.5.1) are named, colored *bundles* of these tokens: a display layer, never a separate enforcement path |
 | Voice/video calls | Companion protocol (WEFT-RT); signaling in core |
 | E2EE | Per-channel opt-in, expressed as a retention mode (MLS) |
 | Transport | QUIC native, WebSocket fallback |
@@ -226,6 +226,19 @@ Signed NS verbs (`TRANSFER`, `RECOVERY CANCEL`) carry the root signature in a `@
 | `INVITE REDEEM` | `INVITE REDEEM <b64>` | — | Verifies chain + counter, mints a member token **bound to the redeemer's key**, auto-joins the default channel. Dead invites → `NO-SUCH-TARGET` (indistinct). |
 
 Invite tokens are capability tokens with an **unbound subject**: one object serves single-use / expiring / vanity links — offline-verifiable authorization, never itself a membership credential.
+
+#### 6.5.1 Roles — named capability-token bundles
+
+A **role** is a named, colored bundle of capability tokens at a scope: `(scope, name, color, caps)`. Roles are a *presentation and convenience* layer over §10.4 capabilities — **there is still no role table in the enforcement path.** A role *is* its capabilities: assigning a role grants exactly its `caps` as ordinary tokens, and every permission check remains a pure capability-token check. "Bob is a Moderator" is derived, not stored per-member: Bob displays a role iff his effective caps at the scope are a superset of that role's `caps`. This keeps the invariant "permissions = scoped capability tokens, no role tables" intact while giving clients human-readable, colored labels.
+
+| Command | Syntax | Cap | → Result / notes |
+|---|---|---|---|
+| `ROLE CREATE` | `ROLE CREATE <scope> <color> <cap>[,…] :<name>` | `ns-admin` at scope | Define/replace a role (upsert on `(scope, name)`). `color` is a display hint (e.g. `#e8b93d`); `name` (may contain spaces) rides the trailing. → updated `ROLES` batch. |
+| `ROLE DELETE` | `ROLE DELETE <scope> :<name>` | `ns-admin` at scope | Remove a definition. Already-granted tokens are unaffected (revoke separately). → updated `ROLES` batch. |
+| `ROLE ASSIGN` | `ROLE ASSIGN <scope> <account> :<name>` | `grant:<cap>` for each cap in the bundle | Grants the role's tokens to the account — identical authority + `TOKEN` path as `GRANT`. |
+| `ROLES` | `ROLES <scope>` | — (public: roles aren't secret) | → a `BATCH` of `ROLE <scope> <color> <caps> :<name>`. |
+
+The `ROLE` event carries a definition; clients map an account's caps back to role names+colors for display (profile cards, member lists).
 
 ### 6.6 Federation & operator (F)
 

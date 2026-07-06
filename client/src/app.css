@@ -1207,36 +1207,332 @@ button {
 }
 
 /* member profile card */
-.profile-card {
-  width: min(360px, 92vw);
+/* Discord-style full-page server-settings overlay */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) minmax(0, 2.6fr);
+  background: var(--bg-void);
 }
-.profile-head {
+.so-nav {
+  background: var(--bg-panel, #131314);
+  overflow-y: auto;
+  padding: 52px 8px 24px 0;
+  display: flex;
+  justify-content: flex-end;
+}
+.so-nav-inner {
+  width: 100%;
+  max-width: 210px;
+  padding-left: 14px;
+}
+.so-heading {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 16px 10px 6px;
+}
+.so-heading:first-child {
+  padding-top: 0;
+  font-size: 15px;
+  text-transform: none;
+  color: var(--text-primary);
+}
+.so-navitem {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  margin-bottom: 2px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 15px;
+}
+.so-navitem:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.so-navitem.active {
+  background: var(--bg-panel-raised);
+  color: var(--text-primary);
+}
+.so-navitem.danger {
+  color: var(--danger, #d83c3e);
+}
+.so-main {
+  position: relative;
+  overflow-y: auto;
+  padding: 52px 40px 60px;
+}
+.so-content {
+  max-width: 620px;
+}
+.so-content h1 {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0 0 8px;
+}
+.so-sub {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin: 0 0 24px;
+  line-height: 1.4;
+}
+.so-close {
+  position: absolute;
+  top: 24px;
+  right: 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 40px;
+  padding: 6px;
+  border: 1px solid var(--border-hair-strong);
+  border-radius: 50%;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 15px;
+}
+.so-close span {
+  font-size: 9px;
+  font-weight: 700;
+}
+.so-close:hover {
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+.field-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin: 0 0 8px;
+}
+.text-input {
+  width: 100%;
+  background: var(--bg-void);
+  border: 1px solid var(--border-hair-strong);
+  border-radius: 5px;
+  padding: 10px 12px;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 15px;
+}
+.section-sep {
+  height: 1px;
+  background: color-mix(in srgb, var(--border-hair-strong) 55%, transparent);
+  margin: 22px 0;
+}
+/* role management */
+.role-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.role-row {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-bottom: 16px;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
 }
-.avatar.lg {
-  position: relative;
-  width: 56px;
-  height: 56px;
-  font-size: 18px;
+.role-swatch {
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
+  flex-shrink: 0;
 }
-.profile-name {
-  font-size: 18px;
-  font-weight: 650;
+.role-meta {
+  flex: 1;
+  min-width: 0;
 }
-.profile-sub {
+.role-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+.role-caps {
   font-size: 12px;
   color: var(--text-muted);
   font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.profile-actions {
+.mini-danger {
+  border: none;
+  background: none;
+  color: var(--danger, #d83c3e);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+.mini-danger:hover {
+  text-decoration: underline;
+}
+.color-row {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+.color-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+.color-dot.on {
+  border-color: var(--text-primary);
+  box-shadow: 0 0 0 2px var(--bg-void) inset;
+}
+.role-pick {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+.role-pill.clickable {
+  cursor: pointer;
+  border: none;
+  font: inherit;
+}
+.role-pill.clickable:hover {
+  background: color-mix(in srgb, var(--role) 28%, transparent);
+}
+
+/* Discord-style profile popover */
+.profile-pop {
+  position: relative;
+  width: min(340px, 92vw);
+  background: var(--bg-elevated, #232428);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  z-index: 101;
+}
+.profile-banner {
+  height: 68px;
+  background: linear-gradient(135deg, var(--pf-accent), color-mix(in srgb, var(--pf-accent) 45%, #000));
+}
+.profile-avwrap {
+  position: absolute;
+  left: 16px;
+  top: 34px;
+}
+.avatar.xl {
+  position: relative;
+  width: 76px;
+  height: 76px;
+  font-size: 26px;
+  border-radius: 50%;
+  border: 5px solid var(--bg-elevated, #232428);
+  background: var(--pf-ring, #5865f2);
+}
+.avatar.xl .dot.corner {
+  width: 18px;
+  height: 18px;
+  border-width: 4px;
+  right: 2px;
+  bottom: 2px;
+}
+.profile-body {
+  padding: 40px 16px 16px;
+}
+.profile-name-lg {
+  display: flex;
   align-items: center;
+  gap: 7px;
+  font-size: 20px;
+  font-weight: 700;
+}
+.profile-handle {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 2px;
+}
+.profile-divider {
+  height: 1px;
+  background: color-mix(in srgb, var(--border-hair-strong) 60%, transparent);
+  margin: 12px 0;
+}
+.profile-section-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 7px;
+}
+.role-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.role-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--role) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--role) 55%, transparent);
+}
+.role-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--role);
+}
+.profile-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pf-row {
+  display: flex;
+  gap: 8px;
+}
+.pf-primary,
+.pf-secondary {
+  flex: 1;
+  padding: 9px 12px;
+  border-radius: var(--radius-md);
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+.pf-primary {
+  background: var(--accent, #5865f2);
+  color: #fff;
+}
+.pf-primary:hover {
+  filter: brightness(1.08);
+}
+.pf-secondary {
+  background: var(--bg-panel-raised);
+  color: var(--text-secondary);
+}
+.pf-secondary:hover {
+  color: var(--text-primary);
+}
+.pf-secondary.danger {
+  color: var(--danger, #d83c3e);
 }
 
 /* settings rows */

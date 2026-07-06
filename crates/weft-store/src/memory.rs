@@ -11,12 +11,13 @@ use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, Retent
 use crate::compact::compaction_plan;
 use crate::traits::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MembershipStore,
-    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, HOLD_RADIUS,
+    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, RoleStore,
+    HOLD_RADIUS,
 };
 use crate::types::{
     ChannelRecord, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord, NamespaceRecord,
     NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome, ReportRecord,
-    ReportResolution, RootHistoryEntry, Scope, Verification,
+    ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 use weft_proto::{ContentState, ReportStatus};
@@ -70,6 +71,8 @@ struct Inner {
     pins: HashMap<ChannelName, std::collections::BTreeMap<Ulid, MsgId>>,
     /// account → channels it's a member of (§6.3 persistent membership).
     memberships: HashMap<Account, std::collections::HashSet<ChannelName>>,
+    /// scope → role name → (color, caps) (§6.5 role definitions).
+    roles: HashMap<String, std::collections::BTreeMap<String, (String, Vec<String>)>>,
 }
 
 #[derive(Default)]
@@ -1028,6 +1031,50 @@ impl MembershipStore for MemoryStore {
             .memberships
             .get(account)
             .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default())
+    }
+}
+
+#[async_trait]
+impl RoleStore for MemoryStore {
+    async fn set_role(
+        &self,
+        scope: &str,
+        name: &str,
+        color: &str,
+        caps: &[String],
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        inner
+            .roles
+            .entry(scope.to_string())
+            .or_default()
+            .insert(name.to_string(), (color.to_string(), caps.to_vec()));
+        Ok(())
+    }
+
+    async fn delete_role(&self, scope: &str, name: &str) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(defs) = inner.roles.get_mut(scope) {
+            defs.remove(name);
+        }
+        Ok(())
+    }
+
+    async fn roles(&self, scope: &str) -> Result<Vec<RoleDef>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .roles
+            .get(scope)
+            .map(|defs| {
+                defs.iter()
+                    .map(|(name, (color, caps))| RoleDef {
+                        name: name.clone(),
+                        color: color.clone(),
+                        caps: caps.clone(),
+                    })
+                    .collect()
+            })
             .unwrap_or_default())
     }
 }

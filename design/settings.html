@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8" />
+    <title>Reference: server menu + server settings</title>
+    <style>
+        /*
+          Static layout reference recreating two uploaded screenshots:
+            1) the server dropdown/context menu
+            2) the "Serverprofil" server-settings page
+          Colors approximated from source pixel samples, not pixel-exact.
+          Structure/spacing reference only — no interactivity.
+          Both shown side by side on one page for convenience.
+        */
+        *{ box-sizing:border-box; }
+        html,body{ margin:0; }
+        body{
+            background:#0f0f10;
+            font-family:-apple-system, "Segoe UI", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+            color:#dbdee1;
+            padding:24px;
+            display:flex;
+            gap:32px;
+            align-items:flex-start;
+            flex-wrap:wrap;
+        }
+        .caption{
+            font-size:12px; color:#87898c; margin:0 0 8px; font-family:ui-monospace,monospace;
+        }
+
+        /* =========================================================
+           1) SERVER DROPDOWN MENU
+           ========================================================= */
+        .menu-demo{ width:265px; }
+        .server-header{
+            display:flex; align-items:center; justify-content:space-between;
+            background:#111214;
+            padding:12px 14px;
+            border-bottom:1px solid #000;
+            font-weight:600; font-size:15px; color:#f2f3f5;
+        }
+        .server-header .chev{ color:#b5bac1; }
+
+        .menu{
+            background:#242428;
+            border-radius:4px;
+            padding:6px 8px;
+            box-shadow:0 8px 16px rgba(0,0,0,.24);
+            margin-top:8px;
+        }
+        .menu-item{
+            display:flex; align-items:center; justify-content:space-between;
+            padding:8px 8px;
+            border-radius:4px;
+            font-size:14px;
+            color:#b5bac1;
+            cursor:default;
+        }
+        .menu-item:hover{ background:#4752c4; color:#fff; }
+        .menu-item.active{ background:#313135; color:#f2f3f5; }
+        .menu-item.danger{ color:#f23f43; }
+        .menu-item .ic{ width:18px; height:18px; opacity:.9; flex-shrink:0; }
+        .menu-sep{ height:1px; background:#333338; margin:6px 4px; }
+        .menu-item .checkbox{
+            width:18px; height:18px; border-radius:4px; border:1px solid #6b6d72;
+        }
+
+        /* =========================================================
+           2) SERVER SETTINGS PAGE
+           ========================================================= */
+        .settings-demo{ width:966px; max-width:100%; }
+        .settings{
+            display:grid;
+            grid-template-columns:218px 1fr;
+            height:720px;
+            background:#1d1d20;
+            border-radius:8px;
+            overflow:hidden;
+        }
+        .settings-nav{
+            background:#131314;
+            padding:52px 8px 20px 0;
+            overflow-y:auto;
+        }
+        .nav-inner{ max-width:190px; margin-left:auto; padding-left:12px; }
+        .nav-heading{
+            font-size:11px; font-weight:700; letter-spacing:.03em;
+            text-transform:uppercase; color:#87898c;
+            padding:16px 10px 6px;
+        }
+        .nav-heading:first-child{ padding-top:0; }
+        .nav-item{
+            display:flex; align-items:center; justify-content:space-between;
+            padding:6px 10px;
+            border-radius:4px;
+            font-size:15px; color:#b5bac1;
+            margin-bottom:2px;
+        }
+        .nav-item:hover{ background:#242428; color:#dbdee1; }
+        .nav-item.active{ background:#313135; color:#f2f3f5; }
+        .nav-item .ext{ width:14px; height:14px; opacity:.7; }
+        .nav-sep{ height:1px; background:#242428; margin:8px 10px; }
+
+        .settings-main{
+            padding:48px 40px;
+            overflow-y:auto;
+        }
+        .settings-main h1{ font-size:20px; font-weight:700; color:#f2f3f5; margin:0 0 8px; }
+        .settings-main .sub{ font-size:14px; color:#b5bac1; margin:0 0 24px; max-width:540px; line-height:1.4; }
+        .field-label{
+            font-size:12px; font-weight:700; letter-spacing:.02em; text-transform:uppercase;
+            color:#b5bac1; margin:0 0 8px;
+        }
+        .text-input{
+            width:100%; max-width:560px;
+            background:#19191c;
+            border:1px solid #000;
+            border-radius:4px;
+            padding:10px 12px;
+            color:#dbdee1; font-size:15px;
+        }
+        .section-sep{ height:1px; background:#2b2b30; margin:24px 0; max-width:560px; }
+
+        .hint{ font-size:13px; color:#b5bac1; margin:0 0 12px; }
+        .btn-blurple{
+            background:#5865f2; color:#fff; border:none;
+            border-radius:4px; padding:9px 16px; font-size:14px; font-weight:500;
+        }
+
+        .banner-grid{
+            display:grid; grid-template-columns:repeat(5, 104px); gap:12px;
+            max-width:560px;
+        }
+        .banner-swatch{
+            height:60px; border-radius:6px; cursor:pointer;
+            border:2px solid transparent;
+        }
+        .banner-swatch.selected{ border-color:#5865f2; }
+        .sw-dark{ background:linear-gradient(135deg,#3a3a3d,#0f0f10); }
+        .sw-pink{ background:linear-gradient(135deg,#f06fb8,#d6247e); }
+        .sw-red{ background:linear-gradient(135deg,#e8654f,#b93124); }
+        .sw-orange{ background:linear-gradient(135deg,#eba05a,#c86a1e); }
+        .sw-yellow{ background:linear-gradient(135deg,#ecd85a,#d4b32a); }
+        .sw-purple{ background:linear-gradient(135deg,#9d6fc4,#5e3c7c); }
+        .sw-blue{ background:linear-gradient(135deg,#7cc4f8,#2e8ad6); }
+        .sw-teal{ background:linear-gradient(135deg,#a9 efe0,#4fb0a5); }
+        .sw-teal{ background:linear-gradient(135deg,#a9efe0,#4fb0a5); }
+        .sw-green{ background:linear-gradient(135deg,#7f9a3a,#3d4d1c); }
+        .sw-gray{ background:linear-gradient(135deg,#6b6b6b,#2a2a2a); }
+
+        .prop-grid{
+            display:grid; grid-template-columns:repeat(3, 176px); gap:12px;
+            max-width:560px;
+        }
+        .prop-input{
+            display:flex; align-items:center; gap:8px;
+            background:#19191c; border:1px solid #000; border-radius:4px;
+            padding:10px 12px; color:#87898c; font-size:14px;
+        }
+        .prop-input .emoji{ opacity:.6; }
+    </style>
+</head>
+<body>
+
+<!-- ============ SERVER DROPDOWN MENU ============ -->
+<div class="menu-demo">
+    <p class="caption">1 · server dropdown menu</p>
+    <div class="server-header">
+        <span>Mikay and Jannik relations…</span>
+        <span class="chev">⌃</span>
+    </div>
+    <div class="menu">
+        <div class="menu-item">Server-Boost
+            <svg class="ic" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 3 7v6c0 5 4 8 9 9 5-1 9-4 9-9V7l-9-5Z"/></svg>
+        </div>
+        <div class="menu-sep"></div>
+        <div class="menu-item">Zu Server einladen
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
+        </div>
+        <div class="menu-item active">Servereinstellungen
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        </div>
+        <div class="menu-item">Kanal erstellen
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
+        </div>
+        <div class="menu-item">Kategorie erstellen
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h7l2 2h9v10a1 1 0 0 1-1 1H3Z"/><path d="M12 13v4M10 15h4"/></svg>
+        </div>
+        <div class="menu-item">Event erstellen
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M12 14v4M10 16h4"/></svg>
+        </div>
+        <div class="menu-item">App-Verzeichnis
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M17.5 14v7M14 17.5h7"/></svg>
+        </div>
+        <div class="menu-sep"></div>
+        <div class="menu-item">Benachrichtigungseinst…
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+        </div>
+        <div class="menu-item">Privatsphäreeinstellungen
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 4 5v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V5l-8-3Z"/></svg>
+        </div>
+        <div class="menu-sep"></div>
+        <div class="menu-item">Serverspezifisches Profi…
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+        </div>
+        <div class="menu-item">Stummgeschaltete Kanä…
+            <span class="checkbox"></span>
+        </div>
+        <div class="menu-sep"></div>
+        <div class="menu-item">Server-ID kopieren
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="7" width="18" height="10" rx="2"/><text x="7" y="15" font-size="7" fill="currentColor" stroke="none">ID</text></svg>
+        </div>
+    </div>
+</div>
+
+<!-- ============ SERVER SETTINGS ============ -->
+<div class="settings-demo">
+    <p class="caption">2 · server settings — Serverprofil</p>
+    <div class="settings">
+        <nav class="settings-nav">
+            <div class="nav-inner">
+                <div class="nav-heading">Mikay and Jannik Relationship …</div>
+                <div class="nav-item active">Serverprofil</div>
+                <div class="nav-item">Server-Tag</div>
+                <div class="nav-item">Beteiligung</div>
+                <div class="nav-item">Boost-Vorteile</div>
+
+                <div class="nav-heading">Ausdruck</div>
+                <div class="nav-item">Emoji</div>
+                <div class="nav-item">Sticker</div>
+                <div class="nav-item">Soundboard</div>
+
+                <div class="nav-heading">Personen</div>
+                <div class="nav-item">Mitglieder</div>
+                <div class="nav-item">Rollen</div>
+                <div class="nav-item">Einladungen</div>
+                <div class="nav-item">Zugriff</div>
+
+                <div class="nav-heading">Apps</div>
+                <div class="nav-item">Integrationen</div>
+                <div class="nav-item">App-Verzeichnis
+                    <svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14 21 3"/></svg>
+                </div>
+
+                <div class="nav-heading">Moderation</div>
+                <div class="nav-item">Sicherheitseinrichtung</div>
+                <div class="nav-item">Audit-Log</div>
+                <div class="nav-item">Gebannte Mitglieder</div>
+                <div class="nav-item">AutoMod</div>
+            </div>
+        </nav>
+
+        <main class="settings-main">
+            <h1>Serverprofil</h1>
+            <p class="sub">Passe an, wie dein Server in Einladungslinks und, falls aktiviert, in „Server entdecken" und Ankündigungskanal-Nachrichten erscheint</p>
+
+            <div class="field-label">Name</div>
+            <input class="text-input" type="text" value="Mikay and Jannik relationship server" />
+
+            <div class="section-sep"></div>
+
+            <div class="field-label">Icon</div>
+            <p class="hint">Wir empfehlen ein Bild von mindestens 512x512 px.</p>
+            <button class="btn-blurple">Server-Icon ändern</button>
+
+            <div class="section-sep"></div>
+
+            <div class="field-label">Banner</div>
+            <div class="banner-grid">
+                <div class="banner-swatch sw-dark selected"></div>
+                <div class="banner-swatch sw-pink"></div>
+                <div class="banner-swatch sw-red"></div>
+                <div class="banner-swatch sw-orange"></div>
+                <div class="banner-swatch sw-yellow"></div>
+                <div class="banner-swatch sw-purple"></div>
+                <div class="banner-swatch sw-blue"></div>
+                <div class="banner-swatch sw-teal"></div>
+                <div class="banner-swatch sw-green"></div>
+                <div class="banner-swatch sw-gray"></div>
+            </div>
+
+            <div class="section-sep"></div>
+
+            <div class="field-label">Eigenschaften</div>
+            <p class="hint">Füge bis zu 5 Eigenschaften hinzu, um die Interessen und die Persönlichkeit deines Servers zu zeigen.</p>
+            <div class="prop-grid">
+                <div class="prop-input"><span class="emoji">☺</span></div>
+                <div class="prop-input"><span class="emoji">☺</span></div>
+                <div class="prop-input"><span class="emoji">☺</span></div>
+                <div class="prop-input"><span class="emoji">☺</span></div>
+                <div class="prop-input"><span class="emoji">☺</span></div>
+            </div>
+        </main>
+    </div>
+</div>
+
+</body>
+</html>

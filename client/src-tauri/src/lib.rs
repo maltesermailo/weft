@@ -361,6 +361,38 @@ fn caps(conn: State<'_, Conn>, account: String, scope: String) -> Result<(), Str
     conn.send(weft::build_caps(&account, &scope)?)
 }
 
+/// §6.6 named roles.
+#[tauri::command]
+fn roles(conn: State<'_, Conn>, scope: String) -> Result<(), String> {
+    conn.send(weft::build_roles(&scope)?)
+}
+
+#[tauri::command]
+fn role_create(
+    conn: State<'_, Conn>,
+    scope: String,
+    color: String,
+    caps: String,
+    name: String,
+) -> Result<(), String> {
+    conn.send(weft::build_role_create(&scope, &color, &caps, &name)?)
+}
+
+#[tauri::command]
+fn role_delete(conn: State<'_, Conn>, scope: String, name: String) -> Result<(), String> {
+    conn.send(weft::build_role_delete(&scope, &name)?)
+}
+
+#[tauri::command]
+fn role_assign(
+    conn: State<'_, Conn>,
+    scope: String,
+    account: String,
+    name: String,
+) -> Result<(), String> {
+    conn.send(weft::build_role_assign(&scope, &account, &name)?)
+}
+
 #[tauri::command]
 fn members(conn: State<'_, Conn>, channel: String) -> Result<(), String> {
     conn.send(weft::build_members(&channel)?)
@@ -432,6 +464,10 @@ pub fn run() {
             recovery_start,
             recovery_cosign,
             ns_recover,
+            roles,
+            role_create,
+            role_delete,
+            role_assign,
             history,
             edit,
             delete,

@@ -2604,3 +2604,61 @@ async fn parting_stops_auto_rejoin() {
         }
     }
 }
+
+// ---- §6.5 named roles (capability-token bundles) ----
+
+#[tokio::test]
+async fn roles_define_list_and_assign_grants_the_bundle() {
+    let ctx = ctx_ops(&["#general"], &["root"]);
+    let mut root = ready(&ctx, "root").await;
+    let _bob = ready(&ctx, "bob").await;
+
+    // Define a role at the global scope (operator authority) → updated batch.
+    root.send("@label=c ROLE CREATE * #e8b93d mute,ban,kick :Moderator");
+    assert!(matches!(root.recv().await.event, Event::BatchStart { .. }));
+    let ev = root.recv().await;
+    let Event::Role {
+        name,
+        caps,
+        color,
+        scope,
+    } = &ev.event
+    else {
+        panic!("expected ROLE, got {ev:?}");
+    };
+    assert_eq!(name, "Moderator");
+    assert_eq!(color, "#e8b93d");
+    assert_eq!(scope, "*");
+    assert_eq!(caps, "mute,ban,kick");
+    assert!(matches!(root.recv().await.event, Event::BatchEnd { .. }));
+
+    // Assign it to bob → grants the bundle (a signed Token).
+    root.send("@label=a ROLE ASSIGN * bob :Moderator");
+    let ev = root.recv().await;
+    assert!(matches!(&ev.event, Event::Token { .. }), "got {ev:?}");
+
+    // bob now effectively holds the role's caps.
+    root.send("@label=q CAPS bob *");
+    let ev = root.recv().await;
+    let Event::Caps { caps, .. } = &ev.event else {
+        panic!("expected CAPS, got {ev:?}");
+    };
+    assert!(
+        caps.contains("mute") && caps.contains("ban") && caps.contains("kick"),
+        "bob holds the role's caps, got {caps}"
+    );
+}
+
+#[tokio::test]
+async fn role_management_needs_admin_authority() {
+    let ctx = ctx_ops(&["#general"], &["root"]);
+    let _root = ready(&ctx, "root").await;
+    let mut mallory = ready(&ctx, "mallory").await; // no caps
+
+    mallory.send("@label=x ROLE CREATE * #fff send :Sneaky");
+    let reply = mallory.expect_err(ErrCode::CapRequired).await;
+    let Event::Err(err) = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(err.context.as_deref(), Some("ns-admin"));
+}

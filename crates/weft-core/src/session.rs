@@ -731,6 +731,28 @@ impl<S: ControlStream> Session<S> {
                 self.on_revoke(label, subject, scope, caps, epoch, account)
                     .await
             }
+            // §6.5 named roles (capability-token bundles).
+            Command::RoleCreate {
+                scope,
+                color,
+                caps,
+                name,
+            } => {
+                self.on_role_create(label, scope, color, caps, name, account)
+                    .await
+            }
+            Command::RoleDelete { scope, name } => {
+                self.on_role_delete(label, scope, name, account).await
+            }
+            Command::RoleAssign {
+                scope,
+                account: subject,
+                name,
+            } => {
+                self.on_role_assign(label, scope, subject, name, account)
+                    .await
+            }
+            Command::RolesList { scope } => self.on_roles_list(label, scope).await,
             Command::ChannelCreate { channel, policy } => {
                 self.on_channel_create(label, channel, policy, account)
                     .await
@@ -1738,6 +1760,138 @@ impl<S: ControlStream> Session<S> {
                 account: subject,
                 scope: scope_str,
                 caps: held.join(","),
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// §6.5 ROLE CREATE: define/replace a named capability-token bundle at a
+    /// scope (scope admin only). Responds with the updated `ROLES` batch.
+    async fn on_role_create(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        color: String,
+        caps: String,
+        name: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        if let TokenScope::Namespace(ns) = &token_scope {
+            if !self.namespace_exists(ns).await {
+                return self.no_such_target(label).await;
+            }
+        }
+        let now = unix_now();
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::NsAdmin, &token_scope, now)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "ns-admin").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        // The bundle must be real capabilities (strict-out).
+        let Some(parsed) = parse_caps(&caps) else {
+            self.send_err(label, ErrCode::Malformed, None, "unknown capability")
+                .await?;
+            return Ok(Flow::Continue);
+        };
+        let cap_strings: Vec<String> = parsed.iter().map(Capability::to_string).collect();
+        if let Err(e) = self
+            .ctx
+            .roles
+            .set_role(&scope, &name, &color, &cap_strings)
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        self.on_roles_list(label, scope).await
+    }
+
+    /// §6.5 ROLE DELETE (scope admin only) → updated `ROLES` batch.
+    async fn on_role_delete(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        name: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        let now = unix_now();
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::NsAdmin, &token_scope, now)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "ns-admin").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        if let Err(e) = self.ctx.roles.delete_role(&scope, &name).await {
+            return self.internal(label, &e).await;
+        }
+        self.on_roles_list(label, scope).await
+    }
+
+    /// §6.5 ROLE ASSIGN: grant the role's token bundle to an account. Resolves
+    /// the role to its caps and reuses the GRANT path — the authority check
+    /// (`account_can_grant`) and token issue are identical, so enforcement
+    /// stays purely token-based.
+    async fn on_role_assign(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        subject: Account,
+        name: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let roles = match self.ctx.roles.roles(&scope).await {
+            Ok(roles) => roles,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let Some(role) = roles.into_iter().find(|r| r.name == name) else {
+            return self.no_such_target(label).await;
+        };
+        let caps = role.caps.join(",");
+        self.on_grant(label, subject.to_string(), scope, caps, None, account)
+            .await
+    }
+
+    /// §6.5 ROLES: the role definitions at a scope, as a `BATCH` of `ROLE`.
+    async fn on_roles_list(&mut self, label: Option<String>, scope: String) -> io::Result<Flow> {
+        let roles = match self.ctx.roles.roles(&scope).await {
+            Ok(roles) => roles,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        self.batches += 1;
+        let id = format!("r{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for role in roles {
+            self.send_event(
+                None,
+                Event::Role {
+                    scope: scope.clone(),
+                    color: role.color,
+                    caps: role.caps.join(","),
+                    name: role.name,
+                },
+            )
+            .await?;
+        }
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+                compacted: false,
             },
         )
         .await?;

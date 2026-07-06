@@ -152,6 +152,28 @@ pub enum Command {
         /// Bumps the scope revocation epoch (§10.4).
         epoch: Option<u64>,
     },
+    /// `ROLE CREATE <scope> <color> <caps> :<name>` (§6.5) — define/replace a
+    /// named, colored capability-token bundle at a scope. `caps` a comma list;
+    /// the display `name` (may contain spaces) rides the trailing.
+    RoleCreate {
+        scope: String,
+        color: String,
+        caps: String,
+        name: String,
+    },
+    /// `ROLE DELETE <scope> :<name>` — remove a role definition (§6.5).
+    RoleDelete { scope: String, name: String },
+    /// `ROLE ASSIGN <scope> <account> :<name>` — grant the role's token bundle
+    /// to an account (§6.5). Enforcement stays token-based; the role resolves
+    /// to its caps.
+    RoleAssign {
+        scope: String,
+        account: Account,
+        name: String,
+    },
+    /// `ROLES <scope>` — list the role definitions at a scope (§6.5) → a BATCH
+    /// of `ROLE` events.
+    RolesList { scope: String },
     /// `CHANNEL CREATE <#chan> [policy]` — default `retained:90d` (§6.3).
     ChannelCreate {
         channel: ChannelName,
@@ -624,6 +646,64 @@ impl Command {
                     scope,
                     caps,
                     epoch,
+                })
+            }
+            "ROLE" => {
+                let mut args = Args::new(line, "ROLE");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "CREATE" => {
+                        let scope = args.req("scope")?.to_string();
+                        let color = args.req("color")?.to_string();
+                        let caps = args.req("caps")?.to_string();
+                        if !caps_ok(&caps) {
+                            return Err(ParseError::BadParam {
+                                verb: "ROLE",
+                                what: "caps",
+                                value: caps,
+                            });
+                        }
+                        let name = line.trailing.clone().ok_or(ParseError::MissingParam {
+                            verb: "ROLE",
+                            what: "name",
+                        })?;
+                        Ok(Command::RoleCreate {
+                            scope,
+                            color,
+                            caps,
+                            name,
+                        })
+                    }
+                    "DELETE" => Ok(Command::RoleDelete {
+                        scope: args.req("scope")?.to_string(),
+                        name: line.trailing.clone().ok_or(ParseError::MissingParam {
+                            verb: "ROLE",
+                            what: "name",
+                        })?,
+                    }),
+                    "ASSIGN" => Ok(Command::RoleAssign {
+                        scope: args.req("scope")?.to_string(),
+                        account: args.req("account")?.parse().map_err(|_| {
+                            ParseError::BadParam {
+                                verb: "ROLE",
+                                what: "account",
+                                value: String::new(),
+                            }
+                        })?,
+                        name: line.trailing.clone().ok_or(ParseError::MissingParam {
+                            verb: "ROLE",
+                            what: "name",
+                        })?,
+                    }),
+                    other => Ok(Command::Unknown {
+                        verb: format!("ROLE {other}"),
+                    }),
+                }
+            }
+            "ROLES" => {
+                let mut args = Args::new(line, "ROLES");
+                Ok(Command::RolesList {
+                    scope: args.req("scope")?.to_string(),
                 })
             }
             "CHANNEL" => {
@@ -1144,6 +1224,44 @@ impl Command {
                 }
                 ("REVOKE", params, None)
             }
+            Command::RoleCreate {
+                scope,
+                color,
+                caps,
+                name,
+            } => {
+                if !caps_ok(caps) {
+                    return Err(SerializeError::BadParam {
+                        param: caps.clone(),
+                        reason: "caps must be a non-empty space-free list",
+                    });
+                }
+                (
+                    "ROLE",
+                    vec![
+                        "CREATE".to_string(),
+                        scope.clone(),
+                        color.clone(),
+                        caps.clone(),
+                    ],
+                    Some(name.clone()),
+                )
+            }
+            Command::RoleDelete { scope, name } => (
+                "ROLE",
+                vec!["DELETE".to_string(), scope.clone()],
+                Some(name.clone()),
+            ),
+            Command::RoleAssign {
+                scope,
+                account,
+                name,
+            } => (
+                "ROLE",
+                vec!["ASSIGN".to_string(), scope.clone(), account.to_string()],
+                Some(name.clone()),
+            ),
+            Command::RolesList { scope } => ("ROLES", vec![scope.clone()], None),
             Command::ChannelCreate { channel, policy } => {
                 let mut params = vec!["CREATE".to_string(), channel.to_string()];
                 if let Some(policy) = policy {
@@ -1604,6 +1722,24 @@ mod tests {
         round_trip(&Request::new(Command::Caps {
             account: "ada".parse().unwrap(),
             scope: "#general".to_string(),
+        }));
+        round_trip(&Request::new(Command::RoleCreate {
+            scope: "ns:gaming".to_string(),
+            color: "#e8b93d".to_string(),
+            caps: "mute,ban,kick,pin".to_string(),
+            name: "Head Moderator".to_string(),
+        }));
+        round_trip(&Request::new(Command::RoleDelete {
+            scope: "ns:gaming".to_string(),
+            name: "Head Moderator".to_string(),
+        }));
+        round_trip(&Request::new(Command::RoleAssign {
+            scope: "ns:gaming".to_string(),
+            account: "bob".parse().unwrap(),
+            name: "Head Moderator".to_string(),
+        }));
+        round_trip(&Request::new(Command::RolesList {
+            scope: "ns:gaming".to_string(),
         }));
         assert_eq!(
             Request::parse("JOIN"),

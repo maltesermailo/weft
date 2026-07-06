@@ -27,12 +27,13 @@ pub use memory::MemoryStore;
 pub use postgres::PgStore;
 pub use traits::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MembershipStore,
-    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, HOLD_RADIUS,
+    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, RoleStore,
+    HOLD_RADIUS,
 };
 pub use types::{
     ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord,
     NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome,
-    ReportRecord, ReportResolution, RootHistoryEntry, Scope, Verification,
+    ReportRecord, ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
 };
 
 use thiserror::Error;

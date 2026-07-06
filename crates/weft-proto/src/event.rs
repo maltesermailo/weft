@@ -152,6 +152,15 @@ pub enum Event {
         scope: String,
         caps: String,
     },
+    /// `ROLE <scope> <color> <caps> :<name>` — a role definition: a named,
+    /// colored capability-token bundle (§6.5, §7). Sent in the `ROLES` batch
+    /// and broadcast on create.
+    Role {
+        scope: String,
+        color: String,
+        caps: String,
+        name: String,
+    },
     /// `PRESENCE <user@net> <status>` — never bridged.
     Presence {
         user: UserRef,
@@ -427,6 +436,15 @@ impl Event {
                     account: args.req("account")?.parse()?,
                     scope: args.req("scope")?.to_string(),
                     caps: line.trailing.clone().unwrap_or_default(),
+                })
+            }
+            "ROLE" => {
+                let mut args = Args::new(line, "ROLE");
+                Ok(Event::Role {
+                    scope: args.req("scope")?.to_string(),
+                    color: args.req("color")?.to_string(),
+                    caps: args.req("caps")?.to_string(),
+                    name: line.trailing.clone().unwrap_or_default(),
                 })
             }
             "MARKED" => {
@@ -883,6 +901,16 @@ impl Event {
                 vec![account.to_string(), scope.clone()],
                 Some(caps.clone()),
             ),
+            Event::Role {
+                scope,
+                color,
+                caps,
+                name,
+            } => (
+                "ROLE",
+                vec![scope.clone(), color.clone(), caps.clone()],
+                Some(name.clone()),
+            ),
             Event::Presence { user, status } => {
                 ("PRESENCE", vec![user.to_string(), status.to_string()], None)
             }
@@ -1310,6 +1338,12 @@ mod tests {
             account: "ada".parse().unwrap(),
             scope: "#general".to_string(),
             caps: String::new(),
+        }));
+        round_trip(&Reply::new(Event::Role {
+            scope: "ns:gaming".to_string(),
+            color: "#e8b93d".to_string(),
+            caps: "mute,ban,kick,pin".to_string(),
+            name: "Head Moderator".to_string(),
         }));
         round_trip(&Reply::new(Event::Presence {
             user: "ada@hda.example".parse().unwrap(),

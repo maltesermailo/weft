@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Reference: profile card overlay</title>
+    <style>
+        /*
+          Static layout reference recreating the uploaded screenshot's structure —
+          a user profile popover card overlaid on a member-list sidebar.
+          Colors are approximated from the source screenshot's pixel values, not
+          pixel-exact. The avatar is a plain placeholder (initials on a flat
+          color) rather than a recreation of the original character art.
+          Intended purely as a structural/spacing reference, not a final asset.
+        */
+        *{ box-sizing:border-box; }
+        html,body{ margin:0; height:100%; }
+        body{
+            background:#1e1f22;
+            font-family:-apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+            display:flex;
+            justify-content:center;
+            align-items:center;
+            min-height:100vh;
+        }
+
+        .stage{
+            position:relative;
+            width:576px;
+            height:339px;
+            background:#19191c;
+            overflow:hidden;
+            border-radius:6px;
+            box-shadow:0 0 0 1px #000;
+        }
+
+        /* ---- right-hand member sidebar (the underlying surface) ---- */
+        .member-sidebar{
+            position:absolute;
+            top:0; right:0;
+            width:210px; height:100%;
+            background:#19191c;
+            padding:10px 8px;
+        }
+        .group-label{
+            font-size:11px;
+            font-weight:600;
+            color:#96989d;
+            padding:6px 6px 4px;
+            text-transform:none;
+        }
+        .member-row{
+            display:flex;
+            align-items:flex-start;
+            gap:8px;
+            padding:6px 6px;
+            border-radius:6px;
+        }
+        .member-row.highlighted{ background:#35373c; }
+        .member-row .avatar{
+            width:32px; height:32px;
+            border-radius:50%;
+            flex-shrink:0;
+            display:flex; align-items:center; justify-content:center;
+            font-size:12px; font-weight:700; color:#fff;
+            position:relative;
+        }
+        .avatar.nightishaman{ background:#6f7dbd; }
+        .avatar.mik{ background:#7a5a4a; opacity:.55; }
+        .status-dot{
+            position:absolute; right:-1px; bottom:-1px;
+            width:10px; height:10px; border-radius:50%;
+            border:2.5px solid #19191c;
+        }
+        .status-dot.online{ background:#3ba55d; }
+        .member-row .who{ min-width:0; }
+        .member-row .name{ font-size:14px; font-weight:600; color:#f2f3f5; line-height:1.3; }
+        .member-row.offline .name{ color:#96989d; font-weight:500; }
+        .member-row .custom-status{
+            font-size:12px; color:#3ba55d; font-weight:500;
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+            max-width:150px;
+        }
+
+        /* ---- profile popover card (the overlay itself) ---- */
+        .profile-card{
+            position:absolute;
+            left:14px; top:14px;
+            width:280px;
+            border-radius:8px;
+            overflow:hidden;
+            box-shadow:0 8px 24px rgba(0,0,0,.5);
+            background:
+                    linear-gradient(180deg,
+                    #68d4f1 0%,
+                    #86dcef 16%,
+                    #cfe6ea 42%,
+                    #dcdcd8 62%,
+                    #bcc0ba 80%,
+                    #a9ada7 100%);
+        }
+        .banner{
+            height:76px;
+            position:relative;
+        }
+        .avatar-wrap{
+            position:absolute;
+            left:14px; top:44px;
+            width:80px; height:80px;
+        }
+        .big-avatar{
+            width:100%; height:100%;
+            border-radius:50%;
+            border:6px solid #cfe6ea; /* matches the gradient tone behind it */
+            background:#6f7dbd;
+            display:flex; align-items:center; justify-content:center;
+            color:#fff; font-weight:700; font-size:22px;
+        }
+        .big-avatar .status-dot{
+            width:20px; height:20px;
+            border-width:4px;
+            right:2px; bottom:2px;
+        }
+
+        .status-bubble{
+            position:absolute;
+            left:104px; top:76px;
+            background:#fff;
+            color:#111214;
+            font-size:13px;
+            font-weight:500;
+            padding:7px 12px;
+            border-radius:14px;
+            box-shadow:0 2px 6px rgba(0,0,0,.25);
+            display:flex; align-items:center; gap:8px;
+            white-space:nowrap;
+        }
+        .status-bubble .actions{
+            display:flex; gap:6px;
+            color:#6a6d73;
+        }
+        .status-bubble svg{ width:14px; height:14px; }
+
+        .card-body{
+            padding:48px 16px 16px;
+        }
+        .display-name{
+            display:flex; align-items:center; gap:6px;
+            font-size:19px; font-weight:700; color:#111214;
+        }
+        .display-name svg{ width:16px; height:16px; color:#4a4d52; }
+        .handle{
+            font-size:13px; color:#3d4045; margin-top:2px;
+            display:flex; align-items:center; gap:8px;
+        }
+        .badge-row{ display:flex; gap:6px; margin-top:2px; }
+        .badge-row .b{
+            width:18px; height:18px; border-radius:4px;
+            display:flex; align-items:center; justify-content:center;
+            font-size:11px;
+        }
+
+        .divider{ height:1px; background:rgba(0,0,0,.12); margin:12px 0; }
+
+        .tag-row{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+        .tag-pill{
+            display:flex; align-items:center; gap:6px;
+            background:rgba(255,255,255,.55);
+            border-radius:14px;
+            padding:5px 10px 5px 8px;
+            font-size:12.5px;
+            font-weight:600;
+            color:#111214;
+        }
+        .tag-pill .dot{ width:8px; height:8px; border-radius:50%; }
+        .tag-pill .dot.pink{ background:#e0679a; }
+        .tag-pill .dot.yellow{ background:#e8b93d; }
+        .tag-pill .x{ color:#4a4d52; font-weight:700; margin-left:2px; }
+        .tag-add{
+            width:22px; height:22px; border-radius:50%;
+            background:rgba(255,255,255,.55);
+            display:flex; align-items:center; justify-content:center;
+            color:#111214; font-weight:700; font-size:14px;
+        }
+
+        .edit-btn{
+            margin-top:16px;
+            width:100%;
+            background:#1a4458;
+            color:#fff;
+            border:none;
+            border-radius:6px;
+            padding:10px 0;
+            font-size:14px;
+            font-weight:600;
+            display:flex; align-items:center; justify-content:center; gap:8px;
+        }
+        .edit-btn svg{ width:15px; height:15px; }
+    </style>
+</head>
+<body>
+
+<div class="stage">
+
+    <div class="member-sidebar">
+        <div class="group-label">The Royal Pair — 1</div>
+        <div class="member-row highlighted">
+            <div class="avatar nightishaman">N<span class="status-dot online"></span></div>
+            <div class="who">
+                <div class="name">Nightishaman</div>
+                <div class="custom-status">AfD Verbot jetzt!</div>
+            </div>
+        </div>
+
+        <div class="group-label" style="margin-top:14px;">Offline — 1</div>
+        <div class="member-row offline">
+            <div class="avatar mik">M</div>
+            <div class="who"><div class="name">mik</div></div>
+        </div>
+    </div>
+
+    <div class="profile-card">
+        <div class="banner">
+            <div class="avatar-wrap">
+                <div class="big-avatar">N<span class="status-dot online"></span></div>
+            </div>
+            <div class="status-bubble">
+                <span>AfD Verbot jetzt!</span>
+                <span class="actions">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+        </span>
+            </div>
+        </div>
+
+        <div class="card-body">
+            <div class="display-name">
+                Nightishaman
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            </div>
+            <div class="handle">
+                nightishaman
+                <div class="badge-row">
+                    <span class="b" title="badge">🟢</span>
+                    <span class="b" title="badge">🎗️</span>
+                    <span class="b" title="badge">🚀</span>
+                    <span class="b" title="badge">🎉</span>
+                    <span class="b" title="badge">🎁</span>
+                    <span class="b" title="badge">🚩</span>
+                </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="tag-row">
+                <div class="tag-pill"><span class="dot pink"></span>The Royal Pair<span class="x">×</span></div>
+                <div class="tag-pill"><span class="dot yellow"></span>Cute King<span class="x">×</span></div>
+                <div class="tag-add">+</div>
+            </div>
+
+            <button class="edit-btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+                Profil bearbeiten
+            </button>
+        </div>
+    </div>
+
+</div>
+
+</body>
+</html>

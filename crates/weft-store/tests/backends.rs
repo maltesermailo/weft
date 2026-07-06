@@ -13,7 +13,7 @@ use weft_store::{
     HistoryItem, InviteRecord, InviteStore, MembershipStore, MemoryStore, ModKind, ModRecord,
     ModerationStore, NamespaceRecord, NamespaceStore, NetblockRecord, NetblockStore, Page,
     PeerRecord, PeerStore, PendingRecovery, PinStore, RedeemOutcome, ReportRecord,
-    ReportResolution, ReportStore, Scope,
+    ReportResolution, ReportStore, RoleDef, RoleStore, Scope,
 };
 
 fn user(name: &str) -> UserRef {
@@ -72,7 +72,8 @@ where
         + NetblockStore
         + ModerationStore
         + PinStore
-        + MembershipStore,
+        + MembershipStore
+        + RoleStore,
 {
     let chan: Scope = Scope::Channel(format!("#suite-{tag}").parse().unwrap());
     let ada: Account = format!("ada-{tag}").parse().unwrap();
@@ -958,6 +959,44 @@ where
     assert_eq!(m, vec![mc1.clone(), mc2.clone()]);
     store.clear_membership(&acct, &mc1).await.unwrap();
     assert_eq!(store.memberships(&acct).await.unwrap(), vec![mc2]);
+
+    // ---- §6.5 role definitions ----
+    let rscope = format!("ns:roles-{tag}");
+    assert!(store.roles(&rscope).await.unwrap().is_empty());
+    store
+        .set_role(
+            &rscope,
+            "Moderator",
+            "#e8b93d",
+            &["mute".into(), "ban".into()],
+        )
+        .await
+        .unwrap();
+    store
+        .set_role(&rscope, "Member", "#3ba55d", &["send".into()])
+        .await
+        .unwrap();
+    // Upsert: same name replaces color + caps.
+    store
+        .set_role(
+            &rscope,
+            "Moderator",
+            "#ff0000",
+            &["mute".into(), "ban".into(), "kick".into()],
+        )
+        .await
+        .unwrap();
+    let roles = store.roles(&rscope).await.unwrap();
+    assert!(roles.contains(&RoleDef {
+        name: "Moderator".into(),
+        color: "#ff0000".into(),
+        caps: vec!["mute".into(), "ban".into(), "kick".into()],
+    }));
+    assert_eq!(roles.len(), 2);
+    store.delete_role(&rscope, "Member").await.unwrap();
+    let roles = store.roles(&rscope).await.unwrap();
+    assert_eq!(roles.len(), 1);
+    assert_eq!(roles[0].name, "Moderator");
 }
 
 #[tokio::test]

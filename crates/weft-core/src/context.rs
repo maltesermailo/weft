@@ -8,7 +8,8 @@ use weft_crypto::{Attestation, Capability, Grant, Keypair, PublicKey, Subject, T
 use weft_proto::{Account, ChannelName, NamespaceName, NetworkName, RetentionPolicy};
 use weft_store::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MembershipStore,
-    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, StoreError,
+    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, RoleStore,
+    StoreError,
 };
 
 use crate::accounts::Accounts;
@@ -96,6 +97,8 @@ pub struct ServerCtx {
     pub(crate) pins: Arc<dyn PinStore>,
     /// Persistent channel membership for auto-rejoin (§6.3).
     pub(crate) memberships: Arc<dyn MembershipStore>,
+    /// Role definitions — named capability-token bundles per scope (§6.5).
+    pub(crate) roles: Arc<dyn RoleStore>,
     /// §6.1 live presence, in-memory only (never stored, never bridged).
     /// account → last non-invisible status; served with MEMBERS for correct
     /// roster dots.
@@ -146,6 +149,7 @@ impl ServerCtx {
             + ModerationStore
             + PinStore
             + MembershipStore
+            + RoleStore
             + 'static,
     {
         let events: Arc<dyn EventStore> = store.clone();
@@ -159,6 +163,7 @@ impl ServerCtx {
         let moderation: Arc<dyn ModerationStore> = store.clone();
         let pins: Arc<dyn PinStore> = store.clone();
         let memberships: Arc<dyn MembershipStore> = store.clone();
+        let roles: Arc<dyn RoleStore> = store.clone();
         let namespaces: Arc<dyn NamespaceStore> = store;
         let registry = Registry::spawn(channels, info.network.clone(), Arc::clone(&events));
         let directory = crate::directory::spawn(
@@ -187,6 +192,7 @@ impl ServerCtx {
             moderation,
             pins,
             memberships,
+            roles,
             presence: std::sync::Mutex::new(std::collections::HashMap::new()),
             federation,
             operators: operators.into_iter().collect(),

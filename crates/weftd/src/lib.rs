@@ -335,6 +335,7 @@ where
         + weft_store::ModerationStore
         + weft_store::PinStore
         + weft_store::MembershipStore
+        + weft_store::RoleStore
         + 'static,
 {
     for (name, policy) in seed {

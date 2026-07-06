@@ -31,6 +31,7 @@ export type WeftEvent =
   | { kind: "pinned"; channel: string; msgid: string; by: string | null }
   | { kind: "unpinned"; channel: string; msgid: string }
   | { kind: "caps"; account: string; scope: string; caps: string }
+  | { kind: "role"; scope: string; color: string; caps: string; name: string }
   | { kind: "chanmeta"; channel: string; key: string; value: string }
   | {
       kind: "ns-meta";
@@ -229,6 +230,20 @@ export function grant(subject: string, scope: string, caps: string) {
 
 export function revoke(subject: string, scope: string, caps: string) {
   return invoke("revoke", { subject, scope, caps });
+}
+
+/// §6.6 named roles (capability-token bundles).
+export function roles(scope: string) {
+  return invoke("roles", { scope });
+}
+export function roleCreate(scope: string, color: string, caps: string, name: string) {
+  return invoke("role_create", { scope, color, caps, name });
+}
+export function roleDelete(scope: string, name: string) {
+  return invoke("role_delete", { scope, name });
+}
+export function roleAssign(scope: string, account: string, name: string) {
+  return invoke("role_assign", { scope, account, name });
 }
 
 export function inviteMint(scope: string) {

@@ -11,7 +11,7 @@ use weft_proto::NetworkName;
 use crate::types::{
     ChannelRecord, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord, NamespaceRecord,
     NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome, ReportRecord,
-    ReportResolution, RootHistoryEntry, Scope, Verification,
+    ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 
@@ -429,4 +429,25 @@ pub trait MembershipStore: Send + Sync {
 
     /// Every channel `account` is a member of, for auto-rejoin.
     async fn memberships(&self, account: &Account) -> Result<Vec<ChannelName>, StoreError>;
+}
+
+/// §6.5 role definitions: named, colored capability-token bundles per scope.
+/// Pure metadata — enforcement stays token-based ("no role tables"); a role
+/// resolves to its caps on assign, and display maps caps back to role names.
+#[async_trait]
+pub trait RoleStore: Send + Sync {
+    /// Define or replace a role at a scope. Idempotent on `(scope, name)`.
+    async fn set_role(
+        &self,
+        scope: &str,
+        name: &str,
+        color: &str,
+        caps: &[String],
+    ) -> Result<(), StoreError>;
+
+    /// Remove a role definition. Idempotent.
+    async fn delete_role(&self, scope: &str, name: &str) -> Result<(), StoreError>;
+
+    /// All role definitions at a scope.
+    async fn roles(&self, scope: &str) -> Result<Vec<RoleDef>, StoreError>;
 }

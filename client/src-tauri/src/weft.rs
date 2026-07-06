@@ -104,6 +104,13 @@ pub enum WeftEvent {
         scope: String,
         caps: String,
     },
+    /// `ROLE <scope> <color> <caps> :<name>` — a role definition (§6.5).
+    Role {
+        scope: String,
+        color: String,
+        caps: String,
+        name: String,
+    },
     /// `CHANMETA <#chan> <key> <value>` — topic / posting / … (§7).
     Chanmeta {
         channel: String,
@@ -527,6 +534,20 @@ fn on_line(
                 caps,
             },
         ),
+        Event::Role {
+            scope,
+            color,
+            caps,
+            name,
+        } => emit(
+            app,
+            WeftEvent::Role {
+                scope,
+                color,
+                caps,
+                name,
+            },
+        ),
         Event::Chanmeta {
             channel,
             key,
@@ -918,6 +939,50 @@ pub fn build_caps(account: &str, scope: &str) -> Result<String, String> {
     Request::new(Command::Caps {
         account: account.parse().map_err(|_| "bad account".to_string())?,
         scope: scope.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// §6.5 named roles (capability-token bundles).
+pub fn build_roles(scope: &str) -> Result<String, String> {
+    Request::new(Command::RolesList {
+        scope: scope.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+pub fn build_role_create(
+    scope: &str,
+    color: &str,
+    caps: &str,
+    name: &str,
+) -> Result<String, String> {
+    Request::new(Command::RoleCreate {
+        scope: scope.to_string(),
+        color: color.to_string(),
+        caps: caps.to_string(),
+        name: name.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+pub fn build_role_delete(scope: &str, name: &str) -> Result<String, String> {
+    Request::new(Command::RoleDelete {
+        scope: scope.to_string(),
+        name: name.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+pub fn build_role_assign(scope: &str, account: &str, name: &str) -> Result<String, String> {
+    Request::new(Command::RoleAssign {
+        scope: scope.to_string(),
+        account: account.parse().map_err(|_| "bad account".to_string())?,
+        name: name.to_string(),
     })
     .serialize()
     .map_err(|e| e.to_string())

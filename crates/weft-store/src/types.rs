@@ -137,6 +137,17 @@ pub struct GrantRecord {
     pub expiry: Option<u64>,
 }
 
+/// A role definition (§6.5): a named, colored capability-token bundle at a
+/// scope. Metadata only — enforcement stays token-based ("no role tables");
+/// assigning a role grants its `caps`, and display maps caps back to names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleDef {
+    pub name: String,
+    /// A display color, e.g. `#e8b93d`.
+    pub color: String,
+    pub caps: Vec<String>,
+}
+
 /// A minted invite (§6.5): an unbound authorization redeemable up to
 /// `uses_left` times until `expiry`.
 #[derive(Debug, Clone, PartialEq, Eq)]
