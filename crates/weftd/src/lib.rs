@@ -334,6 +334,7 @@ where
         + weft_store::NetblockStore
         + weft_store::ModerationStore
         + weft_store::PinStore
+        + weft_store::MembershipStore
         + 'static,
 {
     for (name, policy) in seed {

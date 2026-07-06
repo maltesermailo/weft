@@ -309,9 +309,13 @@ impl Actor {
                 // sees everything from its own join onward.
                 let events = self.events.subscribe();
                 let user = self.user(&account);
-                let fresh = self.members.insert(session, account).is_none();
-                let count = self.members.len() as u64;
-                if fresh {
+                // Only announce a *new* member — a second device/session for an
+                // account already present (e.g. auto-rejoin on reconnect while
+                // another device is online) must not broadcast a fresh join.
+                let account_new = !self.members.values().any(|a| *a == account);
+                self.members.insert(session, account);
+                let count = self.distinct_members();
+                if account_new {
                     self.broadcast(
                         session,
                         member_event(&self.name, user, MemberAction::Join, count),
@@ -339,12 +343,18 @@ impl Actor {
             }
             Cmd::Part { session } => {
                 if let Some(account) = self.members.remove(&session) {
-                    let user = self.user(&account);
-                    let count = self.members.len() as u64;
-                    self.broadcast(
-                        session,
-                        member_event(&self.name, user, MemberAction::Part, count),
-                    );
+                    // Only announce a part when the account has no *other*
+                    // session left — one device leaving while another stays
+                    // online is not a departure.
+                    let account_gone = !self.members.values().any(|a| *a == account);
+                    if account_gone {
+                        let user = self.user(&account);
+                        let count = self.distinct_members();
+                        self.broadcast(
+                            session,
+                            member_event(&self.name, user, MemberAction::Part, count),
+                        );
+                    }
                 }
             }
             Cmd::Publish {
@@ -541,6 +551,15 @@ impl Actor {
 
     fn user(&self, account: &Account) -> UserRef {
         UserRef::new(account.clone(), self.network.clone())
+    }
+
+    /// Distinct-account member count — one account may hold several sessions
+    /// (multi-device), so member counts dedupe by account.
+    fn distinct_members(&self) -> u64 {
+        self.members
+            .values()
+            .collect::<std::collections::HashSet<_>>()
+            .len() as u64
     }
 
     /// Monotonic within the actor = per-channel total order. The generator
