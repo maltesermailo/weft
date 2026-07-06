@@ -235,10 +235,12 @@ A **role** is a named, colored bundle of capability tokens at a scope: `(scope, 
 |---|---|---|---|
 | `ROLE CREATE` | `ROLE CREATE <scope> <color> <cap>[,…] :<name>` | `ns-admin` at scope | Define/replace a role (upsert on `(scope, name)`). `color` is a display hint (e.g. `#e8b93d`); `name` (may contain spaces) rides the trailing. → updated `ROLES` batch. |
 | `ROLE DELETE` | `ROLE DELETE <scope> :<name>` | `ns-admin` at scope | Remove a definition. Already-granted tokens are unaffected (revoke separately). → updated `ROLES` batch. |
-| `ROLE ASSIGN` | `ROLE ASSIGN <scope> <account> :<name>` | `grant:<cap>` for each cap in the bundle | Grants the role's tokens to the account — identical authority + `TOKEN` path as `GRANT`. |
+| `ROLE ASSIGN` | `ROLE ASSIGN <scope> <account> :<name>` | `grant:<cap>` for each cap in the bundle | Grants the role's tokens to the account — identical authority + `TOKEN` path as `GRANT`. At a **namespace** scope also propagates channel role-permissions (below). |
 | `ROLES` | `ROLES <scope>` | — (public: roles aren't secret) | → a `BATCH` of `ROLE <scope> <color> <caps> :<name>`. |
 
 The `ROLE` event carries a definition; clients map an account's caps back to role names+colors for display (profile cards, member lists).
+
+**Role channel-permissions.** Because roles resolve to tokens and tokens are scoped, a namespace role and a **channel role of the same name** compose to give the Discord "role has permission X in channel Y" override — without a rules engine. A role `Speaker` defined at `ns:s` carries the namespace-wide caps; a role `Speaker` defined at `#s/stage` (same name) carries that role's caps *for that channel only*. `ROLE ASSIGN ns:s <account> :Speaker` grants the namespace bundle **and**, for every channel `#s/*` that has a same-named role, that channel role's caps at the channel — so e.g. giving `Speaker` `send` in one restricted channel follows every Speaker automatically on assignment. Editing a channel role affects future assignments; re-assigning re-applies it to an existing member. Enforcement stays purely token-based (§10.4): the namespace covers its channels, a channel covers only itself.
 
 ### 6.6 Federation & operator (F)
 
