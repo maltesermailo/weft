@@ -672,6 +672,16 @@ impl<S: ControlStream> Session<S> {
             // reveal the hiding, so it is accepted and NOT broadcast (there
             // is no "went offline" wire status; spec gap noted in review).
             Command::Presence { status } => {
+                // §6.1 remember it in-memory so MEMBERS serves correct dots.
+                // Invisible is *removed* (renders offline, never revealed).
+                {
+                    let mut map = self.ctx.presence.lock().expect("presence lock");
+                    if status == weft_proto::PresenceStatus::Invisible {
+                        map.remove(&account);
+                    } else {
+                        map.insert(account.clone(), status);
+                    }
+                }
                 if status != weft_proto::PresenceStatus::Invisible {
                     let handles: Vec<ChannelHandle> =
                         self.joined.values().map(|j| j.handle.clone()).collect();
@@ -685,6 +695,13 @@ impl<S: ControlStream> Session<S> {
             // Pagination (`cursor`) isn't needed at reference channel sizes —
             // the roster is served in one batch.
             Command::Members { channel, .. } => self.on_members(label, channel).await,
+            Command::Pin { msgid } => self.on_pin(label, msgid, account, true).await,
+            Command::Unpin { msgid } => self.on_pin(label, msgid, account, false).await,
+            Command::Pins { channel } => self.on_pins(label, channel).await,
+            Command::Caps {
+                account: subject,
+                scope,
+            } => self.on_caps(label, subject, scope).await,
             // §6.5 / §6.3 capability verbs.
             Command::Grant {
                 subject,
@@ -1537,18 +1554,27 @@ impl<S: ControlStream> Session<S> {
         self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
             .await?;
         for account in roster {
+            // §6.1 known presence rides along so the client's roster dots are
+            // correct (not just members who change status while we watch).
+            let status = {
+                let map = self.ctx.presence.lock().expect("presence lock");
+                map.get(&account).copied()
+            };
             let user = UserRef::new(account, self.ctx.info.network.clone());
             self.send_event(
                 None,
                 Event::Member {
                     channel: channel.clone(),
-                    user,
+                    user: user.clone(),
                     action: MemberAction::Join,
                     display: None,
                     count: Some(count),
                 },
             )
             .await?;
+            if let Some(status) = status {
+                self.send_event(None, Event::Presence { user, status }).await?;
+            }
         }
         self.send_event(
             label,
@@ -1556,6 +1582,138 @@ impl<S: ControlStream> Session<S> {
                 id,
                 truncated: false,
                 compacted: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    // ---- §6.4 pins ----
+
+    /// `PIN`/`UNPIN <msgid>`: resolve the msgid's channel, cap-check `pin`, set
+    /// the pin, and broadcast `PINNED`/`UNPINNED` to the channel.
+    async fn on_pin(
+        &mut self,
+        label: Option<String>,
+        msgid: MsgId,
+        account: Account,
+        pinned: bool,
+    ) -> io::Result<Flow> {
+        // The channel is the msgid's scope (PIN carries no channel arg).
+        let channel = match self.ctx.events.find_root(msgid.ulid()).await {
+            Ok(Some(record)) => match record.scope {
+                Scope::Channel(channel) => channel,
+                _ => return self.no_such_target(label).await, // DMs aren't pinnable
+            },
+            Ok(None) => return self.no_such_target(label).await,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let scope = TokenScope::Channel(channel.to_string());
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::Pin, &scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "pin").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        if let Err(e) = self.ctx.pins.set_pin(&channel, &msgid, pinned).await {
+            return self.internal(label, &e).await;
+        }
+        let event = if pinned {
+            Event::Pinned {
+                channel: channel.clone(),
+                msgid,
+                by: Some(account),
+            }
+        } else {
+            Event::Unpinned {
+                channel: channel.clone(),
+                msgid,
+            }
+        };
+        // Broadcast to the channel so every member's pins view updates. The
+        // acting session (if joined) receives it too — that's its confirmation.
+        if let Some(handle) = self.ctx.registry.get(&channel) {
+            handle.announce(event).await;
+        } else {
+            self.send_event(label, event).await?;
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// `PINS <#chan>`: the pinned messages as a `BATCH` of `MESSAGE`
+    /// (membership-gated, like MEMBERS). Purged pins are skipped.
+    async fn on_pins(&mut self, label: Option<String>, channel: ChannelName) -> io::Result<Flow> {
+        if !self.joined.contains_key(&channel) {
+            return self.not_member_cap(label, &channel, "view").await;
+        }
+        let pins = match self.ctx.pins.pins(&channel).await {
+            Ok(pins) => pins,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        self.batches += 1;
+        let id = format!("p{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for msgid in pins {
+            if let Ok(Some(record)) = self.ctx.events.find_root(msgid.ulid()).await {
+                if let EventKind::Message { body, meta } = record.kind {
+                    self.send_event(
+                        None,
+                        Event::Message(Box::new(weft_proto::MessageEvent {
+                            target: Target::Channel(channel.clone()),
+                            sender: record.sender,
+                            msgid: record.msgid,
+                            body,
+                            meta,
+                            edited: None,
+                            edited_at: None,
+                        })),
+                    )
+                    .await?;
+                }
+            }
+        }
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+                compacted: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// §10.4 `CAPS <account> <scope>`: the account's effective caps at the
+    /// scope (public — caps aren't secret). Powers client capability badges.
+    async fn on_caps(
+        &mut self,
+        label: Option<String>,
+        subject: Account,
+        scope_str: String,
+    ) -> io::Result<Flow> {
+        let Some(scope) = TokenScope::parse(&scope_str) else {
+            return self.no_such_target(label).await;
+        };
+        let now = unix_now();
+        let mut held = Vec::new();
+        for cap in Capability::STANDARD {
+            match self.ctx.account_has_cap(&subject, &cap, &scope, now).await {
+                Ok(true) => held.push(cap.to_string()),
+                Ok(false) => {}
+                Err(e) => return self.internal(label, &e).await,
+            }
+        }
+        self.send_event(
+            label,
+            Event::Caps {
+                account: subject,
+                scope: scope_str,
+                caps: held.join(","),
             },
         )
         .await?;

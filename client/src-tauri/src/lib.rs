@@ -41,9 +41,20 @@ async fn connect(
     account
         .parse::<weft_proto::Account>()
         .map_err(|_| "invalid account name (a-z 0-9 - _ .)".to_string())?;
-    let mode = weft::Mode::parse(&mode)?;
+    let parsed_mode = weft::Mode::parse(&mode)?;
     let (addr, server_name) = weft::resolve(&host).await?;
     let password = weft::password_or_default(&password);
+
+    // Device-key login loads the stored keypair up front (secret never leaves
+    // the backend); a missing key fails clearly.
+    let device = if parsed_mode == weft::Mode::Key {
+        Some(keys::load_device(&app, &host, &account).ok_or_else(|| {
+            "no device key enrolled on this device — log in with a password and enroll first"
+                .to_string()
+        })?)
+    } else {
+        None
+    };
 
     let (tx, rx) = mpsc::unbounded_channel();
     *conn.tx.lock().unwrap() = Some(tx);
@@ -53,10 +64,37 @@ async fn connect(
         server_name,
         account,
         password,
-        mode,
+        parsed_mode,
+        device,
         rx,
     ));
     Ok(())
+}
+
+/// Generate + enroll a device key for `(host, account)` while authed, so the
+/// next launch can log in passwordless. Sends `AUTH ENROLL` over the connection.
+#[tauri::command]
+fn enroll_device(
+    app: AppHandle,
+    conn: State<'_, Conn>,
+    host: String,
+    account: String,
+) -> Result<(), String> {
+    let pubkey = keys::enroll_device(&app, &host, &account)?;
+    conn.send(weft::build_auth_enroll(&pubkey)?)
+}
+
+/// Is a device key enrolled locally for `(host, account)`?
+#[tauri::command]
+fn has_device_key(app: AppHandle, host: String, account: String) -> bool {
+    keys::has_device(&app, &host, &account)
+}
+
+/// Drop the outbound sender — the connection task then finishes and closes the
+/// stream. Used for logout / switch-account.
+#[tauri::command]
+fn disconnect(conn: State<'_, Conn>) {
+    *conn.tx.lock().unwrap() = None;
 }
 
 #[tauri::command]
@@ -130,9 +168,7 @@ fn ns_transfer(
     new_owner: String,
 ) -> Result<(), String> {
     let root = keys::load_ns_key(&app, &network, &name)?;
-    let sig = weft_crypto::signature_to_b64(&weft_crypto::sign_transfer(
-        &root, &name, &new_owner,
-    ));
+    let sig = weft_crypto::signature_to_b64(&weft_crypto::sign_transfer(&root, &name, &new_owner));
     conn.send(weft::build_ns_transfer(&name, &new_owner, &sig)?)
 }
 
@@ -196,7 +232,12 @@ fn mark(conn: State<'_, Conn>, channel: String, msgid: String) -> Result<(), Str
 }
 
 #[tauri::command]
-fn grant(conn: State<'_, Conn>, subject: String, scope: String, caps: String) -> Result<(), String> {
+fn grant(
+    conn: State<'_, Conn>,
+    subject: String,
+    scope: String,
+    caps: String,
+) -> Result<(), String> {
     conn.send(weft::build_grant(&subject, &scope, &caps)?)
 }
 
@@ -232,7 +273,11 @@ fn report(
 }
 
 #[tauri::command]
-fn reports_list(conn: State<'_, Conn>, scope: String, status: Option<String>) -> Result<(), String> {
+fn reports_list(
+    conn: State<'_, Conn>,
+    scope: String,
+    status: Option<String>,
+) -> Result<(), String> {
     conn.send(weft::build_reports_list(&scope, status)?)
 }
 
@@ -244,6 +289,21 @@ fn reports_resolve(
     note: Option<String>,
 ) -> Result<(), String> {
     conn.send(weft::build_reports_resolve(&report_id, &action, note)?)
+}
+
+#[tauri::command]
+fn pin(conn: State<'_, Conn>, msgid: String, pinned: bool) -> Result<(), String> {
+    conn.send(weft::build_pin(&msgid, pinned)?)
+}
+
+#[tauri::command]
+fn pins(conn: State<'_, Conn>, channel: String) -> Result<(), String> {
+    conn.send(weft::build_pins(&channel)?)
+}
+
+#[tauri::command]
+fn caps(conn: State<'_, Conn>, account: String, scope: String) -> Result<(), String> {
+    conn.send(weft::build_caps(&account, &scope)?)
 }
 
 #[tauri::command]
@@ -296,9 +356,13 @@ fn send_raw(conn: State<'_, Conn>, line: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(Conn::default())
         .invoke_handler(tauri::generate_handler![
             connect,
+            disconnect,
+            enroll_device,
+            has_device_key,
             join,
             ns_join,
             ns_create,
@@ -324,6 +388,9 @@ pub fn run() {
             reports_list,
             reports_resolve,
             members,
+            pin,
+            pins,
+            caps,
             part,
             channel_create,
             channel_delete,

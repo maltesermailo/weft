@@ -391,3 +391,19 @@ pub trait NetblockStore: Send + Sync {
 
     async fn list_netblocks(&self) -> Result<Vec<NetblockRecord>, StoreError>;
 }
+
+/// §6.4 pinned messages, per channel. Pins are a small set keyed by channel;
+/// the message content is fetched from the [`EventStore`] on demand.
+#[async_trait]
+pub trait PinStore: Send + Sync {
+    /// Pin or unpin a message. Idempotent.
+    async fn set_pin(
+        &self,
+        channel: &ChannelName,
+        msgid: &MsgId,
+        pinned: bool,
+    ) -> Result<(), StoreError>;
+
+    /// The pinned msgids for a channel, oldest-first.
+    async fn pins(&self, channel: &ChannelName) -> Result<Vec<MsgId>, StoreError>;
+}

@@ -11,7 +11,7 @@ use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, Retent
 use crate::compact::compaction_plan;
 use crate::traits::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, ModerationStore,
-    NamespaceStore, NetblockStore, PeerStore, ReportStore, HOLD_RADIUS,
+    NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, HOLD_RADIUS,
 };
 use crate::types::{
     ChannelRecord, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord, NamespaceRecord,
@@ -66,6 +66,8 @@ struct Inner {
     netblocks: HashMap<NetworkName, NetblockRecord>,
     /// (scope, account, kind) → moderation deny record (§6.7).
     moderation: HashMap<(String, Account, ModKind), ModRecord>,
+    /// channel → pinned msgids, ordered by ULID (§6.4).
+    pins: HashMap<ChannelName, std::collections::BTreeMap<Ulid, MsgId>>,
 }
 
 #[derive(Default)]
@@ -959,6 +961,34 @@ impl ModerationStore for MemoryStore {
             .collect();
         records.sort_by(|a, b| a.account.as_str().cmp(b.account.as_str()));
         Ok(records)
+    }
+}
+
+#[async_trait]
+impl PinStore for MemoryStore {
+    async fn set_pin(
+        &self,
+        channel: &ChannelName,
+        msgid: &MsgId,
+        pinned: bool,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let set = inner.pins.entry(channel.clone()).or_default();
+        if pinned {
+            set.insert(msgid.ulid(), msgid.clone());
+        } else {
+            set.remove(&msgid.ulid());
+        }
+        Ok(())
+    }
+
+    async fn pins(&self, channel: &ChannelName) -> Result<Vec<MsgId>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .pins
+            .get(channel)
+            .map(|set| set.values().cloned().collect())
+            .unwrap_or_default())
     }
 }
 

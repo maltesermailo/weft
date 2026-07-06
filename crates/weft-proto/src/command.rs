@@ -101,6 +101,15 @@ pub enum Command {
         channel: ChannelName,
         cursor: Option<String>,
     },
+    /// `PIN <msgid>` — pin a message in its channel (§6.4). Cap: `pin`.
+    Pin { msgid: MsgId },
+    /// `UNPIN <msgid>` — unpin a message (§6.4). Cap: `pin`.
+    Unpin { msgid: MsgId },
+    /// `PINS <#chan>` — list pinned messages (§6.4), membership-gated.
+    Pins { channel: ChannelName },
+    /// `CAPS <account> <scope>` — query an account's effective caps at a scope
+    /// (§10.4). Public: any member may ask (caps aren't secret). → `CAPS` event.
+    Caps { account: Account, scope: String },
     /// `MSG <#chan|@user> [:body]` — empty body legal iff attachments (§6.4;
     /// enforced by the session layer, not the codec).
     Msg {
@@ -485,6 +494,22 @@ impl Command {
                 Ok(Command::Members {
                     channel: args.req("channel")?.parse()?,
                     cursor: args.opt().map(str::to_string),
+                })
+            }
+            "PIN" => Ok(Command::Pin {
+                msgid: Args::new(line, "PIN").req("msgid")?.parse()?,
+            }),
+            "UNPIN" => Ok(Command::Unpin {
+                msgid: Args::new(line, "UNPIN").req("msgid")?.parse()?,
+            }),
+            "PINS" => Ok(Command::Pins {
+                channel: Args::new(line, "PINS").req("channel")?.parse()?,
+            }),
+            "CAPS" => {
+                let mut args = Args::new(line, "CAPS");
+                Ok(Command::Caps {
+                    account: args.req("account")?.parse()?,
+                    scope: args.req("scope")?.to_string(),
                 })
             }
             "MSG" => {
@@ -1038,6 +1063,12 @@ impl Command {
                     .collect(),
                 None,
             ),
+            Command::Pin { msgid } => ("PIN", vec![msgid.to_string()], None),
+            Command::Unpin { msgid } => ("UNPIN", vec![msgid.to_string()], None),
+            Command::Pins { channel } => ("PINS", vec![channel.to_string()], None),
+            Command::Caps { account, scope } => {
+                ("CAPS", vec![account.to_string(), scope.clone()], None)
+            }
             Command::Msg { target, body, meta } => {
                 meta.write_tags(&mut tags)?;
                 ("MSG", vec![target.to_string()], body.clone())
@@ -1560,6 +1591,19 @@ mod tests {
         round_trip(&Request::new(Command::Members {
             channel: "#general".parse().unwrap(),
             cursor: Some("c2".to_string()),
+        }));
+        round_trip(&Request::new(Command::Pin {
+            msgid: MSGID.parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::Unpin {
+            msgid: MSGID.parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::Pins {
+            channel: "#general".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::Caps {
+            account: "ada".parse().unwrap(),
+            scope: "#general".to_string(),
         }));
         assert_eq!(
             Request::parse("JOIN"),

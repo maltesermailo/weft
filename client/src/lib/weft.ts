@@ -1,6 +1,11 @@
 // Thin typed wrapper over the Tauri commands + the `weft` event stream.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 
 export type Mode = "login" | "register";
 
@@ -23,6 +28,9 @@ export type WeftEvent =
   | { kind: "typing"; channel: string; user: string; state: string }
   | { kind: "presence"; user: string; status: string }
   | { kind: "marked"; channel: string; msgid: string }
+  | { kind: "pinned"; channel: string; msgid: string; by: string | null }
+  | { kind: "unpinned"; channel: string; msgid: string }
+  | { kind: "caps"; account: string; scope: string; caps: string }
   | { kind: "chanmeta"; channel: string; key: string; value: string }
   | {
       kind: "ns-meta";
@@ -86,6 +94,18 @@ export type WeftEvent =
 
 export function connect(host: string, account: string, password: string, mode: Mode) {
   return invoke("connect", { host, account, password, mode });
+}
+
+/// Tear down the current connection (logout / switch account).
+export function disconnect() {
+  return invoke("disconnect");
+}
+
+/// Fire a desktop notification (requests permission on first use).
+export async function notify(title: string, body: string) {
+  let ok = await isPermissionGranted();
+  if (!ok) ok = (await requestPermission()) === "granted";
+  if (ok) sendNotification({ title, body });
 }
 
 export function join(channel: string) {
@@ -166,6 +186,18 @@ export function mark(channel: string, msgid: string) {
 
 export function members(channel: string) {
   return invoke("members", { channel });
+}
+
+export function pin(msgid: string, pinned: boolean) {
+  return invoke("pin", { msgid, pinned });
+}
+
+export function pins(channel: string) {
+  return invoke("pins", { channel });
+}
+
+export function caps(account: string, scope: string) {
+  return invoke("caps", { account, scope });
 }
 
 export function grant(subject: string, scope: string, caps: string) {

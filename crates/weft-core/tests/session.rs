@@ -2412,3 +2412,116 @@ async fn members_requires_membership() {
     };
     assert_eq!(e.context.as_deref(), Some("view"));
 }
+
+// ---- §6.4 PIN / UNPIN / PINS ----
+
+#[tokio::test]
+async fn pin_list_and_unpin() {
+    let ctx = ctx_ops(&["#general"], &["mod"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    ada.send("MSG #general :pin me");
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("expected own echo")
+    };
+    let msgid = m.msgid.to_string();
+
+    let mut op = joined(&ctx, "mod", "#general").await;
+    ada.recv().await; // MEMBER: op joined
+
+    // Operator pins the message.
+    op.send(&format!("@label=p PIN {msgid}"));
+    let ev = op.recv().await;
+    assert!(
+        matches!(&ev.event, Event::Pinned { by: Some(a), .. } if a.as_str() == "mod"),
+        "got {ev:?}"
+    );
+    assert!(matches!(ada.recv().await.event, Event::Pinned { .. }), "ada sees the pin");
+
+    // PINS returns the pinned message as a batch.
+    op.send("PINS #general");
+    assert!(matches!(op.recv().await.event, Event::BatchStart { .. }));
+    let msg = op.recv().await;
+    assert!(
+        matches!(&msg.event, Event::Message(m) if m.body == "pin me"),
+        "got {msg:?}"
+    );
+    assert!(matches!(op.recv().await.event, Event::BatchEnd { .. }));
+
+    // Unpin removes it.
+    op.send(&format!("UNPIN {msgid}"));
+    assert!(matches!(op.recv().await.event, Event::Unpinned { .. }));
+    ada.recv().await; // ada sees the unpin
+    op.send("PINS #general");
+    assert!(matches!(op.recv().await.event, Event::BatchStart { .. }));
+    assert!(matches!(op.recv().await.event, Event::BatchEnd { .. }), "no pins left");
+}
+
+#[tokio::test]
+async fn pin_requires_the_cap() {
+    let ctx = ctx_ops(&["#general"], &["mod"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    ada.send("MSG #general :hi");
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!()
+    };
+    let msgid = m.msgid.to_string();
+    // A regular member has no `pin` cap — even for her own message.
+    ada.send(&format!("@label=p PIN {msgid}"));
+    let Event::Err(e) = ada.expect_err(ErrCode::CapRequired).await.event else {
+        panic!()
+    };
+    assert_eq!(e.context.as_deref(), Some("pin"));
+}
+
+// ---- §10.4 CAPS query ----
+
+#[tokio::test]
+async fn caps_query_reports_effective_caps() {
+    let ctx = ctx_ops(&["#general"], &["mod"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+
+    // An operator holds every capability.
+    ada.send("CAPS mod *");
+    let Event::Caps { account, caps, .. } = ada.recv().await.event else {
+        panic!()
+    };
+    assert_eq!(account.as_str(), "mod");
+    assert!(
+        caps.contains("mute") && caps.contains("ban") && caps.contains("ns-admin"),
+        "operator holds all: {caps}"
+    );
+
+    // A regular member holds no explicit caps (posting is implicit, not a cap).
+    ada.send("CAPS ada #general");
+    let Event::Caps { caps, .. } = ada.recv().await.event else {
+        panic!()
+    };
+    assert_eq!(caps, "", "regular member: {caps:?}");
+}
+
+#[tokio::test]
+async fn members_carries_stored_presence() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    ada.send("PRESENCE away");
+    // Serialize: the PONG proves ada's PRESENCE was processed (FIFO) before we
+    // ask for the roster, so the shared presence map is written.
+    ada.send("PING sync");
+    assert!(matches!(ada.recv().await.event, Event::Pong { .. }));
+
+    let mut bob = joined(&ctx, "bob", "#general").await;
+    ada.recv().await; // MEMBER: bob joined
+
+    bob.send("MEMBERS #general");
+    let mut ada_status = None;
+    loop {
+        match bob.recv().await.event {
+            Event::BatchEnd { .. } => break,
+            Event::Presence { user, status } if user.account.as_str() == "ada" => {
+                ada_status = Some(status.to_string());
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(ada_status.as_deref(), Some("away"), "presence rides with MEMBERS");
+}

@@ -27,7 +27,7 @@ pub use memory::MemoryStore;
 pub use postgres::PgStore;
 pub use traits::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, ModerationStore,
-    NamespaceStore, NetblockStore, PeerStore, ReportStore, HOLD_RADIUS,
+    NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, HOLD_RADIUS,
 };
 pub use types::{
     ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord,

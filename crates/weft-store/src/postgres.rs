@@ -18,7 +18,7 @@ use weft_proto::{
 use crate::compact::compaction_plan;
 use crate::traits::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, ModerationStore,
-    NamespaceStore, NetblockStore, PeerStore, ReportStore, HOLD_RADIUS,
+    NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, HOLD_RADIUS,
 };
 use crate::types::{
     ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord,
@@ -1656,6 +1656,52 @@ impl NetblockStore for PgStore {
                     added_ms: row.get::<i64, _>("added_ms") as u64,
                     actor: row.get("actor"),
                 })
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl PinStore for PgStore {
+    async fn set_pin(
+        &self,
+        channel: &ChannelName,
+        msgid: &MsgId,
+        pinned: bool,
+    ) -> Result<(), StoreError> {
+        if pinned {
+            sqlx::query(
+                "INSERT INTO weft_pins (channel, msgid, ulid) VALUES ($1,$2,$3) \
+                 ON CONFLICT (channel, msgid) DO NOTHING",
+            )
+            .bind(channel.as_str())
+            .bind(msgid.to_string())
+            .bind(msgid.ulid().to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        } else {
+            sqlx::query("DELETE FROM weft_pins WHERE channel = $1 AND msgid = $2")
+                .bind(channel.as_str())
+                .bind(msgid.to_string())
+                .execute(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        }
+        Ok(())
+    }
+
+    async fn pins(&self, channel: &ChannelName) -> Result<Vec<MsgId>, StoreError> {
+        let rows = sqlx::query("SELECT msgid FROM weft_pins WHERE channel = $1 ORDER BY ulid ASC")
+            .bind(channel.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter()
+            .map(|r| {
+                r.get::<&str, _>("msgid")
+                    .parse()
+                    .map_err(|_| StoreError::Backend("corrupt pin msgid".to_string()))
             })
             .collect()
     }

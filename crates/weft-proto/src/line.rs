@@ -104,6 +104,49 @@ pub fn unescape_tag_value(raw: &str) -> Result<String, ParseError> {
     Ok(out)
 }
 
+/// Escape a trailing (message body) for the wire (§4). The trailing keeps
+/// spaces and colons literally, so only `\`, CR and LF are escaped — enough to
+/// carry multi-line bodies without a raw line break reaching the transport.
+pub fn escape_trailing(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Unescape a wire trailing. Unknown escapes are kept verbatim (lenient-in); a
+/// dangling trailing backslash is an error (§4).
+pub fn unescape_trailing(raw: &str) -> Result<String, ParseError> {
+    if !raw.contains('\\') {
+        return Ok(raw.to_string()); // fast path: nothing to unescape
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            None => return Err(ParseError::DanglingEscape),
+            Some('r') => out.push('\r'),
+            Some('n') => out.push('\n'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+        }
+    }
+    Ok(out)
+}
+
 impl Line {
     /// Parse one line (with or without its terminator). Lenient-in.
     pub fn parse(input: &str) -> Result<Line, ParseError> {
@@ -143,7 +186,7 @@ impl Line {
             // Only params (not the verb) may introduce a trailing.
             if verb.is_some() {
                 if let Some(t) = cur.strip_prefix(':') {
-                    trailing = Some(t.to_string());
+                    trailing = Some(unescape_trailing(t)?);
                     break;
                 }
             }
@@ -233,11 +276,10 @@ impl Line {
         }
 
         if let Some(trailing) = &self.trailing {
-            if trailing.bytes().any(|b| b == b'\r' || b == b'\n') {
-                return Err(SerializeError::BadTrailing);
-            }
+            // CR/LF are escaped (`\r`/`\n`) so multi-line bodies survive the
+            // line-oriented transport without an embedded break (§4).
             out.push_str(" :");
-            out.push_str(trailing);
+            out.push_str(&escape_trailing(trailing));
         }
 
         if out.len() > MAX_LINE_BYTES {
@@ -465,9 +507,18 @@ mod tests {
             Err(SerializeError::BadTagKey { .. })
         ));
 
+        // A multi-line body escapes on the wire (no raw break) and round-trips.
         let mut line = ok.clone();
-        line.trailing = Some("a\nb".into());
-        assert_eq!(line.serialize(), Err(SerializeError::BadTrailing));
+        line.trailing = Some("a\nb\r\nc".into());
+        let out = line.serialize().unwrap();
+        assert!(
+            !out.contains('\n') && !out.contains('\r'),
+            "no raw break: {out:?}"
+        );
+        assert_eq!(
+            Line::parse(&out).unwrap().trailing,
+            Some("a\nb\r\nc".into())
+        );
 
         let mut line = ok;
         line.trailing = Some("x".repeat(MAX_LINE_BYTES));

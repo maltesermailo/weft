@@ -8,7 +8,7 @@ use weft_crypto::{Attestation, Capability, Grant, Keypair, PublicKey, Subject, T
 use weft_proto::{Account, ChannelName, NamespaceName, NetworkName, RetentionPolicy};
 use weft_store::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, ModerationStore,
-    NamespaceStore, NetblockStore, PeerStore, ReportStore, StoreError,
+    NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, StoreError,
 };
 
 use crate::accounts::Accounts;
@@ -92,6 +92,12 @@ pub struct ServerCtx {
     pub(crate) netblocks: Arc<dyn NetblockStore>,
     /// Mute/ban deny-list (§6.7).
     pub(crate) moderation: Arc<dyn ModerationStore>,
+    /// Pinned messages, per channel (§6.4).
+    pub(crate) pins: Arc<dyn PinStore>,
+    /// §6.1 live presence, in-memory only (never stored, never bridged).
+    /// account → last non-invisible status; served with MEMBERS for correct
+    /// roster dots.
+    pub(crate) presence: std::sync::Mutex<std::collections::HashMap<Account, weft_proto::PresenceStatus>>,
     /// §11 federation config: pinned peer keys + auto-accept.
     pub(crate) federation: FederationConfig,
     /// §2.2 namespace creation: `open` (any account, up to `ns_quota`) or
@@ -135,6 +141,7 @@ impl ServerCtx {
             + PeerStore
             + NetblockStore
             + ModerationStore
+            + PinStore
             + 'static,
     {
         let events: Arc<dyn EventStore> = store.clone();
@@ -146,6 +153,7 @@ impl ServerCtx {
         let peers: Arc<dyn PeerStore> = store.clone();
         let netblocks: Arc<dyn NetblockStore> = store.clone();
         let moderation: Arc<dyn ModerationStore> = store.clone();
+        let pins: Arc<dyn PinStore> = store.clone();
         let namespaces: Arc<dyn NamespaceStore> = store;
         let registry = Registry::spawn(channels, info.network.clone(), Arc::clone(&events));
         let directory = crate::directory::spawn(
@@ -172,6 +180,8 @@ impl ServerCtx {
             peers,
             netblocks,
             moderation,
+            pins,
+            presence: std::sync::Mutex::new(std::collections::HashMap::new()),
             federation,
             operators: operators.into_iter().collect(),
             identity,

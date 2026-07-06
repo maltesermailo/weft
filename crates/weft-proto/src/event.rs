@@ -134,6 +134,24 @@ pub enum Event {
         channel: ChannelName,
         msgid: MsgId,
     },
+    /// `PINNED <#chan> <msgid>` with optional `by=` — a message was pinned (§7).
+    Pinned {
+        channel: ChannelName,
+        msgid: MsgId,
+        by: Option<Account>,
+    },
+    /// `UNPINNED <#chan> <msgid>` — a message was unpinned (§7).
+    Unpinned {
+        channel: ChannelName,
+        msgid: MsgId,
+    },
+    /// `CAPS <account> <scope> :<caps>` — an account's effective caps at a
+    /// scope, comma-separated (§7). Empty trailing = no caps.
+    Caps {
+        account: Account,
+        scope: String,
+        caps: String,
+    },
     /// `PRESENCE <user@net> <status>` — never bridged.
     Presence {
         user: UserRef,
@@ -386,6 +404,29 @@ impl Event {
                     channel: args.req("channel")?.parse()?,
                     user: args.req("user")?.parse()?,
                     state: args.req("state")?.parse()?,
+                })
+            }
+            "PINNED" => {
+                let mut args = Args::new(line, "PINNED");
+                Ok(Event::Pinned {
+                    channel: args.req("channel")?.parse()?,
+                    msgid: args.req("msgid")?.parse()?,
+                    by: line.tags.get("by").map(|v| v.parse()).transpose()?,
+                })
+            }
+            "UNPINNED" => {
+                let mut args = Args::new(line, "UNPINNED");
+                Ok(Event::Unpinned {
+                    channel: args.req("channel")?.parse()?,
+                    msgid: args.req("msgid")?.parse()?,
+                })
+            }
+            "CAPS" => {
+                let mut args = Args::new(line, "CAPS");
+                Ok(Event::Caps {
+                    account: args.req("account")?.parse()?,
+                    scope: args.req("scope")?.to_string(),
+                    caps: line.trailing.clone().unwrap_or_default(),
                 })
             }
             "MARKED" => {
@@ -822,6 +863,26 @@ impl Event {
             Event::Marked { channel, msgid } => {
                 ("MARKED", vec![channel.to_string(), msgid.to_string()], None)
             }
+            Event::Pinned { channel, msgid, by } => {
+                if let Some(by) = by {
+                    tags.insert("by".to_string(), by.to_string());
+                }
+                ("PINNED", vec![channel.to_string(), msgid.to_string()], None)
+            }
+            Event::Unpinned { channel, msgid } => (
+                "UNPINNED",
+                vec![channel.to_string(), msgid.to_string()],
+                None,
+            ),
+            Event::Caps {
+                account,
+                scope,
+                caps,
+            } => (
+                "CAPS",
+                vec![account.to_string(), scope.clone()],
+                Some(caps.clone()),
+            ),
             Event::Presence { user, status } => {
                 ("PRESENCE", vec![user.to_string(), status.to_string()], None)
             }
@@ -1230,6 +1291,25 @@ mod tests {
         round_trip(&Reply::new(Event::Marked {
             channel: "#general".parse().unwrap(),
             msgid: MSGID.parse().unwrap(),
+        }));
+        round_trip(&Reply::new(Event::Pinned {
+            channel: "#general".parse().unwrap(),
+            msgid: MSGID.parse().unwrap(),
+            by: Some("ada".parse().unwrap()),
+        }));
+        round_trip(&Reply::new(Event::Unpinned {
+            channel: "#general".parse().unwrap(),
+            msgid: MSGID.parse().unwrap(),
+        }));
+        round_trip(&Reply::new(Event::Caps {
+            account: "ada".parse().unwrap(),
+            scope: "*".to_string(),
+            caps: "mute,ban,kick".to_string(),
+        }));
+        round_trip(&Reply::new(Event::Caps {
+            account: "ada".parse().unwrap(),
+            scope: "#general".to_string(),
+            caps: String::new(),
         }));
         round_trip(&Reply::new(Event::Presence {
             user: "ada@hda.example".parse().unwrap(),

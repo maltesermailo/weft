@@ -14,6 +14,134 @@
   let formAccount = $state("");
   let formPassword = $state("");
 
+  // ---- session lifecycle (Phase 8) ----
+  const SAVED_KEY = "weft:last-connect";
+  let lastCreds: { host: string; account: string; password: string } | null = null;
+  let manualLogout = false;
+  let reconnecting = $state(false);
+  let reconnectAttempts = 0;
+  let toasts = $state<{ id: number; text: string; kind: string }[]>([]);
+  let toastSeq = 0;
+  let settingsOpen = $state(false);
+  // ---- quick switcher (Ctrl+K) ----
+  let switcherOpen = $state(false);
+  let switcherQuery = $state("");
+  let switcherResults = $derived.by(() => {
+    const q = switcherQuery.toLowerCase().replace(/^[#@]/, "");
+    return Object.values(channels)
+      .filter((c) => c.name.toLowerCase().includes(q))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, 25);
+  });
+  function switchTo(name: string) {
+    switcherOpen = false;
+    if (name.startsWith("@")) homeView = true;
+    else homeView = false;
+    active = name;
+  }
+  function globalKey(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      switcherOpen = true;
+      switcherQuery = "";
+    } else if (e.key === "Escape") {
+      switcherOpen = false;
+      pinsOpen = false;
+      discoverOpen = false;
+      settingsOpen = false;
+    }
+  }
+  // ---- right-click context menus ----
+  type CtxItem = { label: string; danger?: boolean; run: () => void };
+  let ctxMenu = $state<{ x: number; y: number; items: CtxItem[] } | null>(null);
+  function openCtx(e: MouseEvent, items: CtxItem[]) {
+    e.preventDefault();
+    ctxMenu = { x: Math.min(e.clientX, window.innerWidth - 190), y: e.clientY, items };
+  }
+  function msgCtx(e: MouseEvent, m: Msg) {
+    if (m.system || !m.msgid) return;
+    const items: CtxItem[] = [{ label: "Reply", run: () => (replyTo = m) }];
+    if (active.startsWith("#"))
+      items.push({
+        label: activeChannel?.pinnedIds?.includes(m.msgid) ? "Unpin" : "Pin",
+        run: () => togglePin(m),
+      });
+    items.push({ label: "Copy text", run: () => navigator.clipboard?.writeText(m.body) });
+    if (m.own) {
+      items.push({ label: "Edit", run: () => startEdit(m) });
+      items.push({ label: "Delete", danger: true, run: () => doDelete(m) });
+    } else {
+      items.push({ label: "Report", run: () => openReport(m) });
+    }
+    openCtx(e, items);
+  }
+  function chanCtx(e: MouseEvent, ch: Channel) {
+    openCtx(e, [
+      { label: "Mark as read", run: () => (ch.unread = false) },
+      { label: "Copy name", run: () => navigator.clipboard?.writeText(ch.name) },
+      { label: "Leave", danger: true, run: () => weft.part(ch.name).catch(() => {}) },
+    ]);
+  }
+  function memberCtx(e: MouseEvent, name: string) {
+    if (name === account) return;
+    openCtx(e, [
+      { label: "Message", run: () => openDm(name) },
+      { label: "Profile", run: () => openProfile(name) },
+      { label: "Roles", run: () => openRoles(name) },
+      { label: "Mute", run: () => moderate("mute", name) },
+      { label: "Ban", danger: true, run: () => moderate("ban", name) },
+    ]);
+  }
+  let theme = $state<"dark" | "light">("dark");
+  function toggleTheme() {
+    theme = theme === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem("weft:theme", theme);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function toast(text: string, kind = "info") {
+    const id = toastSeq++;
+    toasts = [...toasts, { id, text, kind }];
+    setTimeout(() => (toasts = toasts.filter((t) => t.id !== id)), 4500);
+  }
+
+  function attemptReconnect() {
+    if (!lastCreds) {
+      status = "connect";
+      return;
+    }
+    reconnecting = true;
+    const delay = Math.min(1500 * 2 ** reconnectAttempts, 15000);
+    reconnectAttempts++;
+    setTimeout(() => {
+      if (!reconnecting) return; // logged out meanwhile
+      // Reconnect always uses login — the account already exists.
+      weft.connect(lastCreds!.host, lastCreds!.account, lastCreds!.password, "login").catch(() =>
+        attemptReconnect(),
+      );
+    }, delay);
+  }
+
+  function logout() {
+    manualLogout = true;
+    reconnecting = false;
+    lastCreds = null;
+    statusMenu = false;
+    weft.disconnect().catch(() => {});
+    channels = {};
+    active = "";
+    activeServer = "";
+    homeView = false;
+    discovered = {};
+    presence = {};
+    reportQueue = {};
+    status = "connect";
+  }
+
   // ---- live data ----
   type Member = { name: string; origin: "local" | "federated" };
   type Msg = {
@@ -36,6 +164,8 @@
     md?: boolean;
     /// msgid this replies to (§9.3).
     replyTo?: string;
+    /// Sender is from a federated peer network.
+    bridged?: boolean;
   };
   let msgSeq = 0;
   const mkMsg = (m: Omit<Msg, "key">): Msg => ({ ...m, key: msgSeq++ });
@@ -51,10 +181,12 @@
     /// Channel management + layout (Phase 6).
     topic?: string;
     unread?: boolean;
+    mentioned?: boolean; // has an unread @mention of me
     lastRead?: string; // newest msgid we've marked read
     category?: string; // CHANNEL-LAYOUT grouping
     position?: number;
     rosterLoaded?: boolean; // MEMBERS snapshot fetched
+    pinnedIds?: string[]; // pinned msgids (§6.4)
   };
 
   let channels = $state<Record<string, Channel>>({});
@@ -105,7 +237,28 @@
   let rolesTarget = $state<string | null>(null);
   let roleScope = $state("");
   let roleCap = $state("send");
+  let profileTarget = $state<string | null>(null); // member profile popout
   let inviteLink = $state<string | null>(null);
+  // ---- pins (§6.4) ----
+  let pinsOpen = $state(false);
+  let pinsList = $state<Msg[]>([]);
+  let loadingPins: string | null = null;
+  let pinsBuf: Msg[] = [];
+  // ---- capability badges (§10.4 CAPS), keyed `account|scope` ----
+  let capsFor = $state<Record<string, { owner: boolean; mod: boolean }>>({});
+  const capsInflight = new Set<string>();
+  function ensureCaps(account: string, channel: string) {
+    if (!channel.startsWith("#") || !account) return;
+    const key = `${account}|${channel}`;
+    if (key in capsFor || capsInflight.has(key)) return;
+    capsInflight.add(key);
+    weft.caps(account, channel).catch(() => capsInflight.delete(key));
+  }
+  const badgeFor = (account: string, channel: string) => capsFor[`${account}|${channel}`];
+  function openProfile(account: string) {
+    profileTarget = account;
+    ensureCaps(account, active);
+  }
   // ---- namespace admin panel (§6.2 / §2.4) ----
   let nsSettingsOpen = $state(false);
   let nsTitle = $state("");
@@ -258,15 +411,39 @@
         account = e.account;
         status = "online";
         authError = "";
-        weft.join("#general"); // a sensible default landing channel
+        reconnecting = false;
+        reconnectAttempts = 0;
+        // Remember creds so the next launch logs straight back in. NOTE: this
+        // includes the password in localStorage — a dev convenience; the
+        // hardening is OS-keychain storage in the backend.
+        try {
+          localStorage.setItem(
+            SAVED_KEY,
+            JSON.stringify({ host, account: formAccount.trim(), password: formPassword }),
+          );
+        } catch {
+          /* storage unavailable */
+        }
+        if (!channels["#general"]) weft.join("#general"); // default landing channel
         break;
       case "auth-failed":
+        reconnecting = false;
+        lastCreds = null;
         status = "connect";
         authError = e.reason;
         break;
       case "closed":
-        if (status === "online") authError = e.reason;
-        status = "connect";
+        if (manualLogout) {
+          manualLogout = false;
+          break;
+        }
+        // Unexpected drop while online → keep the UI and auto-reconnect.
+        if (lastCreds && (status === "online" || reconnecting)) {
+          attemptReconnect();
+        } else {
+          status = "connect";
+          authError = e.reason;
+        }
         break;
       case "policy":
         ensureChannel(e.channel).retention = retentionOf(e.policy);
@@ -277,6 +454,8 @@
           if (!ch.members.some((m) => m.name === e.user)) {
             ch.members.push({ name: e.user, origin: e.network === network ? "local" : "federated" });
           }
+          ensureCaps(e.user, e.channel); // for the roster badge
+
           if (e.user === account) {
             if (!active) active = e.channel;
             // Presence is broadcast to shared channels only, so re-announce
@@ -312,17 +491,34 @@
           edited: e.edited,
           md: e.md,
           replyTo: e.reply_to ?? undefined,
+          bridged: e.network !== network,
         });
-        // History-batch messages buffer until BATCH END, then prepend in order.
+        // Batch messages buffer until BATCH END. A PINS batch (loadingPins set)
+        // routes to the pins buffer; a HISTORY batch to the history buffer.
         if (e.history) {
-          historyBuf.push(msg);
+          if (loadingPins) pinsBuf.push(msg);
+          else historyBuf.push(msg);
           break;
         }
         const ch = ensureChannel(key);
         // Dedupe: history backfill may re-deliver a live message.
         if (e.msgid && ch.messages.some((m) => m.msgid === e.msgid)) break;
         ch.messages.push(msg);
-        if (!e.own && key !== active) ch.unread = true;
+        if (key.startsWith("#")) ensureCaps(e.sender, key); // for the author badge
+        const pinged = !e.own && mentionsMe(e.body);
+        if (!e.own && key !== active) {
+          ch.unread = true;
+          if (pinged) ch.mentioned = true;
+        }
+        // Desktop notification for a DM or a mention while unfocused.
+        if (!e.own && !document.hasFocus()) {
+          const dm = e.target.startsWith("@");
+          if (dm || pinged)
+            weft.notify(
+              dm ? `DM from ${e.sender}` : `${e.sender} in ${chanShort(key)}`,
+              e.body.slice(0, 140),
+            );
+        }
         break;
       }
       case "presence":
@@ -340,6 +536,27 @@
       case "chanmeta":
         if (e.key === "topic") ensureChannel(e.channel).topic = e.value;
         break;
+      case "pinned": {
+        const ch = ensureChannel(e.channel);
+        ch.pinnedIds = [...(ch.pinnedIds ?? []).filter((id) => id !== e.msgid), e.msgid];
+        if (pinsOpen && active === e.channel) weft.pins(e.channel).catch(() => {}); // refresh panel
+        break;
+      }
+      case "unpinned": {
+        const ch = channels[e.channel];
+        if (ch) ch.pinnedIds = (ch.pinnedIds ?? []).filter((id) => id !== e.msgid);
+        if (pinsOpen && active === e.channel) pinsList = pinsList.filter((m) => m.msgid !== e.msgid);
+        break;
+      }
+      case "caps": {
+        const set = e.caps ? e.caps.split(",") : [];
+        capsFor[`${e.account}|${e.scope}`] = {
+          owner: set.includes("ns-admin") || set.includes("netblock"),
+          mod: set.includes("mute") || set.includes("ban") || set.includes("kick"),
+        };
+        capsInflight.delete(`${e.account}|${e.scope}`);
+        break;
+      }
       case "channel-layout": {
         const ch = ensureChannel(e.channel);
         ch.category = e.category ?? undefined;
@@ -390,6 +607,14 @@
       case "batch-start":
         break; // messages between here and batch-end are buffered above
       case "batch-end": {
+        if (loadingPins) {
+          const ch = channels[loadingPins];
+          if (ch) ch.pinnedIds = pinsBuf.map((m) => m.msgid).filter(Boolean) as string[];
+          pinsList = pinsBuf;
+          pinsBuf = [];
+          loadingPins = null;
+          break;
+        }
         const target = loadingHistory;
         if (!target) break;
         const ch = ensureChannel(target);
@@ -436,7 +661,7 @@
         break;
       }
       case "error":
-        if (activeChannel) activeChannel.messages.push(mkMsg({ author: "", body: `${e.code}: ${e.text}`, time: clock(), own: false, system: true }));
+        toast(`${e.code}: ${e.text}`, "error");
         break;
     }
   }
@@ -446,6 +671,10 @@
     if (!formAccount.trim()) return;
     authError = "";
     status = "connecting";
+    manualLogout = false;
+    reconnectAttempts = 0;
+    // Held in memory (never persisted) so a mid-session drop can reconnect.
+    lastCreds = { host: host.trim(), account: formAccount.trim(), password: formPassword };
     try {
       await weft.connect(host.trim(), formAccount.trim(), formPassword, mode);
     } catch (err) {
@@ -530,13 +759,31 @@
       return;
     }
     if (!active) return;
-    weft.sendMessage(active, text, replyTo?.msgid).catch(() => {});
-    replyTo = null;
-    stopTyping();
-    composer = "";
+    // Clear only once the send is accepted, so a failure surfaces instead of
+    // silently eating the message (e.g. an over-long body).
+    weft
+      .sendMessage(active, text, replyTo?.msgid)
+      .then(() => {
+        replyTo = null;
+        stopTyping();
+        composer = "";
+      })
+      .catch((e) => toast(String(e), "error"));
   }
 
   function composerKey(e: KeyboardEvent) {
+    // Mention autocomplete captures Enter/Tab/Escape while open.
+    if (mentionQuery !== null && mentionMatches.length) {
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        pickMention(mentionMatches[0]);
+        return;
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        mentionQuery = null;
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       doSend();
@@ -565,7 +812,7 @@
     editDraft = "";
   }
   // Focus the inline editor and put the caret at the end.
-  function autofocus(node: HTMLTextAreaElement) {
+  function autofocus(node: HTMLTextAreaElement | HTMLInputElement) {
     node.focus();
     node.selectionStart = node.selectionEnd = node.value.length;
   }
@@ -593,6 +840,13 @@
   }
 
   // ---- reactions (Phase 3) ----
+  // Curated emoji, categorized (§ Phase 8 polish).
+  const EMOJI: Record<string, string[]> = {
+    Smileys: "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😋 😛 😜 🤪 🤨 🧐 🤓 😎 🥳 😏 😒 😔 🙁 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 🤗 🤔 🤭 🤫 🤥 😐 😑 😬 🙄 😮 😲 🥱 😴 🤤 🤢 🤮 🤧 😷 🤒 🤕".split(" "),
+    Gestures: "👍 👎 👌 🤌 🤏 ✌️ 🤞 🫰 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👋 🤚 🖐️ ✋ 🖖 👏 🙌 🫶 👐 🤲 🤝 🙏 ✍️ 💪 👊 🤛 🤜 ✊".split(" "),
+    Hearts: "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 ♥️".split(" "),
+    Objects: "🔥 ⭐ 🌟 ✨ 💫 ⚡ 💥 💯 ✅ ❌ ❓ ❗ 💤 🎉 🎊 🎈 🎁 🏆 🥇 🎯 🚀 💡 🔔 📌 📍 🔗 💬 👀 🧠 🎵 🎶 ☕ 🍕 🍺 🌈 ☀️ 🌙 ⏰ 💰 🔒 🔑".split(" "),
+  };
   const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "😮", "😢", "🔥", "👀"];
   let pickerKey = $state<number | null>(null); // message whose picker is open
 
@@ -648,8 +902,16 @@
       /(^|\s)(https?:\/\/[^\s<]+)/g,
       '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>',
     );
+    // @mentions → pills; a mention of me / @everyone / @here highlights.
+    s = s.replace(/@(everyone|here|[a-z0-9][a-z0-9._-]*)/gi, (_full, name: string) => {
+      const me = name === account || name === "everyone" || name === "here";
+      return `<span class="mention${me ? " me" : ""}">@${name}</span>`;
+    });
     return s;
   }
+  // Does a body mention the current account (or everyone/here)?
+  const mentionsMe = (body: string) =>
+    !!account && (new RegExp(`@${account}\\b`, "i").test(body) || /@(everyone|here)\b/i.test(body));
 
   // ---- replies (Phase 4) ----
   let replyTo = $state<Msg | null>(null);
@@ -687,6 +949,7 @@
   let typingChannel: string | null = null;
   let typingStop: ReturnType<typeof setTimeout> | undefined;
   function onComposerInput() {
+    updateMention();
     if (!active.startsWith("#")) return;
     if (typingChannel && typingChannel !== active) stopTyping();
     if (!typingChannel) {
@@ -695,6 +958,27 @@
     }
     clearTimeout(typingStop);
     typingStop = setTimeout(stopTyping, 4000);
+  }
+
+  // ---- @-mention autocomplete ----
+  let mentionQuery = $state<string | null>(null);
+  let mentionMatches = $derived.by(() => {
+    if (mentionQuery === null) return [];
+    const q = mentionQuery.toLowerCase();
+    const names: string[] = [];
+    if ("everyone".startsWith(q)) names.push("everyone");
+    if ("here".startsWith(q)) names.push("here");
+    for (const m of activeChannel?.members ?? [])
+      if (m.name !== account && m.name.toLowerCase().startsWith(q)) names.push(m.name);
+    return names.slice(0, 8);
+  });
+  function updateMention() {
+    const m = composer.match(/@([a-z0-9._-]*)$/i);
+    mentionQuery = m ? m[1] : null;
+  }
+  function pickMention(name: string) {
+    composer = composer.replace(/@[a-z0-9._-]*$/i, `@${name} `);
+    mentionQuery = null;
   }
   function stopTyping() {
     clearTimeout(typingStop);
@@ -734,6 +1018,7 @@
     const ch = activeChannel;
     if (!ch) return;
     ch.unread = false;
+    ch.mentioned = false;
     if (!ch.name.startsWith("#")) return;
     let newest: string | undefined;
     for (let i = ch.messages.length - 1; i >= 0; i--)
@@ -833,6 +1118,20 @@
     weft.inviteMint(scopesFor()[0]).catch(() => {});
   }
 
+  // Pins (§6.4)
+  function togglePin(m: Msg) {
+    if (!m.msgid) return;
+    const pinned = activeChannel?.pinnedIds?.includes(m.msgid) ?? false;
+    weft.pin(m.msgid, !pinned).catch((e) => toast(String(e), "error"));
+  }
+  function openPins() {
+    if (!active.startsWith("#")) return;
+    pinsOpen = true;
+    pinsList = [];
+    loadingPins = active;
+    weft.pins(active).catch(() => {});
+  }
+
   // Namespace admin
   function openNsSettings() {
     const meta = discovered[activeServer];
@@ -867,12 +1166,37 @@
   }
 
   onMount(() => {
+    // Restore theme.
+    try {
+      if (localStorage.getItem("weft:theme") === "light") {
+        theme = "light";
+        document.documentElement.dataset.theme = "light";
+      }
+    } catch {
+      /* ignore */
+    }
     const un = weft.onWeft(handle);
+    // Restore the last session and log straight back in (login mode — the
+    // account already exists).
+    try {
+      const saved = JSON.parse(localStorage.getItem(SAVED_KEY) ?? "null");
+      if (saved?.host) host = saved.host;
+      if (saved?.account) formAccount = saved.account;
+      if (saved?.host && saved?.account && saved?.password) {
+        formPassword = saved.password;
+        mode = "login";
+        doConnect();
+      }
+    } catch {
+      /* ignore */
+    }
     return () => {
       un.then((f) => f());
     };
   });
 </script>
+
+<svelte:window onkeydown={globalKey} onclick={() => (ctxMenu = null)} />
 
 {#if status !== "online"}
   <!-- ================= CONNECT / LOGIN / REGISTER ================= -->
@@ -901,6 +1225,48 @@
   </div>
 {:else}
   <!-- ================= MAIN APP ================= -->
+  {#if reconnecting}
+    <div class="reconnect-banner">Connection lost — reconnecting…</div>
+  {/if}
+  <div class="toast-stack">
+    {#each toasts as t (t.id)}
+      <div class="toast {t.kind}">{t.text}</div>
+    {/each}
+  </div>
+  {#if ctxMenu}
+    <div class="ctx-menu" style="left:{ctxMenu.x}px; top:{ctxMenu.y}px">
+      {#each ctxMenu.items as it (it.label)}
+        <button class="ctx-item" class:danger={it.danger} onclick={it.run}>{it.label}</button>
+      {/each}
+    </div>
+  {/if}
+  {#if switcherOpen}
+    <div class="modal-wrap switcher-wrap">
+      <button class="modal-backdrop" aria-label="Close" onclick={() => (switcherOpen = false)}></button>
+      <div class="modal switcher" role="dialog" aria-modal="true">
+        <input
+          class="switcher-input"
+          bind:value={switcherQuery}
+          placeholder="Jump to a channel or DM…"
+          use:autofocus
+          onkeydown={(e) => {
+            if (e.key === "Enter" && switcherResults[0]) switchTo(switcherResults[0].name);
+          }}
+        />
+        <div class="switcher-list">
+          {#each switcherResults as c (c.name)}
+            <button class="switcher-item" onclick={() => switchTo(c.name)}>
+              <span class="si-sigil">{c.name.startsWith("@") ? "@" : "#"}</span>
+              <span>{c.name.startsWith("@") ? peerOf(c.name) : chanShort(c.name)}</span>
+              {#if c.unread}<span class="unread-dot"></span>{/if}
+            </button>
+          {:else}
+            <div class="empty-hint">No matches.</div>
+          {/each}
+        </div>
+      </div>
+    </div>
+  {/if}
   <div class="app" class:members-collapsed={!membersVisible}>
     <!-- COMMUNITY RAIL -->
     <nav class="warp-rail" aria-label="Networks">
@@ -969,10 +1335,10 @@
               <div class="retention-label">{group.category}</div>
               {#each group.list as ch (ch.name)}
                 {@const meta = retentionMeta[ch.retention]}
-                <button class="channel-item" class:active={ch.name === active} class:unread={ch.unread} onclick={() => (active = ch.name)}>
+                <button class="channel-item" class:active={ch.name === active} class:unread={ch.unread} onclick={() => (active = ch.name)} oncontextmenu={(e) => chanCtx(e, ch)}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" /></svg>
                   <span class="ci-name">{chanShort(ch.name)}</span>
-                  {#if ch.unread}<span class="unread-dot"></span>{/if}
+                  {#if ch.mentioned}<span class="mention-badge">@</span>{:else if ch.unread}<span class="unread-dot"></span>{/if}
                   <span class="dot {meta.cls} chan-ret" title={meta.label}></span>
                 </button>
               {/each}
@@ -1004,6 +1370,14 @@
             {#each ["online", "away", "dnd", "invisible"] as s (s)}
               <button onclick={() => setStatus(s)}><span class="dot {s}"></span>{s}</button>
             {/each}
+            <button class="settings-item" onclick={() => { settingsOpen = true; statusMenu = false; }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+              settings
+            </button>
+            <button class="logout-item" onclick={logout}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5" /><path d="M21 12H9" /></svg>
+              log out
+            </button>
           </div>
         {/if}
       </div>
@@ -1034,6 +1408,9 @@
         {/if}
         <div class="topbar-actions">
           {#if activeChannel && !activeIsDm}
+            <button class="icon-btn" title="Pinned messages" aria-label="Pinned messages" onclick={openPins}>
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg>
+            </button>
             <button class="icon-btn" title="Invite" aria-label="Invite" onclick={mintInvite}>
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><line x1="19" y1="8" x2="19" y2="14" /><line x1="22" y1="11" x2="16" y2="11" /></svg>
             </button>
@@ -1063,7 +1440,7 @@
             {#if m.system}
               <div class="msg-group"><div style="width:34px;flex-shrink:0"></div><div class="msg-body"><div class="msg-line system">{m.body}</div></div></div>
             {:else}
-              <div class="msg-group" id="msg-{m.key}">
+              <div class="msg-group" class:mention-hit={!m.own && mentionsMe(m.body)} id="msg-{m.key}" role="article" oncontextmenu={(e) => msgCtx(e, m)}>
                 <div class="avatar">{initials(m.author)}</div>
                 <div class="msg-body">
                   {#if m.replyTo}
@@ -1074,7 +1451,10 @@
                     </button>
                   {/if}
                   <div class="msg-meta">
-                    <span class="author">{m.author}</span>
+                    <button class="author author-btn" onclick={() => openProfile(m.author)}>{m.author}</button>
+                    {#if badgeFor(m.author, active)?.owner}<span class="cap-badge owner">owner</span>
+                    {:else if badgeFor(m.author, active)?.mod}<span class="cap-badge mod">mod</span>{/if}
+                    {#if m.bridged}<span class="cap-badge bridged">bridged</span>{/if}
                     {#if m.own}<span class="cap-badge owner">you</span>{/if}
                     <span class="time">{m.time}</span>
                   </div>
@@ -1108,6 +1488,11 @@
                     <button class="msg-act" title="Reply" aria-label="Reply" onclick={() => (replyTo = m)}>
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 17 4 12l5-5" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg>
                     </button>
+                    {#if active.startsWith("#")}
+                      <button class="msg-act" class:on={activeChannel?.pinnedIds?.includes(m.msgid ?? "")} title={activeChannel?.pinnedIds?.includes(m.msgid ?? "") ? "Unpin" : "Pin"} aria-label="Pin" onclick={() => togglePin(m)}>
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg>
+                      </button>
+                    {/if}
                     {#if m.own}
                       <button class="msg-act" title="Edit" aria-label="Edit" onclick={() => startEdit(m)}>
                         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
@@ -1123,9 +1508,21 @@
                   </div>
                   {#if pickerKey === m.key}
                     <div class="emoji-picker">
-                      {#each QUICK_EMOJI as emoji (emoji)}
-                        <button class="emoji-opt" onclick={() => toggleReaction(m, emoji)}>{emoji}</button>
-                      {/each}
+                      <div class="emoji-quick">
+                        {#each QUICK_EMOJI as emoji (emoji)}
+                          <button class="emoji-opt" onclick={() => toggleReaction(m, emoji)}>{emoji}</button>
+                        {/each}
+                      </div>
+                      <div class="emoji-grid">
+                        {#each Object.entries(EMOJI) as [cat, list] (cat)}
+                          <div class="emoji-cat">{cat}</div>
+                          <div class="emoji-row">
+                            {#each list as emoji (emoji)}
+                              <button class="emoji-opt" onclick={() => toggleReaction(m, emoji)}>{emoji}</button>
+                            {/each}
+                          </div>
+                        {/each}
+                      </div>
                     </div>
                   {/if}
                 {/if}
@@ -1138,6 +1535,15 @@
       </div>
 
       <div class="composer-wrap">
+        {#if mentionQuery !== null && mentionMatches.length}
+          <div class="mention-pop">
+            {#each mentionMatches as name, i (name)}
+              <button class="mention-opt" class:first={i === 0} onclick={() => pickMention(name)}>
+                <span class="mention-sigil">@</span>{name}
+              </button>
+            {/each}
+          </div>
+        {/if}
         {#if replyTo}
           <div class="reply-bar">
             <span>replying to <b>{replyTo.author}</b></span>
@@ -1173,13 +1579,16 @@
       {#if activeChannel && !activeIsDm}
         <div class="member-group-label">Members — {activeChannel.members.length}</div>
         {#each activeChannel.members as m (m.name)}
-          <div class="member-row">
+          <div class="member-row" role="listitem" oncontextmenu={(e) => memberCtx(e, m.name)}>
             <div class="avatar">{initials(m.name)}<span class="origin-flag {m.origin}"></span></div>
             {#if m.name !== account}
-              <button class="mname mlink" onclick={() => openDm(m.name)}><span class={dotClass(m.name)}></span>{m.name}</button>
+              <button class="mname mlink" onclick={() => openProfile(m.name)}><span class={dotClass(m.name)}></span>{m.name}</button>
             {:else}
               <span class="mname"><span class="dot {myStatus}"></span>{m.name}</span>
             {/if}
+            {#if badgeFor(m.name, active)?.owner}<span class="cap-badge owner">owner</span>
+            {:else if badgeFor(m.name, active)?.mod}<span class="cap-badge mod">mod</span>{/if}
+            {#if m.origin === "federated"}<span class="cap-badge bridged">br</span>{/if}
             {#if m.name !== account}
               <div class="member-actions">
                 <button class="mod-btn" title="Message {m.name}" aria-label="Message {m.name}" onclick={() => openDm(m.name)}>
@@ -1358,6 +1767,94 @@
           <div class="modal-join">
             <input readonly value={inviteLink} />
             <button onclick={() => navigator.clipboard?.writeText(inviteLink ?? "")}>Copy</button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if pinsOpen}
+      <div class="modal-wrap">
+        <button class="modal-backdrop" aria-label="Close" onclick={() => (pinsOpen = false)}></button>
+        <div class="modal" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <h2>Pinned — {chanShort(active)}</h2>
+            <button class="linkish" aria-label="Close" onclick={() => (pinsOpen = false)}>✕</button>
+          </div>
+          <div class="modal-list">
+            {#each pinsList as m (m.key)}
+              <div class="pin-card">
+                <div class="avatar sm">{initials(m.author)}</div>
+                <div class="pin-body">
+                  <div class="pin-meta"><b>{m.author}</b> <span class="time">{m.time}</span></div>
+                  <div class="msg-line">{#if m.md}{@html renderMd(m.body)}{:else}{m.body}{/if}</div>
+                </div>
+                <button class="linkish" title="Unpin" onclick={() => m.msgid && weft.pin(m.msgid, false).catch(() => {})}>unpin</button>
+              </div>
+            {:else}
+              <div class="empty-hint">No pinned messages.</div>
+            {/each}
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if profileTarget}
+      {@const p = profileTarget}
+      <div class="modal-wrap">
+        <button class="modal-backdrop" aria-label="Close" onclick={() => (profileTarget = null)}></button>
+        <div class="modal profile-card" role="dialog" aria-modal="true">
+          <div class="profile-head">
+            <div class="avatar lg">{initials(p)}<span class="dot {presence[p] ?? 'offline'} corner"></span></div>
+            <div>
+              <div class="profile-name">
+                {p}
+                {#if badgeFor(p, active)?.owner}<span class="cap-badge owner">owner</span>
+                {:else if badgeFor(p, active)?.mod}<span class="cap-badge mod">mod</span>{/if}
+              </div>
+              <div class="profile-sub">{p}@{network} · {presence[p] ?? "offline"}</div>
+            </div>
+          </div>
+          <div class="profile-actions">
+            {#if p !== account}
+              <button class="ok-btn" onclick={() => { openDm(p); profileTarget = null; }}>Message</button>
+              <button class="linkish" onclick={() => { openRoles(p); profileTarget = null; }}>Roles</button>
+              <button class="linkish" onclick={() => { moderate("mute", p); profileTarget = null; }}>Mute</button>
+              <button class="linkish" onclick={() => { moderate("ban", p); profileTarget = null; }}>Ban</button>
+            {/if}
+            <button class="linkish" onclick={() => navigator.clipboard?.writeText(`${p}@${network}`)}>Copy ID</button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if settingsOpen}
+      <div class="modal-wrap">
+        <button class="modal-backdrop" aria-label="Close" onclick={() => (settingsOpen = false)}></button>
+        <div class="modal" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <h2>Settings</h2>
+            <button class="linkish" aria-label="Close" onclick={() => (settingsOpen = false)}>✕</button>
+          </div>
+          <div class="settings-sec">
+            <h3>Account</h3>
+            <div class="set-row"><span>Identity</span><b>{account}@{network}</b></div>
+            <div class="set-row"><span>Status</span><b>{myStatus}</b></div>
+          </div>
+          <div class="settings-sec">
+            <h3>Appearance</h3>
+            <div class="set-row">
+              <span>Theme</span>
+              <button class="linkish" onclick={toggleTheme}>{theme === "dark" ? "Dark" : "Light"} — switch</button>
+            </div>
+          </div>
+          <div class="settings-sec">
+            <h3>Connection</h3>
+            <div class="set-row"><span>Server</span><b>{host}</b></div>
+            <div class="set-row"><span>State</span><b>{reconnecting ? "reconnecting…" : "connected"}</b></div>
+          </div>
+          <div class="settings-sec danger-sec">
+            <h3>Session</h3>
+            <div class="modal-actions"><button class="danger-btn" onclick={logout}>Log out</button></div>
           </div>
         </div>
       </div>

@@ -18,10 +18,31 @@
   --retained: #5b9bd9;
   --permanent: #e2a13d;
   --e2ee: #4fb0a5;
+  --bg-elevated: #1b1e27;
+  --accent: #5865f2;
+  --text-secondary: #b8bcc8;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
   --font-sans: "IBM Plex Sans", system-ui, sans-serif;
   --radius-sm: 3px;
   --radius-md: 6px;
+  color-scheme: dark;
+}
+
+/* Light theme (toggle in Settings). Most surfaces read the variables above;
+   the palette swap flips them. */
+:root[data-theme="light"] {
+  --bg-void: #eef0f3;
+  --bg-panel: #ffffff;
+  --bg-panel-raised: #f4f5f7;
+  --bg-hover: #e7e9ee;
+  --border-hair: #e5e7ea;
+  --border-hair-strong: #d3d6dc;
+  --text-primary: #17181c;
+  --text-muted: #5b5e68;
+  --text-faint: #9a9ca4;
+  --bg-elevated: #ffffff;
+  --text-secondary: #3a3d45;
+  color-scheme: light;
 }
 
 * {
@@ -695,6 +716,69 @@ button {
   font-style: italic;
 }
 
+/* @mentions (pings) */
+.mention {
+  color: var(--accent, #7aa2f7);
+  background: color-mix(in srgb, var(--accent, #5865f2) 16%, transparent);
+  border-radius: 3px;
+  padding: 0 3px;
+  font-weight: 500;
+}
+.mention.me {
+  color: #e0a53c;
+  background: color-mix(in srgb, #e0a53c 20%, transparent);
+}
+.msg-group.mention-hit {
+  background: color-mix(in srgb, #e0a53c 8%, transparent);
+  box-shadow: inset 2px 0 0 #e0a53c;
+}
+.mention-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #d83c3e;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.mention-pop {
+  background: var(--bg-elevated, #1b1e27);
+  border: 1px solid var(--border-hair-strong, #2a2e3a);
+  border-radius: var(--radius-md);
+  padding: 4px;
+  margin-bottom: 6px;
+  display: flex;
+  flex-direction: column;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.mention-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.mention-opt.first,
+.mention-opt:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.mention-sigil {
+  color: var(--accent, #7aa2f7);
+}
+
 /* unread channels + per-item retention dot (Phase 6) */
 .channel-item .ci-name {
   flex: 1;
@@ -921,6 +1005,207 @@ button {
   background: color-mix(in srgb, #d8a13c 12%, transparent);
 }
 
+/* session lifecycle (Phase 8) */
+.reconnect-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 200;
+  text-align: center;
+  padding: 5px;
+  font-size: 12.5px;
+  color: #1a1a1a;
+  background: #e0a53c;
+}
+.toast-stack {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  min-width: 200px;
+  max-width: 340px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-elevated, #1b1e27);
+  border: 1px solid var(--border-hair-strong, #2a2e3a);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+.toast.error {
+  border-color: #d83c3e;
+  color: #f2a3a4;
+}
+
+/* quick switcher (Ctrl+K) */
+.switcher-wrap {
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+.switcher {
+  width: min(460px, 92vw);
+  padding: 8px;
+}
+.switcher-input {
+  width: 100%;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border-hair-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 15px;
+  margin-bottom: 8px;
+}
+.switcher-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.switcher-list {
+  max-height: 50vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.switcher-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.switcher-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.si-sigil {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+/* right-click context menu */
+.ctx-menu {
+  position: fixed;
+  z-index: 400;
+  min-width: 170px;
+  padding: 4px;
+  background: var(--bg-elevated, #1b1e27);
+  border: 1px solid var(--border-hair-strong, #2a2e3a);
+  border-radius: var(--radius-md);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+.ctx-item {
+  text-align: left;
+  padding: 7px 10px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+.ctx-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.ctx-item.danger {
+  color: #e06c6c;
+}
+.ctx-item.danger:hover {
+  background: rgba(216, 60, 62, 0.15);
+}
+.logout-item {
+  border-top: 1px solid var(--border-hair-strong, #2a2e3a);
+  margin-top: 4px;
+  padding-top: 8px !important;
+  color: #e06c6c !important;
+}
+.settings-item {
+  border-top: 1px solid var(--border-hair-strong, #2a2e3a);
+  margin-top: 4px;
+  padding-top: 8px !important;
+}
+
+/* clickable message author */
+.author-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.author-btn:hover {
+  text-decoration: underline;
+}
+
+/* member profile card */
+.profile-card {
+  width: min(360px, 92vw);
+}
+.profile-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+.avatar.lg {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  font-size: 18px;
+  border-radius: 50%;
+}
+.profile-name {
+  font-size: 18px;
+  font-weight: 650;
+}
+.profile-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+/* settings rows */
+.set-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.set-row b {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 /* hover actions on own messages */
 .msg-actions {
   position: absolute;
@@ -955,6 +1240,34 @@ button {
 }
 .msg-act.danger:hover {
   color: #f16a6a;
+}
+.msg-act.on {
+  color: var(--thread-amber, #e0a53c);
+}
+
+/* pinned messages panel */
+.pin-card {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border-hair-strong);
+  border-radius: var(--radius-md);
+}
+.pin-body {
+  flex: 1;
+  min-width: 0;
+}
+.pin-meta {
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+.pin-meta .time {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  margin-left: 4px;
 }
 
 /* inline editor */
@@ -1023,19 +1336,43 @@ button {
   color: var(--text-primary);
 }
 
-/* quick-emoji picker popover */
+/* emoji picker popover */
 .emoji-picker {
   position: absolute;
   top: 18px;
   right: 10px;
   z-index: 5;
-  display: flex;
-  gap: 2px;
-  padding: 4px;
+  width: 280px;
+  padding: 6px;
   background: var(--bg-elevated, #1b1e27);
   border: 1px solid var(--border-hair-strong, #2a2e3a);
   border-radius: var(--radius-md);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.emoji-quick {
+  display: flex;
+  gap: 2px;
+  padding-bottom: 5px;
+  margin-bottom: 5px;
+  border-bottom: 1px solid var(--border-hair-strong);
+}
+.emoji-grid {
+  max-height: 220px;
+  overflow-y: auto;
+}
+.emoji-cat {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  padding: 6px 2px 3px;
+  position: sticky;
+  top: 0;
+  background: var(--bg-elevated, #1b1e27);
+}
+.emoji-row {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
 }
 .emoji-opt {
   border: none;

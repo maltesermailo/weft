@@ -177,12 +177,33 @@ flavor-B multi-network + roster polish.
 
 Phase 7 is complete except the two multi-party/server-verb items above.
 
-## Phase 8 — account & platform polish
+## Phase 8 — account & platform polish 🟡 core done
 
-- Logout / switch account; account settings; device keys (`AUTH KEY/ENROLL`).
-- Desktop notifications (Tauri plugin); auto-reconnect banner; persistence
-  (remember servers, auto-connect); quick switcher (Ctrl+K); context menus;
-  toasts; theme/settings.
+- [x] **Logout / switch account** — `disconnect` command drops the connection; a
+  log-out item in the status menu resets session state → connect screen.
+- [x] **Persistence** — remembers the last host + account in `localStorage`
+  (never the password) and prefills the connect form on launch.
+- [x] **Auto-reconnect** — an unexpected drop keeps the UI up, shows a
+  "reconnecting…" banner, and retries with exponential backoff (login mode,
+  in-memory creds); `AUTH-FAILED` aborts to the connect screen.
+- [x] **Toasts** — errors now surface as top-right toasts (auto-dismiss) instead
+  of polluting the chat pane.
+- [x] **Desktop notifications** — `tauri-plugin-notification`; a DM or a
+  `@mention` while the window is unfocused fires an OS notification.
+- [x] **Cross-launch auto-login** — full creds saved to `localStorage`
+  (password included — dev convenience, keychain is the hardening) and
+  auto-connected on launch in login mode.
+- [x] **Settings modal** — account identity, connection, and a log-out, opened
+  from the status menu.
+- [x] **Member profile card** — clicking a member (roster) or a message author
+  opens a profile popout: status, id, Message / Roles / Mute / Ban / Copy ID.
+- [x] **Multi-line messages** (fixed) — bodies with newlines were silently
+  dropped (`BadTrailing`); the `Line` trailing now escapes `\r`/`\n`/`\\`
+  symmetrically (spec §4 amendment), so multi-line sends work end-to-end for
+  every client. Send failures now surface as toasts instead of eating the input.
+- [ ] **Deferred** — device keys (`AUTH KEY/ENROLL`), OS-keychain credential
+  storage (harden auto-login), quick switcher (Ctrl+K), right-click context
+  menus, light/dark theme toggle.
 
 ---
 

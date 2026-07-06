@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
+use weft_crypto::{sign_challenge, signature_to_b64, Keypair};
 use weft_proto::{Command, Event, MsgId, Reply, Request, Target};
 use weft_transport::QuicControlStream;
 
@@ -26,6 +27,8 @@ pub enum Mode {
     Login,
     /// REGISTER a new account (which doubles as authentication).
     Register,
+    /// AUTH KEY/PROOF with an enrolled device key — passwordless.
+    Key,
 }
 
 impl Mode {
@@ -33,6 +36,7 @@ impl Mode {
         match s {
             "login" => Ok(Mode::Login),
             "register" => Ok(Mode::Register),
+            "key" => Ok(Mode::Key),
             other => Err(format!("unknown mode {other:?}")),
         }
     }
@@ -82,6 +86,23 @@ pub enum WeftEvent {
     Marked {
         channel: String,
         msgid: String,
+    },
+    /// `PINNED <#chan> <msgid>` — a message was pinned (§7).
+    Pinned {
+        channel: String,
+        msgid: String,
+        by: Option<String>,
+    },
+    /// `UNPINNED <#chan> <msgid>` — a message was unpinned (§7).
+    Unpinned {
+        channel: String,
+        msgid: String,
+    },
+    /// `CAPS <account> <scope> :<caps>` — effective caps (§10.4).
+    Caps {
+        account: String,
+        scope: String,
+        caps: String,
     },
     /// `CHANMETA <#chan> <key> <value>` — topic / posting / … (§7).
     Chanmeta {
@@ -234,6 +255,7 @@ pub async fn run_connection(
     account: String,
     password: String,
     mode: Mode,
+    device: Option<Keypair>,
     mut outbound: mpsc::UnboundedReceiver<String>,
 ) {
     let mut stream = match connect(addr, &server_name).await {
@@ -244,6 +266,9 @@ pub async fn run_connection(
     let mut phase = Phase::HelloSent;
     // Whether we're inside a HISTORY BATCH (messages then are older history).
     let mut in_batch = false;
+    // The network name, captured from the first WELCOME — needed to sign the
+    // device-key challenge (`nonce ‖ network`, §6.1).
+    let mut net_name = String::new();
     // Frontend commands that arrive before READY wait here.
     let mut buffered: Vec<String> = Vec::new();
 
@@ -267,7 +292,7 @@ pub async fn run_connection(
             line = stream.recv_line() => match line {
                 Ok(Some(raw)) => {
                     let mut close = false;
-                    if let Some(out) = on_line(&app, &account, &password, mode, &mut phase, &mut in_batch, &mut close, &raw) {
+                    if let Some(out) = on_line(&app, &account, &password, mode, device.as_ref(), &mut net_name, &mut phase, &mut in_batch, &mut close, &raw) {
                         if send(&mut stream, &app, &out).await.is_err() { return; }
                     }
                     if close {
@@ -306,11 +331,14 @@ enum Phase {
 /// Process one inbound line: advance the handshake, emit structured events,
 /// and return an outbound line to send in response (if any).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn on_line(
     app: &AppHandle,
     account: &str,
     password: &str,
     mode: Mode,
+    device: Option<&Keypair>,
+    net_name: &mut String,
     phase: &mut Phase,
     in_batch: &mut bool,
     close: &mut bool,
@@ -330,12 +358,31 @@ fn on_line(
     };
     // §3.3 handshake progression — the auth verb depends on the chosen mode.
     match (*phase, &reply.event) {
-        (Phase::HelloSent, Event::Welcome { .. }) => {
+        (Phase::HelloSent, Event::Welcome { network, .. }) => {
             *phase = Phase::AuthSent;
+            *net_name = network.to_string(); // needed to sign the key challenge
             return Some(match mode {
                 Mode::Login => format!("AUTH PASSWORD {account} :{password}"),
                 Mode::Register => format!("REGISTER {account} :{password}"),
+                Mode::Key => match device {
+                    Some(kp) => format!("AUTH KEY {account} {}", kp.public().to_b64()),
+                    None => {
+                        emit(app, WeftEvent::AuthFailed { reason: "no device key on this device".into() });
+                        *close = true;
+                        return None;
+                    }
+                },
             });
+        }
+        // §6.1 device-key challenge → sign `nonce ‖ network` and prove.
+        (Phase::AuthSent, Event::Challenge { nonce }) => {
+            let (Some(kp), Ok(nonce_bytes)) = (device, weft_crypto::b64::decode(nonce)) else {
+                emit(app, WeftEvent::AuthFailed { reason: "bad device-key challenge".into() });
+                *close = true;
+                return None;
+            };
+            let sig = sign_challenge(kp, &nonce_bytes, net_name);
+            return Some(format!("AUTH PROOF {}", signature_to_b64(&sig)));
         }
         (Phase::AuthSent, Event::Welcome { network, .. }) => {
             *phase = Phase::Ready;
@@ -356,6 +403,9 @@ fn on_line(
                 }
                 (Mode::Register, weft_proto::ErrCode::Conflict) => {
                     "that account name is already taken".to_string()
+                }
+                (Mode::Key, weft_proto::ErrCode::AuthFailed) => {
+                    "device-key login failed — enroll this device first".to_string()
                 }
                 _ => e.text.clone(),
             };
@@ -439,6 +489,33 @@ fn on_line(
             WeftEvent::Marked {
                 channel: channel.to_string(),
                 msgid: msgid.to_string(),
+            },
+        ),
+        Event::Pinned { channel, msgid, by } => emit(
+            app,
+            WeftEvent::Pinned {
+                channel: channel.to_string(),
+                msgid: msgid.to_string(),
+                by: by.map(|a| a.to_string()),
+            },
+        ),
+        Event::Unpinned { channel, msgid } => emit(
+            app,
+            WeftEvent::Unpinned {
+                channel: channel.to_string(),
+                msgid: msgid.to_string(),
+            },
+        ),
+        Event::Caps {
+            account,
+            scope,
+            caps,
+        } => emit(
+            app,
+            WeftEvent::Caps {
+                account: account.to_string(),
+                scope,
+                caps,
             },
         ),
         Event::Chanmeta {
@@ -807,6 +884,45 @@ pub fn build_mark(channel: &str, msgid: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// `PIN`/`UNPIN <msgid>` — (un)pin a message (§6.4).
+pub fn build_pin(msgid: &str, pinned: bool) -> Result<String, String> {
+    let msgid: MsgId = msgid.parse().map_err(|_| "bad msgid".to_string())?;
+    let cmd = if pinned {
+        Command::Pin { msgid }
+    } else {
+        Command::Unpin { msgid }
+    };
+    Request::new(cmd).serialize().map_err(|e| e.to_string())
+}
+
+/// `AUTH ENROLL <b64-pubkey>` — add a device key while authed (§6.1).
+pub fn build_auth_enroll(pubkey: &str) -> Result<String, String> {
+    Request::new(Command::AuthEnroll {
+        pubkey: pubkey.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `CAPS <account> <scope>` — query an account's effective caps (§10.4).
+pub fn build_caps(account: &str, scope: &str) -> Result<String, String> {
+    Request::new(Command::Caps {
+        account: account.parse().map_err(|_| "bad account".to_string())?,
+        scope: scope.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `PINS <#chan>` — list pinned messages (§6.4).
+pub fn build_pins(channel: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::Pins { channel })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
 /// `MEMBERS <#chan>` — request the roster snapshot (§6.3).
 pub fn build_members(channel: &str) -> Result<String, String> {
     let channel: weft_proto::ChannelName =
@@ -969,8 +1085,9 @@ pub fn build_history(target: &str, before: Option<String>) -> Result<String, Str
 pub fn build_ns_create(name: &str, visibility: &str, root_key: &str) -> Result<String, String> {
     let name: weft_proto::NamespaceName =
         name.parse().map_err(|_| "bad namespace name".to_string())?;
-    let visibility: weft_proto::Visibility =
-        visibility.parse().map_err(|_| "bad visibility".to_string())?;
+    let visibility: weft_proto::Visibility = visibility
+        .parse()
+        .map_err(|_| "bad visibility".to_string())?;
     Request::new(Command::NsCreate {
         name,
         visibility,
@@ -995,7 +1112,9 @@ pub fn build_ns_meta(name: &str, key: &str, value: &str) -> Result<String, Strin
 pub fn build_ns_visibility(name: &str, visibility: &str) -> Result<String, String> {
     Request::new(Command::NsVisibility {
         name: name.parse().map_err(|_| "bad namespace".to_string())?,
-        visibility: visibility.parse().map_err(|_| "bad visibility".to_string())?,
+        visibility: visibility
+            .parse()
+            .map_err(|_| "bad visibility".to_string())?,
     })
     .serialize()
     .map_err(|e| e.to_string())
@@ -1014,8 +1133,7 @@ pub fn build_ns_delegate(name: &str, subject: &str, caps: &str) -> Result<String
 
 /// `NS DELETE <name> <name>` — confirmed by repetition (§6.2).
 pub fn build_ns_delete(name: &str) -> Result<String, String> {
-    let name: weft_proto::NamespaceName =
-        name.parse().map_err(|_| "bad namespace".to_string())?;
+    let name: weft_proto::NamespaceName = name.parse().map_err(|_| "bad namespace".to_string())?;
     Request::new(Command::NsDelete {
         name: name.clone(),
         confirm: name,

@@ -55,7 +55,7 @@ Creation per network config: `open` (any account, quota default **10**, rate-lim
 
 ### 2.3 Normalization (normative)
 - Machine identifiers: **lowercase ASCII**. Accounts `[a-z0-9-_.]{1,64}`; ns/channel segments `[a-z0-9-_]+`; channels ≤200 B incl. `#` and namespace.
-- Display strings: UTF-8, NFC on ingest. `\r`/`\n` forbidden in lines. Display names ≤128 B; topics ≤1024 B.
+- Display strings: UTF-8, NFC on ingest. `\r`/`\n` forbidden **raw** in lines but representable in the **trailing** via the §4 escape table (`\r`→`\r`, `\n`→`\n`, `\\`→`\\`), so a message body may be multi-line — it is escaped on serialize and unescaped on parse, never reaching the transport as a raw break. Display names ≤128 B; topics ≤1024 B.
 
 ### 2.4 Namespace recovery (new)
 
@@ -211,6 +211,8 @@ Signed NS verbs (`TRANSFER`, `RECOVERY CANCEL`) carry the root signature in a `@
 | `DELETE` | `DELETE <msgid>` | `delete-own` \| `delete-any` | Tombstone. → `DELETED`. |
 | `REACT` / `UNREACT` | `REACT <msgid> <emoji>` | `react` | Unicode emoji ≤ 32 B; shortcodes travel **bare** (leading `:` collides with the §4 trailing marker — §18 #8). Idempotent. → `REACTION op=add\|remove` (live). |
 | `HISTORY` | `HISTORY <target> [before=] [after=] [limit=≤500] [thread=]` | membership / acked manifest | `key=value` middle params, any order, unknown keys ignored; target = channel or `@user`. → `BATCH START` … **compacted** events (§12.1) … `BATCH END [truncated]`. `truncated` marks gaps — silence about them is forbidden. |
+| `PIN` / `UNPIN` | `PIN <msgid>` | `pin` | Pin/unpin a message in its channel (resolved from the msgid). → `PINNED <#chan> <msgid> by=` / `UNPINNED <#chan> <msgid>` broadcast to members. |
+| `PINS` | `PINS <#chan>` | membership | The pinned messages. → `BATCH START` … `MESSAGE` per pin … `BATCH END`. |
 | `STREAM` | `STREAM OFFER <media\|backfill> <mime> <bytes>` | — | → `STREAM ACCEPT <token>` → data-plane transfer. HISTORY switches to STREAM above ~200 events (RECOMMENDED). |
 
 ### 6.5 Capabilities & invites (§10.4)

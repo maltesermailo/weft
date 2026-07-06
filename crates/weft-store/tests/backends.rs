@@ -11,6 +11,7 @@ use weft_proto::{
 use weft_store::{
     materialize, AccountStore, CapabilityStore, ChannelStore, EventKind, EventRecord, EventStore,
     HistoryItem, InviteRecord, InviteStore, MemoryStore, ModKind, ModRecord, ModerationStore,
+    PinStore,
     NamespaceRecord, NamespaceStore, NetblockRecord, NetblockStore, Page, PeerRecord, PeerStore,
     PendingRecovery, RedeemOutcome, ReportRecord, ReportResolution, ReportStore, Scope,
 };
@@ -69,7 +70,8 @@ where
         + ReportStore
         + PeerStore
         + NetblockStore
-        + ModerationStore,
+        + ModerationStore
+        + PinStore,
 {
     let chan: Scope = Scope::Channel(format!("#suite-{tag}").parse().unwrap());
     let ada: Account = format!("ada-{tag}").parse().unwrap();
@@ -926,6 +928,21 @@ where
         .is_moderated(&bob, &covering, ModKind::Mute)
         .await
         .unwrap());
+
+    // ---- §6.4 pinned messages ----
+    let pin_chan: weft_proto::ChannelName = format!("#pins-{tag}").parse().unwrap();
+    assert!(store.pins(&pin_chan).await.unwrap().is_empty());
+    let (m1, m2) = (msgid(1_000), msgid(2_000));
+    store.set_pin(&pin_chan, &m2, true).await.unwrap();
+    store.set_pin(&pin_chan, &m1, true).await.unwrap();
+    store.set_pin(&pin_chan, &m1, true).await.unwrap(); // idempotent
+    assert_eq!(
+        store.pins(&pin_chan).await.unwrap(),
+        vec![m1.clone(), m2.clone()],
+        "oldest-first by ULID"
+    );
+    store.set_pin(&pin_chan, &m1, false).await.unwrap();
+    assert_eq!(store.pins(&pin_chan).await.unwrap(), vec![m2]);
 }
 
 #[tokio::test]
