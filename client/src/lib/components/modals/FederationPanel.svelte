@@ -34,7 +34,7 @@
       <h2>Federation</h2>
       <button class="linkish" aria-label="Close" onclick={onclose}>✕</button>
     </div>
-    <p class="modal-sub">Network peering (§11), operator-only. Netblocks, inbound peering, and accept/sever work today; <b>outbound</b> bridge transmission needs the M5d dialer.</p>
+    <p class="modal-sub">Network-level federation (operator): block abusive peer networks entirely, and manage network-wide (<code>*</code>) bridges. <b>Per-namespace</b> federation is decided by each namespace's owner in its Server Settings → Federation.</p>
 
     <div class="section-sep"></div>
     <div class="field-label">Blocked networks</div>

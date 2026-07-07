@@ -84,6 +84,7 @@
       profileTarget = null;
       ctxMenu = null;
       serverMenu = false;
+      userMenu = false;
       newChanOpen = false;
       newCatOpen = false;
       chanPermsCh = null;
@@ -188,7 +189,8 @@
     manualLogout = true;
     reconnecting = false;
     lastCreds = null;
-    statusMenu = false;
+    userMenu = false;
+    settingsOpen = false;
     weft.disconnect().catch(() => {});
     channels = {};
     active = "";
@@ -254,7 +256,9 @@
   let homeView = $state(false); // sidebar shows DMs instead of channels
   let presence = $state<Record<string, string>>({}); // account → status
   let myStatus = $state("online");
-  let statusMenu = $state(false);
+  // Footer user menu (presence + settings + logout) and the user-settings page tab.
+  let userMenu = $state(false);
+  let userTab = $state<"account" | "appearance" | "connection">("account");
   let dmInput = $state("");
   // ---- discover dialog (Phase 6) ----
   let discoverOpen = $state(false);
@@ -404,7 +408,7 @@
   }
   // ---- namespace admin panel (§6.2 / §2.4 / §6.6) ----
   let nsSettingsOpen = $state(false);
-  let nsTab = $state<"overview" | "roles" | "members" | "recovery" | "danger">("overview");
+  let nsTab = $state<"overview" | "roles" | "members" | "federation" | "recovery" | "danger">("overview");
   // Role editor (§6.6). Roles live at the namespace scope.
   let newRoleName = $state("");
   let newRoleColor = $state("#5865f2");
@@ -627,7 +631,7 @@
   }
   function setStatus(s: string) {
     myStatus = s;
-    statusMenu = false;
+    userMenu = false;
     weft.presence(s).catch(() => {});
   }
 
@@ -1684,6 +1688,8 @@
     catCtx,
     get serverMenu() { return serverMenu; },
     set serverMenu(v: boolean) { serverMenu = v; },
+    get userMenu() { return userMenu; },
+    set userMenu(v: boolean) { userMenu = v; },
     openCreateChannel,
     openCreateChannelInCat,
     openNsSettings,
@@ -1693,7 +1699,7 @@
     openDm,
     openRoles,
     moderate,
-    openSettings: () => (settingsOpen = true),
+    openSettings: () => { userTab = "account"; settingsOpen = true; userMenu = false; },
     toast,
     expectSuccess,
     get reportQueue() { return reportQueue; },
@@ -1774,9 +1780,12 @@
     toggleTheme,
     enrollThisDevice: enrollThisDevice,
     logout,
+    // user settings (page overlay)
+    get userTab() { return userTab; },
+    set userTab(v: "account" | "appearance" | "connection") { userTab = v; },
     // server settings (ns overlay)
     get nsTab() { return nsTab; },
-    set nsTab(v: "overview" | "roles" | "members" | "recovery" | "danger") { nsTab = v; },
+    set nsTab(v: "overview" | "roles" | "members" | "federation" | "recovery" | "danger") { nsTab = v; },
     get nsTitle() { return nsTitle; },
     set nsTitle(v: string) { nsTitle = v; },
     get nsDesc() { return nsDesc; },

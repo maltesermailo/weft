@@ -81,6 +81,7 @@ export interface AppCtx {
 
   // ---- server menu / creation ----
   serverMenu: boolean;
+  userMenu: boolean;
   openCreateChannel(prefill?: string): void;
   openCreateChannelInCat(cat: string): void;
   openNsSettings(): void;
@@ -194,8 +195,11 @@ export interface AppCtx {
   enrollThisDevice(): void;
   logout(): void;
 
+  // ---- user settings (page overlay) ----
+  userTab: "account" | "appearance" | "connection";
+
   // ---- server settings (ns overlay) ----
-  nsTab: "overview" | "roles" | "members" | "recovery" | "danger";
+  nsTab: "overview" | "roles" | "members" | "federation" | "recovery" | "danger";
   nsTitle: string;
   nsDesc: string;
   nsVis: string;

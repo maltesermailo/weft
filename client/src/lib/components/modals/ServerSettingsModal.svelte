@@ -5,6 +5,19 @@
   import { CAPS, ROLE_COLORS } from "$lib/constants";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
+
+  // Federation: bridges are proposed at this namespace's scope (§11) — the
+  // namespace owner/admin decides, not the network operator.
+  let brPeer = $state("");
+  let brHistory = $state("from-epoch");
+  let brMedia = $state("none");
+  let brTyping = $state(true);
+  function proposeBridge() {
+    const p = brPeer.trim();
+    if (!p) return;
+    app.bridgePropose(`ns:${app.activeServer}`, p, brHistory, brMedia, brTyping);
+    brPeer = "";
+  }
 </script>
 
 <div class="settings-overlay" role="dialog" aria-modal="true" transition:fade|global={{ duration: 150 }}>
@@ -14,6 +27,7 @@
       <button class="so-navitem" class:active={app.nsTab === "overview"} onclick={() => (app.nsTab = "overview")}>Overview</button>
       <button class="so-navitem" class:active={app.nsTab === "roles"} onclick={() => (app.nsTab = "roles")}>Roles</button>
       <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => (app.nsTab = "members")}>Members &amp; roles</button>
+      <button class="so-navitem" class:active={app.nsTab === "federation"} onclick={() => (app.nsTab = "federation")}>Federation</button>
       <div class="so-heading">Security</div>
       <button class="so-navitem" class:active={app.nsTab === "recovery"} onclick={() => (app.nsTab = "recovery")}>Recovery</button>
       <button class="so-navitem danger" class:active={app.nsTab === "danger"} onclick={() => (app.nsTab = "danger")}>Danger zone</button>
@@ -101,6 +115,43 @@
           {/each}
         </div>
         <div class="modal-actions"><button class="ok-btn" onclick={app.doDelegate}>Grant capabilities</button></div>
+      {:else if app.nsTab === "federation"}
+        <h1>Federation</h1>
+        <p class="so-sub">Bridge <b>{app.activeServer}</b>'s channels to a peer network (§11). You control this as the namespace owner — bridges are scoped to <code>ns:{app.activeServer}</code>, non-transitive, and every change notifies members.</p>
+        <div class="field-label">Active bridges</div>
+        <div class="modal-list">
+          {#each Object.values(app.manifests) as m (m.peer)}
+            <div class="ns-card">
+              <div class="ns-info">
+                <div class="ns-name">{m.peer} <span class="rep-state {m.state}">{m.state}</span> · v{m.version}</div>
+                <div class="ns-desc">{m.channels.length} channel(s) · history {m.history} · media {m.media}{m.typing ? " · typing" : ""}</div>
+              </div>
+              <div class="fed-actions">
+                <button onclick={() => app.bridgeAccept(m.peer, m.version)}>Accept</button>
+                <button class="mini-danger" onclick={() => app.bridgeSever(m.peer)}>Sever</button>
+              </div>
+            </div>
+          {:else}
+            <div class="empty-hint">No bridges yet — propose one below, or wait for an inbound peer.</div>
+          {/each}
+        </div>
+        <div class="section-sep"></div>
+        <div class="field-label">Propose a bridge</div>
+        <p class="so-sub">Snapshot this namespace's channels to <code>&lt;peer&gt;</code> and offer a bridge. Live on mutual accept.</p>
+        <input class="text-input" bind:value={brPeer} placeholder="peer network (e.g. hda.example)" onkeydown={(e) => e.key === "Enter" && proposeBridge()} />
+        <div class="fed-propose">
+          <select bind:value={brHistory}>
+            <option value="from-epoch">history: from-epoch</option>
+            <option value="full">history: full</option>
+          </select>
+          <select bind:value={brMedia}>
+            <option value="none">media: none</option>
+            <option value="mirror">media: mirror</option>
+          </select>
+          <label class="fed-check"><input type="checkbox" bind:checked={brTyping} /> typing</label>
+          <button class="ok-btn" onclick={proposeBridge}>Propose</button>
+        </div>
+        <p class="so-sub" style="margin-top:14px">Outbound bridge transmission needs the M5d dialer; inbound peering, accept, and sever work today. Network-wide defederation (blocking a peer network entirely) is a network-operator action.</p>
       {:else if app.nsTab === "recovery"}
         <h1>Recovery quorum</h1>
         <p class="so-sub">§2.4 M-of-N root recovery. Share your recovery key, or co-sign and submit a rotation.</p>

@@ -414,6 +414,73 @@ button:disabled {
   background: var(--border-hair-strong);
   margin: 5px 4px;
 }
+.sm-item.active {
+  color: var(--text-primary);
+}
+.sm-item.danger {
+  color: var(--danger, #d9685f);
+}
+.sm-item.danger:hover {
+  background: var(--danger, #d9685f);
+  color: #fff;
+}
+
+/* Footer user menu (presence + settings + logout) — pops up from the footer. */
+.sidebar-user-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.user-menu {
+  position: absolute;
+  bottom: calc(100% - 2px);
+  left: 8px;
+  right: 8px;
+  z-index: 401;
+  padding: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hair-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.42);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.um-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px 8px;
+}
+.um-head .who {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.um-head .who .name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.um-head .who .key {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.um-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.um-check {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.sidebar-user.open {
+  background: var(--bg-hover);
+}
 .origin-dot {
   width: 6px;
   height: 6px;
