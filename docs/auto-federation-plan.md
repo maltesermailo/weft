@@ -1,0 +1,216 @@
+# Auto-federation (transparent bridging) — design plan
+
+Status: **design, for approval** (2026-07-07). Decisions taken: build the M5d
+dialer first as the foundation; **open** outbound trigger (any user, any
+non-blocked domain), abuse handled reactively. This doc turns that into a
+concrete flow + phases. It amends spec §11 (federation) — the wire pieces land
+in the spec in the same PR as the code (per CLAUDE.md).
+
+## 1. Goal
+
+A user on their home network `H` accesses a namespace on a foreign network `F`
+by naming it — `F/gaming` in the quick-switcher, or clicking a
+`weft://F/i/<token>` invite — and it "just works": `H` auto-establishes a bridge
+to `F` scoped to that namespace, `F`'s channels mirror in, and the user
+participates. No operator ceremony, no manual `BRIDGE PROPOSE/ACCEPT`.
+
+This is the transparent-federation experience. It is a **thin layer on top of
+the outbound dialer** — which is the actual work.
+
+## 2. What exists vs what's missing
+
+| Piece | State |
+|---|---|
+| Inbound bridge sessions (accept, ingest, forward, gating) | ✅ M5b/M5c |
+| `FederationConfig` `accept_any` / `auto_accept` (inbound policy) | ✅ |
+| `NETBLOCK` (name-keyed defederation, invariant 7) | ✅ |
+| Signed manifests, scope-authority-signed | ✅ M5a |
+| Invite links carry the network — `weft://<net>/i/<token>` | ✅ (client parses it) |
+| **Outbound dialer** (dial a foreign weftd over QUIC) | ❌ **M5d, deferred** |
+| **Well-known key fetch** (get `F`'s signing key + endpoint) | ❌ M5d |
+| `<network>/<namespace>` cross-network addressing | ❌ new |
+| Foreign-side "allow federation" toggle | ❌ new |
+| Auto-bridge-on-demand trigger | ❌ new |
+
+The bottom four all sit on the dialer. **No auto-federation is possible until
+weftd can dial out** — today `BRIDGE ADD/REMOVE` answer `UNSUPPORTED` and
+"forwarding over the bridge session is the dialer's job (M5d)."
+
+## 3. Addressing
+
+- **Namespace reference:** `<network>/<namespace>` — e.g. `hda.example/gaming`.
+  The left of the first `/` is a DNS network name; the right is a namespace on
+  that network. (Local namespaces stay bare: `gaming`, channels `#gaming/general`.)
+- **Invite link:** `weft://<network>/i/<token>` — already the format. Redeeming
+  one whose `<network>` ≠ home network is the invite-driven entry to the same
+  flow.
+- **Canonical link (optional):** `weft://<network>/<namespace>` for "open this
+  foreign namespace," so links are shareable outside the app.
+
+## 4. The auto-bridge flow
+
+User `U` on home `H` wants namespace `N` on foreign `F` (via `F/N` or a foreign
+invite). `H` and `F` are the two weftds.
+
+```
+U →(access F/N)→ H
+                 ├─ netblocked(F)?            → refuse (BLOCKED)
+                 ├─ existing bridge H↔F ⊇ N?  → reuse, join N, done
+                 └─ auto-bridge:
+                     1. resolve F: GET https://F/.well-known/weft
+                        → F's network pubkey + QUIC endpoint      [SSRF guard]
+                     2. rate/cap check (even in open mode)
+                     3. dial F over VERIFIED QUIC (ALPN weft/1)   [M5d dialer]
+                     4. AUTH BRIDGE: H proves its network key to F
+                     5. H requests namespace N  ── new: BRIDGE REQUEST
+                     6. F evaluates: N public? federation=open? H not netblocked?
+                        → if ok, F SIGNS N's manifest and PROPOSEs it (F owns
+                          N's scope authority — H cannot sign it)
+                        → else NO-SUCH-TARGET (anti-enumeration) / BLOCKED
+                     7. H auto-accepts (open policy) → bridge live
+                     8. N's channels mirror into H; U joins; U's posts
+                        originate at H and forward one hop to F (invariant 2)
+```
+
+Key subtlety (**why a request, not a propose, from `H`**): a manifest for `N`
+must be signed by `N`'s scope authority, which lives on `F`. `H` cannot propose a
+bridge *for `F`'s namespace* — it can only **ask**, and `F` decides and offers.
+So auto-federation needs a small new **`BRIDGE REQUEST <ns>`** verb (request the
+peer to offer a manifest for one of *its* scopes). `F`'s existing
+`accept_any`/auto-propose logic answers it.
+
+## 5. The "federation on" toggle
+
+Two independent switches, one per side:
+
+- **Foreign side (`F`, the namespace being reached) — the consent gate.** The
+  namespace owner sets `NS META <name> federation :open` (default `closed`). Only
+  an `open` **and `public`** namespace will be auto-offered to a requesting peer.
+  This is how "when on" is expressed: the ns owner opts their namespace into
+  being reachable. `closed`/`unlisted`/`private` namespaces never auto-bridge.
+- **Home side (`H`) — the trigger policy.** Per the decision: **open** — any
+  member may trigger an outbound bridge request to any non-blocked domain. This
+  is a `[federation]` config (`auto_bridge = open|off`), so an operator can turn
+  the whole behavior off for their network.
+
+## 6. Security — "open" is the auth model, not the absence of safety
+
+The chosen policy removes the *per-user authorization gate*. It does **not**
+remove these, which are mandatory regardless:
+
+1. **SSRF / private-address block (non-negotiable).** `F` must be a public DNS
+   name resolving to a public IP. Refuse to dial loopback, RFC-1918, link-local,
+   CGNAT, ULA, or cloud metadata addresses. A user naming `F` must never make the
+   server hit internal infrastructure.
+2. **Foreign consent is structural.** `H` cannot force `F` to bridge — `F` only
+   offers when `N` is `public` + `federation=open` + `H` not netblocked *by F*.
+   There is no "make them peer" path.
+3. **Rate limiting + backoff.** Per-user and global caps on *new* outbound dial
+   attempts; exponential backoff per failing domain. Stops dial-storm DoS.
+4. **Concurrent-bridge cap.** A ceiling on live outbound bridges.
+5. **NETBLOCK both directions.** `H` won't dial a domain it blocked; `F` won't
+   offer to a peer it blocked. The reactive abuse tool the "open" model relies on.
+6. **Well-known fetch hardening.** TLS-verified, timeout, small response cap, no
+   redirects to private hosts.
+7. **Visibility.** Every auto-bridge emits `MANIFEST` to affected members (§11.5)
+   and appears in the namespace's Federation tab — never silent.
+
+"Open" means step 2 of §4 doesn't consult a cap or allow-list; every item above
+still runs.
+
+## 7. Participation model (cross-network)
+
+- `U@H` joining bridged `N` is a **member on H's mirror** of `N`. Their messages
+  originate on `H` (msgid `H/<ulid>`) and forward one hop to `F` (invariant 2 —
+  origin preserved, never re-minted). `F`'s members see `U@H`.
+- Retention/media/typing negotiate to the **strictest** of the two sides (§5.2,
+  existing manifest negotiation).
+- **`e2ee` namespaces are never bridged** (invariant 8 — the server can't mirror
+  ciphertext it can't represent). A foreign `e2ee` namespace is simply
+  unreachable this way. Stated explicitly so it's not a surprise.
+
+## 8. Prior art: Matrix (and why WEFT differs)
+
+Matrix is the reference for transparent, open federation — it validates the
+shape here and warns about the cost of "open."
+
+**How Matrix does it.** Users are `@alice:home.server`; the shared unit is a
+room. To join a remote room: discover the target server
+(`/.well-known/matrix/server` + SRV, fetch its Ed25519 key from
+`/_matrix/key/v2/server`) → the `make_join` / `send_join` handshake → the
+resident server validates the join against the room's auth rules and returns the
+**full current room state + auth chain** → the joining server now holds a
+**complete replica of the room's event DAG** and receives future events via
+signed federation transactions. Authorization is the room's own
+`m.room.join_rules` (`public` / `invite` / `knock` / `restricted`), *not* a
+server-to-server accept. Federation is **open by default**; blocking is reactive
+(`m.room.server_acl` + each homeserver's allow/deny list).
+
+**What WEFT adopts from it:**
+- Trigger on **user access/join** (alias / ID / link), not operator ceremony.
+- Authorize by the **target's own visibility rule** — WEFT namespace `public` +
+  `federation=open` = Matrix's `join_rules: public`.
+- **Well-known discovery** of the peer's signing key + endpoint.
+- **Open by default** (the chosen policy); NETBLOCK ≈ server ACLs.
+
+**Where WEFT stays different, deliberately:**
+- **One-hop relay, not full replication.** Matrix copies the entire room DAG to
+  every participating server and merges via state resolution — resilient but
+  heavy (the infamous slow join of large rooms; CPU-costly state-res). WEFT keeps
+  events ≤ 1 hop from origin, origin-ordered, no merge. Simpler and cheaper, and
+  it fits the IRC-simple / netcat-debuggable ethos — worth preserving.
+- **Explicit bilateral bridge, not emergent membership.** In Matrix the
+  server relationship is emergent (you federate by having a user in the room —
+  there is no bridge object). WEFT keeps an explicit, signed, bilateral bridge
+  (propose/accept/sever + manifest) for clean defederation and auditability.
+  Auto-federation *auto-establishes* that bridge on the Matrix-style trigger
+  rather than discarding it.
+
+**The cautionary tale (why §6's guardrails are non-negotiable).** Open federation
+made Matrix ubiquitous, but it also brought room/invite spam, abuse, and
+resource exhaustion — forcing later bolt-ons: server ACLs, allow-list-only
+deployments, and moderation tooling (mjolnir/Draupnir). Matrix learned the
+guardrails retroactively; WEFT should ship §6 *with* P3, not after.
+
+## 9. Phases (each independently shippable)
+
+- **P0 — spec.** Amend §11: `BRIDGE REQUEST`, the `federation` ns flag,
+  `<network>/<namespace>` addressing, the open-trigger policy + the §6 guardrails.
+  Appendix A decision entry. *(No code; your approval gate.)*
+- **P1 — M5d dialer (the foundation).** weft-transport verified outbound client
+  (partly exists: `client_endpoint`); weftd well-known **fetch client** +
+  `[[peers]]` config; outbound `AUTH BRIDGE`; `BRIDGE ADD/REMOVE` over real QUIC;
+  **two-live-weftd conformance** (two servers actually federate). Unblocks all.
+- **P2 — foreign-side consent.** `NS META <name> federation :open|closed` (store
+  flag + cap check = ns owner); `BRIDGE REQUEST` handler that auto-offers a
+  signed manifest for a `public`+`open` namespace to a non-blocked peer.
+- **P3 — auto-bridge trigger (home side).** The §4 flow: resolve → SSRF guard →
+  rate/cap → dial → request → auto-accept → mirror → join. `[federation]
+  auto_bridge` knob. All of §6.
+- **P4 — client UX.** Quick-switcher / a "join foreign namespace" field accepts
+  `network/namespace`; foreign invite redeem routes into the flow; a
+  "connecting to F…" state + failure surface; the `federation :open` toggle in
+  the namespace Federation tab.
+
+P1 is most of the effort and is valuable on its own (real two-server federation).
+P2–P4 are comparatively small once dialing exists.
+
+## 10. Open questions (need a decision before P0 closes)
+
+1. **Addressing syntax** — `network/namespace`, `weft://network/namespace`, or
+   `#ns/chan@network`? (Recommend `network/namespace` in UI, `weft://…` for links.)
+2. **`BRIDGE REQUEST` vs reusing `accept_any`** — a real new verb, or model the
+   request as `H` connecting and `F` auto-proposing every open ns? (Recommend the
+   explicit verb — bounded, requests exactly one ns.)
+3. **Foreign flag granularity** — per-namespace `federation` (recommended) or a
+   network-wide "open federation" switch?
+4. **Membership lifetime** — does `U`'s bridged membership persist (auto-rejoin
+   on reconnect) or is it session-scoped to when the bridge is live?
+5. **Dial reuse / teardown** — when the last local member leaves a bridged `N`,
+   keep the bridge warm or sever after an idle window?
+
+---
+
+*Recommendation:* approve P0's shape here, I write the §11 amendment for review,
+then P1 (the dialer) — which is the deferred milestone and the thing that makes
+any of this real. Auto-bridge (P2–P4) is quick once P1 lands.
