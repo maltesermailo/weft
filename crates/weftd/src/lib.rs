@@ -21,7 +21,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::{info, warn};
 use weft_core::{Keypair, MaintenanceConfig, MemoryStore, ServerCtx, ServerInfo};
 use weft_store::{AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, PgStore};
 
@@ -36,19 +36,47 @@ pub struct Server {
     pub ws_addr: Option<SocketAddr>,
     /// Actual HTTP address (`/.well-known/weft`), if enabled.
     pub http_addr: Option<SocketAddr>,
+    /// Actual HTTPS address (well-known + admin, TLS), if enabled.
+    pub https_addr: Option<SocketAddr>,
     /// Actual WEFT-IRC gateway address (§17), if enabled.
     pub irc_addr: Option<SocketAddr>,
     endpoint: quinn::Endpoint,
     tasks: Vec<JoinHandle<()>>,
+    ctx: Arc<ServerCtx>,
 }
 
+/// How long graceful shutdown waits for connections to drain before giving up.
+const GRACE_SECS: u64 = 10;
+
 impl Server {
+    /// Graceful shutdown: signal every session to finish its current command
+    /// and close, stop accepting, drain in-flight connections + HTTP requests,
+    /// then close the QUIC endpoint. Bounded by `GRACE_SECS`; anything still
+    /// running past that is left to the runtime teardown on process exit.
     pub async fn shutdown(self) {
-        self.endpoint.close(0u32.into(), b"shutdown");
-        for task in &self.tasks {
-            task.abort();
+        let Server {
+            endpoint,
+            tasks,
+            ctx,
+            ..
+        } = self;
+        info!("graceful shutdown: draining connections");
+        // Signal sessions, accept loops, maintenance, and the HTTP servers.
+        ctx.shutdown.cancel();
+        let grace = std::time::Duration::from_secs(GRACE_SECS);
+        let drained = tokio::time::timeout(grace, async move {
+            for task in tasks {
+                let _ = task.await;
+            }
+        })
+        .await;
+        if drained.is_err() {
+            warn!("shutdown grace ({GRACE_SECS}s) elapsed; remaining tasks stop on exit");
         }
-        self.endpoint.wait_idle().await;
+        // Peers already received session-level closes; this closes the endpoint.
+        endpoint.close(0u32.into(), b"shutdown");
+        endpoint.wait_idle().await;
+        info!("shutdown complete");
     }
 }
 
@@ -58,6 +86,9 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         .network
         .parse()
         .with_context(|| format!("invalid network name {:?}", config.network))?;
+    // Log before any potentially-slow step (store connect, key load) so a hang
+    // during boot is diagnosable rather than silent.
+    info!(%network, backend = ?config.storage.backend, "weftd starting");
     // Config channels are validated here, then *seeded* into the store —
     // the store is the source of truth the registry loads from.
     let seed_channels = config
@@ -149,6 +180,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 .url
                 .as_deref()
                 .context("storage.backend = \"postgres\" requires storage.url")?;
+            info!("connecting to PostgreSQL (this blocks until the DB answers)…");
             let store = PgStore::connect(url)
                 .await
                 .context("connecting to PostgreSQL")?;
@@ -184,6 +216,8 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         tasks.push(task);
     }
 
+    // Share the resolver with the HTTPS listener (below) before QUIC consumes it.
+    let https_resolver = Arc::clone(&cert_resolver);
     let server_config = weft_transport::server_config_resolving(cert_resolver)?;
     let endpoint = weft_transport::server_endpoint(server_config, config.listen.quic)
         .context("binding QUIC endpoint")?;
@@ -207,23 +241,63 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         }
     };
 
-    let http_addr = match config.listen.http {
-        None => None,
-        Some(addr) => {
+    // One app (well-known + ACME challenge + admin), served plaintext on `http`
+    // (needed for the ACME HTTP-01 challenge on :80) and/or TLS-terminated on
+    // `https` (the secure way to reach the admin — same cert as QUIC).
+    let http_app = (config.listen.http.is_some() || config.listen.https.is_some()).then(|| {
+        let mut app = wellknown::router(&ctx, Arc::clone(&challenges));
+        if let Some(admin) = admin_router {
+            app = app.merge(admin);
+            info!("admin panel mounted at /admin (api at /admin/api)");
+        }
+        app
+    });
+
+    let http_addr = match (config.listen.http, &http_app) {
+        (Some(addr), Some(app)) => {
             let listener = bind(addr, "HTTP").await?;
             let http_addr = listener.local_addr()?;
-            let mut app = wellknown::router(&ctx, Arc::clone(&challenges));
-            if let Some(admin) = admin_router {
-                app = app.merge(admin);
-                info!("admin panel mounted at /admin/api");
-            }
+            let app = app.clone();
+            let shutdown = ctx.shutdown.clone();
             tasks.push(tokio::spawn(async move {
-                if let Err(e) = axum::serve(listener, app).await {
+                let result = axum::serve(listener, app)
+                    .with_graceful_shutdown(async move { shutdown.cancelled().await })
+                    .await;
+                if let Err(e) = result {
                     tracing::error!("HTTP server failed: {e}");
                 }
             }));
             Some(http_addr)
         }
+        _ => None,
+    };
+
+    let https_addr = match (config.listen.https, &http_app) {
+        (Some(addr), Some(app)) => {
+            let tls = weft_transport::https_config(https_resolver);
+            let app = app.clone();
+            info!(%addr, "HTTPS (admin/well-known) listening");
+            // axum-server drains in-flight requests on `graceful_shutdown`.
+            let handle = axum_server::Handle::new();
+            let watcher = handle.clone();
+            let shutdown = ctx.shutdown.clone();
+            tokio::spawn(async move {
+                shutdown.cancelled().await;
+                watcher.graceful_shutdown(Some(std::time::Duration::from_secs(GRACE_SECS)));
+            });
+            tasks.push(tokio::spawn(async move {
+                let config = axum_server::tls_rustls::RustlsConfig::from_config(tls);
+                if let Err(e) = axum_server::bind_rustls(addr, config)
+                    .handle(handle)
+                    .serve(app.into_make_service())
+                    .await
+                {
+                    tracing::error!("HTTPS server failed: {e}");
+                }
+            }));
+            Some(addr)
+        }
+        _ => None,
     };
 
     let irc_addr = match config.listen.irc {
@@ -244,9 +318,11 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         quic_addr,
         ws_addr,
         http_addr,
+        https_addr,
         irc_addr,
         endpoint,
         tasks,
+        ctx,
     })
 }
 
@@ -398,6 +474,7 @@ where
         channels.clone(),
         dm_policy,
         maintenance,
+        ctx.shutdown.clone(),
     )];
     Ok((ctx, channels, tasks, admin_router))
 }

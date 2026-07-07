@@ -32,6 +32,7 @@ async fn start_with(channels: &[&str], tweak: impl FnOnce(&mut Config)) -> weftd
             quic: "127.0.0.1:0".parse().unwrap(),
             ws: Some("127.0.0.1:0".parse().unwrap()),
             http: Some("127.0.0.1:0".parse().unwrap()),
+            https: None,
             irc: None,
         },
         identity: Identity { key_file: None }, // ephemeral key per test
@@ -806,4 +807,18 @@ async fn moderation_mute_refuses_send_over_quic() {
     );
 
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn graceful_shutdown_drains_within_the_window() {
+    let server = start_server(&["#general"]).await;
+    // An active session (+ the HTTP/WS servers and maintenance task from
+    // start_with) must all react to the shutdown signal. A task that ignored it
+    // would hold the drain until the internal 10s grace window elapses.
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(9), server.shutdown())
+        .await
+        .expect("graceful shutdown drained well within the grace window");
 }

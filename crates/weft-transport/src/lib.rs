@@ -15,9 +15,12 @@ mod quic;
 mod ws;
 
 pub use quic::{
-    certified_key, client_endpoint, server_config, server_config_resolving, server_endpoint,
-    QuicControlStream, ReloadableCert, ALPN,
+    certified_key, client_endpoint, https_config, server_config, server_config_resolving,
+    server_endpoint, QuicControlStream, ReloadableCert, ALPN,
 };
+/// Re-exported so weftd can hand the config to `axum-server` without a direct
+/// rustls dependency.
+pub use rustls::ServerConfig as RustlsServerConfig;
 /// The resolver's hot-swap unit — re-exported so consumers (weftd) don't need a
 /// direct rustls dependency.
 pub use rustls::sign::CertifiedKey;

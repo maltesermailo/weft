@@ -121,8 +121,12 @@ async fn obtain(acme: &Acme, challenges: &Challenges) -> anyhow::Result<Arc<Cert
 
     // Finalize with a fresh keypair + CSR, then download the chain.
     let key_pair = rcgen::KeyPair::generate().context("generating cert keypair")?;
-    let csr = rcgen::CertificateParams::new(acme.domains.clone())
-        .context("cert params")?
+    let mut params = rcgen::CertificateParams::new(acme.domains.clone()).context("cert params")?;
+    // Clear rcgen's default subject (CN "rcgen self signed cert") — otherwise
+    // Let's Encrypt reads that CN as a domain identifier and rejects the order.
+    // The SANs alone carry the domains for an ACME CSR.
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    let csr = params
         .serialize_request(&key_pair)
         .context("building CSR")?;
     order

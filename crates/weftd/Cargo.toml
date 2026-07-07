@@ -23,6 +23,8 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 axum = { workspace = true }
+# TLS-terminated HTTP for the admin panel, sharing the QUIC cert resolver.
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 rustls-pemfile = { workspace = true }
 # Built-in ACME (Let's Encrypt). Cert-file hot-reload just polls the mtime.
 instant-acme = "0.7"

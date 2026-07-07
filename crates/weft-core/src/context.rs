@@ -121,6 +121,9 @@ pub struct ServerCtx {
     /// Live session count — inc/dec per connection in `run_session`. Read by the
     /// admin panel's `/stats`; never affects protocol behavior.
     pub connections: Arc<std::sync::atomic::AtomicUsize>,
+    /// Graceful-shutdown signal. Cancelled once on shutdown; sessions finish
+    /// their current command and close, accept loops stop, maintenance exits.
+    pub shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl ServerCtx {
@@ -202,6 +205,7 @@ impl ServerCtx {
             identity,
             next_session: AtomicU64::new(1),
             connections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown: tokio_util::sync::CancellationToken::new(),
         }
     }
 

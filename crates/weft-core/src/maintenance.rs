@@ -38,13 +38,17 @@ pub fn spawn_maintenance(
     channels: Vec<(ChannelName, RetentionPolicy)>,
     dm_policy: RetentionPolicy,
     config: MaintenanceConfig,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(config.interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await; // immediate first tick: skip, let traffic settle
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown.cancelled() => break, // exit promptly on shutdown
+            }
             run_pass(&store, &channels, dm_policy, config.compact_after).await;
             let applied = apply_due_recoveries(&namespaces, unix_now_ms()).await;
             if applied > 0 {

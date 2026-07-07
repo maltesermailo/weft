@@ -120,6 +120,17 @@ pub fn server_endpoint(
     quinn::Endpoint::server(config, addr)
 }
 
+/// A TLS config for the TCP HTTP listener (the well-known + admin surface),
+/// sharing the same hot-swappable cert resolver as QUIC — so ACME / file
+/// rotations apply to HTTPS too. ALPN offers HTTP/2 then HTTP/1.1.
+pub fn https_config(resolver: Arc<ReloadableCert>) -> Arc<rustls::ServerConfig> {
+    let mut tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(resolver);
+    tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Arc::new(tls)
+}
+
 /// A **verified** QUIC client endpoint: the server's certificate is checked
 /// against the bundled Mozilla root store. This is the default for real
 /// clients; `insecure::client_endpoint` (feature `insecure-client`) is the

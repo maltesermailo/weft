@@ -12,6 +12,7 @@ weft-crypto = { path = "../weft-crypto" }
 weft-store = { path = "../weft-store" }
 rand = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true } # CancellationToken for graceful shutdown
 tracing = { workspace = true }
 ulid = { workspace = true }
 

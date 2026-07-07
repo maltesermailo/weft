@@ -55,9 +55,14 @@ quota = 10          # max namespaces per account
 quic = "0.0.0.0:4433"
 # WebSocket fallback for networks that block QUIC/UDP. Omit to disable.
 ws = "0.0.0.0:4434"
-# HTTP server for /.well-known/weft (§10.2) — needed for discovery + federation.
-# Terminate real TLS in front of this (nginx/caddy) in production.
+# HTTP for /.well-known/weft (§10.2) + the ACME HTTP-01 challenge. Plaintext:
+# with [acme], bind this to :80 (Let's Encrypt validates over it). It also serves
+# the admin panel, but the login cookie is Secure — use `https` below for that.
 http = "0.0.0.0:8080"
+# HTTPS (TLS-terminated) for the well-known + admin panel, using the SAME cert as
+# QUIC (ACME / [tls] / self-signed) — no front proxy needed. TCP :443 coexists
+# with QUIC's UDP :443. This is the secure way to reach /admin. Omit to disable.
+# https = "0.0.0.0:443"
 # WEFT-IRC gateway (§17). Omit to disable. :6667 plaintext / :6697 you TLS-front.
 irc = "0.0.0.0:6667"
 
@@ -105,10 +110,12 @@ key = "/etc/weft/privkey.pem"
 # cache_dir = "/var/lib/weft/acme"
 
 # ── operator web admin panel ─────────────────────────────────────────────────
-# When enabled, weftd serves the operator admin panel on the HTTP listener: the
-# SPA at /admin and its JSON API at /admin/api/* (operators = the [operators]
-# list above; they log in with their account password). Needs [listen] http;
-# front with Caddy for HTTPS. See docs/web-admin-panel-plan.md.
+# When enabled, weftd serves the operator admin panel: the SPA at /admin and its
+# JSON API at /admin/api/* (operators = the [operators] list above; they log in
+# with their account password). The login cookie is Secure, so reach it over
+# [listen] https (or a TLS front proxy) — not plain http. Operators must have
+# REGISTERed an account first (that's where the password lives).
+# See docs/web-admin-panel-plan.md and docs/vps-testing.md.
 [admin]
 enabled = false
 

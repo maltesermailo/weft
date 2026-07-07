@@ -162,8 +162,13 @@ pub struct Listen {
     pub quic: SocketAddr,
     /// WebSocket fallback; `None` disables it.
     pub ws: Option<SocketAddr>,
-    /// HTTP for `/.well-known/weft` (§10.2); `None` disables it.
+    /// HTTP for `/.well-known/weft` (§10.2) + the ACME HTTP-01 challenge;
+    /// `None` disables it. Plaintext — front it or use `https` for the admin.
     pub http: Option<SocketAddr>,
+    /// HTTPS (TLS-terminated) for the well-known + admin panel, using the same
+    /// cert as QUIC (ACME / file / self-signed); `None` disables it. This is how
+    /// the admin panel is served securely without a front proxy.
+    pub https: Option<SocketAddr>,
     /// WEFT-IRC gateway (§17); `None` disables it. Conventionally :6667
     /// (plaintext) or :6697 (TLS — TLS termination is the operator's).
     pub irc: Option<SocketAddr>,
@@ -243,6 +248,7 @@ impl Default for Listen {
             quic: ([127, 0, 0, 1], 4433).into(),
             ws: None,
             http: None,
+            https: None,
             irc: None,
         }
     }

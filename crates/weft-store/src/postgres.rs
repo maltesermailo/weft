@@ -46,6 +46,9 @@ impl PgStore {
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
         let pool = PgPoolOptions::new()
             .max_connections(8)
+            // Fail fast on an unreachable/firewalled DB instead of hanging on
+            // TCP retries with no output.
+            .acquire_timeout(std::time::Duration::from_secs(10))
             .connect(url)
             .await
             .map_err(backend_err)?;

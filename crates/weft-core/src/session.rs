@@ -273,6 +273,10 @@ impl<S: ControlStream> Session<S> {
                 direct = self.direct_rx.recv() =>
                     Action::Direct(direct.expect("session holds a direct sender")),
                 _ = tokio::time::sleep_until(self.last_inbound + limit) => Action::Idle,
+                // Graceful shutdown: this branch is only reached between commands
+                // (a command in `on_line` runs to completion first), so no
+                // in-flight work is interrupted; `run_session` then cleans up.
+                _ = self.ctx.shutdown.cancelled() => return Ok(()),
             };
             match action {
                 Action::Line(None) => return Ok(()), // peer closed
