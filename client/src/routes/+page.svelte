@@ -728,6 +728,7 @@
           md: e.md,
           replyTo: e.reply_to ?? undefined,
           bridged: e.network !== network,
+          net: e.network !== network ? e.network : undefined,
         });
         // Batch messages buffer until BATCH END. A PINS batch (loadingPins set)
         // routes to the pins buffer; a HISTORY batch to the history buffer.
@@ -749,9 +750,11 @@
         // Desktop notification for a DM or a mention while unfocused.
         if (!e.own && !document.hasFocus()) {
           const dm = e.target.startsWith("@");
+          // Qualify a foreign sender so the notification isn't ambiguous.
+          const who = e.network !== network ? `${e.sender}@${e.network}` : e.sender;
           if (dm || pinged)
             weft.notify(
-              dm ? `DM from ${e.sender}` : `${e.sender} in ${chanShort(key)}`,
+              dm ? `DM from ${who}` : `${who} in ${chanShort(key)}`,
               e.body.slice(0, 140),
             );
         }

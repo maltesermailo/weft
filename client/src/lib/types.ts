@@ -24,6 +24,9 @@ export type Msg = {
   replyTo?: string;
   /// Sender is from a federated peer network.
   bridged?: boolean;
+  /// The sender's network when foreign (`author@net` disambiguates federated
+  /// users); absent for local senders, who render as a bare handle.
+  net?: string;
 };
 
 export type Channel = {

@@ -18,14 +18,18 @@
         {@const rep = app.activeChannel?.messages.find((x) => x.msgid === m.replyTo)}
         <button class="reply-quote" onclick={() => app.jumpTo(m.replyTo)}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 17 4 12l5-5" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg>
-          {#if rep}<span class="rq-author">{rep.author}</span><span class="rq-body">{rep.body.slice(0, 90)}</span>{:else}<span class="rq-body">an earlier message</span>{/if}
+          {#if rep}<span class="rq-author">{rep.author}{#if rep.net}<span class="net-suffix">@{rep.net}</span>{/if}</span><span class="rq-body">{rep.body.slice(0, 90)}</span>{:else}<span class="rq-body">an earlier message</span>{/if}
         </button>
       {/if}
       <div class="msg-meta">
-        <button class="author author-btn" onclick={(e) => app.openProfile(m.author, e)}>{m.author}</button>
-        {#if app.badgeFor(m.author, app.active)?.owner}<span class="cap-badge owner">owner</span>
-        {:else if app.badgeFor(m.author, app.active)?.mod}<span class="cap-badge mod">mod</span>{/if}
-        {#if m.bridged}<span class="cap-badge bridged">bridged</span>{/if}
+        {#if m.net}
+          <!-- Foreign sender: fully qualified, and no local profile to open. -->
+          <span class="author foreign" title="from {m.net}">{m.author}<span class="net-suffix">@{m.net}</span></span>
+        {:else}
+          <button class="author author-btn" onclick={(e) => app.openProfile(m.author, e)}>{m.author}</button>
+        {/if}
+        {#if !m.net && app.badgeFor(m.author, app.active)?.owner}<span class="cap-badge owner">owner</span>
+        {:else if !m.net && app.badgeFor(m.author, app.active)?.mod}<span class="cap-badge mod">mod</span>{/if}
         {#if m.own}<span class="cap-badge owner">you</span>{/if}
         <span class="time">{m.time}</span>
       </div>
