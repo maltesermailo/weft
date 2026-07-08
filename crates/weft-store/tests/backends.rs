@@ -467,6 +467,7 @@ where
             recovery_set: None,
             pending_recovery: None,
             categories: Vec::new(),
+            federation: false,
         })
         .await
         .unwrap());
@@ -483,6 +484,7 @@ where
             recovery_set: None,
             pending_recovery: None,
             categories: Vec::new(),
+            federation: false,
         })
         .await
         .unwrap());
@@ -510,6 +512,14 @@ where
     let record = store.namespace(&ns).await.unwrap().unwrap();
     assert_eq!(record.title.as_deref(), Some("The Lounge"));
     assert_eq!(record.visibility, "public");
+
+    // §11.10 auto-federation flag toggles + persists (default closed).
+    assert!(!record.federation);
+    store.set_namespace_federation(&ns, true).await.unwrap();
+    assert!(store.namespace(&ns).await.unwrap().unwrap().federation);
+    store.set_namespace_federation(&ns, false).await.unwrap();
+    assert!(!store.namespace(&ns).await.unwrap().unwrap().federation);
+    store.set_namespace_federation(&ns, true).await.unwrap();
 
     // DISCOVER lists public namespaces, cursor-paginated.
     let page = store.list_public(None, 100).await.unwrap();
@@ -583,6 +593,7 @@ where
             recovery_set: None,
             pending_recovery: None,
             categories: Vec::new(),
+            federation: false,
         })
         .await
         .unwrap();

@@ -1930,6 +1930,52 @@ async fn propose(bridge: &mut Client, key: &Keypair, channels: &[&str]) {
     assert!(ack.contains("BRIDGE ACCEPT test.example 1"), "{ack}");
 }
 
+// §11.10 auto-federation: NS META federation flag + BRIDGE REQUEST offer.
+
+#[tokio::test]
+async fn ns_meta_federation_requires_public() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming unlisted", root_key_b64()));
+    ada.recv().await;
+
+    // Opening federation on a non-public namespace is refused (§11.10).
+    ada.send("NS META gaming federation :open");
+    ada.expect_err(ErrCode::Forbidden).await;
+
+    // Public first, then it's allowed.
+    ada.send("NS VISIBILITY gaming public");
+    ada.recv().await;
+    ada.send("NS META gaming federation :open");
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+}
+
+#[tokio::test]
+async fn bridge_request_offers_only_reachable_namespaces() {
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&[], &[], "peer.example", &peer_key.public());
+
+    // Owner makes a public namespace reachable.
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    ada.recv().await;
+    ada.send("NS META gaming federation :open");
+    ada.recv().await;
+
+    let mut peer = bridged_peer(&ctx, "peer.example", &peer_key).await;
+
+    // Reachable → the peer receives a signed BRIDGE PROPOSE offer.
+    peer.send("BRIDGE REQUEST gaming");
+    let offer = peer.recv_raw().await;
+    assert!(offer.contains("BRIDGE PROPOSE"), "expected an offer, got {offer}");
+    assert!(offer.contains("manifest="), "offer must carry a manifest: {offer}");
+
+    // Closed / unknown → NO-SUCH-TARGET (uniform, anti-enumeration).
+    peer.send("BRIDGE REQUEST nonexistent");
+    let miss = peer.recv_raw().await;
+    assert!(miss.contains("NO-SUCH-TARGET"), "expected NO-SUCH-TARGET, got {miss}");
+}
+
 #[tokio::test]
 async fn bridge_auth_rejects_unknown_or_mismatched_key() {
     let peer_key = Keypair::generate();

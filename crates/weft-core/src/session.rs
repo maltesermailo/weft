@@ -101,6 +101,79 @@ pub async fn run_session<S: ControlStream>(stream: S, ctx: Arc<ServerCtx>) {
     .await;
 }
 
+/// How an outbound bridge session opens (§11 M5d / §11.10).
+enum OutboundStart {
+    /// Transmit our operator's stored proposal for the peer (P1).
+    Propose,
+    /// Ask the peer to offer a manifest for its namespace `ns` and auto-accept
+    /// the offer — the §11.10 requester side.
+    Request(NamespaceName),
+}
+
+/// Run an **outbound** bridge session over a `stream` the dialer already
+/// authenticated (the §11.2 handshake driven as a client). Enters `State::Bridge`
+/// directly, opens per `start`, then reuses the ordinary bridge loop — ingesting
+/// the peer's events and forwarding our local-origin ones. `key` is the peer's
+/// network key (pinned / well-known), used to verify the manifests it sends.
+async fn run_outbound_bridge<S: ControlStream>(
+    stream: S,
+    ctx: Arc<ServerCtx>,
+    peer: NetworkName,
+    key: PublicKey,
+    start: OutboundStart,
+) {
+    let id = ctx.next_session_id();
+    let span = info_span!("bridge-out", %peer, id);
+    let _conn = ConnectionGuard::enter(&ctx);
+    async move {
+        let mut session = Session::new(id, stream, ctx);
+        session.state = State::Bridge {
+            peer: peer.clone(),
+            key,
+        };
+        match start {
+            OutboundStart::Propose => session.begin_outbound_bridge(&peer).await,
+            OutboundStart::Request(ns) => {
+                // We asked for this bridge, so accept the offer regardless of the
+                // inbound auto-accept config.
+                session.request_accept = true;
+                session.begin_outbound_request(&ns).await;
+            }
+        }
+        match session.run().await {
+            Ok(()) => debug!("outbound bridge closed"),
+            Err(e) => debug!("outbound bridge ended: {e}"),
+        }
+        session.cleanup().await;
+        let _ = session.stream.close().await;
+    }
+    .instrument(span)
+    .await;
+}
+
+/// P1: run an outbound bridge that transmits our stored proposal.
+pub async fn run_bridge_client<S: ControlStream>(
+    stream: S,
+    ctx: Arc<ServerCtx>,
+    peer: NetworkName,
+    key: PublicKey,
+) {
+    run_outbound_bridge(stream, ctx, peer, key, OutboundStart::Propose).await
+}
+
+/// §11.10: run an outbound bridge that *requests* the peer's namespace `ns`
+/// (`BRIDGE REQUEST`) and auto-accepts the offer — the on-demand auto-federation
+/// path.
+pub async fn run_bridge_requester<S: ControlStream>(
+    stream: S,
+    ctx: Arc<ServerCtx>,
+    peer: NetworkName,
+    key: PublicKey,
+    ns: NamespaceName,
+) {
+    run_outbound_bridge(stream, ctx, peer, key, OutboundStart::Request(ns)).await
+}
+
 /// AUTH KEY / AUTH BRIDGE state between CHALLENGE and PROOF (§6.1, §11.2).
 /// One per session; a new challenge replaces it, any PROOF consumes it.
 #[derive(Debug, Clone)]
@@ -222,6 +295,9 @@ struct Session<S> {
     /// §11: channels this (bridge) session forwards local-origin events on.
     /// One broadcast forwarder per bridged channel; empty for client sessions.
     bridged: HashMap<ChannelName, JoinHandle<()>>,
+    /// §11.10 requester side: this outbound session asked for the peer's
+    /// manifest, so it accepts the offer regardless of the auto-accept config.
+    request_accept: bool,
     /// HISTORY batch id counter (per session, opaque to clients).
     batches: u64,
     malformed_strikes: Vec<Instant>,
@@ -254,6 +330,7 @@ impl<S: ControlStream> Session<S> {
             registered: None,
             dedup: HashMap::new(),
             bridged: HashMap::new(),
+            request_accept: false,
             batches: 0,
             malformed_strikes: Vec::new(),
             last_inbound: Instant::now(),
@@ -963,6 +1040,12 @@ impl<S: ControlStream> Session<S> {
             // handshake, so these acknowledge without a separate op path yet.
             Command::BridgeAdd { .. } | Command::BridgeRemove { .. } => {
                 self.unsupported(label, "BRIDGE ADD/REMOVE: manage via PROPOSE (M5)")
+                    .await
+            }
+            // §11.10 BRIDGE REQUEST is spoken only *over* an authenticated bridge
+            // session (peer → peer), never by a local client.
+            Command::BridgeRequest { .. } => {
+                self.unsupported(label, "BRIDGE REQUEST is bridge-session-only")
                     .await
             }
             Command::NetblockAdd { network, reason } => {
@@ -2937,6 +3020,7 @@ impl<S: ControlStream> Session<S> {
             recovery_set: record.recovery_set.is_some(),
             recovery_pending: record.pending_recovery.as_ref().map(|p| (p.eta_ms, p.rung)),
             categories: record.categories.clone(),
+            federation: record.federation,
         }
     }
 
@@ -2995,6 +3079,7 @@ impl<S: ControlStream> Session<S> {
             recovery_set: None,
             pending_recovery: None,
             categories: Vec::new(),
+            federation: false, // §11.10 closed until the owner opts in
         };
         match self.ctx.namespaces.create_namespace(record.clone()).await {
             Ok(true) => {
@@ -3058,13 +3143,13 @@ impl<S: ControlStream> Session<S> {
     ) -> io::Result<Flow> {
         if !matches!(
             key.as_str(),
-            "title" | "description" | "icon" | "categories"
+            "title" | "description" | "icon" | "categories" | "federation"
         ) {
             self.send_err(
                 label,
                 ErrCode::Policy,
                 None,
-                "meta key must be title|description|icon|categories",
+                "meta key must be title|description|icon|categories|federation",
             )
             .await?;
             return Ok(Flow::Continue);
@@ -3072,6 +3157,27 @@ impl<S: ControlStream> Session<S> {
         let Some(mut record) = self.ns_admin_gate(label.clone(), &name, &account).await? else {
             return Ok(Flow::Continue);
         };
+        // §11.10 auto-federation reachability lives on its own column, and
+        // `open` requires `public` visibility (else it could never be offered).
+        if key == "federation" {
+            let open = value == "open";
+            if open && record.visibility != "public" {
+                self.send_err(
+                    label,
+                    ErrCode::Forbidden,
+                    None,
+                    "federation open requires public visibility",
+                )
+                .await?;
+                return Ok(Flow::Continue);
+            }
+            if let Err(e) = self.ctx.namespaces.set_namespace_federation(&name, open).await {
+                return self.internal(label, &e).await;
+            }
+            record.federation = open;
+            self.send_event(label, Self::ns_meta_event(&record)).await?;
+            return Ok(Flow::Continue);
+        }
         if let Err(e) = self
             .ctx
             .namespaces
@@ -3163,6 +3269,7 @@ impl<S: ControlStream> Session<S> {
                 recovery_set: false,
                 recovery_pending: None,
                 categories: Vec::new(),
+                federation: false,
             },
         )
         .await?;
@@ -3960,6 +4067,7 @@ impl<S: ControlStream> Session<S> {
             }
             Command::BridgeAccept { version, .. } => self.on_bridge_accept_in(peer, version).await,
             Command::BridgeSever { .. } => self.on_bridge_sever_in(peer).await,
+            Command::BridgeRequest { ns } => self.on_bridge_request_in(peer, label, ns).await,
             // §11.7 federated backfill: the peer pulls history over the bridge.
             Command::History {
                 target,
@@ -4017,7 +4125,8 @@ impl<S: ControlStream> Session<S> {
         }
         let now = unix_now_ms();
         let version = signed.manifest.version;
-        let auto = self.ctx.bridge_auto_accept();
+        // Auto-accept if configured, or if *we* requested this bridge (§11.10).
+        let auto = self.ctx.bridge_auto_accept() || self.request_accept;
         let record = PeerRecord {
             peer: peer.clone(),
             scope,
@@ -4074,6 +4183,61 @@ impl<S: ControlStream> Session<S> {
         }
         for (_, forwarder) in self.bridged.drain() {
             forwarder.abort();
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// §11.10 A peer asked us to offer a manifest for one of *our* namespaces.
+    /// We offer (a signed `BRIDGE PROPOSE`) iff it is auto-federation-reachable
+    /// (`public` + `federation` open) and the peer isn't netblocked; otherwise
+    /// `NO-SUCH-TARGET` — uniform with private/absent (anti-enumeration,
+    /// invariant 1). The peer verifies + auto-accepts on its side.
+    async fn on_bridge_request_in(
+        &mut self,
+        peer: NetworkName,
+        label: Option<String>,
+        ns: NamespaceName,
+    ) -> io::Result<Flow> {
+        let reachable = match self.ctx.namespaces.namespace(&ns).await {
+            Ok(Some(rec)) => rec.visibility == "public" && rec.federation,
+            Ok(None) => false,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let blocked = self
+            .ctx
+            .netblocks
+            .is_netblocked(&peer)
+            .await
+            .unwrap_or(false);
+        if !reachable || blocked {
+            return self.no_such_target(label).await;
+        }
+
+        // Compile + sign a v1 manifest for the namespace's channels and offer it.
+        let scope = format!("ns:{ns}");
+        let Some(tscope) = TokenScope::parse(&scope) else {
+            return self.no_such_target(label).await;
+        };
+        let channels = self.scope_channels(&tscope).await;
+        let (history, media, typing) =
+            (weft_proto::HistoryMode::FromEpoch, weft_proto::MediaMode::None, false);
+        let record = match self
+            .store_bridge_proposal(&peer, scope, &channels, history, media, typing)
+            .await
+        {
+            Ok(record) => record,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let cmd = Command::BridgePropose {
+            scope: record.scope.clone(),
+            peer,
+            history,
+            media,
+            typing,
+            manifest: Some(record.manifest.clone()),
+        };
+        if let Ok(line) = Request::new(cmd).serialize() {
+            self.stream.send_line(&line).await?;
         }
         Ok(Flow::Continue)
     }
@@ -4386,6 +4550,56 @@ impl<S: ControlStream> Session<S> {
         }
     }
 
+    /// Outbound bridge startup: transmit the proposal the operator compiled +
+    /// stored (`BRIDGE PROPOSE`) for `peer` — M5d's job — and, if a prior
+    /// session already got it acked, resume forwarding immediately. The peer
+    /// ingests the manifest and (auto-accept) replies `BRIDGE ACCEPT`, handled
+    /// by the ordinary bridge loop.
+    async fn begin_outbound_bridge(&mut self, peer: &NetworkName) {
+        let Ok(Some(record)) = self.ctx.peers.peer(peer).await else {
+            return;
+        };
+        if record.severed {
+            return;
+        }
+        if let Ok(signed) = SignedManifest::from_b64(&record.manifest) {
+            let cmd = Command::BridgePropose {
+                scope: record.scope.clone(),
+                peer: peer.clone(),
+                // The peer authoritatively reads the `@manifest` blob; these
+                // flags are informational, parsed back from it (defaults if not).
+                history: signed
+                    .manifest
+                    .history
+                    .parse()
+                    .unwrap_or(weft_proto::HistoryMode::FromEpoch),
+                media: signed
+                    .manifest
+                    .media
+                    .parse()
+                    .unwrap_or(weft_proto::MediaMode::None),
+                typing: signed.manifest.typing,
+                manifest: Some(record.manifest.clone()),
+            };
+            if let Ok(line) = Request::new(cmd).serialize() {
+                let _ = self.stream.send_line(&line).await;
+            }
+        }
+        if record.acked_manifest.is_some() {
+            self.sync_bridge_forwarders(&record).await;
+        }
+    }
+
+    /// §11.10 requester startup: ask the peer to offer a manifest for its
+    /// namespace `ns`. The peer answers `BRIDGE PROPOSE` (if reachable), handled
+    /// by the ordinary bridge loop and auto-accepted (`request_accept`).
+    async fn begin_outbound_request(&mut self, ns: &NamespaceName) {
+        let cmd = Command::BridgeRequest { ns: ns.clone() };
+        if let Ok(line) = Request::new(cmd).serialize() {
+            let _ = self.stream.send_line(&line).await;
+        }
+    }
+
     /// §6.6 MANIFEST-to-members: broadcast the change into each affected
     /// channel so local members learn of the audience change (mandatory).
     async fn announce_manifest(&self, record: &PeerRecord, state: BridgeState) {
@@ -4426,6 +4640,34 @@ impl<S: ControlStream> Session<S> {
 
     // ---- §11 federation: operator-facing management (§6.6) ----
 
+    /// Compile + sign a v1 manifest for `scope`'s `channels` and store it as a
+    /// pending (un-acked) proposal to `peer`. Shared by the operator
+    /// `BRIDGE PROPOSE` (§6.6) and the §11.10 auto-offer.
+    async fn store_bridge_proposal(
+        &self,
+        peer: &NetworkName,
+        scope: String,
+        channels: &[ChannelName],
+        history: HistoryMode,
+        media: MediaMode,
+        typing: bool,
+    ) -> Result<PeerRecord, weft_store::StoreError> {
+        let now = unix_now_ms();
+        let manifest = bridge::build_manifest(peer, 1, channels, history, media, typing, now, now);
+        let record = PeerRecord {
+            peer: peer.clone(),
+            scope,
+            manifest: self.ctx.sign_manifest(&manifest),
+            version: 1,
+            acked_manifest: None,
+            severed: false,
+            created_ms: now,
+            updated_ms: now,
+        };
+        self.ctx.peers.upsert_peer(record.clone()).await?;
+        Ok(record)
+    }
+
     /// §6.6/§11.3 BRIDGE PROPOSE from an operator: check the scope authority,
     /// compile + sign a v1 manifest, and store it. Transmission to the peer
     /// over the bridge session is the dialer's job (M5d).
@@ -4465,22 +4707,13 @@ impl<S: ControlStream> Session<S> {
             Err(e) => return self.internal(label, &e).await,
         }
         let channels = self.scope_channels(&tscope).await;
-        let now = unix_now_ms();
-        let manifest =
-            bridge::build_manifest(&peer, 1, &channels, history, media, typing, now, now);
-        let record = PeerRecord {
-            peer: peer.clone(),
-            scope,
-            manifest: self.ctx.sign_manifest(&manifest),
-            version: 1,
-            acked_manifest: None,
-            severed: false,
-            created_ms: now,
-            updated_ms: now,
+        let record = match self
+            .store_bridge_proposal(&peer, scope, &channels, history, media, typing)
+            .await
+        {
+            Ok(record) => record,
+            Err(e) => return self.internal(label, &e).await,
         };
-        if let Err(e) = self.ctx.peers.upsert_peer(record.clone()).await {
-            return self.internal(label, &e).await;
-        }
         let channel_strs = bridge::forwardable_channels(&record);
         self.send_event(
             label,

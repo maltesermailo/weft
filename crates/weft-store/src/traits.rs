@@ -260,6 +260,14 @@ pub trait NamespaceStore: Send + Sync {
         visibility: &str,
     ) -> Result<(), StoreError>;
 
+    /// §11.10 NS META federation: toggle auto-federation reachability. No-op if
+    /// the namespace is unknown.
+    async fn set_namespace_federation(
+        &self,
+        name: &NamespaceName,
+        open: bool,
+    ) -> Result<(), StoreError>;
+
     /// NS DELETE. False = no such namespace.
     async fn delete_namespace(&self, name: &NamespaceName) -> Result<bool, StoreError>;
 

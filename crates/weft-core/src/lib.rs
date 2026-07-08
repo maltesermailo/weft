@@ -25,7 +25,7 @@ pub use channel::{ChannelEvent, ChannelHandle, JoinAck};
 pub use context::{FederationConfig, ServerCtx, ServerInfo, PROTOCOL_VERSION};
 pub use maintenance::{apply_due_recoveries, spawn_maintenance, MaintenanceConfig};
 pub use registry::Registry;
-pub use session::{run_session, SessionId};
+pub use session::{run_bridge_client, run_bridge_requester, run_session, SessionId};
 pub use stream::ControlStream;
 pub use weft_store::{ChannelStore, MemoryStore, NamespaceStore, Scope};
 

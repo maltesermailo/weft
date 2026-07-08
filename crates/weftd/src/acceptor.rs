@@ -27,8 +27,9 @@ async fn drain(mut sessions: JoinSet<()>, what: &str) {
     while sessions.join_next().await.is_some() {}
 }
 
-/// Adapter: QUIC control stream as a core `ControlStream`.
-struct QuicLines(QuicControlStream);
+/// Adapter: QUIC control stream as a core `ControlStream`. Also used by the
+/// outbound dialer to hand an authenticated stream to `run_bridge_client`.
+pub(crate) struct QuicLines(pub(crate) QuicControlStream);
 
 impl ControlStream for QuicLines {
     async fn recv_line(&mut self) -> io::Result<Option<String>> {

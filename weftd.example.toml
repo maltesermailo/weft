@@ -120,11 +120,23 @@ key = "/etc/weft/privkey.pem"
 enabled = false
 
 # ── federation (§11) ─────────────────────────────────────────────────────────
-# How this network treats INBOUND bridge sessions. Default: bridge with nobody
-# (peers must be explicitly configured — the outbound dialer is M5d).
+# How this network treats INBOUND bridge sessions. Default: bridge with nobody.
 [federation]
 # Accept a bridge from ANY non-blocked network, trusting the key it proves
 # (trust-on-first-use). NETBLOCK is the escape hatch. Leave false to stay closed.
 accept_any = false
 # Skip the manual operator `BRIDGE ACCEPT` and auto-ack inbound proposals.
 auto_accept = false
+# §11.10 on-demand outbound bridging: "off" = only manual/pinned peering;
+# "open" = a user referencing a foreign namespace auto-establishes the bridge
+# (SSRF-guarded; abuse handled reactively via NETBLOCK).
+auto_bridge = "off"
+
+# OUTBOUND peers (§11.2) — weftd dials each and maintains the bridge (transmits
+# any operator-proposed manifest, forwards local-origin events, ingests theirs).
+# The key is pinned: the peer proves control of it, and it verifies their
+# manifests. Repeat the block per peer.
+# [[peers]]
+# network  = "hda.example"
+# endpoint = "hda.example:443"        # host:port to dial over QUIC (UDP)
+# key      = "BASE64_NETWORK_PUBKEY"  # from the peer's /.well-known/weft

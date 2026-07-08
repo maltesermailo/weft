@@ -181,12 +181,40 @@ guardrails retroactively; WEFT should ship §6 *with* P3, not after.
   (partly exists: `client_endpoint`); weftd well-known **fetch client** +
   `[[peers]]` config; outbound `AUTH BRIDGE`; `BRIDGE ADD/REMOVE` over real QUIC;
   **two-live-weftd conformance** (two servers actually federate). Unblocks all.
-- **P2 — foreign-side consent.** `NS META <name> federation :open|closed` (store
-  flag + cap check = ns owner); `BRIDGE REQUEST` handler that auto-offers a
-  signed manifest for a `public`+`open` namespace to a non-blocked peer.
-- **P3 — auto-bridge trigger (home side).** The §4 flow: resolve → SSRF guard →
-  rate/cap → dial → request → auto-accept → mirror → join. `[federation]
-  auto_bridge` knob. All of §6.
+  - **P1a ✅ (2026-07-07)** — outbound dialer + AUTH BRIDGE handshake
+    (`weftd::dialer::dial_bridge`): HELLO negotiation → `AUTH BRIDGE` → sign
+    `nonce‖peer-net` → `AUTH PROOF` → WELCOME, over real QUIC. Two-weftd
+    conformance: auth succeeds under `accept_any`, rejected when unpinned.
+  - **P1b ✅ (2026-07-07)** — `weft_core::run_bridge_client` runs an outbound
+    session over the authenticated link: `begin_outbound_bridge` transmits the
+    operator's stored `BRIDGE PROPOSE`, the peer ingests + auto-accepts, and the
+    ordinary bridge loop handles the `BRIDGE ACCEPT` → mutually-acked manifest.
+  - **P1c ✅ (2026-07-07)** — forwarding + ingestion ride the reused bridge loop;
+    `[[peers]]` config + `dialer::spawn_dialers` (one maintained dial per peer,
+    reconnect + 5s backoff, shutdown-aware). End-to-end conformance: a message on
+    H's `#general` forwards one hop to a member on F (two live weftds).
+  - **Deferred to P3:** well-known key fetch (pinned `[[peers]]` keys for now).
+- **P2 ✅ (2026-07-08) — foreign-side consent.** `BridgeRequest` verb (proto +
+  round-trip test); `NamespaceRecord.federation` flag (mem + PG + migration 0015
+  + contract test); `NS META <name> federation :open|closed` (ns-admin gate,
+  `open` requires `public`); `on_bridge_request_in` auto-offers a signed manifest
+  for a `public`+`federation`-open namespace, else `NO-SUCH-TARGET` (uniform,
+  anti-enumeration). Shared `store_bridge_proposal` helper (DRY with operator
+  `BRIDGE PROPOSE`). Core tests: the `NS META` public-gate, and the
+  offer/anti-enumeration path over an authenticated bridge session.
+- **P3 ◑ (2026-07-08) — auto-bridge trigger (home side).** Done: the **SSRF
+  guard** (`dialer::is_dialable`, invariant 13 — rejects loopback / RFC-1918 /
+  CGNAT / link-local / ULA / metadata / v4-mapped-private, unit-tested); the
+  **requester orchestration** `run_bridge_requester` (`BRIDGE REQUEST` +
+  auto-accept via a `request_accept` session flag, DRY-shared with the proposer
+  via `OutboundStart`); `dialer::auto_bridge` (SSRF + dial + request) over
+  `run_peer_requester`; the `[federation] auto_bridge = off|open` knob; and a
+  two-weftd conformance test (H requests F's reachable ns → live bridge, no
+  operator ceremony). **Deferred:** well-known key fetch (arbitrary-domain
+  discovery — needs an HTTPS client; caller supplies key+addr for now); the
+  client-facing trigger verb + `network/namespace` parse + the ctx→weftd trigger
+  channel; rate-limit/concurrent-cap (§6, gates the trigger); and mirror/join
+  surfacing (→ P4).
 - **P4 — client UX.** Quick-switcher / a "join foreign namespace" field accepts
   `network/namespace`; foreign invite redeem routes into the flow; a
   "connecting to F…" state + failure surface; the `federation :open` toggle in
@@ -195,22 +223,26 @@ guardrails retroactively; WEFT should ship §6 *with* P3, not after.
 P1 is most of the effort and is valuable on its own (real two-server federation).
 P2–P4 are comparatively small once dialing exists.
 
-## 10. Open questions (need a decision before P0 closes)
+## 10. Decisions (resolved 2026-07-07)
 
-1. **Addressing syntax** — `network/namespace`, `weft://network/namespace`, or
-   `#ns/chan@network`? (Recommend `network/namespace` in UI, `weft://…` for links.)
-2. **`BRIDGE REQUEST` vs reusing `accept_any`** — a real new verb, or model the
-   request as `H` connecting and `F` auto-proposing every open ns? (Recommend the
-   explicit verb — bounded, requests exactly one ns.)
-3. **Foreign flag granularity** — per-namespace `federation` (recommended) or a
-   network-wide "open federation" switch?
-4. **Membership lifetime** — does `U`'s bridged membership persist (auto-rejoin
-   on reconnect) or is it session-scoped to when the bridge is live?
-5. **Dial reuse / teardown** — when the last local member leaves a bridged `N`,
-   keep the bridge warm or sever after an idle window?
+1. **Addressing** — `network/namespace` in the UI; `weft://…` for shareable
+   links (`weft://<net>/<ns>` to open a namespace, existing `weft://<net>/i/<tok>`
+   for invites).
+2. **Request mechanism** — an explicit **`BRIDGE REQUEST <ns>`** verb (bounded:
+   asks the peer to offer a manifest for exactly one of its namespaces), not
+   reuse of `accept_any`.
+3. **Foreign flag** — **per-namespace** `federation :open|closed` (the ns owner
+   opts their namespace in), not a network-wide switch.
+4. **Membership** — bridged membership **persists**; auto-rejoin on reconnect
+   re-triggers the bridge if it was severed.
+5. **Teardown** — **sever** the bridge when the last local member leaves (after
+   an idle window); re-access re-establishes it.
+
+Drafted into the reviewable **`docs/auto-federation-spec-amendment.md`** (the P0
+deliverable). Once approved it folds into spec §11 + Appendix A alongside P1.
 
 ---
 
-*Recommendation:* approve P0's shape here, I write the §11 amendment for review,
-then P1 (the dialer) — which is the deferred milestone and the thing that makes
-any of this real. Auto-bridge (P2–P4) is quick once P1 lands.
+*Next:* review the spec amendment, then **P1 (the dialer)** — the deferred
+milestone that makes two live weftds federate for real. Auto-bridge (P2–P4) is
+quick once P1 lands.

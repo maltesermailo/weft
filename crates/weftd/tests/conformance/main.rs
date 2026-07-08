@@ -809,6 +809,178 @@ async fn moderation_mute_refuses_send_over_quic() {
     server.shutdown().await;
 }
 
+// ---- M5d outbound dialer (auto-federation P1) ----
+
+/// The outbound bridge dialer completes the §11.2 AUTH BRIDGE handshake against
+/// a real inbound weftd — two servers actually authenticating over QUIC.
+#[tokio::test]
+async fn outbound_bridge_dial_authenticates() {
+    // F: accepts any non-blocked bridge peer (trust-on-first-use, §11.2).
+    let server = start_with(&["#general"], |c| c.federation.accept_any = true).await;
+    let peer: weft_proto::NetworkName = "test.example".parse().unwrap(); // F's name
+    let home: weft_proto::NetworkName = "home.example".parse().unwrap();
+    let identity = weft_core::Keypair::generate();
+    let endpoint = weft_transport::insecure::client_endpoint(weft_transport::ALPN).unwrap();
+
+    let link =
+        weftd::dialer::dial_bridge(&endpoint, server.quic_addr, &peer, &identity, &home).await;
+    assert!(link.is_ok(), "outbound bridge auth should succeed: {:?}", link.err());
+    server.shutdown().await;
+}
+
+/// Pinned-only (default): a peer whose key isn't pinned is refused — the proof
+/// verifies but the key was never resolved, so it funnels to AUTH-FAILED.
+#[tokio::test]
+async fn outbound_bridge_dial_rejected_when_unpinned() {
+    let server = start_server(&["#general"]).await; // default: pinned-only, no peers
+    let peer: weft_proto::NetworkName = "test.example".parse().unwrap();
+    let home: weft_proto::NetworkName = "home.example".parse().unwrap();
+    let identity = weft_core::Keypair::generate();
+    let endpoint = weft_transport::insecure::client_endpoint(weft_transport::ALPN).unwrap();
+
+    let link =
+        weftd::dialer::dial_bridge(&endpoint, server.quic_addr, &peer, &identity, &home).await;
+    assert!(link.is_err(), "unpinned bridge auth must be rejected");
+    server.shutdown().await;
+}
+
+/// End-to-end (P1b + P1c): H dials F, transmits its stored `BRIDGE PROPOSE`, F
+/// auto-accepts, and a message posted on H's bridged channel forwards one hop to
+/// a member on F. Two live weftds federating for real over QUIC.
+#[tokio::test]
+async fn outbound_bridge_forwards_messages_end_to_end() {
+    // H's network key, persisted so H boots with it AND we can dial as it.
+    let home_key = weft_core::Keypair::generate();
+    let key_path = std::env::temp_dir().join("weft-p1bc-home.key");
+    std::fs::write(&key_path, home_key.seed_b64()).unwrap();
+
+    // F: accepts + auto-accepts bridges; hosts #general.
+    let f = start_with(&["#general"], |c| {
+        c.federation.accept_any = true;
+        c.federation.auto_accept = true;
+    })
+    .await;
+    let f_net: weft_proto::NetworkName = "test.example".parse().unwrap();
+    let f_key = f.ctx().network_public();
+
+    // H: a *different* network, booted with the persisted key + an operator.
+    let h = start_with(&["#general"], |c| {
+        c.network = "home.example".to_string();
+        c.operators = vec!["admin".to_string()];
+        c.identity.key_file = Some(key_path.clone());
+    })
+    .await;
+    let h_net: weft_proto::NetworkName = "home.example".parse().unwrap();
+
+    // Members watching #general on each side.
+    let mut bob = QuicClient::connect(f.quic_addr).await;
+    bob.ready("bob").await;
+    bob.join("#general").await;
+    let mut ada = QuicClient::connect(h.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#general").await;
+
+    // The operator on H proposes bridging #general to F (compiles + stores it).
+    let mut admin = QuicClient::connect(h.quic_addr).await;
+    admin.ready("admin").await;
+    admin.send("BRIDGE PROPOSE #general test.example").await;
+    assert!(matches!(admin.recv().await.event, Event::Manifest { .. }));
+
+    // H dials F and runs the outbound bridge: transmit proposal → F accepts →
+    // both sides start forwarders.
+    let endpoint = weft_transport::insecure::client_endpoint(weft_transport::ALPN).unwrap();
+    let ctx = h.ctx().clone();
+    let f_addr = f.quic_addr;
+    let bridge = tokio::spawn(async move {
+        weftd::dialer::run_peer_bridge(&endpoint, f_addr, &f_net, f_key, &home_key, &h_net, ctx)
+            .await
+    });
+
+    // Both sides announce the live bridge to their #general members. ada's
+    // announce means H's forwarders are subscribed — safe to post now.
+    assert!(matches!(bob.recv().await.event, Event::Manifest { .. }), "F announces the bridge");
+    assert!(matches!(ada.recv().await.event, Event::Manifest { .. }), "H announces the bridge");
+
+    // A message on H's #general forwards one hop to F.
+    ada.send("MSG #general :hi from H").await;
+    let msg = bob.recv().await;
+    match &msg.event {
+        Event::Message(m) => assert!(m.body.contains("hi from H"), "forwarded body: {:?}", m.body),
+        other => panic!("expected forwarded MESSAGE on F, got {other:?}"),
+    }
+
+    bridge.abort();
+    f.shutdown().await;
+    h.shutdown().await;
+    let _ = std::fs::remove_file(&key_path);
+}
+
+/// P3: on-demand auto-federation. H *requests* F's reachable namespace over a
+/// freshly-dialed bridge (`BRIDGE REQUEST`), F offers its signed manifest, H
+/// auto-accepts — the bridge goes live with no operator ceremony on H.
+#[tokio::test]
+async fn auto_bridge_requests_reachable_namespace() {
+    let home_key = weft_core::Keypair::generate();
+    let key_path = std::env::temp_dir().join("weft-p3-home.key");
+    std::fs::write(&key_path, home_key.seed_b64()).unwrap();
+
+    // F hosts #gaming/general and accepts bridge peers.
+    let f = start_with(&["#gaming/general"], |c| c.federation.accept_any = true).await;
+    let f_net: weft_proto::NetworkName = "test.example".parse().unwrap();
+    let f_key = f.ctx().network_public();
+
+    // Make `gaming` auto-federation-reachable: public + federation open.
+    let ns_root = weft_core::Keypair::generate();
+    let mut ada = QuicClient::connect(f.quic_addr).await;
+    ada.ready("ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", ns_root.public().to_b64())).await;
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    ada.send("NS META gaming federation :open").await;
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+
+    // A member of the namespace channel on F.
+    let mut bob = QuicClient::connect(f.quic_addr).await;
+    bob.ready("bob").await;
+    bob.join("#gaming/general").await;
+
+    // H: a different network that dials + requests `gaming`.
+    let h = start_with(&["#gaming/general"], |c| {
+        c.network = "home.example".to_string();
+        c.identity.key_file = Some(key_path.clone());
+    })
+    .await;
+    let h_net: weft_proto::NetworkName = "home.example".parse().unwrap();
+
+    let endpoint = weft_transport::insecure::client_endpoint(weft_transport::ALPN).unwrap();
+    let ctx = h.ctx().clone();
+    let f_addr = f.quic_addr;
+    // Loopback dodges the SSRF guard (unit-tested separately) — drive the core.
+    let bridge = tokio::spawn(async move {
+        weftd::dialer::run_peer_requester(
+            &endpoint,
+            f_addr,
+            &f_net,
+            f_key,
+            "gaming".parse().unwrap(),
+            &home_key,
+            &h_net,
+            ctx,
+        )
+        .await
+    });
+
+    // F announces the live bridge to the namespace's members → bob sees it.
+    assert!(
+        matches!(bob.recv().await.event, Event::Manifest { .. }),
+        "the requested bridge should go live"
+    );
+
+    bridge.abort();
+    f.shutdown().await;
+    h.shutdown().await;
+    let _ = std::fs::remove_file(&key_path);
+}
+
 #[tokio::test]
 async fn graceful_shutdown_drains_within_the_window() {
     let server = start_server(&["#general"]).await;

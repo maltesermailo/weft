@@ -957,8 +957,8 @@ impl NamespaceStore for PgStore {
     async fn create_namespace(&self, record: NamespaceRecord) -> Result<bool, StoreError> {
         let result = sqlx::query(
             r#"
-            INSERT INTO weft_namespaces (name, owner, root_key, visibility, title, description, icon)
-            VALUES ($1,$2,$3,$4,$5,$6,$7)
+            INSERT INTO weft_namespaces (name, owner, root_key, visibility, title, description, icon, federation)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
             ON CONFLICT (name) DO NOTHING
             "#,
         )
@@ -969,6 +969,7 @@ impl NamespaceStore for PgStore {
         .bind(&record.title)
         .bind(&record.description)
         .bind(&record.icon)
+        .bind(record.federation)
         .execute(&self.pool)
         .await
         .map_err(backend_err)?;
@@ -1047,6 +1048,20 @@ impl NamespaceStore for PgStore {
         sqlx::query("UPDATE weft_namespaces SET visibility = $2 WHERE name = $1")
             .bind(name.as_str())
             .bind(visibility)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn set_namespace_federation(
+        &self,
+        name: &NamespaceName,
+        open: bool,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE weft_namespaces SET federation = $2 WHERE name = $1")
+            .bind(name.as_str())
+            .bind(open)
             .execute(&self.pool)
             .await
             .map_err(backend_err)?;
@@ -1230,6 +1245,7 @@ fn namespace_from_row(row: &sqlx::postgres::PgRow) -> Result<NamespaceRecord, St
             .filter(|c| !c.is_empty())
             .map(str::to_string)
             .collect(),
+        federation: row.get("federation"),
     })
 }
 

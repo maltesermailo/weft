@@ -184,6 +184,10 @@ pub struct NamespaceRecord {
     /// namespace so *empty* categories survive server-side — the client keeps
     /// no category state of its own.
     pub categories: Vec<String>,
+    /// §11.10 auto-federation: when `true` *and* `visibility == "public"`, the
+    /// namespace is auto-federation-reachable — a `BRIDGE REQUEST` for it is
+    /// answered with a signed manifest. Default `false` (closed).
+    pub federation: bool,
 }
 
 /// A recovery in flight: rotates to `new_root_key` + `new_owner` at `eta_ms`

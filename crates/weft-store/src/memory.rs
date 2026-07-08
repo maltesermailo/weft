@@ -819,6 +819,18 @@ impl NamespaceStore for MemoryStore {
         Ok(())
     }
 
+    async fn set_namespace_federation(
+        &self,
+        name: &NamespaceName,
+        open: bool,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(ns) = inner.namespaces.get_mut(name) {
+            ns.federation = open;
+        }
+        Ok(())
+    }
+
     async fn delete_namespace(&self, name: &NamespaceName) -> Result<bool, StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         Ok(inner.namespaces.remove(name).is_some())

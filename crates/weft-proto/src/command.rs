@@ -341,6 +341,10 @@ pub enum Command {
     },
     /// `BRIDGE SEVER <peer>` — unilateral teardown (§6.6).
     BridgeSever { peer: NetworkName },
+    /// `BRIDGE REQUEST <ns>` (§11.10) — ask the peer to offer a manifest for one
+    /// of *its* namespaces. Bridge-session-only; the peer answers with
+    /// `BRIDGE PROPOSE` iff the namespace is auto-federation-reachable.
+    BridgeRequest { ns: NamespaceName },
     /// `NETBLOCK ADD <network> [:reason]` (§6.6, §11.6). Cap `netblock` at `*`.
     NetblockAdd {
         network: NetworkName,
@@ -1057,6 +1061,9 @@ impl Command {
                     "SEVER" => Ok(Command::BridgeSever {
                         peer: args.req("peer")?.parse()?,
                     }),
+                    "REQUEST" => Ok(Command::BridgeRequest {
+                        ns: args.req("ns")?.parse()?,
+                    }),
                     _ => Err(ParseError::BadParam {
                         verb: "BRIDGE",
                         what: "subcommand",
@@ -1580,6 +1587,9 @@ impl Command {
             ),
             Command::BridgeSever { peer } => {
                 ("BRIDGE", vec!["SEVER".to_string(), peer.to_string()], None)
+            }
+            Command::BridgeRequest { ns } => {
+                ("BRIDGE", vec!["REQUEST".to_string(), ns.to_string()], None)
             }
             Command::NetblockAdd { network, reason } => (
                 "NETBLOCK",
@@ -2330,6 +2340,9 @@ mod tests {
         }));
         round_trip(&Request::new(Command::BridgeSever {
             peer: "hda.example".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::BridgeRequest {
+            ns: "gaming".parse().unwrap(),
         }));
         assert!(Request::parse("BRIDGE FROB peer.example").is_err());
         assert!(Request::parse("BRIDGE ACCEPT peer.example notanumber").is_err());

@@ -8,6 +8,7 @@ description = "WEFT reference server binary: config, acceptors, telemetry."
 
 [dependencies]
 weft-proto = { path = "../weft-proto" }
+weft-crypto = { path = "../weft-crypto" }
 weft-core = { path = "../weft-core" }
 weft-store = { path = "../weft-store", features = ["postgres"] }
 weft-transport = { path = "../weft-transport" }

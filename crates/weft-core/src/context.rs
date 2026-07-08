@@ -355,6 +355,12 @@ impl ServerCtx {
         self.info.network.as_str()
     }
 
+    /// This network's signing public key — a peer pins this to verify our
+    /// manifests + bridge auth (§11.2). Safe to expose; the private half stays in.
+    pub fn network_public(&self) -> weft_crypto::PublicKey {
+        self.identity.public()
+    }
+
     /// Operator accounts — the net-scope (`*`) report handlers (§6.7).
     pub(crate) fn operator_accounts(&self) -> Vec<Account> {
         self.operators.iter().cloned().collect()

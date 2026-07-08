@@ -267,6 +267,9 @@ pub enum Event {
         /// Ordered channel categories (`cats=` tag), server-authoritative so
         /// empty categories persist without any client state.
         categories: Vec<String>,
+        /// §11.10 auto-federation reachable (`federation=yes`) — the owner has
+        /// opened this namespace to on-demand bridging.
+        federation: bool,
     },
     /// `MORE <cursor>` — pagination continuation (DISCOVER, §6.2).
     More {
@@ -695,6 +698,7 @@ impl Event {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    federation: line.tags.get("federation").map(String::as_str) == Some("yes"),
                 })
             }
             "MORE" => {
@@ -1098,6 +1102,7 @@ impl Event {
                 recovery_set,
                 recovery_pending,
                 categories,
+                federation,
             } => {
                 for (k, v) in [
                     ("owner", owner),
@@ -1111,6 +1116,9 @@ impl Event {
                 }
                 if *recovery_set {
                     tags.insert("recovery-set".to_string(), "yes".to_string());
+                }
+                if *federation {
+                    tags.insert("federation".to_string(), "yes".to_string());
                 }
                 if let Some((eta, rung)) = recovery_pending {
                     tags.insert("recovery".to_string(), "pending".to_string());
@@ -1677,6 +1685,7 @@ mod tests {
                 recovery_set: true,
                 recovery_pending: Some((1_700_000_000_000, 2)),
                 categories: vec!["Text".into(), "Voice".into()],
+                federation: true,
             },
             "n1",
         ));
@@ -1691,6 +1700,7 @@ mod tests {
             recovery_set: false,
             recovery_pending: None,
             categories: Vec::new(),
+            federation: false,
         }));
         round_trip(&Reply::new(Event::More {
             cursor: "next-page".into(),

@@ -9,6 +9,7 @@
 
 mod acceptor;
 pub mod config;
+pub mod dialer;
 pub mod telemetry;
 mod tls;
 mod wellknown;
@@ -49,6 +50,12 @@ pub struct Server {
 const GRACE_SECS: u64 = 10;
 
 impl Server {
+    /// The server context — the stores + registry + network identity. Exposed
+    /// for the outbound dialer and integration tests.
+    pub fn ctx(&self) -> &Arc<ServerCtx> {
+        &self.ctx
+    }
+
     /// Graceful shutdown: signal every session to finish its current command
     /// and close, stop accepting, drain in-flight connections + HTTP requests,
     /// then close the QUIC endpoint. Bounded by `GRACE_SECS`; anything still
@@ -134,6 +141,8 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         Some(path) => load_or_generate_key(path)?,
         None => Keypair::generate(),
     };
+    // Seed copy for the outbound dialer (identity is consumed by ServerCtx).
+    let identity_seed = identity.seed_b64();
 
     let info = ServerInfo {
         network: network.clone(),
@@ -149,10 +158,22 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         interval: std::time::Duration::from_secs(config.storage.maintenance_interval_secs),
         compact_after: std::time::Duration::from_secs(config.storage.compact_after_hours * 3600),
     };
-    // §11 inbound bridge policy. Peer key pinning arrives with the M5d dialer;
-    // for now `accept_any` (open federation) is the configurable knob.
+    // §11 inbound bridge policy. `[[peers]]` pin peer keys (verified both for
+    // inbound auth and for the outbound dialer); `accept_any` opens it wider.
+    let mut peer_keys = std::collections::HashMap::new();
+    for peer in &config.peers {
+        match (
+            peer.network.parse::<weft_proto::NetworkName>(),
+            weft_core::PublicKey::from_b64(&peer.key),
+        ) {
+            (Ok(n), Ok(k)) => {
+                peer_keys.insert(n, k);
+            }
+            _ => warn!(peer = %peer.network, "skipping [[peers]] entry with invalid network/key"),
+        }
+    }
     let federation = weft_core::FederationConfig {
-        peer_keys: std::collections::HashMap::new(),
+        peer_keys,
         accept_any: config.federation.accept_any,
         auto_accept: config.federation.auto_accept,
     };
@@ -227,6 +248,14 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         endpoint.clone(),
         Arc::clone(&ctx),
     )));
+
+    // §11.2 outbound bridges: one maintained dial per `[[peers]]` entry.
+    tasks.extend(dialer::spawn_dialers(
+        &config.peers,
+        identity_seed,
+        network.clone(),
+        Arc::clone(&ctx),
+    ));
 
     let ws_addr = match config.listen.ws {
         None => None,

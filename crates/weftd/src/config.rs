@@ -30,6 +30,9 @@ pub struct Config {
     pub namespaces: Namespaces,
     /// §11 federation policy (inbound bridge behavior).
     pub federation: Federation,
+    /// §11.2 pinned peers weftd dials outbound (`[[peers]]`).
+    #[serde(default)]
+    pub peers: Vec<Peer>,
     pub listen: Listen,
     pub identity: Identity,
     pub storage: Storage,
@@ -141,7 +144,7 @@ impl Default for Namespaces {
 }
 
 /// §11 federation policy. Controls how this network treats *inbound* bridge
-/// sessions (the outbound dialer + peer pinning are M5d). By default a network
+/// sessions; outbound dialing is driven by `[[peers]]`. By default a network
 /// bridges with nobody; `accept_any` opens it to any peer (trust-on-first-use,
 /// §11.2), and `auto_accept` skips the manual `BRIDGE ACCEPT` step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -153,6 +156,32 @@ pub struct Federation {
     /// Auto-accept incoming `BRIDGE PROPOSE` instead of requiring an operator
     /// `BRIDGE ACCEPT`.
     pub auto_accept: bool,
+    /// §11.10 on-demand outbound bridging when a user references a foreign
+    /// namespace. `off` = only manual/pinned peering; `open` = any member may
+    /// trigger an auto-bridge to any non-blocked, SSRF-safe network.
+    pub auto_bridge: AutoBridge,
+}
+
+/// §11.10 outbound auto-federation policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoBridge {
+    #[default]
+    Off,
+    Open,
+}
+
+/// §11.2 A pinned peer network weftd dials outbound (M5d). Its `key` is pinned:
+/// the peer must prove control of it, and it verifies the peer's manifests.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Peer {
+    /// Peer network name (DNS), e.g. `hda.example`.
+    pub network: String,
+    /// `host:port` to dial over QUIC (UDP).
+    pub endpoint: String,
+    /// Peer's network signing key, base64.
+    pub key: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -231,6 +260,7 @@ impl Default for Config {
             operators: Vec::new(),
             namespaces: Namespaces::default(),
             federation: Federation::default(),
+            peers: Vec::new(),
             dm_policy: "permanent".to_string(),
             listen: Listen::default(),
             identity: Identity::default(),
