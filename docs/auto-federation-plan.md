@@ -215,10 +215,32 @@ guardrails retroactively; WEFT should ship §6 *with* P3, not after.
   client-facing trigger verb + `network/namespace` parse + the ctx→weftd trigger
   channel; rate-limit/concurrent-cap (§6, gates the trigger); and mirror/join
   surfacing (→ P4).
-- **P4 — client UX.** Quick-switcher / a "join foreign namespace" field accepts
-  `network/namespace`; foreign invite redeem routes into the flow; a
-  "connecting to F…" state + failure surface; the `federation :open` toggle in
-  the namespace Federation tab.
+- **P3 trigger ✅ (2026-07-08).** The `FEDERATE <network>/<namespace>` verb
+  (proto + round-trip); `on_federate` (self-network/netblock/cooldown gate) hands
+  an `AutoBridgeRequest` to weftd over a `ServerCtx` **port** (installed only when
+  `auto_bridge = open` — so policy is structural); `dialer::spawn_auto_bridge_consumer`
+  drains it → resolves the peer → `auto_bridge` (SSRF + dial + request). Core
+  tests: FEDERATE reaches the sink, and the self/off/throttle gates.
+- **P3 well-known fetch ✅ (2026-07-08).** `dialer::fetch_signing_key` — a
+  minimal hand-rolled HTTPS GET of `/.well-known/weft` over `tokio-rustls` (ring
+  provider + Mozilla roots, no aws-lc), TLS-verified, 10s timeout, 64 KiB cap, no
+  redirect-following, and **SSRF-guarded before connecting**. The consumer uses
+  it for any network not in `[[peers]]`, so **`FEDERATE <any-public-domain>/<ns>`
+  now works with no pre-pinning** — genuinely open, arbitrary-domain federation.
+  Test: the fetch refuses a private-resolving host. (A full two-weftd HTTPS fetch
+  needs a real trusted cert — exercised on a live deployment, not in-tree, since
+  the conformance servers use self-signed certs.)
+- **P4 ✅ (2026-07-08) — client UX.** The **`federation :open` toggle** (Federation
+  tab, reads the `NS-META` flag, gated on `public`); a **"join a foreign
+  namespace"** field in Discover; a live **"Connecting to <net>/<ns>…" banner**
+  (spinner + dismiss; auto-opens the namespace when its channels surface, else
+  clears after a grace window); **foreign-invite auto-routing** (redeeming a
+  `weft://<foreign>/<ns>/i/<id>` link routes into `FEDERATE`); and
+  **federation-ready invite links** — every namespace invite now embeds the
+  namespace (`weft://<net>/<ns>/i/<id>`), so any link works cross-network even
+  when minted locally. Remaining: precise "connected/failed" detection needs the
+  mirror-surfacing step (H materializing the bridged namespace's channels for the
+  requester — a noted follow-up).
 
 P1 is most of the effort and is valuable on its own (real two-server federation).
 P2–P4 are comparatively small once dialing exists.

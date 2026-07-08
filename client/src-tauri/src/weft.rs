@@ -136,6 +136,8 @@ pub enum WeftEvent {
         recovery_rung: Option<u8>,
         /// Server-authoritative channel categories (§6.3 layout).
         categories: Vec<String>,
+        /// §11.10 auto-federation reachable (owner opened it to bridging).
+        federation: bool,
     },
     /// `CHANNEL-LAYOUT <#chan> <position>` with optional `category=` (§7).
     ChannelLayout {
@@ -612,6 +614,7 @@ fn on_line(
             recovery_set,
             recovery_pending,
             categories,
+            federation,
             ..
         } => emit(
             app,
@@ -625,6 +628,7 @@ fn on_line(
                 recovery_eta: recovery_pending.map(|(eta, _)| eta),
                 recovery_rung: recovery_pending.map(|(_, rung)| rung),
                 categories,
+                federation,
             },
         ),
         Event::ChannelLayout {
@@ -1421,6 +1425,19 @@ pub fn build_ns_meta(name: &str, key: &str, value: &str) -> Result<String, Strin
         name: name.parse().map_err(|_| "bad namespace".to_string())?,
         key: key.to_string(),
         value: value.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `FEDERATE <network>/<namespace>` (§11.10) — request an on-demand bridge to a
+/// foreign namespace. Accepts `network/namespace` or a `weft://<net>/<ns>` link.
+pub fn build_federate(target: &str) -> Result<String, String> {
+    let t = target.trim().strip_prefix("weft://").unwrap_or(target.trim());
+    let (net, ns) = t.split_once('/').ok_or("expected network/namespace")?;
+    Request::new(Command::Federate {
+        network: net.parse().map_err(|_| "bad network".to_string())?,
+        namespace: ns.parse().map_err(|_| "bad namespace".to_string())?,
     })
     .serialize()
     .map_err(|e| e.to_string())

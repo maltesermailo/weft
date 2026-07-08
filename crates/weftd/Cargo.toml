@@ -31,6 +31,9 @@ rustls-pemfile = { workspace = true }
 instant-acme = "0.7"
 serde_json = "1"
 async-trait = { workspace = true }
+# §11.10 well-known key fetch: a minimal HTTPS GET. ring provider only (no aws-lc).
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "0.26"
 
 [dev-dependencies]
 weft-transport = { path = "../weft-transport", features = ["insecure-client"] }

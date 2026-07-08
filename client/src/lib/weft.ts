@@ -45,6 +45,7 @@ export type WeftEvent =
       recovery_eta: number | null;
       recovery_rung: number | null;
       categories: string[];
+      federation: boolean;
     }
   | { kind: "channel-layout"; channel: string; category: string | null; position: number }
   | { kind: "channel-renamed"; old: string; new: string }
@@ -153,6 +154,12 @@ export function nsJoin(name: string) {
 /// only the public key is sent (§6.2).
 export function nsCreate(network: string, name: string, visibility: string) {
   return invoke("ns_create", { network, name, visibility });
+}
+
+// ---- auto-federation (§11.10) ----
+/** Request an on-demand bridge to a foreign namespace (`network/namespace`). */
+export function federate(target: string) {
+  return invoke("federate", { target });
 }
 
 // ---- namespace admin (§6.2 / §2.4) ----

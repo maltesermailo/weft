@@ -118,6 +118,23 @@
       {:else if app.nsTab === "federation"}
         <h1>Federation</h1>
         <p class="so-sub">Bridge <b>{app.activeServer}</b>'s channels to a peer network (§11). You control this as the namespace owner — bridges are scoped to <code>ns:{app.activeServer}</code>, non-transitive, and every change notifies members.</p>
+
+        <div class="field-label">Auto-federation (§11.10)</div>
+        <p class="so-sub">When open, another network can reach this namespace on demand — a user there references <code>{app.network}/{app.activeServer}</code> and their server auto-establishes the bridge. Requires <b>public</b> visibility.</p>
+        <label class="fed-check" style="margin-bottom:14px">
+          <input
+            type="checkbox"
+            checked={app.activeNsMeta?.federation ?? false}
+            disabled={(app.activeNsMeta?.visibility ?? "") !== "public"}
+            onchange={(e) => app.nsSetFederation(e.currentTarget.checked)}
+          />
+          Open <b>{app.activeServer}</b> to auto-federation
+        </label>
+        {#if (app.activeNsMeta?.visibility ?? "") !== "public"}
+          <p class="so-sub" style="color:var(--amber)">Make this namespace public (Overview → Visibility) to enable auto-federation.</p>
+        {/if}
+        <div class="section-sep"></div>
+
         <div class="field-label">Active bridges</div>
         <div class="modal-list">
           {#each Object.values(app.manifests) as m (m.peer)}

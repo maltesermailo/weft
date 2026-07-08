@@ -1582,6 +1582,45 @@
     if (nsDesc.trim()) weft.nsMeta(activeServer, "description", nsDesc.trim()).catch(() => {});
     weft.nsVisibility(activeServer, nsVis).catch(() => {});
   }
+  // §11.10 open/close this namespace to on-demand federation (needs public).
+  function nsSetFederation(open: boolean) {
+    weft.nsMeta(activeServer, "federation", open ? "open" : "closed").catch((e) => toast(String(e), "error"));
+  }
+  // §11.10 on-demand federation: live "connecting…" state for the trigger. The
+  // bridge establishes asynchronously; we surface the namespace when its
+  // channels arrive (best-effort), else the banner clears after a grace window.
+  let federating = $state<{ target: string; ns: string } | null>(null);
+  let federatingTimer: ReturnType<typeof setTimeout> | null = null;
+  function federate(target: string) {
+    const t = target.trim();
+    const slash = t.indexOf("/");
+    if (slash < 1) {
+      toast("Enter a foreign namespace as network/namespace", "error");
+      return;
+    }
+    const ns = t.slice(slash + 1);
+    weft
+      .federate(t)
+      .then(() => {
+        federating = { target: t, ns };
+        if (federatingTimer) clearTimeout(federatingTimer);
+        federatingTimer = setTimeout(() => (federating = null), 20000);
+      })
+      .catch((e) => toast(String(e), "error"));
+  }
+  function cancelFederating() {
+    if (federatingTimer) clearTimeout(federatingTimer);
+    federating = null;
+  }
+  // When the bridged namespace's channels surface, open it and clear the banner.
+  $effect(() => {
+    const f = federating;
+    if (!f) return;
+    if (Object.keys(channels).some((c) => nsOf(c) === f.ns)) {
+      cancelFederating();
+      selectServer(f.ns);
+    }
+  });
   function doDelegate() {
     const s = nsDelegSubject.trim();
     if (s && nsDelegCaps.length) weft.nsDelegate(activeServer, s, nsDelegCaps.join(",")).catch(() => {});
@@ -1813,6 +1852,8 @@
     set recoveryDoc(v: string) { recoveryDoc = v; },
     nsRoleScope,
     saveNsMeta,
+    nsSetFederation,
+    federate,
     createRole,
     deleteRole,
     assignRole,
@@ -1847,6 +1888,13 @@
     <div class="reconnect-banner">Connection lost — reconnecting…</div>
   {/if}
   <Toasts {toasts} />
+  {#if federating}
+    <div class="federating-banner">
+      <span class="fed-spinner"></span>
+      Connecting to <b>{federating.target}</b>…
+      <button class="linkish" onclick={cancelFederating}>dismiss</button>
+    </div>
+  {/if}
   <ContextMenu menu={ctxMenu} onclose={() => (ctxMenu = null)} />
   {#if switcherOpen}
     <QuickSwitcher

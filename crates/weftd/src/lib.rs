@@ -252,10 +252,25 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
     // §11.2 outbound bridges: one maintained dial per `[[peers]]` entry.
     tasks.extend(dialer::spawn_dialers(
         &config.peers,
-        identity_seed,
+        identity_seed.clone(),
         network.clone(),
         Arc::clone(&ctx),
     ));
+
+    // §11.10 auto-federation: wire the FEDERATE trigger to the dialer, only when
+    // the network has opted into on-demand outbound bridging.
+    if config.federation.auto_bridge == config::AutoBridge::Open {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        ctx.set_auto_bridge_sink(tx);
+        tasks.push(dialer::spawn_auto_bridge_consumer(
+            rx,
+            &config.peers,
+            identity_seed,
+            network.clone(),
+            Arc::clone(&ctx),
+        ));
+        info!("auto-federation enabled (auto_bridge = open)");
+    }
 
     let ws_addr = match config.listen.ws {
         None => None,

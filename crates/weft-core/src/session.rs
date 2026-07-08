@@ -938,6 +938,9 @@ impl<S: ControlStream> Session<S> {
             Command::NsJoin { name } => self.on_ns_join(label, name, account).await,
             Command::Discover { cursor } => self.on_discover(label, cursor).await,
             Command::Channels { namespace } => self.on_channels(label, namespace).await,
+            Command::Federate { network, namespace } => {
+                self.on_federate(label, network, namespace, account).await
+            }
             // §2.4 succession + recovery ladder.
             Command::NsTransfer {
                 name,
@@ -2875,7 +2878,14 @@ impl<S: ControlStream> Session<S> {
         {
             return self.internal(label, &e).await;
         }
-        let link = format!("weft://{}/i/{invite_id}", self.ctx.info.network);
+        // Federation-ready link: carry the namespace (from `ns:<name>` or
+        // `#<ns>/<chan>`) so a *foreign* redeemer can auto-federate to it
+        // (§11.10). Top-level channels have no namespace and stay the short form.
+        let network = &self.ctx.info.network;
+        let link = match invite_scope_namespace(&scope) {
+            Some(ns) => format!("weft://{network}/{ns}/i/{invite_id}"),
+            None => format!("weft://{network}/i/{invite_id}"),
+        };
         self.send_event(
             label,
             Event::Invited {
@@ -4638,6 +4648,42 @@ impl<S: ControlStream> Session<S> {
         Ok(())
     }
 
+    /// §11.10 FEDERATE: a local user asks to reach a foreign namespace on
+    /// demand. Gate on the open policy (the dialer sink is installed only when
+    /// `auto_bridge = open`), NETBLOCK, a per-account cooldown, and self-dial;
+    /// then hand the dial to weftd. The bridge establishes asynchronously — the
+    /// client learns it went live via `MANIFEST`.
+    async fn on_federate(
+        &mut self,
+        label: Option<String>,
+        network: NetworkName,
+        namespace: NamespaceName,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if network.as_str() == self.ctx.network_name() {
+            return self
+                .unsupported(label, "that namespace is on this network already")
+                .await;
+        }
+        if self.ctx.netblocks.is_netblocked(&network).await.unwrap_or(false) {
+            self.send_err(label, ErrCode::Blocked, None, "network is blocked")
+                .await?;
+            return Ok(Flow::Continue);
+        }
+        if !self.ctx.federate_allowed(&account) {
+            self.send_err(label, ErrCode::Throttled, None, "one federation request at a time")
+                .await?;
+            return Ok(Flow::Continue);
+        }
+        let req = crate::context::AutoBridgeRequest { network, namespace };
+        if !self.ctx.request_auto_bridge(req) {
+            return self
+                .unsupported(label, "auto-federation is off on this network")
+                .await;
+        }
+        Ok(Flow::Continue)
+    }
+
     // ---- §11 federation: operator-facing management (§6.6) ----
 
     /// Compile + sign a v1 manifest for `scope`'s `channels` and store it as a
@@ -5317,6 +5363,17 @@ fn manifest_event(record: &PeerRecord, state: BridgeState, channels: &[String]) 
 
 /// Sender for a bridged `DELETED` that arrived without a `by=` — the tombstone
 /// is keyed on the root, so this only fills the delete row's `sender` column.
+/// The namespace an invite scope belongs to, for a federation-ready link:
+/// `ns:<name>` → `<name>`; `#<ns>/<chan>` → `<ns>`; a top-level `#<chan>` or
+/// `*` → `None` (nothing to federate).
+fn invite_scope_namespace(scope: &str) -> Option<&str> {
+    if let Some(ns) = scope.strip_prefix("ns:") {
+        Some(ns)
+    } else {
+        scope.strip_prefix('#').and_then(|c| c.split_once('/')).map(|(ns, _)| ns)
+    }
+}
+
 fn deleted_placeholder() -> Account {
     "unknown".parse().expect("valid account literal")
 }

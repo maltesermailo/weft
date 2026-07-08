@@ -31,12 +31,19 @@ export interface AppCtx {
   readonly channelGroups: { category: string; list: Channel[] }[];
   readonly dmList: Channel[];
   readonly activeNsMeta:
-    | { title?: string | null; recovery_eta?: number | null; recovery_rung?: number | null }
+    | {
+        title?: string | null;
+        recovery_eta?: number | null;
+        recovery_rung?: number | null;
+        visibility?: string;
+        federation?: boolean;
+      }
     | undefined;
   goHome(): void;
   selectServer(ns: string): void;
   open(name: string): void; // set active + mark read
   openDiscover(): void;
+  federate(target: string): void; // §11.10 join a foreign namespace on demand
 
   // ---- data ----
   readonly channels: Record<string, Channel>;
@@ -217,6 +224,7 @@ export interface AppCtx {
   recoveryDoc: string;
   nsRoleScope(): string;
   saveNsMeta(): void;
+  nsSetFederation(open: boolean): void;
   createRole(): void;
   deleteRole(name: string): void;
   assignRole(name: string): void;

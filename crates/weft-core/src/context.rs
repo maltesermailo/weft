@@ -124,6 +124,20 @@ pub struct ServerCtx {
     /// Graceful-shutdown signal. Cancelled once on shutdown; sessions finish
     /// their current command and close, accept loops stop, maintenance exits.
     pub shutdown: tokio_util::sync::CancellationToken,
+    /// §11.10 auto-federation trigger port: `FEDERATE` (weft-core) can't dial
+    /// (no transport), so it hands requests to weftd (L3), which owns the
+    /// dialer. `None` = the network's `auto_bridge` policy is off.
+    auto_bridge_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<AutoBridgeRequest>>,
+    /// §11.10 per-account cooldown on `FEDERATE` — a light dial-storm guard even
+    /// under the open trigger policy (§6).
+    federate_cooldown: std::sync::Mutex<HashMap<Account, std::time::Instant>>,
+}
+
+/// A `FEDERATE` request handed from weft-core to weftd's dialer (§11.10).
+#[derive(Debug, Clone)]
+pub struct AutoBridgeRequest {
+    pub network: NetworkName,
+    pub namespace: NamespaceName,
 }
 
 impl ServerCtx {
@@ -206,6 +220,36 @@ impl ServerCtx {
             next_session: AtomicU64::new(1),
             connections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             shutdown: tokio_util::sync::CancellationToken::new(),
+            auto_bridge_tx: std::sync::OnceLock::new(),
+            federate_cooldown: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// weftd installs the auto-federation dialer sink (enables `FEDERATE`).
+    pub fn set_auto_bridge_sink(
+        &self,
+        tx: tokio::sync::mpsc::UnboundedSender<AutoBridgeRequest>,
+    ) {
+        let _ = self.auto_bridge_tx.set(tx);
+    }
+
+    /// §11.10 hand a `FEDERATE` request to the dialer. `false` if auto-bridging
+    /// is off (no sink) or the channel is gone.
+    pub(crate) fn request_auto_bridge(&self, req: AutoBridgeRequest) -> bool {
+        matches!(self.auto_bridge_tx.get(), Some(tx) if tx.send(req).is_ok())
+    }
+
+    /// §11.10 per-account cooldown: at most one `FEDERATE` per window.
+    pub(crate) fn federate_allowed(&self, account: &Account) -> bool {
+        const COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3);
+        let now = std::time::Instant::now();
+        let mut recent = self.federate_cooldown.lock().expect("cooldown lock");
+        match recent.get(account) {
+            Some(&last) if now.duration_since(last) < COOLDOWN => false,
+            _ => {
+                recent.insert(account.clone(), now);
+                true
+            }
         }
     }
 

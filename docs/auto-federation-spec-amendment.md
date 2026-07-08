@@ -17,7 +17,9 @@ membership (auto-rejoin); sever-on-idle; **open** trigger policy.
 > — the left segment is a DNS network name, the right a namespace on it. Local
 > references stay bare (`gaming`, `#gaming/general`). Link forms:
 > `weft://<network>/<namespace>` (open a namespace) and
-> `weft://<network>/i/<token>` (invite). Clients display `network/namespace`;
+> `weft://<network>/<namespace>/i/<token>` (invite — the namespace is embedded so
+> a foreign redeemer auto-federates to it; top-level-channel invites omit it).
+> Clients display `network/namespace`;
 > `weft://` is the shareable/clickable form. The network segment MUST be a
 > resolvable **public** DNS name (§11.10).
 
@@ -44,6 +46,41 @@ Add a row:
 Rationale note: a manifest for `<ns>` must be signed by that namespace's scope
 authority, which lives on the peer — so the requesting side **asks**, the owning
 side **offers**. Bounded: one namespace per request, no `accept_any` blanket.
+
+## C.2 `FEDERATE` verb — §6.6 (the client-facing trigger)
+
+Add a row: `FEDERATE <network>/<namespace>` — cap `membership` + `auto_bridge`
+open; → async (`MANIFEST` when live); errors `UNSUPPORTED` / `BLOCKED` /
+`THROTTLED`.
+
+**Why a distinct verb (not `NS JOIN <net>/<ns>`).** `NS JOIN` is a *membership*
+action against a namespace your server already carries; `FEDERATE` is a
+*request to your home network to go get one it doesn't have yet* — a different
+operation with a different failure surface (SSRF, netblock, dial failure,
+policy-off). Overloading `NS JOIN` would blur "join what exists" with "make it
+exist," and hide the outbound-dial side effects behind an innocuous verb. A
+separate verb keeps the on-demand dial explicit and greppable.
+
+**Why client→home, not over the bridge session.** The two federation-request
+verbs are deliberately different directions: `BRIDGE REQUEST` is peer→peer (H's
+server asks F's server, §C), while `FEDERATE` is user→home (a client asks *its
+own* server to initiate). `FEDERATE` is what *causes* the `BRIDGE REQUEST` to be
+sent, one hop earlier in the chain.
+
+**Layering (why the trigger needs a port, not just a handler).** The command is
+parsed + policy-gated in weft-core (L2), but weft-core has no transport and
+cannot dial. So the handler hands an `AutoBridgeRequest {network, namespace}` to
+weftd (L3) — which owns the dialer — over an in-process port (a
+`ServerCtx`-held sender, installed by weftd only when `auto_bridge = open`). This
+mirrors the existing ports/adapters seams (`ControlStream`, `EventStore`): L2
+states the intent, L3 performs the I/O. It also means the open/off policy is
+expressed structurally — no sink installed ⇒ `FEDERATE` answers `UNSUPPORTED`,
+with no separate flag to keep in sync.
+
+**Why a per-account cooldown.** Under the open trigger policy (§6) any member can
+initiate a dial; the cooldown is the minimal in-core rate-limit that stops a
+single account from issuing a dial-storm. It composes with the transport-level
+SSRF guard and NETBLOCK — belt, braces, and a third belt.
 
 ## D. New §11.10 — Auto-federation (on-demand bridging)
 

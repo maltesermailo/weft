@@ -144,6 +144,11 @@ fn ns_meta(conn: State<'_, Conn>, name: String, key: String, value: String) -> R
 }
 
 #[tauri::command]
+fn federate(conn: State<'_, Conn>, target: String) -> Result<(), String> {
+    conn.send(weft::build_federate(&target)?)
+}
+
+#[tauri::command]
 fn ns_visibility(conn: State<'_, Conn>, name: String, visibility: String) -> Result<(), String> {
     conn.send(weft::build_ns_visibility(&name, &visibility)?)
 }
@@ -559,6 +564,7 @@ pub fn run() {
             ns_join,
             ns_create,
             ns_meta,
+            federate,
             ns_visibility,
             ns_delegate,
             ns_delete,

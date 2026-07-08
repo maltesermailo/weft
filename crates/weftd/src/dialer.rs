@@ -188,6 +188,70 @@ pub async fn dial_bridge(
     }
 }
 
+/// §11.10 Drain the auto-federation port: for each `FEDERATE` request (handed up
+/// from weft-core), resolve the peer, SSRF-guard, dial, and request its
+/// namespace. Peer keys + endpoints come from `[[peers]]` pins for now
+/// (well-known key fetch for arbitrary domains is a TODO). Runs until shutdown.
+pub fn spawn_auto_bridge_consumer(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<weft_core::AutoBridgeRequest>,
+    peers: &[crate::config::Peer],
+    identity_seed: String,
+    our_network: NetworkName,
+    ctx: Arc<ServerCtx>,
+) -> tokio::task::JoinHandle<()> {
+    let pinned: std::collections::HashMap<NetworkName, (String, PublicKey)> = peers
+        .iter()
+        .filter_map(|p| {
+            Some((
+                p.network.parse().ok()?,
+                (p.endpoint.clone(), PublicKey::from_b64(&p.key).ok()?),
+            ))
+        })
+        .collect();
+    tokio::spawn(async move {
+        let Ok(identity) = Keypair::from_seed_b64(&identity_seed) else {
+            return;
+        };
+        let client = match weft_transport::client_endpoint(weft_transport::ALPN) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("auto-federation: cannot build client endpoint: {e}");
+                return;
+            }
+        };
+        loop {
+            let req = tokio::select! {
+                r = rx.recv() => match r { Some(r) => r, None => break },
+                _ = ctx.shutdown.cancelled() => break,
+            };
+            let weft_core::AutoBridgeRequest { network, namespace } = req;
+            // Resolve the peer's key + dial address: a `[[peers]]` pin, else the
+            // §10.2 well-known key fetch (arbitrary public domains).
+            let resolved = match pinned.get(&network) {
+                Some((endpoint, key)) => tokio::net::lookup_host(endpoint)
+                    .await
+                    .ok()
+                    .and_then(|mut a| a.next())
+                    .map(|addr| (*key, addr))
+                    .ok_or_else(|| anyhow::anyhow!("cannot resolve pinned endpoint {endpoint}")),
+                None => fetch_signing_key(network.as_str()).await,
+            };
+            let (key, addr) = match resolved {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(%network, "auto-federation: cannot resolve peer: {e}");
+                    continue;
+                }
+            };
+            if let Err(e) =
+                auto_bridge(&client, addr, &network, key, namespace, &identity, &our_network, Arc::clone(&ctx)).await
+            {
+                tracing::warn!(%network, "auto-bridge failed: {e}");
+            }
+        }
+    })
+}
+
 /// Spawn one maintained outbound bridge per configured peer. Each task dials,
 /// runs the bridge until it closes, then reconnects after a backoff — until
 /// shutdown. Returns the task handles for the caller to track.
@@ -301,6 +365,79 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     !(ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || ula || link_local)
 }
 
+/// §11.10 Fetch a foreign network's Ed25519 signing key from its
+/// `/.well-known/weft` (§10.2), so we can verify its manifests when it isn't
+/// pinned. TLS-verified, timeout- and size-bounded; the resolved host is
+/// SSRF-guarded (invariant 13) *before* we connect, and redirects are not
+/// followed. Returns the key + the resolved dial address (`<network>:443`).
+pub async fn fetch_signing_key(network: &str) -> anyhow::Result<(PublicKey, SocketAddr)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let addr = tokio::net::lookup_host((network, 443u16))
+        .await
+        .ok()
+        .and_then(|mut a| a.next())
+        .with_context(|| format!("resolving {network}:443"))?;
+    if !is_dialable(&addr) {
+        bail!("well-known host {network} ({addr}) is not public (SSRF guard, §11.10)");
+    }
+
+    // rustls client config: process-default provider (ring) + Mozilla roots —
+    // the same trust anchors as the verified QUIC client.
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = tokio_rustls::rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(network.to_string())
+        .context("invalid TLS server name")?;
+
+    const MAX_BODY: usize = 64 * 1024;
+    let raw = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let tcp = tokio::net::TcpStream::connect(addr).await?;
+        let mut tls = connector.connect(server_name, tcp).await?;
+        let req = format!(
+            "GET /.well-known/weft HTTP/1.1\r\nHost: {network}\r\nAccept: application/json\r\nUser-Agent: weftd\r\nConnection: close\r\n\r\n"
+        );
+        tls.write_all(req.as_bytes()).await?;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = tls.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.len() > MAX_BODY {
+                bail!("well-known response exceeds {MAX_BODY} bytes");
+            }
+        }
+        Ok::<Vec<u8>, anyhow::Error>(buf)
+    })
+    .await
+    .context("well-known fetch timed out")??;
+
+    if !raw.starts_with(b"HTTP/1.1 200") && !raw.starts_with(b"HTTP/1.0 200") {
+        let status: String = raw.iter().take_while(|&&b| b != b'\r').map(|&b| b as char).collect();
+        bail!("well-known returned {status:?}");
+    }
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .context("malformed HTTP response (no body)")?;
+    #[derive(serde::Deserialize)]
+    struct Doc {
+        #[serde(rename = "signing-key")]
+        signing_key: String,
+    }
+    let doc: Doc =
+        serde_json::from_slice(&raw[split + 4..]).context("parsing /.well-known/weft JSON")?;
+    let key = PublicKey::from_b64(&doc.signing_key)
+        .map_err(|_| anyhow::anyhow!("well-known signing-key is not a valid pubkey"))?;
+    Ok((key, addr))
+}
+
 async fn send(stream: &mut QuicControlStream, cmd: Command) -> anyhow::Result<()> {
     let line = Request::new(cmd).serialize().context("serialize command")?;
     stream.send_line(&line).await.context("send line")
@@ -346,5 +483,13 @@ mod tests {
         ] {
             assert!(!dialable(bad), "{bad} must not be dialable");
         }
+    }
+
+    #[tokio::test]
+    async fn well_known_fetch_refuses_private_host() {
+        // `localhost` resolves to a loopback address — the fetch must bail on the
+        // SSRF guard before opening any connection (invariant 13).
+        let err = super::fetch_signing_key("localhost").await.unwrap_err();
+        assert!(err.to_string().contains("SSRF guard"), "{err}");
     }
 }

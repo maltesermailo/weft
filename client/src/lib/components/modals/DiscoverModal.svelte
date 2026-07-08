@@ -7,8 +7,19 @@
 
   let discoverName = $state("");
   let redeemInput = $state("");
+  let federateInput = $state("");
   let createName = $state("");
   let createVis = $state("public");
+
+  // §11.10 join a foreign namespace on demand (your server auto-bridges).
+  function doFederate() {
+    const t = federateInput.trim();
+    federateInput = "";
+    if (t) {
+      app.federate(t);
+      onclose();
+    }
+  }
 
   function joinNamespace(name: string) {
     weft.nsJoin(name).catch(() => {});
@@ -23,7 +34,16 @@
   function doRedeem() {
     const t = redeemInput.trim();
     redeemInput = "";
-    if (t) weft.inviteRedeem(t).catch(() => {});
+    if (!t) return;
+    // A foreign invite link (weft://<net>/<ns>/i/<id>) routes into federation —
+    // your server auto-bridges to the namespace it points at (§11.10).
+    const m = t.match(/^weft:\/\/([^/]+)\/(?:([^/]+)\/)?i\/.+$/);
+    if (m && m[1] !== app.network) {
+      if (m[2]) app.federate(`${m[1]}/${m[2]}`);
+      else app.toast("This invite is for another network but names no namespace.", "error");
+    } else {
+      weft.inviteRedeem(t).catch((e) => app.toast(String(e), "error"));
+    }
     onclose();
   }
   async function createNamespace() {
@@ -56,6 +76,10 @@
     <div class="modal-join">
       <input bind:value={redeemInput} placeholder="redeem an invite link…" onkeydown={(e) => e.key === "Enter" && doRedeem()} />
       <button onclick={doRedeem}>Redeem</button>
+    </div>
+    <div class="modal-join">
+      <input bind:value={federateInput} placeholder="join a foreign namespace — network/namespace…" onkeydown={(e) => e.key === "Enter" && doFederate()} />
+      <button onclick={doFederate}>Connect</button>
     </div>
     <div class="modal-join">
       <input bind:value={createName} placeholder="create a namespace…" onkeydown={(e) => e.key === "Enter" && createNamespace()} />

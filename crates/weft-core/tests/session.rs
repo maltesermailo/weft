@@ -1238,6 +1238,26 @@ async fn invite_mint_and_redeem_grants_membership() {
 }
 
 #[tokio::test]
+async fn invite_link_carries_namespace_for_federation() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    ada.recv().await;
+
+    // A namespace-scoped invite's link carries the namespace (§11.10), so a
+    // foreign redeemer can auto-federate to it.
+    ada.send("INVITE MINT ns:gaming");
+    let Event::Invited { link, .. } = ada.recv().await.event else {
+        panic!("expected INVITED");
+    };
+    let link = link.expect("a namespace invite should carry a link");
+    assert!(
+        link.starts_with("weft://test.example/gaming/i/"),
+        "link must carry the namespace: {link}"
+    );
+}
+
+#[tokio::test]
 async fn invite_revoke_kills_the_link() {
     let ctx = ctx_ops(&["#general"], &["boss"]);
     let mut boss = ready_op(&ctx, "boss").await;
@@ -1974,6 +1994,39 @@ async fn bridge_request_offers_only_reachable_namespaces() {
     peer.send("BRIDGE REQUEST nonexistent");
     let miss = peer.recv_raw().await;
     assert!(miss.contains("NO-SUCH-TARGET"), "expected NO-SUCH-TARGET, got {miss}");
+}
+
+#[tokio::test]
+async fn federate_hands_request_to_the_dialer() {
+    let ctx = ctx(&[]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_auto_bridge_sink(tx);
+    let mut ada = ready(&ctx, "ada").await;
+
+    // A valid foreign target is handed to the dialer (async — no client ack).
+    ada.send("FEDERATE hda.example/gaming");
+    let req = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timed out waiting for the dialer request")
+        .expect("sink closed");
+    assert_eq!(req.network.as_str(), "hda.example");
+    assert_eq!(req.namespace.to_string(), "gaming");
+
+    // A second request immediately after is throttled (per-account cooldown).
+    ada.send("FEDERATE hda.example/other");
+    ada.expect_err(ErrCode::Throttled).await;
+
+    // Federating your own network is a no-op (self-check precedes the cooldown).
+    ada.send("FEDERATE test.example/gaming");
+    ada.expect_err(ErrCode::Unsupported).await;
+}
+
+#[tokio::test]
+async fn federate_unsupported_when_auto_bridge_off() {
+    let ctx = ctx(&[]); // no sink installed → auto-federation is off
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send("FEDERATE hda.example/gaming");
+    ada.expect_err(ErrCode::Unsupported).await;
 }
 
 #[tokio::test]

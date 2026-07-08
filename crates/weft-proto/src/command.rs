@@ -345,6 +345,12 @@ pub enum Command {
     /// of *its* namespaces. Bridge-session-only; the peer answers with
     /// `BRIDGE PROPOSE` iff the namespace is auto-federation-reachable.
     BridgeRequest { ns: NamespaceName },
+    /// `FEDERATE <network>/<namespace>` (§11.10) — a local user asks their home
+    /// network to auto-establish a bridge to a foreign namespace on demand.
+    Federate {
+        network: NetworkName,
+        namespace: NamespaceName,
+    },
     /// `NETBLOCK ADD <network> [:reason]` (§6.6, §11.6). Cap `netblock` at `*`.
     NetblockAdd {
         network: NetworkName,
@@ -952,6 +958,19 @@ impl Command {
             "CHANNELS" => Ok(Command::Channels {
                 namespace: Args::new(line, "CHANNELS").req("namespace")?.parse()?,
             }),
+            "FEDERATE" => {
+                let target = Args::new(line, "FEDERATE").req("target")?.to_string();
+                let (network, namespace) =
+                    target.split_once('/').ok_or_else(|| ParseError::BadParam {
+                        verb: "FEDERATE",
+                        what: "target (expected <network>/<namespace>)",
+                        value: target.clone(),
+                    })?;
+                Ok(Command::Federate {
+                    network: network.parse()?,
+                    namespace: namespace.parse()?,
+                })
+            }
             "REPORT" => {
                 let mut args = Args::new(line, "REPORT");
                 let msgid = args.req("msgid")?.parse()?;
@@ -1496,6 +1515,9 @@ impl Command {
                 )
             }
             Command::Discover { cursor } => ("DISCOVER", cursor.iter().cloned().collect(), None),
+            Command::Federate { network, namespace } => {
+                ("FEDERATE", vec![format!("{network}/{namespace}")], None)
+            }
             Command::Channels { namespace } => ("CHANNELS", vec![namespace.to_string()], None),
             Command::Report {
                 msgid,
@@ -2344,6 +2366,11 @@ mod tests {
         round_trip(&Request::new(Command::BridgeRequest {
             ns: "gaming".parse().unwrap(),
         }));
+        round_trip(&Request::new(Command::Federate {
+            network: "hda.example".parse().unwrap(),
+            namespace: "gaming".parse().unwrap(),
+        }));
+        assert!(Request::parse("FEDERATE nonslash").is_err());
         assert!(Request::parse("BRIDGE FROB peer.example").is_err());
         assert!(Request::parse("BRIDGE ACCEPT peer.example notanumber").is_err());
     }
