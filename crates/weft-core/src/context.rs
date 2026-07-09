@@ -19,6 +19,38 @@ use crate::registry::Registry;
 /// The only protocol version this server speaks (§3.6).
 pub const PROTOCOL_VERSION: &str = "weft/1";
 
+/// Who is acting in a session: a **local** account, or a **federated** user
+/// (`account@network`) whose home network vouches for her over a bridge (§10.4,
+/// homeserver authority — F proves its network key, then speaks for its users).
+/// Enforcement keys by the subject; local-only authority (operator / namespace
+/// owner) never applies to a foreign actor.
+#[derive(Debug, Clone)]
+pub enum Actor {
+    Local(Account),
+    /// `account@network`.
+    Foreign(String),
+}
+
+impl Actor {
+    /// The local account, if this actor is local (a foreign actor → `None`) —
+    /// for owner/operator comparisons a federated user can never satisfy.
+    pub fn local(&self) -> Option<&Account> {
+        match self {
+            Actor::Local(account) => Some(account),
+            Actor::Foreign(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Actor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Actor::Local(account) => write!(f, "{account}"),
+            Actor::Foreign(user) => write!(f, "{user}"),
+        }
+    }
+}
+
 /// Attestation lifetime (§10.2: rotation = superseding attestation, so
 /// lifetimes stay short-ish; re-auth refreshes well before expiry).
 const ATTESTATION_TTL_SECS: u64 = 30 * 24 * 3600;
@@ -286,31 +318,49 @@ impl ServerCtx {
 
     // ---- capability enforcement (§10.4, invariant 4) ----
 
-    /// Does `account` hold `cap` for an object at `scope`? Operators hold
-    /// everything at `*`; everyone else's authority comes from grants that
-    /// cover the scope, are unexpired, and are at or above the scope's
-    /// current revocation epoch.
-    pub(crate) async fn account_has_cap(
+    /// The grant-store key for an actor: a local account's immutable **ULID**
+    /// (§10.4), or a foreign `account@network` verbatim. `None` = unknown local
+    /// account (holds no grants).
+    pub(crate) async fn actor_store_key(
         &self,
-        account: &Account,
+        actor: &Actor,
+    ) -> Result<Option<String>, StoreError> {
+        match actor {
+            Actor::Local(account) => self.accounts.account_ulid(account).await,
+            Actor::Foreign(user) => Ok(Some(user.clone())),
+        }
+    }
+
+    /// Does `actor` hold `cap` for an object at `scope`? Operators hold
+    /// everything at `*`; a namespace owner holds everything in their namespace;
+    /// everyone else's authority comes from grants that cover the scope, are
+    /// unexpired, and are at or above the scope's current revocation epoch.
+    /// Operator/owner authority is **local-only** — a federated actor (§10.4,
+    /// homeserver authority) is never a local operator or owner, so her power on
+    /// H comes purely from what H granted `account@network`.
+    pub(crate) async fn actor_has_cap(
+        &self,
+        actor: &Actor,
         cap: &Capability,
         scope: &TokenScope,
         now: u64,
     ) -> Result<bool, StoreError> {
-        if self.operators.contains(account) {
-            return Ok(true);
-        }
-        // A namespace owner holds the ns root key's authority — every cap
-        // within their namespace (§2.1), the ns-scoped analog of an
-        // operator at `*`.
-        if let Some(ns_name) = scope_namespace(scope) {
-            if let Some(ns) = self.namespaces.namespace(&ns_name).await? {
-                if ns.owner == *account {
-                    return Ok(true);
+        if let Actor::Local(account) = actor {
+            if self.operators.contains(account) {
+                return Ok(true);
+            }
+            if let Some(ns_name) = scope_namespace(scope) {
+                if let Some(ns) = self.namespaces.namespace(&ns_name).await? {
+                    if ns.owner == *account {
+                        return Ok(true);
+                    }
                 }
             }
         }
-        for grant in self.caps.grants_for(account.as_str()).await? {
+        let Some(key) = self.actor_store_key(actor).await? else {
+            return Ok(false);
+        };
+        for grant in self.caps.grants_for(&key).await? {
             let Some(gscope) = TokenScope::parse(&grant.scope) else {
                 continue;
             };
@@ -335,20 +385,62 @@ impl ServerCtx {
         Ok(false)
     }
 
-    /// May `account` delegate `cap` at `scope`? (Holds `grant:<cap>` or is
-    /// an operator.)
-    pub(crate) async fn account_can_grant(
+    /// Local-account convenience wrapper over [`Self::actor_has_cap`].
+    pub(crate) async fn account_has_cap(
         &self,
         account: &Account,
         cap: &Capability,
         scope: &TokenScope,
         now: u64,
     ) -> Result<bool, StoreError> {
-        if self.operators.contains(account) {
-            return Ok(true);
+        self.actor_has_cap(&Actor::Local(account.clone()), cap, scope, now)
+            .await
+    }
+
+    /// May `actor` delegate `cap` at `scope`? (Holds `grant:<cap>`, or is a local
+    /// operator.)
+    pub(crate) async fn actor_can_grant(
+        &self,
+        actor: &Actor,
+        cap: &Capability,
+        scope: &TokenScope,
+        now: u64,
+    ) -> Result<bool, StoreError> {
+        if let Actor::Local(account) = actor {
+            if self.operators.contains(account) {
+                return Ok(true);
+            }
         }
         let grant_cap = Capability::Grant(Box::new(cap.clone()));
-        self.account_has_cap(account, &grant_cap, scope, now).await
+        self.actor_has_cap(actor, &grant_cap, scope, now).await
+    }
+
+
+    /// Resolve a GRANT/REVOKE subject string to its stable identity: a device
+    /// key, a local account's **ULID**, or a foreign `account@network` (§10.4).
+    /// Returns the typed token `Subject` and the string the grant store keys by
+    /// (they always agree). `None` for an account name with no such account —
+    /// you can't grant to an identity that doesn't exist.
+    pub(crate) async fn resolve_subject(
+        &self,
+        s: &str,
+    ) -> Result<Option<(Subject, String)>, StoreError> {
+        if let Ok(key) = PublicKey::from_b64(s) {
+            return Ok(Some((Subject::Key(key), s.to_string())));
+        }
+        if s.contains('@') {
+            return Ok(Some((Subject::Foreign(s.to_string()), s.to_string())));
+        }
+        let Ok(account) = s.parse::<Account>() else {
+            return Ok(None);
+        };
+        match self.accounts.account_ulid(&account).await? {
+            Some(ulid_str) => match weft_proto::Ulid::from_string(&ulid_str) {
+                Ok(ulid) => Ok(Some((Subject::Account(ulid), ulid_str))),
+                Err(_) => Ok(None),
+            },
+            None => Ok(None),
+        }
     }
 
     /// Mint a network-key-signed token for a `*`/`#chan`-scoped grant

@@ -247,7 +247,9 @@ pub struct ReportRecord {
 pub struct ReportResolution {
     pub action: ResolveAction,
     pub note: Option<String>,
-    pub resolved_by: Account,
+    /// Who resolved it — a local name or foreign `account@network` (§10.4, a
+    /// federated moderator handling H's queue via homeserver authority).
+    pub resolved_by: String,
     pub at_ms: u64,
     /// Unix ms after which the retention holds may be released.
     pub hold_release_at: u64,

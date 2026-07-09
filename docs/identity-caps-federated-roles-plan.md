@@ -72,14 +72,20 @@ for names). Foreign subjects therefore carry `account@network`, never a ULID.
 
 ## 5. Token format change (signed CBOR)
 
-`Subject` becomes: `Key(pubkey) | Account(ulid-bytes) | Foreign(account@network) |
+`Subject` becomes: `Key(pubkey) | Account(ulid) | Foreign(account@network) |
 Unbound`. This is a change to the **deterministic-CBOR encode-before-sign**, so:
 
-- Bump the token version (`weft-cap/1` → `weft-cap/2`); v1 (name-subject) tokens
-  are refused after the migration window.
-- New subject tag(s): keep `0=Key`, `1=Account` (now 16 ULID bytes, not a name),
-  add `3=Foreign` (the `account@network` bytes); `2=Unbound` unchanged.
-- Round-trip + delegation-chain tests for every subject kind (weft-crypto).
+- Bump the token version (`VERSION 1 → 2`); v1 (name-subject) tokens are refused
+  outright — `from_wire` already rejects `version != VERSION`.
+- Subject tags: `0=Key`, `1=Account` (16 ULID bytes), `2=Unbound`, add
+  **`3=Foreign`** (account@network).
+- **`Account` is fully typed `Account(ulid::Ulid)`** (final, after a brief String
+  detour): the `ulid` crate is pure, so it's L0-legal, and it makes it impossible
+  to ever put a non-ULID in the token. Encoding is the raw 16 bytes; decode
+  length-checks. Choosing this pulled the core name→ULID resolution forward (P3),
+  since weft-core can no longer hand a name — the phases merged.
+- Round-trip + delegation-chain tests for every subject kind, and a
+  hand-crafted-v1-denied test (weft-crypto).
 
 ## 6. Roles for federation users
 
@@ -176,27 +182,84 @@ to the vouched account.
 
 ## 9. Phases (each shippable, each keeps the suite green)
 
-- **P1 — account ULID (store).** `AccountRecord.ulid`, `register` mints it,
-  `account_ulid(name)` accessor, migration 0016 (add col + backfill), mem+PG
-  contract. Names untouched.
-- **P2 — token subject (crypto).** `Subject` widens to `Account(ulid)` +
-  `Foreign(account@network)`; version bump; round-trip + chain tests.
-- **P3 — grant/role store keys by subject.** `GrantRecord`/role-membership key by
-  ULID (local) or `account@network` (foreign); migration rewrites existing name
-  subjects → ULIDs; mem+PG contract.
-- **P4 — core resolution + foreign grants/recognition.** Session caches its ULID
-  at auth; `account_has_cap`, GRANT/REVOKE, ROLE ASSIGN resolve local→ULID and
-  accept foreign `account@network`; foreign role holders shown with color/badge
-  (recognition). No enforcement path yet.
-- **P5 — federation sessions (enforced authority).** Bridge-multiplexing frames
-  (`FSESSION …`); a bridge-tunneled `ControlStream` per foreign user; F-vouched
-  AUTH → `run_session` with `account = alice@F`; full-authority enforcement via
-  H's grant store. The session carries **commands + responses only**; broadcast
-  events ride the existing namespace mirror (no dup, decision §10.3). Two-live-
-  weftd conformance (a foreign moderator mutes on H).
-- **P6 — client + spec.** Client shows foreign role holders + an "acting on H via
-  F" affordance; amend §2.3 (ULID), §6.5 (foreign subjects), §10.4 (token
-  subject), new §11.x (federation sessions + homeserver authority), Appendix A.
+- **P1 ✅ (2026-07-08) — account ULID (store).** `AccountRecord.ulid`, `register`
+  mints it (`weft_proto::Ulid`), `account_ulid(name)` accessor (race-safe lazy
+  backfill for pre-existing PG rows), migration 0016 (nullable UNIQUE col), mem+PG
+  shared contract (register→stable→unique→absent-for-unknown) — validated live on
+  both backends. Names + downstream untouched.
+- **P2 ✅ (2026-07-08) — token subject (crypto).** `Subject` widens with
+  **`Foreign(account@network)`** (tag 3) and **`Account(ulid::Ulid)`** (fully
+  typed, 16-byte encoding); **`VERSION 1 → 2`** denies every v1 token. Tests:
+  ULID/foreign round-trip + verify, foreign-is-a-leaf-only, hand-crafted-v1-
+  denied. 41 crypto tests.
+- **P3 ✅ (2026-07-08) — grants key by ULID, end-to-end (merged P3 + the grant
+  half of P4).** `ServerCtx::resolve_subject` maps a subject string → device key
+  / local **ULID** / foreign `account@network`; `account_has_cap`, GRANT, REVOKE,
+  ROLE UNASSIGN, and invite-redeem all key the grant store by it (never the
+  handle); `Accounts::account_ulid` passthrough; `subject_from_str` removed.
+  **Behavior change:** GRANT/DELEGATE to a nonexistent account → `NO-SUCH-TARGET`
+  (no identity to key on). Migration 0017 (ULID-backfill + grant-subject rewrite,
+  role *membership* left handle-keyed) — validated live on PG. Foreign-subject
+  GRANT works (plumbing for federated roles). 95 core tests; mem+PG green.
+- **P4 ✅ (2026-07-09) — foreign role membership.** Role subject widened
+  `Account` → subject string across **proto** (`RoleAssign`/`RoleUnassign`/
+  `RolesOf` + `RoleMember` event), **store** (`assign_role`/`unassign_role`/
+  `roles_of`/`role_members`, mem+PG), and **core** (the three handlers +
+  `on_role_unassign` revokes by `resolve_subject`). `ROLE ASSIGN <account@network>`
+  now records membership + grants the bundle to the foreign subject; `ROLES-OF`
+  reflects it (recognition). Client already assigns via a free-text subject
+  (placeholder now hints `account@network`). Tests: core foreign-assign +
+  ROLES-OF, store contract with a federated holder (live PG). 96 core tests.
+  **Deferred to P6:** coloring/badging a *foreign message author* by their role
+  in the timeline — needs a foreign-role fetch/cache, best built with the
+  federation client work.
+- **P5 — federation sessions (enforced authority).** Steps 1–4 ✅ (2026-07-09):
+  - **Frames**: `FSESSION <fsid> OPEN|CMD|REPLY|CLOSE` — carries the request/
+    response pair only (`REPLY` renamed from `EVENT` to make it honest: broadcast
+    events ride the mirror, §10.3, so the session never subscribes).
+  - **`Actor`** (`Local(Account) | Foreign(account@network)`) + `actor_has_cap`/
+    `actor_can_grant`/`actor_store_key`; `account_*` are thin local wrappers, so
+    the 41 existing handlers are untouched. Operator/owner authority is local-only.
+  - **Tunnel**: `TunnelStream` (impl `ControlStream`, mpsc-backed) → `run_federated_session`
+    enters `State::Federated { user }`; the bridge demuxes `FSESSION` (`OPEN`
+    spawns, `CMD` feeds, `CLOSE` ends) and drains a `fed_out` queue so all socket
+    writes stay serialized through the one run loop (no race, IP non-exposure —
+    she never connects to H).
+  - **Moderation actor-aware**: `on_moderate`/`on_kick` take `Actor`; `Event::Moderated.by`
+    widened to a subject string (attributes a foreign moderator). `on_federated`
+    dispatch routes mute/ban/kick/ping; the rest answer `UNSUPPORTED`.
+  - **Conformance** (weft-core): a federated user granted `mute` on H wields it
+    over the bridge (`FSESSION OPEN`+`CMD` → `MODERATED` reply, `by=alice@peer`);
+    without the grant → `CAP-REQUIRED`.
+  - **Step 5 ✅ (2026-07-09) — full authority, nothing deferred.** Design
+    refinement: *content* (posting/edit/delete/react) rides the **mirror**
+    (F-origin, one-hop forward — never the session, or origin authority breaks);
+    the federation session carries **control/admin** actions only. Every admin
+    verb now takes `Actor` and is routed in `on_federated`: moderation
+    (mute/ban/kick), **GRANT/REVOKE**, **channel admin** (create/policy/meta/
+    delete), **invites** (mint/revoke), **role assign/unassign**, **ns admin**
+    (meta/visibility/delete/delegate — the shared `ns_admin_gate` is now
+    actor-aware), and **reports** (list/resolve). Two attribution fields widened
+    to a subject string so a foreign admin is named honestly: `Moderated.by`
+    (P5 step 4) and **`ReportResolution.resolved_by`** (store type + PG, live-
+    validated). `account_can_grant` removed (folded into `actor_can_grant`).
+    Conformance (weft-core): federated **mute**, **grant-delegation**, **channel
+    create**, **ns-meta edit** — each over the real bridge, enforced as
+    `account@network`. **P5 done.**
+- **P6 ✅ (2026-07-09) — client + spec.**
+  - **Spec** (normative, `weft-protocol-spec.md`): §10.1 account ULID; §10.4
+    token subject v2 (`pubkey | account-ULID | account@network | UNBOUND`, v1
+    denied) + foreign role holders; **new §11.11** federation sessions &
+    homeserver authority (FSESSION, content-via-mirror/control-via-session, IP
+    non-exposure, no device-signing rationale); §6.6 `FSESSION` command row;
+    Appendix A amendment entry.
+  - **Client**: the MODERATED system line marks a federated moderator explicitly
+    (`… by alice@peer.example (via federation)`) — the "acting on H via F"
+    affordance; and a federated author's roles held on this network render as
+    role-color chips in the timeline (lazy `ROLES-OF` fetch keyed
+    `account@network`, deduped) — foreign role-holder recognition.
+
+**Plan complete — P1–P6 all shipped.**
 
 ## 10. Decisions (resolved)
 

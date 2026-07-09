@@ -42,15 +42,28 @@ weftd/
 │   ├── weft-core/                  # LAYER 2 — domain logic (deps: proto, crypto, store)
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── session.rs          # authenticated connection state machine
-│   │       ├── channel.rs          # channel actor: members, policy, event fan-out
-│   │       ├── router.rs           # verb → handler dispatch, ERR mapping
-│   │       ├── history.rs          # HISTORY pagination over EventStore, thread filter
-│   │       ├── message.rs          # MSG/EDIT/DELETE/REACT materialization rules
-│   │       ├── membership.rs       # JOIN/PART, capability checks at the door
-│   │       ├── grants.rs           # GRANT/REVOKE, token minting + refresh cycle
-│   │       ├── bridge.rs           # peering state machine, remote-event ingestion
-│   │       └── registry.rs         # ChannelId → actor handle map (DashMap)
+│   │       ├── context.rs          # ServerCtx: shared state + ports; Actor + cap enforcement
+│   │       ├── session.rs          # session engine: FSM (State), run loop, verb dispatch
+│   │       │                       #   (on_ready/on_negotiating/…), response helpers, runners
+│   │       ├── session/            # handler groups (one `impl Session` per protocol surface;
+│   │       │   │                   #   methods `pub(super)`, split out of session.rs)
+│   │       │   ├── auth.rs         #   REGISTER + authed WELCOME (§6.1)
+│   │       │   ├── relay.rs        #   JOIN/PART/MSG/EDIT/DELETE/REACT/HISTORY/PIN/MARK (§9)
+│   │       │   ├── caps.rs         #   CAPS/GRANT/REVOKE — token mint + grant store (§10.4)
+│   │       │   ├── channels.rs     #   CHANNEL CREATE/POLICY/META/DELETE/RENAME (§6.3)
+│   │       │   ├── namespaces.rs   #   NS CREATE/META/VISIBILITY/DELETE/RECOVERY/JOIN (§6.2/§2.4)
+│   │       │   ├── invites.rs      #   INVITE MINT/REVOKE/REDEEM (§6.5)
+│   │       │   ├── roles.rs        #   ROLE CREATE/DELETE/ASSIGN/UNASSIGN (§6.5)
+│   │       │   ├── moderation.rs   #   MUTE/BAN/KICK + REPORT/REPORTS (§6.7)
+│   │       │   └── federation.rs   #   bridge auth/sessions, ingest/forward, NETBLOCK,
+│   │       │                       #     FEDERATE, FSESSION tunnel + federated dispatch (§11)
+│   │       ├── channel.rs          # channel actor: members, policy, ULID order, event fan-out
+│   │       ├── registry.rs         # ChannelName → actor handle map (lazy spawn)
+│   │       ├── directory.rs        # account directory actor: DMs, presence, MARK sync
+│   │       ├── accounts.rs         # account registry (password hashing, ULID, device enroll)
+│   │       ├── bridge.rs           # §11 manifest build/verify + one-hop forwarding helpers
+│   │       ├── maintenance.rs      # retention purge + §12.1 compaction scheduler
+│   │       └── stream.rs           # ControlStream port (transport-facing; weftd/IRC adapt it)
 │   │
 │   ├── weft-transport/             # LAYER 2 — transports (deps: proto)
 │   │   └── src/
@@ -73,6 +86,19 @@ weftd/
     ├── conformance/                # black-box protocol tests over real QUIC
     └── fixtures/                   # golden files for line codec round-trips
 ```
+
+> **Reading weft-core.** Start in `session.rs`: `Session<S>` (fields + `State`),
+> the `run` loop's `select!`, and `on_request` — the verb → handler dispatch.
+> Each match arm calls a handler that lives in a `session/*.rs` module grouped by
+> protocol surface (find `MUTE` in `moderation.rs`, `GRANT` in `caps.rs`, a
+> bridge verb in `federation.rs`). The submodules are descendants of `session`,
+> so they read `Session`'s private fields and the response helpers
+> (`send_event`/`send_err`/`cap_required`) that stay in `session.rs`; their
+> handlers are `pub(super)` so the dispatch can reach them. Enforcement
+> (`actor_has_cap`, invariant 4) and the `Actor` type live in `context.rs`.
+>
+> *(The layout above is current for weft-core; other subtrees in this v0.1 sketch
+> may still read aspirationally, e.g. `verb.rs` is `command.rs`.)*
 
 ## 2. Dependency Graph
 

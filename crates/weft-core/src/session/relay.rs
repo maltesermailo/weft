@@ -1,0 +1,793 @@
+//! §6.3 / §9 relay handlers: JOIN/PART/MSG/EDIT/DELETE/REACT/HISTORY/
+//! MEMBERS/PIN/PINS/MARK/TYPING.
+
+use super::*;
+
+impl<S: ControlStream> Session<S> {
+    pub(super) async fn on_join(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        invite: Option<String>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if invite.is_some() {
+            // JOIN with an invite-ref is INVITE REDEEM territory; redeem
+            // directly (§6.5) rather than here.
+            return self
+                .unsupported(label, "use INVITE REDEEM to redeem an invite")
+                .await;
+        }
+        match self.join_one(&channel, &account, label.clone()).await? {
+            JoinResult::Joined => Ok(Flow::Continue),
+            JoinResult::Banned => {
+                self.send_err(label, ErrCode::Banned, None, "you are banned")
+                    .await?;
+                Ok(Flow::Continue)
+            }
+            // §2.2 anti-enumeration: unknown and hidden collapse to one code.
+            JoinResult::Missing | JoinResult::Hidden => self.no_such_target(label).await,
+            JoinResult::Unavailable => {
+                self.send_err(label, ErrCode::Internal, None, "channel unavailable")
+                    .await?;
+                Ok(Flow::Continue)
+            }
+        }
+    }
+
+    /// Join one channel: registry lookup, view-gate + ban checks, subscribe,
+    /// and emit the §6.3 `MEMBER` + `POLICY` response (with `label`). Shared by
+    /// `JOIN` and `NS JOIN`; the caller maps the non-`Joined` results to errors.
+    pub(super) async fn join_one(
+        &mut self,
+        channel: &ChannelName,
+        account: &Account,
+        label: Option<String>,
+    ) -> io::Result<JoinResult> {
+        let Some(handle) = self.ctx.registry.get(channel) else {
+            return Ok(JoinResult::Missing);
+        };
+        if self.view_gated_denied(channel, account).await {
+            return Ok(JoinResult::Hidden);
+        }
+        if self
+            .ctx
+            .moderation
+            .is_moderated(account, &covering_scopes(channel), ModKind::Ban)
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(JoinResult::Banned);
+        }
+        let Some(ack) = handle.join(self.id, account.clone()).await else {
+            return Ok(JoinResult::Unavailable);
+        };
+        // Re-JOIN replaces the subscription; pending echo labels die with the
+        // old receiver (their broadcasts went there), so drop them too.
+        if let Some(old) = self.joined.remove(channel) {
+            old.forwarder.abort();
+        }
+        let forwarder = spawn_forwarder(channel.clone(), ack.events, self.events_tx.clone());
+        self.joined.insert(
+            channel.clone(),
+            Joined {
+                handle,
+                policy: ack.policy,
+                forwarder,
+                pending: VecDeque::new(),
+            },
+        );
+        debug!(%channel, members = ack.count, "joined");
+        let me = UserRef::new(account.clone(), self.ctx.info.network.clone());
+        self.send_event(
+            label.clone(),
+            Event::Member {
+                channel: channel.clone(),
+                user: me,
+                action: MemberAction::Join,
+                display: None,
+                count: Some(ack.count),
+            },
+        )
+        .await?;
+        self.send_event(
+            label,
+            Event::Policy {
+                channel: channel.clone(),
+                policy: ack.policy,
+            },
+        )
+        .await?;
+        // §6.3 persist membership for auto-rejoin on the next auth.
+        if let Err(e) = self.ctx.memberships.set_membership(account, channel).await {
+            error!("persist membership failed: {e}");
+        }
+        Ok(JoinResult::Joined)
+    }
+
+    pub(super) async fn on_part(&mut self, label: Option<String>, channel: ChannelName) -> io::Result<Flow> {
+        let State::Ready { account } = self.state.clone() else {
+            unreachable!("on_part only dispatched in READY");
+        };
+        match self.joined.remove(&channel) {
+            None => self.no_such_target(label).await,
+            Some(joined) => {
+                joined.forwarder.abort();
+                joined.handle.part(self.id).await;
+                // §6.3 drop the persistent membership — no auto-rejoin.
+                if let Err(e) = self
+                    .ctx
+                    .memberships
+                    .clear_membership(&account, &channel)
+                    .await
+                {
+                    error!("clear membership failed: {e}");
+                }
+                // Direct ack mirrors the JOIN response shape; the broadcast
+                // copy goes to remaining members only.
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.send_event(
+                    label,
+                    Event::Member {
+                        channel,
+                        user: me,
+                        action: MemberAction::Part,
+                        display: None,
+                        count: None,
+                    },
+                )
+                .await?;
+                Ok(Flow::Continue)
+            }
+        }
+    }
+
+    pub(super) async fn on_typing(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        state: weft_proto::TypingState,
+    ) -> io::Result<Flow> {
+        match self.joined.get(&channel).map(|j| j.handle.clone()) {
+            None => self.not_member(label, &channel).await,
+            Some(handle) => {
+                // Relay only — never stored, no direct response (§6.3).
+                handle.typing(self.id, state).await;
+                Ok(Flow::Continue)
+            }
+        }
+    }
+
+    pub(super) async fn on_msg(
+        &mut self,
+        label: Option<String>,
+        target: Target,
+        body: Option<String>,
+        meta: MsgMeta,
+    ) -> io::Result<Flow> {
+        if !meta.attachments.is_empty() {
+            return self.unsupported(label, "media lands in M6").await;
+        }
+        // §6.4: empty body legal iff attachments — and M3 has none.
+        let body = body.unwrap_or_default();
+        if body.is_empty() {
+            self.send_err(
+                label,
+                ErrCode::Policy,
+                None,
+                "empty body requires attachments",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        // §9.2 dedup: a retried label replays the stored echo (the ack),
+        // and a label still awaiting its echo is dropped — never republished.
+        if let Some(l) = &label {
+            let now = Instant::now();
+            self.dedup
+                .retain(|_, entry| now.duration_since(entry.at) < DEDUP_WINDOW);
+            if let Some(hit) = self.dedup.get(l) {
+                let line = hit.line.clone();
+                self.stream.send_line(&line).await?;
+                return Ok(Flow::Continue);
+            }
+            let in_flight = self
+                .joined
+                .values()
+                .any(|j| j.pending.iter().any(|p| p.as_deref() == Some(l)))
+                || self
+                    .pending_direct
+                    .iter()
+                    .any(|p| p.as_deref() == Some(l.as_str()));
+            if in_flight {
+                return Ok(Flow::Continue);
+            }
+        }
+        match target {
+            Target::Channel(channel) => {
+                if !self.joined.contains_key(&channel) {
+                    return self.not_member(label, &channel).await;
+                }
+                // §6.7 posting gate: not banned, not muted, and (open channel
+                // or holds `send`).
+                let State::Ready { account } = self.state.clone() else {
+                    unreachable!("on_msg only dispatched in READY");
+                };
+                match self.can_post(&channel, &account).await {
+                    Ok(None) => {}
+                    Ok(Some((code, context))) => {
+                        self.send_err(label, code, Some(context), "cannot post to this channel")
+                            .await?;
+                        return Ok(Flow::Continue);
+                    }
+                    Err(e) => return self.internal(label, &e).await,
+                }
+                let joined = self
+                    .joined
+                    .get_mut(&channel)
+                    .expect("membership checked above");
+                joined.pending.push_back(label);
+                joined.handle.publish(self.id, body, meta).await;
+            }
+            // §9.5 same-network DM, routed through the account directory.
+            Target::User(to) => {
+                let State::Ready { account } = self.state.clone() else {
+                    unreachable!("on_msg only dispatched in READY");
+                };
+                if !self
+                    .ctx
+                    .directory
+                    .dm(self.id, account, to, body, meta)
+                    .await
+                {
+                    // Unknown account — one code for everything hidden (§2.2).
+                    return self.no_such_target(label).await;
+                }
+                self.pending_direct.push_back(label);
+            }
+        }
+        // The ack is the echoed MESSAGE, sent when the broadcast returns.
+        Ok(Flow::Continue)
+    }
+
+    // ---- message mutations (§6.4 EDIT / DELETE / REACT) ----
+
+    /// Locate the scope a msgid lives in and run the checks shared by
+    /// EDIT/DELETE/REACT: origin authority, existence (tombstoned, foreign,
+    /// or other people's DM msgids all answer NO-SUCH-TARGET, §2.2/§8),
+    /// membership/participation, and — for edit/delete — authorship
+    /// (`edit-own`/`delete-own`; `delete-any` arrives with capability
+    /// tokens in M4).
+    ///
+    /// `Ok(None)` = refused, error already sent.
+    pub(super) async fn resolve_message(
+        &mut self,
+        label: Option<String>,
+        msgid: &MsgId,
+        account: &Account,
+        cap: &'static str,
+        must_be_author: bool,
+    ) -> io::Result<Option<MessageRoute>> {
+        // §11.4: EDIT/DELETE are honored only at the msgid's origin.
+        if msgid.origin() != &self.ctx.info.network {
+            self.send_err(
+                label,
+                ErrCode::Forbidden,
+                Some("origin"),
+                "not this message's origin",
+            )
+            .await?;
+            return Ok(None);
+        }
+        let root = match self.ctx.events.find_root(msgid.ulid()).await {
+            Err(e) => {
+                self.internal(label, &e).await?;
+                return Ok(None);
+            }
+            Ok(None) => {
+                self.no_such_target(label).await?;
+                return Ok(None);
+            }
+            Ok(Some(root)) => root,
+        };
+        match self.ctx.events.is_deleted(&root.scope, msgid.ulid()).await {
+            Err(e) => {
+                self.internal(label, &e).await?;
+                return Ok(None);
+            }
+            Ok(true) => {
+                // A tombstoned msgid is indistinguishable from an expired
+                // one — same code (§2.2).
+                self.no_such_target(label).await?;
+                return Ok(None);
+            }
+            Ok(false) => {}
+        }
+        match root.scope.clone() {
+            Scope::Channel(channel) => {
+                let Some(joined) = self.joined.get(&channel) else {
+                    self.not_member_cap(label, &channel, cap).await?;
+                    return Ok(None);
+                };
+                if must_be_author && root.sender.account != *account {
+                    self.send_err(label, ErrCode::CapRequired, Some(cap), "not your message")
+                        .await?;
+                    return Ok(None);
+                }
+                Ok(Some(MessageRoute::Channel {
+                    handle: joined.handle.clone(),
+                    channel,
+                    root: root.msgid,
+                }))
+            }
+            Scope::Dm(a, b) => {
+                // Not your conversation → indistinguishable from
+                // nonexistent (§2.2) — never CAP-REQUIRED here.
+                if *account != a && *account != b {
+                    self.no_such_target(label).await?;
+                    return Ok(None);
+                }
+                if must_be_author && root.sender.account != *account {
+                    self.send_err(label, ErrCode::CapRequired, Some(cap), "not your message")
+                        .await?;
+                    return Ok(None);
+                }
+                let peer = if *account == a { b } else { a };
+                Ok(Some(MessageRoute::Dm {
+                    peer,
+                    root: root.msgid,
+                }))
+            }
+        }
+    }
+
+    pub(super) async fn on_edit(
+        &mut self,
+        label: Option<String>,
+        msgid: MsgId,
+        body: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if body.is_empty() {
+            self.send_err(
+                label,
+                ErrCode::Policy,
+                None,
+                "edited body must not be empty",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        match self
+            .resolve_message(label.clone(), &msgid, &account, "edit-own", true)
+            .await?
+        {
+            None => {}
+            Some(MessageRoute::Channel {
+                handle,
+                channel,
+                root,
+            }) => {
+                self.push_pending(&channel, label);
+                handle.edit(self.id, root, body).await;
+            }
+            Some(MessageRoute::Dm { peer, root }) => {
+                self.pending_direct.push_back(label);
+                self.ctx
+                    .directory
+                    .edit(self.id, account, peer, root, body)
+                    .await;
+            }
+        }
+        Ok(Flow::Continue) // ack = the echoed EDITED broadcast
+    }
+
+    pub(super) async fn on_delete(
+        &mut self,
+        label: Option<String>,
+        msgid: MsgId,
+        account: Account,
+    ) -> io::Result<Flow> {
+        match self
+            .resolve_message(label.clone(), &msgid, &account, "delete-own", true)
+            .await?
+        {
+            None => {}
+            Some(MessageRoute::Channel {
+                handle,
+                channel,
+                root,
+            }) => {
+                self.push_pending(&channel, label);
+                handle.delete(self.id, root).await;
+            }
+            Some(MessageRoute::Dm { peer, root }) => {
+                self.pending_direct.push_back(label);
+                self.ctx
+                    .directory
+                    .delete(self.id, account, peer, root)
+                    .await;
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    pub(super) async fn on_react(
+        &mut self,
+        label: Option<String>,
+        msgid: MsgId,
+        emoji: String,
+        add: bool,
+        account: Account,
+    ) -> io::Result<Flow> {
+        match self
+            .resolve_message(label.clone(), &msgid, &account, "react", false)
+            .await?
+        {
+            None => {}
+            Some(MessageRoute::Channel {
+                handle,
+                channel,
+                root,
+            }) => {
+                self.push_pending(&channel, label);
+                handle.react(self.id, root, emoji, add).await;
+            }
+            Some(MessageRoute::Dm { peer, root }) => {
+                self.pending_direct.push_back(label);
+                self.ctx
+                    .directory
+                    .react(self.id, account, peer, root, emoji, add)
+                    .await;
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn push_pending(&mut self, channel: &ChannelName, label: Option<String>) {
+        if let Some(joined) = self.joined.get_mut(channel) {
+            joined.pending.push_back(label);
+        }
+    }
+
+    // ---- HISTORY (§6.4, §12.1) ----
+
+    pub(super) async fn on_history(
+        &mut self,
+        label: Option<String>,
+        target: Target,
+        before: Option<MsgId>,
+        after: Option<MsgId>,
+        limit: Option<u32>,
+        thread: Option<MsgId>,
+    ) -> io::Result<Flow> {
+        if thread.is_some() {
+            return self.unsupported(label, "thread filter lands in M6").await;
+        }
+        // §6.4: channel history needs membership; DM history is
+        // participant-by-construction (the scope key contains the caller).
+        let (scope, policy, target) = match target {
+            Target::Channel(channel) => {
+                let Some(joined) = self.joined.get(&channel) else {
+                    return self.not_member_cap(label, &channel, "view").await;
+                };
+                (
+                    Scope::Channel(channel.clone()),
+                    joined.policy,
+                    Target::Channel(channel),
+                )
+            }
+            Target::User(peer) => {
+                let State::Ready { account } = self.state.clone() else {
+                    unreachable!("on_history only dispatched in READY");
+                };
+                (
+                    Scope::dm(account, peer.clone()),
+                    self.ctx.dm_policy,
+                    Target::User(peer),
+                )
+            }
+        };
+        let limit = limit.unwrap_or(100).clamp(1, weft_proto::MAX_HISTORY_LIMIT) as usize;
+
+        let (items, truncated) = if policy == weft_proto::RetentionPolicy::Ephemeral {
+            // §5.2 relay-only: nothing stored, and saying so is mandatory.
+            (Vec::new(), true)
+        } else {
+            let page = weft_store::Page {
+                before: before.as_ref().map(|m| m.ulid()),
+                after: after.as_ref().map(|m| m.ulid()),
+                limit,
+            };
+            let roots = match self.ctx.events.roots(&scope, page).await {
+                Ok(roots) => roots,
+                Err(e) => return self.internal(label, &e).await,
+            };
+            let root_ulids: Vec<_> = roots.iter().map(|r| r.msgid.ulid()).collect();
+            let children = match self.ctx.events.children(&scope, &root_ulids).await {
+                Ok(children) => children,
+                Err(e) => return self.internal(label, &e).await,
+            };
+            let watermark = match self.ctx.events.purged_before(&scope).await {
+                Ok(watermark) => watermark,
+                Err(e) => return self.internal(label, &e).await,
+            };
+            let items = weft_store::materialize(roots, children);
+            // §6.4: `truncated` marks retention gaps — set when this page
+            // ran out of data (not merely full) while the window's older
+            // edge reaches into the purged region.
+            let window_floor_ms = after.as_ref().map(|m| m.timestamp_ms()).unwrap_or(0);
+            let truncated = items.len() < limit && watermark.is_some_and(|w| window_floor_ms < w);
+            (items, truncated)
+        };
+
+        self.emit_batch(label, &target, items, truncated).await?;
+        Ok(Flow::Continue)
+    }
+
+    /// Emit a `BATCH START` … events … `BATCH END` page (§7, §12.1). The wire
+    /// form is always the compacted materialization; every line echoes the
+    /// request label (§3.5). Shared by HISTORY and federated backfill (§11.7).
+    pub(super) async fn emit_batch(
+        &mut self,
+        label: Option<String>,
+        target: &Target,
+        items: Vec<weft_store::HistoryItem>,
+        truncated: bool,
+    ) -> io::Result<()> {
+        self.batches += 1;
+        let id = format!("b{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for item in items {
+            match item {
+                weft_store::HistoryItem::Message {
+                    msgid,
+                    sender,
+                    body,
+                    meta,
+                    edited,
+                    reactions,
+                } => {
+                    self.send_event(
+                        label.clone(),
+                        Event::Message(Box::new(weft_proto::MessageEvent {
+                            target: target.clone(),
+                            sender,
+                            msgid: msgid.clone(),
+                            body,
+                            meta,
+                            edited: edited.map(|(count, _)| count),
+                            edited_at: edited.map(|(_, at)| at),
+                        })),
+                    )
+                    .await?;
+                    for summary in reactions {
+                        self.send_event(
+                            label.clone(),
+                            Event::Reactions {
+                                target: target.clone(),
+                                msgid: msgid.clone(),
+                                emoji: summary.emoji,
+                                count: summary.count,
+                                by: summary.actors,
+                            },
+                        )
+                        .await?;
+                    }
+                }
+                weft_store::HistoryItem::Tombstone { msgid, by } => {
+                    self.send_event(
+                        label.clone(),
+                        Event::Deleted {
+                            target: target.clone(),
+                            msgid,
+                            by: Some(by),
+                        },
+                    )
+                    .await?;
+                }
+            }
+        }
+        debug!(target = %target, truncated, "batch served");
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated,
+                compacted: true,
+            },
+        )
+        .await
+    }
+
+    /// §6.3 MEMBERS: a roster snapshot for a member. Framed as a `BATCH` of
+    /// `MEMBER … join` (reusing the join event — the client folds each into its
+    /// roster). Membership-gated; a hidden channel stays `NO-SUCH-TARGET`.
+    pub(super) async fn on_members(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+    ) -> io::Result<Flow> {
+        let Some(joined) = self.joined.get(&channel) else {
+            return self.not_member_cap(label, &channel, "view").await;
+        };
+        let roster = joined.handle.roster().await;
+        let count = roster.len() as u64;
+        self.batches += 1;
+        let id = format!("m{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for account in roster {
+            // §6.1 known presence rides along so the client's roster dots are
+            // correct (not just members who change status while we watch).
+            let status = {
+                let map = self.ctx.presence.lock().expect("presence lock");
+                map.get(&account).copied()
+            };
+            let user = UserRef::new(account, self.ctx.info.network.clone());
+            self.send_event(
+                None,
+                Event::Member {
+                    channel: channel.clone(),
+                    user: user.clone(),
+                    action: MemberAction::Join,
+                    display: None,
+                    count: Some(count),
+                },
+            )
+            .await?;
+            if let Some(status) = status {
+                self.send_event(None, Event::Presence { user, status })
+                    .await?;
+            }
+        }
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+                compacted: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    // ---- §6.4 pins ----
+
+    /// `PIN`/`UNPIN <msgid>`: resolve the msgid's channel, cap-check `pin`, set
+    /// the pin, and broadcast `PINNED`/`UNPINNED` to the channel.
+    pub(super) async fn on_pin(
+        &mut self,
+        label: Option<String>,
+        msgid: MsgId,
+        account: Account,
+        pinned: bool,
+    ) -> io::Result<Flow> {
+        // The channel is the msgid's scope (PIN carries no channel arg).
+        let channel = match self.ctx.events.find_root(msgid.ulid()).await {
+            Ok(Some(record)) => match record.scope {
+                Scope::Channel(channel) => channel,
+                _ => return self.no_such_target(label).await, // DMs aren't pinnable
+            },
+            Ok(None) => return self.no_such_target(label).await,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let scope = TokenScope::Channel(channel.to_string());
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::Pin, &scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "pin").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        if let Err(e) = self.ctx.pins.set_pin(&channel, &msgid, pinned).await {
+            return self.internal(label, &e).await;
+        }
+        let event = if pinned {
+            Event::Pinned {
+                channel: channel.clone(),
+                msgid,
+                by: Some(account),
+            }
+        } else {
+            Event::Unpinned {
+                channel: channel.clone(),
+                msgid,
+            }
+        };
+        // Broadcast to the channel so every member's pins view updates. The
+        // acting session (if joined) receives it too — that's its confirmation.
+        if let Some(handle) = self.ctx.registry.get(&channel) {
+            handle.announce(event).await;
+        } else {
+            self.send_event(label, event).await?;
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// `PINS <#chan>`: the pinned messages as a `BATCH` of `MESSAGE`
+    /// (membership-gated, like MEMBERS). Purged pins are skipped.
+    pub(super) async fn on_pins(&mut self, label: Option<String>, channel: ChannelName) -> io::Result<Flow> {
+        if !self.joined.contains_key(&channel) {
+            return self.not_member_cap(label, &channel, "view").await;
+        }
+        let pins = match self.ctx.pins.pins(&channel).await {
+            Ok(pins) => pins,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        self.batches += 1;
+        let id = format!("p{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for msgid in pins {
+            if let Ok(Some(record)) = self.ctx.events.find_root(msgid.ulid()).await {
+                if let EventKind::Message { body, meta } = record.kind {
+                    self.send_event(
+                        None,
+                        Event::Message(Box::new(weft_proto::MessageEvent {
+                            target: Target::Channel(channel.clone()),
+                            sender: record.sender,
+                            msgid: record.msgid,
+                            body,
+                            meta,
+                            edited: None,
+                            edited_at: None,
+                        })),
+                    )
+                    .await?;
+                }
+            }
+        }
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+                compacted: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// §10.4 `CAPS <account> <scope>`: the account's effective caps at the
+    /// scope (public — caps aren't secret). Powers client capability badges.
+    /// §6.3 MARK: persist the read marker, echo MARKED (the direct
+    /// response), and sync the account's other sessions via the directory.
+    pub(super) async fn on_mark(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        msgid: MsgId,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if !self.joined.contains_key(&channel) {
+            return self.not_member_cap(label, &channel, "view").await;
+        }
+        if let Err(e) = self
+            .ctx
+            .accounts
+            .set_mark(&account, channel.as_str(), &msgid)
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        self.send_event(
+            label,
+            Event::Marked {
+                channel: channel.clone(),
+                msgid: msgid.clone(),
+            },
+        )
+        .await?;
+        self.ctx
+            .directory
+            .mark_sync(self.id, account, channel, msgid)
+            .await;
+        Ok(Flow::Continue)
+    }
+}

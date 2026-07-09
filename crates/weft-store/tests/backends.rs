@@ -262,6 +262,31 @@ where
     // list_accounts (admin surface) includes registered accounts, sorted.
     assert!(store.list_accounts().await.unwrap().contains(&ada));
 
+    // Account ULID (§10.4): minted at register, 26-char canonical, stable across
+    // reads, unique per account, and absent for an unknown account.
+    let ada_ulid = store
+        .account_ulid(&ada)
+        .await
+        .unwrap()
+        .expect("ada has a ULID");
+    assert_eq!(ada_ulid.len(), 26, "canonical ULID is 26 chars");
+    assert_eq!(
+        store.account_ulid(&ada).await.unwrap().as_deref(),
+        Some(ada_ulid.as_str()),
+        "ULID is stable across reads"
+    );
+    assert!(
+        store.account_ulid(&bob).await.unwrap().is_none(),
+        "unknown account has no ULID"
+    );
+    let cara: Account = format!("cara-{tag}").parse().unwrap();
+    assert!(store.register(&cara, "phc-cara").await.unwrap());
+    assert_ne!(
+        store.account_ulid(&cara).await.unwrap().unwrap(),
+        ada_ulid,
+        "distinct accounts get distinct ULIDs"
+    );
+
     let device = [7u8; 32];
     assert!(!store.device_enrolled(&ada, &device).await.unwrap());
     assert!(store.enroll_device(&ada, device).await.unwrap());
@@ -775,7 +800,7 @@ where
     let resolution = ReportResolution {
         action: ResolveAction::UserActioned,
         note: Some("banned".into()),
-        resolved_by: bob.clone(),
+        resolved_by: bob.to_string(),
         at_ms: 700_000,
         hold_release_at: 700_000 + 7 * 24 * 3_600 * 1_000,
     };
@@ -790,7 +815,7 @@ where
             ReportResolution {
                 action: ResolveAction::Dismissed,
                 note: None,
-                resolved_by: bob.clone(),
+                resolved_by: bob.to_string(),
                 at_ms: 700_001,
                 hold_release_at: 700_001,
             }
@@ -1014,35 +1039,29 @@ where
     assert_eq!(roles.len(), 1);
     assert_eq!(roles[0].name, "Moderator");
 
-    // ---- §6.5 explicit role membership ----
-    let racct: Account = format!("racct-{tag}").parse().unwrap();
+    // ---- §6.5 explicit role membership (local name OR foreign account@network) ----
+    let racct = format!("racct-{tag}");
+    let foreign = format!("alice@peer-{tag}.example");
     assert!(store.roles_of(&rscope, &racct).await.unwrap().is_empty());
-    store
-        .assign_role(&rscope, "Moderator", &racct)
-        .await
-        .unwrap();
-    store
-        .assign_role(&rscope, "Moderator", &racct)
-        .await
-        .unwrap(); // idempotent
+    store.assign_role(&rscope, "Moderator", &racct).await.unwrap();
+    store.assign_role(&rscope, "Moderator", &racct).await.unwrap(); // idempotent
+    store.assign_role(&rscope, "Moderator", &foreign).await.unwrap(); // a federated holder
     assert_eq!(
         store.roles_of(&rscope, &racct).await.unwrap(),
         vec!["Moderator".to_string()]
     );
     assert_eq!(
-        store.role_members(&rscope, "Moderator").await.unwrap(),
-        vec![racct.clone()]
+        store.roles_of(&rscope, &foreign).await.unwrap(),
+        vec!["Moderator".to_string()]
     );
-    store
-        .unassign_role(&rscope, "Moderator", &racct)
-        .await
-        .unwrap();
+    let mut members = store.role_members(&rscope, "Moderator").await.unwrap();
+    members.sort();
+    assert_eq!(members, vec![foreign.clone(), racct.clone()]); // alice@… < racct-…
+    store.unassign_role(&rscope, "Moderator", &racct).await.unwrap();
+    store.unassign_role(&rscope, "Moderator", &foreign).await.unwrap();
     assert!(store.roles_of(&rscope, &racct).await.unwrap().is_empty());
     // Deleting a role drops its assignments.
-    store
-        .assign_role(&rscope, "Moderator", &racct)
-        .await
-        .unwrap();
+    store.assign_role(&rscope, "Moderator", &racct).await.unwrap();
     store.delete_role(&rscope, "Moderator").await.unwrap();
     assert!(store.roles_of(&rscope, &racct).await.unwrap().is_empty());
 

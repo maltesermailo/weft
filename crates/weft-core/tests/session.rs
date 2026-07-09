@@ -1319,7 +1319,9 @@ async fn any_user_can_create_a_namespace_and_owns_it() {
         "owner should create channels in her ns, got {reply:?}"
     );
 
-    // ...and delegate ns caps to someone else.
+    // ...and delegate ns caps to someone else (who must exist — caps key by the
+    // target's ULID, §10.4).
+    let _bob = ready(&ctx, "bob").await;
     ada.send("@label=d1 NS DELEGATE gaming bob ban,kick");
     assert!(matches!(ada.recv().await.event, Event::Token { .. }));
 
@@ -1327,6 +1329,31 @@ async fn any_user_can_create_a_namespace_and_owns_it() {
     let mut eve = ready(&ctx, "eve").await;
     eve.send("CHANNEL CREATE #gaming/secret");
     eve.expect_err(ErrCode::CapRequired).await;
+}
+
+#[tokio::test]
+async fn grant_accepts_a_foreign_subject() {
+    let ctx = ctx_ops(&["#general"], &["boss"]);
+    let mut boss = ready_op(&ctx, "boss").await;
+    // An operator can grant caps to a federated user (`account@network`) — keyed
+    // by the network-qualified handle, since H doesn't own her ULID (§10.4). The
+    // token mints; enforcement rides the later federation-session work.
+    boss.send("@label=g1 GRANT alice@peer.example #general send");
+    let reply = boss.recv().await;
+    assert!(
+        matches!(&reply.event, Event::Token { subject, .. } if subject == "alice@peer.example"),
+        "granting to a foreign subject should mint a token, got {reply:?}"
+    );
+}
+
+#[tokio::test]
+async fn grant_to_a_nonexistent_account_is_rejected() {
+    let ctx = ctx_ops(&["#general"], &["boss"]);
+    let mut boss = ready_op(&ctx, "boss").await;
+    // Caps key by ULID, so there's no identity to grant to until the account
+    // exists (§10.4) — anti-enumeration NO-SUCH-TARGET, uniform with private.
+    boss.send("GRANT ghost #general send");
+    boss.expect_err(ErrCode::NoSuchTarget).await;
 }
 
 #[tokio::test]
@@ -2073,6 +2100,98 @@ async fn bridge_ingests_remote_message_with_origin_msgid_intact() {
 }
 
 #[tokio::test]
+async fn federated_moderator_wields_caps_over_the_bridge() {
+    // §11.10 homeserver authority: a federated user granted a cap on H wields it
+    // through a bridge-tunnelled FSESSION — she never connects to H (IP
+    // non-exposure); F vouches for her by having proven its network key.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &["boss"], "peer.example", &peer_key.public());
+
+    // H's operator grants `mute` at #general to the foreign user alice@peer.example.
+    let mut boss = ready(&ctx, "boss").await;
+    boss.send("GRANT alice@peer.example #general mute");
+    assert!(matches!(boss.recv().await.event, Event::Token { .. }));
+
+    // F authenticates the bridge, opens a session for alice, tunnels her MUTE.
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send("FSESSION 1 CMD :@label=m MUTE #general bob :spam");
+
+    // The reply tunnels back as `FSESSION 1 REPLY :<MODERATED …>`, attributed to
+    // the federated moderator — enforcement hit H's grant store for account@net.
+    let raw = bridge.recv_raw().await;
+    assert!(raw.starts_with("FSESSION 1 REPLY :"), "{raw}");
+    assert!(raw.contains("MODERATED #general bob mute"), "{raw}");
+    assert!(raw.contains("by=alice@peer.example"), "{raw}");
+
+    // A federated user WITHOUT the cap is refused — homeserver authority is not a
+    // blanket; her power is exactly what H granted account@network.
+    bridge.send("FSESSION 2 OPEN mallory");
+    bridge.send("FSESSION 2 CMD :@label=x MUTE #general bob");
+    let raw = bridge.recv_raw().await;
+    assert!(raw.starts_with("FSESSION 2 REPLY :"), "{raw}");
+    assert!(raw.contains("CAP-REQUIRED"), "{raw}");
+}
+
+#[tokio::test]
+async fn federated_admin_delegates_a_cap_over_the_bridge() {
+    // §11.10 full authority: a federated admin re-delegates a cap she holds
+    // (`grant:mute`) to another user, over the tunnel — enforced against H's
+    // grant store as her `account@network` identity.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &["boss"], "peer.example", &peer_key.public());
+    let mut boss = ready(&ctx, "boss").await;
+    boss.send("GRANT alice@peer.example #general grant:mute");
+    assert!(matches!(boss.recv().await.event, Event::Token { .. }));
+
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send("FSESSION 1 CMD :@label=g GRANT bob@peer.example #general mute");
+    let raw = bridge.recv_raw().await;
+    assert!(raw.starts_with("FSESSION 1 REPLY :"), "{raw}");
+    assert!(raw.contains("TOKEN"), "{raw}");
+    assert!(raw.contains("bob@peer.example"), "{raw}");
+}
+
+#[tokio::test]
+async fn federated_admin_creates_a_channel_over_the_bridge() {
+    // §11.10 full authority: channel administration is a control action, so it
+    // tunnels via the session (posting/content would ride the mirror instead).
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &["boss"], "peer.example", &peer_key.public());
+    let mut boss = ready(&ctx, "boss").await;
+    boss.send("GRANT alice@peer.example * chan-create");
+    assert!(matches!(boss.recv().await.event, Event::Token { .. }));
+
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send("FSESSION 1 CMD :@label=c CHANNEL CREATE #lounge");
+    let raw = bridge.recv_raw().await;
+    assert!(raw.starts_with("FSESSION 1 REPLY :"), "{raw}");
+    assert!(raw.contains("POLICY #lounge"), "{raw}");
+}
+
+#[tokio::test]
+async fn federated_admin_edits_namespace_meta_over_the_bridge() {
+    // §11.10 full authority incl. namespace administration (the ns-admin gate is
+    // actor-aware). A federated `ns-admin` holder edits H's namespace config.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&[], &["boss"], "peer.example", &peer_key.public());
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    ada.recv().await;
+    ada.send("GRANT alice@peer.example ns:gaming ns-admin");
+    assert!(matches!(ada.recv().await.event, Event::Token { .. }));
+
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send("FSESSION 1 CMD :@label=n NS META gaming title :Alice's Lounge");
+    let raw = bridge.recv_raw().await;
+    assert!(raw.starts_with("FSESSION 1 REPLY :"), "{raw}");
+    assert!(raw.contains("NS-META") && raw.contains("gaming"), "{raw}");
+}
+
+#[tokio::test]
 async fn bridge_forwards_local_messages_to_peer() {
     let peer_key = Keypair::generate();
     let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
@@ -2773,6 +2892,36 @@ async fn roles_define_list_and_assign_grants_the_bundle() {
         caps.contains("mute") && caps.contains("ban") && caps.contains("kick"),
         "bob holds the role's caps, got {caps}"
     );
+}
+
+#[tokio::test]
+async fn role_assigns_to_a_foreign_user() {
+    let ctx = ctx_ops(&["#general"], &["root"]);
+    let mut root = ready(&ctx, "root").await;
+    // Define a role at the global scope.
+    root.send("ROLE CREATE * #e8b93d mute,ban :Moderator");
+    root.recv().await; // BatchStart
+    root.recv().await; // Role
+    root.recv().await; // BatchEnd
+
+    // Assign it to a *federated* user (account@network) — membership recorded by
+    // the network-qualified handle, caps granted to the foreign subject (§10.4).
+    root.send("@label=a ROLE ASSIGN * alice@peer.example :Moderator");
+    let reply = root.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("a"));
+    assert!(
+        matches!(&reply.event, Event::Token { subject, .. } if subject == "alice@peer.example"),
+        "assigning to a foreign user mints the bundle, got {reply:?}"
+    );
+
+    // ROLES-OF reflects the membership (recognition), keyed by account@network.
+    root.send("ROLES-OF * alice@peer.example");
+    let reply = root.recv().await;
+    let Event::RoleMember { account, roles, .. } = &reply.event else {
+        panic!("expected ROLE-MEMBER, got {reply:?}");
+    };
+    assert_eq!(account, "alice@peer.example");
+    assert_eq!(roles, "Moderator");
 }
 
 #[tokio::test]

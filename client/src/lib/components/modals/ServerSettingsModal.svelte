@@ -97,7 +97,7 @@
         <h1>Members &amp; roles</h1>
         <p class="so-sub">Assign a role (grants its token bundle) or delegate individual capabilities.</p>
         <div class="field-label">Account</div>
-        <input class="text-input" bind:value={app.nsDelegSubject} placeholder="account" />
+        <input class="text-input" bind:value={app.nsDelegSubject} placeholder="account or account@network (federated)" />
         <div class="section-sep"></div>
         <div class="field-label">Assign a role</div>
         <div class="role-pick">

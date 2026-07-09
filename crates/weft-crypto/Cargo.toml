@@ -8,6 +8,7 @@ description = "WEFT identity primitives (L0): Ed25519 device/network keys, signe
 
 [dependencies]
 thiserror = { workspace = true }
+ulid = { workspace = true }
 ed25519-dalek = { workspace = true }
 ciborium = { workspace = true }
 serde = { workspace = true }

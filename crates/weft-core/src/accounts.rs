@@ -45,6 +45,11 @@ impl Accounts {
         })
     }
 
+    /// The account's immutable ULID (§10.4), or `None` if unknown.
+    pub async fn account_ulid(&self, account: &Account) -> Result<Option<String>, StoreError> {
+        self.store.account_ulid(account).await
+    }
+
     /// Constant-time, uniform: a missing (or corrupt) stored hash verifies
     /// — and fails — against the dummy instead of returning early.
     pub async fn verify_password(

@@ -356,15 +356,55 @@ impl EventStore for PgStore {
 #[async_trait]
 impl AccountStore for PgStore {
     async fn register(&self, account: &Account, password_phc: &str) -> Result<bool, StoreError> {
+        let ulid = weft_proto::Ulid::new().to_string();
         let result = sqlx::query(
-            "INSERT INTO weft_accounts (name, password_phc) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            "INSERT INTO weft_accounts (name, password_phc, ulid) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
         )
         .bind(account.as_str())
         .bind(password_phc)
+        .bind(&ulid)
         .execute(&self.pool)
         .await
         .map_err(backend_err)?;
         Ok(result.rows_affected() == 1)
+    }
+
+    async fn account_ulid(&self, account: &Account) -> Result<Option<String>, StoreError> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT ulid FROM weft_accounts WHERE name = $1")
+                .bind(account.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        match row {
+            None => Ok(None),                      // unknown account
+            Some((Some(ulid),)) => Ok(Some(ulid)), // already assigned
+            Some((None,)) => {
+                // Pre-existing account from before the ULID column: backfill one,
+                // race-safe (whoever's UPDATE lands first wins; the loser re-reads).
+                let fresh = weft_proto::Ulid::new().to_string();
+                let updated: Option<(String,)> = sqlx::query_as(
+                    "UPDATE weft_accounts SET ulid = $2 WHERE name = $1 AND ulid IS NULL RETURNING ulid",
+                )
+                .bind(account.as_str())
+                .bind(&fresh)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+                match updated {
+                    Some((u,)) => Ok(Some(u)),
+                    None => {
+                        let (u,): (String,) =
+                            sqlx::query_as("SELECT ulid FROM weft_accounts WHERE name = $1")
+                                .bind(account.as_str())
+                                .fetch_one(&self.pool)
+                                .await
+                                .map_err(backend_err)?;
+                        Ok(Some(u))
+                    }
+                }
+            }
+        }
     }
 
     async fn password_phc(&self, account: &Account) -> Result<Option<String>, StoreError> {
@@ -1278,10 +1318,7 @@ fn report_from_row(row: &sqlx::postgres::PgRow) -> Result<ReportRecord, StoreErr
             Ok(ReportResolution {
                 action: action.parse().map_err(|_| corrupt("res_action"))?,
                 note: row.get("res_note"),
-                resolved_by: row
-                    .get::<&str, _>("res_by")
-                    .parse()
-                    .map_err(|_| corrupt("res_by"))?,
+                resolved_by: row.get::<&str, _>("res_by").to_string(),
                 at_ms: row.get::<Option<i64>, _>("res_at_ms").unwrap_or(0) as u64,
                 hold_release_at: row.get::<Option<i64>, _>("hold_release_at").unwrap_or(0) as u64,
             })
@@ -1935,7 +1972,7 @@ impl RoleStore for PgStore {
         &self,
         scope: &str,
         name: &str,
-        account: &Account,
+        subject: &str,
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO weft_role_assignments (scope, name, account) VALUES ($1,$2,$3) \
@@ -1943,7 +1980,7 @@ impl RoleStore for PgStore {
         )
         .bind(scope)
         .bind(name)
-        .bind(account.as_str())
+        .bind(subject)
         .execute(&self.pool)
         .await
         .map_err(backend_err)?;
@@ -1954,26 +1991,26 @@ impl RoleStore for PgStore {
         &self,
         scope: &str,
         name: &str,
-        account: &Account,
+        subject: &str,
     ) -> Result<(), StoreError> {
         sqlx::query(
             "DELETE FROM weft_role_assignments WHERE scope = $1 AND name = $2 AND account = $3",
         )
         .bind(scope)
         .bind(name)
-        .bind(account.as_str())
+        .bind(subject)
         .execute(&self.pool)
         .await
         .map_err(backend_err)?;
         Ok(())
     }
 
-    async fn roles_of(&self, scope: &str, account: &Account) -> Result<Vec<String>, StoreError> {
+    async fn roles_of(&self, scope: &str, subject: &str) -> Result<Vec<String>, StoreError> {
         let rows = sqlx::query(
             "SELECT name FROM weft_role_assignments WHERE scope = $1 AND account = $2 ORDER BY name",
         )
         .bind(scope)
-        .bind(account.as_str())
+        .bind(subject)
         .fetch_all(&self.pool)
         .await
         .map_err(backend_err)?;
@@ -1983,7 +2020,7 @@ impl RoleStore for PgStore {
             .collect())
     }
 
-    async fn role_members(&self, scope: &str, name: &str) -> Result<Vec<Account>, StoreError> {
+    async fn role_members(&self, scope: &str, name: &str) -> Result<Vec<String>, StoreError> {
         let rows =
             sqlx::query("SELECT account FROM weft_role_assignments WHERE scope = $1 AND name = $2")
                 .bind(scope)
@@ -1991,12 +2028,9 @@ impl RoleStore for PgStore {
                 .fetch_all(&self.pool)
                 .await
                 .map_err(backend_err)?;
-        rows.iter()
-            .map(|r| {
-                r.get::<&str, _>("account")
-                    .parse()
-                    .map_err(|_| StoreError::Backend("corrupt role member".to_string()))
-            })
-            .collect()
+        Ok(rows
+            .iter()
+            .map(|r| r.get::<&str, _>("account").to_string())
+            .collect())
     }
 }

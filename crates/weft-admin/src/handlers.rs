@@ -282,7 +282,7 @@ async fn resolve_report(
     let resolution = ReportResolution {
         action,
         note: req.note,
-        resolved_by: who,
+        resolved_by: who.to_string(),
         at_ms: now,
         hold_release_at: now + 7 * 24 * 60 * 60 * 1000, // §12.1 grace
     };

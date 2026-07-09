@@ -60,6 +60,12 @@ pub trait AccountStore: Send + Sync {
 
     async fn password_phc(&self, account: &Account) -> Result<Option<String>, StoreError>;
 
+    /// The account's immutable **ULID** (minted at register) — the stable
+    /// capability-subject key, independent of the mutable handle. `None` if the
+    /// account is unknown. Backends backfill a ULID for any pre-existing
+    /// account on first read.
+    async fn account_ulid(&self, account: &Account) -> Result<Option<String>, StoreError>;
+
     /// Every registered account, sorted by name. The operator admin surface —
     /// the wire protocol never enumerates accounts network-wide.
     async fn list_accounts(&self) -> Result<Vec<Account>, StoreError>;
@@ -480,12 +486,13 @@ pub trait RoleStore: Send + Sync {
     /// All role definitions at a scope.
     async fn roles(&self, scope: &str) -> Result<Vec<RoleDef>, StoreError>;
 
-    /// Record that `account` holds role `name` at `scope`. Idempotent.
+    /// Record that `subject` (a local name or foreign `account@network`, §10.4)
+    /// holds role `name` at `scope`. Idempotent.
     async fn assign_role(
         &self,
         scope: &str,
         name: &str,
-        account: &Account,
+        subject: &str,
     ) -> Result<(), StoreError>;
 
     /// Drop an assignment. Idempotent.
@@ -493,12 +500,12 @@ pub trait RoleStore: Send + Sync {
         &self,
         scope: &str,
         name: &str,
-        account: &Account,
+        subject: &str,
     ) -> Result<(), StoreError>;
 
-    /// The role names `account` holds at `scope` (explicit membership).
-    async fn roles_of(&self, scope: &str, account: &Account) -> Result<Vec<String>, StoreError>;
+    /// The role names `subject` holds at `scope` (explicit membership).
+    async fn roles_of(&self, scope: &str, subject: &str) -> Result<Vec<String>, StoreError>;
 
-    /// The accounts holding role `name` at `scope` — for propagation (§6.5).
-    async fn role_members(&self, scope: &str, name: &str) -> Result<Vec<Account>, StoreError>;
+    /// The subjects holding role `name` at `scope` — for propagation (§6.5).
+    async fn role_members(&self, scope: &str, name: &str) -> Result<Vec<String>, StoreError>;
 }

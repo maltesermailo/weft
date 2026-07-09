@@ -55,6 +55,23 @@ impl Request {
     }
 }
 
+/// The four ops of a federation-session frame (§11.10). `Cmd`/`Event` carry a
+/// full inner control line verbatim (in the frame's trailing), so the tunnel is
+/// transport-agnostic — H re-parses the inner line, F re-emits the inner reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FSessionOp {
+    /// F opens a session for its local user `account` (H forms `account@<peer>`).
+    Open { account: String },
+    /// A command line from that user (F→H).
+    Cmd { line: String },
+    /// The **direct reply** to one of her commands (H→F) — a labeled ack or
+    /// `ERR`. Broadcast events never tunnel here; they ride the namespace mirror
+    /// (§10.3), so the session carries only the request/response pair.
+    Reply { line: String },
+    /// Close the sub-session.
+    Close,
+}
+
 /// M0 verb set. Extra params or an unexpected trailing are ignored
 /// (lenient-in); missing or malformed required parts are typed errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,14 +184,16 @@ pub enum Command {
     /// to an account and record explicit membership (§6.5).
     RoleAssign {
         scope: String,
-        account: Account,
+        /// Local account name **or** foreign `account@network` (§10.4) — a role
+        /// can be worn by a federated user, so this is a subject string.
+        account: String,
         name: String,
     },
     /// `ROLE UNASSIGN <scope> <account> :<name>` — drop membership + revoke the
     /// role's caps (§6.5).
     RoleUnassign {
         scope: String,
-        account: Account,
+        account: String,
         name: String,
     },
     /// `ROLES <scope>` — list the role definitions at a scope (§6.5) → a BATCH
@@ -182,7 +201,7 @@ pub enum Command {
     RolesList { scope: String },
     /// `ROLES-OF <scope> <account>` — the roles an account is assigned at a
     /// scope (§6.5) → a `ROLE-MEMBER` event.
-    RolesOf { scope: String, account: Account },
+    RolesOf { scope: String, account: String },
     /// `CHANNEL CREATE <#chan> [policy]` — default `retained:90d` (§6.3).
     ChannelCreate {
         channel: ChannelName,
@@ -351,6 +370,12 @@ pub enum Command {
         network: NetworkName,
         namespace: NamespaceName,
     },
+    /// `FSESSION <fsid> <OPEN <account>|CMD :<line>|EVENT :<line>|CLOSE>`
+    /// (§11.10) — federation-session multiplexing over a bridge (homeserver
+    /// authority): F tunnels one of its users' command sessions to H, so a
+    /// federated user wields her caps on H without ever connecting to it (IP
+    /// non-exposure). Bridge-session-only.
+    FSession { fsid: String, op: FSessionOp },
     /// `NETBLOCK ADD <network> [:reason]` (§6.6, §11.6). Cap `netblock` at `*`.
     NetblockAdd {
         network: NetworkName,
@@ -710,13 +735,7 @@ impl Command {
                     }),
                     "ASSIGN" => Ok(Command::RoleAssign {
                         scope: args.req("scope")?.to_string(),
-                        account: args.req("account")?.parse().map_err(|_| {
-                            ParseError::BadParam {
-                                verb: "ROLE",
-                                what: "account",
-                                value: String::new(),
-                            }
-                        })?,
+                        account: args.req("account")?.to_string(),
                         name: line.trailing.clone().ok_or(ParseError::MissingParam {
                             verb: "ROLE",
                             what: "name",
@@ -724,13 +743,7 @@ impl Command {
                     }),
                     "UNASSIGN" => Ok(Command::RoleUnassign {
                         scope: args.req("scope")?.to_string(),
-                        account: args.req("account")?.parse().map_err(|_| {
-                            ParseError::BadParam {
-                                verb: "ROLE",
-                                what: "account",
-                                value: String::new(),
-                            }
-                        })?,
+                        account: args.req("account")?.to_string(),
                         name: line.trailing.clone().ok_or(ParseError::MissingParam {
                             verb: "ROLE",
                             what: "name",
@@ -751,14 +764,7 @@ impl Command {
                 let mut args = Args::new(line, "ROLES-OF");
                 Ok(Command::RolesOf {
                     scope: args.req("scope")?.to_string(),
-                    account: args
-                        .req("account")?
-                        .parse()
-                        .map_err(|_| ParseError::BadParam {
-                            verb: "ROLES-OF",
-                            what: "account",
-                            value: String::new(),
-                        })?,
+                    account: args.req("account")?.to_string(),
                 })
             }
             "CHANNEL" => {
@@ -970,6 +976,28 @@ impl Command {
                     network: network.parse()?,
                     namespace: namespace.parse()?,
                 })
+            }
+            "FSESSION" => {
+                let mut args = Args::new(line, "FSESSION");
+                let fsid = args.req("fsid")?.to_string();
+                let op = match args.req("op")?.to_ascii_uppercase().as_str() {
+                    "OPEN" => FSessionOp::Open {
+                        account: args.req("account")?.to_string(),
+                    },
+                    "CMD" => FSessionOp::Cmd {
+                        line: line.trailing.clone().unwrap_or_default(),
+                    },
+                    "REPLY" => FSessionOp::Reply {
+                        line: line.trailing.clone().unwrap_or_default(),
+                    },
+                    "CLOSE" => FSessionOp::Close,
+                    other => {
+                        return Ok(Command::Unknown {
+                            verb: format!("FSESSION {other}"),
+                        })
+                    }
+                };
+                Ok(Command::FSession { fsid, op })
             }
             "REPORT" => {
                 let mut args = Args::new(line, "REPORT");
@@ -1518,6 +1546,24 @@ impl Command {
             Command::Federate { network, namespace } => {
                 ("FEDERATE", vec![format!("{network}/{namespace}")], None)
             }
+            Command::FSession { fsid, op } => match op {
+                FSessionOp::Open { account } => (
+                    "FSESSION",
+                    vec![fsid.clone(), "OPEN".to_string(), account.clone()],
+                    None,
+                ),
+                FSessionOp::Cmd { line } => (
+                    "FSESSION",
+                    vec![fsid.clone(), "CMD".to_string()],
+                    Some(line.clone()),
+                ),
+                FSessionOp::Reply { line } => (
+                    "FSESSION",
+                    vec![fsid.clone(), "REPLY".to_string()],
+                    Some(line.clone()),
+                ),
+                FSessionOp::Close => ("FSESSION", vec![fsid.clone(), "CLOSE".to_string()], None),
+            },
             Command::Channels { namespace } => ("CHANNELS", vec![namespace.to_string()], None),
             Command::Report {
                 msgid,
@@ -2369,6 +2415,30 @@ mod tests {
         round_trip(&Request::new(Command::Federate {
             network: "hda.example".parse().unwrap(),
             namespace: "gaming".parse().unwrap(),
+        }));
+        // §11.10 federation-session tunnel frames.
+        round_trip(&Request::new(Command::FSession {
+            fsid: "7".to_string(),
+            op: FSessionOp::Open {
+                account: "alice".to_string(),
+            },
+        }));
+        round_trip(&Request::new(Command::FSession {
+            fsid: "7".to_string(),
+            op: FSessionOp::Cmd {
+                // The inner line keeps its own tags + trailing verbatim.
+                line: "@label=m1 MUTE #gaming/general bob :spam".to_string(),
+            },
+        }));
+        round_trip(&Request::new(Command::FSession {
+            fsid: "7".to_string(),
+            op: FSessionOp::Reply {
+                line: "MODERATED #gaming/general bob mute".to_string(),
+            },
+        }));
+        round_trip(&Request::new(Command::FSession {
+            fsid: "7".to_string(),
+            op: FSessionOp::Close,
         }));
         assert!(Request::parse("FEDERATE nonslash").is_err());
         assert!(Request::parse("BRIDGE FROB peer.example").is_err());

@@ -28,7 +28,7 @@ mod name;
 mod policy;
 mod types;
 
-pub use command::{Command, Request};
+pub use command::{Command, FSessionOp, Request};
 pub use errcode::ErrCode;
 pub use error::{ParseError, SerializeError};
 pub use event::{ErrEvent, Event, MessageEvent, Reply};

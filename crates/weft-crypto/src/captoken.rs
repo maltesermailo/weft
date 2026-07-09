@@ -21,12 +21,17 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use ulid::Ulid;
 
 use crate::caps::Capability;
 use crate::keys::{Keypair, PublicKey, Signature};
 use crate::{b64, CryptoError};
 
-const VERSION: u8 = 1;
+// v2 (§10.4): `Subject::Account` carries the account's **ULID** (canonical
+// string), not its mutable handle, and `Subject::Foreign` names a federated
+// user. Bumping the version denies every v1 (name-subject) token outright — the
+// `version != VERSION` check below rejects them.
+const VERSION: u8 = 2;
 
 /// Who a token authorizes. Only `Key` subjects can sign child tokens
 /// (delegate further); `Account` subjects are leaves used by that account;
@@ -34,7 +39,12 @@ const VERSION: u8 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Subject {
     Key(PublicKey),
-    Account(String),
+    /// A **local** account, keyed by its immutable **ULID** (§10.4) — never the
+    /// mutable handle. Typed, so it can only ever hold a real ULID.
+    Account(Ulid),
+    /// A **federated** user, `account@network` — F owns her ULID, so H keys her
+    /// by the network-qualified handle (the most stable name it can use).
+    Foreign(String),
     Unbound,
 }
 
@@ -50,18 +60,23 @@ impl Subject {
     fn encode(&self) -> (u8, Vec<u8>) {
         match self {
             Subject::Key(key) => (0, key.as_bytes().to_vec()),
-            Subject::Account(name) => (1, name.as_bytes().to_vec()),
+            Subject::Account(ulid) => (1, ulid.to_bytes().to_vec()),
             Subject::Unbound => (2, Vec::new()),
+            Subject::Foreign(user) => (3, user.as_bytes().to_vec()),
         }
     }
 
     fn decode(tag: u8, payload: Vec<u8>) -> Result<Self, CryptoError> {
         match tag {
             0 => Ok(Subject::Key(PublicKey::from_bytes(&payload)?)),
-            1 => Ok(Subject::Account(
+            1 => {
+                let bytes: [u8; 16] = payload.try_into().map_err(|_| CryptoError::BadToken)?;
+                Ok(Subject::Account(Ulid::from_bytes(bytes)))
+            }
+            2 => Ok(Subject::Unbound),
+            3 => Ok(Subject::Foreign(
                 String::from_utf8(payload).map_err(|_| CryptoError::BadToken)?,
             )),
-            2 => Ok(Subject::Unbound),
             _ => Err(CryptoError::BadToken),
         }
     }
@@ -610,7 +625,7 @@ mod tests {
         // A token granted to an account (no key) cannot delegate further.
         let r = root(
             &net,
-            Subject::Account("ada".into()),
+            Subject::Account(Ulid::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()),
             "ns:x",
             &["grant:ban"],
             0,
@@ -627,7 +642,7 @@ mod tests {
         let net = Keypair::generate();
         let token = root(
             &net,
-            Subject::Account("ada".into()),
+            Subject::Account(Ulid::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()),
             "ns:gaming",
             &["ns-admin", "grant:send"],
             2,
@@ -639,6 +654,77 @@ mod tests {
 
         assert!(Token::from_b64("!!!").is_err());
         assert!(Token::from_b64(&b64::encode(b"not cbor")).is_err());
+    }
+
+    #[test]
+    fn ulid_account_and_foreign_subjects_round_trip_and_verify() {
+        let net = Keypair::generate();
+        // Account now carries a ULID (canonical string); Foreign carries
+        // account@network. Both round-trip through the wire and verify as leaves.
+        for subject in [
+            Subject::Account(Ulid::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()),
+            Subject::Foreign("alice@hda.example".into()),
+        ] {
+            let token = root(&net, subject.clone(), "ns:gaming", &["mute", "send"], 0);
+            let restored = Token::from_b64(&token.to_b64()).unwrap();
+            assert_eq!(restored, token);
+            let v = verify_chain(&[restored], &net.public(), 0, no_revocations).unwrap();
+            assert_eq!(v.subject, subject);
+            assert!(v.authorizes(&cap("mute"), &TokenScope::parse("ns:gaming").unwrap()));
+        }
+    }
+
+    #[test]
+    fn foreign_subject_is_a_leaf_only() {
+        let net = Keypair::generate();
+        let admin = Keypair::generate();
+        // A Foreign subject can be the leaf of a delegation chain (parent holds
+        // `grant:ban`, so it may pass `ban` down)...
+        let r = root(&net, Subject::Key(admin.public()), "ns:x", &["ban", "grant:ban"], 0);
+        let c = child(
+            &admin,
+            &r,
+            Subject::Foreign("mod@peer.example".into()),
+            "ns:x",
+            &["ban"],
+        );
+        let v = verify_chain(&[r, c], &net.public(), 0, no_revocations).unwrap();
+        assert_eq!(v.subject, Subject::Foreign("mod@peer.example".into()));
+        // ...but never an intermediate: a non-key subject can't sign a child,
+        // even when it nominally holds the delegable cap.
+        let bad_root = root(
+            &net,
+            Subject::Foreign("mod@peer.example".into()),
+            "ns:x",
+            &["ban", "grant:ban"],
+            0,
+        );
+        let orphan = child(&admin, &bad_root, Subject::Key(admin.public()), "ns:x", &["ban"]);
+        assert!(verify_chain(&[bad_root, orphan], &net.public(), 0, no_revocations).is_err());
+    }
+
+    #[test]
+    fn v1_tokens_are_denied() {
+        let net = Keypair::generate();
+        // Hand-build a v1 (name-subject) blob — version byte 1 — and confirm the
+        // parser rejects it outright (§10.4 deny-on-upgrade).
+        let wire = Wire(
+            1,
+            net.public().as_bytes().to_vec(),
+            1,
+            b"ada".to_vec(),
+            "ns:x".into(),
+            vec!["send".into()],
+            0,
+            NEVER,
+            None,
+        );
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&(wire, vec![0u8; 64]), &mut bytes).unwrap();
+        assert!(matches!(
+            Token::from_b64(&b64::encode(bytes)),
+            Err(CryptoError::BadToken)
+        ));
     }
 
     #[test]

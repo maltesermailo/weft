@@ -357,6 +357,8 @@
   // Explicit role membership (§6.5) keyed `account|scope`, from ROLE-MEMBER —
   // a role is worn because it was assigned, never inferred from caps.
   let memberRoles = $state<Record<string, string[]>>({});
+  // §11.11 federated authors whose roles we've already fetched (`who|scope`).
+  const fedRolesFetched = new Set<string>();
   function fetchMemberRoles(account: string, scope: string) {
     weft.rolesOfAccount(scope, account).catch(() => {});
   }
@@ -741,7 +743,21 @@
         // Dedupe: history backfill may re-deliver a live message.
         if (e.msgid && ch.messages.some((m) => m.msgid === e.msgid)) break;
         ch.messages.push(msg);
-        if (key.startsWith("#")) ensureCaps(e.sender, key); // for the author badge
+        if (key.startsWith("#")) {
+          if (e.network !== network) {
+            // §11.11 recognition: fetch a federated author's roles here (once)
+            // so the timeline can show their role color, keyed account@network.
+            const who = `${e.sender}@${e.network}`;
+            const rscope = roleScopeOf(key);
+            const fk = `${who}|${rscope}`;
+            if (!fedRolesFetched.has(fk)) {
+              fedRolesFetched.add(fk);
+              fetchMemberRoles(who, rscope);
+            }
+          } else {
+            ensureCaps(e.sender, key); // for the author badge
+          }
+        }
         const pinged = !e.own && mentionsMe(e.body);
         if (!e.own && key !== active) {
           unreadMap[key] = true;
@@ -955,9 +971,12 @@
         break;
       }
       case "moderated": {
-        // Surface the action as a system line in the affected channel.
+        // Surface the action as a system line in the affected channel. A
+        // federated moderator (§11.11 homeserver authority) is attributed with
+        // their @network and flagged — the "acting on H via F" affordance.
         const ch = e.scope.startsWith("#") ? ensureChannel(e.scope) : activeChannel;
-        const who = e.by ? ` by ${e.by}` : "";
+        const fed = e.by && e.by.includes("@") && e.by.split("@")[1] !== network;
+        const who = e.by ? ` by ${e.by}${fed ? " (via federation)" : ""}` : "";
         const why = e.reason ? ` (${e.reason})` : "";
         ch?.messages.push(mkMsg({ author: "", body: `${e.account} ${e.action}d${who} — ${e.scope}${why}`, time: clock(), own: false, system: true }));
         break;

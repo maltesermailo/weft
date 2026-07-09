@@ -24,6 +24,8 @@ use weft_proto::{ContentState, ReportStatus};
 
 struct AccountRecord {
     password_phc: String,
+    /// Immutable per-account ULID — the stable cap-subject key (§10.4).
+    ulid: String,
     devices: Vec<[u8; 32]>,
     /// target key → read marker (§6.3 MARK).
     marks: HashMap<String, MsgId>,
@@ -74,7 +76,8 @@ struct Inner {
     /// scope → role name → (color, caps) (§6.5 role definitions).
     roles: HashMap<String, std::collections::BTreeMap<String, (String, Vec<String>)>>,
     /// Explicit role membership: (scope, role name, account).
-    role_assignments: HashSet<(String, String, Account)>,
+    /// (scope, role name, subject) — subject is a local name or `account@network`.
+    role_assignments: HashSet<(String, String, String)>,
 }
 
 #[derive(Default)]
@@ -272,12 +275,18 @@ impl AccountStore for MemoryStore {
             account.clone(),
             AccountRecord {
                 password_phc: password_phc.to_string(),
+                ulid: weft_proto::Ulid::new().to_string(),
                 devices: Vec::new(),
                 marks: HashMap::new(),
                 verifications: HashMap::new(),
             },
         );
         Ok(true)
+    }
+
+    async fn account_ulid(&self, account: &Account) -> Result<Option<String>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner.accounts.get(account).map(|a| a.ulid.clone()))
     }
 
     async fn password_phc(&self, account: &Account) -> Result<Option<String>, StoreError> {
@@ -565,7 +574,7 @@ impl ChannelStore for MemoryStore {
             inner.roles.insert(nk.clone(), r);
         }
         // 13. channel-scoped role assignments.
-        let ra: Vec<(String, String, Account)> = inner
+        let ra: Vec<(String, String, String)> = inner
             .role_assignments
             .iter()
             .filter(|(s, _, _)| *s == ok)
@@ -1232,12 +1241,12 @@ impl RoleStore for MemoryStore {
         &self,
         scope: &str,
         name: &str,
-        account: &Account,
+        subject: &str,
     ) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         inner
             .role_assignments
-            .insert((scope.to_string(), name.to_string(), account.clone()));
+            .insert((scope.to_string(), name.to_string(), subject.to_string()));
         Ok(())
     }
 
@@ -1245,26 +1254,26 @@ impl RoleStore for MemoryStore {
         &self,
         scope: &str,
         name: &str,
-        account: &Account,
+        subject: &str,
     ) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         inner
             .role_assignments
-            .remove(&(scope.to_string(), name.to_string(), account.clone()));
+            .remove(&(scope.to_string(), name.to_string(), subject.to_string()));
         Ok(())
     }
 
-    async fn roles_of(&self, scope: &str, account: &Account) -> Result<Vec<String>, StoreError> {
+    async fn roles_of(&self, scope: &str, subject: &str) -> Result<Vec<String>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner
             .role_assignments
             .iter()
-            .filter(|(s, _, a)| s == scope && a == account)
+            .filter(|(s, _, a)| s == scope && a == subject)
             .map(|(_, n, _)| n.clone())
             .collect())
     }
 
-    async fn role_members(&self, scope: &str, name: &str) -> Result<Vec<Account>, StoreError> {
+    async fn role_members(&self, scope: &str, name: &str) -> Result<Vec<String>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner
             .role_assignments

@@ -165,7 +165,9 @@ pub enum Event {
     /// explicitly assigned at a scope, comma-separated (§6.5). Empty = none.
     RoleMember {
         scope: String,
-        account: Account,
+        /// Local name or foreign `account@network` — a role holder can be a
+        /// federated user (§10.4).
+        account: String,
         roles: String,
     },
     /// `PRESENCE <user@net> <status>` — never bridged.
@@ -340,7 +342,9 @@ pub enum Event {
         scope: String,
         account: Account,
         action: ModAction,
-        by: Option<Account>,
+        /// Who moderated — a local name or a foreign `account@network` (§10.4,
+        /// a federated moderator acting on H via homeserver authority).
+        by: Option<String>,
         reason: Option<String>,
     },
     Err(ErrEvent),
@@ -470,7 +474,7 @@ impl Event {
                 let mut args = Args::new(line, "ROLE-MEMBER");
                 Ok(Event::RoleMember {
                     scope: args.req("scope")?.to_string(),
-                    account: args.req("account")?.parse()?,
+                    account: args.req("account")?.to_string(),
                     roles: line.trailing.clone().unwrap_or_default(),
                 })
             }
@@ -841,12 +845,7 @@ impl Event {
                     scope,
                     account,
                     action,
-                    by: line
-                        .tags
-                        .get("by")
-                        .filter(|v| !v.is_empty())
-                        .map(|v| v.parse())
-                        .transpose()?,
+                    by: line.tags.get("by").filter(|v| !v.is_empty()).cloned(),
                     reason: line.tags.get("reason").filter(|v| !v.is_empty()).cloned(),
                 })
             }
@@ -1414,7 +1413,7 @@ mod tests {
         }));
         round_trip(&Reply::new(Event::RoleMember {
             scope: "ns:gaming".to_string(),
-            account: "bob".parse().unwrap(),
+            account: "bob".to_string(),
             roles: "Head Moderator,Speaker".to_string(),
         }));
         round_trip(&Reply::new(Event::Presence {
@@ -1817,7 +1816,7 @@ mod tests {
                 scope: "#general".into(),
                 account: "bob".parse().unwrap(),
                 action: crate::types::ModAction::Mute,
-                by: Some("mod".parse().unwrap()),
+                by: Some("mod".to_string()),
                 reason: Some("spamming".into()),
             },
             "m1",
@@ -1832,6 +1831,14 @@ mod tests {
             account: "eve".parse().unwrap(),
             action: crate::types::ModAction::Ban,
             by: None,
+            reason: None,
+        }));
+        // §10.4 a federated moderator (account@network) as `by`.
+        round_trip(&Reply::new(Event::Moderated {
+            scope: "ns:gaming".into(),
+            account: "eve".parse().unwrap(),
+            action: crate::types::ModAction::Mute,
+            by: Some("alice@peer.example".to_string()),
             reason: None,
         }));
     }

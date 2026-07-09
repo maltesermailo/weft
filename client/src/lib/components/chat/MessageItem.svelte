@@ -25,6 +25,10 @@
         {#if m.net}
           <!-- Foreign sender: fully qualified, and no local profile to open. -->
           <span class="author foreign" title="from {m.net}">{m.author}<span class="net-suffix">@{m.net}</span></span>
+          <!-- §11.11 recognition: a federated user's role(s) held on this network. -->
+          {#each app.rolesOf(`${m.author}@${m.net}`, app.roleScopeOf(app.active)) as r (r.name)}
+            <span class="role-pill" style="--role:{r.color}"><span class="role-dot"></span>{r.name}</span>
+          {/each}
         {:else}
           <button class="author author-btn" onclick={(e) => app.openProfile(m.author, e)}>{m.author}</button>
         {/if}
