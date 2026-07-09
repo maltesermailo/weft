@@ -106,9 +106,16 @@ device-key enrollment in the web build is opt-in and documented as such.
 
 ## 6. Phases (each shippable, each green)
 
-- **P1 — extract `weft-client-core`.** Move the protocol client out of `weft.rs`
-  behind `ClientStream` + `EventSink`; refactor `src-tauri` to a thin native
-  binding over it. *Green:* the Tauri app builds + behaves identically.
+- **P1 ✅ (2026-07-09) — extract `weft-client-core`.** New portable crate (deps:
+  `weft-proto`, `weft-crypto`, `serde` — no transport, runtime, or Tauri): the
+  `ClientEvent` enum, the `Mode`/`Phase` types, the `on_line` reply-parse + auth
+  FSM (generalized `AppHandle` → the new **`EventSink`** trait), and all `build_*`
+  command builders. `src-tauri/weft.rs` is now a **thin native binding** (1530 →
+  154 lines): the tokio connection loop, the QUIC `ClientStream`, DNS `resolve`,
+  and a `TauriSink: EventSink` (Tauri `emit`); it re-exports the core so
+  `lib.rs`'s `weft::build_*`/`weft::Mode` are untouched. Workspace + Tauri app
+  build; clippy clean. *(The connection loop stays per-binding — it uses tokio,
+  which the wasm binding will replace with a JS-driven loop in P2.)*
 - **P2 — wasm binding + frontend switch.** `weft-client-wasm` (wasm-bindgen +
   browser WebSocket), `weft.ts` backend switch, wasm-pack build wired into the
   vite build. *Green:* `pnpm dev` in a browser connects to a running weftd over

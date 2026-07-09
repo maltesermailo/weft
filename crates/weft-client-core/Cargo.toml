@@ -1,0 +1,13 @@
+[package]
+name = "weft-client-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Portable WEFT client codec: reply→event parsing, the auth FSM, and command
+# builders. No transport, no runtime, no UI toolkit — so it compiles native
+# (Tauri) and to WASM (browser). Bindings own the loop + transport + event sink.
+[dependencies]
+weft-proto = { path = "../weft-proto" }
+weft-crypto = { path = "../weft-crypto" }
+serde = { workspace = true }

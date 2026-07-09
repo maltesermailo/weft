@@ -653,6 +653,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tokio",
  "toml 0.8.2",
+ "weft-client-core",
  "weft-crypto",
  "weft-proto",
  "weft-transport",
@@ -5916,6 +5917,15 @@ dependencies = [
  "weft-crypto",
  "weft-proto",
  "weft-store",
+]
+
+[[package]]
+name = "weft-client-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "weft-crypto",
+ "weft-proto",
 ]
 
 [[package]]
