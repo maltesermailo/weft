@@ -12,6 +12,7 @@ pub mod config;
 pub mod dialer;
 pub mod telemetry;
 mod tls;
+mod web;
 mod wellknown;
 
 use std::fs;
@@ -288,11 +289,18 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
     // One app (well-known + ACME challenge + admin), served plaintext on `http`
     // (needed for the ACME HTTP-01 challenge on :80) and/or TLS-terminated on
     // `https` (the secure way to reach the admin — same cert as QUIC).
+    if config.listen.web && config.listen.http.is_none() && config.listen.https.is_none() {
+        warn!("[listen] web = true needs an http or https listener; web client not served");
+    }
     let http_app = (config.listen.http.is_some() || config.listen.https.is_some()).then(|| {
         let mut app = wellknown::router(&ctx, Arc::clone(&challenges));
         if let Some(admin) = admin_router {
             app = app.merge(admin);
             info!("admin panel mounted at /admin (api at /admin/api)");
+        }
+        if config.listen.web {
+            app = web::mount(app, Arc::clone(&ctx));
+            web::log_spa_state();
         }
         app
     });

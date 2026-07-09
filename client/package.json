@@ -4,6 +4,9 @@
   "description": "",
   "type": "module",
   "scripts": {
+    "wasm": "wasm-pack build ../crates/weft-client-wasm --target web --out-dir ../../client/static/wasm --out-name weft_client_wasm --no-typescript",
+    "dev:web": "npm run wasm && vite dev",
+    "build:web": "npm run wasm && vite build",
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",

@@ -1,0 +1,4 @@
+# getrandom 0.3 (transitive via ulid→rand) requires this backend selector on
+# wasm32; scoped to the target so it never touches the native/server builds.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

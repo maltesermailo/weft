@@ -63,6 +63,14 @@ http = "0.0.0.0:8080"
 # QUIC (ACME / [tls] / self-signed) — no front proxy needed. TCP :443 coexists
 # with QUIC's UDP :443. This is the secure way to reach /admin. Omit to disable.
 # https = "0.0.0.0:443"
+# Serve the browser client from this weftd, on the `http`/`https` listener above:
+# the SvelteKit SPA at `/` and a SAME-ORIGIN WebSocket at `/ws` (so a browser
+# loads the app and speaks WEFT back to the same host — one port, TLS terminated
+# here). The SPA is only embedded when built with `--features web-ui` (needs
+# `client/build`, i.e. `npm run build:web`); without that feature `web = true`
+# still mounts `/ws` but serves no page. Requires `http` or `https` above.
+# Default false. See README.md → "Embedded".
+# web = true
 # WEFT-IRC gateway (§17). Omit to disable. :6667 plaintext / :6697 you TLS-front.
 irc = "0.0.0.0:6667"
 

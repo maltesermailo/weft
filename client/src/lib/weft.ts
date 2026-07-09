@@ -1,11 +1,50 @@
-// Thin typed wrapper over the Tauri commands + the `weft` event stream.
-import { invoke } from "@tauri-apps/api/core";
+// Thin typed wrapper over the client backend + its event stream. Two backends
+// live behind one `invoke`/`onWeft`/`notify` surface, picked at runtime:
+//   • Desktop (Tauri): `invoke` → #[tauri::command]s, events over the `weft`
+//     channel — the native `weft-client-core` binding.
+//   • Browser (WASM): `invoke` → `WeftClient.invoke`, events via a JS callback —
+//     the `weft-client-wasm` binding, same core compiled to WebAssembly.
+// UI code never sees the difference; only the three primitives below branch.
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   isPermissionGranted,
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+
+/// Tauri v2 injects `__TAURI_INTERNALS__`; its absence ⇒ a plain browser ⇒ WASM.
+const IS_TAURI =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+// ---- WASM backend (lazy: the module + wasm only load in a real browser) ----
+type WasmClient = { invoke(cmd: string, args: unknown): Promise<unknown> };
+let wasmClient: WasmClient | null = null;
+let wasmInit: Promise<WasmClient> | null = null;
+const webListeners = new Set<(e: WeftEvent) => void>();
+
+function ensureWasm(): Promise<WasmClient> {
+  if (!wasmInit) {
+    wasmInit = (async () => {
+      // Served by weftd/vite from `static/wasm`; a non-literal specifier keeps
+      // the generated pkg off both the desktop bundle and svelte-check.
+      const url = "/wasm/weft_client_wasm.js";
+      const mod: any = await import(/* @vite-ignore */ url);
+      await mod.default();
+      wasmClient = new mod.WeftClient((ev: WeftEvent) => {
+        for (const cb of webListeners) cb(ev);
+      }) as WasmClient;
+      return wasmClient;
+    })();
+  }
+  return wasmInit;
+}
+
+/// The one backend-agnostic command entry point every wrapper below calls.
+function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<any> {
+  if (IS_TAURI) return tauriInvoke(cmd, args);
+  return ensureWasm().then((c) => c.invoke(cmd, args));
+}
 
 export type Mode = "login" | "register" | "key";
 
@@ -134,11 +173,23 @@ export function hasDeviceKey(host: string, account: string): Promise<boolean> {
   return invoke("has_device_key", { host, account });
 }
 
-/// Fire a desktop notification (requests permission on first use).
+/// Fire a desktop notification (requests permission on first use). Web falls
+/// back to the browser Notification API.
 export async function notify(title: string, body: string) {
-  let ok = await isPermissionGranted();
-  if (!ok) ok = (await requestPermission()) === "granted";
-  if (ok) sendNotification({ title, body });
+  if (IS_TAURI) {
+    let ok = await isPermissionGranted();
+    if (!ok) ok = (await requestPermission()) === "granted";
+    if (ok) sendNotification({ title, body });
+    return;
+  }
+  if (typeof Notification === "undefined") return;
+  if (Notification.permission === "granted") {
+    new Notification(title, { body });
+  } else if (Notification.permission !== "denied") {
+    if ((await Notification.requestPermission()) === "granted") {
+      new Notification(title, { body });
+    }
+  }
 }
 
 export function join(channel: string) {
@@ -374,5 +425,11 @@ export function sendRaw(line: string) {
 }
 
 export function onWeft(cb: (e: WeftEvent) => void): Promise<UnlistenFn> {
-  return listen<WeftEvent>("weft", (evt) => cb(evt.payload));
+  if (IS_TAURI) return listen<WeftEvent>("weft", (evt) => cb(evt.payload));
+  // Web: register into the fan-out set and make sure the WASM client is live.
+  webListeners.add(cb);
+  void ensureWasm();
+  return Promise.resolve(() => {
+    webListeners.delete(cb);
+  });
 }

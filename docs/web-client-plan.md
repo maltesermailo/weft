@@ -116,14 +116,41 @@ device-key enrollment in the web build is opt-in and documented as such.
   `lib.rs`'s `weft::build_*`/`weft::Mode` are untouched. Workspace + Tauri app
   build; clippy clean. *(The connection loop stays per-binding — it uses tokio,
   which the wasm binding will replace with a JS-driven loop in P2.)*
-- **P2 — wasm binding + frontend switch.** `weft-client-wasm` (wasm-bindgen +
-  browser WebSocket), `weft.ts` backend switch, wasm-pack build wired into the
-  vite build. *Green:* `pnpm dev` in a browser connects to a running weftd over
-  WS and the app works (password auth path first).
-- **P3 — weftd embed.** `rust-embed` the SPA + axum static/fallback serving + the
-  same-origin `/ws` axum route + `[listen] web`. *Green:* `weftd` serves the app
-  at `https://host/`, the browser round-trips over `wss://host/ws`; two-process
-  smoke test.
+- **P2 ✅ (2026-07-09) — wasm binding + frontend switch.** New `weft-client-wasm`
+  crate (`cdylib`+`rlib`, wasm-bindgen): a `JsSink: EventSink` (serde → a JS
+  callback), a **WebSocket-driven** `Conn` (the tokio run loop is replaced by
+  `onopen`→HELLO / `onmessage`→`core::on_line` / `onclose`; pre-READY commands
+  buffer then flush), and a `#[wasm_bindgen] WeftClient` whose `invoke(cmd, args)`
+  dispatch mirrors all ~62 Tauri commands (device/namespace-key ones stubbed →
+  P4). `weft.ts` now branches on `__TAURI_INTERNALS__`: desktop → Tauri
+  `invoke`/`listen`/notification-plugin; browser → a lazily-loaded `WeftClient`
+  (`invoke`), a fan-out `webListeners` set (`onWeft`), and the browser
+  `Notification` API. Build: `npm run wasm` (`wasm-pack --target web` →
+  `static/wasm`, served at `/wasm/`) wired into `dev:web`/`build:web`; desktop
+  `dev`/`build` stay wasm-free. Two wasm-only toolchain notes: `getrandom` is
+  pulled at **both** 0.2 (ed25519-dalek) and 0.3 (ulid→rand) — each needs its JS
+  shim (`features=["js"]` / `["wasm_js"]`), and 0.3 additionally needs
+  `--cfg getrandom_backend="wasm_js"`, supplied by a **wasm32-scoped**
+  `.cargo/config.toml` (native builds untouched). *Green:* svelte-check clean,
+  `npm run build:web` produces the SPA + wasm; browser end-to-end needs the
+  same-origin `/ws` route from P3.
+- **P3 ✅ (2026-07-09) — weftd embed.** New `weftd::web` module mounts two things
+  onto the existing `http`/`https` axum app when `[listen] web = true`: (1) a
+  **same-origin `/ws`** route — `WebSocketUpgrade` → an `AxumWsLines:
+  ControlStream` adapter → the ordinary `run_session` path (one text frame = one
+  line, matching `WsControlStream`); (2) an **`index.html` SPA fallback** serving
+  the `client/build` bundle embedded via `rust-embed`, behind the **`web-ui`**
+  cargo feature (off by default → headless builds stay lean and need no prebuilt
+  SPA). Specific routes (`/ws`, `/.well-known`, `/admin`) win over the fallback;
+  `.wasm` is served as `application/wasm` for streaming instantiation. One
+  wrinkle solved: `run_session` needs `S: Sync` (some `&self` handlers await,
+  e.g. `announce_manifest`), and axum's `WebSocket` is `!Sync` — so the adapter
+  holds the `split()` sink/stream halves (each a `Send + Sync` `BiLock`) instead
+  of the raw socket. Build note: `--features web-ui` requires `client/build` to
+  exist (`pnpm build:web` first). *Green:* a `same_origin_ws_route` conformance
+  test (full HELLO→REGISTER→JOIN→MSG echo over `/ws`), and a two-process smoke
+  test — `weftd` serves `/` (HTML), `/wasm/*_bg.wasm` (`application/wasm`), SPA
+  deep-link fallback, with `/.well-known/weft` still carved out.
 - **P4 — device keys in the browser** (IndexedDB persistence) + polish
   (reconnect, the `weft://` deep-link handler for web).
 

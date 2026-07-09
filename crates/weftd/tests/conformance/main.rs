@@ -34,6 +34,7 @@ async fn start_with(channels: &[&str], tweak: impl FnOnce(&mut Config)) -> weftd
             http: Some("127.0.0.1:0".parse().unwrap()),
             https: None,
             irc: None,
+            web: false,
         },
         identity: Identity { key_file: None }, // ephemeral key per test
         ..Config::default()
@@ -231,7 +232,11 @@ struct WsClient {
 
 impl WsClient {
     async fn connect(addr: SocketAddr) -> Self {
-        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        Self::connect_url(format!("ws://{addr}")).await
+    }
+
+    async fn connect_url(url: String) -> Self {
+        let (ws, _) = tokio_tungstenite::connect_async(url)
             .await
             .expect("WS connect");
         Self { ws }
@@ -275,6 +280,31 @@ async fn ws_fallback_speaks_the_same_protocol() {
     let echo = client.recv().await;
     assert_eq!(echo.label.as_deref(), Some("w1"));
     assert!(matches!(&echo.event, Event::Message(m) if m.body == "over websocket"));
+
+    server.shutdown().await;
+}
+
+/// P3 web embed: the same-origin `/ws` route on the HTTP listener bridges into
+/// the ordinary session path, so a browser served from `https://host/` speaks
+/// WEFT back to `wss://host/ws` — no separate `[listen] ws` port needed.
+#[tokio::test]
+async fn same_origin_ws_route_speaks_the_protocol() {
+    let server = start_with(&["#general"], |c| c.listen.web = true).await;
+    let http = server.http_addr.expect("http enabled");
+    let mut client = WsClient::connect_url(format!("ws://{http}/ws")).await;
+
+    client.send("HELLO weft/1").await;
+    assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+    client.send(&format!("REGISTER ada :{PASSWORD}")).await;
+    assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+    client.send("JOIN #general").await;
+    assert!(matches!(client.recv().await.event, Event::Member { .. }));
+    assert!(matches!(client.recv().await.event, Event::Policy { .. }));
+
+    client.send("@label=o1 MSG #general :same-origin ws").await;
+    let echo = client.recv().await;
+    assert_eq!(echo.label.as_deref(), Some("o1"));
+    assert!(matches!(&echo.event, Event::Message(m) if m.body == "same-origin ws"));
 
     server.shutdown().await;
 }
