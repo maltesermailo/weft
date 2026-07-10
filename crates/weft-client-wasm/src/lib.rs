@@ -119,7 +119,8 @@ impl WeftClient {
     pub fn invoke(&self, cmd: String, args: JsValue) -> Result<JsValue, JsValue> {
         let parsed: serde_json::Value =
             serde_wasm_bindgen::from_value(args).unwrap_or(serde_json::Value::Null);
-        self.dispatch(&cmd, &parsed).map_err(|e| JsValue::from_str(&e))
+        self.dispatch(&cmd, &parsed)
+            .map_err(|e| JsValue::from_str(&e))
     }
 }
 
@@ -127,7 +128,12 @@ impl WeftClient {
     fn dispatch(&self, cmd: &str, args: &serde_json::Value) -> Result<JsValue, String> {
         // Typed extractors over the JS args object: required string, optional
         // string, bool flag (default false), unsigned int (default 0).
-        let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let arg = |k: &str| {
+            args.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
         let opt = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::to_string);
         let flag = |k: &str| args.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
         let num = |k: &str| args.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
@@ -141,7 +147,12 @@ impl WeftClient {
                     .map(|_| JsValue::UNDEFINED);
             }
             "disconnect" => {
-                let handle = self.conn.borrow().as_ref().map(|c| c.keepalive).unwrap_or(0);
+                let handle = self
+                    .conn
+                    .borrow()
+                    .as_ref()
+                    .map(|c| c.keepalive)
+                    .unwrap_or(0);
                 clear_keepalive(handle);
                 *self.conn.borrow_mut() = None;
                 return Ok(JsValue::UNDEFINED);
@@ -162,7 +173,18 @@ impl WeftClient {
             "send_raw" => arg("line"),
             "join" => build_join(&arg("channel"))?,
             "part" => build_part(&arg("channel"))?,
-            "send_message" => build_msg(&arg("target"), &arg("body"), opt("replyTo"))?,
+            "send_message" => {
+                let attachments = args
+                    .get("attachments")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                build_msg(&arg("target"), &arg("body"), opt("replyTo"), attachments)?
+            }
             "edit" => build_edit(&arg("msgid"), &arg("body"))?,
             "delete" => build_delete(&arg("msgid"))?,
             "react" => build_react(&arg("msgid"), &arg("emoji"), flag("add"))?,
@@ -178,14 +200,18 @@ impl WeftClient {
             "grant" => build_grant(&arg("subject"), &arg("scope"), &arg("caps"))?,
             "revoke" => build_revoke(&arg("subject"), &arg("scope"), &arg("caps"))?,
             "roles" => build_roles(&arg("scope"))?,
-            "role_create" => build_role_create(&arg("scope"), &arg("color"), &arg("caps"), &arg("name"))?,
+            "role_create" => {
+                build_role_create(&arg("scope"), &arg("color"), &arg("caps"), &arg("name"))?
+            }
             "role_delete" => build_role_delete(&arg("scope"), &arg("name"))?,
             "role_assign" => build_role_assign(&arg("scope"), &arg("account"), &arg("name"))?,
             "role_unassign" => build_role_unassign(&arg("scope"), &arg("account"), &arg("name"))?,
             "roles_of" => build_roles_of(&arg("scope"), &arg("account"))?,
             // ---- channels ----
             "channel_create" => build_channel_create(&arg("channel"), opt("policy").as_deref())?,
-            "channel_policy" => build_channel_policy(&arg("channel"), &arg("policy"), flag("purge"))?,
+            "channel_policy" => {
+                build_channel_policy(&arg("channel"), &arg("policy"), flag("purge"))?
+            }
             "channel_rename" => build_channel_rename(&arg("old"), &arg("new"))?,
             "channel_delete" => build_channel_delete(&arg("channel"))?,
             "channel_meta" => build_channel_meta(&arg("channel"), &arg("key"), &arg("value"))?,
@@ -197,7 +223,9 @@ impl WeftClient {
             "ns_visibility" => build_ns_visibility(&arg("name"), &arg("visibility"))?,
             "ns_delegate" => build_ns_delegate(&arg("name"), &arg("subject"), &arg("caps"))?,
             "ns_delete" => build_ns_delete(&arg("name"))?,
-            "ns_recovery_set" => build_ns_recovery_set(&arg("name"), num("m") as u32, &arg("keys"))?,
+            "ns_recovery_set" => {
+                build_ns_recovery_set(&arg("name"), num("m") as u32, &arg("keys"))?
+            }
             "ns_recover" => build_ns_recover(&arg("name"), &arg("rotation"))?,
             "federate" => build_federate(&arg("target"))?,
             // ---- invites ----
@@ -205,17 +233,28 @@ impl WeftClient {
             "invite_redeem" => build_invite_redeem(&arg("token"))?,
             "invite_revoke" => build_invite_revoke(&arg("inviteId"))?,
             // ---- moderation / reports ----
-            "moderate" => build_moderation(&arg("verb"), &arg("scope"), &arg("account"), opt("reason").as_deref())?,
+            "moderate" => build_moderation(
+                &arg("verb"),
+                &arg("scope"),
+                &arg("account"),
+                opt("reason").as_deref(),
+            )?,
             "report" => build_report(&arg("msgid"), &arg("category"), &arg("scope"), opt("note"))?,
             "reports_list" => build_reports_list(&arg("scope"), opt("status"))?,
-            "reports_resolve" => build_reports_resolve(&arg("reportId"), &arg("action"), opt("note"))?,
+            "reports_resolve" => {
+                build_reports_resolve(&arg("reportId"), &arg("action"), opt("note"))?
+            }
             // ---- federation (operator) ----
             "netblock_add" => build_netblock_add(&arg("network"), opt("reason").as_deref())?,
             "netblock_remove" => build_netblock_remove(&arg("network"))?,
             "netblock_list" => build_netblock_list()?,
-            "bridge_propose" => {
-                build_bridge_propose(&arg("scope"), &arg("peer"), &arg("history"), &arg("media"), flag("typing"))?
-            }
+            "bridge_propose" => build_bridge_propose(
+                &arg("scope"),
+                &arg("peer"),
+                &arg("history"),
+                &arg("media"),
+                flag("typing"),
+            )?,
             "bridge_accept" => build_bridge_accept(&arg("peer"), num("version"))?,
             "bridge_sever" => build_bridge_sever(&arg("peer"))?,
             other => return Err(format!("unknown command {other}")),

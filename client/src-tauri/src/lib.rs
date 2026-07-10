@@ -288,8 +288,14 @@ fn send_message(
     target: String,
     body: String,
     reply_to: Option<String>,
+    attachments: Option<Vec<String>>,
 ) -> Result<(), String> {
-    conn.send(weft::build_msg(&target, &body, reply_to)?)
+    conn.send(weft::build_msg(
+        &target,
+        &body,
+        reply_to,
+        attachments.unwrap_or_default(),
+    )?)
 }
 
 #[tauri::command]
@@ -350,12 +356,21 @@ fn moderate(
     account: String,
     reason: Option<String>,
 ) -> Result<(), String> {
-    conn.send(weft::build_moderation(&verb, &scope, &account, reason.as_deref())?)
+    conn.send(weft::build_moderation(
+        &verb,
+        &scope,
+        &account,
+        reason.as_deref(),
+    )?)
 }
 
 // ---- federation (operator) ----
 #[tauri::command]
-fn netblock_add(conn: State<'_, Conn>, network: String, reason: Option<String>) -> Result<(), String> {
+fn netblock_add(
+    conn: State<'_, Conn>,
+    network: String,
+    reason: Option<String>,
+) -> Result<(), String> {
     conn.send(weft::build_netblock_add(&network, reason.as_deref())?)
 }
 
@@ -378,7 +393,9 @@ fn bridge_propose(
     media: String,
     typing: bool,
 ) -> Result<(), String> {
-    conn.send(weft::build_bridge_propose(&scope, &peer, &history, &media, typing)?)
+    conn.send(weft::build_bridge_propose(
+        &scope, &peer, &history, &media, typing,
+    )?)
 }
 
 #[tauri::command]

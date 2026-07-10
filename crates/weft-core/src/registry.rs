@@ -16,6 +16,9 @@ pub struct Registry {
     channels: RwLock<HashMap<ChannelName, ChannelHandle>>,
     network: NetworkName,
     store: Arc<dyn EventStore>,
+    /// §13 media reference index, handed to each channel actor so it records
+    /// blob references as it mints msgids (the single-writer point).
+    media: Arc<dyn weft_store::MediaStore>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -34,12 +37,18 @@ impl Registry {
         channels: impl IntoIterator<Item = (ChannelName, RetentionPolicy)>,
         network: NetworkName,
         store: Arc<dyn EventStore>,
+        media: Arc<dyn weft_store::MediaStore>,
     ) -> Self {
         let channels = channels
             .into_iter()
             .map(|(name, policy)| {
-                let handle =
-                    channel::spawn(name.clone(), network.clone(), policy, Arc::clone(&store));
+                let handle = channel::spawn(
+                    name.clone(),
+                    network.clone(),
+                    policy,
+                    Arc::clone(&store),
+                    Arc::clone(&media),
+                );
                 (name, handle)
             })
             .collect();
@@ -47,6 +56,7 @@ impl Registry {
             channels: RwLock::new(channels),
             network,
             store,
+            media,
         }
     }
 
@@ -82,6 +92,7 @@ impl Registry {
             self.network.clone(),
             policy,
             Arc::clone(&self.store),
+            Arc::clone(&self.media),
         );
         channels.insert(name, handle.clone());
         Some(handle)
@@ -115,6 +126,7 @@ impl Registry {
             self.network.clone(),
             policy,
             Arc::clone(&self.store),
+            Arc::clone(&self.media),
         );
         channels.insert(new, handle);
         true

@@ -127,6 +127,13 @@ key = "/etc/weft/privkey.pem"
 [admin]
 enabled = false
 
+# ── media (§13 content-addressed blobs) ──────────────────────────────────────
+# Where uploaded blobs live. Content-addressed by BLAKE3 (dedup by construction),
+# served home-network-only over the QUIC data plane + HTTP `/media`. Unset =
+# in-memory (ephemeral — pairs with `storage.backend = "memory"`, dev/test).
+[media]
+dir = "/var/lib/weft/blobs"
+
 # ── federation (§11) ─────────────────────────────────────────────────────────
 # How this network treats INBOUND bridge sessions. Default: bridge with nobody.
 [federation]

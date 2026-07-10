@@ -109,21 +109,86 @@ clients            upload (OFFER->transfer, drag/paste, progress); render images
 
 ## Milestones (each independently shippable)
 
-- **M-media-0 — data-plane transport spike.** `BlobStore` fs CAS + the QUIC
-  uni-stream / WS-binary / HTTP transfer paths, generic over `media|backfill`.
-  Upload ONE blob (`OFFER`→token→transfer), BLAKE3-hash + store + dedup, fetch it
-  back (bearer token, Range). No `MSG`/attach yet. *Green:* a conformance test
-  round-trips a blob over QUIC and over HTTP; the same bytes dedupe to one hash.
-- **M-media-1 — posting + fetch semantics (single network).** `attach.N=`/
-  `attach-meta=` on `MSG`, `weft-media://` refs + `BlobMeta`, membership-gated
-  fetch (token → session → blob⇄ref index), refcount→retention GC in maintenance,
-  server-generated thumbnails + probed dimensions, `is_blocked` gate (stub).
-  *Green:* two clients exchange an image message; a non-member is denied; deleting
-  the message eventually GCs the blob.
-- **M-media-2 — GUI client (Tauri/web).** Upload (drag/paste, progress bars),
-  render images inline + **ranged `<video>`** + file chips; the `weft-media://` →
-  `/media` + session-token resolution; wasm + native. *Green:* two browsers
-  post + view images and stream a video; weftd enforces membership on each fetch.
+- **M-media-0 ✅ (2026-07-10) — data-plane transport spike.** Proto: `STREAM
+  OFFER <media|backfill> <mime> <bytes>` (`StreamMode` via `wire_enum!`) +
+  `STREAM ACCEPT`/`STREAM STORED` events, round-trip tested. `weft-store`:
+  `BlobStore` trait + `blob_hash` (BLAKE3) + `MemBlobStore` + a shared
+  `blob_store_contract`. `weft-core`: `ServerCtx.blobs` + a media-token registry
+  (`media.rs` — one-time upload grants from `STREAM OFFER`, fetch bearers) + the
+  `on_stream_offer` handler (size-checks, mints, replies `ACCEPT`). `weftd`:
+  `FsBlobStore` (sharded fs CAS, temp-then-rename, meta sidecar), the **QUIC
+  data plane** (extra bidi streams accepted after the control stream, framed
+  `PUT <token>` / `GET <bearer> <hash> [range]`), the **HTTP** `/media` (POST
+  upload + GET fetch with `Range`, `no-referrer`), and `[media] dir` config.
+  *Green:* conformance round-trips a blob over **QUIC and HTTP**, identical bytes
+  dedupe to one hash, ranged fetch + one-time-token + gated-fetch checks hold;
+  full workspace green (24 conformance, 100 core, 21 store).
+  **Scoping calls (deliberate, deferred):** (1) **WS-binary** transfer deferred —
+  QUIC + HTTP satisfy the round-trip; it mirrors the QUIC framing when a WS-only
+  native client needs it. (2) **Membership-gating** is stubbed — a valid bearer
+  fetches any blob (no channels reference blobs yet); per-blob gating is M-media-1.
+  (3) Blob **meta** is a CAS sidecar (`mime\nbytes`); dimensions/refcount move to
+  the SQL store in M-media-1. (4) `STREAM STORED` (control event) is codec-only —
+  M0 returns the URI on the transfer response (bidi/HTTP); the fire-and-forget
+  control-event delivery lands with the M-media-1 posting flow. (5) Bearer
+  issuance is an internal `ctx` API (tests mint via `ctx`); client-facing issuance
+  is M-media-2.
+- **M-media-1 ◑ (2026-07-10) — posting + fetch semantics (single network).**
+  Semantic core shipped: `on_msg` now **accepts + validates** `attach.N=`
+  (well-formed, same-network `weft-media://` refs; foreign → `POLICY`, empty body
+  legal with attachments); a new **`MediaStore`** (reference index + orphan
+  tracking; mem + PG migration 0018 + shared contract) records blob⇄message refs
+  at the **channel actor** (the single-writer msgid mint point) and drops them on
+  DELETE; **membership-gated fetch** (`ServerCtx::may_fetch` — bearer→account, a
+  scope referencing the blob must have the account as member/DM-participant; a
+  gated blob is uniformly "not found", invariant 1) replaces M0's bearer-only
+  stub on both QUIC + HTTP; **refcount→retention GC** (`gc_orphan_blobs` +
+  `drop_refs_before` in the maintenance pass, 1 h grace so uploaded-not-yet-posted
+  blobs survive; `BlobStore::delete` added, fs + mem); and the **`is_blocked`
+  seam** (`ServerCtx::is_blob_blocked` stub → false) is now called on every
+  upload. *Green:* two conformance tests (QUIC + HTTP) — upload → post attachment
+  → member fetch (incl. range) → **non-member denied** → **DELETE → GC → gone**;
+  full workspace green, clippy clean.
+- **M-media-1b ✅ (2026-07-10) — thumbnails, dimensions, attach cap.** Blob
+  metadata moved into the store: `MediaStore` now records a full **`BlobRecord`**
+  (mime, size, width, height, thumbnail hash, created) with a `blob_meta` query
+  (mem + PG, migration 0018 → a `weft_blobs` table). On image upload weftd
+  **probes dimensions** and **generates a ≤256px PNG thumbnail** (`image` crate,
+  off-executor via `spawn_blocking`) stored as its own blob; the HTTP upload
+  response returns `{width, height, thumb-uri, …}`. The **thumbnail is a
+  first-class blob auto-referenced alongside its parent** by the channel actor —
+  so it inherits the parent's membership gating *and* refcount lifetime (deleting
+  the message orphans both; one GC pass collects both), no special cascade. And
+  the **`attach` cap gate**: attachments to a **restricted** channel require
+  `attach` (open channels stay free, mirroring the posting gate) via
+  `Session::can_attach`. *Green:* two new conformance tests — a real PNG's
+  dimensions + thumbnail (member-fetchable, non-member-gated, GC'd with parent),
+  and the restricted-channel attach-cap denial (send-but-no-attach → CAP-REQUIRED).
+  Full workspace green, clippy clean.
+  **Still deferred:** **DM attachments** (channel scope only); the CAS mime
+  sidecar is now vestigial (blob_meta is authoritative) but left in place; video
+  duration probing.
+- **M-media-2 ✅ (2026-07-10, web) — GUI client.** Wire: a new **`MEDIA TOKEN`
+  event** delivers a per-session fetch **bearer** at auth (weft-proto + weft-core
+  `welcome_authed`); the HTTP upload endpoint now also accepts that bearer (mime
+  from `Content-Type`), so the **browser uploads in one authed POST** — no OFFER
+  handshake. `weft-client-core`: `ClientEvent::Message` carries `attachments`,
+  `build_msg` takes them, and a `MediaToken` event flows to JS. Frontend
+  (`weft.ts`): stores the bearer, `upload(file)` (single `fetch` POST →
+  `{media,thumb,width,height}`), and `mediaUrl(ref)` resolving `weft-media://…` →
+  `/media/<hash>?t=<bearer>`. UI: an **attach button** + a pending-attachment tray
+  in the Composer (image previews via the thumbnail), and a new **`Attachment`**
+  component that renders each ref by **probing its `Content-Type`** (1-byte ranged
+  GET) → inline **image**, ranged **`<video controls>`**, or a **file chip**.
+  *Green:* conformance covers the bearer delivery + bearer-authorized upload +
+  post + gated fetch round-trip (27 conformance tests, full workspace, clippy,
+  svelte-check, and the embedded web build all pass). The browser `<video>` does
+  ranged fetches natively against weftd's `Range` support.
+  **Deferred:** the **desktop (Tauri)** media path (needs the QUIC data-plane
+  upload + a non-`window.location` origin for `mediaUrl` — the web slice is the
+  green); drag-and-drop / paste-to-upload + progress bars; and thumbnails at the
+  *recipient* render (needs `attach-meta` in the codec so recipients get dims +
+  thumb without a Content-Type probe).
 - **M-media-3 — federation mirroring (§11.8).** On ingesting a bridged message
   with attachments, fetch the blobs over the bridge data plane, **BLAKE3-verify**,
   store under receiver retention + receiver blocklist, bounded by the manifest

@@ -7,7 +7,7 @@ use crate::line::{label_from_tags, write_label, Args, Line, Tags};
 use crate::name::{Account, ChannelName, NamespaceName, NetworkName, Target};
 use crate::types::{
     report_category_ok, HistoryMode, MediaMode, MsgMeta, PresenceStatus, ReportScope, ReportStatus,
-    ResolveAction, TypingState, Visibility,
+    ResolveAction, StreamMode, TypingState, Visibility,
 };
 
 /// A command plus its optional `label` (§3.5). The label is echoed on every
@@ -133,6 +133,15 @@ pub enum Command {
         target: Target,
         body: Option<String>,
         meta: MsgMeta,
+    },
+    /// `STREAM OFFER <media|backfill> <mime> <bytes>` (§13, §6) — request a
+    /// data-plane transfer. The server checks the `attach` cap + size config and
+    /// replies `STREAM ACCEPT <token>`; the bytes then ride the data plane. For
+    /// `backfill`, `mime` is a pseudo-type and `bytes` an estimate (M-media-4).
+    StreamOffer {
+        mode: StreamMode,
+        mime: String,
+        bytes: u64,
     },
     /// `EDIT <msgid> :<new>` — edit-own only, honored at origin (§6.4).
     Edit { msgid: MsgId, body: String },
@@ -1190,6 +1199,29 @@ impl Command {
                     note: args.trailing_opt(),
                 })
             }
+            "STREAM" => {
+                let mut args = Args::new(line, "STREAM");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "OFFER" => Ok(Command::StreamOffer {
+                        mode: args.req("mode")?.parse()?,
+                        mime: args.req("mime")?.to_string(),
+                        bytes: args
+                            .req("bytes")?
+                            .parse()
+                            .map_err(|_| ParseError::BadParam {
+                                verb: "STREAM",
+                                what: "bytes",
+                                value: line.params.get(3).cloned().unwrap_or_default(),
+                            })?,
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "STREAM",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
             _ => Ok(Command::Unknown {
                 verb: verb.to_string(),
             }),
@@ -1256,6 +1288,16 @@ impl Command {
                 meta.write_tags(&mut tags)?;
                 ("MSG", vec![target.to_string()], body.clone())
             }
+            Command::StreamOffer { mode, mime, bytes } => (
+                "STREAM",
+                vec![
+                    "OFFER".to_string(),
+                    mode.to_string(),
+                    mime.clone(),
+                    bytes.to_string(),
+                ],
+                None,
+            ),
             Command::Edit { msgid, body } => ("EDIT", vec![msgid.to_string()], Some(body.clone())),
             Command::Delete { msgid } => ("DELETE", vec![msgid.to_string()], None),
             Command::React { msgid, emoji } | Command::Unreact { msgid, emoji } => {
@@ -1936,6 +1978,36 @@ mod tests {
     }
 
     #[test]
+    fn stream_offer_round_trips() {
+        let request = Request::new(Command::StreamOffer {
+            mode: StreamMode::Media,
+            mime: "image/png".into(),
+            bytes: 20480,
+        });
+        assert_eq!(
+            request.serialize().unwrap(),
+            "STREAM OFFER media image/png 20480"
+        );
+        round_trip(&request);
+
+        // backfill mode shares the shape (M-media-4 wires the transfer).
+        round_trip(&Request::new(Command::StreamOffer {
+            mode: StreamMode::Backfill,
+            mime: "application/weft-history".into(),
+            bytes: 0,
+        }));
+    }
+
+    #[test]
+    fn stream_offer_rejects_bad_params() {
+        assert!(Request::parse("STREAM OFFER media image/png notanumber").is_err());
+        assert!(Request::parse("STREAM OFFER bogus image/png 1").is_err());
+        assert!(Request::parse("STREAM WAT").is_err());
+        // A bare STREAM with no subcommand is malformed, not Unknown.
+        assert!(Request::parse("STREAM").is_err());
+    }
+
+    #[test]
     fn msg_attachments_only_and_limits() {
         // Empty trailing (bare media, §13) is preserved as Some("").
         let request = Request::new(Command::Msg {
@@ -2131,7 +2203,9 @@ mod tests {
             new_name: "#ns/new".parse().unwrap(),
         }));
         assert_eq!(
-            Request::parse("CHANNEL RENAME #ns/old #ns/new").unwrap().command,
+            Request::parse("CHANNEL RENAME #ns/old #ns/new")
+                .unwrap()
+                .command,
             Command::ChannelRename {
                 channel: "#ns/old".parse().unwrap(),
                 new_name: "#ns/new".parse().unwrap(),

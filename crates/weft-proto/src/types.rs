@@ -213,6 +213,16 @@ impl FromStr for MediaMode {
     }
 }
 
+wire_enum!(
+    /// `STREAM OFFER <media|backfill> …` payload kind (§13, §6). `media` is a
+    /// content-addressed blob; `backfill` is bulk HISTORY streamed over the data
+    /// plane (M-media-4). Both ride the same transport.
+    StreamMode, "stream mode", {
+        Media => "media",
+        Backfill => "backfill",
+    }
+);
+
 /// §6.7 normative report categories; extensible with an `x-` prefix.
 const REPORT_CATEGORIES: &[&str] = &[
     "spam",

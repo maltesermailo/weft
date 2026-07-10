@@ -195,7 +195,9 @@ impl<S: ControlStream> Session<S> {
                 .collect(),
             Err(e) => return self.internal(label, &e).await,
         };
-        let token = self.ctx.mint_token(subj, token_scope, remaining, new_epoch, u64::MAX);
+        let token = self
+            .ctx
+            .mint_token(subj, token_scope, remaining, new_epoch, u64::MAX);
         self.send_event(
             label,
             Event::Token {
@@ -208,5 +210,4 @@ impl<S: ControlStream> Session<S> {
         .await?;
         Ok(Flow::Continue)
     }
-
 }

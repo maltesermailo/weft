@@ -115,13 +115,12 @@ async fn send(stream: &mut QuicControlStream, sink: &TauriSink, line: &str) -> R
         Ok(()) => Ok(()),
         Err(e) => {
             sink.emit(ClientEvent::Closed {
-                    reason: format!("send failed: {e}"),
-                });
+                reason: format!("send failed: {e}"),
+            });
             Err(())
         }
     }
 }
-
 
 async fn connect(
     addr: SocketAddr,
@@ -151,4 +150,3 @@ async fn connect(
     });
     Ok(stream)
 }
-

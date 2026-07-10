@@ -76,8 +76,7 @@ async fn renew_loop(acme: Acme, challenges: Challenges, resolver: Arc<Reloadable
 async fn obtain(acme: &Acme, challenges: &Challenges) -> anyhow::Result<Arc<CertifiedKey>> {
     let account = account(acme).await?;
 
-    let identifiers: Vec<Identifier> =
-        acme.domains.iter().cloned().map(Identifier::Dns).collect();
+    let identifiers: Vec<Identifier> = acme.domains.iter().cloned().map(Identifier::Dns).collect();
     let mut order = account
         .new_order(&NewOrder {
             identifiers: &identifiers,
@@ -87,7 +86,11 @@ async fn obtain(acme: &Acme, challenges: &Challenges) -> anyhow::Result<Arc<Cert
 
     // Publish an HTTP-01 response for each pending authorization.
     let mut tokens = Vec::new();
-    for authz in order.authorizations().await.context("fetching authorizations")? {
+    for authz in order
+        .authorizations()
+        .await
+        .context("fetching authorizations")?
+    {
         if authz.status != AuthorizationStatus::Pending {
             continue;
         }
@@ -135,7 +138,11 @@ async fn obtain(acme: &Acme, challenges: &Challenges) -> anyhow::Result<Arc<Cert
         .context("finalizing order")?;
 
     let chain_pem = loop {
-        if let Some(pem) = order.certificate().await.context("downloading certificate")? {
+        if let Some(pem) = order
+            .certificate()
+            .await
+            .context("downloading certificate")?
+        {
             break pem;
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -175,11 +182,7 @@ async fn account(acme: &Acme) -> anyhow::Result<Account> {
         }
         warn!("ACME: cached account unreadable, registering a new one");
     }
-    let contacts: Vec<String> = acme
-        .email
-        .iter()
-        .map(|e| format!("mailto:{e}"))
-        .collect();
+    let contacts: Vec<String> = acme.email.iter().map(|e| format!("mailto:{e}")).collect();
     let contact: Vec<&str> = contacts.iter().map(String::as_str).collect();
     let (account, creds) = Account::create(
         &NewAccount {

@@ -272,6 +272,7 @@ pub fn spawn(
     network: NetworkName,
     policy: RetentionPolicy,
     store: Arc<dyn EventStore>,
+    media: Arc<dyn weft_store::MediaStore>,
 ) -> ChannelHandle {
     let (inbox_tx, inbox) = mpsc::channel(INBOX_CAPACITY);
     let handle = ChannelHandle {
@@ -284,6 +285,7 @@ pub fn spawn(
         network,
         policy,
         store,
+        media,
         members: std::collections::HashMap::new(),
         events: broadcast::Sender::new(BROADCAST_CAPACITY),
         ulids: ulid::Generator::new(),
@@ -298,6 +300,8 @@ struct Actor {
     network: NetworkName,
     policy: RetentionPolicy,
     store: Arc<dyn EventStore>,
+    /// §13 media reference index — refs recorded here, the single-writer point.
+    media: Arc<dyn weft_store::MediaStore>,
     members: std::collections::HashMap<SessionId, Account>,
     events: broadcast::Sender<ChannelEvent>,
     ulids: ulid::Generator,
@@ -389,6 +393,7 @@ impl Actor {
                     },
                 };
                 self.persist(record).await;
+                self.record_media_refs(&msgid, &meta).await;
                 self.broadcast(
                     session,
                     Event::Message(Box::new(MessageEvent {
@@ -443,6 +448,8 @@ impl Actor {
                     kind: EventKind::Delete,
                 })
                 .await;
+                // §13 the deleted message's blob refs drop → refcount may hit 0.
+                let _ = self.media.drop_refs(&root).await;
                 self.broadcast(
                     session,
                     Event::Deleted {
@@ -602,6 +609,36 @@ impl Actor {
     fn mint(&mut self) -> MsgId {
         let ulid = self.ulids.generate().unwrap_or_else(|_| Ulid::new());
         MsgId::new(self.network.clone(), ulid)
+    }
+
+    /// §13 record the blob references a posted message carries (M-media-1).
+    /// Only well-formed **same-network** `weft-media://` attachments are tracked
+    /// (foreign media = M-media-3 mirroring); malformed refs are ignored.
+    async fn record_media_refs(&self, msgid: &MsgId, meta: &MsgMeta) {
+        if meta.attachments.is_empty() {
+            return;
+        }
+        let net = self.network.to_string();
+        let mut hashes: Vec<String> = Vec::new();
+        for uri in &meta.attachments {
+            let Some((origin, hash)) = crate::media::parse_media_uri(uri) else {
+                continue;
+            };
+            if origin != net.as_str() {
+                continue;
+            }
+            hashes.push(hash.to_string());
+            // §13 also reference the server-generated thumbnail so it shares the
+            // parent's membership gating + refcount lifetime (M-media-1b).
+            if let Ok(Some(rec)) = self.media.blob_meta(hash).await {
+                if let Some(thumb) = rec.thumb {
+                    hashes.push(thumb);
+                }
+            }
+        }
+        if !hashes.is_empty() {
+            let _ = self.media.add_refs(&self.scope, msgid, &hashes).await;
+        }
     }
 
     /// §5.2 `ephemeral` = relay only; everything else is stored. A storage

@@ -2,6 +2,7 @@
   import { getApp } from "$lib/context";
   import { autofocus } from "$lib/actions";
   import { EMOJI, QUICK_EMOJI } from "$lib/emoji";
+  import Attachment from "./Attachment.svelte";
   import type { Msg } from "$lib/types";
 
   const app = getApp();
@@ -42,6 +43,13 @@
         <div class="edit-hint">escape to <button class="linkish" onclick={app.cancelEdit}>cancel</button> · enter to <button class="linkish" onclick={() => app.saveEdit(m)}>save</button></div>
       {:else}
         <div class="msg-line">{#if m.md}{@html app.renderMd(m.body)}{:else}{m.body}{/if}{#if m.edited}<span class="edited-tag" title="edited">(edited)</span>{/if}</div>
+      {/if}
+      {#if m.attachments?.length}
+        <div class="attachments">
+          {#each m.attachments as uri (uri)}
+            <Attachment {uri} />
+          {/each}
+        </div>
       {/if}
       {#if m.reactions && Object.keys(m.reactions).length}
         <div class="reactions">

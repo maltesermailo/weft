@@ -488,24 +488,57 @@ pub trait RoleStore: Send + Sync {
 
     /// Record that `subject` (a local name or foreign `account@network`, §10.4)
     /// holds role `name` at `scope`. Idempotent.
-    async fn assign_role(
-        &self,
-        scope: &str,
-        name: &str,
-        subject: &str,
-    ) -> Result<(), StoreError>;
+    async fn assign_role(&self, scope: &str, name: &str, subject: &str) -> Result<(), StoreError>;
 
     /// Drop an assignment. Idempotent.
-    async fn unassign_role(
-        &self,
-        scope: &str,
-        name: &str,
-        subject: &str,
-    ) -> Result<(), StoreError>;
+    async fn unassign_role(&self, scope: &str, name: &str, subject: &str)
+        -> Result<(), StoreError>;
 
     /// The role names `subject` holds at `scope` (explicit membership).
     async fn roles_of(&self, scope: &str, subject: &str) -> Result<Vec<String>, StoreError>;
 
     /// The subjects holding role `name` at `scope` — for propagation (§6.5).
     async fn role_members(&self, scope: &str, name: &str) -> Result<Vec<String>, StoreError>;
+}
+
+/// §13 media reference index + orphan tracking (M-media-1). Blob *bytes* live in
+/// a [`BlobStore`](crate::BlobStore); this maps which messages (in which scopes)
+/// reference which blob hashes, so fetches can be membership-gated and
+/// unreferenced blobs GC'd (refcount → message retention). Hashes are the wire
+/// hex form.
+#[async_trait]
+pub trait MediaStore: Send + Sync {
+    /// Record a freshly-uploaded blob's metadata (the `created_ms` is also the GC
+    /// grace anchor: it is not collected until orphaned *past* the grace window,
+    /// so an uploaded-but-not-yet-posted blob survives the gap). Idempotent on
+    /// `hash`.
+    async fn record_blob(&self, record: crate::BlobRecord) -> Result<(), StoreError>;
+
+    /// A stored blob's metadata (mime, size, dimensions, thumbnail), if known.
+    async fn blob_meta(&self, hash: &str) -> Result<Option<crate::BlobRecord>, StoreError>;
+
+    /// Record that `msgid` (in `scope`) references these blob hashes.
+    async fn add_refs(
+        &self,
+        scope: &Scope,
+        msgid: &MsgId,
+        hashes: &[String],
+    ) -> Result<(), StoreError>;
+
+    /// Drop every reference held by `msgid` (explicit DELETE). Idempotent.
+    async fn drop_refs(&self, msgid: &MsgId) -> Result<(), StoreError>;
+
+    /// Drop references for messages in `scope` minted before `cutoff_ms`
+    /// (retention purge — the msgid's ULID carries its timestamp).
+    async fn drop_refs_before(&self, scope: &Scope, cutoff_ms: u64) -> Result<(), StoreError>;
+
+    /// The scopes that currently reference `hash` (for membership gating).
+    async fn blob_scopes(&self, hash: &str) -> Result<Vec<Scope>, StoreError>;
+
+    /// Known blobs uploaded before `cutoff_ms` with **zero** live references —
+    /// the GC candidates.
+    async fn orphans(&self, cutoff_ms: u64) -> Result<Vec<String>, StoreError>;
+
+    /// Forget a blob's tracking row after its bytes are deleted. Idempotent.
+    async fn forget_blob(&self, hash: &str) -> Result<(), StoreError>;
 }

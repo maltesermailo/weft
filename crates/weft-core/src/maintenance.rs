@@ -8,7 +8,11 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 use weft_proto::{ChannelName, RetentionPolicy};
-use weft_store::{EventStore, NamespaceStore, ReportStore, Scope};
+use weft_store::{BlobHash, BlobStore, EventStore, MediaStore, NamespaceStore, ReportStore, Scope};
+
+/// §13 grace before an orphaned blob is GC'd — an uploaded-but-not-yet-posted
+/// blob survives this window (it has no references until the MSG lands).
+const MEDIA_GC_GRACE_MS: u64 = 60 * 60 * 1000; // 1 hour
 
 #[derive(Debug, Clone)]
 pub struct MaintenanceConfig {
@@ -35,6 +39,8 @@ pub fn spawn_maintenance(
     store: Arc<dyn EventStore>,
     namespaces: Arc<dyn NamespaceStore>,
     reports: Arc<dyn ReportStore>,
+    media_refs: Arc<dyn MediaStore>,
+    blobs: Arc<dyn BlobStore>,
     channels: Vec<(ChannelName, RetentionPolicy)>,
     dm_policy: RetentionPolicy,
     config: MaintenanceConfig,
@@ -49,7 +55,20 @@ pub fn spawn_maintenance(
                 _ = interval.tick() => {}
                 _ = shutdown.cancelled() => break, // exit promptly on shutdown
             }
-            run_pass(&store, &channels, dm_policy, config.compact_after).await;
+            run_pass(
+                &store,
+                &media_refs,
+                &channels,
+                dm_policy,
+                config.compact_after,
+            )
+            .await;
+            // §13 collect blobs orphaned past the grace window.
+            let cutoff = unix_now_ms().saturating_sub(MEDIA_GC_GRACE_MS);
+            let gc = gc_orphan_blobs(&media_refs, &blobs, cutoff).await;
+            if gc > 0 {
+                info!(collected = gc, "orphaned media blobs GC'd (§13)");
+            }
             let applied = apply_due_recoveries(&namespaces, unix_now_ms()).await;
             if applied > 0 {
                 info!(applied, "namespace recoveries applied (§2.4)");
@@ -64,6 +83,37 @@ pub fn spawn_maintenance(
             }
         }
     })
+}
+
+/// §13 GC orphaned blobs: delete the bytes of every blob uploaded before
+/// `cutoff_ms` with **zero** live references, and forget its tracking row.
+/// Returns the count. `cutoff_ms` should be `now − grace` so an uploaded-but-
+/// not-yet-referenced blob survives. Split out so it is unit/conformance-testable
+/// without waiting for the maintenance interval.
+pub async fn gc_orphan_blobs(
+    media_refs: &Arc<dyn MediaStore>,
+    blobs: &Arc<dyn BlobStore>,
+    cutoff_ms: u64,
+) -> usize {
+    let orphans = match media_refs.orphans(cutoff_ms).await {
+        Ok(orphans) => orphans,
+        Err(e) => {
+            error!("orphan scan failed: {e}");
+            return 0;
+        }
+    };
+    let mut removed = 0;
+    for hash in orphans {
+        if let Some(parsed) = BlobHash::parse(&hash) {
+            if let Err(e) = blobs.delete(&parsed).await {
+                error!("blob delete failed: {e}");
+                continue;
+            }
+        }
+        let _ = media_refs.forget_blob(&hash).await;
+        removed += 1;
+    }
+    removed
 }
 
 /// Apply every pending recovery whose delay window has elapsed: rotate the
@@ -106,6 +156,7 @@ pub async fn apply_due_recoveries(namespaces: &Arc<dyn NamespaceStore>, now_ms: 
 
 async fn run_pass(
     store: &Arc<dyn EventStore>,
+    media_refs: &Arc<dyn MediaStore>,
     channels: &[(ChannelName, RetentionPolicy)],
     dm_policy: RetentionPolicy,
     compact_after: Duration,
@@ -120,12 +171,14 @@ async fn run_pass(
             continue;
         };
         let cutoff = now_ms.saturating_sub(duration.as_secs() * 1_000);
-        match store
-            .purge_before(&Scope::Channel(channel.clone()), cutoff)
-            .await
-        {
+        let scope = Scope::Channel(channel.clone());
+        match store.purge_before(&scope, cutoff).await {
             Ok(count) => purged += count,
             Err(e) => error!(%channel, "purge failed: {e}"),
+        }
+        // §13 purged messages release their blob references (refcount → retention).
+        if let Err(e) = media_refs.drop_refs_before(&scope, cutoff).await {
+            error!(%channel, "media ref purge failed: {e}");
         }
     }
     if let RetentionPolicy::Retained(duration) = dm_policy {

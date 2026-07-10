@@ -147,6 +147,12 @@ export interface AppCtx {
   onComposerInput(): void;
   doSend(): void;
   pickMention(name: string): void;
+  // ---- media (§13) ----
+  readonly pendingAttachments: { uri: string; name: string; mime: string; thumb: string | null }[];
+  attachFile(): void;
+  removeAttachment(i: number): void;
+  /** Resolve a `weft-media://…` reference to a fetchable URL. */
+  mediaUrl(ref: string): string;
   readonly mentionQuery: string | null;
   readonly mentionMatches: string[];
   readonly typingLabel: string;

@@ -4,7 +4,6 @@
 use super::*;
 
 impl<S: ControlStream> Session<S> {
-
     /// §6.2 `NS JOIN <name>`: join every channel in the namespace the caller
     /// can see, skipping view-gated and banned ones ("not hidden by
     /// permissions"). No visible channel — nonexistent, private, or fully
@@ -212,7 +211,12 @@ impl<S: ControlStream> Session<S> {
                 .await?;
                 return Ok(Flow::Continue);
             }
-            if let Err(e) = self.ctx.namespaces.set_namespace_federation(&name, open).await {
+            if let Err(e) = self
+                .ctx
+                .namespaces
+                .set_namespace_federation(&name, open)
+                .await
+            {
                 return self.internal(label, &e).await;
             }
             record.federation = open;
@@ -636,7 +640,6 @@ impl<S: ControlStream> Session<S> {
             }
         }
     }
-
 
     /// The ordered channel layout of a namespace (spec extension). A
     /// non-member of a `private` namespace can't observe it (invariant 1).

@@ -288,7 +288,16 @@ impl<S: ControlStream> Session<S> {
             return Ok(Flow::Continue);
         }
         if channel == new_name {
-            return self.send_event(label, Event::ChannelRenamed { old: channel.clone(), new: new_name }).await.map(|()| Flow::Continue);
+            return self
+                .send_event(
+                    label,
+                    Event::ChannelRenamed {
+                        old: channel.clone(),
+                        new: new_name,
+                    },
+                )
+                .await
+                .map(|()| Flow::Continue);
         }
         // Anti-enumeration: absent source is indistinguishable from unauthorized.
         if !self.ctx.registry.exists(&channel) {
@@ -348,9 +357,7 @@ impl<S: ControlStream> Session<S> {
                 })
                 .await;
         }
-        self.ctx
-            .registry
-            .rename(&channel, new_name.clone(), policy);
+        self.ctx.registry.rename(&channel, new_name.clone(), policy);
         debug!(%channel, %new_name, "channel renamed");
         // Direct (labeled) ack to the initiator.
         self.send_event(
@@ -363,6 +370,4 @@ impl<S: ControlStream> Session<S> {
         .await?;
         Ok(Flow::Continue)
     }
-
-
 }

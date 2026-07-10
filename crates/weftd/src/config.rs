@@ -47,6 +47,8 @@ pub struct Config {
     /// Operator web admin panel. When enabled, weftd mounts the `weft-admin`
     /// API on the HTTP listener (`/admin/api/*`); operators are `[operators]`.
     pub admin: Admin,
+    /// §13 media blob storage.
+    pub media: Media,
 }
 
 /// Embedded admin panel toggle. (Standalone `weft-admin` has its own config.)
@@ -54,6 +56,16 @@ pub struct Config {
 #[serde(deny_unknown_fields, default)]
 pub struct Admin {
     pub enabled: bool,
+}
+
+/// §13 media (content-addressed blobs). Fetched home-network-only; the data
+/// plane rides QUIC + HTTP `/media`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Media {
+    /// Filesystem directory for the content-addressed blob store. Unset =
+    /// in-memory (ephemeral; pairs with `storage.backend = "memory"`).
+    pub dir: Option<PathBuf>,
 }
 
 /// §10.2 built-in ACME. Validates over HTTP-01, so the HTTP listener
@@ -272,6 +284,7 @@ impl Default for Config {
             tls: None,
             acme: Acme::default(),
             admin: Admin::default(),
+            media: Media::default(),
         }
     }
 }

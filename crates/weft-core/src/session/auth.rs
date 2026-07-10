@@ -59,6 +59,11 @@ impl<S: ControlStream> Session<S> {
             motd: None,
         };
         self.send_event(label, welcome).await?;
+        // §13 hand the client a per-session media fetch bearer (used on
+        // `/media/<hash>?t=…` URLs; membership is re-checked per fetch).
+        let media_token = self.ctx.mint_media_bearer(account.clone());
+        self.send_event(None, Event::MediaToken { token: media_token })
+            .await?;
         // Join the account directory (DM delivery, MARK sync)...
         self.ctx
             .directory

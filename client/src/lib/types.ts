@@ -27,6 +27,8 @@ export type Msg = {
   /// The sender's network when foreign (`author@net` disambiguates federated
   /// users); absent for local senders, who render as a bare handle.
   net?: string;
+  /// §13 `attach.N=` media references (`weft-media://…` URIs), in order.
+  attachments?: string[];
 };
 
 export type Channel = {

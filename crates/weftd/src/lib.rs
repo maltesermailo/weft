@@ -10,6 +10,7 @@
 mod acceptor;
 pub mod config;
 pub mod dialer;
+pub mod media;
 pub mod telemetry;
 mod tls;
 mod web;
@@ -178,6 +179,16 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         accept_any: config.federation.accept_any,
         auto_accept: config.federation.auto_accept,
     };
+    // §13 blob store: filesystem CAS when `[media] dir` is set, else in-memory
+    // (ephemeral — pairs with the memory storage backend + conformance tests).
+    let blobs: Arc<dyn weft_store::BlobStore> = match &config.media.dir {
+        Some(dir) => Arc::new(
+            media::FsBlobStore::open(dir.clone())
+                .await
+                .with_context(|| format!("opening media dir {}", dir.display()))?,
+        ),
+        None => Arc::new(weft_core::MemBlobStore::default()),
+    };
     let (ctx, channels, mut tasks, admin_router) = match config.storage.backend {
         config::StorageBackend::Memory => {
             boot(
@@ -187,6 +198,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 dm_policy,
                 maintenance,
                 Arc::new(MemoryStore::default()),
+                Arc::clone(&blobs),
                 &seed_channels,
                 operators.clone(),
                 ns_creation_open,
@@ -213,6 +225,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 dm_policy,
                 maintenance,
                 Arc::new(store),
+                Arc::clone(&blobs),
                 &seed_channels,
                 operators.clone(),
                 ns_creation_open,
@@ -302,6 +315,8 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
             app = web::mount(app, Arc::clone(&ctx));
             web::log_spa_state();
         }
+        // §13 media data plane over HTTP: /media upload + /media/<hash> fetch.
+        app = app.merge(media::router(Arc::clone(&ctx)));
         app
     });
 
@@ -414,11 +429,7 @@ impl weft_admin::Live for LiveRegistry {
         }
     }
 
-    async fn delete_message(
-        &self,
-        msgid: &weft_proto::MsgId,
-        by: &weft_proto::Account,
-    ) -> bool {
+    async fn delete_message(&self, msgid: &weft_proto::MsgId, by: &weft_proto::Account) -> bool {
         // Resolve which channel owns the message, then tell its actor to
         // tombstone it (the actor is the single ULID writer, §9.1).
         let Ok(Some(root)) = self.ctx.events.find_root(msgid.ulid()).await else {
@@ -445,6 +456,7 @@ async fn boot<S>(
     dm_policy: weft_proto::RetentionPolicy,
     maintenance: MaintenanceConfig,
     store: Arc<S>,
+    blobs: Arc<dyn weft_store::BlobStore>,
     seed: &[(weft_proto::ChannelName, weft_proto::RetentionPolicy)],
     operators: Vec<weft_proto::Account>,
     ns_creation_open: bool,
@@ -470,6 +482,7 @@ where
         + weft_store::ModerationStore
         + weft_store::PinStore
         + weft_store::MembershipStore
+        + weft_store::MediaStore
         + weft_store::RoleStore
         + 'static,
 {
@@ -488,8 +501,13 @@ where
     // ingredients (server-only network seed, operators, network) before `info`/
     // `identity`/`operators` are consumed by ServerCtx; wire the live actions
     // over the registry once `ctx` exists.
-    let admin_ingredients = admin_enabled
-        .then(|| (identity.seed_b64().into_bytes(), operators.clone(), info.network.to_string()));
+    let admin_ingredients = admin_enabled.then(|| {
+        (
+            identity.seed_b64().into_bytes(),
+            operators.clone(),
+            info.network.to_string(),
+        )
+    });
 
     let ctx = Arc::new(ServerCtx::new(
         info,
@@ -497,6 +515,7 @@ where
         identity,
         registration_open,
         Arc::clone(&store),
+        Arc::clone(&blobs),
         dm_policy,
         operators,
         ns_creation_open,
@@ -518,11 +537,14 @@ where
 
     let events: Arc<dyn EventStore> = store.clone();
     let reports: Arc<dyn weft_store::ReportStore> = store.clone();
+    let media_refs: Arc<dyn weft_store::MediaStore> = store.clone();
     let namespaces: Arc<dyn weft_store::NamespaceStore> = store;
     let tasks = vec![weft_core::spawn_maintenance(
         events,
         namespaces,
         reports,
+        media_refs,
+        Arc::clone(&blobs),
         channels.clone(),
         dm_policy,
         maintenance,

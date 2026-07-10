@@ -680,7 +680,13 @@ mod tests {
         let admin = Keypair::generate();
         // A Foreign subject can be the leaf of a delegation chain (parent holds
         // `grant:ban`, so it may pass `ban` down)...
-        let r = root(&net, Subject::Key(admin.public()), "ns:x", &["ban", "grant:ban"], 0);
+        let r = root(
+            &net,
+            Subject::Key(admin.public()),
+            "ns:x",
+            &["ban", "grant:ban"],
+            0,
+        );
         let c = child(
             &admin,
             &r,
@@ -699,7 +705,13 @@ mod tests {
             &["ban", "grant:ban"],
             0,
         );
-        let orphan = child(&admin, &bad_root, Subject::Key(admin.public()), "ns:x", &["ban"]);
+        let orphan = child(
+            &admin,
+            &bad_root,
+            Subject::Key(admin.public()),
+            "ns:x",
+            &["ban"],
+        );
         assert!(verify_chain(&[bad_root, orphan], &net.public(), 0, no_revocations).is_err());
     }
 

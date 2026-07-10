@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_code)]
 
+mod blob;
 mod compact;
 mod materialize;
 mod memory;
@@ -20,15 +21,18 @@ mod postgres;
 mod traits;
 mod types;
 
+pub use blob::{
+    blob_hash, blob_store_contract, BlobHash, BlobMeta, BlobRecord, BlobStore, MemBlobStore,
+};
 pub use compact::compaction_plan;
 pub use materialize::{materialize, HistoryItem, ReactionSummary, MAX_REACTION_ACTORS};
 pub use memory::MemoryStore;
 #[cfg(feature = "postgres")]
 pub use postgres::PgStore;
 pub use traits::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MembershipStore,
-    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, RoleStore,
-    HOLD_RADIUS,
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaStore,
+    MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore,
+    ReportStore, RoleStore, HOLD_RADIUS,
 };
 pub use types::{
     ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord,

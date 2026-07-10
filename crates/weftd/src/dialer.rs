@@ -86,7 +86,17 @@ pub async fn auto_bridge(
     if !is_dialable(&addr) {
         bail!("refusing to auto-bridge {peer} at non-public address {addr} (SSRF guard, §11.10)");
     }
-    run_peer_requester(endpoint, addr, peer, peer_key, ns, identity, our_network, ctx).await
+    run_peer_requester(
+        endpoint,
+        addr,
+        peer,
+        peer_key,
+        ns,
+        identity,
+        our_network,
+        ctx,
+    )
+    .await
 }
 
 /// Dial `peer`, then request its namespace `ns` and auto-accept the offer,
@@ -243,8 +253,17 @@ pub fn spawn_auto_bridge_consumer(
                     continue;
                 }
             };
-            if let Err(e) =
-                auto_bridge(&client, addr, &network, key, namespace, &identity, &our_network, Arc::clone(&ctx)).await
+            if let Err(e) = auto_bridge(
+                &client,
+                addr,
+                &network,
+                key,
+                namespace,
+                &identity,
+                &our_network,
+                Arc::clone(&ctx),
+            )
+            .await
             {
                 tracing::warn!(%network, "auto-bridge failed: {e}");
             }
@@ -315,9 +334,16 @@ async fn dial_loop(
             .and_then(|mut a| a.next())
         {
             Some(addr) => {
-                if let Err(e) =
-                    run_peer_bridge(&client, addr, &network, key, &identity, &our_network, Arc::clone(&ctx))
-                        .await
+                if let Err(e) = run_peer_bridge(
+                    &client,
+                    addr,
+                    &network,
+                    key,
+                    &identity,
+                    &our_network,
+                    Arc::clone(&ctx),
+                )
+                .await
                 {
                     tracing::debug!(%network, "outbound bridge ended: {e}");
                 }
@@ -419,7 +445,11 @@ pub async fn fetch_signing_key(network: &str) -> anyhow::Result<(PublicKey, Sock
     .context("well-known fetch timed out")??;
 
     if !raw.starts_with(b"HTTP/1.1 200") && !raw.starts_with(b"HTTP/1.0 200") {
-        let status: String = raw.iter().take_while(|&&b| b != b'\r').map(|&b| b as char).collect();
+        let status: String = raw
+            .iter()
+            .take_while(|&&b| b != b'\r')
+            .map(|&b| b as char)
+            .collect();
         bail!("well-known returned {status:?}");
     }
     let split = raw
@@ -469,17 +499,17 @@ mod tests {
         assert!(dialable("[2606:2800:220:1:248:1893:25c8:1946]:443"));
         // Internal / special → refused (invariant 13).
         for bad in [
-            "127.0.0.1:443",           // loopback
-            "10.0.0.5:443",            // RFC-1918
-            "192.168.1.1:443",         // RFC-1918
-            "172.16.0.1:443",          // RFC-1918
-            "169.254.169.254:443",     // cloud metadata (link-local)
-            "100.64.0.1:443",          // CGNAT
-            "0.0.0.0:443",             // unspecified
-            "[::1]:443",               // v6 loopback
-            "[fc00::1]:443",           // ULA
-            "[fe80::1]:443",           // v6 link-local
-            "[::ffff:10.0.0.1]:443",   // v4-mapped private (smuggling)
+            "127.0.0.1:443",         // loopback
+            "10.0.0.5:443",          // RFC-1918
+            "192.168.1.1:443",       // RFC-1918
+            "172.16.0.1:443",        // RFC-1918
+            "169.254.169.254:443",   // cloud metadata (link-local)
+            "100.64.0.1:443",        // CGNAT
+            "0.0.0.0:443",           // unspecified
+            "[::1]:443",             // v6 loopback
+            "[fc00::1]:443",         // ULA
+            "[fe80::1]:443",         // v6 link-local
+            "[::ffff:10.0.0.1]:443", // v4-mapped private (smuggling)
         ] {
             assert!(!dialable(bad), "{bad} must not be dialable");
         }

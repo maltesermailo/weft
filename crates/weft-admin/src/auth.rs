@@ -71,7 +71,11 @@ pub async fn logout() -> Response {
 
 /// Gate `/api/*`: a valid session cookie for a current operator. Injects the
 /// acting `Account` into request extensions for handlers (the moderator).
-pub async fn require_operator(State(st): State<AdminState>, mut req: Request, next: Next) -> Response {
+pub async fn require_operator(
+    State(st): State<AdminState>,
+    mut req: Request,
+    next: Next,
+) -> Response {
     let account = req
         .headers()
         .get(header::COOKIE)
@@ -89,7 +93,11 @@ pub async fn require_operator(State(st): State<AdminState>, mut req: Request, ne
 }
 
 pub(crate) fn unauthorized() -> Response {
-    (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response()
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({ "error": "unauthorized" })),
+    )
+        .into_response()
 }
 
 fn session_cookie(header: &str) -> Option<String> {

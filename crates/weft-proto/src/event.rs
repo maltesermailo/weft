@@ -227,6 +227,23 @@ pub enum Event {
         truncated: bool,
         compacted: bool,
     },
+    /// `MEDIA TOKEN <token>` (§13) — a per-session fetch bearer, issued at auth;
+    /// the client puts it on `/media/<hash>?t=<token>` fetch URLs.
+    MediaToken {
+        token: String,
+    },
+    /// `STREAM ACCEPT <token>` (§13) — the server granted a data-plane transfer;
+    /// the client sends the bytes on a data-plane stream tagged with `token`.
+    StreamAccept {
+        token: String,
+    },
+    /// `STREAM STORED <token> :<weft-media://origin/b3-hash>` (§13) — the blob was
+    /// received, BLAKE3-hashed, and stored; the trailing is its content-addressed
+    /// URI (dedup means two identical uploads yield the same URI).
+    StreamStored {
+        token: String,
+        media: String,
+    },
     /// `TOKEN <subject> <scope>` with the minted capability token in the
     /// `token=` tag (§6.5, §10.4). Response to GRANT and to refresh.
     Token {
@@ -484,6 +501,38 @@ impl Event {
                     channel: args.req("channel")?.parse()?,
                     msgid: args.req("msgid")?.parse()?,
                 })
+            }
+            "MEDIA" => {
+                let mut args = Args::new(line, "MEDIA");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "TOKEN" => Ok(Event::MediaToken {
+                        token: args.req("token")?.to_string(),
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "MEDIA",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
+            "STREAM" => {
+                let mut args = Args::new(line, "STREAM");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "ACCEPT" => Ok(Event::StreamAccept {
+                        token: args.req("token")?.to_string(),
+                    }),
+                    "STORED" => Ok(Event::StreamStored {
+                        token: args.req("token")?.to_string(),
+                        media: args.trailing_req("media")?.to_string(),
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "STREAM",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
             }
             "PRESENCE" => {
                 let mut args = Args::new(line, "PRESENCE");
@@ -925,6 +974,17 @@ impl Event {
             Event::Marked { channel, msgid } => {
                 ("MARKED", vec![channel.to_string(), msgid.to_string()], None)
             }
+            Event::MediaToken { token } => {
+                ("MEDIA", vec!["TOKEN".to_string(), token.clone()], None)
+            }
+            Event::StreamAccept { token } => {
+                ("STREAM", vec!["ACCEPT".to_string(), token.clone()], None)
+            }
+            Event::StreamStored { token, media } => (
+                "STREAM",
+                vec!["STORED".to_string(), token.clone()],
+                Some(media.clone()),
+            ),
             Event::Pinned { channel, msgid, by } => {
                 if let Some(by) = by {
                     tags.insert("by".to_string(), by.to_string());
@@ -1271,6 +1331,48 @@ mod tests {
     fn round_trip(reply: &Reply) {
         let wire = reply.serialize().unwrap();
         assert_eq!(&Reply::parse(&wire).unwrap(), reply, "wire: {wire}");
+    }
+
+    #[test]
+    fn media_token_round_trips() {
+        let reply = Reply::new(Event::MediaToken {
+            token: "bearer-01H".into(),
+        });
+        assert_eq!(reply.serialize().unwrap(), "MEDIA TOKEN bearer-01H");
+        round_trip(&reply);
+        assert!(Reply::parse("MEDIA TOKEN").is_err()); // token required
+    }
+
+    #[test]
+    fn stream_events_round_trip() {
+        let accept = Reply::new(Event::StreamAccept {
+            token: "tok-01H".into(),
+        });
+        assert_eq!(accept.serialize().unwrap(), "STREAM ACCEPT tok-01H");
+        round_trip(&accept);
+
+        let stored = Reply::new(Event::StreamStored {
+            token: "tok-01H".into(),
+            media: "weft-media://hda.example/b3-abc123".into(),
+        });
+        assert_eq!(
+            stored.serialize().unwrap(),
+            "STREAM STORED tok-01H :weft-media://hda.example/b3-abc123"
+        );
+        round_trip(&stored);
+
+        // Labels echo on the direct STREAM ACCEPT ack (§3.5).
+        round_trip(&Reply::with_label(
+            Event::StreamAccept { token: "t".into() },
+            "u1",
+        ));
+    }
+
+    #[test]
+    fn stream_event_rejects_bad_subcommand() {
+        assert!(Reply::parse("STREAM WAT tok").is_err());
+        assert!(Reply::parse("STREAM ACCEPT").is_err()); // token required
+        assert!(Reply::parse("STREAM STORED tok").is_err()); // media trailing required
     }
 
     #[test]
@@ -1845,12 +1947,12 @@ mod tests {
 
     #[test]
     fn unknown_event_is_ignored_not_error() {
-        // STREAM is a media event (M6) — still unknown here.
-        let reply = Reply::parse("@label=l1 STREAM ACCEPT tok-9 :ready").unwrap();
+        // VOICE is a WEFT-RT event (M6+) — still unknown here.
+        let reply = Reply::parse("@label=l1 VOICE OFFER tok-9 :ready").unwrap();
         assert_eq!(
             reply.event,
             Event::Unknown {
-                verb: "STREAM".into()
+                verb: "VOICE".into()
             }
         );
         assert_eq!(reply.label.as_deref(), Some("l1")); // label still visible for correlation

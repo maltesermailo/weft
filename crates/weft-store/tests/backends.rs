@@ -10,9 +10,9 @@ use weft_proto::{
 };
 use weft_store::{
     materialize, AccountStore, CapabilityStore, ChannelStore, EventKind, EventRecord, EventStore,
-    HistoryItem, InviteRecord, InviteStore, MembershipStore, MemoryStore, ModKind, ModRecord,
-    ModerationStore, NamespaceRecord, NamespaceStore, NetblockRecord, NetblockStore, Page,
-    PeerRecord, PeerStore, PendingRecovery, PinStore, RedeemOutcome, ReportRecord,
+    HistoryItem, InviteRecord, InviteStore, MediaStore, MembershipStore, MemoryStore, ModKind,
+    ModRecord, ModerationStore, NamespaceRecord, NamespaceStore, NetblockRecord, NetblockStore,
+    Page, PeerRecord, PeerStore, PendingRecovery, PinStore, RedeemOutcome, ReportRecord,
     ReportResolution, ReportStore, RoleDef, RoleStore, Scope,
 };
 
@@ -73,6 +73,7 @@ where
         + ModerationStore
         + PinStore
         + MembershipStore
+        + MediaStore
         + RoleStore,
 {
     let chan: Scope = Scope::Channel(format!("#suite-{tag}").parse().unwrap());
@@ -1043,9 +1044,18 @@ where
     let racct = format!("racct-{tag}");
     let foreign = format!("alice@peer-{tag}.example");
     assert!(store.roles_of(&rscope, &racct).await.unwrap().is_empty());
-    store.assign_role(&rscope, "Moderator", &racct).await.unwrap();
-    store.assign_role(&rscope, "Moderator", &racct).await.unwrap(); // idempotent
-    store.assign_role(&rscope, "Moderator", &foreign).await.unwrap(); // a federated holder
+    store
+        .assign_role(&rscope, "Moderator", &racct)
+        .await
+        .unwrap();
+    store
+        .assign_role(&rscope, "Moderator", &racct)
+        .await
+        .unwrap(); // idempotent
+    store
+        .assign_role(&rscope, "Moderator", &foreign)
+        .await
+        .unwrap(); // a federated holder
     assert_eq!(
         store.roles_of(&rscope, &racct).await.unwrap(),
         vec!["Moderator".to_string()]
@@ -1057,11 +1067,20 @@ where
     let mut members = store.role_members(&rscope, "Moderator").await.unwrap();
     members.sort();
     assert_eq!(members, vec![foreign.clone(), racct.clone()]); // alice@… < racct-…
-    store.unassign_role(&rscope, "Moderator", &racct).await.unwrap();
-    store.unassign_role(&rscope, "Moderator", &foreign).await.unwrap();
+    store
+        .unassign_role(&rscope, "Moderator", &racct)
+        .await
+        .unwrap();
+    store
+        .unassign_role(&rscope, "Moderator", &foreign)
+        .await
+        .unwrap();
     assert!(store.roles_of(&rscope, &racct).await.unwrap().is_empty());
     // Deleting a role drops its assignments.
-    store.assign_role(&rscope, "Moderator", &racct).await.unwrap();
+    store
+        .assign_role(&rscope, "Moderator", &racct)
+        .await
+        .unwrap();
     store.delete_role(&rscope, "Moderator").await.unwrap();
     assert!(store.roles_of(&rscope, &racct).await.unwrap().is_empty());
 
@@ -1093,7 +1112,11 @@ where
     // The old identity is gone everywhere; the new one carries it all.
     assert!(store.channel(&old).await.unwrap().is_none());
     assert!(store.channel(&new).await.unwrap().is_some());
-    let p10 = Page { before: None, after: None, limit: 10 };
+    let p10 = Page {
+        before: None,
+        after: None,
+        limit: 10,
+    };
     assert!(store.roots(&old_scope, p10).await.unwrap().is_empty());
     assert_eq!(store.roots(&new_scope, p10).await.unwrap().len(), 1);
     assert!(store
@@ -1117,6 +1140,58 @@ where
         .await
         .unwrap();
     assert!(!store.rename_channel(&old, &new).await.unwrap()); // new taken
+
+    // -- §13 media references + orphan tracking (M-media-1) --
+    let mchan = Scope::Channel(format!("#media-{tag}").parse().unwrap());
+    let m1 = msgid(10_000);
+    let h_a = format!("{tag}-blob-a");
+    let h_b = format!("{tag}-blob-b");
+    // Two blobs uploaded at t=10_000; a message references only h_a.
+    let blob = |hash: &str| weft_store::BlobRecord {
+        hash: hash.to_string(),
+        mime: "image/png".into(),
+        bytes: 10,
+        width: Some(64),
+        height: Some(48),
+        thumb: None,
+        created_ms: 10_000,
+    };
+    store.record_blob(blob(&h_a)).await.unwrap();
+    store.record_blob(blob(&h_b)).await.unwrap();
+    // Metadata round-trips.
+    assert_eq!(
+        store.blob_meta(&h_a).await.unwrap().unwrap().width,
+        Some(64)
+    );
+    assert!(store.blob_meta("no-such-blob").await.unwrap().is_none());
+    store
+        .add_refs(&mchan, &m1, std::slice::from_ref(&h_a))
+        .await
+        .unwrap();
+    assert_eq!(store.blob_scopes(&h_a).await.unwrap(), vec![mchan.clone()]);
+    assert!(store.blob_scopes(&h_b).await.unwrap().is_empty());
+
+    // Grace: a just-uploaded blob is NOT an orphan before the cutoff passes it.
+    assert!(!store.orphans(5_000).await.unwrap().contains(&h_b));
+    // Past the grace cutoff, the unreferenced h_b is an orphan; h_a is not.
+    let orphans = store.orphans(20_000).await.unwrap();
+    assert!(orphans.contains(&h_b) && !orphans.contains(&h_a));
+
+    // Deleting the message re-orphans h_a; forget_blob clears it from tracking.
+    store.drop_refs(&m1).await.unwrap();
+    assert!(store.blob_scopes(&h_a).await.unwrap().is_empty());
+    assert!(store.orphans(20_000).await.unwrap().contains(&h_a));
+    store.forget_blob(&h_a).await.unwrap();
+    assert!(!store.orphans(20_000).await.unwrap().contains(&h_a));
+
+    // Retention purge: refs by an old msgid (ULID t=1_000) drop before the cutoff.
+    let m_old = msgid(1_000);
+    store
+        .add_refs(&mchan, &m_old, std::slice::from_ref(&h_b))
+        .await
+        .unwrap();
+    store.drop_refs_before(&mchan, 5_000).await.unwrap();
+    assert!(store.blob_scopes(&h_b).await.unwrap().is_empty());
 }
 
 #[tokio::test]

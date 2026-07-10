@@ -105,7 +105,11 @@ impl<S: ControlStream> Session<S> {
         Ok(JoinResult::Joined)
     }
 
-    pub(super) async fn on_part(&mut self, label: Option<String>, channel: ChannelName) -> io::Result<Flow> {
+    pub(super) async fn on_part(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+    ) -> io::Result<Flow> {
         let State::Ready { account } = self.state.clone() else {
             unreachable!("on_part only dispatched in READY");
         };
@@ -165,12 +169,28 @@ impl<S: ControlStream> Session<S> {
         body: Option<String>,
         meta: MsgMeta,
     ) -> io::Result<Flow> {
+        // §13 validate attachments: well-formed, SAME-NETWORK `weft-media://`
+        // refs only (foreign media = M-media-3 mirroring). The `attach` cap gate
+        // is a follow-up. The channel actor records the refs as it mints the msgid.
         if !meta.attachments.is_empty() {
-            return self.unsupported(label, "media lands in M6").await;
+            let net = self.ctx.info.network.to_string();
+            let ok = meta.attachments.iter().all(|uri| {
+                matches!(crate::media::parse_media_uri(uri), Some((origin, _)) if origin == net)
+            });
+            if !ok {
+                self.send_err(
+                    label,
+                    ErrCode::Policy,
+                    None,
+                    "invalid or foreign media reference",
+                )
+                .await?;
+                return Ok(Flow::Continue);
+            }
         }
-        // §6.4: empty body legal iff attachments — and M3 has none.
+        // §6.4: empty body legal iff attachments.
         let body = body.unwrap_or_default();
-        if body.is_empty() {
+        if body.is_empty() && meta.attachments.is_empty() {
             self.send_err(
                 label,
                 ErrCode::Policy,
@@ -221,6 +241,14 @@ impl<S: ControlStream> Session<S> {
                         return Ok(Flow::Continue);
                     }
                     Err(e) => return self.internal(label, &e).await,
+                }
+                // §13 attachments to a restricted channel require `attach`.
+                if !meta.attachments.is_empty() {
+                    match self.can_attach(&channel, &account).await {
+                        Ok(true) => {}
+                        Ok(false) => return self.cap_required(label, "attach").await,
+                        Err(e) => return self.internal(label, &e).await,
+                    }
                 }
                 let joined = self
                     .joined
@@ -711,7 +739,11 @@ impl<S: ControlStream> Session<S> {
 
     /// `PINS <#chan>`: the pinned messages as a `BATCH` of `MESSAGE`
     /// (membership-gated, like MEMBERS). Purged pins are skipped.
-    pub(super) async fn on_pins(&mut self, label: Option<String>, channel: ChannelName) -> io::Result<Flow> {
+    pub(super) async fn on_pins(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+    ) -> io::Result<Flow> {
         if !self.joined.contains_key(&channel) {
             return self.not_member_cap(label, &channel, "view").await;
         }

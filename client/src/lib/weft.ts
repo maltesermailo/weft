@@ -56,6 +56,7 @@ export type Mode = "login" | "register" | "key";
 export type WeftEvent =
   | { kind: "connected"; network: string; account: string }
   | { kind: "auth-failed"; reason: string }
+  | { kind: "media-token"; token: string }
   | {
       kind: "message";
       target: string;
@@ -68,6 +69,7 @@ export type WeftEvent =
       edited: boolean;
       reply_to: string | null;
       md: boolean;
+      attachments: string[];
     }
   | { kind: "typing"; channel: string; user: string; state: string }
   | { kind: "presence"; user: string; status: string }
@@ -276,8 +278,64 @@ export function unreact(msgid: string, emoji: string) {
   return invoke("react", { msgid, emoji, add: false });
 }
 
-export function sendMessage(target: string, body: string, replyTo?: string) {
-  return invoke("send_message", { target, body, replyTo: replyTo ?? null });
+export function sendMessage(
+  target: string,
+  body: string,
+  replyTo?: string,
+  attachments?: string[],
+) {
+  return invoke("send_message", {
+    target,
+    body,
+    replyTo: replyTo ?? null,
+    attachments: attachments ?? [],
+  });
+}
+
+// ---- §13 media ----
+
+/** The per-session fetch bearer (from the `media-token` event); set on connect. */
+let mediaBearer = "";
+export function setMediaBearer(token: string) {
+  mediaBearer = token;
+}
+
+export type UploadResult = {
+  media: string; // weft-media://origin/hash
+  thumb: string | null;
+  width: number | null;
+  height: number | null;
+};
+
+/** Base HTTP origin for the media endpoints — same-origin on web. */
+function mediaOrigin(): string {
+  if (typeof window !== "undefined" && window.location) return window.location.origin;
+  return "";
+}
+
+/**
+ * Upload a file to the network and return its content-addressed reference.
+ * Web: a single authed POST to `/media` (the session bearer authorizes it).
+ * Desktop upload rides a later milestone.
+ */
+export async function upload(file: File | Blob): Promise<UploadResult> {
+  if (IS_TAURI) throw new Error("desktop media upload is not available yet");
+  if (!mediaBearer) throw new Error("no media session");
+  const res = await fetch(`${mediaOrigin()}/media?t=${encodeURIComponent(mediaBearer)}`, {
+    method: "POST",
+    headers: { "Content-Type": (file as File).type || "application/octet-stream" },
+    body: file,
+  });
+  if (!res.ok) throw new Error(`upload failed (${res.status})`);
+  const j = await res.json();
+  return { media: j.media, thumb: j.thumb ?? null, width: j.width ?? null, height: j.height ?? null };
+}
+
+/** Resolve a `weft-media://origin/hash` reference to a fetchable URL. */
+export function mediaUrl(ref: string): string {
+  const rest = ref.replace(/^weft-media:\/\//, "");
+  const hash = rest.slice(rest.indexOf("/") + 1);
+  return `${mediaOrigin()}/media/${hash}?t=${encodeURIComponent(mediaBearer)}`;
 }
 
 export function typing(channel: string, active: boolean) {

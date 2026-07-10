@@ -18,11 +18,10 @@ use tokio::time::Instant;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 use weft_crypto::{Capability, PublicKey, SignedManifest, TokenScope};
 use weft_proto::{
-    Account, BridgeState, ChannelName, Command, ContentState, ErrCode, ErrEvent, Event,
-    FSessionOp, HistoryMode, Line, MediaMode, MemberAction, ModAction, MsgId, MsgMeta,
-    NamespaceName,
+    Account, BridgeState, ChannelName, Command, ContentState, ErrCode, ErrEvent, Event, FSessionOp,
+    HistoryMode, Line, MediaMode, MemberAction, ModAction, MsgId, MsgMeta, NamespaceName,
     NetworkName, ParseError, Reply, ReportScope, ReportStatus, Request, ResolveAction,
-    RetentionPolicy, Target, Ulid, UserRef, Visibility, MAX_LABEL_BYTES,
+    RetentionPolicy, StreamMode, Target, Ulid, UserRef, Visibility, MAX_LABEL_BYTES,
 };
 
 use weft_store::{
@@ -41,13 +40,13 @@ use crate::stream::ControlStream;
 // and helpers as descendants).
 mod auth;
 mod caps;
-mod namespaces;
-mod federation;
-mod relay;
-mod roles;
 mod channels;
+mod federation;
 mod invites;
 mod moderation;
+mod namespaces;
+mod relay;
+mod roles;
 
 /// Process-unique connection identifier (also the actor-side member key).
 pub type SessionId = u64;
@@ -723,7 +722,6 @@ impl<S: ControlStream> Session<S> {
         }
     }
 
-
     async fn on_ready(
         &mut self,
         label: Option<String>,
@@ -745,6 +743,10 @@ impl<S: ControlStream> Session<S> {
             Command::Part { channel, .. } => self.on_part(label, channel).await,
             Command::Typing { channel, state } => self.on_typing(label, channel, state).await,
             Command::Msg { target, body, meta } => self.on_msg(label, target, body, meta).await,
+            Command::StreamOffer { mode, mime, bytes } => {
+                self.on_stream_offer(label, mode, mime, bytes, account)
+                    .await
+            }
             Command::Edit { msgid, body } => self.on_edit(label, msgid, body, account).await,
             Command::Delete { msgid } => self.on_delete(label, msgid, account).await,
             Command::React { msgid, emoji } => {
@@ -942,8 +944,15 @@ impl<S: ControlStream> Session<S> {
                 caps,
             } => {
                 // Sugar for GRANT at ns: scope (§6.2).
-                self.on_grant(label, subject, format!("ns:{name}"), caps, None, Actor::Local(account))
-                    .await
+                self.on_grant(
+                    label,
+                    subject,
+                    format!("ns:{name}"),
+                    caps,
+                    None,
+                    Actor::Local(account),
+                )
+                .await
             }
             Command::NsDelete { name, confirm } => {
                 self.on_ns_delete(label, name, confirm, Actor::Local(account))
@@ -1005,30 +1014,62 @@ impl<S: ControlStream> Session<S> {
                 account: target,
                 reason,
             } => {
-                self.on_moderate(label, scope, target, ModKind::Mute, true, reason, Actor::Local(account))
-                    .await
+                self.on_moderate(
+                    label,
+                    scope,
+                    target,
+                    ModKind::Mute,
+                    true,
+                    reason,
+                    Actor::Local(account),
+                )
+                .await
             }
             Command::Unmute {
                 scope,
                 account: target,
             } => {
-                self.on_moderate(label, scope, target, ModKind::Mute, false, None, Actor::Local(account))
-                    .await
+                self.on_moderate(
+                    label,
+                    scope,
+                    target,
+                    ModKind::Mute,
+                    false,
+                    None,
+                    Actor::Local(account),
+                )
+                .await
             }
             Command::Ban {
                 scope,
                 account: target,
                 reason,
             } => {
-                self.on_moderate(label, scope, target, ModKind::Ban, true, reason, Actor::Local(account))
-                    .await
+                self.on_moderate(
+                    label,
+                    scope,
+                    target,
+                    ModKind::Ban,
+                    true,
+                    reason,
+                    Actor::Local(account),
+                )
+                .await
             }
             Command::Unban {
                 scope,
                 account: target,
             } => {
-                self.on_moderate(label, scope, target, ModKind::Ban, false, None, Actor::Local(account))
-                    .await
+                self.on_moderate(
+                    label,
+                    scope,
+                    target,
+                    ModKind::Ban,
+                    false,
+                    None,
+                    Actor::Local(account),
+                )
+                .await
             }
             Command::Kick {
                 channel,
@@ -1097,7 +1138,6 @@ impl<S: ControlStream> Session<S> {
     }
 
     // ---- READY verb handlers ----
-
 
     // ---- account-scoped events (directory) ----
 
@@ -1186,7 +1226,6 @@ impl<S: ControlStream> Session<S> {
     }
 
     // ---- namespace verbs (§6.2 NS / DISCOVER) ----
-
 
     async fn on_event(&mut self, event: SessionEvent) -> io::Result<()> {
         if let State::Bridge { peer, .. } = self.state.clone() {
@@ -1293,6 +1332,34 @@ impl<S: ControlStream> Session<S> {
                 Ok(())
             }
         }
+    }
+
+    /// `STREAM OFFER <media|backfill> <mime> <bytes>` (§13) — check size (the
+    /// `attach` cap + per-mime limits are M-media-1), mint a one-time upload
+    /// grant, and reply `STREAM ACCEPT <token>`; the bytes then ride the data
+    /// plane (weftd), consuming the grant.
+    async fn on_stream_offer(
+        &mut self,
+        label: Option<String>,
+        mode: StreamMode,
+        mime: String,
+        bytes: u64,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if mode != StreamMode::Media {
+            return self
+                .unsupported(label, "STREAM backfill lands in M-media-4")
+                .await;
+        }
+        if bytes == 0 || bytes > crate::MEDIA_MAX_BYTES {
+            self.send_err(label, ErrCode::TooLarge, None, "blob size out of range")
+                .await?;
+            return Ok(Flow::Continue);
+        }
+        let token = self.ctx.mint_upload_token(account, mime, bytes);
+        self.send_event(label, Event::StreamAccept { token })
+            .await?;
+        Ok(Flow::Continue)
     }
 
     async fn send_err(
@@ -1407,7 +1474,10 @@ fn invite_scope_namespace(scope: &str) -> Option<&str> {
     if let Some(ns) = scope.strip_prefix("ns:") {
         Some(ns)
     } else {
-        scope.strip_prefix('#').and_then(|c| c.split_once('/')).map(|(ns, _)| ns)
+        scope
+            .strip_prefix('#')
+            .and_then(|c| c.split_once('/'))
+            .map(|(ns, _)| ns)
     }
 }
 

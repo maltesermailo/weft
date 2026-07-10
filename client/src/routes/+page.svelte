@@ -672,6 +672,9 @@
         // to its channels by the server (persistent membership, §6.3).
         if (mode === "register") weft.join("#general").catch(() => {});
         break;
+      case "media-token":
+        weft.setMediaBearer(e.token); // §13 fetch bearer for /media URLs
+        break;
       case "auth-failed":
         reconnecting = false;
         lastCreds = null;
@@ -747,6 +750,7 @@
           replyTo: e.reply_to ?? undefined,
           bridged: e.network !== network,
           net: e.network !== network ? e.network : undefined,
+          attachments: e.attachments?.length ? e.attachments : undefined,
         });
         // Batch messages buffer until BATCH END. A PINS batch (loadingPins set)
         // routes to the pins buffer; a HISTORY batch to the history buffer.
@@ -1119,23 +1123,57 @@
     }
   }
 
+  // ---- §13 media attachments ----
+  let pendingAttachments = $state<{ uri: string; name: string; mime: string; thumb: string | null }[]>([]);
+
+  function attachFile() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    input.onchange = async () => {
+      for (const file of Array.from(input.files ?? [])) {
+        if (pendingAttachments.length >= 10) {
+          toast("up to 10 attachments per message", "error");
+          break;
+        }
+        try {
+          const up = await weft.upload(file);
+          pendingAttachments = [
+            ...pendingAttachments,
+            { uri: up.media, name: file.name, mime: file.type, thumb: up.thumb },
+          ];
+        } catch (e) {
+          toast(`upload failed: ${e}`, "error");
+        }
+      }
+    };
+    input.click();
+  }
+
+  function removeAttachment(i: number) {
+    pendingAttachments = pendingAttachments.filter((_, k) => k !== i);
+  }
+
   function doSend() {
     const text = composer.trim();
-    if (!text) return;
     if (text.startsWith("/")) {
       runSlash(text);
       composer = "";
       return;
     }
+    // §6.4: empty body is legal when there are attachments.
+    if (!text && !pendingAttachments.length) return;
     if (!active) return;
+    const attachments = pendingAttachments.map((a) => a.uri);
     // Clear only once the send is accepted, so a failure surfaces instead of
     // silently eating the message (e.g. an over-long body).
     weft
-      .sendMessage(active, text, replyTo?.msgid)
+      .sendMessage(active, text, replyTo?.msgid, attachments)
       .then(() => {
         replyTo = null;
         stopTyping();
         composer = "";
+        pendingAttachments = [];
       })
       .catch((e) => toast(String(e), "error"));
   }
@@ -1819,6 +1857,10 @@
     onComposerInput,
     doSend,
     pickMention,
+    get pendingAttachments() { return pendingAttachments; },
+    attachFile,
+    removeAttachment,
+    mediaUrl: weft.mediaUrl,
     get mentionQuery() { return mentionQuery; },
     get mentionMatches() { return mentionMatches; },
     get typingLabel() { return typingLabel; },

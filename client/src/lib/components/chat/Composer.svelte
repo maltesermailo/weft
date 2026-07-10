@@ -19,7 +19,25 @@
       <button class="linkish" onclick={() => (app.replyTo = null)} aria-label="Cancel reply">✕</button>
     </div>
   {/if}
+  {#if app.pendingAttachments.length}
+    <div class="attach-tray">
+      {#each app.pendingAttachments as a, i (a.uri)}
+        <div class="attach-chip" title={a.name}>
+          {#if a.mime.startsWith("image/")}
+            <img src={app.mediaUrl(a.thumb ?? a.uri)} alt={a.name} />
+          {:else}
+            <span class="attach-icon">📎</span>
+          {/if}
+          <span class="attach-name">{a.name}</span>
+          <button class="attach-x" aria-label="Remove attachment" onclick={() => app.removeAttachment(i)}>✕</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
   <div class="composer">
+    <button class="icon-btn" title="Attach a file" aria-label="Attach a file" disabled={!app.active} onclick={app.attachFile}>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
+    </button>
     <textarea
       rows="1"
       placeholder={app.active ? `Message ${app.active}…` : "Join a channel first"}

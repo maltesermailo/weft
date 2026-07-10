@@ -14,6 +14,8 @@ postgres = ["dep:sqlx"]
 weft-proto = { path = "../weft-proto" }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+# Content addressing for media blobs (§13) — pure hashing, no I/O (L1-safe).
+blake3 = { workspace = true }
 sqlx = { workspace = true, optional = true }
 
 [dev-dependencies]

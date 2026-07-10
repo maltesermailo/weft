@@ -50,12 +50,19 @@ pub enum ClientEvent {
     AuthFailed {
         reason: String,
     },
+    /// §13 per-session media fetch bearer (issued at auth); the UI puts it on
+    /// `/media/<hash>?t=…` fetch URLs.
+    MediaToken {
+        token: String,
+    },
     Message {
         target: String,
         sender: String,
         network: String,
         msgid: String,
         body: String,
+        /// §13 `attach.N=` media references (`weft-media://…` URIs), in order.
+        attachments: Vec<String>,
         own: bool,
         /// True when this arrived inside a `HISTORY` batch (older messages to
         /// prepend), false for live traffic to append.
@@ -265,7 +272,6 @@ pub enum ClientEvent {
     },
 }
 
-
 /// §3.3 client handshake phase. The binding starts a connection in `HelloSent`;
 /// `on_line` advances it to `Ready` (or signals close on `AUTH-FAILED`).
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -293,11 +299,9 @@ pub fn on_line<E: EventSink>(
     let reply = match Reply::parse(raw) {
         Ok(reply) => reply,
         Err(_) => {
-            sink.emit(
-                ClientEvent::Raw {
-                    line: raw.to_string(),
-                },
-            );
+            sink.emit(ClientEvent::Raw {
+                line: raw.to_string(),
+            });
             return None;
         }
     };
@@ -312,11 +316,9 @@ pub fn on_line<E: EventSink>(
                 Mode::Key => match device {
                     Some(kp) => format!("AUTH KEY {account} {}", kp.public().to_b64()),
                     None => {
-                        sink.emit(
-                            ClientEvent::AuthFailed {
-                                reason: "no device key on this device".into(),
-                            },
-                        );
+                        sink.emit(ClientEvent::AuthFailed {
+                            reason: "no device key on this device".into(),
+                        });
                         *close = true;
                         return None;
                     }
@@ -326,11 +328,9 @@ pub fn on_line<E: EventSink>(
         // §6.1 device-key challenge → sign `nonce ‖ network` and prove.
         (Phase::AuthSent, Event::Challenge { nonce }) => {
             let (Some(kp), Ok(nonce_bytes)) = (device, weft_crypto::b64::decode(nonce)) else {
-                sink.emit(
-                    ClientEvent::AuthFailed {
-                        reason: "bad device-key challenge".into(),
-                    },
-                );
+                sink.emit(ClientEvent::AuthFailed {
+                    reason: "bad device-key challenge".into(),
+                });
                 *close = true;
                 return None;
             };
@@ -339,12 +339,10 @@ pub fn on_line<E: EventSink>(
         }
         (Phase::AuthSent, Event::Welcome { network, .. }) => {
             *phase = Phase::Ready;
-            sink.emit(
-                ClientEvent::Connected {
-                    network: network.to_string(),
-                    account: account.to_string(),
-                },
-            );
+            sink.emit(ClientEvent::Connected {
+                network: network.to_string(),
+                account: account.to_string(),
+            });
             return None;
         }
         // Login/registration rejected — surface a friendly reason and close.
@@ -379,123 +377,101 @@ pub fn on_line<E: EventSink>(
             *in_batch = false;
             sink.emit(ClientEvent::BatchEnd { id, truncated });
         }
-        Event::Message(m) => sink.emit(
-            ClientEvent::Message {
-                target: m.target.to_string(),
-                sender: m.sender.account.to_string(),
-                network: m.sender.network.to_string(),
-                msgid: m.msgid.to_string(),
-                own: m.sender.account.as_str() == account,
-                history: *in_batch,
-                edited: m.edited.is_some(),
-                reply_to: m.meta.reply_to.as_ref().map(|r| r.to_string()),
-                md: m.meta.fmt.as_deref() == Some("md"),
-                body: m.body,
-            },
-        ),
+        Event::MediaToken { token } => sink.emit(ClientEvent::MediaToken { token }),
+        Event::Message(m) => sink.emit(ClientEvent::Message {
+            target: m.target.to_string(),
+            sender: m.sender.account.to_string(),
+            network: m.sender.network.to_string(),
+            msgid: m.msgid.to_string(),
+            own: m.sender.account.as_str() == account,
+            history: *in_batch,
+            edited: m.edited.is_some(),
+            reply_to: m.meta.reply_to.as_ref().map(|r| r.to_string()),
+            md: m.meta.fmt.as_deref() == Some("md"),
+            attachments: m.meta.attachments.clone(),
+            body: m.body,
+        }),
         Event::Member {
             channel,
             user,
             action,
             count,
             ..
-        } => sink.emit(
-            ClientEvent::Member {
-                channel: channel.to_string(),
-                user: user.account.to_string(),
-                network: user.network.to_string(),
-                action: action.to_string(),
-                count,
-            },
-        ),
-        Event::Policy { channel, policy } => sink.emit(
-            ClientEvent::Policy {
-                channel: channel.to_string(),
-                policy: policy.to_string(),
-            },
-        ),
+        } => sink.emit(ClientEvent::Member {
+            channel: channel.to_string(),
+            user: user.account.to_string(),
+            network: user.network.to_string(),
+            action: action.to_string(),
+            count,
+        }),
+        Event::Policy { channel, policy } => sink.emit(ClientEvent::Policy {
+            channel: channel.to_string(),
+            policy: policy.to_string(),
+        }),
         Event::Typing {
             channel,
             user,
             state,
-        } => sink.emit(
-            ClientEvent::Typing {
-                channel: channel.to_string(),
-                user: user.account.to_string(),
-                state: state.to_string(),
-            },
-        ),
-        Event::Presence { user, status } => sink.emit(
-            ClientEvent::Presence {
-                user: user.account.to_string(),
-                status: status.to_string(),
-            },
-        ),
-        Event::Marked { channel, msgid } => sink.emit(
-            ClientEvent::Marked {
-                channel: channel.to_string(),
-                msgid: msgid.to_string(),
-            },
-        ),
-        Event::Pinned { channel, msgid, by } => sink.emit(
-            ClientEvent::Pinned {
-                channel: channel.to_string(),
-                msgid: msgid.to_string(),
-                by: by.map(|a| a.to_string()),
-            },
-        ),
-        Event::Unpinned { channel, msgid } => sink.emit(
-            ClientEvent::Unpinned {
-                channel: channel.to_string(),
-                msgid: msgid.to_string(),
-            },
-        ),
+        } => sink.emit(ClientEvent::Typing {
+            channel: channel.to_string(),
+            user: user.account.to_string(),
+            state: state.to_string(),
+        }),
+        Event::Presence { user, status } => sink.emit(ClientEvent::Presence {
+            user: user.account.to_string(),
+            status: status.to_string(),
+        }),
+        Event::Marked { channel, msgid } => sink.emit(ClientEvent::Marked {
+            channel: channel.to_string(),
+            msgid: msgid.to_string(),
+        }),
+        Event::Pinned { channel, msgid, by } => sink.emit(ClientEvent::Pinned {
+            channel: channel.to_string(),
+            msgid: msgid.to_string(),
+            by: by.map(|a| a.to_string()),
+        }),
+        Event::Unpinned { channel, msgid } => sink.emit(ClientEvent::Unpinned {
+            channel: channel.to_string(),
+            msgid: msgid.to_string(),
+        }),
         Event::Caps {
             account,
             scope,
             caps,
-        } => sink.emit(
-            ClientEvent::Caps {
-                account: account.to_string(),
-                scope,
-                caps,
-            },
-        ),
+        } => sink.emit(ClientEvent::Caps {
+            account: account.to_string(),
+            scope,
+            caps,
+        }),
         Event::Role {
             scope,
             color,
             caps,
             name,
-        } => sink.emit(
-            ClientEvent::Role {
-                scope,
-                color,
-                caps,
-                name,
-            },
-        ),
+        } => sink.emit(ClientEvent::Role {
+            scope,
+            color,
+            caps,
+            name,
+        }),
         Event::RoleMember {
             scope,
             account,
             roles,
-        } => sink.emit(
-            ClientEvent::RoleMember {
-                scope,
-                account: account.to_string(),
-                roles,
-            },
-        ),
+        } => sink.emit(ClientEvent::RoleMember {
+            scope,
+            account: account.to_string(),
+            roles,
+        }),
         Event::Chanmeta {
             channel,
             key,
             value,
-        } => sink.emit(
-            ClientEvent::Chanmeta {
-                channel: channel.to_string(),
-                key,
-                value,
-            },
-        ),
+        } => sink.emit(ClientEvent::Chanmeta {
+            channel: channel.to_string(),
+            key,
+            value,
+        }),
         Event::NsMeta {
             name,
             visibility,
@@ -507,37 +483,31 @@ pub fn on_line<E: EventSink>(
             categories,
             federation,
             ..
-        } => sink.emit(
-            ClientEvent::NsMeta {
-                name: name.to_string(),
-                visibility: visibility.to_string(),
-                owner,
-                title,
-                description,
-                recovery_set,
-                recovery_eta: recovery_pending.map(|(eta, _)| eta),
-                recovery_rung: recovery_pending.map(|(_, rung)| rung),
-                categories,
-                federation,
-            },
-        ),
+        } => sink.emit(ClientEvent::NsMeta {
+            name: name.to_string(),
+            visibility: visibility.to_string(),
+            owner,
+            title,
+            description,
+            recovery_set,
+            recovery_eta: recovery_pending.map(|(eta, _)| eta),
+            recovery_rung: recovery_pending.map(|(_, rung)| rung),
+            categories,
+            federation,
+        }),
         Event::ChannelLayout {
             channel,
             category,
             position,
-        } => sink.emit(
-            ClientEvent::ChannelLayout {
-                channel: channel.to_string(),
-                category,
-                position,
-            },
-        ),
-        Event::ChannelRenamed { old, new } => sink.emit(
-            ClientEvent::ChannelRenamed {
-                old: old.to_string(),
-                new: new.to_string(),
-            },
-        ),
+        } => sink.emit(ClientEvent::ChannelLayout {
+            channel: channel.to_string(),
+            category,
+            position,
+        }),
+        Event::ChannelRenamed { old, new } => sink.emit(ClientEvent::ChannelRenamed {
+            old: old.to_string(),
+            new: new.to_string(),
+        }),
         Event::More { cursor } => sink.emit(ClientEvent::More { cursor }),
         Event::Token { subject, scope, .. } => sink.emit(ClientEvent::Token { subject, scope }),
         Event::Invited {
@@ -546,14 +516,12 @@ pub fn on_line<E: EventSink>(
             link,
             max_uses,
             ..
-        } => sink.emit(
-            ClientEvent::Invited {
-                scope,
-                invite_id,
-                link,
-                max_uses,
-            },
-        ),
+        } => sink.emit(ClientEvent::Invited {
+            scope,
+            invite_id,
+            link,
+            max_uses,
+        }),
         Event::Reported { report_id } => sink.emit(ClientEvent::Reported { report_id }),
         Event::ReportFiled {
             report_id,
@@ -562,99 +530,83 @@ pub fn on_line<E: EventSink>(
             state,
             scope,
             reporter,
-        } => sink.emit(
-            ClientEvent::ReportFiled {
-                report_id,
-                msgid: msgid.to_string(),
-                category,
-                state: state.to_string(),
-                scope: scope.to_string(),
-                reporter,
-            },
-        ),
+        } => sink.emit(ClientEvent::ReportFiled {
+            report_id,
+            msgid: msgid.to_string(),
+            category,
+            state: state.to_string(),
+            scope: scope.to_string(),
+            reporter,
+        }),
         Event::ReportResolved {
             report_id,
             action,
             note,
             ..
-        } => sink.emit(
-            ClientEvent::ReportResolved {
-                report_id,
-                action: action.to_string(),
-                note,
-            },
-        ),
+        } => sink.emit(ClientEvent::ReportResolved {
+            report_id,
+            action: action.to_string(),
+            note,
+        }),
         Event::Edited {
             target,
             user,
             edit_of,
             body,
             ..
-        } => sink.emit(
-            ClientEvent::Edited {
-                target: target.to_string(),
-                sender: user.account.to_string(),
-                edit_of: edit_of.to_string(),
-                body,
-            },
-        ),
-        Event::Deleted { target, msgid, .. } => sink.emit(
-            ClientEvent::Deleted {
-                target: target.to_string(),
-                msgid: msgid.to_string(),
-            },
-        ),
+        } => sink.emit(ClientEvent::Edited {
+            target: target.to_string(),
+            sender: user.account.to_string(),
+            edit_of: edit_of.to_string(),
+            body,
+        }),
+        Event::Deleted { target, msgid, .. } => sink.emit(ClientEvent::Deleted {
+            target: target.to_string(),
+            msgid: msgid.to_string(),
+        }),
         Event::Reaction {
             target,
             msgid,
             emoji,
             op,
             by,
-        } => sink.emit(
-            ClientEvent::Reaction {
-                target: target.to_string(),
-                msgid: msgid.to_string(),
-                emoji,
-                op: op.to_string(),
-                by: by.account.to_string(),
-            },
-        ),
+        } => sink.emit(ClientEvent::Reaction {
+            target: target.to_string(),
+            msgid: msgid.to_string(),
+            emoji,
+            op: op.to_string(),
+            by: by.account.to_string(),
+        }),
         Event::Reactions {
             target,
             msgid,
             emoji,
             count,
             by,
-        } => sink.emit(
-            ClientEvent::Reactions {
-                target: target.to_string(),
-                msgid: msgid.to_string(),
-                emoji,
-                count,
-                by: by.iter().map(|u| u.account.to_string()).collect(),
-            },
-        ),
+        } => sink.emit(ClientEvent::Reactions {
+            target: target.to_string(),
+            msgid: msgid.to_string(),
+            emoji,
+            count,
+            by: by.iter().map(|u| u.account.to_string()).collect(),
+        }),
         Event::Moderated {
             scope,
             account,
             action,
             by,
             reason,
-        } => sink.emit(
-            ClientEvent::Moderated {
-                scope,
-                account: account.to_string(),
-                action: action.to_string(),
-                by: by.map(|a| a.to_string()),
-                reason,
-            },
-        ),
-        Event::Err(e) => sink.emit(
-            ClientEvent::Error {
-                code: e.code.to_string(),
-                text: e.text,
-            },
-        ),
+        } => sink.emit(ClientEvent::Moderated {
+            scope,
+            account: account.to_string(),
+            action: action.to_string(),
+            by: by.map(|a| a.to_string()),
+            reason,
+        }),
+        Event::Err(e) => sink.emit(ClientEvent::Error {
+            code: e.code.to_string(),
+            text: e.text,
+        }),
         // Federation (§11): bridge manifests + netblock notifications.
         Event::Manifest {
             peer,
@@ -664,35 +616,28 @@ pub fn on_line<E: EventSink>(
             history,
             media,
             typing,
-        } => sink.emit(
-            ClientEvent::Manifest {
-                peer: peer.to_string(),
-                version,
-                state: state.to_string(),
-                channels: channels.iter().map(|c| c.to_string()).collect(),
-                history: history.to_string(),
-                media: media.to_string(),
-                typing,
-            },
-        ),
-        Event::Netblocked { network, reason } => sink.emit(
-            ClientEvent::Netblocked {
-                network: network.to_string(),
-                reason,
-            },
-        ),
+        } => sink.emit(ClientEvent::Manifest {
+            peer: peer.to_string(),
+            version,
+            state: state.to_string(),
+            channels: channels.iter().map(|c| c.to_string()).collect(),
+            history: history.to_string(),
+            media: media.to_string(),
+            typing,
+        }),
+        Event::Netblocked { network, reason } => sink.emit(ClientEvent::Netblocked {
+            network: network.to_string(),
+            reason,
+        }),
         // Keepalive answers are internal — never shown.
         Event::Pong { .. } => {}
         // Batches, reactions, presence, etc. — surfaced raw for now.
-        _ => sink.emit(
-            ClientEvent::Raw {
-                line: raw.to_string(),
-            },
-        ),
+        _ => sink.emit(ClientEvent::Raw {
+            line: raw.to_string(),
+        }),
     }
     None
 }
-
 
 pub fn password_or_default(password: &str) -> String {
     if password.is_empty() {
@@ -704,7 +649,12 @@ pub fn password_or_default(password: &str) -> String {
 
 /// Build a WEFT command line for the frontend's high-level intents, validated
 /// through the proto codec so we never emit something our own parser rejects.
-pub fn build_msg(target: &str, body: &str, reply_to: Option<String>) -> Result<String, String> {
+pub fn build_msg(
+    target: &str,
+    body: &str,
+    reply_to: Option<String>,
+    attachments: Vec<String>,
+) -> Result<String, String> {
     let target: Target = target.parse().map_err(|_| "bad target".to_string())?;
     let reply_to = match reply_to.filter(|r| !r.is_empty()) {
         Some(r) => Some(
@@ -717,6 +667,7 @@ pub fn build_msg(target: &str, body: &str, reply_to: Option<String>) -> Result<S
         // The client composes in markdown; tag it so peers render it (§9.4).
         fmt: Some("md".to_string()),
         reply_to,
+        attachments,
         ..Default::default()
     };
     weft_proto::Request::new(weft_proto::Command::Msg {
@@ -795,7 +746,8 @@ pub fn build_invite_revoke(invite_id: &str) -> Result<String, String> {
 
 /// `NETBLOCK ADD <network> [:reason]` (§11.6). Cap `netblock` at `*`.
 pub fn build_netblock_add(network: &str, reason: Option<&str>) -> Result<String, String> {
-    let network: weft_proto::NetworkName = network.parse().map_err(|_| "bad network".to_string())?;
+    let network: weft_proto::NetworkName =
+        network.parse().map_err(|_| "bad network".to_string())?;
     Request::new(Command::NetblockAdd {
         network,
         reason: reason.filter(|r| !r.is_empty()).map(String::from),
@@ -806,7 +758,8 @@ pub fn build_netblock_add(network: &str, reason: Option<&str>) -> Result<String,
 
 /// `NETBLOCK REMOVE <network>` (§11.6).
 pub fn build_netblock_remove(network: &str) -> Result<String, String> {
-    let network: weft_proto::NetworkName = network.parse().map_err(|_| "bad network".to_string())?;
+    let network: weft_proto::NetworkName =
+        network.parse().map_err(|_| "bad network".to_string())?;
     Request::new(Command::NetblockRemove { network })
         .serialize()
         .map_err(|e| e.to_string())
@@ -829,8 +782,9 @@ pub fn build_bridge_propose(
     typing: bool,
 ) -> Result<String, String> {
     let peer: weft_proto::NetworkName = peer.parse().map_err(|_| "bad peer network".to_string())?;
-    let history: weft_proto::HistoryMode =
-        history.parse().map_err(|_| "bad history mode".to_string())?;
+    let history: weft_proto::HistoryMode = history
+        .parse()
+        .map_err(|_| "bad history mode".to_string())?;
     let media: weft_proto::MediaMode = media.parse().map_err(|_| "bad media mode".to_string())?;
     Request::new(Command::BridgePropose {
         scope: scope.to_string(),
@@ -872,10 +826,24 @@ pub fn build_moderation(
     let scope = scope.to_string();
     let reason = reason.filter(|r| !r.is_empty()).map(String::from);
     let cmd = match verb {
-        "mute" => Command::Mute { scope, account: acct, reason },
-        "unmute" => Command::Unmute { scope, account: acct },
-        "ban" => Command::Ban { scope, account: acct, reason },
-        "unban" => Command::Unban { scope, account: acct },
+        "mute" => Command::Mute {
+            scope,
+            account: acct,
+            reason,
+        },
+        "unmute" => Command::Unmute {
+            scope,
+            account: acct,
+        },
+        "ban" => Command::Ban {
+            scope,
+            account: acct,
+            reason,
+        },
+        "unban" => Command::Unban {
+            scope,
+            account: acct,
+        },
         "kick" => Command::Kick {
             channel: scope.parse().map_err(|_| "bad channel".to_string())?,
             account: acct,
@@ -1077,9 +1045,10 @@ pub fn build_channel_create(channel: &str, policy: Option<&str>) -> Result<Strin
     let channel: weft_proto::ChannelName =
         channel.parse().map_err(|_| "bad channel".to_string())?;
     let policy = match policy {
-        Some(p) if !p.is_empty() => {
-            Some(p.parse::<weft_proto::RetentionPolicy>().map_err(|_| "bad policy".to_string())?)
-        }
+        Some(p) if !p.is_empty() => Some(
+            p.parse::<weft_proto::RetentionPolicy>()
+                .map_err(|_| "bad policy".to_string())?,
+        ),
         _ => None,
     };
     Request::new(Command::ChannelCreate { channel, policy })
@@ -1265,7 +1234,10 @@ pub fn build_ns_meta(name: &str, key: &str, value: &str) -> Result<String, Strin
 /// `FEDERATE <network>/<namespace>` (§11.10) — request an on-demand bridge to a
 /// foreign namespace. Accepts `network/namespace` or a `weft://<net>/<ns>` link.
 pub fn build_federate(target: &str) -> Result<String, String> {
-    let t = target.trim().strip_prefix("weft://").unwrap_or(target.trim());
+    let t = target
+        .trim()
+        .strip_prefix("weft://")
+        .unwrap_or(target.trim());
     let (net, ns) = t.split_once('/').ok_or("expected network/namespace")?;
     Request::new(Command::Federate {
         network: net.parse().map_err(|_| "bad network".to_string())?,

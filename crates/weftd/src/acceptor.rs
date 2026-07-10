@@ -62,6 +62,19 @@ impl ControlStream for WsLines {
     }
 }
 
+/// §13 data plane: accept blob-transfer bidi streams on an established
+/// connection (beyond the control stream) and hand each to the media handler.
+/// One task per connection; aborted when its session ends.
+async fn accept_data_plane(connection: quinn::Connection, ctx: Arc<ServerCtx>) {
+    let mut transfers = JoinSet::new();
+    // Ends when the connection closes / stops opening streams (Err from accept_bi).
+    while let Ok((send, recv)) = connection.accept_bi().await {
+        let ctx = Arc::clone(&ctx);
+        transfers.spawn(crate::media::handle_data_stream(ctx, send, recv));
+        while transfers.try_join_next().is_some() {}
+    }
+}
+
 pub(crate) async fn accept_quic(endpoint: quinn::Endpoint, ctx: Arc<ServerCtx>) {
     let mut sessions = JoinSet::new();
     loop {
@@ -78,10 +91,15 @@ pub(crate) async fn accept_quic(endpoint: quinn::Endpoint, ctx: Arc<ServerCtx>) 
                         }
                     };
                     info!(peer = %connection.remote_address(), "QUIC connection");
-                    // The client opens the control stream (§3.1 stream 0).
+                    // The client opens the control stream FIRST (§3.1 stream 0);
+                    // accepting it here means the data-plane loop below only ever
+                    // sees the *subsequent* bidi streams (§13 blob transfers).
                     match QuicControlStream::accept(&connection).await {
                         Ok(stream) => {
+                            let data_plane =
+                                tokio::spawn(accept_data_plane(connection.clone(), Arc::clone(&ctx)));
                             weft_core::run_session(QuicLines(stream), ctx).await;
+                            data_plane.abort(); // session over ⇒ stop taking transfers
                             // The session finished its stream; give the peer a
                             // moment to receive everything and close first —
                             // `Connection::close` abandons un-acked stream data.

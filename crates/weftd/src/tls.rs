@@ -59,7 +59,8 @@ fn load_pem(cert: &Path, key: &Path) -> anyhow::Result<Arc<weft_transport::Certi
     anyhow::ensure!(!chain.is_empty(), "no certificates in {}", cert.display());
 
     let mut reader = BufReader::new(
-        std::fs::File::open(key).with_context(|| format!("opening private key {}", key.display()))?,
+        std::fs::File::open(key)
+            .with_context(|| format!("opening private key {}", key.display()))?,
     );
     let key_der: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut reader)
         .context("parsing private key PEM")?

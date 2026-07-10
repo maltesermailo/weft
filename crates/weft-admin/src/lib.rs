@@ -91,10 +91,7 @@ impl AdminState {
     }
 
     /// Embedded mode: attach the weftd live-connection counter for `/stats`.
-    pub fn with_live_connections(
-        mut self,
-        counter: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> Self {
+    pub fn with_live_connections(mut self, counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
         self.live_connections = Some(counter);
         self
     }

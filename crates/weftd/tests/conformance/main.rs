@@ -82,18 +82,73 @@ impl QuicClient {
         Reply::parse(&line).expect("unparseable server line")
     }
 
-    /// HELLO + REGISTER (registration doubles as auth, §6.1).
-    async fn ready(&mut self, account: &str) {
+    /// HELLO + REGISTER (registration doubles as auth, §6.1). Returns the §13
+    /// media fetch bearer the server pushes right after auth.
+    async fn ready(&mut self, account: &str) -> String {
         self.send("HELLO weft/1").await;
         assert!(matches!(self.recv().await.event, Event::Welcome { .. }));
         self.send(&format!("REGISTER {account} :{PASSWORD}")).await;
         assert!(matches!(self.recv().await.event, Event::Welcome { .. }));
+        let Event::MediaToken { token } = self.recv().await.event else {
+            panic!("expected MEDIA TOKEN after auth");
+        };
+        token
     }
 
     async fn join(&mut self, channel: &str) {
         self.send(&format!("JOIN {channel}")).await;
         assert!(matches!(self.recv().await.event, Event::Member { .. }));
         assert!(matches!(self.recv().await.event, Event::Policy { .. }));
+    }
+
+    /// Receive, skipping events (e.g. interleaved broadcast copies) until one
+    /// matches `want`. Bounded so a genuinely-missing event fails, not hangs.
+    async fn recv_until(&mut self, want: impl Fn(&Reply) -> bool) -> Reply {
+        for _ in 0..16 {
+            let reply = self.recv().await;
+            if want(&reply) {
+                return reply;
+            }
+        }
+        panic!("expected event never arrived");
+    }
+
+    /// §13 upload a blob on a data-plane bidi stream; returns its weft-media URI.
+    async fn blob_upload(&self, token: &str, bytes: &[u8]) -> String {
+        let (mut send, mut recv) = self._connection.open_bi().await.expect("open data stream");
+        send.write_all(format!("PUT {token}\n").as_bytes())
+            .await
+            .unwrap();
+        send.write_all(bytes).await.unwrap();
+        let _ = send.finish();
+        let resp = recv.read_to_end(64 * 1024).await.expect("upload response");
+        let line = String::from_utf8_lossy(&resp);
+        line.trim()
+            .strip_prefix("OK ")
+            .unwrap_or_else(|| panic!("upload failed: {}", line.trim()))
+            .to_string()
+    }
+
+    /// §13 fetch a blob on a data-plane bidi stream (optional `start-end` range).
+    async fn blob_download(&self, bearer: &str, hash: &str, range: Option<&str>) -> Vec<u8> {
+        let (mut send, mut recv) = self._connection.open_bi().await.expect("open data stream");
+        let req = match range {
+            Some(r) => format!("GET {bearer} {hash} {r}\n"),
+            None => format!("GET {bearer} {hash}\n"),
+        };
+        send.write_all(req.as_bytes()).await.unwrap();
+        let _ = send.finish();
+        let resp = recv
+            .read_to_end(600 * 1024 * 1024)
+            .await
+            .expect("download response");
+        let nl = resp
+            .iter()
+            .position(|&b| b == b'\n')
+            .expect("response header");
+        let header = String::from_utf8_lossy(&resp[..nl]).into_owned();
+        assert!(header.starts_with("OK "), "download failed: {header}");
+        resp[nl + 1..].to_vec()
     }
 }
 
@@ -115,6 +170,10 @@ async fn quic_full_session_flow() {
 
     client.send(&format!("REGISTER ada :{PASSWORD}")).await;
     assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+    assert!(matches!(
+        client.recv().await.event,
+        Event::MediaToken { .. }
+    ));
     client.join("#general").await;
 
     client.send("@label=m1 MSG #general :over real QUIC").await;
@@ -222,6 +281,351 @@ async fn quic_malformed_line_gets_err() {
     server.shutdown().await;
 }
 
+// ---- §13 media: data plane (M-media-0) + posting/gating/GC (M-media-1) ----
+
+/// Upload a blob (control OFFER→ACCEPT + data-plane PUT), returning `(uri, hash)`.
+async fn upload_blob(client: &mut QuicClient, mime: &str, data: &[u8]) -> (String, String) {
+    client
+        .send(&format!("STREAM OFFER media {mime} {}", data.len()))
+        .await;
+    let Event::StreamAccept { token } = client.recv().await.event else {
+        panic!("expected STREAM ACCEPT");
+    };
+    let uri = client.blob_upload(&token, data).await;
+    let hash = uri.rsplit('/').next().unwrap().to_string();
+    (uri, hash)
+}
+
+#[tokio::test]
+async fn media_attachment_message_gates_fetch_and_gcs_on_delete() {
+    let server = start_server(&["#general"]).await;
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#general").await;
+
+    let data = b"hello media data plane".to_vec();
+    let (uri, hash) = upload_blob(&mut ada, "text/plain", &data).await;
+    assert!(uri.starts_with("weft-media://test.example/"), "uri: {uri}");
+
+    // Dedup: a second upload of identical bytes yields the SAME hash.
+    let (uri2, _) = upload_blob(&mut ada, "text/plain", &data).await;
+    assert_eq!(uri, uri2, "identical bytes must dedupe to one content hash");
+
+    // A blob nobody has posted yet is NOT fetchable (no scope references it).
+    let ada_bearer = server.ctx().mint_media_bearer("ada".parse().unwrap());
+    assert!(
+        fetch_fails(&ada, &ada_bearer, &hash).await,
+        "unreferenced blob is gated"
+    );
+
+    // Post it as an attachment (empty body is legal with attachments, §6.4).
+    ada.send(&format!("@attach.1={uri} MSG #general :look"))
+        .await;
+    let echo = ada.recv().await;
+    let Event::Message(m) = &echo.event else {
+        panic!("expected the MESSAGE echo, got {echo:?}");
+    };
+    assert_eq!(m.meta.attachments, vec![uri.clone()]);
+    let msgid = m.msgid.to_string();
+
+    // Now a MEMBER of #general (which references the blob) may fetch it.
+    assert_eq!(ada.blob_download(&ada_bearer, &hash, None).await, data);
+    assert_eq!(
+        ada.blob_download(&ada_bearer, &hash, Some("0-4")).await,
+        b"hello"
+    );
+
+    // A NON-member is denied — invariant 1: gated is indistinguishable from absent.
+    let bob_bearer = server.ctx().mint_media_bearer("bob".parse().unwrap());
+    assert!(
+        fetch_fails(&ada, &bob_bearer, &hash).await,
+        "non-member must be denied"
+    );
+
+    // Delete the message → its blob reference drops → refcount hits 0.
+    ada.send(&format!("DELETE {msgid}")).await;
+    assert!(matches!(ada.recv().await.event, Event::Deleted { .. }));
+
+    // A GC pass (cutoff in the far future ⇒ grace elapsed) collects the orphan.
+    let removed =
+        weft_core::gc_orphan_blobs(&server.ctx().media_refs, &server.ctx().blobs, u64::MAX).await;
+    assert!(removed >= 1, "GC should collect the now-orphaned blob");
+    assert!(
+        fetch_fails(&ada, &ada_bearer, &hash).await,
+        "GC'd blob is gone"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn media_posting_and_gated_fetch_over_http() {
+    let server = start_server(&["#general"]).await;
+    let http = server.http_addr.expect("http enabled");
+
+    // Browser shape: WS/QUIC control session + HTTP media transfer.
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#general").await;
+
+    // Upload via HTTP POST (token minted over the control session).
+    let data = b"http media bytes".to_vec();
+    ada.send(&format!("STREAM OFFER media text/plain {}", data.len()))
+        .await;
+    let Event::StreamAccept { token } = ada.recv().await.event else {
+        panic!("expected STREAM ACCEPT");
+    };
+    let (status, body) = http_post(http, &format!("/media?t={token}"), &data).await;
+    assert_eq!(status, 200, "upload: {}", String::from_utf8_lossy(&body));
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let hash = json["hash"].as_str().unwrap().to_string();
+    let uri = json["media"].as_str().unwrap().to_string();
+
+    // Post it so a member may fetch it.
+    ada.send(&format!("@attach.1={uri} MSG #general :look"))
+        .await;
+    assert!(matches!(ada.recv().await.event, Event::Message(_)));
+
+    // Member fetch over HTTP (bearer in the query).
+    let bearer = server.ctx().mint_media_bearer("ada".parse().unwrap());
+    let (status, got) = http_get(http, &format!("/media/{hash}?t={bearer}"), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(got, data);
+
+    // Ranged GET → 206 Partial Content.
+    let (status, head) = http_get(
+        http,
+        &format!("/media/{hash}?t={bearer}"),
+        Some("bytes=0-3"),
+    )
+    .await;
+    assert_eq!(status, 206);
+    assert_eq!(head, b"http");
+
+    // Non-member bearer AND bad bearer both → 404 (gated == absent, invariant 1).
+    let bob = server.ctx().mint_media_bearer("bob".parse().unwrap());
+    assert_eq!(
+        http_get(http, &format!("/media/{hash}?t={bob}"), None)
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        http_get(http, &format!("/media/{hash}?t=nope"), None)
+            .await
+            .0,
+        404
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn media_image_probes_dimensions_and_generates_thumbnail() {
+    let server = start_server(&["#general"]).await;
+    let http = server.http_addr.expect("http enabled");
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#general").await;
+
+    // A real 300×200 PNG.
+    let img = image::RgbImage::from_fn(300, 200, |x, _| image::Rgb([(x % 256) as u8, 10, 20]));
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let png = png.into_inner();
+
+    // Upload via HTTP; the response carries probed dimensions + a thumbnail URI.
+    ada.send(&format!("STREAM OFFER media image/png {}", png.len()))
+        .await;
+    let Event::StreamAccept { token } = ada.recv().await.event else {
+        panic!("expected STREAM ACCEPT");
+    };
+    let (status, body) = http_post(http, &format!("/media?t={token}"), &png).await;
+    assert_eq!(status, 200);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["width"], 300);
+    assert_eq!(json["height"], 200);
+    let media_uri = json["media"].as_str().unwrap().to_string();
+    let hash = json["hash"].as_str().unwrap().to_string();
+    let thumb_uri = json["thumb"]
+        .as_str()
+        .expect("a thumbnail was generated")
+        .to_string();
+    let thumb_hash = thumb_uri.rsplit('/').next().unwrap().to_string();
+    assert_ne!(thumb_hash, hash, "the thumbnail is a distinct blob");
+
+    // Post the image — the actor references BOTH it and its thumbnail.
+    ada.send(&format!("@attach.1={media_uri} MSG #general :pic"))
+        .await;
+    let Event::Message(m) = &ada.recv().await.event else {
+        panic!("expected MESSAGE echo");
+    };
+    let msgid = m.msgid.to_string();
+
+    // A MEMBER fetches the image and the (gated) thumbnail; the thumb fits 256px.
+    let bearer = server.ctx().mint_media_bearer("ada".parse().unwrap());
+    assert_eq!(ada.blob_download(&bearer, &hash, None).await, png);
+    let thumb_bytes = ada.blob_download(&bearer, &thumb_hash, None).await;
+    let thumb_img = image::load_from_memory(&thumb_bytes).expect("thumbnail decodes");
+    assert!(
+        thumb_img.width() <= 256 && thumb_img.height() <= 256,
+        "thumb ≤256px"
+    );
+
+    // A NON-member is denied the thumbnail too — it shares the parent's gating.
+    let bob = server.ctx().mint_media_bearer("bob".parse().unwrap());
+    assert!(
+        fetch_fails(&ada, &bob, &thumb_hash).await,
+        "thumb is member-gated"
+    );
+
+    // Deleting the message orphans BOTH; one GC pass collects them together.
+    ada.send(&format!("DELETE {msgid}")).await;
+    assert!(matches!(ada.recv().await.event, Event::Deleted { .. }));
+    weft_core::gc_orphan_blobs(&server.ctx().media_refs, &server.ctx().blobs, u64::MAX).await;
+    assert!(fetch_fails(&ada, &bearer, &hash).await, "image GC'd");
+    assert!(
+        fetch_fails(&ada, &bearer, &thumb_hash).await,
+        "thumbnail GC'd"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn media_attach_cap_gates_a_restricted_channel() {
+    // ada is an operator (holds every cap, incl. `attach`).
+    let server = start_with(&["#locked"], |c| c.operators = vec!["ada".to_string()]).await;
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#locked").await;
+
+    // bob must exist before he can be granted a cap.
+    let mut bob = QuicClient::connect(server.quic_addr).await;
+    bob.ready("bob").await;
+
+    // Restrict posting, then grant bob `send` (so he can post) but NOT `attach`.
+    ada.send("CHANNEL META #locked posting :restricted").await;
+    ada.recv_until(|r| matches!(r.event, Event::Chanmeta { .. }))
+        .await;
+    ada.send("GRANT bob #locked send").await;
+    ada.recv_until(|r| matches!(r.event, Event::Token { .. }))
+        .await;
+
+    // A blob to try to attach.
+    let (uri, _) = upload_blob(&mut ada, "text/plain", b"secret.txt").await;
+
+    bob.join("#locked").await;
+
+    // bob can post text (he has `send`)…
+    bob.send("@label=t1 MSG #locked :hello").await;
+    bob.recv_until(|r| r.label.as_deref() == Some("t1")).await;
+    // …but attaching requires `attach`, which he lacks → CAP-REQUIRED.
+    bob.send(&format!("@label=t2;attach.1={uri} MSG #locked :file"))
+        .await;
+    let reply = bob.recv_until(|r| r.label.as_deref() == Some("t2")).await;
+    let Event::Err(err) = &reply.event else {
+        panic!("expected ERR, got {reply:?}");
+    };
+    assert_eq!(err.code, ErrCode::CapRequired);
+    assert_eq!(err.context.as_deref(), Some("attach"));
+
+    // ada (operator, holds `attach`) attaches fine.
+    ada.send(&format!("@label=z;attach.1={uri} MSG #locked :file"))
+        .await;
+    let ok = ada.recv_until(|r| r.label.as_deref() == Some("z")).await;
+    assert!(matches!(ok.event, Event::Message(_)));
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn media_session_bearer_authorizes_http_upload() {
+    let server = start_server(&["#general"]).await;
+    let http = server.http_addr.expect("http enabled");
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    // §13 the per-session fetch bearer is delivered right after auth.
+    let bearer = ada.ready("ada").await;
+    ada.join("#general").await;
+
+    // Upload authorized by the bearer alone (no OFFER handshake) — the browser
+    // path: one POST with a Content-Type.
+    let data = b"bearer-authorized upload".to_vec();
+    let head = format!(
+        "POST /media?t={bearer} HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
+        data.len()
+    );
+    let (status, body) = http_request(http, &head, &data).await;
+    assert_eq!(status, 200, "upload: {}", String::from_utf8_lossy(&body));
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let uri = json["media"].as_str().unwrap().to_string();
+    let hash = json["hash"].as_str().unwrap().to_string();
+
+    // Post + fetch with the same bearer (the round-trip the browser client does).
+    ada.send(&format!("@attach.1={uri} MSG #general :file"))
+        .await;
+    assert!(matches!(ada.recv().await.event, Event::Message(_)));
+    let (status, got) = http_get(http, &format!("/media/{hash}?t={bearer}"), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(got, data);
+
+    server.shutdown().await;
+}
+
+/// A data-plane GET that is expected to be refused (`ERR …`).
+async fn fetch_fails(client: &QuicClient, bearer: &str, hash: &str) -> bool {
+    let (mut send, mut recv) = client._connection.open_bi().await.unwrap();
+    send.write_all(format!("GET {bearer} {hash}\n").as_bytes())
+        .await
+        .unwrap();
+    let _ = send.finish();
+    let resp = recv.read_to_end(1024).await.unwrap();
+    String::from_utf8_lossy(&resp).starts_with("ERR")
+}
+
+/// Minimal raw HTTP/1.1 client (Connection: close ⇒ read to EOF) for the media
+/// endpoints — avoids a heavy HTTP client dep in the test.
+async fn http_request(addr: SocketAddr, head: &str, body: &[u8]) -> (u16, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+    sock.write_all(head.as_bytes()).await.unwrap();
+    if !body.is_empty() {
+        sock.write_all(body).await.unwrap();
+    }
+    let mut buf = Vec::new();
+    sock.read_to_end(&mut buf).await.unwrap();
+    let pos = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("http response");
+    let head = String::from_utf8_lossy(&buf[..pos]).into_owned();
+    let status = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .expect("http status");
+    (status, buf[pos + 4..].to_vec())
+}
+
+async fn http_post(addr: SocketAddr, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    http_request(addr, &head, body).await
+}
+
+async fn http_get(addr: SocketAddr, path: &str, range: Option<&str>) -> (u16, Vec<u8>) {
+    let range_hdr = range.map(|r| format!("Range: {r}\r\n")).unwrap_or_default();
+    let head =
+        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n{range_hdr}Connection: close\r\n\r\n");
+    http_request(addr, &head, &[]).await
+}
+
 // ---- WebSocket fallback ----
 
 struct WsClient {
@@ -272,6 +676,10 @@ async fn ws_fallback_speaks_the_same_protocol() {
     assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
     client.send(&format!("REGISTER ada :{PASSWORD}")).await;
     assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+    assert!(matches!(
+        client.recv().await.event,
+        Event::MediaToken { .. }
+    ));
     client.send("JOIN #general").await;
     assert!(matches!(client.recv().await.event, Event::Member { .. }));
     assert!(matches!(client.recv().await.event, Event::Policy { .. }));
@@ -297,6 +705,10 @@ async fn same_origin_ws_route_speaks_the_protocol() {
     assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
     client.send(&format!("REGISTER ada :{PASSWORD}")).await;
     assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+    assert!(matches!(
+        client.recv().await.event,
+        Event::MediaToken { .. }
+    ));
     client.send("JOIN #general").await;
     assert!(matches!(client.recv().await.event, Event::Member { .. }));
     assert!(matches!(client.recv().await.event, Event::Policy { .. }));
@@ -321,6 +733,7 @@ async fn quic_and_ws_share_channels() {
     ws.recv().await;
     ws.send(&format!("REGISTER bob :{PASSWORD}")).await;
     ws.recv().await;
+    ws.recv().await; // MEDIA TOKEN (§13)
     ws.send("JOIN #general").await;
     ws.recv().await;
     ws.recv().await;
@@ -425,7 +838,11 @@ async fn key_auth_attestation_verifies_against_wellknown() {
     assert_eq!(attestation.account, "ada");
     assert_eq!(attestation.device, device.public());
 
-    // Key-authed session is READY.
+    // Key-authed session is READY — consume the §13 media bearer, then join.
+    assert!(matches!(
+        second.recv().await.event,
+        Event::MediaToken { .. }
+    ));
     second.join("#general").await;
     server.shutdown().await;
 }
@@ -584,7 +1001,8 @@ async fn dms_and_mark_sync_over_quic() {
     ada2.send("HELLO weft/1").await;
     ada2.recv().await;
     ada2.send(&format!("AUTH PASSWORD ada :{PASSWORD}")).await;
-    ada2.recv().await;
+    ada2.recv().await; // WELCOME
+    ada2.recv().await; // §13 MEDIA TOKEN
 
     ada.send("JOIN #general").await;
     ada.recv().await;
@@ -854,7 +1272,11 @@ async fn outbound_bridge_dial_authenticates() {
 
     let link =
         weftd::dialer::dial_bridge(&endpoint, server.quic_addr, &peer, &identity, &home).await;
-    assert!(link.is_ok(), "outbound bridge auth should succeed: {:?}", link.err());
+    assert!(
+        link.is_ok(),
+        "outbound bridge auth should succeed: {:?}",
+        link.err()
+    );
     server.shutdown().await;
 }
 
@@ -928,8 +1350,14 @@ async fn outbound_bridge_forwards_messages_end_to_end() {
 
     // Both sides announce the live bridge to their #general members. ada's
     // announce means H's forwarders are subscribed — safe to post now.
-    assert!(matches!(bob.recv().await.event, Event::Manifest { .. }), "F announces the bridge");
-    assert!(matches!(ada.recv().await.event, Event::Manifest { .. }), "H announces the bridge");
+    assert!(
+        matches!(bob.recv().await.event, Event::Manifest { .. }),
+        "F announces the bridge"
+    );
+    assert!(
+        matches!(ada.recv().await.event, Event::Manifest { .. }),
+        "H announces the bridge"
+    );
 
     // A message on H's #general forwards one hop to F.
     ada.send("MSG #general :hi from H").await;
@@ -963,7 +1391,11 @@ async fn auto_bridge_requests_reachable_namespace() {
     let ns_root = weft_core::Keypair::generate();
     let mut ada = QuicClient::connect(f.quic_addr).await;
     ada.ready("ada").await;
-    ada.send(&format!("@root={} NS CREATE gaming public", ns_root.public().to_b64())).await;
+    ada.send(&format!(
+        "@root={} NS CREATE gaming public",
+        ns_root.public().to_b64()
+    ))
+    .await;
     assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
     ada.send("NS META gaming federation :open").await;
     assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));

@@ -4,7 +4,6 @@
 use super::*;
 
 impl<S: ControlStream> Session<S> {
-
     /// §11.2 AUTH BRIDGE: resolve the key the peer must prove control of —
     /// the pinned key (which the asserted key must match), or, in accept-any
     /// mode, the asserted key itself. A blocked network, an unknown network in
@@ -249,7 +248,11 @@ impl<S: ControlStream> Session<S> {
     }
 
     /// The peer acked our manifest at `version` → live. Mark it and forward.
-    pub(super) async fn on_bridge_accept_in(&mut self, peer: NetworkName, version: u64) -> io::Result<Flow> {
+    pub(super) async fn on_bridge_accept_in(
+        &mut self,
+        peer: NetworkName,
+        version: u64,
+    ) -> io::Result<Flow> {
         let Ok(Some(mut record)) = self.ctx.peers.peer(&peer).await else {
             return Ok(Flow::Continue);
         };
@@ -313,8 +316,11 @@ impl<S: ControlStream> Session<S> {
             return self.no_such_target(label).await;
         };
         let channels = self.scope_channels(&tscope).await;
-        let (history, media, typing) =
-            (weft_proto::HistoryMode::FromEpoch, weft_proto::MediaMode::None, false);
+        let (history, media, typing) = (
+            weft_proto::HistoryMode::FromEpoch,
+            weft_proto::MediaMode::None,
+            false,
+        );
         let record = match self
             .store_bridge_proposal(&peer, scope, &channels, history, media, typing)
             .await
@@ -712,7 +718,11 @@ impl<S: ControlStream> Session<S> {
     /// A bridge session's channel events: forward only *local-origin*
     /// message-plane events to the peer (one hop, §11.4 — received events are
     /// never re-forwarded because their origin != our network).
-    pub(super) async fn on_bridge_event(&mut self, _peer: NetworkName, event: SessionEvent) -> io::Result<()> {
+    pub(super) async fn on_bridge_event(
+        &mut self,
+        _peer: NetworkName,
+        event: SessionEvent,
+    ) -> io::Result<()> {
         let SessionEvent::Channel { event, .. } = event else {
             return Ok(()); // Lagged: a real bridge would resync (M5c)
         };
@@ -749,14 +759,25 @@ impl<S: ControlStream> Session<S> {
                 .unsupported(label, "that namespace is on this network already")
                 .await;
         }
-        if self.ctx.netblocks.is_netblocked(&network).await.unwrap_or(false) {
+        if self
+            .ctx
+            .netblocks
+            .is_netblocked(&network)
+            .await
+            .unwrap_or(false)
+        {
             self.send_err(label, ErrCode::Blocked, None, "network is blocked")
                 .await?;
             return Ok(Flow::Continue);
         }
         if !self.ctx.federate_allowed(&account) {
-            self.send_err(label, ErrCode::Throttled, None, "one federation request at a time")
-                .await?;
+            self.send_err(
+                label,
+                ErrCode::Throttled,
+                None,
+                "one federation request at a time",
+            )
+            .await?;
             return Ok(Flow::Continue);
         }
         let req = crate::context::AutoBridgeRequest { network, namespace };
@@ -1118,6 +1139,30 @@ impl<S: ControlStream> Session<S> {
         Ok(None)
     }
 
+    /// §13 may `account` post *attachments* to `channel`? Attachments to a
+    /// **restricted** channel additionally require the `attach` capability
+    /// (open channels allow them freely, mirroring the posting gate). Operators /
+    /// ns-owners hold `attach` implicitly via `account_has_cap`.
+    pub(super) async fn can_attach(
+        &self,
+        channel: &ChannelName,
+        account: &Account,
+    ) -> Result<bool, weft_store::StoreError> {
+        let restricted = self
+            .ctx
+            .channel_store
+            .channel(channel)
+            .await?
+            .map(|c| c.restricted)
+            .unwrap_or(false);
+        if !restricted {
+            return Ok(true);
+        }
+        let scope = TokenScope::Channel(channel.to_string());
+        self.ctx
+            .account_has_cap(account, &Capability::Attach, &scope, unix_now())
+            .await
+    }
 
     /// §11.10 dispatch for a **federated** (tunnelled) session: F's user `user`
     /// (`account@F`) acts on H under homeserver authority, enforced against H's
@@ -1175,13 +1220,19 @@ impl<S: ControlStream> Session<S> {
                 scope,
                 caps,
                 expiry,
-            } => self.on_grant(label, subject, scope, caps, expiry, actor).await,
+            } => {
+                self.on_grant(label, subject, scope, caps, expiry, actor)
+                    .await
+            }
             Command::Revoke {
                 subject,
                 scope,
                 caps,
                 epoch,
-            } => self.on_revoke(label, subject, scope, caps, epoch, actor).await,
+            } => {
+                self.on_revoke(label, subject, scope, caps, epoch, actor)
+                    .await
+            }
             // §6.3 channel administration.
             Command::ChannelCreate { channel, policy } => {
                 self.on_channel_create(label, channel, policy, actor).await
@@ -1198,7 +1249,10 @@ impl<S: ControlStream> Session<S> {
                 channel,
                 key,
                 value,
-            } => self.on_channel_meta(label, channel, key, value, actor).await,
+            } => {
+                self.on_channel_meta(label, channel, key, value, actor)
+                    .await
+            }
             Command::ChannelDelete { channel, confirm } => {
                 self.on_channel_delete(label, channel, confirm, actor).await
             }
@@ -1219,7 +1273,10 @@ impl<S: ControlStream> Session<S> {
                 scope,
                 account: subject,
                 name,
-            } => self.on_role_assign(label, scope, subject, name, actor).await,
+            } => {
+                self.on_role_assign(label, scope, subject, name, actor)
+                    .await
+            }
             Command::RoleUnassign {
                 scope,
                 account: subject,

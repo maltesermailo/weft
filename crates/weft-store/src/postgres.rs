@@ -17,9 +17,9 @@ use weft_proto::{
 
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MembershipStore,
-    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, RoleStore,
-    HOLD_RADIUS,
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaStore,
+    MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore,
+    ReportStore, RoleStore, HOLD_RADIUS,
 };
 use crate::types::{
     ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord,
@@ -416,11 +416,10 @@ impl AccountStore for PgStore {
     }
 
     async fn list_accounts(&self) -> Result<Vec<Account>, StoreError> {
-        let names: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM weft_accounts ORDER BY name")
-                .fetch_all(&self.pool)
-                .await
-                .map_err(backend_err)?;
+        let names: Vec<String> = sqlx::query_scalar("SELECT name FROM weft_accounts ORDER BY name")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
         Ok(names.into_iter().filter_map(|n| n.parse().ok()).collect())
     }
 
@@ -1968,12 +1967,7 @@ impl RoleStore for PgStore {
             .collect())
     }
 
-    async fn assign_role(
-        &self,
-        scope: &str,
-        name: &str,
-        subject: &str,
-    ) -> Result<(), StoreError> {
+    async fn assign_role(&self, scope: &str, name: &str, subject: &str) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO weft_role_assignments (scope, name, account) VALUES ($1,$2,$3) \
              ON CONFLICT (scope, name, account) DO NOTHING",
@@ -2032,5 +2026,120 @@ impl RoleStore for PgStore {
             .iter()
             .map(|r| r.get::<&str, _>("account").to_string())
             .collect())
+    }
+}
+
+#[async_trait]
+impl MediaStore for PgStore {
+    async fn record_blob(&self, record: crate::BlobRecord) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO weft_blobs (hash, mime, bytes, width, height, thumb, created_ms) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (hash) DO NOTHING",
+        )
+        .bind(&record.hash)
+        .bind(&record.mime)
+        .bind(record.bytes as i64)
+        .bind(record.width.map(|w| w as i32))
+        .bind(record.height.map(|h| h as i32))
+        .bind(record.thumb.as_deref())
+        .bind(record.created_ms as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn blob_meta(&self, hash: &str) -> Result<Option<crate::BlobRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT hash, mime, bytes, width, height, thumb, created_ms \
+             FROM weft_blobs WHERE hash = $1",
+        )
+        .bind(hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(row.map(|r| crate::BlobRecord {
+            hash: r.get("hash"),
+            mime: r.get("mime"),
+            bytes: r.get::<i64, _>("bytes") as u64,
+            width: r.get::<Option<i32>, _>("width").map(|w| w as u32),
+            height: r.get::<Option<i32>, _>("height").map(|h| h as u32),
+            thumb: r.get("thumb"),
+            created_ms: r.get::<i64, _>("created_ms") as u64,
+        }))
+    }
+
+    async fn add_refs(
+        &self,
+        scope: &Scope,
+        msgid: &MsgId,
+        hashes: &[String],
+    ) -> Result<(), StoreError> {
+        let ulid_ms = msgid.ulid().timestamp_ms() as i64;
+        for hash in hashes {
+            sqlx::query(
+                "INSERT INTO weft_media_refs (scope, msgid, hash, ulid_ms) VALUES ($1,$2,$3,$4)",
+            )
+            .bind(scope.as_key())
+            .bind(msgid.to_string())
+            .bind(hash)
+            .bind(ulid_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        }
+        Ok(())
+    }
+
+    async fn drop_refs(&self, msgid: &MsgId) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM weft_media_refs WHERE msgid = $1")
+            .bind(msgid.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn drop_refs_before(&self, scope: &Scope, cutoff_ms: u64) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM weft_media_refs WHERE scope = $1 AND ulid_ms < $2")
+            .bind(scope.as_key())
+            .bind(cutoff_ms as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn blob_scopes(&self, hash: &str) -> Result<Vec<Scope>, StoreError> {
+        let rows = sqlx::query("SELECT DISTINCT scope FROM weft_media_refs WHERE hash = $1")
+            .bind(hash)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| Scope::from_key(r.get::<&str, _>("scope")))
+            .collect())
+    }
+
+    async fn orphans(&self, cutoff_ms: u64) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT hash FROM weft_blobs u WHERE created_ms < $1 \
+             AND NOT EXISTS (SELECT 1 FROM weft_media_refs r WHERE r.hash = u.hash)",
+        )
+        .bind(cutoff_ms as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("hash")).collect())
+    }
+
+    async fn forget_blob(&self, hash: &str) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM weft_blobs WHERE hash = $1")
+            .bind(hash)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
     }
 }

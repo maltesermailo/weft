@@ -39,17 +39,18 @@ pub(crate) fn router(ctx: &ServerCtx, challenges: Challenges) -> Router {
         // running, in which case the challenge task fills `challenges`.
         .route(
             "/.well-known/acme-challenge/:token",
-            get(move |axum::extract::Path(token): axum::extract::Path<String>| {
-                let challenges = Arc::clone(&challenges);
-                async move {
-                    challenges
-                        .read()
-                        .expect("challenges lock")
-                        .get(&token)
-                        .cloned()
-                        .ok_or(axum::http::StatusCode::NOT_FOUND)
-                }
-            }),
+            get(
+                move |axum::extract::Path(token): axum::extract::Path<String>| {
+                    let challenges = Arc::clone(&challenges);
+                    async move {
+                        challenges
+                            .read()
+                            .expect("challenges lock")
+                            .get(&token)
+                            .cloned()
+                            .ok_or(axum::http::StatusCode::NOT_FOUND)
+                    }
+                },
+            ),
         )
 }
-

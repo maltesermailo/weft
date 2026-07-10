@@ -7,13 +7,14 @@ use std::sync::Arc;
 use weft_crypto::{Attestation, Capability, Grant, Keypair, PublicKey, Subject, TokenScope};
 use weft_proto::{Account, ChannelName, NamespaceName, NetworkName, RetentionPolicy};
 use weft_store::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MembershipStore,
-    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, RoleStore,
-    StoreError,
+    AccountStore, BlobStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaStore,
+    MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore,
+    ReportStore, RoleStore, StoreError,
 };
 
 use crate::accounts::Accounts;
 use crate::directory::Directory;
+use crate::media::{MediaRegistry, UploadGrant};
 use crate::registry::Registry;
 
 /// The only protocol version this server speaks (§3.6).
@@ -136,6 +137,13 @@ pub struct ServerCtx {
     /// roster dots.
     pub(crate) presence:
         std::sync::Mutex<std::collections::HashMap<Account, weft_proto::PresenceStatus>>,
+    /// §13 content-addressed blob storage (fs CAS in weftd; memory in tests).
+    /// The DS never reads blob bytes for meaning — it just stores/serves them.
+    pub blobs: Arc<dyn BlobStore>,
+    /// §13 media reference index (blob⇄message) — membership gating + refcount GC.
+    pub media_refs: Arc<dyn MediaStore>,
+    /// §13 media data-plane token registry (upload grants + fetch bearers).
+    media: MediaRegistry,
     /// §11 federation config: pinned peer keys + auto-accept.
     pub(crate) federation: FederationConfig,
     /// §2.2 namespace creation: `open` (any account, up to `ns_quota`) or
@@ -182,6 +190,7 @@ impl ServerCtx {
         identity: Keypair,
         registration_open: bool,
         store: Arc<S>,
+        blobs: Arc<dyn BlobStore>,
         dm_policy: RetentionPolicy,
         operators: impl IntoIterator<Item = Account>,
         ns_creation_open: bool,
@@ -201,10 +210,12 @@ impl ServerCtx {
             + ModerationStore
             + PinStore
             + MembershipStore
+            + MediaStore
             + RoleStore
             + 'static,
     {
         let events: Arc<dyn EventStore> = store.clone();
+        let media_refs: Arc<dyn MediaStore> = store.clone();
         let accounts: Arc<dyn AccountStore> = store.clone();
         let caps: Arc<dyn CapabilityStore> = store.clone();
         let invites: Arc<dyn InviteStore> = store.clone();
@@ -217,7 +228,12 @@ impl ServerCtx {
         let memberships: Arc<dyn MembershipStore> = store.clone();
         let roles: Arc<dyn RoleStore> = store.clone();
         let namespaces: Arc<dyn NamespaceStore> = store;
-        let registry = Registry::spawn(channels, info.network.clone(), Arc::clone(&events));
+        let registry = Registry::spawn(
+            channels,
+            info.network.clone(),
+            Arc::clone(&events),
+            Arc::clone(&media_refs),
+        );
         let directory = crate::directory::spawn(
             info.network.clone(),
             dm_policy,
@@ -246,6 +262,9 @@ impl ServerCtx {
             memberships,
             roles,
             presence: std::sync::Mutex::new(std::collections::HashMap::new()),
+            blobs,
+            media_refs,
+            media: MediaRegistry::default(),
             federation,
             operators: operators.into_iter().collect(),
             identity,
@@ -258,10 +277,7 @@ impl ServerCtx {
     }
 
     /// weftd installs the auto-federation dialer sink (enables `FEDERATE`).
-    pub fn set_auto_bridge_sink(
-        &self,
-        tx: tokio::sync::mpsc::UnboundedSender<AutoBridgeRequest>,
-    ) {
+    pub fn set_auto_bridge_sink(&self, tx: tokio::sync::mpsc::UnboundedSender<AutoBridgeRequest>) {
         let _ = self.auto_bridge_tx.set(tx);
     }
 
@@ -415,7 +431,6 @@ impl ServerCtx {
         self.actor_has_cap(actor, &grant_cap, scope, now).await
     }
 
-
     /// Resolve a GRANT/REVOKE subject string to its stable identity: a device
     /// key, a local account's **ULID**, or a foreign `account@network` (§10.4).
     /// Returns the typed token `Subject` and the string the grant store keys by
@@ -469,6 +484,68 @@ impl ServerCtx {
     /// The public signing key, for `/.well-known/weft` (§10.2).
     pub fn identity_public(&self) -> PublicKey {
         self.identity.public()
+    }
+
+    // ---- §13 media data-plane tokens (bytes ride the data plane in weftd) ----
+
+    /// Mint a one-time upload grant (from `STREAM OFFER`); returns its token.
+    pub(crate) fn mint_upload_token(
+        &self,
+        account: Account,
+        mime: String,
+        max_bytes: u64,
+    ) -> String {
+        self.media.mint_upload(UploadGrant {
+            account,
+            mime,
+            max_bytes,
+        })
+    }
+
+    /// Consume an upload grant if valid — called by weftd's data-plane handler
+    /// before it accepts bytes.
+    pub fn take_upload_token(&self, token: &str) -> Option<UploadGrant> {
+        self.media.take_upload(token)
+    }
+
+    /// Mint a fetch bearer for an account (M-media-0: a valid bearer = may
+    /// fetch; per-blob membership-gating is M-media-1).
+    pub fn mint_media_bearer(&self, account: Account) -> String {
+        self.media.mint_bearer(account)
+    }
+
+    /// The account a fetch bearer authorizes, if the token is valid.
+    pub fn media_bearer_account(&self, token: &str) -> Option<Account> {
+        self.media.bearer_account(token)
+    }
+
+    /// §13 moderation gate: is this blob hash blocked? Stub — M-media-5 wires the
+    /// real BLAKE3 blocklist. Every upload/fetch/mirror path calls it, so the
+    /// seam is already in place (re-uploads die on arrival once it's live).
+    pub async fn is_blob_blocked(&self, _hash: &str) -> bool {
+        false
+    }
+
+    /// §13 membership-gated fetch: may `account` fetch blob `hash`? Allowed iff a
+    /// scope referencing it has the account as a member (channel) or participant
+    /// (DM). A gated/absent blob is uniformly "not found" to the caller
+    /// (invariant 1). *(The `view`-cap path for non-members is a follow-up.)*
+    pub async fn may_fetch(&self, account: &Account, hash: &str) -> bool {
+        let Ok(scopes) = self.media_refs.blob_scopes(hash).await else {
+            return false;
+        };
+        if scopes.is_empty() {
+            return false;
+        }
+        let mine = self
+            .memberships
+            .memberships(account)
+            .await
+            .unwrap_or_default();
+        scopes.iter().any(|scope| match scope {
+            weft_store::Scope::Channel(channel) => mine.contains(channel),
+            weft_store::Scope::Dm(a, b) => a == account || b == account,
+        })
     }
 
     /// Issue a device attestation for a just-verified session (§6.1, §10.2).

@@ -8,11 +8,12 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, RetentionPolicy, Ulid};
 
+use crate::blob::BlobRecord;
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MembershipStore,
-    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ReportStore, RoleStore,
-    HOLD_RADIUS,
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaStore,
+    MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore,
+    ReportStore, RoleStore, HOLD_RADIUS,
 };
 use crate::types::{
     ChannelRecord, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord, NamespaceRecord,
@@ -78,6 +79,11 @@ struct Inner {
     /// Explicit role membership: (scope, role name, account).
     /// (scope, role name, subject) — subject is a local name or `account@network`.
     role_assignments: HashSet<(String, String, String)>,
+    /// §13 media: blob hash → full metadata record (mime, size, dims, thumb,
+    /// created_ms). The `created_ms` doubles as the GC grace anchor.
+    blobs: HashMap<String, BlobRecord>,
+    /// §13 media reference rows: (scope, msgid, blob hash).
+    media_refs: Vec<(Scope, MsgId, String)>,
 }
 
 #[derive(Default)]
@@ -501,8 +507,12 @@ impl ChannelStore for MemoryStore {
             inner.channels.insert(new.clone(), rec);
         }
         // 2. events — re-scope every (scope, ulid) entry.
-        let ev: Vec<(String, Ulid)> =
-            inner.events.keys().filter(|(s, _)| *s == ok).cloned().collect();
+        let ev: Vec<(String, Ulid)> = inner
+            .events
+            .keys()
+            .filter(|(s, _)| *s == ok)
+            .cloned()
+            .collect();
         for k in ev {
             if let Some(v) = inner.events.remove(&k) {
                 inner.events.insert((nk.clone(), k.1), v);
@@ -515,8 +525,12 @@ impl ChannelStore for MemoryStore {
             }
         }
         // 4. tombstoned roots.
-        let del: Vec<(String, Ulid)> =
-            inner.deleted.iter().filter(|(s, _)| *s == ok).cloned().collect();
+        let del: Vec<(String, Ulid)> = inner
+            .deleted
+            .iter()
+            .filter(|(s, _)| *s == ok)
+            .cloned()
+            .collect();
         for k in del {
             inner.deleted.remove(&k);
             inner.deleted.insert((nk.clone(), k.1));
@@ -526,8 +540,12 @@ impl ChannelStore for MemoryStore {
             inner.watermarks.insert(nk.clone(), w);
         }
         // 6. capability grants (key scope + record scope).
-        let gk: Vec<(String, String)> =
-            inner.grants.keys().filter(|(_, s)| *s == ok).cloned().collect();
+        let gk: Vec<(String, String)> = inner
+            .grants
+            .keys()
+            .filter(|(_, s)| *s == ok)
+            .cloned()
+            .collect();
         for k in gk {
             if let Some(mut rec) = inner.grants.remove(&k) {
                 rec.scope = nk.clone();
@@ -539,8 +557,12 @@ impl ChannelStore for MemoryStore {
             inner.epochs.insert(nk.clone(), e);
         }
         // 8. retention holds (invariant 11 — they follow the content).
-        let hk: Vec<(String, Ulid)> =
-            inner.holds.keys().filter(|(s, _)| *s == ok).cloned().collect();
+        let hk: Vec<(String, Ulid)> = inner
+            .holds
+            .keys()
+            .filter(|(s, _)| *s == ok)
+            .cloned()
+            .collect();
         for k in hk {
             if let Some(v) = inner.holds.remove(&k) {
                 inner.holds.insert((nk.clone(), k.1), v);
@@ -1237,12 +1259,7 @@ impl RoleStore for MemoryStore {
             .unwrap_or_default())
     }
 
-    async fn assign_role(
-        &self,
-        scope: &str,
-        name: &str,
-        subject: &str,
-    ) -> Result<(), StoreError> {
+    async fn assign_role(&self, scope: &str, name: &str, subject: &str) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         inner
             .role_assignments
@@ -1317,6 +1334,89 @@ impl NetblockStore for MemoryStore {
             .collect();
         blocks.sort_by(|a, b| a.network.as_str().cmp(b.network.as_str()));
         Ok(blocks)
+    }
+}
+
+#[async_trait]
+impl MediaStore for MemoryStore {
+    async fn record_blob(&self, record: BlobRecord) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .expect("store lock")
+            .blobs
+            .entry(record.hash.clone())
+            .or_insert(record);
+        Ok(())
+    }
+
+    async fn blob_meta(&self, hash: &str) -> Result<Option<BlobRecord>, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("store lock")
+            .blobs
+            .get(hash)
+            .cloned())
+    }
+
+    async fn add_refs(
+        &self,
+        scope: &Scope,
+        msgid: &MsgId,
+        hashes: &[String],
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        for hash in hashes {
+            inner
+                .media_refs
+                .push((scope.clone(), msgid.clone(), hash.clone()));
+        }
+        Ok(())
+    }
+
+    async fn drop_refs(&self, msgid: &MsgId) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .expect("store lock")
+            .media_refs
+            .retain(|(_, m, _)| m != msgid);
+        Ok(())
+    }
+
+    async fn drop_refs_before(&self, scope: &Scope, cutoff_ms: u64) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .expect("store lock")
+            .media_refs
+            .retain(|(s, m, _)| !(s == scope && m.ulid().timestamp_ms() < cutoff_ms));
+        Ok(())
+    }
+
+    async fn blob_scopes(&self, hash: &str) -> Result<Vec<Scope>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let scopes: HashSet<Scope> = inner
+            .media_refs
+            .iter()
+            .filter(|(_, _, h)| h == hash)
+            .map(|(s, _, _)| s.clone())
+            .collect();
+        Ok(scopes.into_iter().collect())
+    }
+
+    async fn orphans(&self, cutoff_ms: u64) -> Result<Vec<String>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let referenced: HashSet<&String> = inner.media_refs.iter().map(|(_, _, h)| h).collect();
+        Ok(inner
+            .blobs
+            .values()
+            .filter(|rec| rec.created_ms < cutoff_ms && !referenced.contains(&rec.hash))
+            .map(|rec| rec.hash.clone())
+            .collect())
+    }
+
+    async fn forget_blob(&self, hash: &str) -> Result<(), StoreError> {
+        self.inner.lock().expect("store lock").blobs.remove(hash);
+        Ok(())
     }
 }
 

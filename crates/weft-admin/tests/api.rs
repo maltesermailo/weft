@@ -135,7 +135,12 @@ async fn delete_message_requires_live() {
     let app = build().await;
     let cookie = session(&app).await;
     let res = app
-        .oneshot(Request::delete(format!("/admin/api/messages/{msgid}")).header(header::COOKIE, &cookie).body(Body::empty()).unwrap())
+        .oneshot(
+            Request::delete(format!("/admin/api/messages/{msgid}"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED);
@@ -145,7 +150,12 @@ async fn delete_message_requires_live() {
     let app = build_with_live(Arc::new(live.clone())).await;
     let cookie = session(&app).await;
     let res = app
-        .oneshot(Request::delete(format!("/admin/api/messages/{msgid}")).header(header::COOKIE, &cookie).body(Body::empty()).unwrap())
+        .oneshot(
+            Request::delete(format!("/admin/api/messages/{msgid}"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
@@ -168,7 +178,12 @@ async fn serves_the_spa() {
     // The SPA shell is public (the API under it is gated); it loads at /admin.
     let res = build().await.oneshot(get("/admin", None)).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let ct = res.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+    let ct = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/html"));
 }
 
@@ -177,7 +192,11 @@ async fn auth_gate_and_operator_login() {
     let app = build().await;
 
     // Unauthed reads are rejected.
-    let res = app.clone().oneshot(get("/admin/api/stats", None)).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(get("/admin/api/stats", None))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     // Wrong password → uniform 401.
@@ -185,7 +204,11 @@ async fn auth_gate_and_operator_login() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     // A valid account that isn't an operator → 401 (same code, anti-enumeration).
-    let res = app.clone().oneshot(login("mallory", PASSWORD)).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(login("mallory", PASSWORD))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     // Operator login → 200 + session cookie.
@@ -203,13 +226,24 @@ async fn auth_gate_and_operator_login() {
         .to_string();
 
     // The cookie unlocks reads.
-    let res = app.clone().oneshot(get("/admin/api/stats", Some(&cookie))).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(get("/admin/api/stats", Some(&cookie)))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let res = app.oneshot(get("/admin/api/accounts", Some(&cookie))).await.unwrap();
+    let res = app
+        .oneshot(get("/admin/api/accounts", Some(&cookie)))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
     // A tampered cookie is rejected.
     let bad = format!("{cookie}tamper");
-    let res = build().await.oneshot(get("/admin/api/stats", Some(&bad))).await.unwrap();
+    let res = build()
+        .await
+        .oneshot(get("/admin/api/stats", Some(&bad)))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }

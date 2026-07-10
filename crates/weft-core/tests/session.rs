@@ -49,8 +49,16 @@ impl Client {
     }
 
     async fn recv(&mut self) -> Reply {
-        let raw = self.recv_raw().await;
-        Reply::parse(&raw).expect("server sent an unparseable line")
+        loop {
+            let raw = self.recv_raw().await;
+            let reply = Reply::parse(&raw).expect("server sent an unparseable line");
+            // §13 the media fetch bearer is pushed after auth; it's out-of-band
+            // for these (non-media) tests, so skip it transparently.
+            if matches!(reply.event, Event::MediaToken { .. }) {
+                continue;
+            }
+            return reply;
+        }
     }
 
     async fn expect_err(&mut self, code: ErrCode) -> Reply {
@@ -107,6 +115,7 @@ fn ctx_full(
         Keypair::generate(),
         registration_open,
         Arc::new(MemoryStore::default()),
+        Arc::new(weft_core::MemBlobStore::default()),
         "permanent".parse().unwrap(), // §9.5 DM default
         operators.iter().map(|o| o.parse().unwrap()),
         true, // §2.2 namespace creation open
@@ -519,8 +528,8 @@ async fn msg_error_paths() {
     );
     client.send("MSG #general :"); // §6.4: empty body needs attachments
     client.expect_err(ErrCode::Policy).await;
-    client.send("@attach.1=blob MSG #general :look"); // media is M6
-    client.expect_err(ErrCode::Unsupported).await;
+    client.send("@attach.1=blob MSG #general :look"); // malformed media reference
+    client.expect_err(ErrCode::Policy).await;
     client.send("MSG #other :not joined"); // exists, not a member
     let reply = client.expect_err(ErrCode::CapRequired).await;
     let Event::Err(err) = &reply.event else {
@@ -732,7 +741,9 @@ async fn admin_delete_tombstones_without_membership() {
 
     // The member sees the tombstone, attributed to a moderator.
     let ev = ada.recv().await;
-    assert!(matches!(&ev.event, Event::Deleted { msgid: m, by: Some(_), .. } if m.to_string() == msgid));
+    assert!(
+        matches!(&ev.event, Event::Deleted { msgid: m, by: Some(_), .. } if m.to_string() == msgid)
+    );
 
     // The message is gone — further mutation is NoSuchTarget (§2.2).
     ada.send(&format!("EDIT {msgid} :necromancy"));
@@ -1450,6 +1461,7 @@ async fn namespace_quota_is_enforced_when_open() {
         Keypair::generate(),
         true,
         Arc::new(MemoryStore::default()),
+        Arc::new(weft_core::MemBlobStore::default()),
         "permanent".parse().unwrap(),
         std::iter::empty::<weft_proto::Account>(),
         true, // open
@@ -1705,6 +1717,7 @@ async fn recovery_applies_at_expiry_via_scheduler() {
         Keypair::generate(),
         true,
         Arc::clone(&store),
+        Arc::new(weft_core::MemBlobStore::default()),
         "permanent".parse().unwrap(),
         std::iter::empty::<weft_proto::Account>(),
         true,
@@ -1890,6 +1903,7 @@ fn ctx_bridged(
         Keypair::generate(),
         true,
         Arc::new(MemoryStore::default()),
+        Arc::new(weft_core::MemBlobStore::default()),
         "permanent".parse().unwrap(),
         operators.iter().map(|o| o.parse().unwrap()),
         true,
@@ -1919,6 +1933,7 @@ fn ctx_open_federation(channels: &[&str], operators: &[&str]) -> Arc<ServerCtx> 
         Keypair::generate(),
         true,
         Arc::new(MemoryStore::default()),
+        Arc::new(weft_core::MemBlobStore::default()),
         "permanent".parse().unwrap(),
         operators.iter().map(|o| o.parse().unwrap()),
         true,
@@ -1983,7 +1998,10 @@ async fn propose(bridge: &mut Client, key: &Keypair, channels: &[&str]) {
 async fn ns_meta_federation_requires_public() {
     let ctx = ctx(&[]);
     let mut ada = ready(&ctx, "ada").await;
-    ada.send(&format!("@root={} NS CREATE gaming unlisted", root_key_b64()));
+    ada.send(&format!(
+        "@root={} NS CREATE gaming unlisted",
+        root_key_b64()
+    ));
     ada.recv().await;
 
     // Opening federation on a non-public namespace is refused (§11.10).
@@ -2014,13 +2032,22 @@ async fn bridge_request_offers_only_reachable_namespaces() {
     // Reachable → the peer receives a signed BRIDGE PROPOSE offer.
     peer.send("BRIDGE REQUEST gaming");
     let offer = peer.recv_raw().await;
-    assert!(offer.contains("BRIDGE PROPOSE"), "expected an offer, got {offer}");
-    assert!(offer.contains("manifest="), "offer must carry a manifest: {offer}");
+    assert!(
+        offer.contains("BRIDGE PROPOSE"),
+        "expected an offer, got {offer}"
+    );
+    assert!(
+        offer.contains("manifest="),
+        "offer must carry a manifest: {offer}"
+    );
 
     // Closed / unknown → NO-SUCH-TARGET (uniform, anti-enumeration).
     peer.send("BRIDGE REQUEST nonexistent");
     let miss = peer.recv_raw().await;
-    assert!(miss.contains("NO-SUCH-TARGET"), "expected NO-SUCH-TARGET, got {miss}");
+    assert!(
+        miss.contains("NO-SUCH-TARGET"),
+        "expected NO-SUCH-TARGET, got {miss}"
+    );
 }
 
 #[tokio::test]

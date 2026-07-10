@@ -39,7 +39,10 @@ pub fn routes() -> Router<AdminState> {
         .route("/api/channels/:name/messages", get(browse_messages))
         // msgids are `<network>/<ULID>` — they contain a slash, so capture the
         // whole tail with a wildcard.
-        .route("/api/messages/*msgid", axum::routing::delete(delete_message))
+        .route(
+            "/api/messages/*msgid",
+            axum::routing::delete(delete_message),
+        )
 }
 
 // ---- read ----
@@ -99,14 +102,20 @@ impl From<weft_store::ReportRecord> for ReportDto {
             reporter: r.reporter.to_string(),
             note: r.note,
             filed_at_ms: r.filed_at_ms,
-            resolution: r.resolution.map(|res| format!("{:?}", res.action).to_lowercase()),
+            resolution: r
+                .resolution
+                .map(|res| format!("{:?}", res.action).to_lowercase()),
         }
     }
 }
 
 async fn list_reports(State(st): State<AdminState>, Query(q): Query<ScopeQuery>) -> Response {
     let scope = q.scope.as_deref().unwrap_or("*");
-    match st.reports.list_reports(scope, None, None, q.limit.unwrap_or(200)).await {
+    match st
+        .reports
+        .list_reports(scope, None, None, q.limit.unwrap_or(200))
+        .await
+    {
         Ok(list) => Json(list.into_iter().map(ReportDto::from).collect::<Vec<_>>()).into_response(),
         Err(e) => internal(e),
     }
@@ -142,7 +151,10 @@ async fn report_with_context(st: &AdminState, id: &str) -> Result<Option<Value>,
         }
     }
     let children = st.events.children(&scope, &root_ulids).await?;
-    let context: Vec<Value> = materialize(roots, children).into_iter().map(msg_dto).collect();
+    let context: Vec<Value> = materialize(roots, children)
+        .into_iter()
+        .map(msg_dto)
+        .collect();
 
     Ok(Some(json!({
         "report": ReportDto::from(report),
@@ -179,14 +191,16 @@ async fn list_moderation(State(st): State<AdminState>, Query(q): Query<ScopeQuer
     match st.moderation.list_moderation(scope).await {
         Ok(list) => Json(
             list.into_iter()
-                .map(|m| json!({
-                    "scope": m.scope,
-                    "account": m.account.to_string(),
-                    "kind": format!("{:?}", m.kind).to_lowercase(),
-                    "actor": m.actor,
-                    "reason": m.reason,
-                    "at_ms": m.at_ms,
-                }))
+                .map(|m| {
+                    json!({
+                        "scope": m.scope,
+                        "account": m.account.to_string(),
+                        "kind": format!("{:?}", m.kind).to_lowercase(),
+                        "actor": m.actor,
+                        "reason": m.reason,
+                        "at_ms": m.at_ms,
+                    })
+                })
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -222,10 +236,14 @@ async fn moderate(
                 live.eject(&channel, &account).await;
                 StatusCode::NO_CONTENT.into_response()
             }
-            (None, _) => {
-                (StatusCode::NOT_IMPLEMENTED, "kick requires the embedded server").into_response()
+            (None, _) => (
+                StatusCode::NOT_IMPLEMENTED,
+                "kick requires the embedded server",
+            )
+                .into_response(),
+            (_, Err(_)) => {
+                (StatusCode::BAD_REQUEST, "kick scope must be a channel").into_response()
             }
-            (_, Err(_)) => (StatusCode::BAD_REQUEST, "kick scope must be a channel").into_response(),
         };
     }
 
@@ -235,7 +253,10 @@ async fn moderate(
         other => return (StatusCode::BAD_REQUEST, format!("unknown verb {other}")).into_response(),
     };
     let result = if req.verb.starts_with("un") {
-        st.moderation.clear_moderation(&req.scope, &account, kind).await.map(|_| ())
+        st.moderation
+            .clear_moderation(&req.scope, &account, kind)
+            .await
+            .map(|_| ())
     } else {
         st.moderation
             .set_moderation(ModRecord {
@@ -297,13 +318,15 @@ async fn list_namespaces(State(st): State<AdminState>) -> Response {
     match st.namespaces.list_public(None, 500).await {
         Ok(list) => Json(
             list.into_iter()
-                .map(|n| json!({
-                    "name": n.name.to_string(),
-                    "owner": n.owner.to_string(),
-                    "visibility": n.visibility,
-                    "title": n.title,
-                    "description": n.description,
-                }))
+                .map(|n| {
+                    json!({
+                        "name": n.name.to_string(),
+                        "owner": n.owner.to_string(),
+                        "visibility": n.visibility,
+                        "title": n.title,
+                        "description": n.description,
+                    })
+                })
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -316,13 +339,15 @@ async fn list_grants(State(st): State<AdminState>, Query(q): Query<ScopeQuery>) 
     match st.caps.grants_at_scope(scope).await {
         Ok(list) => Json(
             list.into_iter()
-                .map(|g| json!({
-                    "subject": g.subject,
-                    "scope": g.scope,
-                    "caps": g.caps,
-                    "epoch": g.epoch,
-                    "expiry": g.expiry,
-                }))
+                .map(|g| {
+                    json!({
+                        "subject": g.subject,
+                        "scope": g.scope,
+                        "caps": g.caps,
+                        "epoch": g.epoch,
+                        "expiry": g.expiry,
+                    })
+                })
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -355,7 +380,10 @@ async fn browse(st: &AdminState, scope: Scope, limit: usize) -> Result<Vec<Value
     let roots = st.events.roots(&scope, page).await?;
     let root_ulids: Vec<Ulid> = roots.iter().map(|r| r.msgid.ulid()).collect();
     let children = st.events.children(&scope, &root_ulids).await?;
-    Ok(materialize(roots, children).into_iter().map(msg_dto).collect())
+    Ok(materialize(roots, children)
+        .into_iter()
+        .map(msg_dto)
+        .collect())
 }
 
 /// Render one materialized item as JSON (shared by browse + report context).
@@ -394,7 +422,11 @@ async fn delete_message(
     Path(msgid): Path<String>,
 ) -> Response {
     let Some(live) = &st.live else {
-        return (StatusCode::NOT_IMPLEMENTED, "delete requires the embedded server").into_response();
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "delete requires the embedded server",
+        )
+            .into_response();
     };
     let Ok(id) = msgid.parse::<MsgId>() else {
         return (StatusCode::BAD_REQUEST, "bad msgid").into_response();
@@ -402,7 +434,11 @@ async fn delete_message(
     if live.delete_message(&id, &who).await {
         StatusCode::NO_CONTENT.into_response()
     } else {
-        (StatusCode::NOT_FOUND, "no such message (or not a live channel)").into_response()
+        (
+            StatusCode::NOT_FOUND,
+            "no such message (or not a live channel)",
+        )
+            .into_response()
     }
 }
 

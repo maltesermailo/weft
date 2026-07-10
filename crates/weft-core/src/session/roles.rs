@@ -154,15 +154,8 @@ impl<S: ControlStream> Session<S> {
         // namespace — so "give role X send in #chan" follows the assignment.
         if let Some(ns) = scope.strip_prefix("ns:") {
             for (cscope, caps) in self.channel_role_caps(ns, &name).await {
-                self.on_grant(
-                    None,
-                    subject.to_string(),
-                    cscope,
-                    caps,
-                    None,
-                    actor.clone(),
-                )
-                .await?;
+                self.on_grant(None, subject.to_string(), cscope, caps, None, actor.clone())
+                    .await?;
             }
         }
         Ok(Flow::Continue)
@@ -286,7 +279,11 @@ impl<S: ControlStream> Session<S> {
     }
 
     /// §6.5 ROLES: the role definitions at a scope, as a `BATCH` of `ROLE`.
-    pub(super) async fn on_roles_list(&mut self, label: Option<String>, scope: String) -> io::Result<Flow> {
+    pub(super) async fn on_roles_list(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+    ) -> io::Result<Flow> {
         let roles = match self.ctx.roles.roles(&scope).await {
             Ok(roles) => roles,
             Err(e) => return self.internal(label, &e).await,
