@@ -37,9 +37,18 @@
   let network = $state("");
   let account = $state("");
   let authError = $state("");
+  // AUTH-FAILED is followed by the server closing the stream; this flag lets the
+  // `closed` handler keep the specific auth reason instead of clobbering it with
+  // a generic "connection closed".
+  let authFailed = false;
 
   let mode = $state<weft.Mode>("login");
-  let host = $state("127.0.0.1:4433");
+  // Web build: the network is wherever the page was served from (same-origin,
+  // P3 embed); desktop: a QUIC host the user types. The web value is display-only
+  // — the WASM backend derives its WS URL from window.location regardless.
+  let host = $state(
+    weft.isWeb && typeof window !== "undefined" ? window.location.host : "127.0.0.1:4433",
+  );
   let formAccount = $state("");
   let formPassword = $state("");
   // client.toml: TLS mode (verified by default) + optional prefill host.
@@ -668,10 +677,17 @@
         lastCreds = null;
         status = "connect";
         authError = e.reason;
+        authFailed = true;
         break;
       case "closed":
         if (manualLogout) {
           manualLogout = false;
+          break;
+        }
+        // AUTH-FAILED already closed the stream (§3.6) and set a specific
+        // reason — don't overwrite it with the generic close message.
+        if (authFailed) {
+          authFailed = false;
           break;
         }
         // Unexpected drop while online → keep the UI and auto-reconnect.
@@ -1014,6 +1030,7 @@
   async function doConnect() {
     if (!formAccount.trim()) return;
     authError = "";
+    authFailed = false;
     status = "connecting";
     manualLogout = false;
     reconnectAttempts = 0;
@@ -1688,7 +1705,8 @@
     // account already exists).
     try {
       const saved = JSON.parse(localStorage.getItem(SAVED_KEY) ?? "null");
-      if (saved?.host) host = saved.host;
+      // On web the network is always the page origin — don't restore a stale host.
+      if (saved?.host && !weft.isWeb) host = saved.host;
       if (saved?.account) formAccount = saved.account;
       if (saved?.host && saved?.account && saved?.password) {
         formPassword = saved.password;

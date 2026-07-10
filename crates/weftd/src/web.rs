@@ -102,17 +102,28 @@ mod spa {
     /// Fallback handler (specific routes — `/ws`, `/.well-known`, `/admin` — win
     /// first): serve the requested asset, else hand back `index.html` so the
     /// client router owns unknown paths.
+    ///
+    /// `Cache-Control: no-cache` (revalidate every load) because the SPA entry +
+    /// the wasm pkg have **stable** names (`/wasm/*_bg.wasm`), so a far-future
+    /// cache would pin a stale client across rebuilds. SvelteKit's own hashed
+    /// `_app/*` assets are immutable regardless, so this costs almost nothing.
     pub(super) async fn serve(uri: Uri) -> Response {
         let path = uri.path().trim_start_matches('/');
         let path = if path.is_empty() { "index.html" } else { path };
+        let no_cache = (header::CACHE_CONTROL, "no-cache");
         if let Some(file) = Assets::get(path) {
-            return ([(header::CONTENT_TYPE, mime_for(path))], file.data.into_owned())
+            return (
+                [(header::CONTENT_TYPE, mime_for(path)), no_cache],
+                file.data.into_owned(),
+            )
                 .into_response();
         }
         match Assets::get("index.html") {
-            Some(index) => {
-                ([(header::CONTENT_TYPE, "text/html")], index.data.into_owned()).into_response()
-            }
+            Some(index) => (
+                [(header::CONTENT_TYPE, "text/html"), no_cache],
+                index.data.into_owned(),
+            )
+                .into_response(),
             None => (StatusCode::NOT_FOUND, "web UI not built").into_response(),
         }
     }

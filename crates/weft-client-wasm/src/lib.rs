@@ -28,6 +28,10 @@ impl EventSink for JsSink {
     }
 }
 
+/// §3.4 keepalive cadence. The server closes silent sessions at ~30s, so PING
+/// well under that (matches the desktop client's 10s).
+const KEEPALIVE_MS: i32 = 10_000;
+
 /// Live connection state, shared across the WebSocket callbacks.
 struct Conn {
     ws: WebSocket,
@@ -39,6 +43,17 @@ struct Conn {
     in_batch: bool,
     buffered: Vec<String>,
     sink: JsSink,
+    /// `setInterval` handle for the keepalive PING (0 = none); cleared on close.
+    keepalive: i32,
+}
+
+/// Stop a keepalive interval (no-op for 0 / no window).
+fn clear_keepalive(handle: i32) {
+    if handle != 0 {
+        if let Some(w) = web_sys::window() {
+            w.clear_interval_with_handle(handle);
+        }
+    }
 }
 
 impl Conn {
@@ -126,6 +141,8 @@ impl WeftClient {
                     .map(|_| JsValue::UNDEFINED);
             }
             "disconnect" => {
+                let handle = self.conn.borrow().as_ref().map(|c| c.keepalive).unwrap_or(0);
+                clear_keepalive(handle);
                 *self.conn.borrow_mut() = None;
                 return Ok(JsValue::UNDEFINED);
             }
@@ -223,7 +240,7 @@ impl WeftClient {
         if mode == Mode::Key {
             return Err("device-key login is not available in the web build yet".into());
         }
-        let url = ws_url(host);
+        let url = ws_url(host)?;
         let ws = WebSocket::new(&url).map_err(|_| format!("cannot open WebSocket to {url}"))?;
         let password = core::password_or_default(&password);
         *self.conn.borrow_mut() = Some(Conn {
@@ -236,6 +253,7 @@ impl WeftClient {
             in_batch: false,
             buffered: Vec::new(),
             sink: self.sink.clone(),
+            keepalive: 0,
         });
 
         // onopen → HELLO (start the §3.3 handshake)
@@ -265,11 +283,13 @@ impl WeftClient {
             ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
             self._keep.borrow_mut().push(onmessage.into_js_value());
         }
-        // onclose → Closed
+        // onclose → Closed (stop the keepalive timer first)
         {
             let conn = self.conn.clone();
             let sink = self.sink.clone();
             let onclose = Closure::<dyn FnMut(CloseEvent)>::new(move |_e: CloseEvent| {
+                let handle = conn.borrow().as_ref().map(|c| c.keepalive).unwrap_or(0);
+                clear_keepalive(handle);
                 *conn.borrow_mut() = None;
                 sink.emit(ClientEvent::Closed {
                     reason: "connection closed".into(),
@@ -278,22 +298,58 @@ impl WeftClient {
             ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
             self._keep.borrow_mut().push(onclose.into_js_value());
         }
+        // §3.4 keepalive: PING on a cadence under the server's idle timeout so a
+        // quiet session isn't dropped every 30s. The interval self-guards on the
+        // socket being OPEN; onclose/disconnect clear it.
+        {
+            let conn = self.conn.clone();
+            let ping = Closure::<dyn FnMut()>::new(move || {
+                if let Some(c) = conn.borrow().as_ref() {
+                    if c.ws.ready_state() == WebSocket::OPEN {
+                        let _ = c.ws.send_with_str("PING keepalive");
+                    }
+                }
+            });
+            let handle = web_sys::window()
+                .and_then(|w| {
+                    w.set_interval_with_callback_and_timeout_and_arguments_0(
+                        ping.as_ref().unchecked_ref(),
+                        KEEPALIVE_MS,
+                    )
+                    .ok()
+                })
+                .unwrap_or(0);
+            if let Some(c) = self.conn.borrow_mut().as_mut() {
+                c.keepalive = handle;
+            }
+            self._keep.borrow_mut().push(ping.into_js_value());
+        }
         Ok(())
     }
 }
 
-/// `wss://<host>/ws` (or `ws://` for a plain-http host) — the same-origin default
-/// weftd serves (§11 web embed). A full `ws(s)://…` host is passed through.
-fn ws_url(host: &str) -> String {
+/// Resolve the session's WebSocket URL.
+///
+/// The web client is served *by* the weft network it talks to (P3 embed), so by
+/// default the URL is derived **same-origin** from `window.location`: the origin
+/// is the network (never `127.0.0.1`), and the scheme tracks the page — `wss`
+/// under HTTPS, `ws` under HTTP (so no mixed-content block, no TLS-vs-plaintext
+/// mismatch). An explicit `ws(s)://…` `host` is honored verbatim as a
+/// cross-origin override.
+fn ws_url(host: &str) -> Result<String, String> {
+    let host = host.trim();
     if host.starts_with("ws://") || host.starts_with("wss://") {
-        return host.to_string();
+        return Ok(host.to_string());
     }
-    let (scheme, rest) = if let Some(r) = host.strip_prefix("http://") {
-        ("ws", r)
-    } else if let Some(r) = host.strip_prefix("https://") {
-        ("wss", r)
-    } else {
-        ("wss", host)
+    let location = web_sys::window()
+        .ok_or("no window object (not a browser?)")?
+        .location();
+    let scheme = match location.protocol().as_deref() {
+        Ok("https:") => "wss",
+        _ => "ws",
     };
-    format!("{scheme}://{}/ws", rest.trim_end_matches('/'))
+    let authority = location
+        .host()
+        .map_err(|_| "cannot read window.location.host".to_string())?;
+    Ok(format!("{scheme}://{authority}/ws"))
 }

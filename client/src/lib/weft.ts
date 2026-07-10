@@ -17,6 +17,11 @@ import {
 const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/// True in the browser (WASM) build, false in the Tauri desktop app. Used by the
+/// UI to prefill the network with the page origin (the web client is served by
+/// the network it talks to — P3 embed).
+export const isWeb = !IS_TAURI;
+
 // ---- WASM backend (lazy: the module + wasm only load in a real browser) ----
 type WasmClient = { invoke(cmd: string, args: unknown): Promise<unknown> };
 let wasmClient: WasmClient | null = null;

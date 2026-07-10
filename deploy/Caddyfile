@@ -1,5 +1,7 @@
-# Caddy fronts the WEFT *HTTP* surface (the /.well-known/weft discovery doc, and
-# later the web control panel) with automatic Let's Encrypt.
+# Caddy fronts the WEFT *HTTP* surface with automatic Let's Encrypt: the
+# /.well-known/weft discovery doc (§10.2), the /admin panel, and — with the P3
+# web embed (`[listen] web = true`, weftd built `--features web-ui`) — the
+# browser client at / plus its same-origin WebSocket at /ws.
 #
 # IMPORTANT: QUIC is NOT proxied here. weftd's native transport is QUIC (UDP +
 # TLS 1.3, end-to-end) — a reverse proxy cannot terminate it. weftd holds the
@@ -7,19 +9,23 @@
 # shared cert file (see deploy/README.md). Caddy only handles TCP/HTTP.
 
 weft.example.com {
-	# The network discovery document (§10.2) — weftd serves it on its HTTP
-	# listener ([listen] http = "127.0.0.1:8080").
-	handle /.well-known/weft {
-		reverse_proxy 127.0.0.1:8080
-	}
-
-	# (Future) web control panel, once weftd serves it at /admin.
-	handle /admin* {
-		reverse_proxy 127.0.0.1:8080
-	}
-
-	# Everything else: 404 (or add your own site here).
-	handle {
-		respond 404
-	}
+	# Proxy the whole HTTP surface to weftd's HTTP listener
+	# ([listen] http = "127.0.0.1:8080"). This one rule covers the SPA (/),
+	# the wasm bundle (/wasm/*), /.well-known/weft, /admin, AND the WebSocket
+	# at /ws — Caddy's reverse_proxy upgrades WebSocket connections
+	# transparently, so no extra config is needed for /ws.
+	reverse_proxy 127.0.0.1:8080
 }
+
+# If you'd rather NOT serve the browser client here (API/well-known only), use
+# path-scoped handles instead — but then /ws must still be routed to weftd or the
+# web client can't connect:
+#
+# weft.example.com {
+# 	handle /.well-known/weft { reverse_proxy 127.0.0.1:8080 }
+# 	handle /admin*           { reverse_proxy 127.0.0.1:8080 }
+# 	handle /ws               { reverse_proxy 127.0.0.1:8080 }  # WebSocket
+# 	handle /wasm/*           { reverse_proxy 127.0.0.1:8080 }
+# 	handle /                 { reverse_proxy 127.0.0.1:8080 }  # SPA entry
+# 	handle { respond 404 }
+# }

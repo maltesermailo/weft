@@ -20,7 +20,7 @@ serde-wasm-bindgen = "0.6"
 
 [dependencies.web-sys]
 version = "0.3"
-features = ["WebSocket", "MessageEvent", "CloseEvent", "ErrorEvent", "BinaryType", "Window"]
+features = ["WebSocket", "MessageEvent", "CloseEvent", "ErrorEvent", "BinaryType", "Window", "Location"]
 
 
 # wasm32 entropy: getrandom is pulled at 0.2 (via ed25519-dalek) and 0.3 (via
