@@ -73,13 +73,26 @@ impl QuicClient {
         self.stream.send_line(line).await.expect("send");
     }
 
-    async fn recv(&mut self) -> Reply {
+    /// One reply, verbatim (no filtering).
+    async fn recv_reply(&mut self) -> Reply {
         let line = tokio::time::timeout(Duration::from_secs(5), self.stream.recv_line())
             .await
             .expect("timed out")
             .expect("recv")
             .expect("stream closed");
         Reply::parse(&line).expect("unparseable server line")
+    }
+
+    /// A reply, skipping server-generated system messages (join/part lines) so
+    /// they don't perturb flows that don't assert on them.
+    async fn recv(&mut self) -> Reply {
+        loop {
+            let reply = self.recv_reply().await;
+            if matches!(&reply.event, Event::Message(m) if m.meta.system.is_some()) {
+                continue;
+            }
+            return reply;
+        }
     }
 
     /// HELLO + REGISTER (registration doubles as auth, §6.1). Returns the §13
@@ -148,6 +161,27 @@ impl QuicClient {
             .expect("response header");
         let header = String::from_utf8_lossy(&resp[..nl]).into_owned();
         assert!(header.starts_with("OK "), "download failed: {header}");
+        resp[nl + 1..].to_vec()
+    }
+
+    /// §6/§13 pull a backfill batch on a data-plane bidi stream, returning the
+    /// serialized `Reply` lines (`OK <len>\n<body>`).
+    async fn backfill_pull(&self, token: &str) -> Vec<u8> {
+        let (mut send, mut recv) = self._connection.open_bi().await.expect("open data stream");
+        send.write_all(format!("BACKFILL {token}\n").as_bytes())
+            .await
+            .unwrap();
+        let _ = send.finish();
+        let resp = recv
+            .read_to_end(600 * 1024 * 1024)
+            .await
+            .expect("backfill response");
+        let nl = resp
+            .iter()
+            .position(|&b| b == b'\n')
+            .expect("response header");
+        let header = String::from_utf8_lossy(&resp[..nl]).into_owned();
+        assert!(header.starts_with("OK "), "backfill failed: {header}");
         resp[nl + 1..].to_vec()
     }
 }
@@ -420,6 +454,76 @@ async fn media_posting_and_gated_fetch_over_http() {
     server.shutdown().await;
 }
 
+/// §6/§13 M-media-4: a HISTORY page over the stream threshold is served as a
+/// data-plane stream (`STREAM ACCEPT` → `BACKFILL`) instead of hundreds of
+/// inline `BATCH` lines — proven over **both** QUIC and HTTP. The pulled body is
+/// the serialized batch the client folds exactly like an inline `BATCH`.
+#[tokio::test]
+async fn large_scrollback_transfers_as_a_backfill_stream() {
+    let server = start_server(&["#general"]).await;
+    let http = server.http_addr.expect("http enabled");
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#general").await;
+
+    // Post one message past the stream threshold.
+    let n = weft_proto::HISTORY_STREAM_THRESHOLD + 1;
+    for i in 0..n {
+        ada.send(&format!("MSG #general :m{i}")).await;
+        assert!(matches!(ada.recv().await.event, Event::Message(_)));
+    }
+
+    // Each HISTORY over the threshold yields a one-time stream token.
+    async fn stream_token(ada: &mut QuicClient) -> String {
+        ada.send("HISTORY #general limit=500").await;
+        match ada.recv().await.event {
+            Event::StreamAccept { token } => token,
+            other => panic!("expected STREAM ACCEPT for a large page, got {other:?}"),
+        }
+    }
+
+    let quic_token = stream_token(&mut ada).await;
+    let quic_body = ada.backfill_pull(&quic_token).await;
+
+    let http_token = stream_token(&mut ada).await;
+    let (status, http_body) = http_get(http, &format!("/backfill?t={http_token}"), None).await;
+    assert_eq!(status, 200, "HTTP backfill pull");
+
+    // Both transports carry the same complete, foldable batch.
+    for body in [quic_body, http_body] {
+        let text = String::from_utf8(body).expect("utf-8 batch");
+        let events: Vec<Event> = text
+            .lines()
+            .map(|l| Reply::parse(l).expect("parseable batch line").event)
+            .collect();
+        assert!(matches!(events.first(), Some(Event::BatchStart { .. })));
+        assert!(matches!(events.last(), Some(Event::BatchEnd { .. })));
+        let bodies: std::collections::HashSet<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Message(m) => Some(m.body.clone()),
+                _ => None,
+            })
+            .collect();
+        for i in 0..n {
+            assert!(
+                bodies.contains(&format!("m{i}")),
+                "m{i} missing from stream"
+            );
+        }
+    }
+
+    // One-time: re-pulling a spent token is uniformly "not found" (invariant 1).
+    assert_eq!(
+        http_get(http, &format!("/backfill?t={http_token}"), None)
+            .await
+            .0,
+        404
+    );
+
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn media_image_probes_dimensions_and_generates_thumbnail() {
     let server = start_server(&["#general"]).await;
@@ -575,6 +679,155 @@ async fn media_session_bearer_authorizes_http_upload() {
     server.shutdown().await;
 }
 
+/// §13 M-media-5: MEDIA BLOCK deletes a blob and makes it dead on arrival —
+/// a member's fetch 404s and a re-upload of the identical bytes is rejected
+/// (content = identity, so re-uploads can't evade). The same `is_blob_blocked`
+/// gate guards the mirror path (§11.8).
+#[tokio::test]
+async fn media_block_deletes_and_rejects_reupload() {
+    let server = start_with(&["#general"], |c| c.operators = vec!["admin".to_string()]).await;
+    let http = server.http_addr.expect("http enabled");
+
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    let bearer = ada.ready("ada").await;
+    ada.join("#general").await;
+
+    // Upload + post an attachment; a member can fetch it.
+    let data = b"blockable media bytes".to_vec();
+    let (uri, hash) = upload_blob(&mut ada, "text/plain", &data).await;
+    ada.send(&format!("@attach.1={uri} MSG #general :look"))
+        .await;
+    ada.recv_until(|r| matches!(&r.event, Event::Message(m) if m.body.contains("look")))
+        .await;
+    assert_eq!(
+        http_get(http, &format!("/media/{hash}?t={bearer}"), None)
+            .await
+            .0,
+        200,
+        "member fetch works before the block"
+    );
+
+    // An operator blocks the hash.
+    let mut admin = QuicClient::connect(server.quic_addr).await;
+    admin.ready("admin").await;
+    admin.send(&format!("MEDIA BLOCK {hash} :csam")).await;
+    assert!(matches!(
+        admin.recv().await.event,
+        Event::MediaBlocked { .. }
+    ));
+
+    // Fetch now 404 (bytes deleted + gated, uniform with absent — invariant 1).
+    assert_eq!(
+        http_get(http, &format!("/media/{hash}?t={bearer}"), None)
+            .await
+            .0,
+        404,
+        "blocked blob is dead on arrival"
+    );
+
+    // Re-uploading the identical bytes is rejected (403) — content is identity.
+    assert_eq!(
+        http_post(http, &format!("/media?t={bearer}"), &data)
+            .await
+            .0,
+        403,
+        "re-upload of a blocked hash is rejected"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn membership_join_line_is_a_persistent_system_message() {
+    let server = start_server(&["#general"]).await;
+
+    // ada joins — the actor emits + stores a `system=join` message. A live
+    // observer would see it (skipped by our recv); here we prove it PERSISTS.
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#general").await;
+    ada.send("@label=m MSG #general :hi").await; // ensure the join was processed
+    ada.recv_until(|r| r.label.as_deref() == Some("m")).await;
+
+    // A fresh member pulls HISTORY and finds ada's join line durably recorded.
+    let mut cara = QuicClient::connect(server.quic_addr).await;
+    cara.ready("cara").await;
+    cara.join("#general").await;
+    cara.send("HISTORY #general").await;
+    let mut found = false;
+    loop {
+        let reply = cara.recv_reply().await; // raw: don't skip system messages
+        match &reply.event {
+            Event::Message(m)
+                if m.meta.system.as_deref() == Some("join")
+                    && m.sender.account.as_str() == "ada" =>
+            {
+                found = true;
+            }
+            Event::BatchEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(
+        found,
+        "ada's join must persist as a system message in HISTORY"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn reconnect_does_not_repost_the_join_line() {
+    let server = start_server(&["#general"]).await;
+
+    // ada's genuine first join posts one system "join".
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#general").await;
+    ada.send("@label=a MSG #general :hi").await;
+    ada.recv_until(|r| r.label.as_deref() == Some("a")).await;
+
+    // Simulate a client reload: drop the connection, then reconnect the same
+    // account. welcome_authed auto-rejoins #general (membership persists) — which
+    // must NOT post a second join line.
+    drop(ada);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut ada2 = QuicClient::connect(server.quic_addr).await;
+    ada2.send("HELLO weft/1").await;
+    assert!(matches!(ada2.recv().await.event, Event::Welcome { .. }));
+    ada2.send(&format!("AUTH PASSWORD ada :{PASSWORD}")).await;
+    assert!(matches!(ada2.recv().await.event, Event::Welcome { .. }));
+    // Drain the auto-rejoin traffic by waiting for our own marker's echo.
+    ada2.send("@label=r MSG #general :back").await;
+    ada2.recv_until(|r| r.label.as_deref() == Some("r")).await;
+
+    // A fresh member counts ada's join lines in HISTORY — exactly one.
+    let mut cara = QuicClient::connect(server.quic_addr).await;
+    cara.ready("cara").await;
+    cara.join("#general").await;
+    cara.send("HISTORY #general").await;
+    let mut joins = 0;
+    loop {
+        let reply = cara.recv_reply().await;
+        match &reply.event {
+            Event::Message(m)
+                if m.meta.system.as_deref() == Some("join")
+                    && m.sender.account.as_str() == "ada" =>
+            {
+                joins += 1;
+            }
+            Event::BatchEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        joins, 1,
+        "reconnect/auto-rejoin must not repost the join line"
+    );
+
+    server.shutdown().await;
+}
+
 /// A data-plane GET that is expected to be refused (`ERR …`).
 async fn fetch_fails(client: &QuicClient, bearer: &str, hash: &str) -> bool {
     let (mut send, mut recv) = client._connection.open_bi().await.unwrap();
@@ -661,7 +914,12 @@ impl WsClient {
                 .expect("ws closed")
                 .expect("ws error");
             if let Message::Text(line) = msg {
-                return Reply::parse(&line).expect("unparseable server line");
+                let reply = Reply::parse(&line).expect("unparseable server line");
+                // Skip server-generated system messages (join/part lines).
+                if matches!(&reply.event, Event::Message(m) if m.meta.system.is_some()) {
+                    continue;
+                }
+                return reply;
             }
         }
     }
@@ -1344,8 +1602,17 @@ async fn outbound_bridge_forwards_messages_end_to_end() {
     let ctx = h.ctx().clone();
     let f_addr = f.quic_addr;
     let bridge = tokio::spawn(async move {
-        weftd::dialer::run_peer_bridge(&endpoint, f_addr, &f_net, f_key, &home_key, &h_net, ctx)
-            .await
+        weftd::dialer::run_peer_bridge(
+            &endpoint,
+            f_addr,
+            &f_net,
+            f_key,
+            &home_key,
+            &h_net,
+            ctx,
+            weftd::dialer::PeerLinks::new(),
+        )
+        .await
     });
 
     // Both sides announce the live bridge to their #general members. ada's
@@ -1400,10 +1667,12 @@ async fn auto_bridge_requests_reachable_namespace() {
     ada.send("NS META gaming federation :open").await;
     assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
 
-    // A member of the namespace channel on F.
+    // A member of the namespace channel on F, with some pre-bridge history.
     let mut bob = QuicClient::connect(f.quic_addr).await;
     bob.ready("bob").await;
     bob.join("#gaming/general").await;
+    bob.send("MSG #gaming/general :pre-bridge history").await;
+    assert!(matches!(bob.recv().await.event, Event::Message(_)));
 
     // H: a different network that dials + requests `gaming`.
     let h = start_with(&["#gaming/general"], |c| {
@@ -1413,9 +1682,17 @@ async fn auto_bridge_requests_reachable_namespace() {
     .await;
     let h_net: weft_proto::NetworkName = "home.example".parse().unwrap();
 
+    // A member on H, present as the auto-bridge comes up.
+    let mut ada = QuicClient::connect(h.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#gaming/general").await;
+
     let endpoint = weft_transport::insecure::client_endpoint(weft_transport::ALPN).unwrap();
     let ctx = h.ctx().clone();
     let f_addr = f.quic_addr;
+    // Register in H's own PeerLinks so its backfill consumer pulls over this
+    // connection (auto-federation offers `history=full`, §11.10).
+    let links = h.peer_links();
     // Loopback dodges the SSRF guard (unit-tested separately) — drive the core.
     let bridge = tokio::spawn(async move {
         weftd::dialer::run_peer_requester(
@@ -1427,6 +1704,7 @@ async fn auto_bridge_requests_reachable_namespace() {
             &home_key,
             &h_net,
             ctx,
+            links,
         )
         .await
     });
@@ -1436,6 +1714,21 @@ async fn auto_bridge_requests_reachable_namespace() {
         matches!(bob.recv().await.event, Event::Manifest { .. }),
         "the requested bridge should go live"
     );
+
+    // Bridge live → wait for H's manifest announce to ada, then she asks for
+    // history. `history=full` auto-federation means the on-demand pull reaches
+    // F's *pre-bridge* scrollback, so bob's earlier message lands on H.
+    ada.recv_until(|r| matches!(r.event, Event::Manifest { .. }))
+        .await;
+    ada.send("HISTORY #gaming/general limit=500").await;
+    let seen = ada
+        .recv_until(|r| {
+            matches!(&r.event, Event::Message(m)
+                if m.msgid.origin().as_str() == "test.example"
+                    && m.body.contains("pre-bridge history"))
+        })
+        .await;
+    assert!(matches!(&seen.event, Event::Message(_)));
 
     bridge.abort();
     f.shutdown().await;
@@ -1455,4 +1748,277 @@ async fn graceful_shutdown_drains_within_the_window() {
     tokio::time::timeout(std::time::Duration::from_secs(9), server.shutdown())
         .await
         .expect("graceful shutdown drained well within the grace window");
+}
+
+/// §11.8 federation media mirroring end-to-end over two live weftds: F posts an
+/// image on a bridged channel; H ingests the message with F's `weft-media://`
+/// URI intact, then pulls the blob back over the bridge (a signed `MIRROR`) and
+/// stores it — so a member on H fetches the media from *H*, never touching F.
+#[tokio::test]
+async fn federated_media_mirrors_over_the_bridge() {
+    // Persisted keys so both boot with a known identity we can pin mutually.
+    let f_kp = weft_core::Keypair::generate();
+    let h_kp = weft_core::Keypair::generate();
+    let f_key_path = std::env::temp_dir().join("weft-mirror-f.key");
+    let h_key_path = std::env::temp_dir().join("weft-mirror-h.key");
+    std::fs::write(&f_key_path, f_kp.seed_b64()).unwrap();
+    std::fs::write(&h_key_path, h_kp.seed_b64()).unwrap();
+
+    // F (origin, test.example): hosts #general, pins H (to verify H's MIRROR
+    // pulls + accept its bridge), auto-accepts the proposal. It never dials H.
+    let f = start_with(&["#general"], |c| {
+        c.identity.key_file = Some(f_key_path.clone());
+        c.federation.auto_accept = true;
+        c.peers = vec![weftd::config::Peer {
+            network: "home.example".to_string(),
+            // Unresolvable (`.invalid` never resolves): F pins H's key but never
+            // actually dials it — the bridge is H→F, and F only needs the key.
+            endpoint: "h.invalid:1".to_string(),
+            key: h_kp.public().to_b64(),
+        }];
+    })
+    .await;
+    let f_net: weft_proto::NetworkName = "test.example".parse().unwrap();
+
+    // H (receiver, home.example): pins F, boots with its key + an operator.
+    let h = start_with(&["#general"], |c| {
+        c.network = "home.example".to_string();
+        c.identity.key_file = Some(h_key_path.clone());
+        c.operators = vec!["admin".to_string()];
+        c.peers = vec![weftd::config::Peer {
+            network: "test.example".to_string(),
+            endpoint: f.quic_addr.to_string(),
+            key: f_kp.public().to_b64(),
+        }];
+    })
+    .await;
+    let h_net: weft_proto::NetworkName = "home.example".parse().unwrap();
+
+    // Members watching #general on each side.
+    let mut bob = QuicClient::connect(f.quic_addr).await; // origin poster
+    bob.ready("bob").await;
+    bob.join("#general").await;
+    let mut ada = QuicClient::connect(h.quic_addr).await; // receiver member
+    ada.ready("ada").await;
+    ada.join("#general").await;
+
+    // admin on H proposes bridging #general to F (compiles + stores it).
+    let mut admin = QuicClient::connect(h.quic_addr).await;
+    admin.ready("admin").await;
+    admin.send("BRIDGE PROPOSE #general test.example").await;
+    assert!(matches!(admin.recv().await.event, Event::Manifest { .. }));
+
+    // Drive H's outbound bridge by hand, but register it in H's *own* PeerLinks
+    // so the in-process mirror consumer pulls over this very connection.
+    let endpoint = weft_transport::insecure::client_endpoint(weft_transport::ALPN).unwrap();
+    let ctx = h.ctx().clone();
+    let f_addr = f.quic_addr;
+    let links = h.peer_links();
+    let bridge = tokio::spawn(async move {
+        weftd::dialer::run_peer_bridge(
+            &endpoint,
+            f_addr,
+            &f_net,
+            f_kp.public(),
+            &h_kp,
+            &h_net,
+            ctx,
+            links,
+        )
+        .await
+    });
+
+    // Both sides announce the live bridge to #general members.
+    bob.recv_until(|r| matches!(r.event, Event::Manifest { .. }))
+        .await;
+    ada.recv_until(|r| matches!(r.event, Event::Manifest { .. }))
+        .await;
+
+    // F uploads a real image + posts it as an attachment on #general.
+    let img = image::RgbImage::from_fn(80, 60, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 7])
+    });
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let png = png.into_inner();
+    let (uri, hash) = upload_blob(&mut bob, "image/png", &png).await;
+    assert!(
+        uri.starts_with("weft-media://test.example/"),
+        "origin uri: {uri}"
+    );
+    bob.send(&format!("@attach.1={uri} MSG #general :from F"))
+        .await;
+    bob.recv_until(|r| matches!(&r.event, Event::Message(m) if m.body.contains("from F")))
+        .await;
+
+    // H ingests the forwarded message with the *foreign* attachment intact.
+    let msg = ada
+        .recv_until(|r| matches!(&r.event, Event::Message(m) if m.body.contains("from F")))
+        .await;
+    let Event::Message(m) = &msg.event else {
+        unreachable!()
+    };
+    assert_eq!(
+        m.meta.attachments,
+        vec![uri.clone()],
+        "origin URI preserved"
+    );
+
+    // H's mirror consumer pulls the blob from F. Poll H's store until it lands.
+    let mut mirrored = false;
+    for _ in 0..50 {
+        if matches!(h.ctx().media_refs.blob_meta(&hash).await, Ok(Some(_))) {
+            mirrored = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(mirrored, "H must mirror F's blob within the timeout");
+
+    // A member on H fetches the mirrored bytes *from H* — never touching F.
+    let ada_bearer = h.ctx().mint_media_bearer("ada".parse().unwrap());
+    assert_eq!(
+        ada.blob_download(&ada_bearer, &hash, None).await,
+        png,
+        "mirrored bytes match the origin's"
+    );
+
+    bridge.abort();
+    f.shutdown().await;
+    h.shutdown().await;
+    let _ = std::fs::remove_file(&f_key_path);
+    let _ = std::fs::remove_file(&h_key_path);
+}
+
+/// §11.7 M-media-4 federated **backfill over STREAM** across two live weftds: F
+/// hosts a large pre-bridge scrollback on #general. When H dials + bridges F, H
+/// pulls that scrollback — F serves it as a data-plane stream (the page exceeds
+/// the inline threshold), H opens a `BACKFILL` stream over the bridge, ingests
+/// every event (origin msgids intact, invariant 2), and a member on H sees F's
+/// history delivered locally — never having issued a HISTORY herself.
+#[tokio::test]
+async fn federated_backfill_streams_over_the_bridge() {
+    let f_kp = weft_core::Keypair::generate();
+    let h_kp = weft_core::Keypair::generate();
+    let f_key_path = std::env::temp_dir().join("weft-backfill-f.key");
+    let h_key_path = std::env::temp_dir().join("weft-backfill-h.key");
+    std::fs::write(&f_key_path, f_kp.seed_b64()).unwrap();
+    std::fs::write(&h_key_path, h_kp.seed_b64()).unwrap();
+
+    // F (origin): hosts #general, pins H (to accept its bridge), auto-accepts.
+    let f = start_with(&["#general"], |c| {
+        c.identity.key_file = Some(f_key_path.clone());
+        c.federation.auto_accept = true;
+        c.peers = vec![weftd::config::Peer {
+            network: "home.example".to_string(),
+            endpoint: "h.invalid:1".to_string(), // F never dials H
+            key: h_kp.public().to_b64(),
+        }];
+    })
+    .await;
+    let f_net: weft_proto::NetworkName = "test.example".parse().unwrap();
+
+    // H (receiver): pins F, boots with its key + an operator.
+    let h = start_with(&["#general"], |c| {
+        c.network = "home.example".to_string();
+        c.identity.key_file = Some(h_key_path.clone());
+        c.operators = vec!["admin".to_string()];
+        c.peers = vec![weftd::config::Peer {
+            network: "test.example".to_string(),
+            endpoint: f.quic_addr.to_string(),
+            key: f_kp.public().to_b64(),
+        }];
+    })
+    .await;
+    let h_net: weft_proto::NetworkName = "home.example".parse().unwrap();
+
+    // F builds a scrollback that exceeds the inline stream threshold.
+    let mut bob = QuicClient::connect(f.quic_addr).await;
+    bob.ready("bob").await;
+    bob.join("#general").await;
+    let n = weft_proto::HISTORY_STREAM_THRESHOLD + 1;
+    for i in 0..n {
+        bob.send(&format!("MSG #general :old{i}")).await;
+        assert!(matches!(bob.recv().await.event, Event::Message(_)));
+    }
+
+    // A member on H, present before the bridge goes live.
+    let mut ada = QuicClient::connect(h.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#general").await;
+
+    // admin on H proposes bridging #general to F.
+    let mut admin = QuicClient::connect(h.quic_addr).await;
+    admin.ready("admin").await;
+    // `history=full` so the pre-bridge scrollback is in scope (from-epoch would
+    // serve only post-manifest history, §11.7).
+    admin
+        .send("BRIDGE PROPOSE #general test.example history=full")
+        .await;
+    assert!(matches!(admin.recv().await.event, Event::Manifest { .. }));
+
+    // Drive H's outbound bridge, registered in H's own PeerLinks so the
+    // in-process backfill consumer pulls over this very connection.
+    let endpoint = weft_transport::insecure::client_endpoint(weft_transport::ALPN).unwrap();
+    let ctx = h.ctx().clone();
+    let f_addr = f.quic_addr;
+    let links = h.peer_links();
+    let bridge = tokio::spawn(async move {
+        weftd::dialer::run_peer_bridge(
+            &endpoint,
+            f_addr,
+            &f_net,
+            f_kp.public(),
+            &h_kp,
+            &h_net,
+            ctx,
+            links,
+        )
+        .await
+    });
+
+    // Wait for the bridge to go live — H announces the manifest to #general's
+    // members (ada). Nothing is backfilled yet: it's fetched only on demand.
+    ada.recv_until(|r| matches!(r.event, Event::Manifest { .. }))
+        .await;
+
+    // Lazy: with the bridge live but no client asking, H holds none of F's
+    // scrollback (only local join lines) — we never eagerly pull it.
+    let scope = weft_store::Scope::Channel("#general".parse().unwrap());
+    let page = || weft_store::Page {
+        before: None,
+        after: None,
+        limit: 500,
+    };
+    let before_ask = h.ctx().events.roots(&scope, page()).await.unwrap().len();
+    assert!(
+        before_ask < n,
+        "no eager backfill before a client asks ({before_ask})"
+    );
+
+    // A client asks for history → H lazily pulls F's scrollback from the peer.
+    // The large page streams over the bridge.
+    ada.send("HISTORY #general limit=500").await;
+
+    // The whole scrollback now lands in H's own store (F's origin msgids intact).
+    let mut count = 0;
+    for _ in 0..50 {
+        count = h.ctx().events.roots(&scope, page()).await.unwrap().len();
+        if count >= n {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        count >= n,
+        "H ingested F's whole scrollback (got {count} of {n})"
+    );
+
+    bridge.abort();
+    f.shutdown().await;
+    h.shutdown().await;
+    let _ = std::fs::remove_file(&f_key_path);
+    let _ = std::fs::remove_file(&h_key_path);
 }

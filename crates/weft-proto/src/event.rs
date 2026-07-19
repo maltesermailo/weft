@@ -352,6 +352,12 @@ pub enum Event {
         network: NetworkName,
         reason: Option<String>,
     },
+    /// `MEDIA-BLOCKED <hash> [:reason]` (§13) — the ack to `MEDIA BLOCK`/`UNBLOCK`
+    /// and one per entry for `MEDIA BLOCKS`. Reason surfaces the operator note.
+    MediaBlocked {
+        hash: String,
+        reason: Option<String>,
+    },
     /// `MODERATED <scope> <account> <action>` with `by=`/`reason=` tags (§6.7)
     /// — a moderation state change (mute/ban/kick), broadcast to a channel's
     /// members and echoed to the acting moderator.
@@ -885,6 +891,13 @@ impl Event {
                     reason: args.trailing_opt(),
                 })
             }
+            "MEDIA-BLOCKED" => {
+                let mut args = Args::new(line, "MEDIA-BLOCKED");
+                Ok(Event::MediaBlocked {
+                    hash: args.req("hash")?.to_string(),
+                    reason: args.trailing_opt(),
+                })
+            }
             "MODERATED" => {
                 let mut args = Args::new(line, "MODERATED");
                 let scope = args.req("scope")?.to_string();
@@ -1289,6 +1302,9 @@ impl Event {
             }
             Event::Netblocked { network, reason } => {
                 ("NETBLOCKED", vec![network.to_string()], reason.clone())
+            }
+            Event::MediaBlocked { hash, reason } => {
+                ("MEDIA-BLOCKED", vec![hash.clone()], reason.clone())
             }
             Event::Moderated {
                 scope,
@@ -1907,6 +1923,21 @@ mod tests {
         ));
         round_trip(&Reply::new(Event::Netblocked {
             network: "evil.example".parse().unwrap(),
+            reason: None,
+        }));
+    }
+
+    #[test]
+    fn media_blocked_event_round_trips() {
+        round_trip(&Reply::with_label(
+            Event::MediaBlocked {
+                hash: "b3deadbeef".to_string(),
+                reason: Some("csam".into()),
+            },
+            "mb1",
+        ));
+        round_trip(&Reply::new(Event::MediaBlocked {
+            hash: "b3deadbeef".to_string(),
             reason: None,
         }));
     }

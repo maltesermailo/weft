@@ -429,6 +429,11 @@ fn reports_list(
 }
 
 #[tauri::command]
+fn mod_list(conn: State<'_, Conn>, scope: String) -> Result<(), String> {
+    conn.send(weft::build_mod_list(&scope)?)
+}
+
+#[tauri::command]
 fn reports_resolve(
     conn: State<'_, Conn>,
     report_id: String,
@@ -619,6 +624,7 @@ pub fn run() {
             bridge_sever,
             report,
             reports_list,
+            mod_list,
             reports_resolve,
             members,
             pin,

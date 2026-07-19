@@ -8,52 +8,70 @@
   :root {
     --bg: #14161c; --panel: #1b1e27; --raised: #20232c; --hover: #262a34;
     --border: #2b2f3a; --text: #e6e4de; --muted: #8b8d97; --accent: #5865f2;
-    --teal: #4fb0a5; --amber: #e2a13d; --danger: #d9685f;
+    --teal: #4fb0a5; --amber: #e2a13d; --danger: #d9685f; --green: #57a773;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
-  a { color: var(--teal); cursor: pointer; }
+  body { margin: 0; font: 13px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  a { color: var(--teal); cursor: pointer; text-decoration: none; }
+  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   .muted { color: var(--muted); }
   .err { color: var(--danger); font-size: 13px; }
-  button { font: inherit; cursor: pointer; border: none; border-radius: 6px; padding: 7px 12px; background: var(--raised); color: var(--text); }
+  h2 { margin: 0 0 4px; font-size: 17px; }
+  h3 { margin: 20px 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .sub { color: var(--muted); font-size: 12px; margin: 0 0 14px; }
+  button { font: inherit; cursor: pointer; border: none; border-radius: 6px; padding: 6px 11px; background: var(--raised); color: var(--text); }
   button:hover { background: var(--hover); }
   button.primary { background: var(--accent); color: #fff; }
   button.danger { background: var(--danger); color: #fff; }
-  input, select { font: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 8px 10px; }
+  button.sm { padding: 3px 8px; font-size: 12px; }
+  input, select { font: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px 9px; }
   .hidden { display: none !important; }
 
   #login { display: grid; place-items: center; height: 100vh; }
   #login form { width: min(340px, 90vw); background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 10px; }
   #login h1 { margin: 0 0 8px; font-size: 20px; }
 
-  #app { display: grid; grid-template-columns: 200px 1fr; height: 100vh; }
-  nav { background: var(--panel); border-right: 1px solid var(--border); padding: 16px 10px; display: flex; flex-direction: column; gap: 4px; }
-  nav .brand { font-weight: 700; padding: 6px 10px 14px; }
-  nav button { text-align: left; background: none; }
+  #app { display: grid; grid-template-columns: 190px 1fr; height: 100vh; }
+  nav { background: var(--panel); border-right: 1px solid var(--border); padding: 14px 8px; display: flex; flex-direction: column; gap: 2px; overflow: auto; }
+  nav .brand { font-weight: 700; padding: 4px 10px 12px; }
+  nav button { text-align: left; background: none; padding: 6px 10px; border-radius: 6px; }
   nav button.active { background: var(--raised); }
-  nav .who { margin-top: auto; font-size: 12px; color: var(--muted); padding: 8px 10px; }
-  main { overflow: auto; padding: 24px 28px; }
-  h2 { margin: 0 0 16px; font-size: 18px; }
+  nav .who { margin-top: auto; font-size: 12px; color: var(--muted); padding: 10px; border-top: 1px solid var(--border); }
+  main { overflow: auto; padding: 22px 26px; }
 
-  .cards { display: flex; gap: 12px; flex-wrap: wrap; }
-  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; min-width: 130px; }
-  .stat .n { font-size: 28px; font-weight: 700; }
-  .stat .l { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 10px; margin-bottom: 8px; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 13px 15px; }
+  .stat .n { font-size: 24px; font-weight: 700; line-height: 1.1; }
+  .stat .l { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; margin-top: 3px; }
 
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  th { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+  th, td { text-align: left; padding: 6px 9px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; position: sticky; top: 0; background: var(--bg); }
   tr.click { cursor: pointer; } tr.click:hover { background: var(--panel); }
-  .pill { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); }
-  .pill.verified { color: var(--teal); border-color: var(--teal); }
-  .pill.open { color: var(--amber); border-color: var(--amber); }
+  td.actions { text-align: right; white-space: nowrap; }
 
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
-  .msg { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+  .pill { font-size: 10.5px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+  .pill.op { color: var(--accent); border-color: var(--accent); }
+  .pill.teal, .pill.verified { color: var(--teal); border-color: var(--teal); }
+  .pill.amber, .pill.open { color: var(--amber); border-color: var(--amber); }
+  .pill.danger, .pill.ban, .pill.banned, .pill.severed { color: var(--danger); border-color: var(--danger); }
+  .pill.mute, .pill.muted { color: var(--amber); border-color: var(--amber); }
+  .pill.green, .pill.live, .pill.added { color: var(--green); border-color: var(--green); }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .claim { margin: 2px 0; }
+
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .row input, .row select { padding: 7px 9px; }
+  .grow { flex: 1; min-width: 120px; }
+  .msg { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; margin-bottom: 7px; }
   .msg.reported { border-color: var(--amber); }
   .msg .h { font-size: 12px; color: var(--muted); margin-bottom: 3px; }
   .msg .del { color: var(--danger); font-style: italic; }
   .back { color: var(--muted); cursor: pointer; margin-bottom: 12px; display: inline-block; }
+  .kv { display: grid; grid-template-columns: 130px 1fr; gap: 4px 14px; margin: 10px 0; }
+  .kv .k { color: var(--muted); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .hdr { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 </style>
 </head>
 <body>
@@ -74,8 +92,13 @@
     <button data-view="dash">Dashboard</button>
     <button data-view="reports">Reports</button>
     <button data-view="users">Users</button>
-    <button data-view="messages">Messages</button>
+    <button data-view="channels">Channels</button>
+    <button data-view="namespaces">Namespaces</button>
+    <button data-view="grants">Grants</button>
+    <button data-view="federation">Federation</button>
+    <button data-view="media">Media blocks</button>
     <button data-view="moderation">Moderation</button>
+    <button data-view="messages">Messages</button>
     <div class="who"><span id="who"></span><br /><a id="logout">Log out</a></div>
   </nav>
   <main id="main"></main>
@@ -89,8 +112,9 @@ const set = (html) => { main().innerHTML = html; };
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const when = (ms) => (ms ? new Date(ms).toLocaleString() : "");
 const pill = (s, cls = "") => `<span class="pill ${esc(cls || s)}">${esc(s)}</span>`;
+const short = (s) => { s = String(s ?? ""); return s.length > 12 ? s.slice(0, 8) + "…" : s; };
 
-// The current detail view re-renders itself after a mutation (delete).
+// The current detail view re-renders itself after a mutation.
 let refresh = () => {};
 
 async function api(path, opts = {}) {
@@ -101,15 +125,16 @@ async function api(path, opts = {}) {
 }
 
 // Shared renderers ----------------------------------------------------------
-// rows: [{ cells:[html…], action?, id? }] — clicks handled by delegation.
+// rows: [{ cells:[html…], action?, id? }] — row clicks handled by delegation.
 function table(cols, rows) {
   if (!rows.length) return `<p class="muted">Nothing here.</p>`;
   const head = cols.map((c) => `<th>${c}</th>`).join("");
   const body = rows
-    .map((r) => `<tr class="${r.action ? "click" : ""}"${r.action ? ` data-action="${r.action}" data-id="${esc(r.id)}"` : ""}>${r.cells.map((c) => `<td>${c}</td>`).join("")}</tr>`)
+    .map((r) => `<tr class="${r.action ? "click" : ""}"${r.action ? ` data-action="${r.action}" data-id="${esc(r.id)}"` : ""}>${r.cells.map((c) => `<td class="${c.cls || ""}">${c.h ?? c}</td>`).join("")}</tr>`)
     .join("");
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
+const act = (html) => ({ h: html, cls: "actions" });
 
 function msgCard(m, reported = false) {
   if (m.deleted) return `<div class="msg"><span class="del">deleted by ${esc(m.by)}</span></div>`;
@@ -122,37 +147,102 @@ function msgCard(m, reported = false) {
 const screens = {
   async dash() {
     const s = await api("/stats");
-    const stat = (n, l) => `<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`;
-    set(`<h2>Dashboard</h2><div class="cards">${stat(s.accounts, "Accounts")}${stat(s.channels, "Channels")}${stat(s.live_connections ?? "—", "Live connections")}</div>`);
+    const stat = (n, l) => `<div class="stat"><div class="n">${n ?? "—"}</div><div class="l">${l}</div></div>`;
+    set(`<h2>Dashboard</h2><p class="sub">${esc(WHO.network)} · operator overview</p>
+      <div class="cards">
+        ${stat(s.accounts, "Accounts")}${stat(s.channels, "Channels")}${stat(s.namespaces, "Namespaces")}
+        ${stat(s.live_connections, "Live now")}${stat(s.open_reports, "Open reports")}${stat(s.peers, "Bridge peers")}
+        ${stat(s.netblocks, "Netblocks")}${stat(s.blocked_media, "Blocked media")}
+      </div>`);
   },
   async reports() {
     const list = await api("/reports?scope=*");
-    set(`<h2>Reports</h2>` + table(["Category", "State", "Status", "Reporter", "Filed"],
+    set(`<h2>Reports</h2><p class="sub">Queue across all scopes. Open one for the reported message + context.</p>` +
+      table(["Category", "State", "Status", "Reporter", "Filed"],
       list.map((r) => ({ action: "report", id: r.id, cells: [esc(r.category), pill(r.state), pill(r.status, "open"), esc(r.reporter), when(r.filed_at_ms)] }))));
   },
   async users() {
     const users = await api("/accounts");
-    set(`<h2>Users <span class="pill">${users.length}</span></h2>` + table(["Account"], users.map((u) => ({ cells: [esc(u)] }))));
+    ALL_USERS = users;
+    set(`<div class="hdr"><h2>Users <span class="pill">${users.length}</span></h2>
+      <input id="userSearch" placeholder="filter accounts…" class="grow" style="max-width:260px" /></div>
+      <div id="userTable"></div>`);
+    $("#userSearch").addEventListener("input", (e) => renderUsers(e.target.value.trim().toLowerCase()));
+    renderUsers("");
+  },
+  async channels() {
+    const list = await api("/channels");
+    set(`<h2>Channels <span class="pill">${list.length}</span></h2><p class="sub">Every channel in the store (config seeds + runtime-created).</p>` +
+      table(["Channel", "Retention", ""],
+      list.map((c) => ({ cells: [`<code>${esc(c.name)}</code>`, pill(c.policy), act(`<button class="sm" data-action="browseChan" data-id="${esc(c.name)}">messages</button>`)] }))));
+  },
+  async namespaces() {
+    const list = await api("/namespaces");
+    set(`<h2>Namespaces <span class="pill">${list.length}</span></h2><p class="sub">Public/listed namespaces and their owners.</p>` +
+      table(["Namespace", "Owner", "Visibility", "Title"],
+      list.map((n) => ({ cells: [`<code>${esc(n.name)}</code>`, esc(n.owner), pill(n.visibility), esc(n.title || "")] }))));
+  },
+  async grants(scope = "*") {
+    const list = await api("/grants?scope=" + encodeURIComponent(scope));
+    set(`<h2>Grants</h2><p class="sub">Capability grants recorded at a scope (subjects are account ULIDs or device keys).</p>
+      <div class="row"><input id="gScope" value="${esc(scope)}" placeholder="scope (#chan / ns:x / *)" /><button class="primary" data-action="grantScope">Load</button></div>` +
+      table(["Subject", "Scope", "Caps", "Epoch", "Expiry"],
+      list.map((g) => ({ cells: [`<code>${esc(short(g.subject))}</code>`, esc(g.scope), `<div class="chips">${(g.caps || []).map((c) => pill(c)).join("")}</div>`, g.epoch, g.expiry ? when(g.expiry * 1000) : "—"] }))));
+    $("#gScope").addEventListener("keydown", (e) => { if (e.key === "Enter") screens.grants($("#gScope").value.trim() || "*"); });
+  },
+  async federation() {
+    const [peers, blocks] = await Promise.all([api("/peers"), api("/netblocks")]);
+    set(`<h2>Federation</h2><p class="sub">Bridge peers (§11) and the network-wide netblock list (§11.6).</p>
+      <h3>Bridge peers <span class="pill">${peers.length}</span></h3>` +
+      table(["Peer", "Scope", "State", "v", "Updated"],
+        peers.map((p) => ({ cells: [`<code>${esc(p.peer)}</code>`, esc(p.scope), p.severed ? pill("severed") : (p.acked ? pill("live", "green") : pill("pending", "amber")), p.version, when(p.updated_ms)] }))) +
+      `<h3>Netblocks <span class="pill">${blocks.length}</span></h3>
+      <div class="row"><input id="nbNet" placeholder="network (e.g. evil.example)" /><input id="nbReason" class="grow" placeholder="reason (optional)" /><button class="danger" data-action="addNetblock">Block network</button></div>` +
+      table(["Network", "Reason", "By", "Added", ""],
+        blocks.map((b) => ({ cells: [`<code>${esc(b.network)}</code>`, esc(b.reason || ""), esc(b.actor), when(b.added_ms), act(`<button class="sm" data-action="rmNetblock" data-id="${esc(b.network)}">unblock</button>`)] }))));
+  },
+  async media() {
+    const list = await api("/media-blocks");
+    set(`<h2>Media blocks <span class="pill">${list.length}</span></h2>
+      <p class="sub">Blocked BLAKE3 hashes (§13). A blocked hash is dead on arrival — re-upload, fetch, and mirror are rejected. Deleting stored bytes for a panel-added hash rides the GC + fetch gate.</p>
+      <div class="row"><input id="mbHash" class="grow mono" placeholder="BLAKE3 hash" /><input id="mbReason" placeholder="reason (e.g. csam)" /><button class="danger" data-action="blockMedia">Block hash</button></div>` +
+      table(["Hash", "Reason", "By", "Added", ""],
+        list.map((b) => ({ cells: [`<code>${esc(short(b.hash))}</code>`, esc(b.reason || ""), esc(b.actor), when(b.added_ms), act(`<button class="sm" data-action="unblockMedia" data-id="${esc(b.hash)}">unblock</button>`)] }))));
   },
   messages() {
-    set(`<h2>Messages</h2><div class="row"><input id="chan" placeholder="#namespace/channel" style="flex:1" /><button class="primary" data-action="browse">Browse</button></div><div id="msgs"></div>`);
+    set(`<h2>Messages</h2><p class="sub">Browse a channel's materialized history.</p><div class="row"><input id="chan" class="grow" placeholder="#namespace/channel" /><button class="primary" data-action="browse">Browse</button></div><div id="msgs"></div>`);
     $("#chan").addEventListener("keydown", (e) => { if (e.key === "Enter") browse(); });
   },
   async moderation() {
     const list = await api("/moderation?scope=*");
     const verbs = ["mute", "ban", "unmute", "unban", "kick"].map((v) => `<option>${v}</option>`).join("");
-    set(`<h2>Moderation</h2>
+    set(`<h2>Moderation</h2><p class="sub">Deny-list at any scope (<code>#chan</code> / <code>ns:x</code> / <code>*</code>). Kick + channel-ban force-part live.</p>
       <div class="row">
         <select id="mVerb">${verbs}</select>
-        <input id="mScope" placeholder="scope (#chan / ns:x / *)" />
+        <input id="mScope" placeholder="scope" />
         <input id="mAcct" placeholder="account" />
-        <input id="mReason" placeholder="reason (optional)" style="flex:1" />
+        <input id="mReason" class="grow" placeholder="reason (optional)" />
         <button class="danger" data-action="moderate">Apply</button>
       </div>
-      <h3>Active (scope *)</h3>` + table(["Kind", "Account", "Scope", "By", "Reason", "When"],
+      <h3>Active at scope <code>*</code></h3>` + table(["Kind", "Account", "Scope", "By", "Reason", "When"],
         list.map((r) => ({ cells: [pill(r.kind), esc(r.account), esc(r.scope), esc(r.actor), esc(r.reason || ""), when(r.at_ms)] }))));
   },
 };
+
+// Users table (client-filtered) --------------------------------------------
+let ALL_USERS = [];
+function renderUsers(q) {
+  const rows = ALL_USERS.filter((u) => !q || u.account.toLowerCase().includes(q)).map((u) => ({
+    action: "user", id: u.account,
+    cells: [
+      esc(u.account),
+      `<code class="muted">${esc(short(u.ulid))}</code>`,
+      `<div class="chips">${u.operator ? pill("operator", "op") : ""}${u.banned ? pill("banned") : ""}${u.muted ? pill("muted") : ""}${(u.caps || []).map((c) => pill(c)).join("")}</div>`,
+      act(`<button class="sm danger" data-action="delUser" data-id="${esc(u.account)}">delete</button>`),
+    ],
+  }));
+  $("#userTable").innerHTML = table(["Account", "ULID", "Operator / caps @* / state", ""], rows);
+}
 
 // Detail views + actions ----------------------------------------------------
 async function openReport(id) {
@@ -163,21 +253,56 @@ async function openReport(id) {
     || `<p class="muted">Content unavailable (expired / e2ee / purged).</p>`;
   const btns = ["dismissed", "content-removed", "user-actioned", "escalated"]
     .map((a) => `<button data-action="resolve" data-id="${esc(id)}" data-x="${a}">${a}</button>`).join("");
-  set(`<span class="back" data-action="back">← Reports</span>
+  set(`<span class="back" data-action="back" data-x="reports">← Reports</span>
     <h2>${esc(r.category)} ${pill(r.status)}</h2>
-    <p class="muted">${esc(r.scope)} · reported by ${esc(r.reporter)} · ${when(r.filed_at_ms)}${r.note ? " · " + esc(r.note) : ""}</p>
+    <p class="sub">${esc(r.scope)} · reported by ${esc(r.reporter)} · ${when(r.filed_at_ms)}${r.note ? " · " + esc(r.note) : ""}</p>
     <h3>Reported message + context</h3>${ctx}
     <div class="row" style="margin-top:16px">${btns}</div>`);
 }
 
-async function browse() {
-  const chan = $("#chan").value.trim();
+function userMsgCard(m) {
+  const del = `<button class="sm danger" data-action="delMsg" data-id="${esc(m.msgid)}" style="float:right">delete</button>`;
+  return `<div class="msg"><div class="h"><code>${esc(m.scope)}</code> · ${when(m.at_ms)}${del}</div>${esc(m.body)}</div>`;
+}
+
+async function openUser(name) {
+  refresh = () => openUser(name);
+  const [u, msgs] = await Promise.all([
+    api("/accounts/" + encodeURIComponent(name)),
+    api("/accounts/" + encodeURIComponent(name) + "/messages?limit=200").catch(() => []),
+  ]);
+  const grantRows = (u.grants || []).map((g) => `<tr><td><code>${esc(g.scope)}</code></td><td><div class="chips">${(g.caps || []).map((c) => pill(c)).join("")}</div></td><td>${g.epoch}</td><td>${g.expiry ? when(g.expiry * 1000) : "—"}</td></tr>`).join("");
+  const mem = (u.memberships || []).map((c) => pill(c)).join(" ") || `<span class="muted">none</span>`;
+  // Verified claims carry the value (email address, age, …) in `subject`.
+  const email = (u.verifications || []).find((v) => v.kind === "email");
+  const claims = (u.verifications || []).length
+    ? (u.verifications || []).map((v) => `<div class="claim">${pill(v.kind, v.verified ? "verified" : "amber")} <code>${esc(v.subject)}</code> ${v.verified ? "" : '<span class="muted">(unconfirmed)</span>'}</div>`).join("")
+    : `<span class="muted">none</span>`;
+  set(`<span class="back" data-action="back" data-x="users">← Users</span>
+    <div class="hdr"><h2>${esc(u.account)} ${u.operator ? pill("operator", "op") : ""}${u.banned ? pill("banned") : ""}${u.muted ? pill("muted") : ""}</h2>
+      <button class="danger" data-action="delUser" data-id="${esc(u.account)}">Delete account</button></div>
+    <div class="panel"><div class="kv">
+      <div class="k">ULID</div><div><code>${esc(u.ulid)}</code></div>
+      <div class="k">Email</div><div>${email ? `<code>${esc(email.subject)}</code>${email.verified ? " " + pill("verified", "verified") : " " + pill("unconfirmed", "amber")}` : '<span class="muted">none on file</span>'}</div>
+      <div class="k">Verified claims</div><div>${claims}</div>
+      <div class="k">Memberships</div><div class="chips">${mem}</div>
+    </div></div>
+    <h3>Capability grants</h3>
+    ${grantRows ? `<table><thead><tr><th>Scope</th><th>Caps</th><th>Epoch</th><th>Expiry</th></tr></thead><tbody>${grantRows}</tbody></table>` : `<p class="muted">No grants.</p>`}
+    <h3>Messages <span class="pill">${msgs.length}</span></h3>
+    ${msgs.length ? msgs.map(userMsgCard).join("") : `<p class="muted">No messages authored (or all purged).</p>`}`);
+}
+
+async function browse(chanArg) {
+  const chan = (chanArg || $("#chan")?.value || "").trim();
   if (!chan) return;
-  refresh = browse;
+  if ($("#chan")) $("#chan").value = chan;
+  refresh = () => browse(chan);
   try {
     const msgs = await api("/channels/" + encodeURIComponent(chan) + "/messages?limit=100");
-    $("#msgs").innerHTML = msgs.length ? msgs.map((m) => msgCard(m)).join("") : `<p class="muted">No messages.</p>`;
-  } catch (e) { $("#msgs").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+    const target = $("#msgs");
+    if (target) target.innerHTML = msgs.length ? msgs.map((m) => msgCard(m)).join("") : `<p class="muted">No messages.</p>`;
+  } catch (e) { const t = $("#msgs"); if (t) t.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 
 async function doModerate() {
@@ -190,23 +315,43 @@ async function doModerate() {
 // One delegated click handler (survives innerHTML swaps). --------------------
 const clicks = {
   report: (el) => openReport(el.dataset.id),
-  back: () => go("reports"),
+  user: (el) => openUser(el.dataset.id),
+  back: (el) => go(el.dataset.x),
   resolve: async (el) => { await api(`/reports/${encodeURIComponent(el.dataset.id)}/resolve`, { method: "POST", body: JSON.stringify({ action: el.dataset.x }) }); go("reports"); },
   browse: () => browse(),
+  browseChan: (el) => { go("messages").then(() => browse(el.dataset.id)); },
+  grantScope: () => screens.grants($("#gScope").value.trim() || "*"),
   moderate: () => doModerate(),
+  delUser: async (el) => {
+    if (!confirm(`Delete account "${el.dataset.id}"? Their memberships, grants, and moderation records are removed; posted messages remain.`)) return;
+    try { await api("/accounts/" + encodeURIComponent(el.dataset.id), { method: "DELETE" }); go("users"); }
+    catch (e) { alert(e.message); }
+  },
   delMsg: async (el) => {
     if (!confirm("Delete this message for everyone?")) return;
-    // msgid is `<network>/<ULID>` — its slash is a real path separator (wildcard route).
     try { await api("/messages/" + el.dataset.id, { method: "DELETE" }); refresh(); }
     catch (e) { alert(e.message); }
   },
+  addNetblock: async () => {
+    const network = $("#nbNet").value.trim(); if (!network) return;
+    try { await api("/netblocks", { method: "POST", body: JSON.stringify({ network, reason: $("#nbReason").value.trim() || null }) }); go("federation"); }
+    catch (e) { alert(e.message); }
+  },
+  rmNetblock: async (el) => { try { await api("/netblocks/" + encodeURIComponent(el.dataset.id), { method: "DELETE" }); go("federation"); } catch (e) { alert(e.message); } },
+  blockMedia: async () => {
+    const hash = $("#mbHash").value.trim(); if (!hash) return;
+    try { await api("/media-blocks", { method: "POST", body: JSON.stringify({ hash, reason: $("#mbReason").value.trim() || null }) }); go("media"); }
+    catch (e) { alert(e.message); }
+  },
+  unblockMedia: async (el) => { try { await api("/media-blocks/" + encodeURIComponent(el.dataset.id), { method: "DELETE" }); go("media"); } catch (e) { alert(e.message); } },
 };
 main().addEventListener("click", (e) => {
   const el = e.target.closest("[data-action]");
-  if (el && clicks[el.dataset.action]) clicks[el.dataset.action](el);
+  if (el && clicks[el.dataset.action]) { e.preventDefault(); clicks[el.dataset.action](el); }
 });
 
 // Nav + auth ----------------------------------------------------------------
+let WHO = { account: "", network: "" };
 async function go(name) {
   document.querySelectorAll("nav [data-view]").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   try { await screens[name](); } catch (e) { set(`<p class="err">${esc(e.message)}</p>`); }
@@ -227,8 +372,11 @@ $("#loginForm").addEventListener("submit", async (e) => {
 $("#logout").addEventListener("click", async () => { try { await api("/logout", { method: "POST" }); } catch {} showLogin(); });
 
 async function start() {
-  try { const me = await api("/me"); $("#who").textContent = `${me.account}@${me.network}`; showApp(); go("dash"); }
-  catch { showLogin(); }
+  try {
+    WHO = await api("/me");
+    $("#who").textContent = `${WHO.account}@${WHO.network}`;
+    showApp(); go("dash");
+  } catch { showLogin(); }
 }
 start();
 </script>

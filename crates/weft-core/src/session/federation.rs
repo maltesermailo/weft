@@ -93,6 +93,22 @@ impl<S: ControlStream> Session<S> {
             // Remote membership / typing / presence / marks are informational;
             // not stored, not re-broadcast in M5b.
             "MEMBER" | "TYPING" | "PRESENCE" | "MARKED" | "POLICY" => Ok(Flow::Continue),
+            // §11.7 the peer answered our backfill HISTORY with a stream offer
+            // (large page) → hand weftd the pull; it drains the data plane and
+            // feeds each line back through `ingest_bridged`.
+            "STREAM" => {
+                if let Ok(Reply {
+                    event: Event::StreamAccept { token },
+                    ..
+                }) = Reply::from_line(line)
+                {
+                    self.ctx.request_backfill_pull(crate::BackfillPull {
+                        peer: peer.clone(),
+                        token,
+                    });
+                }
+                Ok(Flow::Continue)
+            }
             _ => match Request::from_line(line) {
                 Ok(req) => self.on_bridge_cmd(peer, key, req.label, req.command).await,
                 Err(_) => Ok(Flow::Continue), // tolerate noise on a bridge
@@ -316,8 +332,12 @@ impl<S: ControlStream> Session<S> {
             return self.no_such_target(label).await;
         };
         let channels = self.scope_channels(&tscope).await;
+        // §11.10 auto-federation offers `history=full`: a user joining a foreign
+        // public namespace wants its existing scrollback (§11.7 backfill), not
+        // just messages from the moment they federated. `from-epoch` would floor
+        // backfill at the manifest's creation and hide everything already posted.
         let (history, media, typing) = (
-            weft_proto::HistoryMode::FromEpoch,
+            weft_proto::HistoryMode::Full,
             weft_proto::MediaMode::None,
             false,
         );
@@ -485,138 +505,8 @@ impl<S: ControlStream> Session<S> {
     /// peer (invariant 2), and the channel must be in the acked manifest
     /// (invariant 3). Persisted with its origin msgid intact.
     pub(super) async fn on_ingest(&mut self, peer: &NetworkName, line: &Line) -> io::Result<Flow> {
-        // §11.6 effect 3: a blocked network's events are rejected at ingestion
-        // (a mid-session block takes effect at once, not just at auth).
-        if self
-            .ctx
-            .netblocks
-            .is_netblocked(peer)
-            .await
-            .unwrap_or(false)
-        {
-            return Ok(Flow::Continue);
-        }
-        let Ok(reply) = Reply::from_line(line) else {
-            return Ok(Flow::Continue);
-        };
-        let Some((channel, record)) = self.ingest_record(peer, &reply.event) else {
-            return Ok(Flow::Continue);
-        };
-        let gated = self
-            .ctx
-            .peers
-            .peer(peer)
-            .await
-            .ok()
-            .flatten()
-            .map(|p| bridge::is_forwardable(&p, channel.as_str()))
-            .unwrap_or(false);
-        if !gated {
-            debug!(%peer, %channel, "dropped ingest: channel not in acked manifest");
-            return Ok(Flow::Continue);
-        }
-        if let Some(handle) = self.ctx.registry.get(&channel) {
-            handle.ingest(self.id, record, reply.event).await;
-        }
+        self.ctx.ingest_bridged(peer, line).await;
         Ok(Flow::Continue)
-    }
-
-    /// Map a bridged event to its storage record, enforcing origin authority
-    /// (invariant 2): the event and its root must originate on `peer`.
-    fn ingest_record(
-        &self,
-        peer: &NetworkName,
-        event: &Event,
-    ) -> Option<(ChannelName, EventRecord)> {
-        let channel_of = |t: &Target| match t {
-            Target::Channel(c) => Some(c.clone()),
-            _ => None, // DMs never bridge (§9.5)
-        };
-        let from_peer = |id: &MsgId| id.origin().as_str() == peer.as_str();
-        match event {
-            Event::Message(m) => {
-                let channel = channel_of(&m.target)?;
-                if !from_peer(&m.msgid) || m.sender.network.as_str() != peer.as_str() {
-                    return None;
-                }
-                let record = EventRecord {
-                    scope: Scope::Channel(channel.clone()),
-                    msgid: m.msgid.clone(),
-                    root: m.msgid.clone(),
-                    sender: m.sender.clone(),
-                    kind: EventKind::Message {
-                        body: m.body.clone(),
-                        meta: m.meta.clone(),
-                    },
-                };
-                Some((channel, record))
-            }
-            Event::Edited {
-                target,
-                user,
-                msgid,
-                edit_of,
-                body,
-            } => {
-                let channel = channel_of(target)?;
-                // The edit and the message it edits both belong to the origin.
-                if !from_peer(msgid) || !from_peer(edit_of) {
-                    return None;
-                }
-                let record = EventRecord {
-                    scope: Scope::Channel(channel.clone()),
-                    msgid: msgid.clone(),
-                    root: edit_of.clone(),
-                    sender: user.clone(),
-                    kind: EventKind::Edit { body: body.clone() },
-                };
-                Some((channel, record))
-            }
-            Event::Deleted { target, msgid, by } => {
-                let channel = channel_of(target)?;
-                if !from_peer(msgid) {
-                    return None;
-                }
-                let sender = by
-                    .clone()
-                    .unwrap_or_else(|| UserRef::new(deleted_placeholder(), peer.clone()));
-                let record = EventRecord {
-                    // A replica delete row needs its own id; the tombstone is
-                    // keyed on the root (`msgid`), which is what materialize
-                    // uses — this id is local bookkeeping only.
-                    scope: Scope::Channel(channel.clone()),
-                    msgid: MsgId::new(peer.clone(), Ulid::new()),
-                    root: msgid.clone(),
-                    sender,
-                    kind: EventKind::Delete,
-                };
-                Some((channel, record))
-            }
-            Event::Reaction {
-                target,
-                msgid,
-                emoji,
-                op,
-                by,
-            } => {
-                let channel = channel_of(target)?;
-                if !from_peer(msgid) {
-                    return None;
-                }
-                let record = EventRecord {
-                    scope: Scope::Channel(channel.clone()),
-                    msgid: MsgId::new(peer.clone(), Ulid::new()),
-                    root: msgid.clone(),
-                    sender: by.clone(),
-                    kind: EventKind::React {
-                        emoji: emoji.clone(),
-                        add: matches!(op, weft_proto::ReactionOp::Add),
-                    },
-                };
-                Some((channel, record))
-            }
-            _ => None,
-        }
     }
 
     /// Subscribe the bridge session to exactly the forwardable channels
@@ -637,16 +527,59 @@ impl<S: ControlStream> Session<S> {
                 forwarder.abort();
             }
         }
-        for channel in want {
-            if self.bridged.contains_key(&channel) {
+        for channel in &want {
+            if self.bridged.contains_key(channel) {
                 continue;
             }
-            if let Some(handle) = self.ctx.registry.get(&channel) {
+            if let Some(handle) = self.ctx.registry.get(channel) {
                 if let Some(rx) = handle.subscribe().await {
                     let forwarder = spawn_forwarder(channel.clone(), rx, self.events_tx.clone());
-                    self.bridged.insert(channel, forwarder);
+                    self.bridged.insert(channel.clone(), forwarder);
                 }
             }
+        }
+    }
+
+    /// §11.7 on-demand backfill: a local client's HISTORY ran out of local
+    /// scrollback for a channel this bridge forwards, so pull that window from
+    /// the peer (the peer serves the compacted view, bounded by its manifest
+    /// `history` flag + retention, and streams it if large). We fetch **only what
+    /// a client asked to see** — never a whole federated scrollback eagerly.
+    /// Gated on forwardability (invariant 3) and deduped per `(channel, before)`
+    /// window so repeated scrolls hit the peer once. Origin authority (invariant
+    /// 2) keeps us ingesting only the peer's own events.
+    pub(super) async fn on_backfill_demand(&mut self, req: crate::BackfillReq) {
+        let State::Bridge { peer, .. } = self.state.clone() else {
+            return; // only a bridge session speaks to a peer
+        };
+        let forwardable = self
+            .ctx
+            .peers
+            .peer(&peer)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| bridge::is_forwardable(&p, req.channel.as_str()))
+            .unwrap_or(false);
+        if !forwardable {
+            return; // not our peer's channel — another bridge may serve it
+        }
+        let window = (
+            req.channel.clone(),
+            req.before.as_ref().map(|m| m.to_string()),
+        );
+        if !self.backfilled.insert(window) {
+            return; // already asked the peer for this window
+        }
+        let cmd = Command::History {
+            target: Target::Channel(req.channel),
+            before: req.before,
+            after: None,
+            limit: Some(weft_proto::MAX_HISTORY_LIMIT),
+            thread: None,
+        };
+        if let Ok(line) = Request::new(cmd).serialize() {
+            let _ = self.stream.send_line(&line).await;
         }
     }
 
@@ -728,6 +661,9 @@ impl<S: ControlStream> Session<S> {
         };
         let ours = |id: &MsgId| id.origin().as_str() == self.ctx.network_name();
         let forward = match &event.event {
+            // System messages (join/part lines) are local channel noise — not
+            // re-broadcast across the bridge (like remote MEMBER, §11).
+            Event::Message(m) if m.meta.system.is_some() => false,
             Event::Message(m) => ours(&m.msgid),
             Event::Edited { msgid, .. } => ours(msgid),
             Event::Deleted { msgid, .. } => ours(msgid),
@@ -1328,6 +1264,183 @@ impl<S: ControlStream> Session<S> {
                 self.unsupported(label, "not yet available over a federation session")
                     .await
             }
+        }
+    }
+}
+
+// ---- ctx-level bridged ingestion (shared by the live bridge session and
+// weftd's §11.7 backfill puller, which has no Session) ----
+
+/// Map a bridged event to its storage record, enforcing origin authority
+/// (invariant 2): the event and its root must originate on `peer`.
+fn ingest_record(peer: &NetworkName, event: &Event) -> Option<(ChannelName, EventRecord)> {
+    let channel_of = |t: &Target| match t {
+        Target::Channel(c) => Some(c.clone()),
+        _ => None, // DMs never bridge (§9.5)
+    };
+    let from_peer = |id: &MsgId| id.origin().as_str() == peer.as_str();
+    match event {
+        Event::Message(m) => {
+            let channel = channel_of(&m.target)?;
+            if !from_peer(&m.msgid) || m.sender.network.as_str() != peer.as_str() {
+                return None;
+            }
+            let record = EventRecord {
+                scope: Scope::Channel(channel.clone()),
+                msgid: m.msgid.clone(),
+                root: m.msgid.clone(),
+                sender: m.sender.clone(),
+                kind: EventKind::Message {
+                    body: m.body.clone(),
+                    meta: m.meta.clone(),
+                },
+            };
+            Some((channel, record))
+        }
+        Event::Edited {
+            target,
+            user,
+            msgid,
+            edit_of,
+            body,
+        } => {
+            let channel = channel_of(target)?;
+            // The edit and the message it edits both belong to the origin.
+            if !from_peer(msgid) || !from_peer(edit_of) {
+                return None;
+            }
+            let record = EventRecord {
+                scope: Scope::Channel(channel.clone()),
+                msgid: msgid.clone(),
+                root: edit_of.clone(),
+                sender: user.clone(),
+                kind: EventKind::Edit { body: body.clone() },
+            };
+            Some((channel, record))
+        }
+        Event::Deleted { target, msgid, by } => {
+            let channel = channel_of(target)?;
+            if !from_peer(msgid) {
+                return None;
+            }
+            let sender = by
+                .clone()
+                .unwrap_or_else(|| UserRef::new(deleted_placeholder(), peer.clone()));
+            let record = EventRecord {
+                // A replica delete row needs its own id; the tombstone is keyed
+                // on the root (`msgid`), which is what materialize uses — this
+                // id is local bookkeeping only.
+                scope: Scope::Channel(channel.clone()),
+                msgid: MsgId::new(peer.clone(), Ulid::new()),
+                root: msgid.clone(),
+                sender,
+                kind: EventKind::Delete,
+            };
+            Some((channel, record))
+        }
+        Event::Reaction {
+            target,
+            msgid,
+            emoji,
+            op,
+            by,
+        } => {
+            let channel = channel_of(target)?;
+            if !from_peer(msgid) {
+                return None;
+            }
+            let record = EventRecord {
+                scope: Scope::Channel(channel.clone()),
+                msgid: MsgId::new(peer.clone(), Ulid::new()),
+                root: msgid.clone(),
+                sender: by.clone(),
+                kind: EventKind::React {
+                    emoji: emoji.clone(),
+                    add: matches!(op, weft_proto::ReactionOp::Add),
+                },
+            };
+            Some((channel, record))
+        }
+        _ => None,
+    }
+}
+
+impl ServerCtx {
+    /// §11.4 ingest one verified line from `peer` (a live bridge event, or a
+    /// line pulled from a §11.7 backfill stream). Netblock-guarded (invariant
+    /// 7), origin-authority-checked (invariant 2), manifest-gated (invariant 3),
+    /// with foreign attachments mirrored (§11.8). A non-ingestible line (a batch
+    /// frame, a non-origin event) is silently skipped, so feeding a whole backfill
+    /// body through it is safe. `SessionId::MAX` origin ⇒ every member gets the
+    /// broadcast copy (the puller is no session).
+    pub async fn ingest_bridged(&self, peer: &NetworkName, line: &Line) {
+        // §11.6 effect 3: a blocked network's events are rejected at ingestion
+        // (a mid-session block takes effect at once, not just at auth).
+        if self.netblocks.is_netblocked(peer).await.unwrap_or(false) {
+            return;
+        }
+        let Ok(reply) = Reply::from_line(line) else {
+            return;
+        };
+        let Some((channel, record)) = ingest_record(peer, &reply.event) else {
+            return;
+        };
+        let gated = self
+            .peers
+            .peer(peer)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| bridge::is_forwardable(&p, channel.as_str()))
+            .unwrap_or(false);
+        if !gated {
+            debug!(%peer, %channel, "dropped ingest: channel not in acked manifest");
+            return;
+        }
+        // §11.8 mirror any foreign blob attachments the bridged message carries:
+        // record the reference (so local members are gated + can fetch it once
+        // present) and ask weftd to pull + verify + store the bytes.
+        if let Event::Message(m) = &reply.event {
+            self.mirror_attachments(peer, &channel, m).await;
+        }
+        if let Some(handle) = self.registry.get(&channel) {
+            handle.ingest(u64::MAX, record, reply.event).await;
+        }
+    }
+
+    /// §11.8 for each **foreign** `weft-media://` attachment on a bridged message,
+    /// record its reference in the mirrored channel and hand weftd a mirror pull.
+    /// The peer's manifest `media` policy (+ `mirror-max` + the receiver
+    /// blocklist) is enforced in weftd's mirror fetcher.
+    async fn mirror_attachments(
+        &self,
+        peer: &NetworkName,
+        channel: &ChannelName,
+        msg: &MessageEvent,
+    ) {
+        let our = self.network_name();
+        for uri in &msg.meta.attachments {
+            let Some((origin, hash)) = crate::media::parse_media_uri(uri) else {
+                continue;
+            };
+            // Local-origin blobs are already home; only foreign ones mirror.
+            if origin == our {
+                continue;
+            }
+            let hash = hash.to_string();
+            let _ = self
+                .media_refs
+                .add_refs(
+                    &weft_store::Scope::Channel(channel.clone()),
+                    &msg.msgid,
+                    std::slice::from_ref(&hash),
+                )
+                .await;
+            self.request_mirror(crate::MirrorRequest {
+                peer: peer.clone(),
+                hash,
+                channel: channel.clone(),
+            });
         }
     }
 }

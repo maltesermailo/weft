@@ -39,10 +39,33 @@ The `weft-admin` crate is a **library** weftd mounts (`[admin] enabled = true`):
   + tamper; kick + delete 501-without-live / 204-with-live); `weft-core`
   `admin_delete_tombstones_without_membership` (actor mints + broadcasts the
   tombstone for a non-member moderator; the message becomes `NoSuchTarget`).
-- **TODO (next phases)**: reporter anonymization per §6.7; per-account
-  enrichment (presence/devices/roles); SPA polish (search, pagination, account
-  detail). "More moderation features" (account suspend/purge, durations, audit
-  log) slot into the moderation area. Sharding routing (§3a) when needed.
+- **Density + comprehensiveness pass (2026-07-11)**: the SPA was rebuilt denser
+  (tighter tables, badges, 10-item nav) and comprehensive. New screens:
+  **Channels**, **Namespaces**, **Grants** (scope-filtered), **Federation**
+  (bridge peers + netblock list, add/remove netblock), **Media blocks** (§13
+  blocklist, block/unblock). The dashboard gained cards (namespaces, open
+  reports, peers, netblocks, blocked media). **Users** is now an enriched table
+  (ULID, operator badge, caps@*, muted/banned) with client-side search and a
+  per-account **detail view**: ULID, **email + verified claims** (the claim
+  `subject` values), memberships, all grants, mod state, and **every message the
+  user authored** across all channels/DMs (newest-first, each deletable) via
+  `EventStore::messages_by_sender` (mem + PG + contract) behind
+  `GET /accounts/:name/messages`. **Account delete** shipped: `AccountStore::delete_account` (mem + PG +
+  contract) hard-deletes the account **and** its per-account data (memberships,
+  ULID-keyed grants, moderation records, role assignments) while keeping posted
+  messages; API `DELETE /accounts/:name` (refuses self-delete) + a delete button
+  in the list and detail. New read/action endpoints: `GET /accounts/:name`,
+  `GET/POST/DELETE /netblocks`, `GET /peers`, `GET/POST/DELETE /media-blocks`,
+  enriched `GET /accounts` + `/stats`. `AdminState` gained the Membership /
+  Netblock / Peer / MediaBlocklist store roles. Tests:
+  `operator_deletes_a_user_but_not_themselves`,
+  `netblock_and_media_block_endpoints`.
+- **TODO (next phases)**: reporter anonymization per §6.7; SPA pagination for
+  large lists; message-content purge on account delete (opt-in); durations +
+  audit log for moderation; media-block byte deletion from the panel (the store
+  role can't reach weftd's blob store — the wire `MEDIA BLOCK` verb does the
+  deletion, GC + fetch gate cover panel-added hashes). Sharding routing (§3a)
+  when needed.
 
 Remaining plan below.
 

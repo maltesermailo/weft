@@ -394,6 +394,17 @@ pub enum Command {
     NetblockRemove { network: NetworkName },
     /// `NETBLOCK LIST` — the operator's blocklist (§11.6).
     NetblockList,
+    /// `MEDIA BLOCK <hash> [:reason]` (§13) — block a BLAKE3 media hash
+    /// network-wide: delete it and reject re-upload + mirror. Cap `media-block`
+    /// at `*`. `hash` is the bare content hash (validated by the media layer).
+    MediaBlock {
+        hash: String,
+        reason: Option<String>,
+    },
+    /// `MEDIA UNBLOCK <hash>` — lift a hash block (§13).
+    MediaUnblock { hash: String },
+    /// `MEDIA BLOCKS` — the media hash blocklist (§13). → `MEDIA-BLOCKED` per entry.
+    MediaBlocks,
     /// `REPORT-FORWARD <report-id> <msgid> <category> [:note]` — bridge-session
     /// only (§11.9). Reporter identity is stripped by the forwarder; the origin
     /// treats it as a net-scope, `unverified` signal.
@@ -427,6 +438,10 @@ pub enum Command {
         account: Account,
         reason: Option<String>,
     },
+    /// `MODLIST <scope>` — list the moderation deny-list (mutes + bans) at a
+    /// scope (`#chan|ns:<name>|*`, §6.7). Cap `mute` or `ban` at the scope.
+    /// Answered as a `BATCH` of `MODERATED` events (each a current mute/ban).
+    ModList { scope: String },
     /// Any verb outside the known set. Servers ignore it silently (§4).
     Unknown { verb: String },
 }
@@ -1146,6 +1161,25 @@ impl Command {
                     }),
                 }
             }
+            "MEDIA" => {
+                let mut args = Args::new(line, "MEDIA");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "BLOCK" => Ok(Command::MediaBlock {
+                        hash: args.req("hash")?.to_string(),
+                        reason: args.trailing_opt(),
+                    }),
+                    "UNBLOCK" => Ok(Command::MediaUnblock {
+                        hash: args.req("hash")?.to_string(),
+                    }),
+                    "BLOCKS" => Ok(Command::MediaBlocks),
+                    _ => Err(ParseError::BadParam {
+                        verb: "MEDIA",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
             "MUTE" | "UNMUTE" | "BAN" | "UNBAN" => {
                 let verb = match verb {
                     "MUTE" => "MUTE",
@@ -1178,6 +1212,12 @@ impl Command {
                     channel: args.req("channel")?.parse()?,
                     account: args.req("account")?.parse()?,
                     reason: args.trailing_opt(),
+                })
+            }
+            "MODLIST" => {
+                let mut args = Args::new(line, "MODLIST");
+                Ok(Command::ModList {
+                    scope: args.req("scope")?.to_string(),
                 })
             }
             "REPORT-FORWARD" => {
@@ -1712,6 +1752,15 @@ impl Command {
                 None,
             ),
             Command::NetblockList => ("NETBLOCK", vec!["LIST".to_string()], None),
+            Command::MediaBlock { hash, reason } => (
+                "MEDIA",
+                vec!["BLOCK".to_string(), hash.clone()],
+                reason.clone(),
+            ),
+            Command::MediaUnblock { hash } => {
+                ("MEDIA", vec!["UNBLOCK".to_string(), hash.clone()], None)
+            }
+            Command::MediaBlocks => ("MEDIA", vec!["BLOCKS".to_string()], None),
             Command::ReportForward {
                 report_id,
                 msgid,
@@ -1763,6 +1812,7 @@ impl Command {
                 vec![channel.to_string(), account.to_string()],
                 reason.clone(),
             ),
+            Command::ModList { scope } => ("MODLIST", vec![scope.clone()], None),
             Command::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown command"));
             }
@@ -1868,6 +1918,7 @@ mod tests {
             PresenceStatus::Away,
             PresenceStatus::Dnd,
             PresenceStatus::Invisible,
+            PresenceStatus::Offline,
         ] {
             round_trip(&Request::new(Command::Presence { status }));
         }
@@ -1960,6 +2011,7 @@ mod tests {
                     reply_to: Some(MSGID.parse().unwrap()),
                     thread: Some(MSGID.parse().unwrap()),
                     attachments: vec![],
+                    system: None,
                 },
             },
             "req-1",
@@ -2545,6 +2597,31 @@ mod tests {
     }
 
     #[test]
+    fn media_block_round_trips() {
+        round_trip(&Request::with_label(
+            Command::MediaBlock {
+                hash: "b3hashhex".to_string(),
+                reason: Some("csam".to_string()),
+            },
+            "m1",
+        ));
+        assert_eq!(
+            Request::new(Command::MediaBlock {
+                hash: "b3hashhex".to_string(),
+                reason: None,
+            })
+            .serialize()
+            .unwrap(),
+            "MEDIA BLOCK b3hashhex"
+        );
+        round_trip(&Request::new(Command::MediaUnblock {
+            hash: "b3hashhex".to_string(),
+        }));
+        round_trip(&Request::new(Command::MediaBlocks));
+        assert!(Request::parse("MEDIA FROB x").is_err());
+    }
+
+    #[test]
     fn report_forward_round_trips() {
         round_trip(&Request::with_label(
             Command::ReportForward {
@@ -2602,6 +2679,9 @@ mod tests {
             channel: "#general".parse().unwrap(),
             account: "eve".parse().unwrap(),
             reason: None,
+        }));
+        round_trip(&Request::new(Command::ModList {
+            scope: "ns:games".into(),
         }));
     }
 

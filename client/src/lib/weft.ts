@@ -23,10 +23,35 @@ const IS_TAURI =
 export const isWeb = !IS_TAURI;
 
 // ---- WASM backend (lazy: the module + wasm only load in a real browser) ----
-type WasmClient = { invoke(cmd: string, args: unknown): Promise<unknown> };
+type WasmClient = {
+  invoke(cmd: string, args: unknown): Promise<unknown>;
+  /** §6/§13 fold one backfill-stream line back through the inbound FSM. */
+  feed_line(line: string): void;
+};
 let wasmClient: WasmClient | null = null;
 let wasmInit: Promise<WasmClient> | null = null;
 const webListeners = new Set<(e: WeftEvent) => void>();
+
+/// §6/§13 a large HISTORY page arrives as a `backfill` event carrying a token:
+/// pull the serialized batch off `/backfill` and replay each line through the
+/// FSM, so it folds exactly like an inline BATCH. A failed pull is harmless —
+/// the client re-issues the HISTORY (resume = new token). Never forwarded to the
+/// app; only the resulting batch events are.
+async function pullBackfill(token: string): Promise<void> {
+  const client = wasmClient;
+  if (!client) return;
+  try {
+    const res = await fetch(`${mediaOrigin()}/backfill?t=${encodeURIComponent(token)}`);
+    if (!res.ok) return;
+    const text = await res.text();
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed) client.feed_line(trimmed);
+    }
+  } catch {
+    /* transient — the next HISTORY re-request mints a fresh token */
+  }
+}
 
 function ensureWasm(): Promise<WasmClient> {
   if (!wasmInit) {
@@ -37,6 +62,11 @@ function ensureWasm(): Promise<WasmClient> {
       const mod: any = await import(/* @vite-ignore */ url);
       await mod.default();
       wasmClient = new mod.WeftClient((ev: WeftEvent) => {
+        // Intercept backfill tokens: pull + replay, don't surface to the app.
+        if (ev.kind === "backfill") {
+          void pullBackfill(ev.token);
+          return;
+        }
         for (const cb of webListeners) cb(ev);
       }) as WasmClient;
       return wasmClient;
@@ -57,6 +87,7 @@ export type WeftEvent =
   | { kind: "connected"; network: string; account: string }
   | { kind: "auth-failed"; reason: string }
   | { kind: "media-token"; token: string }
+  | { kind: "backfill"; token: string }
   | {
       kind: "message";
       target: string;
@@ -70,6 +101,7 @@ export type WeftEvent =
       reply_to: string | null;
       md: boolean;
       attachments: string[];
+      system: string | null;
     }
   | { kind: "typing"; channel: string; user: string; state: string }
   | { kind: "presence"; user: string; status: string }
@@ -441,6 +473,12 @@ export function report(msgid: string, category: string, scope: string, note?: st
 
 export function reportsList(scope: string, status?: string) {
   return invoke("reports_list", { scope, status: status ?? null });
+}
+
+/// List the moderation deny-list (mutes + bans) at a scope (§6.7). Answered as
+/// a batch of `moderated` events (each a current mute/ban).
+export function modList(scope: string) {
+  return invoke("mod_list", { scope });
 }
 
 export function reportsResolve(reportId: string, action: string, note?: string) {

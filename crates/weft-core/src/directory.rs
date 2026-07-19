@@ -47,6 +47,10 @@ enum Cmd {
         account: Account,
         session: SessionId,
     },
+    IsOnline {
+        account: Account,
+        reply: oneshot::Sender<bool>,
+    },
     /// Pre-validated except recipient existence (the directory owns that
     /// check — anti-enumeration: the reply is a plain bool the session
     /// turns into NO-SUCH-TARGET).
@@ -113,6 +117,25 @@ impl Directory {
 
     pub(crate) async fn deregister(&self, account: Account, session: SessionId) {
         let _ = self.inbox.send(Cmd::Deregister { account, session }).await;
+    }
+
+    /// Does `account` still have at least one live session? Ordered after a
+    /// preceding `deregister` (same inbox), so a session can ask "was I the
+    /// last?" right after leaving — used to clear presence on true disconnect.
+    pub(crate) async fn is_online(&self, account: &Account) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .inbox
+            .send(Cmd::IsOnline {
+                account: account.clone(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
     }
 
     /// Push `event` to every live session of `account` (§6.7). Best-effort.
@@ -281,6 +304,9 @@ impl Actor {
                         self.sessions.remove(&account);
                     }
                 }
+            }
+            Cmd::IsOnline { account, reply } => {
+                let _ = reply.send(self.sessions.contains_key(&account));
             }
             Cmd::Dm {
                 origin,

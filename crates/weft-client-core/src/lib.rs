@@ -55,6 +55,12 @@ pub enum ClientEvent {
     MediaToken {
         token: String,
     },
+    /// §6/§13 a large HISTORY page is being served as a data-plane stream: the
+    /// client pulls `/backfill?t=<token>` and folds the returned lines exactly
+    /// like an inline `BATCH` (M-media-4). Correlates to the pending HISTORY.
+    Backfill {
+        token: String,
+    },
     Message {
         target: String,
         sender: String,
@@ -63,6 +69,9 @@ pub enum ClientEvent {
         body: String,
         /// §13 `attach.N=` media references (`weft-media://…` URIs), in order.
         attachments: Vec<String>,
+        /// `system=<kind>` — a server-generated system message (`join`/`part`);
+        /// the client renders localized text instead of a normal message.
+        system: Option<String>,
         own: bool,
         /// True when this arrived inside a `HISTORY` batch (older messages to
         /// prepend), false for live traffic to append.
@@ -378,6 +387,8 @@ pub fn on_line<E: EventSink>(
             sink.emit(ClientEvent::BatchEnd { id, truncated });
         }
         Event::MediaToken { token } => sink.emit(ClientEvent::MediaToken { token }),
+        // §6/§13 a HISTORY over the stream threshold — pull it off the data plane.
+        Event::StreamAccept { token } => sink.emit(ClientEvent::Backfill { token }),
         Event::Message(m) => sink.emit(ClientEvent::Message {
             target: m.target.to_string(),
             sender: m.sender.account.to_string(),
@@ -389,6 +400,7 @@ pub fn on_line<E: EventSink>(
             reply_to: m.meta.reply_to.as_ref().map(|r| r.to_string()),
             md: m.meta.fmt.as_deref() == Some("md"),
             attachments: m.meta.attachments.clone(),
+            system: m.meta.system.clone(),
             body: m.body,
         }),
         Event::Member {
@@ -1023,6 +1035,15 @@ pub fn build_members(channel: &str) -> Result<String, String> {
     Request::new(Command::Members {
         channel,
         cursor: None,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `MODLIST <scope>` — list the moderation deny-list (mutes + bans, §6.7).
+pub fn build_mod_list(scope: &str) -> Result<String, String> {
+    Request::new(Command::ModList {
+        scope: scope.to_string(),
     })
     .serialize()
     .map_err(|e| e.to_string())

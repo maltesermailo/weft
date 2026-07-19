@@ -27,6 +27,7 @@
       <button class="so-navitem" class:active={app.nsTab === "overview"} onclick={() => (app.nsTab = "overview")}>Overview</button>
       <button class="so-navitem" class:active={app.nsTab === "roles"} onclick={() => (app.nsTab = "roles")}>Roles</button>
       <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => (app.nsTab = "members")}>Members &amp; roles</button>
+      <button class="so-navitem" class:active={app.nsTab === "bans"} onclick={() => { app.nsTab = "bans"; app.refreshBans(); }}>Bans &amp; mutes</button>
       <button class="so-navitem" class:active={app.nsTab === "federation"} onclick={() => (app.nsTab = "federation")}>Federation</button>
       <div class="so-heading">Security</div>
       <button class="so-navitem" class:active={app.nsTab === "recovery"} onclick={() => (app.nsTab = "recovery")}>Recovery</button>
@@ -115,6 +116,25 @@
           {/each}
         </div>
         <div class="modal-actions"><button class="ok-btn" onclick={app.doDelegate}>Grant capabilities</button></div>
+      {:else if app.nsTab === "bans"}
+        <h1>Bans &amp; mutes</h1>
+        <p class="so-sub">Accounts denied at <code>ns:{app.activeServer}</code> (§6.7). A <b>ban</b> blocks join + posting; a <b>mute</b> blocks posting. Lifting one takes effect immediately.</p>
+        <div class="modal-list">
+          {#each app.denyList() as d (d.kind + d.account)}
+            <div class="ns-card">
+              <div class="ns-info">
+                <div class="ns-name">{d.account} <span class="rep-state {d.kind === "ban" ? "severed" : "added"}">{d.kind}</span></div>
+                <div class="ns-desc">{d.reason ? d.reason : "no reason given"}{d.by ? ` · by ${d.by}` : ""}</div>
+              </div>
+              <div class="fed-actions">
+                <button class="mini-danger" onclick={() => app.liftMod(d.kind, d.account)}>{d.kind === "ban" ? "Unban" : "Unmute"}</button>
+              </div>
+            </div>
+          {:else}
+            <div class="empty-hint">No bans or mutes at this server.</div>
+          {/each}
+        </div>
+        <div class="modal-actions"><button class="set-btn" onclick={app.refreshBans}>Refresh</button></div>
       {:else if app.nsTab === "federation"}
         <h1>Federation</h1>
         <p class="so-sub">Bridge <b>{app.activeServer}</b>'s channels to a peer network (§11). You control this as the namespace owner — bridges are scoped to <code>ns:{app.activeServer}</code>, non-transitive, and every change notifies members.</p>

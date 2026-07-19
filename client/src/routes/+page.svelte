@@ -8,6 +8,7 @@
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import QuickSwitcher from "$lib/components/QuickSwitcher.svelte";
   import CommunityRail from "$lib/components/CommunityRail.svelte";
+  import EmptyHome from "$lib/components/EmptyHome.svelte";
   import MemberList from "$lib/components/MemberList.svelte";
   import ChannelList from "$lib/components/sidebar/ChannelList.svelte";
   import SidebarHeader from "$lib/components/sidebar/SidebarHeader.svelte";
@@ -419,7 +420,22 @@
   }
   // ---- namespace admin panel (§6.2 / §2.4 / §6.6) ----
   let nsSettingsOpen = $state(false);
-  let nsTab = $state<"overview" | "roles" | "members" | "federation" | "recovery" | "danger">("overview");
+  let nsTab = $state<
+    "overview" | "roles" | "members" | "bans" | "federation" | "recovery" | "danger"
+  >("overview");
+  // §6.7 moderation deny-list (mutes + bans) per scope, for the Bans tab.
+  let modDeny = $state<
+    Record<string, { account: string; kind: string; by?: string | null; reason?: string | null }[]>
+  >({});
+  const banScope = () => (activeServer ? `ns:${activeServer}` : "*");
+  const denyList = () => modDeny[banScope()] ?? [];
+  function refreshBans() {
+    modDeny[banScope()] = []; // full refresh; the batch response repopulates
+    weft.modList(banScope()).catch((e) => toast(String(e), "error"));
+  }
+  function liftMod(kind: string, account: string) {
+    moderate(kind === "mute" ? "unmute" : "unban", account, banScope());
+  }
   // Role editor (§6.6). Roles live at the namespace scope.
   let newRoleName = $state("");
   let newRoleColor = $state("#5865f2");
@@ -668,9 +684,10 @@
         } catch {
           /* storage unavailable */
         }
-        // A new account lands in #general; a returning session is auto-rejoined
-        // to its channels by the server (persistent membership, §6.3).
-        if (mode === "register") weft.join("#general").catch(() => {});
+        // A returning session is auto-rejoined to its channels by the server
+        // (persistent membership, §6.3). A brand-new account joins nothing —
+        // it's not forced into the seeded server; the empty-home screen guides
+        // it to Discover / create / join instead.
         break;
       case "media-token":
         weft.setMediaBearer(e.token); // §13 fetch bearer for /media URLs
@@ -707,6 +724,8 @@
         break;
       case "member": {
         const ch = ensureChannel(e.channel);
+        // Roster only — the Discord-style "joined"/"left" line is a persistent
+        // system MESSAGE the server emits alongside this event (see "message").
         if (e.action === "join") {
           if (!ch.members.some((m) => m.name === e.user)) {
             ch.members.push({ name: e.user, origin: e.network === network ? "local" : "federated" });
@@ -739,17 +758,28 @@
         if (e.target.startsWith("#")) key = e.target;
         else if (e.target.startsWith("@")) key = "@" + (e.own ? e.target.slice(1) : e.sender);
         else break;
+        // Server-generated system messages (join/part, …) — a persistent line
+        // that rides the normal message + history path, rendered Discord-style.
+        const who = e.network === network ? e.sender : `${e.sender}@${e.network}`;
+        const systemBody = e.system
+          ? e.system === "join"
+            ? `${who} joined`
+            : e.system === "part"
+              ? `${who} left`
+              : `${who} ${e.system}`
+          : null;
         const msg = mkMsg({
           author: e.sender,
-          body: e.body,
+          body: systemBody ?? e.body,
+          system: e.system ? true : undefined,
           time: msgTime(e.msgid),
-          own: e.own,
+          own: e.own && !e.system,
           msgid: e.msgid,
           edited: e.edited,
-          md: e.md,
+          md: e.md && !e.system,
           replyTo: e.reply_to ?? undefined,
           bridged: e.network !== network,
-          net: e.network !== network ? e.network : undefined,
+          net: !e.system && e.network !== network ? e.network : undefined,
           attachments: e.attachments?.length ? e.attachments : undefined,
         });
         // Batch messages buffer until BATCH END. A PINS batch (loadingPins set)
@@ -938,6 +968,12 @@
         currentBatchId = e.id; // `r…` = a ROLES batch (see below)
         break; // messages between here and batch-end are buffered above
       case "batch-end": {
+        // A MODLIST batch only refreshed the deny-list cache (handled per
+        // "moderated" event above) — nothing to flush here.
+        if (currentBatchId.startsWith("mod")) {
+          currentBatchId = "";
+          break;
+        }
         if (currentBatchId.startsWith("r")) {
           const scope = roleFetchQueue.shift();
           if (scope) rolesByScope[scope] = roleBuf;
@@ -991,6 +1027,24 @@
         break;
       }
       case "moderated": {
+        // Keep the deny-list cache current (for the Bans tab). A MODLIST reply
+        // arrives inside a `mod`-batch; live actions arrive bare. `mute`/`ban`
+        // add-or-replace; `unmute`/`unban` remove; `kick` is transient.
+        if (e.action === "mute" || e.action === "ban") {
+          const list = (modDeny[e.scope] ??= []);
+          const i = list.findIndex((r) => r.account === e.account && r.kind === e.action);
+          const rec = { account: e.account, kind: e.action, by: e.by, reason: e.reason };
+          if (i >= 0) list[i] = rec;
+          else list.push(rec);
+        } else if (e.action === "unmute" || e.action === "unban") {
+          const kind = e.action === "unmute" ? "mute" : "ban";
+          if (modDeny[e.scope])
+            modDeny[e.scope] = modDeny[e.scope].filter(
+              (r) => !(r.account === e.account && r.kind === kind),
+            );
+        }
+        // A list response shouldn't also post system lines in the timeline.
+        if (currentBatchId.startsWith("mod")) break;
         // Surface the action as a system line in the affected channel. A
         // federated moderator (§11.11 homeserver authority) is attributed with
         // their @network and flagged — the "acting on H via F" affordance.
@@ -1906,7 +1960,10 @@
     set userTab(v: "account" | "appearance" | "connection") { userTab = v; },
     // server settings (ns overlay)
     get nsTab() { return nsTab; },
-    set nsTab(v: "overview" | "roles" | "members" | "federation" | "recovery" | "danger") { nsTab = v; },
+    set nsTab(v: "overview" | "roles" | "members" | "bans" | "federation" | "recovery" | "danger") { nsTab = v; },
+    denyList,
+    refreshBans,
+    liftMod,
     get nsTitle() { return nsTitle; },
     set nsTitle(v: string) { nsTitle = v; },
     get nsDesc() { return nsDesc; },
@@ -2012,10 +2069,14 @@
 
     <!-- MAIN -->
     <main class="main">
-      <ChatTopbar />
+      {#if !activeChannel && !homeView}
+        <EmptyHome />
+      {:else}
+        <ChatTopbar />
 
-      <MessageList bind:scrollEl onscroll={onScroll} />
-      <Composer />
+        <MessageList bind:scrollEl onscroll={onScroll} />
+        <Composer />
+      {/if}
     </main>
 
     <!-- MEMBERS -->

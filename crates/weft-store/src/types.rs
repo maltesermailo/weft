@@ -324,6 +324,20 @@ pub struct NetblockRecord {
     pub actor: String,
 }
 
+/// A media hash blocklist entry (§13): `{hash, private reason, added, actor}`.
+/// Content-addressed, so the block is network-wide and re-uploads of the same
+/// bytes are dead on arrival.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaBlockRecord {
+    /// The BLAKE3 content hash (bare, no `weft-media://` prefix).
+    pub hash: String,
+    /// Operator-private reason (e.g. `csam`); surfaced to `media-block` holders.
+    pub reason: Option<String>,
+    pub added_ms: u64,
+    /// The account (operator or `media-block`-cap holder) who blocked it.
+    pub actor: String,
+}
+
 /// Result of an atomic redeem attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedeemOutcome {

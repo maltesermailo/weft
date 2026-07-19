@@ -13,6 +13,7 @@
 //! a valid media bearer (per-blob membership-gating is M-media-1). WS-binary
 //! transfer is deferred (QUIC + HTTP satisfy the M0 round-trip).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,8 +27,14 @@ use axum::{Json, Router};
 use quinn::{RecvStream, SendStream};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::debug;
-use weft_core::{ServerCtx, MEDIA_MAX_BYTES};
+use weft_core::{PublicKey, ServerCtx, MEDIA_MAX_BYTES};
+use weft_proto::NetworkName;
 use weft_store::{blob_hash, BlobHash, BlobMeta, BlobRecord, BlobStore, StoreError};
+
+/// Peer network signing keys (from `[[peers]]`), used to verify inbound `MIRROR`
+/// pull requests (§11.8). A requester proves control of its network key over the
+/// data plane exactly as a bridge does over the control plane.
+pub(crate) type PeerKeys = Arc<HashMap<NetworkName, PublicKey>>;
 
 /// Max bytes of a single data-plane request (blob ceiling + a header allowance).
 const MAX_REQUEST: usize = MEDIA_MAX_BYTES as usize + 4096;
@@ -170,8 +177,12 @@ async fn respond(send: &mut SendStream, line: &str) {
 /// the raw bytes):
 /// - `PUT <upload-token>\n<bytes…>` → `OK <weft-media://…>` | `ERR <why>`
 /// - `GET <bearer> <hash> [start-end]` → `OK <len>\n<bytes…>` | `ERR <why>`
+/// - `MIRROR <requester-net> <hash> <sig>` → `OK <mime> <len>\n<bytes…>` | `ERR`
+///   (§11.8 federation pull: `sig` is the requester network's key over
+///   `hash‖requester‖origin`; served only to a `[[peers]]`-known network.)
 pub(crate) async fn handle_data_stream(
     ctx: Arc<ServerCtx>,
+    peer_keys: PeerKeys,
     mut send: SendStream,
     mut recv: RecvStream,
 ) {
@@ -228,7 +239,9 @@ pub(crate) async fn handle_data_stream(
                 respond(&mut send, "ERR nosuch").await;
                 return;
             };
-            if !ctx.may_fetch(&account, hash.as_str()).await {
+            if !ctx.may_fetch(&account, hash.as_str()).await
+                || ctx.is_blob_blocked(hash.as_str()).await
+            {
                 respond(&mut send, "ERR nosuch").await;
                 return;
             }
@@ -247,7 +260,97 @@ pub(crate) async fn handle_data_stream(
                 }
             }
         }
+        Some("BACKFILL") => {
+            // §6/§13: pull a pre-serialized, membership-gated HISTORY batch that
+            // exceeded the inline threshold. The one-time token is the cap (the
+            // body was authorized at mint time); a bad/spent token is uniformly
+            // "nosuch" (invariant 1).
+            let token = parts.next().unwrap_or("");
+            match ctx.take_backfill_token(token) {
+                Some(body) => {
+                    let _ = send
+                        .write_all(format!("OK {}\n", body.len()).as_bytes())
+                        .await;
+                    let _ = send.write_all(&body).await;
+                    let _ = send.finish();
+                }
+                None => respond(&mut send, "ERR nosuch").await,
+            }
+        }
+        Some("MIRROR") => {
+            let requester = parts.next().unwrap_or("");
+            let hash_str = parts.next().unwrap_or("");
+            let sig_b64 = parts.next().unwrap_or("");
+            // Origin authority (§11.8): serve only when a `[[peers]]`-known
+            // network proves its key over `hash‖requester‖origin`. Any failure
+            // is the uniform "nosuch" (invariant 1: presence never leaks).
+            let authorized = requester
+                .parse::<NetworkName>()
+                .ok()
+                .and_then(|net| peer_keys.get(&net).copied())
+                .zip(weft_crypto::signature_from_b64(sig_b64).ok())
+                .is_some_and(|(key, sig)| {
+                    weft_crypto::verify_mirror_request(
+                        &key,
+                        hash_str,
+                        requester,
+                        ctx.info.network.as_str(),
+                        &sig,
+                    )
+                });
+            let Some(hash) = BlobHash::parse(hash_str).filter(|_| authorized) else {
+                respond(&mut send, "ERR nosuch").await;
+                return;
+            };
+            match ctx.blobs.get(&hash, None).await {
+                Ok(Some(data)) => {
+                    let mime = ctx
+                        .media_refs
+                        .blob_meta(hash.as_str())
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|m| m.mime)
+                        .unwrap_or_else(|| "application/octet-stream".to_string());
+                    let _ = send
+                        .write_all(format!("OK {} {}\n", mime, data.len()).as_bytes())
+                        .await;
+                    let _ = send.write_all(&data).await;
+                    let _ = send.finish();
+                }
+                Ok(None) => respond(&mut send, "ERR nosuch").await,
+                Err(e) => {
+                    debug!("mirror blob get failed: {e}");
+                    respond(&mut send, "ERR nosuch").await;
+                }
+            }
+        }
         _ => respond(&mut send, "ERR verb").await,
+    }
+}
+
+/// Store a blob pulled from a peer via [`crate::dialer`] mirroring (§11.8): it is
+/// content-verified by the caller, so here we honor the moderation gate, persist
+/// the bytes, and record metadata (dimensions/thumbnail) exactly like an upload.
+/// Returns whether the blob is now stored locally.
+pub(crate) async fn store_mirrored(
+    ctx: &ServerCtx,
+    expected: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> bool {
+    if blob_hash(bytes).as_str() != expected || ctx.is_blob_blocked(expected).await {
+        return false;
+    }
+    match ctx.blobs.put(mime, bytes).await {
+        Ok(hash) => {
+            record_upload(ctx, &hash, mime, bytes).await;
+            true
+        }
+        Err(e) => {
+            debug!("mirror store failed: {e}");
+            false
+        }
     }
 }
 
@@ -265,8 +368,31 @@ pub(crate) fn router(ctx: Arc<ServerCtx>) -> Router {
     Router::new()
         .route("/media", post(upload))
         .route("/media/:hash", get(download))
+        .route("/backfill", get(backfill))
         .layer(DefaultBodyLimit::max(MAX_REQUEST))
         .with_state(ctx)
+}
+
+/// §6/§13 pull a large HISTORY batch (web client). `?t=<token>` is the one-time
+/// backfill grant minted when the page exceeded the inline threshold; the body
+/// is the newline-delimited `Reply` lines the client folds like an inline
+/// `BATCH`. A bad/spent token is uniformly "not found" (invariant 1). A failed
+/// fetch is retried by re-issuing the HISTORY (resume = new token), so one-time
+/// consumption is safe.
+async fn backfill(State(ctx): State<Arc<ServerCtx>>, Query(q): Query<TokenQuery>) -> Response {
+    match ctx.take_backfill_token(&q.t) {
+        Some(body) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                // The token rides the URL (decision #9) — keep it out of referers.
+                (header::REFERRER_POLICY, "no-referrer"),
+            ],
+            body,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "no such target").into_response(),
+    }
 }
 
 async fn upload(
@@ -339,7 +465,7 @@ async fn download(
     let Some(hash) = BlobHash::parse(&hash) else {
         return gated_absent();
     };
-    if !ctx.may_fetch(&account, hash.as_str()).await {
+    if !ctx.may_fetch(&account, hash.as_str()).await || ctx.is_blob_blocked(hash.as_str()).await {
         return gated_absent();
     }
     let range = http_range(&headers);

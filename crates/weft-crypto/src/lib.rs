@@ -18,6 +18,7 @@ mod captoken;
 mod challenge;
 mod keys;
 mod manifest;
+mod mirror;
 mod password;
 mod rotation;
 
@@ -27,6 +28,7 @@ pub use captoken::{verify_chain, Grant, Subject, Token, TokenScope, Verified};
 pub use challenge::{sign_challenge, verify_challenge, CHALLENGE_NONCE_LEN};
 pub use keys::{signature_from_b64, signature_to_b64, Keypair, PublicKey, Signature};
 pub use manifest::{Manifest, SignedManifest};
+pub use mirror::{sign_mirror_request, verify_mirror_request};
 pub use password::PasswordHash;
 pub use rotation::{
     sign_cancel, sign_transfer, verify_cancel, verify_transfer, RotationRecord, SignedRotation,

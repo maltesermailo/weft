@@ -2371,6 +2371,13 @@ button:disabled {
   padding: 5px 4px;
   border-radius: var(--radius-sm);
 }
+/* Discord-style: offline members are dimmed (grouped at the bottom). */
+.member-row.member-offline {
+  opacity: 0.42;
+}
+.member-row.member-offline:hover {
+  opacity: 1;
+}
 .member-row:hover {
   background: var(--bg-hover);
 }
@@ -2458,6 +2465,53 @@ button:disabled {
   text-align: center;
   padding: 40px 20px;
   line-height: 1.6;
+}
+
+/* ---------- EMPTY HOME (no servers) ---------- */
+.empty-home {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: var(--bg-void);
+}
+.empty-home-card {
+  max-width: 440px;
+  text-align: center;
+}
+.empty-home-glyph {
+  font-size: 52px;
+  line-height: 1;
+  margin-bottom: 18px;
+}
+.empty-home-card h1 {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 10px;
+}
+.empty-home-card p {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0 auto 8px;
+}
+.empty-home-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin: 22px 0 16px;
+}
+.empty-home-hint {
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+.empty-home-hint code {
+  background: var(--bg-panel-raised);
+  padding: 1px 5px;
+  border-radius: 4px;
 }
 
 /* ---------- CONNECT SCREEN ---------- */

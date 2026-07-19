@@ -51,10 +51,16 @@ enum Cmd {
     Join {
         session: SessionId,
         account: Account,
+        /// Post a persistent "joined" system message — true only on a *first*
+        /// join (new persistent membership), not on reconnect/auto-rejoin.
+        announce: bool,
         reply: oneshot::Sender<JoinAck>,
     },
     Part {
         session: SessionId,
+        /// Post a persistent "left" system message — true only on a *genuine*
+        /// leave (PART clears membership), not on a disconnect.
+        announce: bool,
     },
     /// §11: subscribe to the broadcast without joining as a member — a bridge
     /// session watches the channel to forward local events, but must not show
@@ -144,12 +150,18 @@ pub struct ChannelHandle {
 }
 
 impl ChannelHandle {
-    pub async fn join(&self, session: SessionId, account: Account) -> Option<JoinAck> {
+    pub async fn join(
+        &self,
+        session: SessionId,
+        account: Account,
+        announce: bool,
+    ) -> Option<JoinAck> {
         let (reply, ack) = oneshot::channel();
         self.inbox
             .send(Cmd::Join {
                 session,
                 account,
+                announce,
                 reply,
             })
             .await
@@ -157,8 +169,8 @@ impl ChannelHandle {
         ack.await.ok()
     }
 
-    pub async fn part(&self, session: SessionId) {
-        let _ = self.inbox.send(Cmd::Part { session }).await;
+    pub async fn part(&self, session: SessionId, announce: bool) {
+        let _ = self.inbox.send(Cmd::Part { session, announce }).await;
     }
 
     /// §6.7 kick/ban: force-remove an account's session(s) from the channel.
@@ -319,6 +331,7 @@ impl Actor {
             Cmd::Join {
                 session,
                 account,
+                announce,
                 reply,
             } => {
                 // Subscribe before broadcasting so the joiner's receiver
@@ -332,10 +345,26 @@ impl Actor {
                 self.members.insert(session, account);
                 let count = self.distinct_members();
                 if account_new {
-                    self.broadcast(
-                        session,
-                        member_event(&self.name, user, MemberAction::Join, count),
-                    );
+                    if announce {
+                        // Genuine first join → a new roster member (§6.3) + the
+                        // persistent "joined" line.
+                        self.broadcast(
+                            session,
+                            member_event(&self.name, user.clone(), MemberAction::Join, count),
+                        );
+                        self.announce_membership(session, user, "join").await;
+                    } else {
+                        // Reconnect/auto-rejoin of an existing member: they're
+                        // already in every roster (Discord-style), so this is a
+                        // presence flip to online, not a fresh join.
+                        self.broadcast(
+                            session,
+                            Event::Presence {
+                                user,
+                                status: weft_proto::PresenceStatus::Online,
+                            },
+                        );
+                    }
                 }
                 let _ = reply.send(JoinAck {
                     events,
@@ -357,19 +386,34 @@ impl Actor {
                     .collect();
                 let _ = reply.send(roster);
             }
-            Cmd::Part { session } => {
+            Cmd::Part { session, announce } => {
                 if let Some(account) = self.members.remove(&session) {
-                    // Only announce a part when the account has no *other*
-                    // session left — one device leaving while another stays
-                    // online is not a departure.
+                    // Only act when the account has no *other* live session —
+                    // one device dropping while another stays on is a no-op.
                     let account_gone = !self.members.values().any(|a| *a == account);
                     if account_gone {
                         let user = self.user(&account);
-                        let count = self.distinct_members();
-                        self.broadcast(
-                            session,
-                            member_event(&self.name, user, MemberAction::Part, count),
-                        );
+                        if announce {
+                            // Explicit PART: the persistent membership is dropped,
+                            // so the member leaves the roster (§6.3) + a "left" line.
+                            let count = self.distinct_members();
+                            self.broadcast(
+                                session,
+                                member_event(&self.name, user.clone(), MemberAction::Part, count),
+                            );
+                            self.announce_membership(session, user, "part").await;
+                        } else {
+                            // Disconnect: persistent membership is retained, so the
+                            // member stays in the roster but goes offline (a grey
+                            // dot, Discord-style) — not a departure.
+                            self.broadcast(
+                                session,
+                                Event::Presence {
+                                    user,
+                                    status: weft_proto::PresenceStatus::Offline,
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -566,8 +610,11 @@ impl Actor {
                 // session and the acting moderator — receives the part.
                 self.broadcast(
                     SENTINEL_ORIGIN,
-                    member_event(&self.name, user, MemberAction::Part, count),
+                    member_event(&self.name, user.clone(), MemberAction::Part, count),
                 );
+                // A kick/ban is a genuine removal → persistent "left" line.
+                self.announce_membership(SENTINEL_ORIGIN, user, "part")
+                    .await;
             }
             Cmd::SetPolicy { session, policy } => {
                 self.policy = policy;
@@ -609,6 +656,41 @@ impl Actor {
     fn mint(&mut self) -> MsgId {
         let ulid = self.ulids.generate().unwrap_or_else(|_| Ulid::new());
         MsgId::new(self.network.clone(), ulid)
+    }
+
+    /// Append + broadcast a **persistent system message** for a membership
+    /// change (Discord-style, `join`/`part`) so it lands in `HISTORY` and
+    /// survives reload. Structured `system=<kind>` (empty body) — the client
+    /// renders the text; `ephemeral` channels store nothing but still relay it.
+    async fn announce_membership(&mut self, session: SessionId, user: UserRef, kind: &str) {
+        let msgid = self.mint();
+        let meta = MsgMeta {
+            system: Some(kind.to_string()),
+            ..Default::default()
+        };
+        self.persist(EventRecord {
+            scope: self.scope.clone(),
+            msgid: msgid.clone(),
+            root: msgid.clone(),
+            sender: user.clone(),
+            kind: EventKind::Message {
+                body: String::new(),
+                meta: meta.clone(),
+            },
+        })
+        .await;
+        self.broadcast(
+            session,
+            Event::Message(Box::new(MessageEvent {
+                target: Target::Channel(self.name.clone()),
+                sender: user,
+                msgid,
+                body: String::new(),
+                meta,
+                edited: None,
+                edited_at: None,
+            })),
+        );
     }
 
     /// §13 record the blob references a posted message carries (M-media-1).

@@ -10,10 +10,11 @@ use weft_proto::{
 };
 use weft_store::{
     materialize, AccountStore, CapabilityStore, ChannelStore, EventKind, EventRecord, EventStore,
-    HistoryItem, InviteRecord, InviteStore, MediaStore, MembershipStore, MemoryStore, ModKind,
-    ModRecord, ModerationStore, NamespaceRecord, NamespaceStore, NetblockRecord, NetblockStore,
-    Page, PeerRecord, PeerStore, PendingRecovery, PinStore, RedeemOutcome, ReportRecord,
-    ReportResolution, ReportStore, RoleDef, RoleStore, Scope,
+    HistoryItem, InviteRecord, InviteStore, MediaBlockRecord, MediaBlocklistStore, MediaStore,
+    MembershipStore, MemoryStore, ModKind, ModRecord, ModerationStore, NamespaceRecord,
+    NamespaceStore, NetblockRecord, NetblockStore, Page, PeerRecord, PeerStore, PendingRecovery,
+    PinStore, RedeemOutcome, ReportRecord, ReportResolution, ReportStore, RoleDef, RoleStore,
+    Scope,
 };
 
 fn user(name: &str) -> UserRef {
@@ -70,6 +71,7 @@ where
         + ReportStore
         + PeerStore
         + NetblockStore
+        + MediaBlocklistStore
         + ModerationStore
         + PinStore
         + MembershipStore
@@ -153,6 +155,34 @@ where
         .is_none());
     assert!(store.is_deleted(&chan, msgid(4_000).ulid()).await.unwrap());
     assert!(!store.is_deleted(&chan, msgid(2_000).ulid()).await.unwrap());
+
+    // messages_by_sender (admin: every message a user authored, newest-first).
+    // A dedicated scope + sender so it stays isolated from `chan`'s assertions.
+    let poster = format!("poster-{tag}");
+    let poster_ref = user(&poster).to_string();
+    let pscope: Scope = Scope::Channel(format!("#poster-{tag}").parse().unwrap());
+    for at in [10_000, 11_000] {
+        store
+            .append(record(
+                &pscope,
+                at,
+                at,
+                &poster,
+                EventKind::Message {
+                    body: format!("by {poster} at {at}"),
+                    meta: MsgMeta::default(),
+                },
+            ))
+            .await
+            .unwrap();
+    }
+    let mine = store.messages_by_sender(&poster_ref, 10).await.unwrap();
+    assert_eq!(mine.len(), 2, "only this sender's roots");
+    assert_eq!(
+        mine.iter().map(|r| r.at_ms()).collect::<Vec<_>>(),
+        [11_000, 10_000],
+        "newest-first"
+    );
 
     // Materialization through a real fetch round trip.
     let roots = store.roots(&chan, page(10)).await.unwrap();
@@ -287,6 +317,39 @@ where
         ada_ulid,
         "distinct accounts get distinct ULIDs"
     );
+
+    // delete_account (operator hard-delete) cascades per-account data but keeps
+    // messages. Give `cara` a membership + grant + moderation record, delete her,
+    // and assert all three are gone.
+    let cara_ulid = store.account_ulid(&cara).await.unwrap().unwrap();
+    let dchan: ChannelName = format!("#del-{tag}").parse().unwrap();
+    store.set_membership(&cara, &dchan).await.unwrap();
+    store
+        .record_grant(&cara_ulid, "*", &["send".to_string()], 0, None)
+        .await
+        .unwrap();
+    store
+        .set_moderation(ModRecord {
+            scope: "*".to_string(),
+            account: cara.clone(),
+            kind: ModKind::Mute,
+            actor: "op".to_string(),
+            reason: None,
+            at_ms: 9_000,
+        })
+        .await
+        .unwrap();
+    assert!(store.delete_account(&cara).await.unwrap());
+    assert!(!store.list_accounts().await.unwrap().contains(&cara));
+    assert!(store.account_ulid(&cara).await.unwrap().is_none());
+    assert!(store.memberships(&cara).await.unwrap().is_empty());
+    assert!(store.grants_for(&cara_ulid).await.unwrap().is_empty());
+    assert!(!store
+        .is_moderated(&cara, &["*".to_string()], ModKind::Mute)
+        .await
+        .unwrap());
+    // Deleting an unknown account is a no-op false.
+    assert!(!store.delete_account(&cara).await.unwrap());
 
     let device = [7u8; 32];
     assert!(!store.device_enrolled(&ada, &device).await.unwrap());
@@ -918,6 +981,42 @@ where
     assert!(store.remove_netblock(&evil).await.unwrap());
     assert!(!store.is_netblocked(&evil).await.unwrap());
     assert!(!store.remove_netblock(&evil).await.unwrap());
+
+    // §13 media hash blocklist: content-addressed, idempotent, name-keyed on hash.
+    let bad_hash = format!("b3-bad-{tag}");
+    assert!(!store.is_hash_blocked(&bad_hash).await.unwrap());
+    store
+        .block_hash(MediaBlockRecord {
+            hash: bad_hash.clone(),
+            reason: Some("csam".to_string()),
+            added_ms: 7_000,
+            actor: "op".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(store.is_hash_blocked(&bad_hash).await.unwrap());
+    // Re-blocking refreshes rather than duplicating.
+    store
+        .block_hash(MediaBlockRecord {
+            hash: bad_hash.clone(),
+            reason: Some("illegal".to_string()),
+            added_ms: 8_000,
+            actor: "op2".to_string(),
+        })
+        .await
+        .unwrap();
+    let hblocks: Vec<_> = store
+        .list_blocked_hashes()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|b| b.hash == bad_hash)
+        .collect();
+    assert_eq!(hblocks.len(), 1);
+    assert_eq!(hblocks[0].reason.as_deref(), Some("illegal"));
+    assert!(store.unblock_hash(&bad_hash).await.unwrap());
+    assert!(!store.is_hash_blocked(&bad_hash).await.unwrap());
+    assert!(!store.unblock_hash(&bad_hash).await.unwrap());
 
     // ---- §6.7 moderation deny-list ----
     let bob: Account = format!("bob-{tag}").parse().unwrap();

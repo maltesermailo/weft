@@ -57,6 +57,11 @@ impl Client {
             if matches!(reply.event, Event::MediaToken { .. }) {
                 continue;
             }
+            // Server-generated system messages (join/part lines) interleave with
+            // most flows; skip them here — a dedicated test asserts on them.
+            if matches!(&reply.event, Event::Message(m) if m.meta.system.is_some()) {
+                continue;
+            }
             return reply;
         }
     }
@@ -584,7 +589,10 @@ async fn part_acks_directly_and_broadcasts() {
 }
 
 #[tokio::test]
-async fn disconnect_broadcasts_part_to_members() {
+async fn disconnect_marks_a_member_offline_not_departed() {
+    // Discord-style: a disconnect retains persistent membership, so the member
+    // stays in the roster and just goes offline (a presence flip) — an explicit
+    // PART is what removes them (see `part_broadcasts_member_leave`).
     let ctx = ctx(&["#general"]);
     let mut ada = joined(&ctx, "ada", "#general").await;
     let bob = joined(&ctx, "bob", "#general").await;
@@ -592,11 +600,14 @@ async fn disconnect_broadcasts_part_to_members() {
 
     drop(bob); // connection drops without QUIT
     let reply = ada.recv().await;
-    assert!(matches!(
-        &reply.event,
-        Event::Member { user, action: MemberAction::Part, .. }
-            if user.to_string() == "bob@test.example"
-    ));
+    assert!(
+        matches!(
+            &reply.event,
+            Event::Presence { user, status: weft_proto::PresenceStatus::Offline }
+                if user.to_string() == "bob@test.example"
+        ),
+        "disconnect goes offline, not part: {reply:?}"
+    );
 }
 
 #[tokio::test]
@@ -2127,6 +2138,42 @@ async fn bridge_ingests_remote_message_with_origin_msgid_intact() {
 }
 
 #[tokio::test]
+async fn bridge_ingest_mirrors_foreign_attachments() {
+    // §11.8: a bridged message with a foreign `weft-media://` attachment records
+    // the reference locally and hands weftd a mirror pull.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_mirror_sink(tx);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    assert!(matches!(ada.recv().await.event, Event::Manifest { .. }));
+
+    let mid = "peer.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let hash = "aa".repeat(32); // 64-hex content hash
+    bridge.send(&format!(
+        "@msgid={mid};attach.1=weft-media://peer.example/{hash} MESSAGE #general bob@peer.example :"
+    ));
+    assert!(matches!(ada.recv().await.event, Event::Message(_)));
+
+    // A mirror pull was handed to weftd for the foreign blob.
+    let req = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("mirror request")
+        .expect("sink open");
+    assert_eq!(req.peer.as_str(), "peer.example");
+    assert_eq!(req.hash, hash);
+    assert_eq!(req.channel.as_str(), "#general");
+
+    // And the reference was recorded so a local member is gated + can fetch it.
+    let scopes = ctx.media_refs.blob_scopes(&hash).await.unwrap();
+    assert!(scopes
+        .iter()
+        .any(|s| matches!(s, weft_store::Scope::Channel(c) if c.as_str() == "#general")));
+}
+
+#[tokio::test]
 async fn federated_moderator_wields_caps_over_the_bridge() {
     // §11.10 homeserver authority: a federated user granted a cap on H wields it
     // through a bridge-tunnelled FSESSION — she never connects to H (IP
@@ -2315,6 +2362,43 @@ async fn netblock_add_list_remove_gated_on_cap() {
     op.expect_err(ErrCode::NoSuchTarget).await;
 }
 
+/// §13 M-media-5: MEDIA BLOCK is `media-block`-cap-gated (`*`), flips
+/// `is_blob_blocked`, lists, and UNBLOCK reverses it.
+#[tokio::test]
+async fn media_block_gates_cap_and_flips_the_blocklist() {
+    let ctx = ctx_ops(&[], &["op"]);
+
+    // A non-operator lacks the `media-block` cap.
+    let mut mallory = ready(&ctx, "mallory").await;
+    mallory.send("MEDIA BLOCK deadbeef");
+    let err = mallory.expect_err(ErrCode::CapRequired).await;
+    let Event::Err(e) = err.event else { panic!() };
+    assert_eq!(e.context.as_deref(), Some("media-block"));
+
+    // The operator blocks a hash → the gate flips + a MEDIA-BLOCKED ack.
+    let mut op = ready(&ctx, "op").await;
+    assert!(!ctx.is_blob_blocked("deadbeef").await);
+    op.send("@label=b1 MEDIA BLOCK deadbeef :csam");
+    let ack = op.recv().await;
+    assert_eq!(ack.label.as_deref(), Some("b1"));
+    assert!(matches!(&ack.event, Event::MediaBlocked { hash, reason }
+            if hash == "deadbeef" && reason.as_deref() == Some("csam")));
+    assert!(ctx.is_blob_blocked("deadbeef").await);
+
+    // MEDIA BLOCKS lists the entry.
+    op.send("MEDIA BLOCKS");
+    assert!(
+        matches!(&op.recv().await.event, Event::MediaBlocked { hash, .. } if hash == "deadbeef")
+    );
+
+    // UNBLOCK reverses; a second UNBLOCK is NO-SUCH-TARGET.
+    op.send("MEDIA UNBLOCK deadbeef");
+    assert!(matches!(op.recv().await.event, Event::MediaBlocked { .. }));
+    assert!(!ctx.is_blob_blocked("deadbeef").await);
+    op.send("MEDIA UNBLOCK deadbeef");
+    op.expect_err(ErrCode::NoSuchTarget).await;
+}
+
 // ---- §11 federation: backfill, report-forward, netblock effects (M5c) ----
 
 #[tokio::test]
@@ -2350,6 +2434,54 @@ async fn bridge_backfill_serves_acked_channel_history() {
         compacted,
         "backfill serves the compacted materialization (§11.7)"
     );
+}
+
+/// §6/§13 a HISTORY page over the stream threshold is offered as a `STREAM
+/// ACCEPT <token>` instead of an inline BATCH; the token resolves to the whole
+/// serialized batch, which parses back to `BatchStart … messages … BatchEnd`.
+#[tokio::test]
+async fn large_history_upgrades_to_a_backfill_stream() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    // Post one past the threshold so the page must stream.
+    let n = weft_proto::HISTORY_STREAM_THRESHOLD + 1;
+    for i in 0..n {
+        ada.send(&format!("MSG #general :m{i}"));
+        assert!(matches!(ada.recv().await.event, Event::Message(_)));
+    }
+
+    ada.send("HISTORY #general limit=500");
+    let Event::StreamAccept { token } = ada.recv().await.event else {
+        panic!("a large page must upgrade to a STREAM ACCEPT");
+    };
+
+    // The token yields the serialized batch, one Reply per line.
+    let body = ctx
+        .take_backfill_token(&token)
+        .expect("backfill token resolves to a body");
+    let body = String::from_utf8(body).expect("utf-8 batch");
+    let events: Vec<Event> = body
+        .lines()
+        .map(|l| Reply::parse(l).expect("parseable batch line").event)
+        .collect();
+    assert!(matches!(events.first(), Some(Event::BatchStart { .. })));
+    assert!(matches!(events.last(), Some(Event::BatchEnd { .. })));
+    let bodies: std::collections::HashSet<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Message(m) => Some(m.body.as_str()),
+            _ => None,
+        })
+        .collect();
+    for i in 0..n {
+        assert!(
+            bodies.contains(format!("m{i}").as_str()),
+            "m{i} missing from stream"
+        );
+    }
+
+    // One-time: a second pull of the same token is uniformly "not found".
+    assert!(ctx.take_backfill_token(&token).is_none());
 }
 
 #[tokio::test]
@@ -2505,6 +2637,51 @@ async fn mute_denies_send_and_unmute_restores() {
     assert!(
         matches!(bob.recv().await.event, Event::Message(_)),
         "unmuted → can post"
+    );
+}
+
+#[tokio::test]
+async fn modlist_returns_the_deny_list() {
+    let ctx = ctx_ops(&["#general"], &["mod"]);
+    let mut op = ready(&ctx, "mod").await;
+    op.send("MUTE #general bob :spam");
+    op.recv().await;
+    op.send("BAN #general eve :raid");
+    op.recv().await;
+
+    // The moderator lists the channel deny-list — a BATCH of MODERATED entries.
+    op.send("@label=L MODLIST #general");
+    assert!(
+        matches!(op.recv().await.event, Event::BatchStart { .. }),
+        "MODLIST opens a batch"
+    );
+    let mut got = Vec::new();
+    loop {
+        match op.recv().await.event {
+            Event::Moderated {
+                account, action, ..
+            } => got.push((account.to_string(), action)),
+            Event::BatchEnd { .. } => break,
+            other => panic!("unexpected in modlist batch: {other:?}"),
+        }
+    }
+    assert!(
+        got.iter()
+            .any(|(a, act)| a == "bob" && *act == weft_proto::ModAction::Mute),
+        "mute present: {got:?}"
+    );
+    assert!(
+        got.iter()
+            .any(|(a, act)| a == "eve" && *act == weft_proto::ModAction::Ban),
+        "ban present: {got:?}"
+    );
+
+    // A non-moderator cannot read the list.
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send("MODLIST #general");
+    assert!(
+        matches!(&ada.recv().await.event, Event::Err(e) if e.code == ErrCode::CapRequired),
+        "non-moderator MODLIST is cap-gated"
     );
 }
 
@@ -2669,6 +2846,8 @@ async fn members_returns_the_full_roster() {
             } => {
                 names.insert(user.account.as_str().to_string());
             }
+            // Each member's dot rides along as a Presence event (§6.1).
+            Event::Presence { .. } => {}
             Event::BatchEnd { .. } => break,
             other => panic!("unexpected in roster batch: {other:?}"),
         }
@@ -2676,6 +2855,46 @@ async fn members_returns_the_full_roster() {
     assert_eq!(
         names,
         ["ada", "bob"].into_iter().map(String::from).collect()
+    );
+}
+
+#[tokio::test]
+async fn members_shows_disconnected_members_offline() {
+    // Discord-style: a disconnected member stays in the roster, dot offline.
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let bob = joined(&ctx, "bob", "#general").await;
+    ada.recv().await; // bob's MEMBER join
+
+    drop(bob); // abrupt disconnect
+    assert!(
+        matches!(
+            &ada.recv().await.event,
+            Event::Presence { user, status: weft_proto::PresenceStatus::Offline }
+                if user.account.as_str() == "bob"
+        ),
+        "co-member sees bob go offline live"
+    );
+
+    ada.send("MEMBERS #general");
+    assert!(matches!(ada.recv().await.event, Event::BatchStart { .. }));
+    let mut bob_status = None;
+    let mut in_roster = false;
+    loop {
+        match ada.recv().await.event {
+            Event::Member { user, .. } if user.account.as_str() == "bob" => in_roster = true,
+            Event::Presence { user, status } if user.account.as_str() == "bob" => {
+                bob_status = Some(status)
+            }
+            Event::BatchEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(in_roster, "bob remains a roster member after disconnect");
+    assert_eq!(
+        bob_status,
+        Some(weft_proto::PresenceStatus::Offline),
+        "bob's dot is offline"
     );
 }
 

@@ -30,6 +30,11 @@ pub const MAX_ATTACHMENTS: usize = 10;
 pub const MAX_EMOJI_BYTES: usize = 32;
 /// §6.4: HISTORY page size cap; servers clamp, they don't error.
 pub const MAX_HISTORY_LIMIT: u32 = 500;
+/// §6/§13: a HISTORY page larger than this switches from an inline `BATCH` to a
+/// data-plane stream (`STREAM ACCEPT <token>` → `BACKFILL <token>`, RECOMMENDED
+/// ~200). The batch is serialized once and pulled over the data plane instead of
+/// riding hundreds of control-plane lines (M-media-4).
+pub const HISTORY_STREAM_THRESHOLD: usize = 200;
 
 /// Tag map. `BTreeMap` so serialization is deterministic (CLAUDE.md:
 /// deterministic output wherever a signature might apply). A flag tag

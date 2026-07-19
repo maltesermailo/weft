@@ -17,13 +17,13 @@ use weft_proto::{
 
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaStore,
-    MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore,
-    ReportStore, RoleStore, HOLD_RADIUS,
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaBlocklistStore,
+    MediaStore, MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore,
+    PinStore, ReportStore, RoleStore, HOLD_RADIUS,
 };
 use crate::types::{
-    ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord,
-    NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome,
+    ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, MediaBlockRecord, ModKind,
+    ModRecord, NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome,
     ReportRecord, ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
@@ -85,7 +85,11 @@ impl PgStore {
                     fmt: row.get("fmt"),
                     reply_to: parse_opt_msgid(row.get("reply_to"))?,
                     thread: parse_opt_msgid(row.get("thread"))?,
-                    attachments: Vec::new(), // rejected until media (M6)
+                    attachments: row
+                        .get::<Option<String>, _>("attachments")
+                        .map(|s| s.split('\n').map(str::to_string).collect())
+                        .unwrap_or_default(),
+                    system: row.get("system"),
                 },
             },
             KIND_EDIT => EventKind::Edit { body: body() },
@@ -154,36 +158,49 @@ fn parse_opt_msgid(text: Option<String>) -> Result<Option<MsgId>, StoreError> {
 #[async_trait]
 impl EventStore for PgStore {
     async fn append(&self, record: EventRecord) -> Result<(), StoreError> {
-        let (kind, body, fmt, reply_to, thread, emoji, react_add) = match &record.kind {
-            EventKind::Message { body, meta } => (
-                KIND_MESSAGE,
-                Some(body.clone()),
-                meta.fmt.clone(),
-                meta.reply_to.as_ref().map(MsgId::to_string),
-                meta.thread.as_ref().map(MsgId::to_string),
-                None,
-                None,
-            ),
-            EventKind::Edit { body } => {
-                (KIND_EDIT, Some(body.clone()), None, None, None, None, None)
-            }
-            EventKind::Delete => (KIND_DELETE, None, None, None, None, None, None),
-            EventKind::React { emoji, add } => (
-                KIND_REACT,
-                None,
-                None,
-                None,
-                None,
-                Some(emoji.clone()),
-                Some(*add),
-            ),
-        };
+        let (kind, body, fmt, reply_to, thread, emoji, react_add, attachments, system) =
+            match &record.kind {
+                EventKind::Message { body, meta } => (
+                    KIND_MESSAGE,
+                    Some(body.clone()),
+                    meta.fmt.clone(),
+                    meta.reply_to.as_ref().map(MsgId::to_string),
+                    meta.thread.as_ref().map(MsgId::to_string),
+                    None,
+                    None,
+                    (!meta.attachments.is_empty()).then(|| meta.attachments.join("\n")),
+                    meta.system.clone(),
+                ),
+                EventKind::Edit { body } => (
+                    KIND_EDIT,
+                    Some(body.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                EventKind::Delete => (KIND_DELETE, None, None, None, None, None, None, None, None),
+                EventKind::React { emoji, add } => (
+                    KIND_REACT,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(emoji.clone()),
+                    Some(*add),
+                    None,
+                    None,
+                ),
+            };
         sqlx::query(
             r#"
             INSERT INTO weft_events
               (scope, ulid, origin, root_ulid, root_origin, kind, sender,
-               body, fmt, reply_to, thread, emoji, react_add, at_ms)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+               body, fmt, reply_to, thread, emoji, react_add, at_ms, attachments, system)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
             ON CONFLICT (scope, ulid) DO NOTHING
             "#,
         )
@@ -201,6 +218,8 @@ impl EventStore for PgStore {
         .bind(emoji)
         .bind(react_add)
         .bind(record.at_ms() as i64)
+        .bind(attachments)
+        .bind(system)
         .execute(&self.pool)
         .await
         .map_err(backend_err)?;
@@ -258,6 +277,22 @@ impl EventStore for PgStore {
             .await
             .map_err(backend_err)?;
         row.as_ref().map(Self::record_from_row).transpose()
+    }
+
+    async fn messages_by_sender(
+        &self,
+        sender: &str,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM weft_events WHERE kind = 0 AND sender = $1 ORDER BY ulid DESC LIMIT $2",
+        )
+        .bind(sender)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.iter().map(Self::record_from_row).collect()
     }
 
     async fn is_deleted(&self, scope: &Scope, root: Ulid) -> Result<bool, StoreError> {
@@ -421,6 +456,47 @@ impl AccountStore for PgStore {
             .await
             .map_err(backend_err)?;
         Ok(names.into_iter().filter_map(|n| n.parse().ok()).collect())
+    }
+
+    async fn delete_account(&self, account: &Account) -> Result<bool, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(backend_err)?;
+        // The account's ULID is the grant-subject key (§10.4).
+        let ulid: Option<String> =
+            sqlx::query_scalar("SELECT ulid FROM weft_accounts WHERE name = $1")
+                .bind(account.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(backend_err)?;
+        let Some(ulid) = ulid else {
+            return Ok(false);
+        };
+        for (sql, bind) in [
+            ("DELETE FROM weft_grants WHERE subject = $1", ulid.as_str()),
+            (
+                "DELETE FROM weft_memberships WHERE account = $1",
+                account.as_str(),
+            ),
+            (
+                "DELETE FROM weft_moderation WHERE account = $1",
+                account.as_str(),
+            ),
+            (
+                "DELETE FROM weft_role_assignments WHERE account = $1",
+                account.as_str(),
+            ),
+            (
+                "DELETE FROM weft_accounts WHERE name = $1",
+                account.as_str(),
+            ),
+        ] {
+            sqlx::query(sql)
+                .bind(bind)
+                .execute(&mut *tx)
+                .await
+                .map_err(backend_err)?;
+        }
+        tx.commit().await.map_err(backend_err)?;
+        Ok(true)
     }
 
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError> {
@@ -1810,6 +1886,64 @@ impl NetblockStore for PgStore {
 }
 
 #[async_trait]
+impl MediaBlocklistStore for PgStore {
+    async fn block_hash(&self, record: MediaBlockRecord) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO weft_media_blocklist (hash, reason, added_ms, actor)
+            VALUES ($1,$2,$3,$4)
+            ON CONFLICT (hash) DO UPDATE SET
+                reason = EXCLUDED.reason,
+                added_ms = EXCLUDED.added_ms,
+                actor = EXCLUDED.actor
+            "#,
+        )
+        .bind(&record.hash)
+        .bind(&record.reason)
+        .bind(record.added_ms as i64)
+        .bind(&record.actor)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn unblock_hash(&self, hash: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM weft_media_blocklist WHERE hash = $1")
+            .bind(hash)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn is_hash_blocked(&self, hash: &str) -> Result<bool, StoreError> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM weft_media_blocklist WHERE hash = $1)")
+            .bind(hash)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(backend_err)
+    }
+
+    async fn list_blocked_hashes(&self) -> Result<Vec<MediaBlockRecord>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM weft_media_blocklist ORDER BY hash")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter()
+            .map(|row| {
+                Ok(MediaBlockRecord {
+                    hash: row.get("hash"),
+                    reason: row.get("reason"),
+                    added_ms: row.get::<i64, _>("added_ms") as u64,
+                    actor: row.get("actor"),
+                })
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
 impl PinStore for PgStore {
     async fn set_pin(
         &self,
@@ -1899,6 +2033,21 @@ impl MembershipStore for PgStore {
                 r.get::<&str, _>("channel")
                     .parse()
                     .map_err(|_| StoreError::Backend("corrupt membership channel".to_string()))
+            })
+            .collect()
+    }
+
+    async fn members(&self, channel: &ChannelName) -> Result<Vec<Account>, StoreError> {
+        let rows = sqlx::query("SELECT account FROM weft_memberships WHERE channel = $1")
+            .bind(channel.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter()
+            .map(|r| {
+                r.get::<&str, _>("account")
+                    .parse()
+                    .map_err(|_| StoreError::Backend("corrupt membership account".to_string()))
             })
             .collect()
     }

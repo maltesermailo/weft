@@ -46,6 +46,7 @@ pub struct Server {
     endpoint: quinn::Endpoint,
     tasks: Vec<JoinHandle<()>>,
     ctx: Arc<ServerCtx>,
+    peer_links: dialer::PeerLinks,
 }
 
 /// How long graceful shutdown waits for connections to drain before giving up.
@@ -56,6 +57,13 @@ impl Server {
     /// for the outbound dialer and integration tests.
     pub fn ctx(&self) -> &Arc<ServerCtx> {
         &self.ctx
+    }
+
+    /// The registry of live outbound bridge connections the mirror consumer
+    /// (§11.8) pulls over. Exposed so an integration test can drive a bridge by
+    /// hand yet still have the in-process mirror consumer see its connection.
+    pub fn peer_links(&self) -> dialer::PeerLinks {
+        self.peer_links.clone()
     }
 
     /// Graceful shutdown: signal every session to finish its current command
@@ -174,6 +182,9 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
             _ => warn!(peer = %peer.network, "skipping [[peers]] entry with invalid network/key"),
         }
     }
+    // Shared with the media data plane so inbound `MIRROR` pulls can verify a
+    // requester network's key exactly as the control plane verifies a bridge.
+    let mirror_peer_keys: media::PeerKeys = Arc::new(peer_keys.clone());
     let federation = weft_core::FederationConfig {
         peer_keys,
         accept_any: config.federation.accept_any,
@@ -261,13 +272,41 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
     tasks.push(tokio::spawn(acceptor::accept_quic(
         endpoint.clone(),
         Arc::clone(&ctx),
+        Arc::clone(&mirror_peer_keys),
     )));
+
+    // §11.8 federation media mirroring: outbound bridge connections register
+    // here so the mirror consumer can pull foreign blobs back over them.
+    let peer_links = dialer::PeerLinks::new();
 
     // §11.2 outbound bridges: one maintained dial per `[[peers]]` entry.
     tasks.extend(dialer::spawn_dialers(
         &config.peers,
         identity_seed.clone(),
         network.clone(),
+        Arc::clone(&ctx),
+        peer_links.clone(),
+    ));
+
+    // §11.8 drain the mirror port: pull blobs referenced by ingested foreign
+    // messages back over the bridge (self-authenticating signed `MIRROR`).
+    let (mirror_tx, mirror_rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_mirror_sink(mirror_tx);
+    tasks.push(dialer::spawn_mirror_consumer(
+        mirror_rx,
+        peer_links.clone(),
+        identity_seed.clone(),
+        network.clone(),
+        Arc::clone(&ctx),
+    ));
+
+    // §11.7 drain the backfill port: pull a peer's large scrollback over the
+    // bridge data plane (`BACKFILL <token>`) and ingest it (invariants 2, 3).
+    let (backfill_tx, backfill_rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_backfill_sink(backfill_tx);
+    tasks.push(dialer::spawn_backfill_consumer(
+        backfill_rx,
+        peer_links.clone(),
         Arc::clone(&ctx),
     ));
 
@@ -282,6 +321,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
             identity_seed,
             network.clone(),
             Arc::clone(&ctx),
+            peer_links.clone(),
         ));
         info!("auto-federation enabled (auto_bridge = open)");
     }
@@ -390,6 +430,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         endpoint,
         tasks,
         ctx,
+        peer_links,
     })
 }
 
@@ -483,6 +524,7 @@ where
         + weft_store::PinStore
         + weft_store::MembershipStore
         + weft_store::MediaStore
+        + weft_store::MediaBlocklistStore
         + weft_store::RoleStore
         + 'static,
 {

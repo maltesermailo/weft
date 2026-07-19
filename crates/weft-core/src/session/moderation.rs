@@ -417,4 +417,155 @@ impl<S: ControlStream> Session<S> {
         .await?;
         Ok(Flow::Continue)
     }
+
+    /// `MODLIST <scope>` (§6.7): list the deny-list (mutes + bans) at a scope —
+    /// answered as a `BATCH` of `MODERATED` events, one per current record. A
+    /// moderator who can `mute` OR `ban` at the scope may read it.
+    pub(super) async fn on_modlist(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        actor: Actor,
+    ) -> io::Result<Flow> {
+        let Some(tscope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        let now = unix_now();
+        let can = matches!(
+            self.ctx
+                .actor_has_cap(&actor, &Capability::Ban, &tscope, now)
+                .await,
+            Ok(true)
+        ) || matches!(
+            self.ctx
+                .actor_has_cap(&actor, &Capability::Mute, &tscope, now)
+                .await,
+            Ok(true)
+        );
+        if !can {
+            return self.cap_required(label, "ban").await;
+        }
+        let records = match self.ctx.moderation.list_moderation(&scope).await {
+            Ok(records) => records,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        self.batches += 1;
+        let id = format!("mod{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for record in records {
+            let action = match record.kind {
+                ModKind::Mute => ModAction::Mute,
+                ModKind::Ban => ModAction::Ban,
+            };
+            self.send_event(
+                None,
+                Event::Moderated {
+                    scope: record.scope,
+                    account: record.account,
+                    action,
+                    by: Some(record.actor),
+                    reason: record.reason,
+                },
+            )
+            .await?;
+        }
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+                compacted: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// §13 MEDIA BLOCK <hash> [:reason] — block a media hash network-wide: delete
+    /// its bytes + derived thumbnail and reject re-upload + mirror. Cap
+    /// `media-block` at `*` (content is network-global).
+    pub(super) async fn on_media_block(
+        &mut self,
+        label: Option<String>,
+        hash: String,
+        reason: Option<String>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if !self.has_media_block_cap(&account).await {
+            return self.cap_required(label, "media-block").await;
+        }
+        if let Err(e) = self
+            .ctx
+            .block_media_hash(&hash, reason.clone(), &account)
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        self.send_event(label, Event::MediaBlocked { hash, reason })
+            .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// §13 MEDIA UNBLOCK <hash> — lift a hash block (does not restore the blob).
+    pub(super) async fn on_media_unblock(
+        &mut self,
+        label: Option<String>,
+        hash: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if !self.has_media_block_cap(&account).await {
+            return self.cap_required(label, "media-block").await;
+        }
+        match self.ctx.media_blocks.unblock_hash(&hash).await {
+            Ok(true) => {
+                self.send_event(label, Event::MediaBlocked { hash, reason: None })
+                    .await?
+            }
+            Ok(false) => return self.no_such_target(label).await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// §13 MEDIA BLOCKS — the media hash blocklist, one `MEDIA-BLOCKED` per entry.
+    pub(super) async fn on_media_blocks(
+        &mut self,
+        label: Option<String>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if !self.has_media_block_cap(&account).await {
+            return self.cap_required(label, "media-block").await;
+        }
+        let blocks = match self.ctx.media_blocks.list_blocked_hashes().await {
+            Ok(blocks) => blocks,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        for entry in blocks {
+            self.send_event(
+                label.clone(),
+                Event::MediaBlocked {
+                    hash: entry.hash,
+                    reason: entry.reason,
+                },
+            )
+            .await?;
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// The `media-block` cap is `*`-scope only (§13; content is network-global).
+    /// Fails closed: a store error denies (the operator retries) rather than
+    /// killing the session.
+    async fn has_media_block_cap(&self, account: &Account) -> bool {
+        self.ctx
+            .account_has_cap(
+                account,
+                &Capability::MediaBlock,
+                &TokenScope::Wildcard,
+                unix_now(),
+            )
+            .await
+            .unwrap_or(false)
+    }
 }

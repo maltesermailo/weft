@@ -52,6 +52,7 @@ wire_enum!(
         Away => "away",
         Dnd => "dnd",
         Invisible => "invisible",
+        Offline => "offline",
     }
 );
 
@@ -252,6 +253,10 @@ pub struct MsgMeta {
     pub thread: Option<MsgId>,
     /// `attach.1=`..`attach.10=` media references, in index order (§6.4).
     pub attachments: Vec<String>,
+    /// `system=<kind>` — a **server-generated** system message (e.g. `join` /
+    /// `part`); the client renders localized text, the body is empty. Only ever
+    /// set by the server; stripped from inbound `MSG` so clients can't forge one.
+    pub system: Option<String>,
 }
 
 impl MsgMeta {
@@ -278,6 +283,7 @@ impl MsgMeta {
             reply_to: msgid_tag("reply-to")?,
             thread: msgid_tag("thread")?,
             attachments: attachments.into_iter().map(|(_, v)| v).collect(),
+            system: tags.get("system").filter(|v| !v.is_empty()).cloned(),
         })
     }
 
@@ -302,6 +308,12 @@ impl MsgMeta {
                 return Err(SerializeError::Unrepresentable("empty attachment"));
             }
             tags.insert(format!("attach.{}", i + 1), attachment.clone());
+        }
+        if let Some(system) = &self.system {
+            if system.is_empty() {
+                return Err(SerializeError::Unrepresentable("empty system kind"));
+            }
+            tags.insert("system".to_string(), system.clone());
         }
         Ok(())
     }

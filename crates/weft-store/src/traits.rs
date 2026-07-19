@@ -9,9 +9,9 @@ use weft_proto::NamespaceName;
 use weft_proto::NetworkName;
 
 use crate::types::{
-    ChannelRecord, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord, NamespaceRecord,
-    NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome, ReportRecord,
-    ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
+    ChannelRecord, EventRecord, GrantRecord, InviteRecord, MediaBlockRecord, ModKind, ModRecord,
+    NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome,
+    ReportRecord, ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 
@@ -29,6 +29,15 @@ pub trait EventStore: Send + Sync {
     /// Locate a root by its ULID across scopes — EDIT/DELETE/REACT arrive
     /// with only a msgid (§6.4).
     async fn find_root(&self, ulid: Ulid) -> Result<Option<EventRecord>, StoreError>;
+
+    /// Root (`Message`) rows authored by `sender` (the `account@network` form),
+    /// across every scope, newest-first. The operator admin surface only — the
+    /// wire protocol is channel-scoped and never queries by author.
+    async fn messages_by_sender(
+        &self,
+        sender: &str,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, StoreError>;
 
     /// Whether a root already carries a tombstone.
     async fn is_deleted(&self, scope: &Scope, root: Ulid) -> Result<bool, StoreError>;
@@ -69,6 +78,13 @@ pub trait AccountStore: Send + Sync {
     /// Every registered account, sorted by name. The operator admin surface —
     /// the wire protocol never enumerates accounts network-wide.
     async fn list_accounts(&self) -> Result<Vec<Account>, StoreError>;
+
+    /// Operator hard-delete of an account: drop the account record **and** its
+    /// per-account data (memberships, capability grants keyed by its ULID,
+    /// moderation records targeting it, marks/devices/verifications). Its posted
+    /// **messages are preserved** (attributed) — content moderation is a
+    /// separate action (delete message / block hash). Returns false if unknown.
+    async fn delete_account(&self, account: &Account) -> Result<bool, StoreError>;
 
     /// Idempotent; false iff the account is unknown.
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError>;
@@ -425,6 +441,21 @@ pub trait NetblockStore: Send + Sync {
     async fn list_netblocks(&self) -> Result<Vec<NetblockRecord>, StoreError>;
 }
 
+/// §13 media hash blocklist. Content-addressed, so a block is network-wide and
+/// re-uploads of the same bytes are dead on arrival.
+#[async_trait]
+pub trait MediaBlocklistStore: Send + Sync {
+    /// MEDIA BLOCK — idempotent; re-blocking refreshes reason/actor/time.
+    async fn block_hash(&self, record: MediaBlockRecord) -> Result<(), StoreError>;
+
+    /// MEDIA UNBLOCK. False = the hash wasn't blocked.
+    async fn unblock_hash(&self, hash: &str) -> Result<bool, StoreError>;
+
+    async fn is_hash_blocked(&self, hash: &str) -> Result<bool, StoreError>;
+
+    async fn list_blocked_hashes(&self) -> Result<Vec<MediaBlockRecord>, StoreError>;
+}
+
 /// §6.4 pinned messages, per channel. Pins are a small set keyed by channel;
 /// the message content is fetched from the [`EventStore`] on demand.
 #[async_trait]
@@ -462,6 +493,10 @@ pub trait MembershipStore: Send + Sync {
 
     /// Every channel `account` is a member of, for auto-rejoin.
     async fn memberships(&self, account: &Account) -> Result<Vec<ChannelName>, StoreError>;
+
+    /// Every account that is a persistent member of `channel` — the roster
+    /// (§6.3), including members currently offline (Discord-style member list).
+    async fn members(&self, channel: &ChannelName) -> Result<Vec<Account>, StoreError>;
 }
 
 /// §6.5 role definitions + assignments. Definitions are named, colored

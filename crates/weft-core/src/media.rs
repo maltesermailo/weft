@@ -53,6 +53,12 @@ fn random_token() -> String {
 pub(crate) struct MediaRegistry {
     uploads: Mutex<HashMap<String, UploadGrant>>,
     bearers: Mutex<HashMap<String, Account>>,
+    /// §6/§13 one-time backfill grants: a serialized `BATCH` (newline-delimited
+    /// `Reply` lines) minted when a HISTORY page exceeds the stream threshold,
+    /// pulled once over the data plane (`BACKFILL <token>`) then dropped. The
+    /// body is already membership-gated at mint time, so the token alone (192
+    /// unguessable bits, one-time) is the capability — like an upload grant.
+    backfills: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl MediaRegistry {
@@ -81,5 +87,19 @@ impl MediaRegistry {
 
     pub(crate) fn bearer_account(&self, token: &str) -> Option<Account> {
         self.bearers.lock().expect("media lock").get(token).cloned()
+    }
+
+    pub(crate) fn mint_backfill(&self, body: Vec<u8>) -> String {
+        let token = random_token();
+        self.backfills
+            .lock()
+            .expect("media lock")
+            .insert(token.clone(), body);
+        token
+    }
+
+    /// Consume a backfill grant (one-time) if it exists.
+    pub(crate) fn take_backfill(&self, token: &str) -> Option<Vec<u8>> {
+        self.backfills.lock().expect("media lock").remove(token)
     }
 }

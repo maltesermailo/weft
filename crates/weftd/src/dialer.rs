@@ -9,12 +9,13 @@
 //! The inbound acceptor path (weft-core `run_session`) is the mirror of this;
 //! here weftd is the initiator, so the handshake is hand-driven with the codec.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context};
 use tracing::info;
-use weft_core::{Keypair, PublicKey, ServerCtx};
+use weft_core::{BlobHash, Keypair, MirrorRequest, PublicKey, ServerCtx};
 use weft_proto::{Command, Event, NamespaceName, NetworkName, Reply, Request};
 use weft_transport::QuicControlStream;
 
@@ -24,6 +25,32 @@ pub struct BridgeLink {
     pub stream: QuicControlStream,
     /// Kept alive for the lifetime of the stream.
     pub connection: quinn::Connection,
+}
+
+/// Live authenticated **outbound** bridge connections, keyed by peer network.
+/// The mirror consumer (§11.8) opens data-plane streams back over these to pull
+/// foreign blobs referenced by ingested messages. Populated by [`dial_and_run`]
+/// for as long as a bridge session is up, then removed.
+#[derive(Clone, Default)]
+pub struct PeerLinks(Arc<Mutex<HashMap<NetworkName, quinn::Connection>>>);
+
+impl PeerLinks {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn insert(&self, peer: NetworkName, connection: quinn::Connection) {
+        self.0.lock().unwrap().insert(peer, connection);
+    }
+
+    fn remove(&self, peer: &NetworkName) {
+        self.0.lock().unwrap().remove(peer);
+    }
+
+    /// The current bridge connection to `peer`, if one is live.
+    pub fn get(&self, peer: &NetworkName) -> Option<quinn::Connection> {
+        self.0.lock().unwrap().get(peer).cloned()
+    }
 }
 
 /// Dial `peer`, authenticate, and run the outbound bridge session to completion
@@ -39,22 +66,31 @@ pub async fn run_peer_bridge(
     identity: &Keypair,
     our_network: &NetworkName,
     ctx: Arc<ServerCtx>,
+    links: PeerLinks,
 ) -> anyhow::Result<()> {
-    dial_and_run(endpoint, addr, peer, identity, our_network, move |lines| {
-        weft_core::run_bridge_client(lines, ctx, peer.clone(), peer_key)
-    })
+    dial_and_run(
+        endpoint,
+        addr,
+        peer,
+        identity,
+        our_network,
+        links,
+        move |lines| weft_core::run_bridge_client(lines, ctx, peer.clone(), peer_key),
+    )
     .await
 }
 
 /// Dial + authenticate a bridge, then hand the stream to `run` (the core session
 /// runner), holding the connection alive until it returns. Shared by the P1
 /// proposer and the §11.10 requester.
+#[allow(clippy::too_many_arguments)]
 async fn dial_and_run<F, Fut>(
     endpoint: &quinn::Endpoint,
     addr: SocketAddr,
     peer: &NetworkName,
     identity: &Keypair,
     our_network: &NetworkName,
+    links: PeerLinks,
     run: F,
 ) -> anyhow::Result<()>
 where
@@ -63,7 +99,11 @@ where
 {
     let BridgeLink { stream, connection } =
         dial_bridge(endpoint, addr, peer, identity, our_network).await?;
+    // Register the connection so the mirror consumer can pull foreign blobs back
+    // over it (§11.8) for as long as this bridge is up.
+    links.insert(peer.clone(), connection.clone());
     run(crate::acceptor::QuicLines(stream)).await;
+    links.remove(peer);
     drop(connection);
     Ok(())
 }
@@ -82,6 +122,7 @@ pub async fn auto_bridge(
     identity: &Keypair,
     our_network: &NetworkName,
     ctx: Arc<ServerCtx>,
+    links: PeerLinks,
 ) -> anyhow::Result<()> {
     if !is_dialable(&addr) {
         bail!("refusing to auto-bridge {peer} at non-public address {addr} (SSRF guard, §11.10)");
@@ -95,6 +136,7 @@ pub async fn auto_bridge(
         identity,
         our_network,
         ctx,
+        links,
     )
     .await
 }
@@ -112,10 +154,17 @@ pub async fn run_peer_requester(
     identity: &Keypair,
     our_network: &NetworkName,
     ctx: Arc<ServerCtx>,
+    links: PeerLinks,
 ) -> anyhow::Result<()> {
-    dial_and_run(endpoint, addr, peer, identity, our_network, move |lines| {
-        weft_core::run_bridge_requester(lines, ctx, peer.clone(), peer_key, ns)
-    })
+    dial_and_run(
+        endpoint,
+        addr,
+        peer,
+        identity,
+        our_network,
+        links,
+        move |lines| weft_core::run_bridge_requester(lines, ctx, peer.clone(), peer_key, ns),
+    )
     .await
 }
 
@@ -208,6 +257,7 @@ pub fn spawn_auto_bridge_consumer(
     identity_seed: String,
     our_network: NetworkName,
     ctx: Arc<ServerCtx>,
+    links: PeerLinks,
 ) -> tokio::task::JoinHandle<()> {
     let pinned: std::collections::HashMap<NetworkName, (String, PublicKey)> = peers
         .iter()
@@ -262,6 +312,7 @@ pub fn spawn_auto_bridge_consumer(
                 &identity,
                 &our_network,
                 Arc::clone(&ctx),
+                links.clone(),
             )
             .await
             {
@@ -279,6 +330,7 @@ pub fn spawn_dialers(
     identity_seed: String,
     our_network: NetworkName,
     ctx: Arc<ServerCtx>,
+    links: PeerLinks,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut tasks = Vec::new();
     for peer in peers {
@@ -300,6 +352,7 @@ pub fn spawn_dialers(
             seed,
             our_network,
             ctx,
+            links.clone(),
         )));
     }
     tasks
@@ -307,6 +360,7 @@ pub fn spawn_dialers(
 
 /// Maintain one outbound bridge: (re)dial with a backoff, running the session
 /// each time until it drops. Interruptible by the shutdown signal.
+#[allow(clippy::too_many_arguments)]
 async fn dial_loop(
     endpoint_str: String,
     network: NetworkName,
@@ -314,6 +368,7 @@ async fn dial_loop(
     seed: String,
     our_network: NetworkName,
     ctx: Arc<ServerCtx>,
+    links: PeerLinks,
 ) {
     let Ok(identity) = Keypair::from_seed_b64(&seed) else {
         tracing::error!("invalid network key seed; not dialing");
@@ -342,6 +397,7 @@ async fn dial_loop(
                     &identity,
                     &our_network,
                     Arc::clone(&ctx),
+                    links.clone(),
                 )
                 .await
                 {
@@ -466,6 +522,186 @@ pub async fn fetch_signing_key(network: &str) -> anyhow::Result<(PublicKey, Sock
     let key = PublicKey::from_b64(&doc.signing_key)
         .map_err(|_| anyhow::anyhow!("well-known signing-key is not a valid pubkey"))?;
     Ok((key, addr))
+}
+
+/// §11.8 Drain the mirror port: for each foreign attachment weft-core ingested,
+/// pull the blob back over the live bridge connection to its origin and store it
+/// locally, so members fetch media from *this* server (no connection to the
+/// origin, no origin↔member correlation). The pull is a signed `MIRROR` request
+/// (this network's key), self-authenticating so the origin need not correlate
+/// the data-plane stream with a bridge session. Runs until shutdown.
+pub fn spawn_mirror_consumer(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<MirrorRequest>,
+    links: PeerLinks,
+    identity_seed: String,
+    our_network: NetworkName,
+    ctx: Arc<ServerCtx>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Ok(identity) = Keypair::from_seed_b64(&identity_seed) else {
+            tracing::error!("mirror: invalid network key seed; not mirroring");
+            return;
+        };
+        loop {
+            let req = tokio::select! {
+                r = rx.recv() => match r { Some(r) => r, None => break },
+                _ = ctx.shutdown.cancelled() => break,
+            };
+            let MirrorRequest { peer, hash, .. } = req;
+            // Already have it? on_ingest recorded the *reference* eagerly; the
+            // blob record only exists once bytes are stored, so this is the
+            // honest "do we hold the bytes" check (and dedups retries).
+            if ctx
+                .media_refs
+                .blob_meta(&hash)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                continue;
+            }
+            let Some(connection) = links.get(&peer) else {
+                tracing::debug!(%peer, %hash, "mirror: no live bridge to origin; skipping pull");
+                continue;
+            };
+            if let Err(e) =
+                pull_blob(&connection, &identity, &our_network, &peer, &hash, &ctx).await
+            {
+                tracing::warn!(%peer, %hash, "mirror pull failed: {e}");
+            }
+        }
+    })
+}
+
+/// One mirror pull: open a data-plane bidi stream to the origin, send a signed
+/// `MIRROR <our-network> <hash> <sig>`, verify the returned bytes hash to `hash`
+/// (content addressing — the origin can't substitute), and store them locally.
+async fn pull_blob(
+    connection: &quinn::Connection,
+    identity: &Keypair,
+    our_network: &NetworkName,
+    origin: &NetworkName,
+    hash: &str,
+    ctx: &Arc<ServerCtx>,
+) -> anyhow::Result<()> {
+    let sig =
+        weft_crypto::sign_mirror_request(identity, hash, our_network.as_str(), origin.as_str());
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .context("opening mirror data stream")?;
+    let line = format!(
+        "MIRROR {} {} {}\n",
+        our_network,
+        hash,
+        weft_crypto::signature_to_b64(&sig)
+    );
+    send.write_all(line.as_bytes())
+        .await
+        .context("sending MIRROR request")?;
+    let _ = send.finish();
+
+    // `OK <mime> <len>\n<bytes…>` on success; `ERR <why>` otherwise.
+    let resp = recv
+        .read_to_end(weft_core::MEDIA_MAX_BYTES as usize + 4096)
+        .await
+        .context("reading mirror response")?;
+    let nl = resp.iter().position(|&b| b == b'\n').unwrap_or(resp.len());
+    let header = String::from_utf8_lossy(&resp[..nl]).into_owned();
+    let body = resp.get(nl + 1..).unwrap_or(&[]);
+    let mut parts = header.split_whitespace();
+    match parts.next() {
+        Some("OK") => {
+            let mime = parts.next().unwrap_or("application/octet-stream");
+            // Content addressing: refuse anything that doesn't hash to what we
+            // asked for (the origin cannot swap in other bytes, invariant 2).
+            if BlobHash::parse(hash).is_none() || weft_core::blob_hash(body).as_str() != hash {
+                bail!("mirror bytes do not match requested hash");
+            }
+            if !crate::media::store_mirrored(ctx, hash, mime, body).await {
+                bail!("storing mirrored blob failed");
+            }
+            tracing::debug!(%origin, %hash, bytes = body.len(), "mirrored foreign blob");
+            Ok(())
+        }
+        _ => bail!("origin refused mirror: {}", header.trim()),
+    }
+}
+
+/// §11.7 Drain the backfill port: for each `STREAM ACCEPT` a peer offered in
+/// answer to our federated HISTORY, open a data-plane stream on the live bridge
+/// to that peer, pull the serialized batch (`BACKFILL <token>`), and feed each
+/// line back through `ctx.ingest_bridged` — origin-authority-checked and
+/// manifest-gated exactly like a live bridge event (invariants 2, 3). Runs until
+/// shutdown.
+pub fn spawn_backfill_consumer(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<weft_core::BackfillPull>,
+    links: PeerLinks,
+    ctx: Arc<ServerCtx>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let req = tokio::select! {
+                r = rx.recv() => match r { Some(r) => r, None => break },
+                _ = ctx.shutdown.cancelled() => break,
+            };
+            let weft_core::BackfillPull { peer, token } = req;
+            let Some(connection) = links.get(&peer) else {
+                tracing::debug!(%peer, "backfill: no live bridge to peer; dropping pull");
+                continue;
+            };
+            if let Err(e) = pull_backfill(&connection, &peer, &token, &ctx).await {
+                tracing::warn!(%peer, "backfill pull failed: {e}");
+            }
+        }
+    })
+}
+
+/// One backfill pull: open a data-plane bidi stream to `peer`, send `BACKFILL
+/// <token>`, and ingest each serialized line it streams back.
+async fn pull_backfill(
+    connection: &quinn::Connection,
+    peer: &NetworkName,
+    token: &str,
+    ctx: &Arc<ServerCtx>,
+) -> anyhow::Result<()> {
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .context("opening backfill data stream")?;
+    send.write_all(format!("BACKFILL {token}\n").as_bytes())
+        .await
+        .context("sending BACKFILL request")?;
+    let _ = send.finish();
+
+    // `OK <len>\n<serialized Reply lines…>` on success; `ERR <why>` otherwise.
+    // The batch is capped at MAX_HISTORY_LIMIT events, so it fits the media
+    // ceiling comfortably.
+    let resp = recv
+        .read_to_end(weft_core::MEDIA_MAX_BYTES as usize + 4096)
+        .await
+        .context("reading backfill response")?;
+    let nl = resp.iter().position(|&b| b == b'\n').unwrap_or(resp.len());
+    let header = String::from_utf8_lossy(&resp[..nl]).into_owned();
+    if !header.starts_with("OK ") {
+        bail!("peer refused backfill: {}", header.trim());
+    }
+    let body = resp.get(nl + 1..).unwrap_or(&[]);
+    let mut count = 0usize;
+    for raw in body.split(|&b| b == b'\n') {
+        let line = String::from_utf8_lossy(raw);
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(parsed) = weft_proto::Line::parse(line) {
+            ctx.ingest_bridged(peer, &parsed).await;
+            count += 1;
+        }
+    }
+    tracing::debug!(%peer, lines = count, "ingested backfill stream");
+    Ok(())
 }
 
 async fn send(stream: &mut QuicControlStream, cmd: Command) -> anyhow::Result<()> {

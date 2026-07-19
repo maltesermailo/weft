@@ -19,9 +19,9 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use weft_crypto::{Capability, PublicKey, SignedManifest, TokenScope};
 use weft_proto::{
     Account, BridgeState, ChannelName, Command, ContentState, ErrCode, ErrEvent, Event, FSessionOp,
-    HistoryMode, Line, MediaMode, MemberAction, ModAction, MsgId, MsgMeta, NamespaceName,
-    NetworkName, ParseError, Reply, ReportScope, ReportStatus, Request, ResolveAction,
-    RetentionPolicy, StreamMode, Target, Ulid, UserRef, Visibility, MAX_LABEL_BYTES,
+    HistoryMode, Line, MediaMode, MemberAction, MessageEvent, ModAction, MsgId, MsgMeta,
+    NamespaceName, NetworkName, ParseError, Reply, ReportScope, ReportStatus, Request,
+    ResolveAction, RetentionPolicy, StreamMode, Target, Ulid, UserRef, Visibility, MAX_LABEL_BYTES,
 };
 
 use weft_store::{
@@ -53,8 +53,12 @@ pub type SessionId = u64;
 
 /// §3.3: idle pre-auth sessions closed after 30 s.
 const PREAUTH_IDLE: Duration = Duration::from_secs(30);
-/// §3.4: 10 s keepalive interval, 2 missed = dead (plus slack).
-const READY_IDLE: Duration = Duration::from_secs(30);
+/// §3.4 keepalive: authed clients PING every ~10 s, so a healthy session is
+/// never quiet this long. The generous ceiling tolerates browser background-tab
+/// timer throttling (which can stretch the client's interval past a minute) and
+/// brief network stalls without a spurious reconnect; a genuinely dead socket is
+/// still reaped by the transport's own idle timeout.
+const READY_IDLE: Duration = Duration::from_secs(120);
 /// §9.2: dedup MSG retries by (session, label) for 5 minutes.
 const DEDUP_WINDOW: Duration = Duration::from_secs(300);
 /// §8: MALFORMED — close after 5 per 60 s.
@@ -144,6 +148,11 @@ async fn run_outbound_bridge<S: ControlStream>(
             peer: peer.clone(),
             key,
         };
+        // Only an **outbound** bridge (we dialed) pulls the peer's scrollback on
+        // client demand (§11.7): register this session as a backfill target.
+        session
+            .ctx
+            .register_backfill_demand(session.backfill_demand_tx.clone());
         match start {
             OutboundStart::Propose => session.begin_outbound_bridge(&peer).await,
             OutboundStart::Request(ns) => {
@@ -392,6 +401,15 @@ struct Session<S> {
     /// §11.10 requester side: this outbound session asked for the peer's
     /// manifest, so it accepts the offer regardless of the auto-accept config.
     request_accept: bool,
+    /// §11.7 bridge sessions: `(channel, before)` windows we've already asked the
+    /// peer to backfill, so repeated client scrolls over the same window fetch
+    /// the peer only once.
+    backfilled: std::collections::HashSet<(ChannelName, Option<String>)>,
+    /// §11.7 outbound bridge sessions: local clients' on-demand backfill needs
+    /// (a HISTORY that ran out of local scrollback), drained in the run loop and
+    /// turned into a HISTORY to the peer. Empty/unused on other sessions.
+    backfill_demand_tx: mpsc::UnboundedSender<crate::BackfillReq>,
+    backfill_demand_rx: mpsc::UnboundedReceiver<crate::BackfillReq>,
     /// HISTORY batch id counter (per session, opaque to clients).
     batches: u64,
     malformed_strikes: Vec<Instant>,
@@ -405,6 +423,8 @@ enum Action {
     Direct(DirectEvent),
     /// §11.10 a tunnelled federated session's outbound frame, to write out.
     FedOut(String),
+    /// §11.7 a local client's on-demand backfill need (outbound bridge only).
+    Backfill(crate::BackfillReq),
     Idle,
 }
 
@@ -413,6 +433,7 @@ impl<S: ControlStream> Session<S> {
         let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE);
         let (direct_tx, direct_rx) = mpsc::channel(EVENT_QUEUE);
         let (fed_out_tx, fed_out_rx) = mpsc::channel(EVENT_QUEUE);
+        let (backfill_demand_tx, backfill_demand_rx) = mpsc::unbounded_channel();
         Self {
             id,
             stream,
@@ -431,6 +452,9 @@ impl<S: ControlStream> Session<S> {
             fed_out_rx,
             tunnels: HashMap::new(),
             request_accept: false,
+            backfilled: std::collections::HashSet::new(),
+            backfill_demand_tx,
+            backfill_demand_rx,
             batches: 0,
             malformed_strikes: Vec::new(),
             last_inbound: Instant::now(),
@@ -451,6 +475,8 @@ impl<S: ControlStream> Session<S> {
                     Action::Direct(direct.expect("session holds a direct sender")),
                 framed = self.fed_out_rx.recv() =>
                     Action::FedOut(framed.expect("session holds a fed_out sender")),
+                req = self.backfill_demand_rx.recv() =>
+                    Action::Backfill(req.expect("session holds a backfill sender")),
                 _ = tokio::time::sleep_until(self.last_inbound + limit) => Action::Idle,
                 // Graceful shutdown: this branch is only reached between commands
                 // (a command in `on_line` runs to completion first), so no
@@ -470,6 +496,9 @@ impl<S: ControlStream> Session<S> {
                 // §11.10 a tunnelled federated session's reply — write it out on
                 // this (bridge) session's single stream.
                 Action::FedOut(framed) => self.stream.send_line(&framed).await?,
+                // §11.7 a local client asked for history we don't hold — fetch it
+                // from the peer over this bridge (outbound bridge sessions only).
+                Action::Backfill(req) => self.on_backfill_demand(req).await,
                 Action::Idle => {
                     debug!("idle timeout");
                     return Ok(());
@@ -483,13 +512,29 @@ impl<S: ControlStream> Session<S> {
     async fn cleanup(&mut self) {
         for (_, joined) in self.joined.drain() {
             joined.forwarder.abort();
-            joined.handle.part(self.id).await;
+            // A disconnect keeps the persistent membership (auto-rejoin later),
+            // so it broadcasts a MEMBER part for the roster but posts NO "left"
+            // system line — only an explicit PART does.
+            joined.handle.part(self.id, false).await;
         }
         for (_, forwarder) in self.bridged.drain() {
             forwarder.abort();
         }
         if let Some(account) = self.registered.take() {
-            self.ctx.directory.deregister(account, self.id).await;
+            self.ctx
+                .directory
+                .deregister(account.clone(), self.id)
+                .await;
+            // If that was the account's last session, it is now offline —
+            // drop its presence so a later MEMBERS snapshot renders it offline
+            // (the live grey-out already rode each channel's disconnect part).
+            if !self.ctx.directory.is_online(&account).await {
+                self.ctx
+                    .presence
+                    .lock()
+                    .expect("presence lock")
+                    .remove(&account);
+            }
         }
     }
 
@@ -798,14 +843,12 @@ impl<S: ControlStream> Session<S> {
             // is no "went offline" wire status; spec gap noted in review).
             Command::Presence { status } => {
                 // §6.1 remember it in-memory so MEMBERS serves correct dots.
-                // Invisible is *removed* (renders offline, never revealed).
+                // Invisible is stored (so a live invisible member reads offline
+                // in the snapshot) but never broadcast — revealing it would
+                // defeat hiding.
                 {
                     let mut map = self.ctx.presence.lock().expect("presence lock");
-                    if status == weft_proto::PresenceStatus::Invisible {
-                        map.remove(&account);
-                    } else {
-                        map.insert(account.clone(), status);
-                    }
+                    map.insert(account.clone(), status);
                 }
                 if status != weft_proto::PresenceStatus::Invisible {
                     let handles: Vec<ChannelHandle> =
@@ -1079,6 +1122,9 @@ impl<S: ControlStream> Session<S> {
                 self.on_kick(label, channel, target, reason, Actor::Local(account))
                     .await
             }
+            Command::ModList { scope } => {
+                self.on_modlist(label, scope, Actor::Local(account)).await
+            }
             // §11 federation — operator-facing management (§6.6).
             Command::BridgePropose {
                 scope,
@@ -1122,6 +1168,11 @@ impl<S: ControlStream> Session<S> {
                 self.on_netblock_remove(label, network, account).await
             }
             Command::NetblockList => self.on_netblock_list(label, account).await,
+            Command::MediaBlock { hash, reason } => {
+                self.on_media_block(label, hash, reason, account).await
+            }
+            Command::MediaUnblock { hash } => self.on_media_unblock(label, hash, account).await,
+            Command::MediaBlocks => self.on_media_blocks(label, account).await,
             // `AUTH BRIDGE` belongs in UNAUTHED; `REPORT-FORWARD` is
             // bridge-session-only (§11.9) — neither is valid from a client.
             Command::AuthBridge { .. } | Command::ReportForward { .. } => {
@@ -1277,6 +1328,13 @@ impl<S: ControlStream> Session<S> {
                     return self.send_event(None, event.event).await;
                 }
                 match event.event {
+                    // Own system message (our own join/part line): other members
+                    // see it live, and it was stored, so it still reaches us via
+                    // HISTORY on reload — no need to echo it back to ourselves.
+                    Event::Message(m) if m.meta.system.is_some() => {
+                        let _ = m;
+                        Ok(())
+                    }
                     // Own MESSAGE/EDITED/DELETED/REACTION copy = the ack;
                     // attach the corresponding command's label (FIFO — the
                     // actor broadcasts this session's commands in send

@@ -122,6 +122,16 @@ impl WeftClient {
         self.dispatch(&cmd, &parsed)
             .map_err(|e| JsValue::from_str(&e))
     }
+
+    /// §6/§13 fold one line pulled from a `/backfill` stream back through the
+    /// inbound FSM — the JS layer fetches the stream on a `backfill` event and
+    /// replays each `BATCH`/`MESSAGE` line here, so it lands exactly like an
+    /// inline batch (no server round-trip; batch lines never produce a reply).
+    pub fn feed_line(&self, line: String) {
+        if let Some(conn) = self.conn.borrow_mut().as_mut() {
+            conn.feed(&line);
+        }
+    }
 }
 
 impl WeftClient {
@@ -240,6 +250,7 @@ impl WeftClient {
                 opt("reason").as_deref(),
             )?,
             "report" => build_report(&arg("msgid"), &arg("category"), &arg("scope"), opt("note"))?,
+            "mod_list" => build_mod_list(&arg("scope"))?,
             "reports_list" => build_reports_list(&arg("scope"), opt("status"))?,
             "reports_resolve" => {
                 build_reports_resolve(&arg("reportId"), &arg("action"), opt("note"))?

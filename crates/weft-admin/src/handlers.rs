@@ -32,10 +32,29 @@ pub fn routes() -> Router<AdminState> {
         .route("/api/reports/:id", get(report_detail))
         .route("/api/reports/:id/resolve", post(resolve_report))
         .route("/api/accounts", get(list_accounts))
+        .route(
+            "/api/accounts/:name",
+            get(account_detail).delete(delete_account),
+        )
+        .route("/api/accounts/:name/messages", get(account_messages))
         .route("/api/channels", get(list_channels))
         .route("/api/namespaces", get(list_namespaces))
         .route("/api/grants", get(list_grants))
         .route("/api/moderation", get(list_moderation).post(moderate))
+        .route("/api/peers", get(list_peers))
+        .route("/api/netblocks", get(list_netblocks).post(add_netblock))
+        .route(
+            "/api/netblocks/:network",
+            axum::routing::delete(remove_netblock),
+        )
+        .route(
+            "/api/media-blocks",
+            get(list_media_blocks).post(block_media),
+        )
+        .route(
+            "/api/media-blocks/:hash",
+            axum::routing::delete(unblock_media),
+        )
         .route("/api/channels/:name/messages", get(browse_messages))
         // msgids are `<network>/<ULID>` — they contain a slash, so capture the
         // whole tail with a wildcard.
@@ -52,19 +71,30 @@ async fn me(Extension(who): Extension<Account>, State(st): State<AdminState>) ->
 }
 
 async fn stats(State(st): State<AdminState>) -> Response {
-    let accounts = st.accounts.list_accounts().await.map(|a| a.len());
-    let channels = st.channels.list_channels().await.map(|c| c.len());
-    match (accounts, channels) {
-        (Ok(accounts), Ok(channels)) => Json(json!({
-            "accounts": accounts,
-            "channels": channels,
+    // Each count is a cheap list-and-len; the admin dashboard isn't a hot path.
+    let counts = async {
+        Ok::<_, StoreError>(json!({
+            "accounts": st.accounts.list_accounts().await?.len(),
+            "channels": st.channels.list_channels().await?.len(),
+            "namespaces": st.namespaces.list_public(None, 10_000).await?.len(),
+            "open_reports": st
+                .reports
+                .list_reports("*", Some(weft_proto::ReportStatus::Open), None, 10_000)
+                .await?
+                .len(),
+            "peers": st.peers.list_peers().await?.len(),
+            "netblocks": st.netblocks.list_netblocks().await?.len(),
+            "blocked_media": st.media_blocks.list_blocked_hashes().await?.len(),
             "live_connections": st
                 .live_connections
                 .as_ref()
                 .map(|c| c.load(std::sync::atomic::Ordering::Relaxed)),
         }))
-        .into_response(),
-        (Err(e), _) | (_, Err(e)) => internal(e),
+    }
+    .await;
+    match counts {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => internal(e),
     }
 }
 
@@ -163,12 +193,157 @@ async fn report_with_context(st: &AdminState, id: &str) -> Result<Option<Value>,
     })))
 }
 
+/// Enriched account list: name, ULID, operator flag, caps at `*`, and whether
+/// muted/banned network-wide. `*`-grants + `*`-moderation are each fetched once
+/// and joined, so it stays a couple of queries plus one ULID lookup per account.
 async fn list_accounts(State(st): State<AdminState>) -> Response {
-    match st.accounts.list_accounts().await {
-        // TODO: enrich with presence / device count / *-roles per account.
-        Ok(accts) => {
-            Json(accts.into_iter().map(|a| a.to_string()).collect::<Vec<_>>()).into_response()
+    let enriched = async {
+        let accounts = st.accounts.list_accounts().await?;
+        // ULID → caps at `*` (grants key by the account's stable ULID, §10.4).
+        let star_grants = st.caps.grants_at_scope("*").await?;
+        let caps_by_ulid: std::collections::HashMap<String, Vec<String>> = star_grants
+            .into_iter()
+            .map(|g| (g.subject, g.caps))
+            .collect();
+        // account → mod kinds at `*`.
+        let star_mod = st.moderation.list_moderation("*").await?;
+        let mut out = Vec::with_capacity(accounts.len());
+        for account in accounts {
+            let ulid = st
+                .accounts
+                .account_ulid(&account)
+                .await?
+                .unwrap_or_default();
+            let muted = star_mod
+                .iter()
+                .any(|m| m.account == account && matches!(m.kind, ModKind::Mute));
+            let banned = star_mod
+                .iter()
+                .any(|m| m.account == account && matches!(m.kind, ModKind::Ban));
+            out.push(json!({
+                "account": account.to_string(),
+                "ulid": ulid,
+                "operator": st.auth.operators.contains(&account),
+                "caps": caps_by_ulid.get(&ulid).cloned().unwrap_or_default(),
+                "muted": muted,
+                "banned": banned,
+            }));
         }
+        Ok::<_, StoreError>(out)
+    }
+    .await;
+    match enriched {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// One account's full operator view: ULID, operator flag, channel memberships,
+/// every capability grant (across scopes), verification claims, and its `*`
+/// moderation state. Messages are browsed separately.
+async fn account_detail(State(st): State<AdminState>, Path(name): Path<String>) -> Response {
+    let Ok(account) = name.parse::<Account>() else {
+        return (StatusCode::BAD_REQUEST, "bad account").into_response();
+    };
+    let detail = async {
+        let Some(ulid) = st.accounts.account_ulid(&account).await? else {
+            return Ok(None);
+        };
+        let grants: Vec<Value> = st
+            .caps
+            .grants_for(&ulid)
+            .await?
+            .into_iter()
+            .map(|g| json!({ "scope": g.scope, "caps": g.caps, "epoch": g.epoch, "expiry": g.expiry }))
+            .collect();
+        let memberships: Vec<String> = st
+            .memberships
+            .memberships(&account)
+            .await?
+            .into_iter()
+            .map(|c| c.to_string())
+            .collect();
+        let verifications: Vec<Value> = st
+            .accounts
+            .verifications(&account)
+            .await?
+            .into_iter()
+            .map(|v| json!({ "kind": v.kind, "subject": v.subject, "verified": v.verified_at.is_some() }))
+            .collect();
+        Ok::<_, StoreError>(Some(json!({
+            "account": account.to_string(),
+            "ulid": ulid,
+            "operator": st.auth.operators.contains(&account),
+            "grants": grants,
+            "memberships": memberships,
+            "verifications": verifications,
+            "muted": st.moderation.is_moderated(&account, &["*".to_string()], ModKind::Mute).await?,
+            "banned": st.moderation.is_moderated(&account, &["*".to_string()], ModKind::Ban).await?,
+        })))
+    }
+    .await;
+    match detail {
+        Ok(Some(v)) => Json(v).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such account").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// Operator hard-delete of an account (+ its per-account data; messages kept).
+/// An operator can't delete themselves (avoid locking out the live session).
+async fn delete_account(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Path(name): Path<String>,
+) -> Response {
+    let Ok(account) = name.parse::<Account>() else {
+        return (StatusCode::BAD_REQUEST, "bad account").into_response();
+    };
+    if account == who {
+        return (StatusCode::FORBIDDEN, "cannot delete your own account").into_response();
+    }
+    match st.accounts.delete_account(&account).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such account").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// Every message a user authored, across all channels/DMs, newest-first — the
+/// operator "all their messages" view. Bodies are the stored originals (edits
+/// are separate rows); each is deletable by its msgid.
+async fn account_messages(
+    State(st): State<AdminState>,
+    Path(name): Path<String>,
+    Query(q): Query<ScopeQuery>,
+) -> Response {
+    let Ok(account) = name.parse::<Account>() else {
+        return (StatusCode::BAD_REQUEST, "bad account").into_response();
+    };
+    let sender = format!("{account}@{}", st.network);
+    match st
+        .events
+        .messages_by_sender(&sender, q.limit.unwrap_or(200))
+        .await
+    {
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(|r| {
+                    let body = match r.kind {
+                        weft_store::EventKind::Message { body, .. } => body,
+                        _ => String::new(),
+                    };
+                    json!({
+                        "msgid": r.msgid.to_string(),
+                        "scope": r.scope.as_key(),
+                        "sender": r.sender.to_string(),
+                        "body": body,
+                        "at_ms": r.msgid.timestamp_ms(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(e) => internal(e),
     }
 }
@@ -439,6 +614,152 @@ async fn delete_message(
             "no such message (or not a live channel)",
         )
             .into_response()
+    }
+}
+
+// ---- §11 federation: peers + netblocks ----
+
+async fn list_peers(State(st): State<AdminState>) -> Response {
+    match st.peers.list_peers().await {
+        Ok(list) => Json(
+            list.into_iter()
+                .map(|p| {
+                    json!({
+                        "peer": p.peer.to_string(),
+                        "scope": p.scope,
+                        "version": p.version,
+                        "acked": p.acked_manifest.is_some(),
+                        "severed": p.severed,
+                        "updated_ms": p.updated_ms,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+async fn list_netblocks(State(st): State<AdminState>) -> Response {
+    match st.netblocks.list_netblocks().await {
+        Ok(list) => Json(
+            list.into_iter()
+                .map(|n| {
+                    json!({
+                        "network": n.network.to_string(),
+                        "reason": n.reason,
+                        "actor": n.actor,
+                        "added_ms": n.added_ms,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct NetblockReq {
+    network: String,
+    reason: Option<String>,
+}
+
+async fn add_netblock(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Json(req): Json<NetblockReq>,
+) -> Response {
+    let Ok(network) = req.network.parse::<weft_proto::NetworkName>() else {
+        return (StatusCode::BAD_REQUEST, "bad network").into_response();
+    };
+    match st
+        .netblocks
+        .add_netblock(weft_store::NetblockRecord {
+            network,
+            reason: req.reason,
+            added_ms: now_ms(),
+            actor: who.to_string(),
+        })
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+async fn remove_netblock(State(st): State<AdminState>, Path(network): Path<String>) -> Response {
+    let Ok(network) = network.parse::<weft_proto::NetworkName>() else {
+        return (StatusCode::BAD_REQUEST, "bad network").into_response();
+    };
+    match st.netblocks.remove_netblock(&network).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "not blocked").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+// ---- §13 media hash blocklist ----
+
+async fn list_media_blocks(State(st): State<AdminState>) -> Response {
+    match st.media_blocks.list_blocked_hashes().await {
+        Ok(list) => Json(
+            list.into_iter()
+                .map(|b| {
+                    json!({
+                        "hash": b.hash,
+                        "reason": b.reason,
+                        "actor": b.actor,
+                        "added_ms": b.added_ms,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct BlockMediaReq {
+    hash: String,
+    reason: Option<String>,
+}
+
+/// Record a hash block. NOTE: this admin path records the blocklist entry (so
+/// re-upload/mirror/fetch are rejected) but does **not** itself delete already
+/// stored bytes — the blob store lives in weftd, not the store roles here. The
+/// wire `MEDIA BLOCK` verb (operator over a session) does the byte deletion; the
+/// GC + the fetch gate cover blobs blocked via this panel.
+async fn block_media(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Json(req): Json<BlockMediaReq>,
+) -> Response {
+    let hash = req.hash.trim();
+    if hash.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty hash").into_response();
+    }
+    match st
+        .media_blocks
+        .block_hash(weft_store::MediaBlockRecord {
+            hash: hash.to_string(),
+            reason: req.reason,
+            added_ms: now_ms(),
+            actor: who.to_string(),
+        })
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+async fn unblock_media(State(st): State<AdminState>, Path(hash): Path<String>) -> Response {
+    match st.media_blocks.unblock_hash(&hash).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "not blocked").into_response(),
+        Err(e) => internal(e),
     }
 }
 

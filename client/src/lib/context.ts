@@ -212,7 +212,11 @@ export interface AppCtx {
   userTab: "account" | "appearance" | "connection";
 
   // ---- server settings (ns overlay) ----
-  nsTab: "overview" | "roles" | "members" | "federation" | "recovery" | "danger";
+  nsTab: "overview" | "roles" | "members" | "bans" | "federation" | "recovery" | "danger";
+  // §6.7 moderation deny-list (mutes + bans) for the active server.
+  denyList(): { account: string; kind: string; by?: string | null; reason?: string | null }[];
+  refreshBans(): void;
+  liftMod(kind: string, account: string): void;
   nsTitle: string;
   nsDesc: string;
   nsVis: string;

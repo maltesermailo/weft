@@ -162,6 +162,167 @@ async fn delete_message_requires_live() {
     assert_eq!(live.deletes.lock().unwrap().len(), 1);
 }
 
+fn del(path: &str, cookie: &str) -> Request<Body> {
+    Request::delete(path)
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn body_string(res: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+#[tokio::test]
+async fn operator_deletes_a_user_but_not_themselves() {
+    let app = build().await;
+    let cookie = session(&app).await;
+
+    // The enriched account list carries mallory before the delete.
+    let list = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/accounts", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(list.contains("mallory") && list.contains("\"operator\":true"));
+
+    // Delete mallory → 204, then she's gone and a second delete is 404.
+    let res = app
+        .clone()
+        .oneshot(del("/admin/api/accounts/mallory", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let list = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/accounts", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(!list.contains("mallory"));
+    let res = app
+        .clone()
+        .oneshot(del("/admin/api/accounts/mallory", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // An operator can't delete themselves.
+    let res = app
+        .oneshot(del("/admin/api/accounts/admin", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn account_messages_lists_a_users_posts() {
+    use weft_store::{EventKind, EventRecord, EventStore, Scope};
+    let store = Arc::new(MemoryStore::default());
+    let admin: weft_proto::Account = "admin".parse().unwrap();
+    store
+        .register(&admin, PasswordHash::new(PASSWORD).as_phc())
+        .await
+        .unwrap();
+    // Two messages authored by `poster@test.net` in #general.
+    let poster: weft_proto::UserRef = "poster@test.net".parse().unwrap();
+    for (n, body) in [("A", "hello"), ("B", "world")] {
+        let ulid = weft_proto::Ulid::new();
+        let msgid = weft_proto::MsgId::new("test.net".parse().unwrap(), ulid);
+        store
+            .append(EventRecord {
+                scope: Scope::Channel("#general".parse().unwrap()),
+                msgid: msgid.clone(),
+                root: msgid,
+                sender: poster.clone(),
+                kind: EventKind::Message {
+                    body: format!("{n}:{body}"),
+                    meta: Default::default(),
+                },
+            })
+            .await
+            .unwrap();
+    }
+    let auth = auth::config(b"a-test-session-secret".to_vec(), [admin]);
+    let app = weft_admin::router(AdminState::from_store(store, auth, "test.net".into()));
+    let cookie = session(&app).await;
+
+    let body = body_string(
+        app.oneshot(get("/admin/api/accounts/poster/messages", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        body.contains("A:hello") && body.contains("B:world"),
+        "{body}"
+    );
+    assert!(body.contains("#general"));
+}
+
+#[tokio::test]
+async fn netblock_and_media_block_endpoints() {
+    let app = build().await;
+    let cookie = session(&app).await;
+
+    // Netblock: add → list contains it → remove.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/netblocks",
+            &cookie,
+            r#"{"network":"evil.example","reason":"spam"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let list = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/netblocks", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(list.contains("evil.example"));
+    let res = app
+        .clone()
+        .oneshot(del("/admin/api/netblocks/evil.example", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Media block: add → list contains it → unblock.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/media-blocks",
+            &cookie,
+            r#"{"hash":"b3deadbeef","reason":"csam"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let list = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/media-blocks", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(list.contains("b3deadbeef"));
+    let res = app
+        .oneshot(del("/admin/api/media-blocks/b3deadbeef", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+}
+
 async fn build_with_live(live: Arc<dyn weft_admin::Live>) -> axum::Router {
     let store = Arc::new(MemoryStore::default());
     let admin: weft_proto::Account = "admin".parse().unwrap();

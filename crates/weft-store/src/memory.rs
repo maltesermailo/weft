@@ -11,14 +11,14 @@ use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, Retent
 use crate::blob::BlobRecord;
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaStore,
-    MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore,
-    ReportStore, RoleStore, HOLD_RADIUS,
+    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaBlocklistStore,
+    MediaStore, MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore,
+    PinStore, ReportStore, RoleStore, HOLD_RADIUS,
 };
 use crate::types::{
-    ChannelRecord, EventRecord, GrantRecord, InviteRecord, ModKind, ModRecord, NamespaceRecord,
-    NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome, ReportRecord,
-    ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
+    ChannelRecord, EventRecord, GrantRecord, InviteRecord, MediaBlockRecord, ModKind, ModRecord,
+    NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome,
+    ReportRecord, ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 use weft_proto::{ContentState, ReportStatus};
@@ -68,6 +68,8 @@ struct Inner {
     peers: HashMap<NetworkName, PeerRecord>,
     /// blocked network name → blocklist entry (§11.6, name-keyed).
     netblocks: HashMap<NetworkName, NetblockRecord>,
+    /// blocked BLAKE3 media hash → blocklist entry (§13, content-addressed).
+    blocked_hashes: HashMap<String, MediaBlockRecord>,
     /// (scope, account, kind) → moderation deny record (§6.7).
     moderation: HashMap<(String, Account, ModKind), ModRecord>,
     /// channel → pinned msgids, ordered by ULID (§6.4).
@@ -158,6 +160,24 @@ impl EventStore for MemoryStore {
             .get(&ulid)
             .and_then(|key| inner.events.get(key))
             .cloned())
+    }
+
+    async fn messages_by_sender(
+        &self,
+        sender: &str,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut hits: Vec<EventRecord> = inner
+            .events
+            .values()
+            .filter(|r| r.is_root() && r.sender.to_string() == sender)
+            .cloned()
+            .collect();
+        // Newest-first (ULID is time-ordered); the msgid IS the key order.
+        hits.sort_by(|a, b| b.msgid.ulid().cmp(&a.msgid.ulid()));
+        hits.truncate(limit);
+        Ok(hits)
     }
 
     async fn is_deleted(&self, scope: &Scope, root: Ulid) -> Result<bool, StoreError> {
@@ -308,6 +328,23 @@ impl AccountStore for MemoryStore {
         let mut names: Vec<Account> = inner.accounts.keys().cloned().collect();
         names.sort();
         Ok(names)
+    }
+
+    async fn delete_account(&self, account: &Account) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let Some(record) = inner.accounts.remove(account) else {
+            return Ok(false); // unknown — messages/devices/marks lived here
+        };
+        // Cascade the per-account data. Grants key by the account's stable ULID;
+        // moderation + memberships key by the account name.
+        let ulid = record.ulid;
+        inner.memberships.remove(account);
+        inner.grants.retain(|(subject, _), _| subject != &ulid);
+        inner.moderation.retain(|(_, acct, _), _| acct != account);
+        inner
+            .role_assignments
+            .retain(|(_, _, subject)| subject != account.as_str());
+        Ok(true)
     }
 
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError> {
@@ -1211,6 +1248,16 @@ impl MembershipStore for MemoryStore {
             .map(|set| set.iter().cloned().collect())
             .unwrap_or_default())
     }
+
+    async fn members(&self, channel: &ChannelName) -> Result<Vec<Account>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .memberships
+            .iter()
+            .filter(|(_, chans)| chans.contains(channel))
+            .map(|(account, _)| account.clone())
+            .collect())
+    }
 }
 
 #[async_trait]
@@ -1333,6 +1380,45 @@ impl NetblockStore for MemoryStore {
             .cloned()
             .collect();
         blocks.sort_by(|a, b| a.network.as_str().cmp(b.network.as_str()));
+        Ok(blocks)
+    }
+}
+
+#[async_trait]
+impl MediaBlocklistStore for MemoryStore {
+    async fn block_hash(&self, record: MediaBlockRecord) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .blocked_hashes
+            .insert(record.hash.clone(), record);
+        Ok(())
+    }
+
+    async fn unblock_hash(&self, hash: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .blocked_hashes
+            .remove(hash)
+            .is_some())
+    }
+
+    async fn is_hash_blocked(&self, hash: &str) -> Result<bool, StoreError> {
+        Ok(self.inner.lock().unwrap().blocked_hashes.contains_key(hash))
+    }
+
+    async fn list_blocked_hashes(&self) -> Result<Vec<MediaBlockRecord>, StoreError> {
+        let mut blocks: Vec<MediaBlockRecord> = self
+            .inner
+            .lock()
+            .unwrap()
+            .blocked_hashes
+            .values()
+            .cloned()
+            .collect();
+        blocks.sort_by(|a, b| a.hash.cmp(&b.hash));
         Ok(blocks)
     }
 }

@@ -59,7 +59,17 @@ impl<S: ControlStream> Session<S> {
         {
             return Ok(JoinResult::Banned);
         }
-        let Some(ack) = handle.join(self.id, account.clone()).await else {
+        // A persistent "joined" system line is posted only on a genuine *first*
+        // join (no membership recorded yet) — auto-rejoin on reconnect must not
+        // repost it, or reloading would spam the channel.
+        let first_join = !self
+            .ctx
+            .memberships
+            .memberships(account)
+            .await
+            .map(|chans| chans.contains(channel))
+            .unwrap_or(false);
+        let Some(ack) = handle.join(self.id, account.clone(), first_join).await else {
             return Ok(JoinResult::Unavailable);
         };
         // Re-JOIN replaces the subscription; pending echo labels die with the
@@ -117,7 +127,9 @@ impl<S: ControlStream> Session<S> {
             None => self.no_such_target(label).await,
             Some(joined) => {
                 joined.forwarder.abort();
-                joined.handle.part(self.id).await;
+                // Explicit PART = a genuine leave (clears membership) → post the
+                // persistent "left" system line.
+                joined.handle.part(self.id, true).await;
                 // §6.3 drop the persistent membership — no auto-rejoin.
                 if let Err(e) = self
                     .ctx
@@ -167,8 +179,11 @@ impl<S: ControlStream> Session<S> {
         label: Option<String>,
         target: Target,
         body: Option<String>,
-        meta: MsgMeta,
+        mut meta: MsgMeta,
     ) -> io::Result<Flow> {
+        // `system=` is server-only — a client can't forge a membership/system
+        // line, so strip any inbound value before the message is relayed.
+        meta.system = None;
         // §13 validate attachments: well-formed, SAME-NETWORK `weft-media://`
         // refs only (foreign media = M-media-3 mirroring). The `attach` cap gate
         // is a follow-up. The channel actor records the refs as it mints the msgid.
@@ -549,13 +564,33 @@ impl<S: ControlStream> Session<S> {
             (items, truncated)
         };
 
+        // §11.7 lazy federated backfill: a full page (`items.len() == limit`)
+        // means local scrollback still has more, so wait. A short page means we
+        // ran out locally — if this channel is federated, ask the bridge to fetch
+        // the same window from its peer (no-op when unfederated; the bridge gates
+        // on forwardability + dedups per window). Fire-and-forget: pulled events
+        // broadcast to members + persist, so the next page serves them locally.
+        // We only ever fetch what a client asked to see, never a whole scrollback.
+        let ran_out = items.len() < limit;
         self.emit_batch(label, &target, items, truncated).await?;
+        if ran_out {
+            if let Target::Channel(channel) = target {
+                self.ctx
+                    .request_channel_backfill(crate::BackfillReq { channel, before });
+            }
+        }
         Ok(Flow::Continue)
     }
 
     /// Emit a `BATCH START` … events … `BATCH END` page (§7, §12.1). The wire
     /// form is always the compacted materialization; every line echoes the
     /// request label (§3.5). Shared by HISTORY and federated backfill (§11.7).
+    ///
+    /// §6/§13: a page larger than [`weft_proto::HISTORY_STREAM_THRESHOLD`] is
+    /// **not** sent inline — it is serialized once, held under a one-time
+    /// backfill token, and the caller gets a `STREAM ACCEPT <token>` to pull it
+    /// over the data plane (`BACKFILL <token>`). Both direct HISTORY and the
+    /// bridge backfill path (which call this) upgrade identically.
     pub(super) async fn emit_batch(
         &mut self,
         label: Option<String>,
@@ -565,68 +600,19 @@ impl<S: ControlStream> Session<S> {
     ) -> io::Result<()> {
         self.batches += 1;
         let id = format!("b{}", self.batches);
-        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
-            .await?;
-        for item in items {
-            match item {
-                weft_store::HistoryItem::Message {
-                    msgid,
-                    sender,
-                    body,
-                    meta,
-                    edited,
-                    reactions,
-                } => {
-                    self.send_event(
-                        label.clone(),
-                        Event::Message(Box::new(weft_proto::MessageEvent {
-                            target: target.clone(),
-                            sender,
-                            msgid: msgid.clone(),
-                            body,
-                            meta,
-                            edited: edited.map(|(count, _)| count),
-                            edited_at: edited.map(|(_, at)| at),
-                        })),
-                    )
-                    .await?;
-                    for summary in reactions {
-                        self.send_event(
-                            label.clone(),
-                            Event::Reactions {
-                                target: target.clone(),
-                                msgid: msgid.clone(),
-                                emoji: summary.emoji,
-                                count: summary.count,
-                                by: summary.actors,
-                            },
-                        )
-                        .await?;
-                    }
-                }
-                weft_store::HistoryItem::Tombstone { msgid, by } => {
-                    self.send_event(
-                        label.clone(),
-                        Event::Deleted {
-                            target: target.clone(),
-                            msgid,
-                            by: Some(by),
-                        },
-                    )
-                    .await?;
-                }
-            }
+        let events = batch_events(id, target, items, truncated);
+        if events.len() - 2 > weft_proto::HISTORY_STREAM_THRESHOLD {
+            // Large page → serialize once + hand back a stream token. Membership
+            // gating already happened building `items`, so the token is the cap.
+            let body = serialize_batch(label.as_deref(), &events);
+            let token = self.ctx.mint_backfill_token(body);
+            debug!(target = %target, count = events.len() - 2, "batch offered as stream");
+            return self.send_event(label, Event::StreamAccept { token }).await;
         }
-        debug!(target = %target, truncated, "batch served");
-        self.send_event(
-            label,
-            Event::BatchEnd {
-                id,
-                truncated,
-                compacted: true,
-            },
-        )
-        .await
+        for event in events {
+            self.send_event(label.clone(), event).await?;
+        }
+        Ok(())
     }
 
     /// §6.3 MEMBERS: a roster snapshot for a member. Framed as a `BATCH` of
@@ -640,18 +626,35 @@ impl<S: ControlStream> Session<S> {
         let Some(joined) = self.joined.get(&channel) else {
             return self.not_member_cap(label, &channel, "view").await;
         };
-        let roster = joined.handle.roster().await;
+        // §6.3 the roster is the *persistent* membership — offline members are
+        // shown too (Discord-style). Online-ness is who currently holds a live
+        // session in the channel; the presence map only refines online→away/dnd.
+        let roster = match self.ctx.memberships.members(&channel).await {
+            Ok(roster) => roster,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let live: std::collections::HashSet<Account> =
+            joined.handle.roster().await.into_iter().collect();
         let count = roster.len() as u64;
         self.batches += 1;
         let id = format!("m{}", self.batches);
         self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
             .await?;
         for account in roster {
-            // §6.1 known presence rides along so the client's roster dots are
-            // correct (not just members who change status while we watch).
-            let status = {
+            // Live in this channel ⇒ online (or the away/dnd they announced;
+            // invisible reads as offline). No live session ⇒ offline (a grey
+            // dot, Discord-style).
+            let status = if live.contains(&account) {
                 let map = self.ctx.presence.lock().expect("presence lock");
-                map.get(&account).copied()
+                match map.get(&account).copied() {
+                    None => weft_proto::PresenceStatus::Online,
+                    Some(weft_proto::PresenceStatus::Invisible) => {
+                        weft_proto::PresenceStatus::Offline
+                    }
+                    Some(other) => other,
+                }
+            } else {
+                weft_proto::PresenceStatus::Offline
             };
             let user = UserRef::new(account, self.ctx.info.network.clone());
             self.send_event(
@@ -665,10 +668,8 @@ impl<S: ControlStream> Session<S> {
                 },
             )
             .await?;
-            if let Some(status) = status {
-                self.send_event(None, Event::Presence { user, status })
-                    .await?;
-            }
+            self.send_event(None, Event::Presence { user, status })
+                .await?;
         }
         self.send_event(
             label,
@@ -822,4 +823,81 @@ impl<S: ControlStream> Session<S> {
             .await;
         Ok(Flow::Continue)
     }
+}
+
+/// The ordered `BATCH START` … `BATCH END` event sequence for a history page
+/// (§7, §12.1) — the compacted materialization, shared by the inline and the
+/// streamed backfill paths so both emit byte-identical wire forms. The first
+/// and last elements are always `BatchStart`/`BatchEnd`.
+pub(super) fn batch_events(
+    id: String,
+    target: &Target,
+    items: Vec<weft_store::HistoryItem>,
+    truncated: bool,
+) -> Vec<Event> {
+    let mut events = Vec::with_capacity(items.len() + 2);
+    events.push(Event::BatchStart { id: id.clone() });
+    for item in items {
+        match item {
+            weft_store::HistoryItem::Message {
+                msgid,
+                sender,
+                body,
+                meta,
+                edited,
+                reactions,
+            } => {
+                events.push(Event::Message(Box::new(weft_proto::MessageEvent {
+                    target: target.clone(),
+                    sender,
+                    msgid: msgid.clone(),
+                    body,
+                    meta,
+                    edited: edited.map(|(count, _)| count),
+                    edited_at: edited.map(|(_, at)| at),
+                })));
+                for summary in reactions {
+                    events.push(Event::Reactions {
+                        target: target.clone(),
+                        msgid: msgid.clone(),
+                        emoji: summary.emoji,
+                        count: summary.count,
+                        by: summary.actors,
+                    });
+                }
+            }
+            weft_store::HistoryItem::Tombstone { msgid, by } => {
+                events.push(Event::Deleted {
+                    target: target.clone(),
+                    msgid,
+                    by: Some(by),
+                });
+            }
+        }
+    }
+    events.push(Event::BatchEnd {
+        id,
+        truncated,
+        compacted: true,
+    });
+    events
+}
+
+/// Serialize a batch as the newline-delimited `Reply` lines the data plane
+/// streams (§6/§13). Each line echoes the request label, exactly like the inline
+/// form, so a client folds a pulled backfill identically to an inline `BATCH`.
+/// Unserializable events (a bug — our own events always serialize) are skipped.
+fn serialize_batch(label: Option<&str>, events: &[Event]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for event in events {
+        let reply = Reply {
+            label: label.map(str::to_string),
+            event: event.clone(),
+        };
+        if let Ok(line) = reply.serialize() {
+            body.extend_from_slice(line.as_bytes());
+            body.push(b'\n');
+        }
+    }
+    body
 }

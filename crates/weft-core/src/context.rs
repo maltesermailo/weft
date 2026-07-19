@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use weft_crypto::{Attestation, Capability, Grant, Keypair, PublicKey, Subject, TokenScope};
-use weft_proto::{Account, ChannelName, NamespaceName, NetworkName, RetentionPolicy};
+use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, RetentionPolicy};
 use weft_store::{
-    AccountStore, BlobStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaStore,
-    MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore,
-    ReportStore, RoleStore, StoreError,
+    AccountStore, BlobStore, CapabilityStore, ChannelStore, EventStore, InviteStore,
+    MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
+    NetblockStore, PeerStore, PinStore, ReportStore, RoleStore, StoreError,
 };
 
 use crate::accounts::Accounts;
@@ -142,6 +142,8 @@ pub struct ServerCtx {
     pub blobs: Arc<dyn BlobStore>,
     /// §13 media reference index (blob⇄message) — membership gating + refcount GC.
     pub media_refs: Arc<dyn MediaStore>,
+    /// §13 media hash blocklist — a blocked BLAKE3 hash is dead on arrival.
+    pub(crate) media_blocks: Arc<dyn MediaBlocklistStore>,
     /// §13 media data-plane token registry (upload grants + fetch bearers).
     media: MediaRegistry,
     /// §11 federation config: pinned peer keys + auto-accept.
@@ -168,9 +170,58 @@ pub struct ServerCtx {
     /// (no transport), so it hands requests to weftd (L3), which owns the
     /// dialer. `None` = the network's `auto_bridge` policy is off.
     auto_bridge_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<AutoBridgeRequest>>,
+    /// §11.8 media-mirror port: on ingesting a bridged message with attachments,
+    /// core (socket-free) hands weftd the pull requests; weftd fetches the blobs
+    /// over the bridge data plane. `None` = no sink installed.
+    mirror_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<MirrorRequest>>,
+    /// §11.7 bridge-backfill port: when a peer answers our federated HISTORY with
+    /// `STREAM ACCEPT <token>` (large page), core (socket-free) hands weftd the
+    /// pull; weftd opens a data stream on the bridge, drains it, and ingests each
+    /// line. `None` = no sink installed.
+    backfill_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<BackfillPull>>,
+    /// §11.7 lazy backfill demand: each **outbound** bridge session registers a
+    /// sender here; a local client's HISTORY that runs out of local scrollback
+    /// for a forwardable channel signals every registered bridge, which fetches
+    /// that window from its peer on demand (we never eagerly pull a whole
+    /// federated scrollback nobody has asked to see). Closed senders are pruned
+    /// on send, so a dropped bridge deregisters itself.
+    backfill_demand: std::sync::Mutex<Vec<tokio::sync::mpsc::UnboundedSender<BackfillReq>>>,
     /// §11.10 per-account cooldown on `FEDERATE` — a light dial-storm guard even
     /// under the open trigger policy (§6).
     federate_cooldown: std::sync::Mutex<HashMap<Account, std::time::Instant>>,
+}
+
+/// §11.8 a blob to mirror from a bridge peer, handed core→weftd.
+#[derive(Debug, Clone)]
+pub struct MirrorRequest {
+    /// The origin network to pull from (the blob's `weft-media://<origin>/…`).
+    pub peer: NetworkName,
+    /// The BLAKE3 content hash to fetch + verify.
+    pub hash: String,
+    /// The channel the reference arrived in (for receiver-side blocklist/policy).
+    pub channel: ChannelName,
+}
+
+/// §11.7 a federated backfill to pull, handed core→weftd: the peer offered a
+/// `STREAM ACCEPT <token>` in response to our HISTORY, so weftd opens a data
+/// stream on the bridge to `peer`, sends `BACKFILL <token>`, and ingests the
+/// serialized events it streams back (origin-authority-checked, invariant 2).
+#[derive(Debug, Clone)]
+pub struct BackfillPull {
+    /// The peer network serving the backfill (and the origin of its events).
+    pub peer: NetworkName,
+    /// The one-time backfill grant token the peer minted.
+    pub token: String,
+}
+
+/// §11.7 a local client's on-demand backfill need: fetch history for `channel`
+/// older than `before` (the client's oldest, or `None` for the recent page)
+/// from whichever bridge peer forwards it. Broadcast to every outbound bridge
+/// session; each ignores channels it doesn't forward.
+#[derive(Debug, Clone)]
+pub struct BackfillReq {
+    pub channel: ChannelName,
+    pub before: Option<MsgId>,
 }
 
 /// A `FEDERATE` request handed from weft-core to weftd's dialer (§11.10).
@@ -211,11 +262,13 @@ impl ServerCtx {
             + PinStore
             + MembershipStore
             + MediaStore
+            + MediaBlocklistStore
             + RoleStore
             + 'static,
     {
         let events: Arc<dyn EventStore> = store.clone();
         let media_refs: Arc<dyn MediaStore> = store.clone();
+        let media_blocks: Arc<dyn MediaBlocklistStore> = store.clone();
         let accounts: Arc<dyn AccountStore> = store.clone();
         let caps: Arc<dyn CapabilityStore> = store.clone();
         let invites: Arc<dyn InviteStore> = store.clone();
@@ -264,6 +317,7 @@ impl ServerCtx {
             presence: std::sync::Mutex::new(std::collections::HashMap::new()),
             blobs,
             media_refs,
+            media_blocks,
             media: MediaRegistry::default(),
             federation,
             operators: operators.into_iter().collect(),
@@ -272,6 +326,9 @@ impl ServerCtx {
             connections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             shutdown: tokio_util::sync::CancellationToken::new(),
             auto_bridge_tx: std::sync::OnceLock::new(),
+            mirror_tx: std::sync::OnceLock::new(),
+            backfill_tx: std::sync::OnceLock::new(),
+            backfill_demand: std::sync::Mutex::new(Vec::new()),
             federate_cooldown: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -285,6 +342,45 @@ impl ServerCtx {
     /// is off (no sink) or the channel is gone.
     pub(crate) fn request_auto_bridge(&self, req: AutoBridgeRequest) -> bool {
         matches!(self.auto_bridge_tx.get(), Some(tx) if tx.send(req).is_ok())
+    }
+
+    /// weftd installs the §11.8 media-mirror sink (its bridge data-plane fetcher).
+    pub fn set_mirror_sink(&self, tx: tokio::sync::mpsc::UnboundedSender<MirrorRequest>) {
+        let _ = self.mirror_tx.set(tx);
+    }
+
+    /// §11.8 hand a blob-mirror request to weftd. `false` if no sink is installed.
+    pub(crate) fn request_mirror(&self, req: MirrorRequest) -> bool {
+        matches!(self.mirror_tx.get(), Some(tx) if tx.send(req).is_ok())
+    }
+
+    /// weftd installs the §11.7 bridge-backfill sink (its data-plane puller).
+    pub fn set_backfill_sink(&self, tx: tokio::sync::mpsc::UnboundedSender<BackfillPull>) {
+        let _ = self.backfill_tx.set(tx);
+    }
+
+    /// §11.7 hand a backfill pull to weftd. `false` if no sink is installed.
+    pub(crate) fn request_backfill_pull(&self, req: BackfillPull) -> bool {
+        matches!(self.backfill_tx.get(), Some(tx) if tx.send(req).is_ok())
+    }
+
+    /// §11.7 an outbound bridge session registers its demand inbox so local
+    /// clients can trigger on-demand backfill from its peer.
+    pub(crate) fn register_backfill_demand(
+        &self,
+        tx: tokio::sync::mpsc::UnboundedSender<BackfillReq>,
+    ) {
+        self.backfill_demand.lock().expect("backfill lock").push(tx);
+    }
+
+    /// §11.7 a local client ran out of local scrollback for `channel`: ask every
+    /// outbound bridge to fetch that window (each ignores channels it doesn't
+    /// forward). No-op with no bridges. Closed inboxes are pruned here.
+    pub(crate) fn request_channel_backfill(&self, req: BackfillReq) {
+        self.backfill_demand
+            .lock()
+            .expect("backfill lock")
+            .retain(|tx| tx.send(req.clone()).is_ok());
     }
 
     /// §11.10 per-account cooldown: at most one `FEDERATE` per window.
@@ -519,11 +615,62 @@ impl ServerCtx {
         self.media.bearer_account(token)
     }
 
-    /// §13 moderation gate: is this blob hash blocked? Stub — M-media-5 wires the
-    /// real BLAKE3 blocklist. Every upload/fetch/mirror path calls it, so the
-    /// seam is already in place (re-uploads die on arrival once it's live).
-    pub async fn is_blob_blocked(&self, _hash: &str) -> bool {
-        false
+    /// §6/§13 mint a one-time backfill grant holding a pre-serialized `BATCH`;
+    /// returns its token (pulled once via `BACKFILL <token>` on the data plane).
+    pub(crate) fn mint_backfill_token(&self, body: Vec<u8>) -> String {
+        self.media.mint_backfill(body)
+    }
+
+    /// Consume a backfill grant if valid — called by weftd's data-plane handler.
+    pub fn take_backfill_token(&self, token: &str) -> Option<Vec<u8>> {
+        self.media.take_backfill(token)
+    }
+
+    /// §13 moderation gate: is this blob hash blocked (M-media-5)? Consulted on
+    /// every upload/fetch/mirror path, so a blocked hash is dead on arrival and
+    /// re-uploads can't evade it (content = identity). A store error fails
+    /// closed-open (treated as not-blocked) but is logged by the store.
+    pub async fn is_blob_blocked(&self, hash: &str) -> bool {
+        self.media_blocks
+            .is_hash_blocked(hash)
+            .await
+            .unwrap_or(false)
+    }
+
+    /// §13 block a media hash: delete its bytes + its derived thumbnail, forget
+    /// the blob records, and record the block so re-upload/mirror are rejected.
+    /// Returns the reason echoed back. Idempotent.
+    pub(crate) async fn block_media_hash(
+        &self,
+        hash: &str,
+        reason: Option<String>,
+        actor: &Account,
+    ) -> Result<(), StoreError> {
+        self.media_blocks
+            .block_hash(weft_store::MediaBlockRecord {
+                hash: hash.to_string(),
+                reason,
+                added_ms: now_ms(),
+                actor: actor.to_string(),
+            })
+            .await?;
+        // Delete the bytes + a derived thumbnail (its own blob), and forget the
+        // records so the GC + fetch gate see them gone. Best-effort: the block is
+        // authoritative even if a delete lags.
+        let thumb = self
+            .media_refs
+            .blob_meta(hash)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|m| m.thumb);
+        for h in std::iter::once(hash.to_string()).chain(thumb) {
+            if let Some(parsed) = weft_store::BlobHash::parse(&h) {
+                let _ = self.blobs.delete(&parsed).await;
+            }
+            let _ = self.media_refs.forget_blob(&h).await;
+        }
+        Ok(())
     }
 
     /// §13 membership-gated fetch: may `account` fetch blob `hash`? Allowed iff a
@@ -582,6 +729,14 @@ impl ServerCtx {
     pub(crate) fn next_session_id(&self) -> u64 {
         self.next_session.fetch_add(1, Ordering::Relaxed)
     }
+}
+
+/// Wall-clock unix ms — the block timestamp (§13).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// The scopes a channel's moderation checks consult, widest-covering last: the

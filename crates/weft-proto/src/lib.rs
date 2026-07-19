@@ -34,9 +34,9 @@ pub use error::{ParseError, SerializeError};
 pub use event::{ErrEvent, Event, MessageEvent, Reply};
 pub use id::MsgId;
 pub use line::{
-    escape_tag_value, unescape_tag_value, Line, Tags, MAX_ATTACHMENTS, MAX_EMOJI_BYTES,
-    MAX_HISTORY_LIMIT, MAX_LABEL_BYTES, MAX_LINE_BYTES, MAX_PARAMS, MAX_TAGS, MAX_TAG_KEY_BYTES,
-    MAX_TAG_VALUE_BYTES,
+    escape_tag_value, unescape_tag_value, Line, Tags, HISTORY_STREAM_THRESHOLD, MAX_ATTACHMENTS,
+    MAX_EMOJI_BYTES, MAX_HISTORY_LIMIT, MAX_LABEL_BYTES, MAX_LINE_BYTES, MAX_PARAMS, MAX_TAGS,
+    MAX_TAG_KEY_BYTES, MAX_TAG_VALUE_BYTES,
 };
 pub use name::{Account, ChannelName, NamespaceName, NetworkName, Target, UserRef};
 pub use policy::{RetainedFor, RetentionPolicy, RetentionUnit};

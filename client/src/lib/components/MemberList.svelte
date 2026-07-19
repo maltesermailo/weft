@@ -1,14 +1,22 @@
 <script lang="ts">
-  import { getApp } from "$lib/context";
+  import { getApp, type Member } from "$lib/context";
   const app = getApp();
   const members = $derived(app.activeChannel?.members ?? []);
+  const statusOf = (name: string) =>
+    name === app.account ? app.myStatus : (app.presence[name] ?? "offline");
+  const isOnline = (name: string) => {
+    const s = statusOf(name);
+    return s !== "offline" && s !== "invisible";
+  };
+  // Discord-style: online members first, offline greyed at the bottom.
+  const online = $derived(members.filter((m) => isOnline(m.name)));
+  const offline = $derived(members.filter((m) => !isOnline(m.name)));
 </script>
 
-<div class="member-group-label">Members — {members.length}</div>
-{#each members as m (m.name)}
-  <div class="member-row" role="listitem" oncontextmenu={(e) => app.memberCtx(e, m.name)}>
+{#snippet row(m: Member)}
+  <div class="member-row" class:member-offline={!isOnline(m.name)} role="listitem" oncontextmenu={(e) => app.memberCtx(e, m.name)}>
     <button class="member-id" onclick={(e) => app.openProfile(m.name, e)}>
-      <div class="avatar">{app.initials(m.name)}<span class="dot {m.name !== app.account ? (app.presence[m.name] ?? 'offline') : app.myStatus} corner"></span></div>
+      <div class="avatar">{app.initials(m.name)}<span class="dot {statusOf(m.name)} corner"></span></div>
       <span class="mname">{m.name}</span>
       {#if app.badgeFor(m.name, app.active)?.owner}<span class="cap-badge owner">owner</span>
       {:else if app.badgeFor(m.name, app.active)?.mod}<span class="cap-badge mod">mod</span>{/if}
@@ -31,4 +39,13 @@
       </div>
     {/if}
   </div>
-{/each}
+{/snippet}
+
+{#if online.length}
+  <div class="member-group-label">Online — {online.length}</div>
+  {#each online as m (m.name)}{@render row(m)}{/each}
+{/if}
+{#if offline.length}
+  <div class="member-group-label">Offline — {offline.length}</div>
+  {#each offline as m (m.name)}{@render row(m)}{/each}
+{/if}

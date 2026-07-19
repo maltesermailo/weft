@@ -33,13 +33,16 @@ pub enum Capability {
     NsAdmin,
     NsCreate,
     Netblock,
+    /// Block a BLAKE3 media hash network-wide (§13) — delete on arrival, reject
+    /// re-upload + mirror. `*`-scope (content is network-global).
+    MediaBlock,
     /// `grant:<cap>` — may delegate the inner capability.
     Grant(Box<Capability>),
 }
 
 impl Capability {
     /// The standard set, sans `grant:` (which composes over these).
-    pub const STANDARD: [Capability; 19] = [
+    pub const STANDARD: [Capability; 20] = [
         Capability::Send,
         Capability::EditOwn,
         Capability::DeleteOwn,
@@ -59,6 +62,7 @@ impl Capability {
         Capability::NsAdmin,
         Capability::NsCreate,
         Capability::Netblock,
+        Capability::MediaBlock,
     ];
 
     fn base_str(&self) -> Option<&'static str> {
@@ -82,6 +86,7 @@ impl Capability {
             Capability::NsAdmin => "ns-admin",
             Capability::NsCreate => "ns-create",
             Capability::Netblock => "netblock",
+            Capability::MediaBlock => "media-block",
             Capability::Grant(_) => return None,
         })
     }

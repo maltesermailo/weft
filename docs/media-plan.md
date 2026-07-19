@@ -189,19 +189,68 @@ clients            upload (OFFER->transfer, drag/paste, progress); render images
   green); drag-and-drop / paste-to-upload + progress bars; and thumbnails at the
   *recipient* render (needs `attach-meta` in the codec so recipients get dims +
   thumb without a Content-Type probe).
-- **M-media-3 — federation mirroring (§11.8).** On ingesting a bridged message
-  with attachments, fetch the blobs over the bridge data plane, **BLAKE3-verify**,
-  store under receiver retention + receiver blocklist, bounded by the manifest
-  `media` policy. *Green:* `ada@net1` posts an image; `bob@net2` (bridged) sees it
-  from net2's mirror, verified, with net1 never contacted by bob.
-- **M-media-4 — backfill over STREAM.** `STREAM OFFER backfill`; `HISTORY`
-  switches to STREAM above ~200 events (§6), ULID-cursor resumable; bulk bridge
-  backfill (§11.7) rides it. *Green:* a large scrollback transfers as one resumable
-  stream instead of hundreds of lines.
-- **M-media-5 — hash moderation enablement.** `MEDIA BLOCK <hash>` (mod cap) +
-  the blocklist table; the `is_blocked` stub goes live on upload/fetch/mirror; a
-  blocked hash is deleted + dead-on-arrival. *Green:* blocking a hash removes it
-  and rejects re-upload + mirror.
+- **M-media-3 — federation mirroring (§11.8). ✅** On ingesting a bridged message
+  with a foreign `weft-media://` attachment, the receiver records the reference
+  locally (so its members are gated + can fetch) and pulls the blob back over the
+  live bridge connection to the origin, **BLAKE3-verified**, then stores it under
+  the receiver's own retention + blocklist gate. **Design:** a self-authenticating
+  signed `MIRROR <requester-net> <hash> <sig>` on the data plane (`sign_mirror_request`
+  over `hash‖requester‖origin`, weft-crypto `mirror.rs`) — the origin serves iff a
+  `[[peers]]`-known network proves its key, so no origin↔member correlation is
+  needed. **Wiring:** weft-core `MirrorRequest` port (`ServerCtx::set_mirror_sink`)
+  eagerly emitted from `on_ingest`; weftd `PeerLinks` registry of live outbound
+  bridge connections; `spawn_mirror_consumer` drains the port and pulls; the origin
+  side is a `MIRROR` verb in `handle_data_stream`. Failures are the uniform
+  `ERR nosuch` (invariant 1). *Green:* two live weftds — F posts an image on a
+  bridged `#general`; H ingests the message with F's URI intact, mirrors the blob,
+  and a member on H fetches it **from H**, never touching F
+  (`federated_media_mirrors_over_the_bridge`). *Deferred:* the manifest `media`-mode
+  gate (mirror always-on for now, matching M5c's media-negotiation stub) and the
+  `mirror-max` bandwidth bound (§18 #5).
+- **M-media-4 — backfill over STREAM. ✅** A served `HISTORY` page over
+  `HISTORY_STREAM_THRESHOLD` (200 events) is serialized once, held under a
+  one-time token, and answered `STREAM ACCEPT <token>` instead of an inline
+  `BATCH` (shared `emit_batch` upgrade → both direct HISTORY and §11.7 bridge
+  backfill get it). The requester pulls the batch off the **generic data plane**:
+  a `BACKFILL <token>` QUIC data-stream verb + an HTTP `GET /backfill?t=<token>`
+  (web client), body = newline-delimited `Reply` lines folded like an inline
+  batch. **Bridge flow (full scope), lazy:** federated scrollback is pulled
+  **only on client demand** — never eagerly on bridge-up. When a local client's
+  `HISTORY` for a forwardable channel runs short (out of local scrollback),
+  `on_history` signals a ctx port (`request_channel_backfill`) that every
+  outbound bridge session drains (`on_backfill_demand`); the responsible bridge
+  (forwardability-gated) sends a bulk `HISTORY` for that `(channel, before)`
+  window (deduped); the peer streams it if large; weftd's
+  `spawn_backfill_consumer` opens a `BACKFILL` stream over the bridge and feeds
+  each line through a new ctx-level `ingest_bridged` (origin-authority +
+  manifest-gated, invariants 2/3) — symmetric requests never dup a side's own
+  history; pre-bridge scrollback needs `history=full` (so §11.10 auto-federation
+  offers full). Client (web): a `backfill` event → `fetch('/backfill')`
+  → `feed_line` replays each line through the FSM. *Green:* core unit
+  (large page → `STREAM ACCEPT` → token resolves to the full parseable batch,
+  one-time), conformance (large scrollback over **QUIC + HTTP**; two-live-weftd
+  **federated backfill streams over the bridge** — asserts H holds *none* of F's
+  scrollback until a client asks, then a client HISTORY lazily pulls F's 201-msg
+  scrollback into H's store), full workspace + clippy `-D warnings` +
+  svelte-check + wasm build green. *Deferred:* desktop (Tauri) backfill pull
+  (web is the green; desktop paging stays under the threshold); replica
+  reaction/edit fidelity (compacted form is lossy, as for any bridged batch).
+- **M-media-5 — hash moderation enablement. ✅** A new `media-block` capability
+  (`*`-scope — content is network-global) gates `MEDIA BLOCK <hash> [:reason]` /
+  `MEDIA UNBLOCK <hash>` / `MEDIA BLOCKS`, each → a `MEDIA-BLOCKED` event. A
+  `MediaBlocklistStore` (mem + PG, migration 0020, shared contract) holds the
+  hashes; `MEDIA BLOCK` records the hash **and** deletes the blob's bytes + its
+  derived thumbnail + forgets the blob records (`ServerCtx::block_media_hash`).
+  The `is_blocked` stub is now live (`ServerCtx::is_blob_blocked` → the store),
+  checked on every **upload** (QUIC `PUT` + HTTP `POST`), **fetch** (QUIC `GET` +
+  HTTP `GET`, uniform not-found), and **mirror** (`store_mirrored`) path — so a
+  blocked hash is dead on arrival and re-uploads of identical bytes can't evade
+  it (content = identity). *Green:* core cap-gate/flip/unblock unit test; store
+  blocklist contract (mem+PG); conformance `media_block_deletes_and_rejects_reupload`
+  (upload → post → member fetch OK → `MEDIA BLOCK` → fetch 404 + re-upload 403);
+  full workspace + clippy `-D warnings` green. *Deferred:* a client operator UI
+  for the verb (a `*`-scope operator action like `NETBLOCK`); cross-network shared
+  blocklists (spec §18 #4).
 
 ## Hard parts / risks (call out early)
 

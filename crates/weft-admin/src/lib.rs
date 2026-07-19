@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use axum::Router;
 use weft_store::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, ModerationStore, NamespaceStore,
-    ReportStore,
+    AccountStore, CapabilityStore, ChannelStore, EventStore, MediaBlocklistStore, MembershipStore,
+    ModerationStore, NamespaceStore, NetblockStore, PeerStore, ReportStore,
 };
 
 pub use auth::AuthConfig;
@@ -52,6 +52,10 @@ pub struct AdminState {
     pub(crate) moderation: Arc<dyn ModerationStore>,
     pub(crate) caps: Arc<dyn CapabilityStore>,
     pub(crate) namespaces: Arc<dyn NamespaceStore>,
+    pub(crate) memberships: Arc<dyn MembershipStore>,
+    pub(crate) netblocks: Arc<dyn NetblockStore>,
+    pub(crate) peers: Arc<dyn PeerStore>,
+    pub(crate) media_blocks: Arc<dyn MediaBlocklistStore>,
     pub(crate) auth: Arc<AuthConfig>,
     pub(crate) network: String,
     /// Live connection count, when the API shares the weftd process (embedded);
@@ -73,6 +77,10 @@ impl AdminState {
             + ModerationStore
             + CapabilityStore
             + NamespaceStore
+            + MembershipStore
+            + NetblockStore
+            + PeerStore
+            + MediaBlocklistStore
             + 'static,
     {
         Self {
@@ -82,7 +90,11 @@ impl AdminState {
             channels: store.clone(),
             moderation: store.clone(),
             caps: store.clone(),
-            namespaces: store,
+            namespaces: store.clone(),
+            memberships: store.clone(),
+            netblocks: store.clone(),
+            peers: store.clone(),
+            media_blocks: store,
             auth: Arc::new(auth),
             network,
             live_connections: None,
