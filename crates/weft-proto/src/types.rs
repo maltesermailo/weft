@@ -215,6 +215,18 @@ impl FromStr for MediaMode {
 }
 
 wire_enum!(
+    /// `VOICE STATE <#chan> <user@net> <join|leave|update>` participant
+    /// transition (§16, WEFT-RT). `Join`/`Leave` bracket voice-room membership
+    /// (independent of channel membership); `Update` carries a mute/deaf/speaking
+    /// flag change for a participant already in the room.
+    VoiceAction, "voice action", {
+        Join => "join",
+        Leave => "leave",
+        Update => "update",
+    }
+);
+
+wire_enum!(
     /// `STREAM OFFER <media|backfill> …` payload kind (§13, §6). `media` is a
     /// content-addressed blob; `backfill` is bulk HISTORY streamed over the data
     /// plane (M-media-4). Both ride the same transport.

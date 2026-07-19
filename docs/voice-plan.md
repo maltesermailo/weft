@@ -144,18 +144,59 @@ C: VOICE LEAVE #gaming/lounge                 → SFU tears the peer down; VOICE
 
 ## Milestones (each independently shippable)
 
-- **M-voice-0 — codec (weft-proto).** `VOICE JOIN|LEAVE|DESC|CAND` verbs,
-  `VOICE-OFFER`/`VOICE-STATE` events, `MediaToken` + `IceCandidate` types, the
-  `speak`/`listen` cap scopes in weft-crypto. Round-trip tests for every wire type
-  (`features=voice` already round-trips). *Ships nothing user-facing; unblocks
-  everyone. Follows the "new wire behavior = proto first" rule.*
-- **M-voice-1 — SFU skeleton + authz (weft-rt + weft-core).** The `VoiceBackend`
-  port; a per-channel voice-room actor; one webrtc-rs PeerConnection per client;
-  Opus RTP forwarded to all other subscribers; `speak`/`listen` + membership + M7
-  mute checks in `on_voice_join` (caps precede side effects). weftd: the `voice`
-  feature flag, `[voice]` config, SFU spawn, backend wiring. *Green:* a
-  loopback/two-native-peer test — two sessions join, audio forwards one→two and
-  two→one, a non-member is `NO-SUCH-TARGET`, a no-`listen` grant is denied.
+- **M-voice-0 ✅ (2026-07-20) — codec (weft-proto + weft-crypto).** Commands
+  `VOICE JOIN|LEAVE <#chan>`, `VOICE DESC <#chan> :<sdp>`, `VOICE CAND <#chan>
+  :<candidate>` (raw SDP rides the trailing — CR/LF survive as `\r`/`\n` like any
+  message body, so no base64). Events `VOICE OFFER <#chan> <token> [:endpoint]`
+  and `VOICE STATE <#chan> <user@net> <join|leave|update>` with presence-style
+  `mute=`/`deaf=`/`speaking=` flag tags (emitted only when set) + a `VoiceAction`
+  `wire_enum!`. weft-crypto gains the `speak`/`listen` caps (auto-covered by
+  `every_standard_cap_round_trips`). Round-trip tests for every form incl. the
+  multi-line-SDP case; the old "VOICE is unknown" event test retargeted to a
+  genuine unknown verb. weft-core routes the four verbs to the existing
+  `unsupported` helper as a placeholder (the SFU is M-voice-1) so the workspace
+  stays green. *Green:* `weft-proto` 86 + 4, `weft-crypto` 43, `weft-core` 105;
+  clippy `-D warnings` clean. *Ships nothing user-facing; unblocks everyone.*
+- **M-voice-1 — SFU skeleton + authz.** Delivered in sub-steps (as media was):
+  - **M-voice-1a ✅ (2026-07-20) — core signaling authz + port (weft-core).** The
+    `VoiceBackend` port (`Arc<dyn>`, async-trait) held as an optional `OnceLock`
+    on `ServerCtx` + `set_voice_backend` (installed by weftd, like the sink
+    ports); `on_voice_join/leave/desc/cand` in `session/voice.rs` replacing the
+    M-voice-0 stub. **Authz (invariant 4, all before the backend is touched):**
+    membership (unjoined → `NO-SUCH-TARGET`, invariant 1), the M7 ban (→
+    `FORBIDDEN`) / mute (→ removes `speak`) deny-list via `is_moderated`, and
+    `listen`/`speak` caps on a *restricted* channel (mirrors the posting gate).
+    `VOICE JOIN` → `VOICE OFFER <token>` (labeled ack) + a `VOICE STATE join`
+    fanned to co-members via a new `ChannelHandle::announce_as` (origin=self, so
+    the actor's own copy is skipped — the `SetPolicy` pattern); `VOICE DESC` →
+    the SFU answer as a `VOICE DESC` event (codec gained `Event::VoiceDesc` +
+    `VoiceCand` for symmetry); disconnect tears down every voice room. A
+    `MockVoice` backend drives 5 networkless tests (no-backend→UNSUPPORTED,
+    unjoined→NO-SUCH-TARGET, offer+token+co-member state+DESC-relay+leave,
+    muted→renders muted, `*`-banned→FORBIDDEN). *Green:* weft-core 110, weft-proto
+    86, clippy `-D warnings` clean.
+  - **M-voice-1b ✅ (2026-07-20) — the WebRTC SFU (weft-rt).** New crate on
+    **`webrtc` 0.17.1** (the `RTCPeerConnection` API — the sans-IO `sfu` crate is
+    0.0.x/immature; ring provider, no aws-lc). `WebrtcSfu` implements
+    `VoiceBackend`: one shared `API` (MediaEngine+Opus, default interceptors,
+    pinned UDP port range), a per-channel `Room`, one PeerConnection per session.
+    `join` wires `on_track` → mirror the peer's inbound Opus into a
+    `TrackLocalStaticRTP` + pump its RTP (SSRC/PT rewritten per binding —
+    verbatim forward); `describe` subscribes the peer to every existing publisher
+    (**`add_track` before `set_remote_description`** — the ordering that binds the
+    sender; the reverse leaves it paused, the bug that cost the media path) then
+    non-trickle gather+answer; `leave` closes + prunes. *Green:* two real-webrtc
+    integration tests (offline host-ICE, distinct UDP ranges) — the SFU answers a
+    client offer with gathered candidates, and **Opus forwards publisher →
+    subscriber end-to-end over DTLS-SRTP** (~3s). clippy `-D warnings` clean;
+    workspace builds. weft-rt is a `members` (not `default-members`) crate — the
+    default build stays lean; weftd pulls it behind the `voice` feature in 1c.
+    *Deferred to 1c:* SFU-initiated renegotiation (an offer the server pushes) so
+    a *new* publisher reaches already-connected peers — today a room converges
+    when peers join in order; a late publisher needs the subscriber to re-`describe`.
+  - **M-voice-1c — weftd wiring + conformance.** `voice` feature flag, `[voice]`
+    config, SFU spawn + `set_voice_backend`. *Green:* a loopback/two-native-peer
+    test — two sessions join, audio forwards both ways.
 - **M-voice-2 — web client.** `getUserMedia` → `RTCPeerConnection`, SDP/ICE over
   the existing WebSocket, a voice-channel panel: join/leave, member list, speaking
   ring, local mute. *First real usable voice (browser ↔ browser through the SFU).*

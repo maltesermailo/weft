@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weft-irc", "crates/weft-admin", "crates/weftd", "crates/weft-tui", "crates/weft-client-core", "crates/weft-client-wasm", "client/src-tauri"]
+members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weft-irc", "crates/weft-admin", "crates/weftd", "crates/weft-rt", "crates/weft-tui", "crates/weft-client-core", "crates/weft-client-wasm", "client/src-tauri"]
 default-members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weft-irc", "crates/weft-admin", "crates/weftd"]
 
 [workspace.package]
@@ -45,6 +45,10 @@ sha2 = "0.10"
 blake3 = "1"
 argon2 = "0.5"
 async-trait = "0.1"
+# §16 WEFT-RT SFU. The main RTCPeerConnection crate (owns UDP/DTLS/ICE) — the
+# sans-IO `sfu` crate is too immature (0.0.x). Uses rustls; keep it on the ring
+# provider to match the workspace (no aws-lc — ambiguous default, CLAUDE.md).
+webrtc = "0.17"
 subtle = "2"
 axum = "0.7"
 rustls-pemfile = "2"

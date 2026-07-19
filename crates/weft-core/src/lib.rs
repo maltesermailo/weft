@@ -20,6 +20,7 @@ mod media;
 mod registry;
 mod session;
 mod stream;
+mod voice;
 
 pub use accounts::Accounts;
 pub use channel::{ChannelEvent, ChannelHandle, JoinAck};
@@ -34,6 +35,7 @@ pub use media::{parse_media_uri, UploadGrant, MEDIA_MAX_BYTES};
 pub use registry::Registry;
 pub use session::{run_bridge_client, run_bridge_requester, run_session, SessionId};
 pub use stream::ControlStream;
+pub use voice::{VoiceBackend, VoiceError, VoiceGrant, VoiceJoinReq};
 pub use weft_store::{
     blob_hash, BlobHash, BlobMeta, BlobRecord, BlobStore, ChannelStore, MediaStore, MemBlobStore,
     MemoryStore, NamespaceStore, Scope,

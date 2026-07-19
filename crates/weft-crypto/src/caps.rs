@@ -36,13 +36,17 @@ pub enum Capability {
     /// Block a BLAKE3 media hash network-wide (§13) — delete on arrival, reject
     /// re-upload + mirror. `*`-scope (content is network-global).
     MediaBlock,
+    /// Publish audio to a channel's voice room — the WEFT-RT `speak` cap (§16).
+    Speak,
+    /// Receive forwarded audio from a channel's voice room — WEFT-RT `listen` (§16).
+    Listen,
     /// `grant:<cap>` — may delegate the inner capability.
     Grant(Box<Capability>),
 }
 
 impl Capability {
     /// The standard set, sans `grant:` (which composes over these).
-    pub const STANDARD: [Capability; 20] = [
+    pub const STANDARD: [Capability; 22] = [
         Capability::Send,
         Capability::EditOwn,
         Capability::DeleteOwn,
@@ -63,6 +67,8 @@ impl Capability {
         Capability::NsCreate,
         Capability::Netblock,
         Capability::MediaBlock,
+        Capability::Speak,
+        Capability::Listen,
     ];
 
     fn base_str(&self) -> Option<&'static str> {
@@ -87,6 +93,8 @@ impl Capability {
             Capability::NsCreate => "ns-create",
             Capability::Netblock => "netblock",
             Capability::MediaBlock => "media-block",
+            Capability::Speak => "speak",
+            Capability::Listen => "listen",
             Capability::Grant(_) => return None,
         })
     }

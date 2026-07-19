@@ -9,9 +9,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use weft_core::{
     run_session, Attestation, ControlStream, Keypair, MemoryStore, ServerCtx, ServerInfo,
+    VoiceBackend, VoiceError, VoiceGrant, VoiceJoinReq,
 };
 use weft_proto::RetentionPolicy;
-use weft_proto::{ErrCode, Event, MemberAction, Reply};
+use weft_proto::{ErrCode, Event, MemberAction, Reply, VoiceAction};
 
 struct MockStream {
     from_client: mpsc::UnboundedReceiver<String>,
@@ -3289,4 +3290,179 @@ async fn roles_are_explicit_membership_not_derived() {
         matches!(&ev.event, Event::RoleMember { roles, .. } if roles.is_empty()),
         "got {ev:?}"
     );
+}
+
+// ---- §16 WEFT-RT voice signaling (M-voice-1) ----
+
+/// A stand-in SFU: it authorizes nothing (core already did) — it just mints a
+/// token and echoes SDP so the signaling relay is observable without WebRTC.
+struct MockVoice;
+
+#[async_trait::async_trait]
+impl VoiceBackend for MockVoice {
+    async fn join(&self, req: VoiceJoinReq) -> Result<VoiceGrant, VoiceError> {
+        Ok(VoiceGrant {
+            token: format!("vtok-{}-{}", req.channel, req.session),
+            endpoint: None,
+        })
+    }
+    async fn describe(
+        &self,
+        _session: u64,
+        _channel: &weft_proto::ChannelName,
+        sdp: String,
+    ) -> Result<String, VoiceError> {
+        Ok(format!("answer-to:{sdp}"))
+    }
+    async fn candidate(
+        &self,
+        _session: u64,
+        _channel: &weft_proto::ChannelName,
+        _candidate: String,
+    ) -> Result<(), VoiceError> {
+        Ok(())
+    }
+    async fn leave(&self, _session: u64, _channel: &weft_proto::ChannelName) {}
+}
+
+fn ctx_voice(channels: &[&str], operators: &[&str]) -> Arc<ServerCtx> {
+    let ctx = ctx_ops(channels, operators);
+    ctx.set_voice_backend(Arc::new(MockVoice));
+    ctx
+}
+
+/// Next `VOICE STATE` from a co-member's stream, skipping the MEMBER/PRESENCE
+/// lines that interleave when several clients share a channel.
+async fn next_voice_state(client: &mut Client) -> Reply {
+    loop {
+        let reply = client.recv().await;
+        if matches!(reply.event, Event::VoiceState { .. }) {
+            return reply;
+        }
+    }
+}
+
+#[tokio::test]
+async fn voice_join_without_backend_is_unsupported() {
+    // No backend installed → the verb is known but the server has no SFU.
+    let ctx = ctx(&["#general"]);
+    let mut alice = joined(&ctx, "alice", "#general").await;
+    alice.send("@label=v VOICE JOIN #general");
+    let reply = alice.expect_err(ErrCode::Unsupported).await;
+    assert_eq!(reply.label.as_deref(), Some("v"));
+}
+
+#[tokio::test]
+async fn voice_join_unjoined_channel_is_no_such_target() {
+    // Invariant 1: joining voice for a channel you're not in reveals nothing.
+    let ctx = ctx_voice(&["#general"], &[]);
+    let mut alice = ready(&ctx, "alice").await;
+    alice.send("@label=v VOICE JOIN #general");
+    let reply = alice.expect_err(ErrCode::NoSuchTarget).await;
+    assert_eq!(reply.label.as_deref(), Some("v"));
+}
+
+#[tokio::test]
+async fn voice_join_offers_token_and_announces_to_members() {
+    let ctx = ctx_voice(&["#general"], &[]);
+    let mut bob = joined(&ctx, "bob", "#general").await;
+    let mut alice = joined(&ctx, "alice", "#general").await;
+
+    // alice joins voice → labeled VOICE OFFER with a token, endpoint absent.
+    alice.send("@label=v1 VOICE JOIN #general");
+    let reply = alice.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("v1"));
+    let Event::VoiceOffer {
+        channel,
+        token,
+        endpoint,
+    } = &reply.event
+    else {
+        panic!("expected VOICE OFFER, got {reply:?}");
+    };
+    assert_eq!(channel.as_str(), "#general");
+    assert!(token.starts_with("vtok-"), "token: {token}");
+    assert!(endpoint.is_none());
+
+    // bob (a co-member) sees alice enter voice, not muted (open channel).
+    let reply = next_voice_state(&mut bob).await;
+    let Event::VoiceState {
+        user,
+        action,
+        muted,
+        ..
+    } = &reply.event
+    else {
+        unreachable!()
+    };
+    assert_eq!(user.account.as_str(), "alice");
+    assert_eq!(*action, VoiceAction::Join);
+    assert!(!*muted);
+
+    // alice negotiates: her SDP offer gets the SFU's answer back as VOICE DESC.
+    alice.send("@label=v2 VOICE DESC #general :v=0\\r\\nmy-offer");
+    let reply = alice.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("v2"));
+    let Event::VoiceDesc { sdp, .. } = &reply.event else {
+        panic!("expected VOICE DESC answer, got {reply:?}");
+    };
+    assert_eq!(sdp, "answer-to:v=0\r\nmy-offer");
+
+    // alice leaves → labeled VOICE STATE leave ack; bob sees the leave too.
+    alice.send("@label=v3 VOICE LEAVE #general");
+    let reply = alice.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("v3"));
+    assert!(matches!(
+        &reply.event,
+        Event::VoiceState { action, user, .. }
+            if *action == VoiceAction::Leave && user.account.as_str() == "alice"
+    ));
+    let reply = next_voice_state(&mut bob).await;
+    assert!(
+        matches!(&reply.event, Event::VoiceState { action, .. } if *action == VoiceAction::Leave)
+    );
+
+    // Leaving again → nothing to leave (uniform NO-SUCH-TARGET).
+    alice.send("VOICE LEAVE #general");
+    alice.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn voice_muted_member_joins_but_renders_muted() {
+    let ctx = ctx_voice(&["#general"], &["boss"]);
+    let mut boss = ready_op(&ctx, "boss").await;
+    let mut bob = joined(&ctx, "bob", "#general").await;
+    let mut alice = joined(&ctx, "alice", "#general").await;
+
+    // A network-wide mute (M7) removes `speak` but not the join itself.
+    boss.send("@label=m MUTE * alice");
+    let reply = drain_until_label(&mut boss, "m").await;
+    assert!(matches!(reply.event, Event::Moderated { .. }));
+
+    alice.send("VOICE JOIN #general");
+    assert!(matches!(alice.recv().await.event, Event::VoiceOffer { .. }));
+
+    // bob sees alice join voice, flagged muted (can't speak).
+    let reply = next_voice_state(&mut bob).await;
+    assert!(matches!(
+        &reply.event,
+        Event::VoiceState { action, muted, .. } if *action == VoiceAction::Join && *muted
+    ));
+}
+
+#[tokio::test]
+async fn voice_banned_member_cannot_join() {
+    let ctx = ctx_voice(&["#general"], &["boss"]);
+    let mut boss = ready_op(&ctx, "boss").await;
+    let mut alice = joined(&ctx, "alice", "#general").await;
+
+    // A `*`-scope ban covers #general but doesn't force-part her (only a
+    // channel-scope ban ejects) — so she is a member yet barred from voice.
+    boss.send("@label=b BAN * alice");
+    let reply = drain_until_label(&mut boss, "b").await;
+    assert!(matches!(reply.event, Event::Moderated { .. }));
+
+    alice.send("@label=v VOICE JOIN #general");
+    let reply = alice.expect_err(ErrCode::Forbidden).await;
+    assert_eq!(reply.label.as_deref(), Some("v"));
 }

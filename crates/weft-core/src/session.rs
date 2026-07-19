@@ -7,7 +7,7 @@
 //! broadcast receiver lags and the client gets `ERR SLOW` (§9.2) instead of
 //! unbounded buffering.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,6 +47,7 @@ mod moderation;
 mod namespaces;
 mod relay;
 mod roles;
+mod voice;
 
 /// Process-unique connection identifier (also the actor-side member key).
 pub type SessionId = u64;
@@ -412,6 +413,9 @@ struct Session<S> {
     backfill_demand_rx: mpsc::UnboundedReceiver<crate::BackfillReq>,
     /// HISTORY batch id counter (per session, opaque to clients).
     batches: u64,
+    /// §16 voice rooms this session has joined (a subset of `joined`). Drives
+    /// SFU teardown on `VOICE LEAVE` and on disconnect so no peer is orphaned.
+    voice: HashSet<ChannelName>,
     malformed_strikes: Vec<Instant>,
     last_inbound: Instant,
 }
@@ -456,6 +460,7 @@ impl<S: ControlStream> Session<S> {
             backfill_demand_tx,
             backfill_demand_rx,
             batches: 0,
+            voice: HashSet::new(),
             malformed_strikes: Vec::new(),
             last_inbound: Instant::now(),
         }
@@ -510,6 +515,11 @@ impl<S: ControlStream> Session<S> {
     /// Leave all channels so members see MEMBER part even on abrupt drops,
     /// and drop out of the account directory.
     async fn cleanup(&mut self) {
+        // §16 tear down any voice peers first (before the channel handles go),
+        // so the SFU drops them and members see a `VOICE STATE leave`.
+        for channel in std::mem::take(&mut self.voice) {
+            self.teardown_voice(&channel).await;
+        }
         for (_, joined) in self.joined.drain() {
             joined.forwarder.abort();
             // A disconnect keeps the persistent membership (auto-rejoin later),
@@ -1184,6 +1194,14 @@ impl<S: ControlStream> Session<S> {
             | Command::AuthKey { .. }
             | Command::AuthProof { .. }
             | Command::Register { .. } => self.not_authed(label, "already authenticated").await,
+            // §16 WEFT-RT voice signaling. The SFU backend is installed by weftd;
+            // a zero-voice server answers `UNSUPPORTED` inside these handlers.
+            Command::VoiceJoin { channel } => self.on_voice_join(label, channel, account).await,
+            Command::VoiceLeave { channel } => self.on_voice_leave(label, channel).await,
+            Command::VoiceDesc { channel, sdp } => self.on_voice_desc(label, channel, sdp).await,
+            Command::VoiceCand { channel, candidate } => {
+                self.on_voice_cand(label, channel, candidate).await
+            }
             Command::Unknown { .. } => Ok(Flow::Continue), // handled in on_request
         }
     }

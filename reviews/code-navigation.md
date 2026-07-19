@@ -190,3 +190,53 @@ Chain 8: boot with Postgres — `weftd::start` → backend match →
 | Compaction semantics | `weft-store/src/compact.rs` only |
 | DM behavior | `directory.rs` + session `on_direct`/`on_msg` |
 | Verification kinds/flows | store substrate exists (`Verification`); wire flow = spec decision first |
+
+## M-voice addendum — §16 WEFT-RT voice signaling (M-voice-0/1a)
+
+Voice is a **projection over the same session/actor machinery**, not a new
+server. The media plane (an SFU) is separate — see below.
+
+New load-bearing files:
+- `weft-proto/src/command.rs` + `event.rs` — the `VOICE JOIN/LEAVE/DESC/CAND`
+  verbs and `VOICE OFFER`/`VOICE STATE`/`VOICE DESC`/`VOICE CAND` events. `DESC`
+  is symmetric (command = client offer, event = SFU answer); raw SDP rides the
+  trailing (CR/LF auto-escaped, same as a message body — no base64).
+- `weft-core/src/voice.rs` — the **`VoiceBackend` port** (the pluggable-SFU
+  seam): `Arc<dyn VoiceBackend>` (async-trait) with `join`/`describe`/
+  `candidate`/`leave`. Held as an optional `OnceLock` on `ServerCtx`; weftd
+  installs one via `set_voice_backend` (like the mirror/backfill sink ports).
+  `None` = zero-voice server → voice verbs answer `UNSUPPORTED`.
+- `weft-core/src/session/voice.rs` — the handlers (`Session::on_voice_*`).
+
+Chain 9: a voice join — `session.rs` dispatch → `voice::on_voice_join`:
+membership (`self.joined`) → M7 `is_moderated` ban/mute (`covering_scopes`) →
+`voice_caps` (`listen`/`speak` on a restricted channel) — **all authority before
+the backend** (invariant 4) — → `ctx.voice_backend().join()` → `VOICE OFFER`
+(labeled ack) → `announce_voice_state` → `ChannelHandle::announce_as(self.id, …)`
+(broadcasts `VOICE STATE` to co-members; the actor's own copy is skipped, the
+`Cmd::SetPolicy` pattern). `VOICE DESC` relays the SDP to the backend and returns
+its answer. Disconnect: `cleanup` → `teardown_voice` per room.
+
+The **SFU media engine is not here** — `weft-core` never touches a socket. The
+`WebrtcSfu` (webrtc-rs) implementing `VoiceBackend` lives in the `weft-rt` crate
+(below) and owns the UDP/DTLS/ICE; `on_voice_*` only carry SDP/ICE to it.
+
+The media plane — `weft-rt` (M-voice-1b), a **`members`-but-not-`default-members`**
+crate (webrtc 0.17.1; only built with weftd's `voice` feature):
+- `weft-rt/src/sfu.rs` — `WebrtcSfu` (the reference `VoiceBackend`). One shared
+  `webrtc::API` (MediaEngine+Opus, pinned UDP range); a `rooms:
+  Mutex<HashMap<ChannelName, Room>>`, each `Room` = per-session PeerConnections +
+  per-session `TrackLocalStaticRTP` publishers. `join` sets `on_track` → mirror
+  inbound Opus into a local track + pump RTP to it (webrtc rewrites SSRC/PT per
+  subscriber binding = verbatim fan-out). `describe` = **`add_track` the existing
+  publishers BEFORE `set_remote_description`** (the ordering that binds the
+  sender — the reverse leaves it paused and forwards zero bytes) → non-trickle
+  gather+answer. Tests (`weft-rt/tests/sfu.rs`) drive real webrtc client PCs over
+  loopback (host ICE, no STUN); one asserts a gathered answer, one asserts Opus
+  actually forwards publisher→subscriber.
+
+| Change | Touch |
+|---|---|
+| Voice signaling authz | `weft-core/src/session/voice.rs` (never the SFU) |
+| The SFU seam / a new backend (e.g. LiveKit) | implement `VoiceBackend` (`weft-core/src/voice.rs`); the default lives in `weft-rt` |
+| Voice wire form | `weft-proto` command.rs/event.rs **+ round-trip test first** |

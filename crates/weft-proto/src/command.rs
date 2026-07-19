@@ -442,6 +442,22 @@ pub enum Command {
     /// scope (`#chan|ns:<name>|*`, §6.7). Cap `mute` or `ban` at the scope.
     /// Answered as a `BATCH` of `MODERATED` events (each a current mute/ban).
     ModList { scope: String },
+    /// `VOICE JOIN <#chan>` (§16, WEFT-RT) — request to join a channel's voice
+    /// room. The server checks `listen`/`speak` caps + membership + mutes, then
+    /// answers `VOICE OFFER` with a media token; media rides WebRTC, not this line.
+    VoiceJoin { channel: ChannelName },
+    /// `VOICE LEAVE <#chan>` — leave the voice room; the SFU tears the peer down.
+    VoiceLeave { channel: ChannelName },
+    /// `VOICE DESC <#chan> :<sdp>` (§16) — an SDP offer/answer for the channel's
+    /// peer connection. Same verb both directions; the raw SDP rides the trailing
+    /// (CR/LF survive the wire as `\r`/`\n`, like any message body).
+    VoiceDesc { channel: ChannelName, sdp: String },
+    /// `VOICE CAND <#chan> :<ice-candidate>` (§16) — a trickle-ICE candidate.
+    /// Optional: non-trickle clients gather candidates into the `VOICE DESC` SDP.
+    VoiceCand {
+        channel: ChannelName,
+        candidate: String,
+    },
     /// Any verb outside the known set. Servers ignore it silently (§4).
     Unknown { verb: String },
 }
@@ -1262,6 +1278,31 @@ impl Command {
                     }),
                 }
             }
+            "VOICE" => {
+                let mut args = Args::new(line, "VOICE");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "JOIN" => Ok(Command::VoiceJoin {
+                        channel: args.req("channel")?.parse()?,
+                    }),
+                    "LEAVE" => Ok(Command::VoiceLeave {
+                        channel: args.req("channel")?.parse()?,
+                    }),
+                    "DESC" => Ok(Command::VoiceDesc {
+                        channel: args.req("channel")?.parse()?,
+                        sdp: args.trailing_req("sdp")?.to_string(),
+                    }),
+                    "CAND" => Ok(Command::VoiceCand {
+                        channel: args.req("channel")?.parse()?,
+                        candidate: args.trailing_req("candidate")?.to_string(),
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "VOICE",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
             _ => Ok(Command::Unknown {
                 verb: verb.to_string(),
             }),
@@ -1813,6 +1854,24 @@ impl Command {
                 reason.clone(),
             ),
             Command::ModList { scope } => ("MODLIST", vec![scope.clone()], None),
+            Command::VoiceJoin { channel } => {
+                ("VOICE", vec!["JOIN".to_string(), channel.to_string()], None)
+            }
+            Command::VoiceLeave { channel } => (
+                "VOICE",
+                vec!["LEAVE".to_string(), channel.to_string()],
+                None,
+            ),
+            Command::VoiceDesc { channel, sdp } => (
+                "VOICE",
+                vec!["DESC".to_string(), channel.to_string()],
+                Some(sdp.clone()),
+            ),
+            Command::VoiceCand { channel, candidate } => (
+                "VOICE",
+                vec!["CAND".to_string(), channel.to_string()],
+                Some(candidate.clone()),
+            ),
             Command::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown command"));
             }
@@ -2683,6 +2742,48 @@ mod tests {
         round_trip(&Request::new(Command::ModList {
             scope: "ns:games".into(),
         }));
+    }
+
+    #[test]
+    fn voice_verbs_round_trip() {
+        round_trip(&Request::with_label(
+            Command::VoiceJoin {
+                channel: "#gaming/lounge".parse().unwrap(),
+            },
+            "v1",
+        ));
+        assert_eq!(
+            Request::new(Command::VoiceLeave {
+                channel: "#general".parse().unwrap(),
+            })
+            .serialize()
+            .unwrap(),
+            "VOICE LEAVE #general"
+        );
+
+        // A real SDP carries CR/LF; it must survive the wire (escaped as
+        // `\r`/`\n` in the trailing) and round-trip byte-for-byte.
+        let sdp = "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
+        let desc = Request::with_label(
+            Command::VoiceDesc {
+                channel: "#general".parse().unwrap(),
+                sdp: sdp.to_string(),
+            },
+            "v2",
+        );
+        let wire = desc.serialize().unwrap();
+        assert!(!wire.contains('\n'), "SDP newlines must be escaped: {wire}");
+        round_trip(&desc);
+
+        round_trip(&Request::new(Command::VoiceCand {
+            channel: "#general".parse().unwrap(),
+            candidate: "candidate:1 1 UDP 2130706431 192.0.2.1 54321 typ host".to_string(),
+        }));
+
+        // Missing channel / SDP are hard errors; unknown subcommand too.
+        assert!(Request::parse("VOICE JOIN").is_err());
+        assert!(Request::parse("VOICE DESC #general").is_err());
+        assert!(Request::parse("VOICE FROB #general").is_err());
     }
 
     #[test]

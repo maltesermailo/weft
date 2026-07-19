@@ -9,7 +9,7 @@ use crate::name::{Account, ChannelName, NamespaceName, NetworkName, Target, User
 use crate::policy::RetentionPolicy;
 use crate::types::{
     BridgeState, ContentState, HistoryMode, MediaMode, MemberAction, ModAction, MsgMeta,
-    PresenceStatus, ReactionOp, ReportScope, ResolveAction, TypingState, Visibility,
+    PresenceStatus, ReactionOp, ReportScope, ResolveAction, TypingState, Visibility, VoiceAction,
 };
 
 /// An event plus its optional `label` echo (§3.5). Only direct responses
@@ -370,11 +370,57 @@ pub enum Event {
         by: Option<String>,
         reason: Option<String>,
     },
+    /// `VOICE OFFER <#chan> <token> [:endpoint]` (§16, WEFT-RT) — the answer to
+    /// `VOICE JOIN`: a short-lived media token (bearing `speak`/`listen`) plus
+    /// the SFU endpoint/connection hints in the trailing (empty for an embedded
+    /// SFU reachable at the session host). The client then negotiates WebRTC via
+    /// `VOICE DESC`.
+    VoiceOffer {
+        channel: ChannelName,
+        token: String,
+        endpoint: Option<String>,
+    },
+    /// `VOICE STATE <#chan> <user@net> <join|leave|update>` (§16) — voice-room
+    /// presence, distinct from the text `MEMBER` roster. `mute=`/`deaf=`/
+    /// `speaking=` flag tags carry per-participant state (emitted as `yes` only
+    /// when set; absence = false). A full snapshot on (re)join is a `BATCH` of
+    /// these; live changes are single `update` lines.
+    VoiceState {
+        channel: ChannelName,
+        user: UserRef,
+        action: VoiceAction,
+        muted: bool,
+        deaf: bool,
+        speaking: bool,
+    },
+    /// `VOICE DESC <#chan> :<sdp>` (§16) — the SFU's SDP **answer** to the
+    /// client's `VOICE DESC` offer. Symmetric with the command (spec §16 uses
+    /// `VOICE DESC` both directions); the raw SDP rides the trailing.
+    VoiceDesc {
+        channel: ChannelName,
+        sdp: String,
+    },
+    /// `VOICE CAND <#chan> :<ice-candidate>` (§16) — a trickle-ICE candidate
+    /// from the SFU. Unused by the non-trickle default (candidates ride the
+    /// answer SDP); present so trickle needs no new wire form.
+    VoiceCand {
+        channel: ChannelName,
+        candidate: String,
+    },
     Err(ErrEvent),
     /// Any event outside the known set — MUST be ignored by clients.
     Unknown {
         verb: String,
     },
+}
+
+/// A presence-style boolean flag tag (`<key>=yes`): read `true` iff the tag is
+/// present and equal to `yes` (case-insensitive, lenient-in); serializers emit
+/// it only when `true`, so absence means `false`.
+fn flag_tag(line: &Line, key: &str) -> bool {
+    line.tags
+        .get(key)
+        .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
 }
 
 /// Optional numeric tag (`retry-after=`, `max=`).
@@ -911,6 +957,38 @@ impl Event {
                     reason: line.tags.get("reason").filter(|v| !v.is_empty()).cloned(),
                 })
             }
+            "VOICE" => {
+                let mut args = Args::new(line, "VOICE");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "OFFER" => Ok(Event::VoiceOffer {
+                        channel: args.req("channel")?.parse()?,
+                        token: args.req("token")?.to_string(),
+                        endpoint: args.trailing_opt(),
+                    }),
+                    "STATE" => Ok(Event::VoiceState {
+                        channel: args.req("channel")?.parse()?,
+                        user: args.req("user")?.parse()?,
+                        action: args.req("action")?.parse()?,
+                        muted: flag_tag(line, "mute"),
+                        deaf: flag_tag(line, "deaf"),
+                        speaking: flag_tag(line, "speaking"),
+                    }),
+                    "DESC" => Ok(Event::VoiceDesc {
+                        channel: args.req("channel")?.parse()?,
+                        sdp: args.trailing_req("sdp")?.to_string(),
+                    }),
+                    "CAND" => Ok(Event::VoiceCand {
+                        channel: args.req("channel")?.parse()?,
+                        candidate: args.trailing_req("candidate")?.to_string(),
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "VOICE",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
             verb => Ok(Event::Unknown {
                 verb: verb.to_string(),
             }),
@@ -1325,6 +1403,53 @@ impl Event {
                     None,
                 )
             }
+            Event::VoiceOffer {
+                channel,
+                token,
+                endpoint,
+            } => (
+                "VOICE",
+                vec!["OFFER".to_string(), channel.to_string(), token.clone()],
+                endpoint.clone(),
+            ),
+            Event::VoiceState {
+                channel,
+                user,
+                action,
+                muted,
+                deaf,
+                speaking,
+            } => {
+                if *muted {
+                    tags.insert("mute".to_string(), "yes".to_string());
+                }
+                if *deaf {
+                    tags.insert("deaf".to_string(), "yes".to_string());
+                }
+                if *speaking {
+                    tags.insert("speaking".to_string(), "yes".to_string());
+                }
+                (
+                    "VOICE",
+                    vec![
+                        "STATE".to_string(),
+                        channel.to_string(),
+                        user.to_string(),
+                        action.to_string(),
+                    ],
+                    None,
+                )
+            }
+            Event::VoiceDesc { channel, sdp } => (
+                "VOICE",
+                vec!["DESC".to_string(), channel.to_string()],
+                Some(sdp.clone()),
+            ),
+            Event::VoiceCand { channel, candidate } => (
+                "VOICE",
+                vec!["CAND".to_string(), channel.to_string()],
+                Some(candidate.clone()),
+            ),
             Event::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown event"));
             }
@@ -1977,13 +2102,97 @@ mod tests {
     }
 
     #[test]
+    fn voice_events_round_trip() {
+        // VOICE OFFER with endpoint hints in the trailing, labeled as the
+        // direct answer to a VOICE JOIN.
+        let offer = Reply::with_label(
+            Event::VoiceOffer {
+                channel: "#gaming/lounge".parse().unwrap(),
+                token: "vtok-01H".into(),
+                endpoint: Some("stun:sfu.hda.example:3478".into()),
+            },
+            "v1",
+        );
+        assert_eq!(
+            offer.serialize().unwrap(),
+            "@label=v1 VOICE OFFER #gaming/lounge vtok-01H :stun:sfu.hda.example:3478"
+        );
+        round_trip(&offer);
+
+        // Endpoint-less offer (embedded SFU, reachable at the session host).
+        round_trip(&Reply::new(Event::VoiceOffer {
+            channel: "#general".parse().unwrap(),
+            token: "vtok-2".into(),
+            endpoint: None,
+        }));
+
+        // VOICE STATE flags emit only when set; a speaking participant.
+        let speaking = Reply::new(Event::VoiceState {
+            channel: "#general".parse().unwrap(),
+            user: "alice@hda.example".parse().unwrap(),
+            action: VoiceAction::Update,
+            muted: false,
+            deaf: false,
+            speaking: true,
+        });
+        let wire = speaking.serialize().unwrap();
+        assert!(wire.contains("speaking=yes"), "{wire}");
+        assert!(!wire.contains("mute="), "unset flags omitted: {wire}");
+        round_trip(&speaking);
+
+        // A muted+deafened join, and a bare leave (all flags false → no tags).
+        round_trip(&Reply::new(Event::VoiceState {
+            channel: "#general".parse().unwrap(),
+            user: "bob@peer.example".parse().unwrap(),
+            action: VoiceAction::Join,
+            muted: true,
+            deaf: true,
+            speaking: false,
+        }));
+        let leave = Reply::new(Event::VoiceState {
+            channel: "#general".parse().unwrap(),
+            user: "bob@peer.example".parse().unwrap(),
+            action: VoiceAction::Leave,
+            muted: false,
+            deaf: false,
+            speaking: false,
+        });
+        assert_eq!(
+            leave.serialize().unwrap(),
+            "VOICE STATE #general bob@peer.example leave"
+        );
+        round_trip(&leave);
+
+        // Server-side DESC (the SFU's answer) + CAND, symmetric with the command
+        // side; raw SDP survives the trailing.
+        let answer = Reply::with_label(
+            Event::VoiceDesc {
+                channel: "#general".parse().unwrap(),
+                sdp: "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\na=sendrecv\r\n".into(),
+            },
+            "v3",
+        );
+        let wire = answer.serialize().unwrap();
+        assert!(!wire.contains('\n'), "SDP newlines escaped: {wire}");
+        round_trip(&answer);
+        round_trip(&Reply::new(Event::VoiceCand {
+            channel: "#general".parse().unwrap(),
+            candidate: "candidate:2 1 UDP 2130706430 198.51.100.7 40000 typ srflx".into(),
+        }));
+
+        assert!(Reply::parse("VOICE OFFER #general").is_err()); // token required
+        assert!(Reply::parse("VOICE STATE #general alice@hda.example frob").is_err());
+        assert!(Reply::parse("VOICE DESC #general").is_err()); // sdp required
+        assert!(Reply::parse("VOICE FROB #general").is_err());
+    }
+
+    #[test]
     fn unknown_event_is_ignored_not_error() {
-        // VOICE is a WEFT-RT event (M6+) — still unknown here.
-        let reply = Reply::parse("@label=l1 VOICE OFFER tok-9 :ready").unwrap();
+        let reply = Reply::parse("@label=l1 QUUX foo bar :ready").unwrap();
         assert_eq!(
             reply.event,
             Event::Unknown {
-                verb: "VOICE".into()
+                verb: "QUUX".into()
             }
         );
         assert_eq!(reply.label.as_deref(), Some("l1")); // label still visible for correlation

@@ -1,0 +1,19 @@
+[package]
+name = "weft-rt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WEFT-RT voice SFU (§16): the reference WebrtcSfu backend implementing weft-core's VoiceBackend port. Owns the UDP/DTLS/ICE — the media plane."
+
+[dependencies]
+weft-core = { path = "../weft-core" }
+weft-proto = { path = "../weft-proto" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+webrtc = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

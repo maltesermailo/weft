@@ -264,6 +264,20 @@ impl ChannelHandle {
             .await;
     }
 
+    /// §16 broadcast a non-stored event **attributed to `session`**: that
+    /// session's own forwarder skips it (it already sent its direct response),
+    /// every other member receives it. Used for `VOICE STATE` — the actor gets a
+    /// labeled ack directly while co-members see the voice-roster change.
+    pub async fn announce_as(&self, session: SessionId, event: Event) {
+        let _ = self
+            .inbox
+            .send(Cmd::Announce {
+                origin: session,
+                event: Box::new(event),
+            })
+            .await;
+    }
+
     /// §11.4 ingest a verified remote event (see [`Cmd::Ingest`]).
     pub async fn ingest(&self, origin: SessionId, record: EventRecord, event: Event) {
         let _ = self

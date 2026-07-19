@@ -189,6 +189,10 @@ pub struct ServerCtx {
     /// §11.10 per-account cooldown on `FEDERATE` — a light dial-storm guard even
     /// under the open trigger policy (§6).
     federate_cooldown: std::sync::Mutex<HashMap<Account, std::time::Instant>>,
+    /// §16 WEFT-RT voice: the SFU backend weftd installs behind a feature flag.
+    /// `None` = this server has no voice (advertises no `features=voice`; voice
+    /// verbs answer `UNSUPPORTED`). Set once at boot, like the sink ports.
+    voice: std::sync::OnceLock<Arc<dyn crate::voice::VoiceBackend>>,
 }
 
 /// §11.8 a blob to mirror from a bridge peer, handed core→weftd.
@@ -330,7 +334,18 @@ impl ServerCtx {
             backfill_tx: std::sync::OnceLock::new(),
             backfill_demand: std::sync::Mutex::new(Vec::new()),
             federate_cooldown: std::sync::Mutex::new(HashMap::new()),
+            voice: std::sync::OnceLock::new(),
         }
+    }
+
+    /// weftd installs the §16 voice SFU backend (enables voice; `features=voice`).
+    pub fn set_voice_backend(&self, backend: Arc<dyn crate::voice::VoiceBackend>) {
+        let _ = self.voice.set(backend);
+    }
+
+    /// The installed voice backend, or `None` on a zero-voice server (§16).
+    pub(crate) fn voice_backend(&self) -> Option<&Arc<dyn crate::voice::VoiceBackend>> {
+        self.voice.get()
     }
 
     /// weftd installs the auto-federation dialer sink (enables `FEDERATE`).

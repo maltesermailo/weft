@@ -1,0 +1,300 @@
+//! §16 WEFT-RT voice signaling: `VOICE JOIN/LEAVE/DESC/CAND`.
+//!
+//! Authority lives here, not in the SFU (invariant 4): a join is gated on
+//! channel membership + the M7 mute/ban deny-list + `listen`/`speak` caps
+//! *before* the [`VoiceBackend`](crate::voice::VoiceBackend) is ever asked to
+//! allocate a peer. The backend (weft-rt's `WebrtcSfu`, or a future adapter)
+//! owns the WebRTC negotiation; core only relays SDP/ICE to it and fans
+//! `VOICE STATE` out to the room. A server with no backend answers
+//! `UNSUPPORTED` (it also advertises no `features=voice`).
+
+use super::*;
+
+use weft_proto::VoiceAction;
+
+use crate::voice::{VoiceError, VoiceJoinReq};
+
+impl<S: ControlStream> Session<S> {
+    /// `VOICE JOIN <#chan>` — authorize, reserve an SFU slot, answer
+    /// `VOICE OFFER` (the labeled ack), and tell co-members via `VOICE STATE`.
+    pub(super) async fn on_voice_join(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if self.ctx.voice_backend().is_none() {
+            return self
+                .unsupported(label, "voice is not enabled on this server")
+                .await;
+        }
+        // Invariant 1: you can only join voice for a channel you're in; unknown
+        // and unjoined collapse to NO-SUCH-TARGET (no existence leak).
+        if !self.joined.contains_key(&channel) {
+            return self.no_such_target(label).await;
+        }
+
+        // §6.7 moderation: a ban denies voice outright; a mute removes `speak`.
+        let scopes = covering_scopes(&channel);
+        match self
+            .ctx
+            .moderation
+            .is_moderated(&account, &scopes, ModKind::Ban)
+            .await
+        {
+            Ok(true) => {
+                self.send_err(label, ErrCode::Forbidden, Some("banned"), "you are banned")
+                    .await?;
+                return Ok(Flow::Continue);
+            }
+            Ok(false) => {}
+            Err(e) => return self.internal(label, &e).await,
+        }
+        let muted = match self
+            .ctx
+            .moderation
+            .is_moderated(&account, &scopes, ModKind::Mute)
+            .await
+        {
+            Ok(muted) => muted,
+            Err(e) => return self.internal(label, &e).await,
+        };
+
+        let (can_listen, can_speak) = match self.voice_caps(&channel, &account, muted).await {
+            Ok(pair) => pair,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        if !can_listen {
+            return self.cap_required(label, "listen").await;
+        }
+
+        let backend = self.ctx.voice_backend().expect("checked above").clone();
+        let grant = match backend
+            .join(VoiceJoinReq {
+                channel: channel.clone(),
+                account: account.clone(),
+                session: self.id,
+                can_speak,
+            })
+            .await
+        {
+            Ok(grant) => grant,
+            Err(VoiceError::Unavailable) => {
+                self.send_err(label, ErrCode::Internal, None, "voice unavailable")
+                    .await?;
+                return Ok(Flow::Continue);
+            }
+            Err(VoiceError::BadDescription) => {
+                self.send_err(label, ErrCode::Malformed, None, "voice rejected")
+                    .await?;
+                return Ok(Flow::Continue);
+            }
+        };
+
+        self.voice.insert(channel.clone());
+        self.send_event(
+            label,
+            Event::VoiceOffer {
+                channel: channel.clone(),
+                token: grant.token,
+                endpoint: grant.endpoint,
+            },
+        )
+        .await?;
+        // A listen-only participant renders muted to the room.
+        self.announce_voice_state(&channel, &account, VoiceAction::Join, !can_speak)
+            .await;
+        Ok(Flow::Continue)
+    }
+
+    /// `VOICE LEAVE <#chan>` — tear the peer down, ack with `VOICE STATE leave`,
+    /// and tell co-members. Not-in-that-room is the uniform NO-SUCH-TARGET.
+    pub(super) async fn on_voice_leave(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+    ) -> io::Result<Flow> {
+        if !self.voice.remove(&channel) {
+            return self.no_such_target(label).await;
+        }
+        let State::Ready { account } = self.state.clone() else {
+            unreachable!("voice verbs only dispatch in READY");
+        };
+        if let Some(backend) = self.ctx.voice_backend() {
+            backend.leave(self.id, &channel).await;
+        }
+        // Co-members learn via an origin=self broadcast (our own copy is skipped);
+        // the caller gets the labeled leave directly as its ack.
+        self.announce_voice_state(&channel, &account, VoiceAction::Leave, false)
+            .await;
+        let user = UserRef::new(account, self.ctx.info.network.clone());
+        self.send_event(
+            label,
+            Event::VoiceState {
+                channel,
+                user,
+                action: VoiceAction::Leave,
+                muted: false,
+                deaf: false,
+                speaking: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// `VOICE DESC <#chan> :<sdp>` — relay the client's SDP offer to the SFU and
+    /// return its answer as a `VOICE DESC` event (symmetric verb, §16).
+    pub(super) async fn on_voice_desc(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        sdp: String,
+    ) -> io::Result<Flow> {
+        let Some(backend) = self.ctx.voice_backend().cloned() else {
+            return self
+                .unsupported(label, "voice is not enabled on this server")
+                .await;
+        };
+        // Must have an active voice slot in the channel (invariant 1 otherwise).
+        if !self.voice.contains(&channel) {
+            return self.no_such_target(label).await;
+        }
+        match backend.describe(self.id, &channel, sdp).await {
+            Ok(answer) => {
+                self.send_event(
+                    label,
+                    Event::VoiceDesc {
+                        channel,
+                        sdp: answer,
+                    },
+                )
+                .await?;
+                Ok(Flow::Continue)
+            }
+            Err(VoiceError::BadDescription) => {
+                self.send_err(label, ErrCode::Malformed, None, "bad SDP")
+                    .await?;
+                Ok(Flow::Continue)
+            }
+            Err(VoiceError::Unavailable) => {
+                self.send_err(label, ErrCode::Internal, None, "voice unavailable")
+                    .await?;
+                Ok(Flow::Continue)
+            }
+        }
+    }
+
+    /// `VOICE CAND <#chan> :<candidate>` — hand a trickle-ICE candidate to the
+    /// SFU. No direct response beyond the label echo on error.
+    pub(super) async fn on_voice_cand(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        candidate: String,
+    ) -> io::Result<Flow> {
+        let Some(backend) = self.ctx.voice_backend().cloned() else {
+            return self
+                .unsupported(label, "voice is not enabled on this server")
+                .await;
+        };
+        if !self.voice.contains(&channel) {
+            return self.no_such_target(label).await;
+        }
+        if let Err(VoiceError::BadDescription) =
+            backend.candidate(self.id, &channel, candidate).await
+        {
+            self.send_err(label, ErrCode::Malformed, None, "bad candidate")
+                .await?;
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// §16 disconnect cleanup: drop this session's peer in `channel` and tell the
+    /// room (SENTINEL broadcast — the leaving session is going away). Idempotent.
+    pub(super) async fn teardown_voice(&self, channel: &ChannelName) {
+        if let Some(backend) = self.ctx.voice_backend() {
+            backend.leave(self.id, channel).await;
+        }
+        let Some(account) = self.registered.clone() else {
+            return;
+        };
+        if let Some(joined) = self.joined.get(channel) {
+            let user = UserRef::new(account, self.ctx.info.network.clone());
+            joined
+                .handle
+                .announce(Event::VoiceState {
+                    channel: channel.clone(),
+                    user,
+                    action: VoiceAction::Leave,
+                    muted: false,
+                    deaf: false,
+                    speaking: false,
+                })
+                .await;
+        }
+    }
+
+    /// The `(can_listen, can_speak)` pair for a join. **Open** channels let any
+    /// member do both (speaking still subject to mutes). A **restricted** channel
+    /// gates each on its cap (`listen` to hear, `speak` to talk) — mirroring the
+    /// posting gate — with a mute always removing `speak`.
+    async fn voice_caps(
+        &self,
+        channel: &ChannelName,
+        account: &Account,
+        muted: bool,
+    ) -> Result<(bool, bool), weft_store::StoreError> {
+        let restricted = self
+            .ctx
+            .channel_store
+            .channel(channel)
+            .await?
+            .map(|c| c.restricted)
+            .unwrap_or(false);
+        if !restricted {
+            return Ok((true, !muted));
+        }
+        let scope = TokenScope::Channel(channel.to_string());
+        let now = unix_now();
+        let can_listen = self
+            .ctx
+            .account_has_cap(account, &Capability::Listen, &scope, now)
+            .await?;
+        let can_speak = !muted
+            && self
+                .ctx
+                .account_has_cap(account, &Capability::Speak, &scope, now)
+                .await?;
+        Ok((can_listen, can_speak))
+    }
+
+    /// Broadcast a `VOICE STATE` for `account` to `channel`'s co-members,
+    /// attributed to this session so its own forwarder skips the copy (the actor
+    /// gets its ack directly). No-op if the channel handle is gone.
+    async fn announce_voice_state(
+        &self,
+        channel: &ChannelName,
+        account: &Account,
+        action: VoiceAction,
+        muted: bool,
+    ) {
+        if let Some(joined) = self.joined.get(channel) {
+            let user = UserRef::new(account.clone(), self.ctx.info.network.clone());
+            joined
+                .handle
+                .announce_as(
+                    self.id,
+                    Event::VoiceState {
+                        channel: channel.clone(),
+                        user,
+                        action,
+                        muted,
+                        deaf: false,
+                        speaking: false,
+                    },
+                )
+                .await;
+        }
+    }
+}
