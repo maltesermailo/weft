@@ -7224,6 +7224,7 @@ dependencies = [
  "weft-crypto",
  "weft-irc",
  "weft-proto",
+ "weft-rt",
  "weft-store",
  "weft-transport",
 ]

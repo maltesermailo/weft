@@ -97,6 +97,41 @@ impl Server {
     }
 }
 
+/// §16 build the voice SFU backend from config, or `None` when voice is off /
+/// this build lacks the `voice` feature. A construction failure logs + degrades
+/// to no-voice rather than aborting the whole server.
+#[cfg(feature = "voice")]
+fn build_voice_sfu(cfg: &config::Voice) -> Option<std::sync::Arc<dyn weft_core::VoiceBackend>> {
+    if !cfg.enabled {
+        return None;
+    }
+    match weft_rt::WebrtcSfu::new(weft_rt::SfuConfig {
+        udp_port_min: cfg.udp_port_min,
+        udp_port_max: cfg.udp_port_max,
+        ice_servers: cfg.stun.clone(),
+    }) {
+        Ok(sfu) => {
+            info!(
+                udp = %format!("{}-{}", cfg.udp_port_min, cfg.udp_port_max),
+                "voice SFU enabled (§16)"
+            );
+            Some(std::sync::Arc::new(sfu))
+        }
+        Err(e) => {
+            warn!("voice SFU failed to start, continuing without voice: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "voice"))]
+fn build_voice_sfu(cfg: &config::Voice) -> Option<std::sync::Arc<dyn weft_core::VoiceBackend>> {
+    if cfg.enabled {
+        warn!("[voice] enabled in config but weftd was built without the `voice` feature");
+    }
+    None
+}
+
 /// Validate config, load identity + TLS, spawn actors and accept loops.
 pub async fn start(config: Config) -> anyhow::Result<Server> {
     let network: weft_proto::NetworkName = config
@@ -154,10 +189,18 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
     // Seed copy for the outbound dialer (identity is consumed by ServerCtx).
     let identity_seed = identity.seed_b64();
 
+    // §16 build the voice SFU up front (feature-gated) so WELCOME advertises
+    // `features=voice` only when the SFU actually came up; it's installed into
+    // `ctx` once boot returns it.
+    let voice_sfu = build_voice_sfu(&config.voice);
+    let mut features = vec!["presence".to_string()]; // media/e2ee/backfill: later
+    if voice_sfu.is_some() {
+        features.push("voice".to_string());
+    }
     let info = ServerInfo {
         network: network.clone(),
         motd: config.motd.clone(),
-        features: vec!["presence".to_string()], // media/voice/e2ee/backfill: later
+        features,
     };
     // Backend selection. Both paths run the same seed-then-load boot:
     // config channels are upserted, then the registry is built from
@@ -254,6 +297,12 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         dm_policy = %dm_policy,
         "channel registry loaded from store"
     );
+
+    // §16 install the voice SFU backend (enables the VOICE verbs; already
+    // advertised in WELCOME features above).
+    if let Some(sfu) = voice_sfu {
+        ctx.set_voice_backend(sfu);
+    }
 
     // TLS: one hot-swappable resolver, fed from ACME / a PEM file / self-signed.
     let challenges = tls::Challenges::default();

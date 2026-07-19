@@ -134,6 +134,20 @@ enabled = false
 [media]
 dir = "/var/lib/weft/blobs"
 
+# ── voice (§16 WEFT-RT) ──────────────────────────────────────────────────────
+# The embedded SFU (Selective Forwarding Unit). Needs a `voice`-feature build
+# (`cargo build --features voice`); otherwise `enabled = true` just warns. Off =
+# a zero-voice, fully-conformant server (advertises no `features=voice`).
+[voice]
+enabled = false
+# UDP port range the SFU binds for media. Open this range to the internet (and
+# forward it through NAT) for voice to reach clients.
+udp_port_min = 40000
+udp_port_max = 40100
+# STUN servers advertised to clients for their server-reflexive candidates.
+# (TURN, for UDP-blocked clients, is a later addition.)
+stun = ["stun:stun.l.google.com:19302"]
+
 # ── federation (§11) ─────────────────────────────────────────────────────────
 # How this network treats INBOUND bridge sessions. Default: bridge with nobody.
 [federation]

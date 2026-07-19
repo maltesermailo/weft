@@ -194,9 +194,24 @@ C: VOICE LEAVE #gaming/lounge                 → SFU tears the peer down; VOICE
     *Deferred to 1c:* SFU-initiated renegotiation (an offer the server pushes) so
     a *new* publisher reaches already-connected peers — today a room converges
     when peers join in order; a late publisher needs the subscriber to re-`describe`.
-  - **M-voice-1c — weftd wiring + conformance.** `voice` feature flag, `[voice]`
-    config, SFU spawn + `set_voice_backend`. *Green:* a loopback/two-native-peer
-    test — two sessions join, audio forwards both ways.
+  - **M-voice-1c ✅ (2026-07-20) — weftd wiring + conformance.** A `voice` Cargo
+    feature (`dep:weft-rt`, off by default — the lean build pulls neither webrtc
+    nor its tree); a `[voice]` config block (`enabled`, UDP port range, STUN);
+    `build_voice_sfu` constructs the SFU up front so WELCOME advertises
+    `features=voice` only when it came up, then `ctx.set_voice_backend` installs
+    it once boot returns `ctx`. A failed SFU build degrades to no-voice (logged),
+    never aborts boot; `enabled` without the feature just warns. *Green:* two
+    QUIC conformance tests — the default server advertises no voice + answers
+    `VOICE JOIN` with `UNSUPPORTED`; the `voice`-feature server advertises voice,
+    `VOICE JOIN` → a real `VOICE OFFER` (the SFU allocated a peer), and a bad
+    `VOICE DESC` is rejected `MALFORMED` — the whole control→SFU path over real
+    QUIC. clippy `-D warnings` clean on **both** build configs; `weftd.example.toml`
+    documents `[voice]`. *Deferred to a follow-up (was noted in 1b):* SFU-initiated
+    renegotiation for late joiners; a two-live-weftd media-forwarding conformance
+    (media forwarding itself is already proven by the weft-rt integration test).
+
+**M-voice-1 is complete** (1a+1b+1c): authorized voice signaling over QUIC drives
+a real webrtc SFU that forwards Opus between participants, behind a feature flag.
 - **M-voice-2 — web client.** `getUserMedia` → `RTCPeerConnection`, SDP/ICE over
   the existing WebSocket, a voice-channel panel: join/leave, member list, speaking
   ring, local mute. *First real usable voice (browser ↔ browser through the SFU).*

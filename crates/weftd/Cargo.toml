@@ -11,6 +11,10 @@ description = "WEFT reference server binary: config, acceptors, telemetry."
 # and serve it from weftd. Off by default so a headless build stays lean and
 # needs no prebuilt SPA.
 web-ui = ["dep:rust-embed"]
+# §16 WEFT-RT voice: compile + embed the webrtc SFU (weft-rt). Off by default so
+# a headless build pulls neither webrtc nor its dep tree; a zero-voice server
+# stays conformant (advertises no `features=voice`).
+voice = ["dep:weft-rt"]
 
 [dependencies]
 weft-proto = { path = "../weft-proto" }
@@ -20,6 +24,8 @@ weft-store = { path = "../weft-store", features = ["postgres"] }
 weft-transport = { path = "../weft-transport" }
 weft-irc = { path = "../weft-irc" }
 weft-admin = { path = "../weft-admin" }
+# §16 voice SFU — optional, behind the `voice` feature (pulls webrtc).
+weft-rt = { path = "../weft-rt", optional = true }
 tokio = { workspace = true }
 quinn = { workspace = true }
 rcgen = { workspace = true }

@@ -49,6 +49,8 @@ pub struct Config {
     pub admin: Admin,
     /// §13 media blob storage.
     pub media: Media,
+    /// §16 voice SFU (off by default).
+    pub voice: Voice,
 }
 
 /// Embedded admin panel toggle. (Standalone `weft-admin` has its own config.)
@@ -66,6 +68,33 @@ pub struct Media {
     /// Filesystem directory for the content-addressed blob store. Unset =
     /// in-memory (ephemeral; pairs with `storage.backend = "memory"`).
     pub dir: Option<PathBuf>,
+}
+
+/// §16 WEFT-RT voice. The embedded SFU is compiled only with the `voice` build
+/// feature; without it, `enabled = true` just logs a warning and voice stays
+/// off. `enabled = false` (the default) = a zero-voice, fully-conformant server.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Voice {
+    /// Turn the SFU on (also needs the `voice` build feature).
+    pub enabled: bool,
+    /// UDP port range the SFU binds for media (its host/srflx candidates). Open
+    /// this range to the internet for voice to work behind NAT.
+    pub udp_port_min: u16,
+    pub udp_port_max: u16,
+    /// STUN servers advertised to clients for server-reflexive candidates.
+    pub stun: Vec<String>,
+}
+
+impl Default for Voice {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            udp_port_min: 40000,
+            udp_port_max: 40100,
+            stun: vec!["stun:stun.l.google.com:19302".to_string()],
+        }
+    }
 }
 
 /// §10.2 built-in ACME. Validates over HTTP-01, so the HTTP listener
@@ -285,6 +314,7 @@ impl Default for Config {
             acme: Acme::default(),
             admin: Admin::default(),
             media: Media::default(),
+            voice: Voice::default(),
         }
     }
 }

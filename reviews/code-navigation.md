@@ -235,8 +235,19 @@ crate (webrtc 0.17.1; only built with weftd's `voice` feature):
   loopback (host ICE, no STUN); one asserts a gathered answer, one asserts Opus
   actually forwards publisher→subscriber.
 
+weftd wiring (M-voice-1c): the `voice` Cargo feature gates the optional
+`weft-rt` dep (default build pulls no webrtc). `weftd/src/lib.rs ::
+build_voice_sfu` (two `#[cfg]` arms) constructs the SFU from `[voice]` config
+(`weftd/src/config.rs :: Voice`); `start` advertises `features=voice` iff it came
+up, then `ctx.set_voice_backend` installs it. Conformance:
+`tests/conformance/main.rs` — `voice_disabled_by_default_is_unsupported` (always)
++ `voice_enabled_signaling_over_quic` (`#[cfg(feature = "voice")]`, run with
+`--features voice`).
+
 | Change | Touch |
 |---|---|
 | Voice signaling authz | `weft-core/src/session/voice.rs` (never the SFU) |
 | The SFU seam / a new backend (e.g. LiveKit) | implement `VoiceBackend` (`weft-core/src/voice.rs`); the default lives in `weft-rt` |
 | Voice wire form | `weft-proto` command.rs/event.rs **+ round-trip test first** |
+| Voice config / enabling | `weftd/src/config.rs :: Voice` + `lib.rs :: build_voice_sfu`; the `voice` feature in `weftd/Cargo.toml` |
+| The SFU media engine (forwarding, codecs, ICE) | `weft-rt/src/sfu.rs` — run its tests with `cargo test -p weft-rt` |

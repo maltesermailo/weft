@@ -2022,3 +2022,94 @@ async fn federated_backfill_streams_over_the_bridge() {
     let _ = std::fs::remove_file(&f_key_path);
     let _ = std::fs::remove_file(&h_key_path);
 }
+
+// ---- §16 WEFT-RT voice signaling (M-voice-1c) ----
+
+/// A zero-voice server (the default) advertises no `features=voice` and answers
+/// the VOICE verbs with UNSUPPORTED.
+#[tokio::test]
+async fn voice_disabled_by_default_is_unsupported() {
+    let server = start_server(&["#general"]).await;
+    let mut client = QuicClient::connect(server.quic_addr).await;
+
+    client.send("HELLO weft/1").await;
+    let Event::Welcome { features, .. } = client.recv().await.event else {
+        panic!("expected WELCOME");
+    };
+    assert!(
+        !features.iter().any(|f| f == "voice"),
+        "no-voice server must not advertise voice: {features:?}"
+    );
+    client.send(&format!("REGISTER ada :{PASSWORD}")).await;
+    assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+
+    client.send("@label=v VOICE JOIN #general").await;
+    let reply = client
+        .recv_until(|r| matches!(r.event, Event::Err(_)))
+        .await;
+    let Event::Err(err) = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(err.code, ErrCode::Unsupported);
+    assert_eq!(reply.label.as_deref(), Some("v"));
+
+    server.shutdown().await;
+}
+
+/// With the SFU enabled: WELCOME advertises voice, `VOICE JOIN` returns a real
+/// `VOICE OFFER` (the SFU allocated a peer connection), and a bad `VOICE DESC`
+/// is rejected by the SFU over QUIC — the whole control→SFU path end to end.
+#[cfg(feature = "voice")]
+#[tokio::test]
+async fn voice_enabled_signaling_over_quic() {
+    let server = start_with(&["#general"], |c| {
+        c.voice.enabled = true;
+        c.voice.udp_port_min = 42000;
+        c.voice.udp_port_max = 42099;
+        c.voice.stun = vec![]; // offline: host candidates only
+    })
+    .await;
+    let mut client = QuicClient::connect(server.quic_addr).await;
+
+    client.send("HELLO weft/1").await;
+    let Event::Welcome { features, .. } = client.recv().await.event else {
+        panic!("expected WELCOME");
+    };
+    assert!(
+        features.iter().any(|f| f == "voice"),
+        "voice server advertises it: {features:?}"
+    );
+    client.send(&format!("REGISTER ada :{PASSWORD}")).await;
+    assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+    assert!(matches!(
+        client.recv().await.event,
+        Event::MediaToken { .. }
+    ));
+
+    client.join("#general").await;
+
+    client.send("@label=j VOICE JOIN #general").await;
+    let reply = client
+        .recv_until(|r| matches!(r.event, Event::VoiceOffer { .. }))
+        .await;
+    let Event::VoiceOffer { channel, token, .. } = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(channel.as_str(), "#general");
+    assert!(!token.is_empty(), "VOICE OFFER carries a media token");
+    assert_eq!(reply.label.as_deref(), Some("j"));
+
+    // A malformed SDP reaches the SFU and is rejected as MALFORMED.
+    client
+        .send("@label=d VOICE DESC #general :not-a-valid-sdp")
+        .await;
+    let reply = client
+        .recv_until(|r| matches!(r.event, Event::Err(_)))
+        .await;
+    let Event::Err(err) = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(err.code, ErrCode::Malformed);
+
+    server.shutdown().await;
+}
