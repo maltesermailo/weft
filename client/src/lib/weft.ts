@@ -125,7 +125,13 @@ export type WeftEvent =
       categories: string[];
       federation: boolean;
     }
-  | { kind: "channel-layout"; channel: string; category: string | null; position: number }
+  | {
+      kind: "channel-layout";
+      channel: string;
+      category: string | null;
+      position: number;
+      channel_kind: string;
+    }
   | { kind: "channel-renamed"; old: string; new: string }
   | {
       kind: "manifest";
@@ -182,6 +188,18 @@ export type WeftEvent =
       by: string | null;
       reason: string | null;
     }
+  | { kind: "voice-offer"; channel: string; token: string; endpoint: string | null }
+  | {
+      kind: "voice-state";
+      channel: string;
+      user: string;
+      action: string;
+      muted: boolean;
+      deaf: boolean;
+      speaking: boolean;
+    }
+  | { kind: "voice-desc"; channel: string; sdp: string }
+  | { kind: "voice-cand"; channel: string; candidate: string }
   | { kind: "error"; code: string; text: string }
   | { kind: "closed"; reason: string }
   | { kind: "raw"; line: string };
@@ -233,6 +251,22 @@ export async function notify(title: string, body: string) {
 
 export function join(channel: string) {
   return invoke("join", { channel });
+}
+
+// §16 WEFT-RT voice signaling. The SDP/ICE payloads ride these control
+// commands; the media path is a separate browser WebRTC connection (see
+// `voice.svelte.ts`).
+export function voiceJoin(channel: string) {
+  return invoke("voice_join", { channel });
+}
+export function voiceLeave(channel: string) {
+  return invoke("voice_leave", { channel });
+}
+export function voiceDesc(channel: string, sdp: string) {
+  return invoke("voice_desc", { channel, sdp });
+}
+export function voiceCand(channel: string, candidate: string) {
+  return invoke("voice_cand", { channel, candidate });
 }
 
 /// Auto-join every visible channel in a namespace (§6.2 NS JOIN).
@@ -489,8 +523,8 @@ export function part(channel: string) {
   return invoke("part", { channel });
 }
 
-export function channelCreate(channel: string, policy?: string) {
-  return invoke("channel_create", { channel, policy: policy ?? null });
+export function channelCreate(channel: string, policy?: string, kind?: string) {
+  return invoke("channel_create", { channel, policy: policy ?? null, kind: kind ?? null });
 }
 
 /// Change an existing channel's retention (§6.3). `purge` is required for some

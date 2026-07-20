@@ -640,15 +640,18 @@ impl ChannelStore for PgStore {
         &self,
         name: &ChannelName,
         policy: RetentionPolicy,
+        kind: weft_proto::ChannelKind,
     ) -> Result<(), StoreError> {
+        // §16 kind is set on insert only; a later upsert changes policy, not kind.
         sqlx::query(
             r#"
-            INSERT INTO weft_channels (name, policy) VALUES ($1, $2)
+            INSERT INTO weft_channels (name, policy, kind) VALUES ($1, $2, $3)
             ON CONFLICT (name) DO UPDATE SET policy = EXCLUDED.policy
             "#,
         )
         .bind(name.as_str())
         .bind(policy.to_string())
+        .bind(kind.to_string())
         .execute(&self.pool)
         .await
         .map_err(backend_err)?;
@@ -838,6 +841,10 @@ fn channel_from_row(row: &sqlx::postgres::PgRow) -> Result<ChannelRecord, StoreE
         restricted: row.get("restricted"),
         category: row.get("category"),
         position: row.get::<Option<i64>, _>("position").unwrap_or(0),
+        kind: row
+            .get::<Option<String>, _>("kind")
+            .and_then(|k| k.parse().ok())
+            .unwrap_or(weft_proto::ChannelKind::Text),
     })
 }
 

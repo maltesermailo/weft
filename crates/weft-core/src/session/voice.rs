@@ -28,10 +28,21 @@ impl<S: ControlStream> Session<S> {
                 .unsupported(label, "voice is not enabled on this server")
                 .await;
         }
-        // Invariant 1: you can only join voice for a channel you're in; unknown
-        // and unjoined collapse to NO-SUCH-TARGET (no existence leak).
-        if !self.joined.contains_key(&channel) {
+        // §16 the target must exist AND be a *voice* channel; missing / text /
+        // private all collapse to NO-SUCH-TARGET (invariant 1). Voice channels
+        // are entered here, never via a text JOIN.
+        let Some(handle) = self.ctx.registry.get(&channel) else {
             return self.no_such_target(label).await;
+        };
+        if self.channel_kind(&channel).await != ChannelKind::Voice {
+            return self.no_such_target(label).await;
+        }
+        // Re-join replaces any existing peer/subscription for this room.
+        if let Some(room) = self.voice.remove(&channel) {
+            room.forwarder.abort();
+            if let Some(backend) = self.ctx.voice_backend() {
+                backend.leave(self.id, &channel).await;
+            }
         }
 
         // §6.7 moderation: a ban denies voice outright; a mute removes `speak`.
@@ -91,7 +102,23 @@ impl<S: ControlStream> Session<S> {
             }
         };
 
-        self.voice.insert(channel.clone());
+        // Subscribe to the channel's broadcast so co-members' VOICE STATE reaches
+        // us — without becoming a text member (voice-only, §16).
+        let Some(events) = handle.subscribe().await else {
+            backend.leave(self.id, &channel).await;
+            self.send_err(label, ErrCode::Internal, None, "voice unavailable")
+                .await?;
+            return Ok(Flow::Continue);
+        };
+        let forwarder = spawn_forwarder(channel.clone(), events, self.events_tx.clone());
+        self.voice.insert(
+            channel.clone(),
+            VoiceRoom {
+                handle: handle.clone(),
+                forwarder,
+            },
+        );
+
         self.send_event(
             label,
             Event::VoiceOffer {
@@ -102,7 +129,7 @@ impl<S: ControlStream> Session<S> {
         )
         .await?;
         // A listen-only participant renders muted to the room.
-        self.announce_voice_state(&channel, &account, VoiceAction::Join, !can_speak)
+        self.announce_voice_state(&handle, &channel, &account, VoiceAction::Join, !can_speak)
             .await;
         Ok(Flow::Continue)
     }
@@ -114,9 +141,10 @@ impl<S: ControlStream> Session<S> {
         label: Option<String>,
         channel: ChannelName,
     ) -> io::Result<Flow> {
-        if !self.voice.remove(&channel) {
+        let Some(room) = self.voice.remove(&channel) else {
             return self.no_such_target(label).await;
-        }
+        };
+        room.forwarder.abort();
         let State::Ready { account } = self.state.clone() else {
             unreachable!("voice verbs only dispatch in READY");
         };
@@ -125,7 +153,7 @@ impl<S: ControlStream> Session<S> {
         }
         // Co-members learn via an origin=self broadcast (our own copy is skipped);
         // the caller gets the labeled leave directly as its ack.
-        self.announce_voice_state(&channel, &account, VoiceAction::Leave, false)
+        self.announce_voice_state(&room.handle, &channel, &account, VoiceAction::Leave, false)
             .await;
         let user = UserRef::new(account, self.ctx.info.network.clone());
         self.send_event(
@@ -157,7 +185,7 @@ impl<S: ControlStream> Session<S> {
                 .await;
         };
         // Must have an active voice slot in the channel (invariant 1 otherwise).
-        if !self.voice.contains(&channel) {
+        if !self.voice.contains_key(&channel) {
             return self.no_such_target(label).await;
         }
         match backend.describe(self.id, &channel, sdp).await {
@@ -198,7 +226,7 @@ impl<S: ControlStream> Session<S> {
                 .unsupported(label, "voice is not enabled on this server")
                 .await;
         };
-        if !self.voice.contains(&channel) {
+        if !self.voice.contains_key(&channel) {
             return self.no_such_target(label).await;
         }
         if let Err(VoiceError::BadDescription) =
@@ -210,29 +238,41 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
-    /// §16 disconnect cleanup: drop this session's peer in `channel` and tell the
-    /// room (SENTINEL broadcast — the leaving session is going away). Idempotent.
-    pub(super) async fn teardown_voice(&self, channel: &ChannelName) {
+    /// §16 disconnect cleanup: abort the room's forwarder, drop this session's
+    /// SFU peer, and tell the room (SENTINEL broadcast — the session is going
+    /// away). Called with the drained [`VoiceRoom`] from `cleanup`.
+    pub(super) async fn teardown_voice(&self, channel: &ChannelName, room: VoiceRoom) {
+        room.forwarder.abort();
         if let Some(backend) = self.ctx.voice_backend() {
             backend.leave(self.id, channel).await;
         }
         let Some(account) = self.registered.clone() else {
             return;
         };
-        if let Some(joined) = self.joined.get(channel) {
-            let user = UserRef::new(account, self.ctx.info.network.clone());
-            joined
-                .handle
-                .announce(Event::VoiceState {
-                    channel: channel.clone(),
-                    user,
-                    action: VoiceAction::Leave,
-                    muted: false,
-                    deaf: false,
-                    speaking: false,
-                })
-                .await;
-        }
+        let user = UserRef::new(account, self.ctx.info.network.clone());
+        room.handle
+            .announce(Event::VoiceState {
+                channel: channel.clone(),
+                user,
+                action: VoiceAction::Leave,
+                muted: false,
+                deaf: false,
+                speaking: false,
+            })
+            .await;
+    }
+
+    /// A channel's kind (§16); `Text` if unknown — fails safe so a store hiccup
+    /// never turns a text channel into a voice one.
+    pub(super) async fn channel_kind(&self, channel: &ChannelName) -> ChannelKind {
+        self.ctx
+            .channel_store
+            .channel(channel)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.kind)
+            .unwrap_or(ChannelKind::Text)
     }
 
     /// The `(can_listen, can_speak)` pair for a join. **Open** channels let any
@@ -269,32 +309,30 @@ impl<S: ControlStream> Session<S> {
         Ok((can_listen, can_speak))
     }
 
-    /// Broadcast a `VOICE STATE` for `account` to `channel`'s co-members,
+    /// Broadcast a `VOICE STATE` for `account` to `channel`'s voice subscribers,
     /// attributed to this session so its own forwarder skips the copy (the actor
-    /// gets its ack directly). No-op if the channel handle is gone.
+    /// gets its ack directly).
     async fn announce_voice_state(
         &self,
+        handle: &ChannelHandle,
         channel: &ChannelName,
         account: &Account,
         action: VoiceAction,
         muted: bool,
     ) {
-        if let Some(joined) = self.joined.get(channel) {
-            let user = UserRef::new(account.clone(), self.ctx.info.network.clone());
-            joined
-                .handle
-                .announce_as(
-                    self.id,
-                    Event::VoiceState {
-                        channel: channel.clone(),
-                        user,
-                        action,
-                        muted,
-                        deaf: false,
-                        speaking: false,
-                    },
-                )
-                .await;
-        }
+        let user = UserRef::new(account.clone(), self.ctx.info.network.clone());
+        handle
+            .announce_as(
+                self.id,
+                Event::VoiceState {
+                    channel: channel.clone(),
+                    user,
+                    action,
+                    muted,
+                    deaf: false,
+                    speaking: false,
+                },
+            )
+            .await;
     }
 }

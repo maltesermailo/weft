@@ -46,6 +46,7 @@ export type Channel = {
   lastRead?: string; // newest msgid we've marked read
   category?: string; // CHANNEL-LAYOUT grouping
   position?: number;
+  voice?: boolean; // §16 a voice-only channel (kind=voice) — entered via VOICE JOIN
   rosterLoaded?: boolean; // MEMBERS snapshot fetched
   pinnedIds?: string[]; // pinned msgids (§6.4)
 };

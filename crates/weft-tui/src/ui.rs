@@ -391,6 +391,7 @@ pub fn reply_entry(raw: String, reply: &Reply, me: &str) -> LogEntry {
             channel,
             category,
             position,
+            ..
         } => {
             let category = category
                 .as_deref()

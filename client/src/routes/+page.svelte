@@ -10,6 +10,7 @@
   import CommunityRail from "$lib/components/CommunityRail.svelte";
   import EmptyHome from "$lib/components/EmptyHome.svelte";
   import MemberList from "$lib/components/MemberList.svelte";
+  import { initVoice } from "$lib/voice.svelte";
   import ChannelList from "$lib/components/sidebar/ChannelList.svelte";
   import SidebarHeader from "$lib/components/sidebar/SidebarHeader.svelte";
   import DmList from "$lib/components/sidebar/DmList.svelte";
@@ -673,6 +674,7 @@
         reconnecting = false;
         reconnectAttempts = 0;
         ensureCapsAt(account, "*"); // learn operator status (federation gating)
+        initVoice(account); // §16 wire the voice controller to the event stream
         // Remember creds so the next launch logs straight back in. NOTE: this
         // includes the password in localStorage — a dev convenience; the
         // hardening is OS-keychain storage in the backend.
@@ -879,6 +881,7 @@
         const ch = ensureChannel(e.channel);
         ch.category = e.category ?? undefined;
         ch.position = e.position;
+        ch.voice = e.channel_kind === "voice"; // §16 render as a voice channel
         cacheChanLayout(e.channel, ch.category, e.position);
         break;
       }
@@ -1532,11 +1535,13 @@
   let newChanCategory = $state("");
   let newChanAnnounce = $state(false);
   let newChanRet = $state(""); // "" = server default; else a RETENTION_OPTIONS value
+  let newChanVoice = $state(false); // §16 create a voice channel
   function openCreateChannel(prefillName = "") {
     newChanName = prefillName;
     newChanCategory = "";
     newChanAnnounce = false;
     newChanRet = "";
+    newChanVoice = false;
     newChanOpen = true;
     serverMenu = false;
   }
@@ -1545,13 +1550,17 @@
     if (!slug) return;
     const full = activeServer ? `#${activeServer}/${slug}` : `#${slug}`;
     const cat = newChanCategory.trim();
+    const voice = newChanVoice;
     weft
-      .channelCreate(full, newChanRet || undefined)
-      .then(() => weft.join(full))
+      .channelCreate(full, voice ? undefined : newChanRet || undefined, voice ? "voice" : undefined)
+      // §16 voice channels aren't text-joinable — don't JOIN (that's NO-SUCH-TARGET).
+      .then(() => (voice ? undefined : weft.join(full)))
       .then(() => (cat ? weft.channelMeta(full, "category", cat) : undefined))
       // Announcement channel: everyone can view, only members with the `send`
-      // capability may post (§6.7 restricted posting).
-      .then(() => (newChanAnnounce ? weft.channelMeta(full, "posting", "restricted") : undefined))
+      // capability may post (§6.7 restricted posting). N/A to voice.
+      .then(() =>
+        !voice && newChanAnnounce ? weft.channelMeta(full, "posting", "restricted") : undefined,
+      )
       .then(() => (newChanOpen = false))
       .catch((e) => toast(String(e), "error"));
   }
@@ -1579,6 +1588,7 @@
     newChanCategory = cat === "Channels" ? "" : cat;
     newChanAnnounce = false;
     newChanRet = "";
+    newChanVoice = false;
     newChanOpen = true;
   }
   function deleteCategory(cat: string) {
@@ -2116,6 +2126,7 @@
         bind:category={newChanCategory}
         bind:announce={newChanAnnounce}
         bind:retention={newChanRet}
+        bind:voice={newChanVoice}
         {activeServer}
         categories={channelGroups.map((g) => g.category)}
         onclose={() => (newChanOpen = false)}

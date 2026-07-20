@@ -215,6 +215,18 @@ impl FromStr for MediaMode {
 }
 
 wire_enum!(
+    /// A channel's kind (§6.3 / §16). `Text` is an ordinary message channel;
+    /// `Voice` is a WEFT-RT voice room — voice-only (not text-joinable, so a
+    /// text `JOIN` answers `NO-SUCH-TARGET`, which keeps voice channels invisible
+    /// to the IRC gateway, §17). Advertised in `CHANNEL-LAYOUT` (`kind=`); `Text`
+    /// is the default and omitted on the wire.
+    ChannelKind, "channel kind", {
+        Text => "text",
+        Voice => "voice",
+    }
+);
+
+wire_enum!(
     /// `VOICE STATE <#chan> <user@net> <join|leave|update>` participant
     /// transition (§16, WEFT-RT). `Join`/`Leave` bracket voice-room membership
     /// (independent of channel membership); `Update` carries a mute/deaf/speaking

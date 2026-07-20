@@ -456,11 +456,13 @@ impl ChannelStore for MemoryStore {
         &self,
         name: &ChannelName,
         policy: RetentionPolicy,
+        kind: weft_proto::ChannelKind,
     ) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         inner
             .channels
             .entry(name.clone())
+            // §16 kind is immutable after creation — only `policy` updates.
             .and_modify(|record| record.policy = policy)
             .or_insert(ChannelRecord {
                 policy,
@@ -469,6 +471,7 @@ impl ChannelStore for MemoryStore {
                 restricted: false,
                 category: None,
                 position: 0,
+                kind,
             });
         Ok(())
     }

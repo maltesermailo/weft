@@ -559,7 +559,11 @@ impl App {
                 let mut it = args.split_whitespace();
                 match it.next().map(str::parse::<ChannelName>) {
                     Some(Ok(channel)) => match it.next().map(str::parse).transpose() {
-                        Ok(policy) => self.issue(Command::ChannelCreate { channel, policy }),
+                        Ok(policy) => self.issue(Command::ChannelCreate {
+                            channel,
+                            policy,
+                            kind: weft_proto::ChannelKind::Text,
+                        }),
                         Err(_) => self.note("policy: ephemeral|retained:<d>|permanent|e2ee"),
                     },
                     _ => self.note("usage: /create #channel [policy]"),

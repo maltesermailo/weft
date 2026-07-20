@@ -688,6 +688,7 @@ impl<S: ControlStream> Session<S> {
                     channel: name,
                     category: record.category,
                     position: record.position,
+                    kind: record.kind,
                 },
             )
             .await?;

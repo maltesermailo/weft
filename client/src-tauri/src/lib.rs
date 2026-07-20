@@ -520,8 +520,13 @@ fn channel_create(
     conn: State<'_, Conn>,
     channel: String,
     policy: Option<String>,
+    kind: Option<String>,
 ) -> Result<(), String> {
-    conn.send(weft::build_channel_create(&channel, policy.as_deref())?)
+    conn.send(weft::build_channel_create(
+        &channel,
+        policy.as_deref(),
+        kind.as_deref(),
+    )?)
 }
 
 #[tauri::command]

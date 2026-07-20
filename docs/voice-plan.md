@@ -12,6 +12,15 @@ Parked behind media + moderation, which are shipped.
   SFU endpoint + a **short-lived media token** carrying `speak`/`listen` caps;
   `VOICE DESC :<sdp>` is the SDP-equivalent negotiation; discovery via
   `features=voice` (already emitted in `WELCOME`).
+- **Voice channels are a distinct channel kind** (`text` | `voice`), not a voice
+  room bolted onto a text channel (decided 2026-07-20). A `voice` channel is
+  **voice-only**: a text `JOIN` answers `NO-SUCH-TARGET`, which keeps it
+  invisible to the IRC gateway (§17) with no gateway code; clients enter it via
+  `VOICE JOIN` (which subscribes for the `VOICE STATE` roster). Kind is set at
+  `CHANNEL CREATE #chan voice` / `[[channels]]` config, immutable after, and
+  advertised in `CHANNEL-LAYOUT` (`kind=voice`). *This superseded the M-voice-1a
+  assumption that `VOICE JOIN` required a prior text JOIN of the same channel —
+  implemented across proto/store/core/weftd/client, all tests green.*
 - **Topology is an SFU** — selective forwarding, the Discord model. **Not mesh**
   (leaks member IPs, doesn't federate, caps at ~5), **not an MCU** (server-side
   mixing, CPU-bound). Fixed by §16.
@@ -212,9 +221,20 @@ C: VOICE LEAVE #gaming/lounge                 → SFU tears the peer down; VOICE
 
 **M-voice-1 is complete** (1a+1b+1c): authorized voice signaling over QUIC drives
 a real webrtc SFU that forwards Opus between participants, behind a feature flag.
-- **M-voice-2 — web client.** `getUserMedia` → `RTCPeerConnection`, SDP/ICE over
-  the existing WebSocket, a voice-channel panel: join/leave, member list, speaking
-  ring, local mute. *First real usable voice (browser ↔ browser through the SFU).*
+- **M-voice-2 ✅ (2026-07-20, code) — web client.** weft-client-core: `VoiceOffer`/
+  `VoiceState`/`VoiceDesc`/`VoiceCand` `ClientEvent`s + `build_voice_join|leave|
+  desc|cand` (native + wasm); weft-client-wasm dispatch arms. `client/src/lib/
+  voice.svelte.ts` — a Svelte-5-`$state` WebRTC controller: `joinVoice` →
+  server-authorized `voice-offer` → `getUserMedia` + a **non-trickle** offer
+  (gather-then-send, matching the SFU) → `voiceDesc` → set the `voice-desc`
+  answer → Opus both ways; a hidden `<audio>` plays the forwarded stream;
+  `voice-state` drives the roster; `toggleMute` disables the local track.
+  `VoiceBar.svelte` (join/leave, mute, speaking-ring roster) rendered atop the
+  member column; `initVoice` wired on connect. *Green:* `svelte-check` 0/0, the
+  wasm build, `vite build`, and the full workspace all compile clean; clippy
+  clean. **Not runtime-verified here** (getUserMedia + two-browser audio needs a
+  real browser against a `--features voice` weftd) — but the SFU media path (1b)
+  and the control path over the wire (1c) are already proven.
 - **M-voice-3 — desktop client (Tauri).** webrtc-rs client PeerConnection + `cpal`
   capture/playback + an `opus` binding, the same UI. Cross-client web ↔ desktop
   voice. *(Heaviest client lift — see risks: native audio has no built-in echo

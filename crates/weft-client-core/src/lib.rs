@@ -151,11 +151,14 @@ pub enum ClientEvent {
         /// §11.10 auto-federation reachable (owner opened it to bridging).
         federation: bool,
     },
-    /// `CHANNEL-LAYOUT <#chan> <position>` with optional `category=` (§7).
+    /// `CHANNEL-LAYOUT <#chan> <position>` with optional `category=`/`kind=` (§7).
+    /// `channel_kind` is `text` (default) or `voice` (§16 voice-only room) —
+    /// named to avoid clashing with the enum's `kind` serde tag.
     ChannelLayout {
         channel: String,
         category: Option<String>,
         position: i64,
+        channel_kind: String,
     },
     /// `CHANNEL-RENAMED <#old> <#new>` — a channel changed identity (§6.3).
     ChannelRenamed {
@@ -267,6 +270,35 @@ pub enum ClientEvent {
         action: String,
         by: Option<String>,
         reason: Option<String>,
+    },
+    /// §16 `VOICE OFFER <#chan> <token> [:endpoint]` — the answer to our
+    /// `VOICE JOIN`: the media token + optional SFU endpoint hint. The UI then
+    /// negotiates WebRTC (create an offer, send `VOICE DESC`).
+    VoiceOffer {
+        channel: String,
+        token: String,
+        endpoint: Option<String>,
+    },
+    /// §16 `VOICE STATE <#chan> <user@net> <join|leave|update>` — voice-room
+    /// presence for the channel's members (speaking / muted / deafened flags).
+    VoiceState {
+        channel: String,
+        user: String,
+        action: String,
+        muted: bool,
+        deaf: bool,
+        speaking: bool,
+    },
+    /// §16 `VOICE DESC <#chan> :<sdp>` — the SFU's SDP answer to our offer.
+    VoiceDesc {
+        channel: String,
+        sdp: String,
+    },
+    /// §16 `VOICE CAND <#chan> :<candidate>` — a trickle-ICE candidate from the
+    /// SFU (unused by the non-trickle default; handled for completeness).
+    VoiceCand {
+        channel: String,
+        candidate: String,
     },
     Error {
         code: String,
@@ -511,10 +543,12 @@ pub fn on_line<E: EventSink>(
             channel,
             category,
             position,
+            kind,
         } => sink.emit(ClientEvent::ChannelLayout {
             channel: channel.to_string(),
             category,
             position,
+            channel_kind: kind.to_string(),
         }),
         Event::ChannelRenamed { old, new } => sink.emit(ClientEvent::ChannelRenamed {
             old: old.to_string(),
@@ -614,6 +648,39 @@ pub fn on_line<E: EventSink>(
             action: action.to_string(),
             by: by.map(|a| a.to_string()),
             reason,
+        }),
+        // §16 WEFT-RT voice signaling.
+        Event::VoiceOffer {
+            channel,
+            token,
+            endpoint,
+        } => sink.emit(ClientEvent::VoiceOffer {
+            channel: channel.to_string(),
+            token,
+            endpoint,
+        }),
+        Event::VoiceState {
+            channel,
+            user,
+            action,
+            muted,
+            deaf,
+            speaking,
+        } => sink.emit(ClientEvent::VoiceState {
+            channel: channel.to_string(),
+            user: user.account.to_string(),
+            action: action.to_string(),
+            muted,
+            deaf,
+            speaking,
+        }),
+        Event::VoiceDesc { channel, sdp } => sink.emit(ClientEvent::VoiceDesc {
+            channel: channel.to_string(),
+            sdp,
+        }),
+        Event::VoiceCand { channel, candidate } => sink.emit(ClientEvent::VoiceCand {
+            channel: channel.to_string(),
+            candidate,
         }),
         Event::Err(e) => sink.emit(ClientEvent::Error {
             code: e.code.to_string(),
@@ -1061,8 +1128,14 @@ pub fn build_part(channel: &str) -> Result<String, String> {
     .map_err(|e| e.to_string())
 }
 
-/// `CHANNEL CREATE <#chan> [policy]` — optional retention, else server default (§6.3).
-pub fn build_channel_create(channel: &str, policy: Option<&str>) -> Result<String, String> {
+/// `CHANNEL CREATE <#chan> [policy] [voice]` — optional retention (else server
+/// default) and kind (§6.3, §16). `kind` is `"voice"` for a voice channel, else
+/// text.
+pub fn build_channel_create(
+    channel: &str,
+    policy: Option<&str>,
+    kind: Option<&str>,
+) -> Result<String, String> {
     let channel: weft_proto::ChannelName =
         channel.parse().map_err(|_| "bad channel".to_string())?;
     let policy = match policy {
@@ -1072,9 +1145,17 @@ pub fn build_channel_create(channel: &str, policy: Option<&str>) -> Result<Strin
         ),
         _ => None,
     };
-    Request::new(Command::ChannelCreate { channel, policy })
-        .serialize()
-        .map_err(|e| e.to_string())
+    let kind = match kind.filter(|k| !k.is_empty()) {
+        Some(k) => k.parse().map_err(|_| "bad channel kind".to_string())?,
+        None => weft_proto::ChannelKind::Text,
+    };
+    Request::new(Command::ChannelCreate {
+        channel,
+        policy,
+        kind,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
 }
 
 /// `CHANNEL POLICY <#chan> <policy> [purge]` — change an existing channel's
@@ -1352,4 +1433,49 @@ pub fn build_ns_join(name: &str) -> Result<String, String> {
     weft_proto::Request::new(weft_proto::Command::NsJoin { name })
         .serialize()
         .map_err(|e| e.to_string())
+}
+
+// ---- §16 WEFT-RT voice signaling ----
+
+/// `VOICE JOIN <#chan>` — request to join a channel's voice room (§16).
+pub fn build_voice_join(channel: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::VoiceJoin { channel })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `VOICE LEAVE <#chan>` — leave a channel's voice room (§16).
+pub fn build_voice_leave(channel: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::VoiceLeave { channel })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `VOICE DESC <#chan> :<sdp>` — an SDP offer for the channel's peer (§16). The
+/// raw SDP rides the trailing; the codec escapes its CR/LF for the wire.
+pub fn build_voice_desc(channel: &str, sdp: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::VoiceDesc {
+        channel,
+        sdp: sdp.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `VOICE CAND <#chan> :<ice-candidate>` — a trickle-ICE candidate (§16).
+pub fn build_voice_cand(channel: &str, candidate: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::VoiceCand {
+        channel,
+        candidate: candidate.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
 }

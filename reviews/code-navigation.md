@@ -208,14 +208,24 @@ New load-bearing files:
   `None` = zero-voice server → voice verbs answer `UNSUPPORTED`.
 - `weft-core/src/session/voice.rs` — the handlers (`Session::on_voice_*`).
 
+**Voice channels are a distinct kind** (`ChannelKind` in weft-proto; a `kind`
+column, migration 0021; `ChannelRecord.kind`). Voice channels are **voice-only**:
+`relay.rs :: join_one` rejects a text JOIN to a `Voice` channel (→ NO-SUCH-TARGET,
+which is also the IRC-invisibility guarantee — no weft-irc code). Kind is set at
+`CHANNEL CREATE #chan voice` / `[[channels]]` config and advertised in
+`CHANNEL-LAYOUT` (`kind=voice`).
+
 Chain 9: a voice join — `session.rs` dispatch → `voice::on_voice_join`:
-membership (`self.joined`) → M7 `is_moderated` ban/mute (`covering_scopes`) →
-`voice_caps` (`listen`/`speak` on a restricted channel) — **all authority before
-the backend** (invariant 4) — → `ctx.voice_backend().join()` → `VOICE OFFER`
-(labeled ack) → `announce_voice_state` → `ChannelHandle::announce_as(self.id, …)`
-(broadcasts `VOICE STATE` to co-members; the actor's own copy is skipped, the
-`Cmd::SetPolicy` pattern). `VOICE DESC` relays the SDP to the backend and returns
-its answer. Disconnect: `cleanup` → `teardown_voice` per room.
+`registry.get` + `channel_kind == Voice` (else NO-SUCH-TARGET) → M7 `is_moderated`
+ban/mute → `voice_caps` (`listen`/`speak` on a restricted channel) — **all
+authority before the backend** (invariant 4) — → `ctx.voice_backend().join()` →
+**`handle.subscribe()` + `spawn_forwarder`** (a voice channel isn't text-joined,
+so the session *subscribes* to the broadcast for `VOICE STATE`, tracked in
+`self.voice: HashMap<ChannelName, VoiceRoom>`) → `VOICE OFFER` (labeled ack) →
+`announce_voice_state` → `ChannelHandle::announce_as(self.id, …)` (the actor's own
+copy is skipped, the `Cmd::SetPolicy` pattern). `VOICE DESC` relays the SDP to the
+backend and returns its answer. Disconnect: `cleanup` → `teardown_voice` per room
+(aborts the forwarder + SFU-leaves).
 
 The **SFU media engine is not here** — `weft-core` never touches a socket. The
 `WebrtcSfu` (webrtc-rs) implementing `VoiceBackend` lives in the `weft-rt` crate
@@ -246,8 +256,11 @@ up, then `ctx.set_voice_backend` installs it. Conformance:
 
 | Change | Touch |
 |---|---|
+| Channel kind (text/voice) | `weft-proto :: ChannelKind` + `CHANNEL CREATE`/`CHANNEL-LAYOUT`; store `kind` column (new migration) + `ChannelRecord`; the `join_one` reject + `on_voice_join` gate in weft-core |
 | Voice signaling authz | `weft-core/src/session/voice.rs` (never the SFU) |
 | The SFU seam / a new backend (e.g. LiveKit) | implement `VoiceBackend` (`weft-core/src/voice.rs`); the default lives in `weft-rt` |
 | Voice wire form | `weft-proto` command.rs/event.rs **+ round-trip test first** |
 | Voice config / enabling | `weftd/src/config.rs :: Voice` + `lib.rs :: build_voice_sfu`; the `voice` feature in `weftd/Cargo.toml` |
 | The SFU media engine (forwarding, codecs, ICE) | `weft-rt/src/sfu.rs` — run its tests with `cargo test -p weft-rt` |
+| Web voice UI / browser WebRTC | `client/src/lib/voice.svelte.ts` (the `$state` controller: getUserMedia + RTCPeerConnection + the JOIN→OFFER→DESC handshake) + `components/VoiceBar.svelte`; wired in `routes/+page.svelte` (`initVoice` on connect, `<VoiceBar>` in the members aside) |
+| Web voice wire glue | `weft-client-core/src/lib.rs` (`ClientEvent::Voice*` + `build_voice_*`) + `weft-client-wasm/src/lib.rs` dispatch + `client/src/lib/weft.ts` (`WeftEvent` union + `voice*` wrappers) |

@@ -132,11 +132,14 @@ pub trait AccountStore: Send + Sync {
 /// CREATE/DELETE/META (§6.3) write through here.
 #[async_trait]
 pub trait ChannelStore: Send + Sync {
-    /// Insert or update a channel's policy (leaves topic/view-gated intact).
+    /// Insert or update a channel's policy + kind (leaves topic/view-gated
+    /// intact). `kind` is set on first insert and not changed by later upserts
+    /// (§16 kind is immutable after creation).
     async fn upsert_channel(
         &self,
         name: &ChannelName,
         policy: RetentionPolicy,
+        kind: weft_proto::ChannelKind,
     ) -> Result<(), StoreError>;
 
     async fn list_channels(&self) -> Result<Vec<(ChannelName, RetentionPolicy)>, StoreError>;

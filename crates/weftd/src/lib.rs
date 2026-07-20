@@ -159,7 +159,13 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 policy != weft_proto::RetentionPolicy::E2ee,
                 "e2ee channels land in M6 ({name})"
             );
-            Ok((name, policy))
+            let kind = channel
+                .kind()
+                .parse::<weft_proto::ChannelKind>()
+                .map_err(|_| {
+                    anyhow::anyhow!("invalid channel kind {:?} for {}", channel.kind(), name)
+                })?;
+            Ok((name, policy, kind))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let dm_policy: weft_proto::RetentionPolicy = config
@@ -547,7 +553,11 @@ async fn boot<S>(
     maintenance: MaintenanceConfig,
     store: Arc<S>,
     blobs: Arc<dyn weft_store::BlobStore>,
-    seed: &[(weft_proto::ChannelName, weft_proto::RetentionPolicy)],
+    seed: &[(
+        weft_proto::ChannelName,
+        weft_proto::RetentionPolicy,
+        weft_proto::ChannelKind,
+    )],
     operators: Vec<weft_proto::Account>,
     ns_creation_open: bool,
     ns_quota: u64,
@@ -577,9 +587,9 @@ where
         + weft_store::RoleStore
         + 'static,
 {
-    for (name, policy) in seed {
+    for (name, policy, kind) in seed {
         store
-            .upsert_channel(name, *policy)
+            .upsert_channel(name, *policy, *kind)
             .await
             .map_err(|e| anyhow::anyhow!("seeding channel {name}: {e}"))?;
     }

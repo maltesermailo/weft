@@ -1161,6 +1161,7 @@ async fn message_lifecycle_and_history_over_quic() {
             ChannelConfig::Detailed {
                 name: "#volatile".to_string(),
                 policy: "ephemeral".to_string(),
+                kind: None,
             },
         ];
     })
@@ -2062,7 +2063,13 @@ async fn voice_disabled_by_default_is_unsupported() {
 #[cfg(feature = "voice")]
 #[tokio::test]
 async fn voice_enabled_signaling_over_quic() {
-    let server = start_with(&["#general"], |c| {
+    let server = start_with(&[], |c| {
+        // §16 a voice channel is seeded via config (voice-only, not text-joinable).
+        c.channels.push(ChannelConfig::Detailed {
+            name: "#lounge".to_string(),
+            policy: "retained:90d".to_string(),
+            kind: Some("voice".to_string()),
+        });
         c.voice.enabled = true;
         c.voice.udp_port_min = 42000;
         c.voice.udp_port_max = 42099;
@@ -2086,22 +2093,21 @@ async fn voice_enabled_signaling_over_quic() {
         Event::MediaToken { .. }
     ));
 
-    client.join("#general").await;
-
-    client.send("@label=j VOICE JOIN #general").await;
+    // A voice channel is entered via VOICE JOIN (never a text JOIN) → VOICE OFFER.
+    client.send("@label=j VOICE JOIN #lounge").await;
     let reply = client
         .recv_until(|r| matches!(r.event, Event::VoiceOffer { .. }))
         .await;
     let Event::VoiceOffer { channel, token, .. } = &reply.event else {
         unreachable!()
     };
-    assert_eq!(channel.as_str(), "#general");
+    assert_eq!(channel.as_str(), "#lounge");
     assert!(!token.is_empty(), "VOICE OFFER carries a media token");
     assert_eq!(reply.label.as_deref(), Some("j"));
 
     // A malformed SDP reaches the SFU and is rejected as MALFORMED.
     client
-        .send("@label=d VOICE DESC #general :not-a-valid-sdp")
+        .send("@label=d VOICE DESC #lounge :not-a-valid-sdp")
         .await;
     let reply = client
         .recv_until(|r| matches!(r.event, Event::Err(_)))

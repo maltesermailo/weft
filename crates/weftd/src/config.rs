@@ -130,7 +130,18 @@ impl Default for Acme {
 #[serde(untagged)]
 pub enum ChannelConfig {
     Name(String),
-    Detailed { name: String, policy: String },
+    Detailed {
+        name: String,
+        #[serde(default = "default_channel_policy")]
+        policy: String,
+        /// §16 `"voice"` for a WEFT-RT voice channel; default `"text"`.
+        #[serde(default)]
+        kind: Option<String>,
+    },
+}
+
+fn default_channel_policy() -> String {
+    "retained:90d".to_string()
 }
 
 impl ChannelConfig {
@@ -146,6 +157,14 @@ impl ChannelConfig {
         match self {
             ChannelConfig::Name(_) => "retained:90d",
             ChannelConfig::Detailed { policy, .. } => policy,
+        }
+    }
+
+    /// §16 channel kind: `text` (default) or `voice`.
+    pub fn kind(&self) -> &str {
+        match self {
+            ChannelConfig::Name(_) => "text",
+            ChannelConfig::Detailed { kind, .. } => kind.as_deref().unwrap_or("text"),
         }
     }
 }

@@ -1170,8 +1170,13 @@ impl<S: ControlStream> Session<S> {
                     .await
             }
             // §6.3 channel administration.
-            Command::ChannelCreate { channel, policy } => {
-                self.on_channel_create(label, channel, policy, actor).await
+            Command::ChannelCreate {
+                channel,
+                policy,
+                kind,
+            } => {
+                self.on_channel_create(label, channel, policy, kind, actor)
+                    .await
             }
             Command::ChannelPolicy {
                 channel,

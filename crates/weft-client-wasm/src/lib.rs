@@ -218,7 +218,11 @@ impl WeftClient {
             "role_unassign" => build_role_unassign(&arg("scope"), &arg("account"), &arg("name"))?,
             "roles_of" => build_roles_of(&arg("scope"), &arg("account"))?,
             // ---- channels ----
-            "channel_create" => build_channel_create(&arg("channel"), opt("policy").as_deref())?,
+            "channel_create" => build_channel_create(
+                &arg("channel"),
+                opt("policy").as_deref(),
+                opt("kind").as_deref(),
+            )?,
             "channel_policy" => {
                 build_channel_policy(&arg("channel"), &arg("policy"), flag("purge"))?
             }
@@ -227,6 +231,11 @@ impl WeftClient {
             "channel_meta" => build_channel_meta(&arg("channel"), &arg("key"), &arg("value"))?,
             "channels" => build_channels(&arg("namespace"))?,
             "discover" => build_discover(opt("cursor"))?,
+            // ---- §16 voice signaling ----
+            "voice_join" => build_voice_join(&arg("channel"))?,
+            "voice_leave" => build_voice_leave(&arg("channel"))?,
+            "voice_desc" => build_voice_desc(&arg("channel"), &arg("sdp"))?,
+            "voice_cand" => build_voice_cand(&arg("channel"), &arg("candidate"))?,
             // ---- namespaces ----
             "ns_join" => build_ns_join(&arg("name"))?,
             "ns_meta" => build_ns_meta(&arg("name"), &arg("key"), &arg("value"))?,

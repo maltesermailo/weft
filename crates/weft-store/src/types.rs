@@ -2,8 +2,8 @@
 //! are rows referencing the original message's msgid — never mutations.
 
 use weft_proto::{
-    Account, ChannelName, ContentState, MsgId, MsgMeta, NamespaceName, NetworkName, ReportStatus,
-    ResolveAction, RetentionPolicy, Ulid, UserRef,
+    Account, ChannelKind, ChannelName, ContentState, MsgId, MsgMeta, NamespaceName, NetworkName,
+    ReportStatus, ResolveAction, RetentionPolicy, Ulid, UserRef,
 };
 
 /// Where events live: a channel, or a same-network DM pair (§9.5).
@@ -118,6 +118,9 @@ pub struct ChannelRecord {
     pub category: Option<String>,
     /// Sort order within the (namespace, category); default 0.
     pub position: i64,
+    /// §16 channel kind — `Text` (default) or a voice-only `Voice` room. Set at
+    /// creation, immutable after.
+    pub kind: ChannelKind,
 }
 
 /// A recorded capability grant (§6.5, §10.4). The server keeps these so an

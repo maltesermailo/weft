@@ -211,10 +211,12 @@ pub enum Command {
     /// `ROLES-OF <scope> <account>` — the roles an account is assigned at a
     /// scope (§6.5) → a `ROLE-MEMBER` event.
     RolesOf { scope: String, account: String },
-    /// `CHANNEL CREATE <#chan> [policy]` — default `retained:90d` (§6.3).
+    /// `CHANNEL CREATE <#chan> [policy] [text|voice]` — default `retained:90d`,
+    /// `text` (§6.3). A `voice` channel is a WEFT-RT voice room (§16, voice-only).
     ChannelCreate {
         channel: ChannelName,
         policy: Option<crate::RetentionPolicy>,
+        kind: crate::ChannelKind,
     },
     /// `CHANNEL POLICY <#chan> <policy> [purge]` (§6.3).
     ChannelPolicy {
@@ -811,10 +813,26 @@ impl Command {
                 let mut args = Args::new(line, "CHANNEL");
                 let sub = args.req("subcommand")?.to_ascii_uppercase();
                 match sub.as_str() {
-                    "CREATE" => Ok(Command::ChannelCreate {
-                        channel: args.req("channel")?.parse()?,
-                        policy: args.opt().map(str::parse).transpose()?,
-                    }),
+                    "CREATE" => {
+                        let channel = args.req("channel")?.parse()?;
+                        // `[policy]` and `[text|voice]` are optional bare tokens in
+                        // either order; a token that parses as a kind is the kind,
+                        // otherwise it's the retention policy (lenient-in).
+                        let mut policy = None;
+                        let mut kind = crate::ChannelKind::Text;
+                        while let Some(tok) = args.opt() {
+                            if let Ok(k) = tok.parse::<crate::ChannelKind>() {
+                                kind = k;
+                            } else {
+                                policy = Some(tok.parse()?);
+                            }
+                        }
+                        Ok(Command::ChannelCreate {
+                            channel,
+                            policy,
+                            kind,
+                        })
+                    }
                     "POLICY" => {
                         let channel = args.req("channel")?.parse()?;
                         let policy = args.req("policy")?.parse()?;
@@ -1500,10 +1518,18 @@ impl Command {
             Command::RolesOf { scope, account } => {
                 ("ROLES-OF", vec![scope.clone(), account.to_string()], None)
             }
-            Command::ChannelCreate { channel, policy } => {
+            Command::ChannelCreate {
+                channel,
+                policy,
+                kind,
+            } => {
                 let mut params = vec!["CREATE".to_string(), channel.to_string()];
                 if let Some(policy) = policy {
                     params.push(policy.to_string());
+                }
+                // `text` is the default — only emit an explicit `voice`.
+                if *kind != crate::ChannelKind::Text {
+                    params.push(kind.to_string());
                 }
                 ("CHANNEL", params, None)
             }
@@ -2285,15 +2311,44 @@ mod tests {
         round_trip(&Request::new(Command::ChannelCreate {
             channel: "#new".parse().unwrap(),
             policy: Some("retained:30d".parse().unwrap()),
+            kind: crate::ChannelKind::Text,
         }));
         assert_eq!(
             Request::new(Command::ChannelCreate {
                 channel: "#new".parse().unwrap(),
                 policy: None,
+                kind: crate::ChannelKind::Text,
             })
             .serialize()
             .unwrap(),
             "CHANNEL CREATE #new"
+        );
+        // A voice channel: the `voice` kind rides after the (optional) policy and
+        // round-trips; parse order is lenient (kind before or after policy).
+        round_trip(&Request::new(Command::ChannelCreate {
+            channel: "#lounge".parse().unwrap(),
+            policy: None,
+            kind: crate::ChannelKind::Voice,
+        }));
+        assert_eq!(
+            Request::new(Command::ChannelCreate {
+                channel: "#lounge".parse().unwrap(),
+                policy: None,
+                kind: crate::ChannelKind::Voice,
+            })
+            .serialize()
+            .unwrap(),
+            "CHANNEL CREATE #lounge voice"
+        );
+        assert_eq!(
+            Request::parse("CHANNEL CREATE #lounge voice")
+                .unwrap()
+                .command,
+            Command::ChannelCreate {
+                channel: "#lounge".parse().unwrap(),
+                policy: None,
+                kind: crate::ChannelKind::Voice,
+            }
         );
         round_trip(&Request::new(Command::ChannelPolicy {
             channel: "#c".parse().unwrap(),

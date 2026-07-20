@@ -7,6 +7,7 @@
     category = $bindable(),
     announce = $bindable(),
     retention = $bindable(),
+    voice = $bindable(),
     activeServer,
     categories,
     onclose,
@@ -16,6 +17,7 @@
     category: string;
     announce: boolean;
     retention: string;
+    voice: boolean;
     activeServer: string;
     categories: string[];
     onclose: () => void;
@@ -39,16 +41,22 @@
     <datalist id="cat-suggest">
       {#each categories as c (c)}<option value={c}></option>{/each}
     </datalist>
-    <label class="fld">Retention
-      <select bind:value={retention}>
-        <option value="">Server default</option>
-        {#each RETENTION_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
-      </select>
-    </label>
     <label class="check-row">
-      <input type="checkbox" bind:checked={announce} />
-      <span>📢 Announcement channel — everyone can read, only members with the <code>send</code> permission can post</span>
+      <input type="checkbox" bind:checked={voice} />
+      <span>🔊 Voice channel — members connect to talk; no text, and hidden from IRC clients (§16)</span>
     </label>
+    {#if !voice}
+      <label class="fld">Retention
+        <select bind:value={retention}>
+          <option value="">Server default</option>
+          {#each RETENTION_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+        </select>
+      </label>
+      <label class="check-row">
+        <input type="checkbox" bind:checked={announce} />
+        <span>📢 Announcement channel — everyone can read, only members with the <code>send</code> permission can post</span>
+      </label>
+    {/if}
     <div class="modal-actions"><button class="ok-btn" disabled={!name.trim()} onclick={oncreate}>Create</button></div>
   </div>
 </div>

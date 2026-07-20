@@ -410,11 +410,19 @@ where
     // -- channels: seed + load (the boot path) --
     let name: weft_proto::ChannelName = format!("#chan-{tag}").parse().unwrap();
     store
-        .upsert_channel(&name, RetentionPolicy::Ephemeral)
+        .upsert_channel(
+            &name,
+            RetentionPolicy::Ephemeral,
+            weft_proto::ChannelKind::Text,
+        )
         .await
         .unwrap();
     store
-        .upsert_channel(&name, "retained:7d".parse().unwrap())
+        .upsert_channel(
+            &name,
+            "retained:7d".parse().unwrap(),
+            weft_proto::ChannelKind::Text,
+        )
         .await
         .unwrap(); // policy update wins
     let channels = store.list_channels().await.unwrap();
@@ -640,7 +648,7 @@ where
     let c3: weft_proto::ChannelName = format!("#{nsl}/voice").parse().unwrap();
     for c in [&c1, &c2, &c3] {
         store
-            .upsert_channel(c, RetentionPolicy::Permanent)
+            .upsert_channel(c, RetentionPolicy::Permanent, weft_proto::ChannelKind::Text)
             .await
             .unwrap();
     }
@@ -1189,7 +1197,11 @@ where
     let old_scope = Scope::Channel(old.clone());
     let new_scope = Scope::Channel(new.clone());
     store
-        .upsert_channel(&old, RetentionPolicy::Permanent)
+        .upsert_channel(
+            &old,
+            RetentionPolicy::Permanent,
+            weft_proto::ChannelKind::Text,
+        )
         .await
         .unwrap();
     store
@@ -1235,7 +1247,11 @@ where
     // Guards: absent old, or already-taken new → false, no mutation.
     assert!(!store.rename_channel(&old, &new).await.unwrap()); // old now absent
     store
-        .upsert_channel(&old, RetentionPolicy::Ephemeral)
+        .upsert_channel(
+            &old,
+            RetentionPolicy::Ephemeral,
+            weft_proto::ChannelKind::Text,
+        )
         .await
         .unwrap();
     assert!(!store.rename_channel(&old, &new).await.unwrap()); // new taken

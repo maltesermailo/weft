@@ -138,6 +138,12 @@ dir = "/var/lib/weft/blobs"
 # The embedded SFU (Selective Forwarding Unit). Needs a `voice`-feature build
 # (`cargo build --features voice`); otherwise `enabled = true` just warns. Off =
 # a zero-voice, fully-conformant server (advertises no `features=voice`).
+#   Declare voice channels in [[channels]] with `kind = "voice"`, e.g.:
+#     [[channels]]
+#     name = "#lounge"
+#     kind = "voice"
+#   Voice channels are voice-only (entered via VOICE JOIN, not text-joinable) and
+#   invisible to IRC clients.
 [voice]
 enabled = false
 # UDP port range the SFU binds for media. Open this range to the internet (and

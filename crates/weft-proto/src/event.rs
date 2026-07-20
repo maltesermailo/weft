@@ -8,8 +8,9 @@ use crate::line::{label_from_tags, write_label, Args, Line, Tags};
 use crate::name::{Account, ChannelName, NamespaceName, NetworkName, Target, UserRef};
 use crate::policy::RetentionPolicy;
 use crate::types::{
-    BridgeState, ContentState, HistoryMode, MediaMode, MemberAction, ModAction, MsgMeta,
-    PresenceStatus, ReactionOp, ReportScope, ResolveAction, TypingState, Visibility, VoiceAction,
+    BridgeState, ChannelKind, ContentState, HistoryMode, MediaMode, MemberAction, ModAction,
+    MsgMeta, PresenceStatus, ReactionOp, ReportScope, ResolveAction, TypingState, Visibility,
+    VoiceAction,
 };
 
 /// An event plus its optional `label` echo (§3.5). Only direct responses
@@ -294,12 +295,14 @@ pub enum Event {
     More {
         cursor: String,
     },
-    /// `CHANNEL-LAYOUT <#chan> <position>` with optional `category=` — one
-    /// per channel in a namespace's layout (spec extension).
+    /// `CHANNEL-LAYOUT <#chan> <position>` with optional `category=`/`kind=` —
+    /// one per channel in a namespace's layout (spec extension). `kind=voice`
+    /// marks a WEFT-RT voice channel (§16); `text` is the default and omitted.
     ChannelLayout {
         channel: ChannelName,
         category: Option<String>,
         position: i64,
+        kind: crate::ChannelKind,
     },
     /// `CHANNEL-RENAMED <#old> <#new>` — a channel changed identity (§6.3);
     /// announced to members so clients re-key their local channel state.
@@ -825,6 +828,11 @@ impl Event {
                     channel,
                     category: line.tags.get("category").filter(|v| !v.is_empty()).cloned(),
                     position,
+                    kind: line
+                        .tags
+                        .get("kind")
+                        .and_then(|k| k.parse().ok())
+                        .unwrap_or(ChannelKind::Text),
                 })
             }
             "CHANNEL-RENAMED" => {
@@ -1289,9 +1297,13 @@ impl Event {
                 channel,
                 category,
                 position,
+                kind,
             } => {
                 if let Some(category) = category {
                     tags.insert("category".to_string(), category.clone());
+                }
+                if *kind != ChannelKind::Text {
+                    tags.insert("kind".to_string(), kind.to_string());
                 }
                 (
                     "CHANNEL-LAYOUT",
@@ -1892,6 +1904,7 @@ mod tests {
                 channel: "#gaming/general".parse().unwrap(),
                 category: Some("text".into()),
                 position: 3,
+                kind: ChannelKind::Text,
             },
             "c1",
         ));
@@ -1900,7 +1913,17 @@ mod tests {
             channel: "#gaming/lobby".parse().unwrap(),
             category: None,
             position: 0,
+            kind: ChannelKind::Text,
         }));
+        // A voice channel advertises `kind=voice`.
+        let voice = Reply::new(Event::ChannelLayout {
+            channel: "#gaming/lounge".parse().unwrap(),
+            category: Some("Voice".into()),
+            position: 1,
+            kind: ChannelKind::Voice,
+        });
+        assert!(voice.serialize().unwrap().contains("kind=voice"));
+        round_trip(&voice);
     }
 
     #[test]

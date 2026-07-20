@@ -7,7 +7,7 @@
 //! broadcast receiver lags and the client gets `ERR SLOW` (§9.2) instead of
 //! unbounded buffering.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,9 +18,9 @@ use tokio::time::Instant;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 use weft_crypto::{Capability, PublicKey, SignedManifest, TokenScope};
 use weft_proto::{
-    Account, BridgeState, ChannelName, Command, ContentState, ErrCode, ErrEvent, Event, FSessionOp,
-    HistoryMode, Line, MediaMode, MemberAction, MessageEvent, ModAction, MsgId, MsgMeta,
-    NamespaceName, NetworkName, ParseError, Reply, ReportScope, ReportStatus, Request,
+    Account, BridgeState, ChannelKind, ChannelName, Command, ContentState, ErrCode, ErrEvent,
+    Event, FSessionOp, HistoryMode, Line, MediaMode, MemberAction, MessageEvent, ModAction, MsgId,
+    MsgMeta, NamespaceName, NetworkName, ParseError, Reply, ReportScope, ReportStatus, Request,
     ResolveAction, RetentionPolicy, StreamMode, Target, Ulid, UserRef, Visibility, MAX_LABEL_BYTES,
 };
 
@@ -357,6 +357,14 @@ struct DedupEntry {
     at: Instant,
 }
 
+/// §16 a voice room this session has joined. Voice channels aren't text-joined,
+/// so the session *subscribes* to the channel's broadcast (for `VOICE STATE`)
+/// without becoming a text member; `handle` is used to announce state changes.
+struct VoiceRoom {
+    handle: ChannelHandle,
+    forwarder: JoinHandle<()>,
+}
+
 /// Where a msgid's mutations must be sent (each scope has one writer).
 enum MessageRoute {
     Channel {
@@ -413,9 +421,10 @@ struct Session<S> {
     backfill_demand_rx: mpsc::UnboundedReceiver<crate::BackfillReq>,
     /// HISTORY batch id counter (per session, opaque to clients).
     batches: u64,
-    /// §16 voice rooms this session has joined (a subset of `joined`). Drives
-    /// SFU teardown on `VOICE LEAVE` and on disconnect so no peer is orphaned.
-    voice: HashSet<ChannelName>,
+    /// §16 voice rooms this session has joined (voice-only channels, distinct
+    /// from `joined`). Drives SFU teardown + broadcast unsubscribe on `VOICE
+    /// LEAVE` and on disconnect so no peer or forwarder is orphaned.
+    voice: HashMap<ChannelName, VoiceRoom>,
     malformed_strikes: Vec<Instant>,
     last_inbound: Instant,
 }
@@ -460,7 +469,7 @@ impl<S: ControlStream> Session<S> {
             backfill_demand_tx,
             backfill_demand_rx,
             batches: 0,
-            voice: HashSet::new(),
+            voice: HashMap::new(),
             malformed_strikes: Vec::new(),
             last_inbound: Instant::now(),
         }
@@ -517,8 +526,8 @@ impl<S: ControlStream> Session<S> {
     async fn cleanup(&mut self) {
         // §16 tear down any voice peers first (before the channel handles go),
         // so the SFU drops them and members see a `VOICE STATE leave`.
-        for channel in std::mem::take(&mut self.voice) {
-            self.teardown_voice(&channel).await;
+        for (channel, room) in std::mem::take(&mut self.voice) {
+            self.teardown_voice(&channel, room).await;
         }
         for (_, joined) in self.joined.drain() {
             joined.forwarder.abort();
@@ -933,8 +942,12 @@ impl<S: ControlStream> Session<S> {
                 scope,
                 account: subject,
             } => self.on_roles_of(label, scope, subject).await,
-            Command::ChannelCreate { channel, policy } => {
-                self.on_channel_create(label, channel, policy, Actor::Local(account))
+            Command::ChannelCreate {
+                channel,
+                policy,
+                kind,
+            } => {
+                self.on_channel_create(label, channel, policy, kind, Actor::Local(account))
                     .await
             }
             Command::ChannelPolicy {

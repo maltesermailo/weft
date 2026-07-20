@@ -8,6 +8,7 @@ impl<S: ControlStream> Session<S> {
         label: Option<String>,
         channel: ChannelName,
         policy: Option<RetentionPolicy>,
+        kind: ChannelKind,
         actor: Actor,
     ) -> io::Result<Flow> {
         // A namespaced channel (#ns/chan) needs its namespace to exist;
@@ -41,12 +42,12 @@ impl<S: ControlStream> Session<S> {
                 if let Err(e) = self
                     .ctx
                     .channel_store
-                    .upsert_channel(&channel, policy)
+                    .upsert_channel(&channel, policy, kind)
                     .await
                 {
                     return self.internal(label, &e).await;
                 }
-                debug!(%channel, "channel created");
+                debug!(%channel, ?kind, "channel created");
                 self.send_event(label, Event::Policy { channel, policy })
                     .await?;
                 Ok(Flow::Continue)
@@ -81,7 +82,9 @@ impl<S: ControlStream> Session<S> {
         if let Err(e) = self
             .ctx
             .channel_store
-            .upsert_channel(&channel, policy)
+            // Kind is immutable after creation; `upsert` only updates the policy
+            // for an existing channel, so the passed kind is inert here.
+            .upsert_channel(&channel, policy, ChannelKind::Text)
             .await
         {
             return self.internal(label, &e).await;
@@ -200,6 +203,7 @@ impl<S: ControlStream> Session<S> {
                         channel: channel.clone(),
                         category: rec.category,
                         position: rec.position,
+                        kind: rec.kind,
                     })
                     .await;
             }

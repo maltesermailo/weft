@@ -47,6 +47,12 @@ impl<S: ControlStream> Session<S> {
         let Some(handle) = self.ctx.registry.get(channel) else {
             return Ok(JoinResult::Missing);
         };
+        // §16 a voice channel is not text-joinable: a text JOIN answers
+        // NO-SUCH-TARGET, which also keeps voice channels invisible to the IRC
+        // gateway (§17). Voice is entered via VOICE JOIN.
+        if self.channel_kind(channel).await == ChannelKind::Voice {
+            return Ok(JoinResult::Missing);
+        }
         if self.view_gated_denied(channel, account).await {
             return Ok(JoinResult::Hidden);
         }

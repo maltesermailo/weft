@@ -1531,6 +1531,7 @@ async fn channel_categories_and_ordering() {
                 channel,
                 category,
                 position,
+                ..
             } => layout.push((channel.to_string(), category, position)),
             Event::NsMeta { .. } => {}
             other => panic!("expected CHANNEL-LAYOUT or NS-META, got {other:?}"),
@@ -3342,34 +3343,81 @@ async fn next_voice_state(client: &mut Client) -> Reply {
     }
 }
 
+/// Create a voice channel `name` via a fresh operator session, which then drops
+/// (the channel persists in the registry + store). Returns a voice-enabled ctx.
+async fn voice_ctx_with(name: &str) -> Arc<ServerCtx> {
+    let ctx = ctx_voice(&[], &["boss"]);
+    let mut boss = ready_op(&ctx, "boss").await;
+    boss.send(&format!("CHANNEL CREATE {name} voice"));
+    assert!(matches!(boss.recv().await.event, Event::Policy { .. }));
+    ctx
+}
+
 #[tokio::test]
 async fn voice_join_without_backend_is_unsupported() {
     // No backend installed → the verb is known but the server has no SFU.
     let ctx = ctx(&["#general"]);
-    let mut alice = joined(&ctx, "alice", "#general").await;
+    let mut alice = ready(&ctx, "alice").await;
     alice.send("@label=v VOICE JOIN #general");
     let reply = alice.expect_err(ErrCode::Unsupported).await;
     assert_eq!(reply.label.as_deref(), Some("v"));
 }
 
 #[tokio::test]
-async fn voice_join_unjoined_channel_is_no_such_target() {
-    // Invariant 1: joining voice for a channel you're not in reveals nothing.
+async fn voice_join_a_text_or_missing_channel_is_no_such_target() {
+    // §16 voice-only: a text channel (or a nonexistent one) is not a voice
+    // target — both collapse to NO-SUCH-TARGET (invariant 1).
     let ctx = ctx_voice(&["#general"], &[]);
     let mut alice = ready(&ctx, "alice").await;
-    alice.send("@label=v VOICE JOIN #general");
-    let reply = alice.expect_err(ErrCode::NoSuchTarget).await;
-    assert_eq!(reply.label.as_deref(), Some("v"));
+    alice.send("@label=t VOICE JOIN #general"); // a text channel
+    assert_eq!(
+        alice
+            .expect_err(ErrCode::NoSuchTarget)
+            .await
+            .label
+            .as_deref(),
+        Some("t")
+    );
+    alice.send("@label=m VOICE JOIN #nope"); // nonexistent
+    assert_eq!(
+        alice
+            .expect_err(ErrCode::NoSuchTarget)
+            .await
+            .label
+            .as_deref(),
+        Some("m")
+    );
+}
+
+#[tokio::test]
+async fn voice_channel_is_not_text_joinable() {
+    // §16 the IRC-protection guarantee: a text JOIN to a voice channel is
+    // NO-SUCH-TARGET, so voice channels never surface to text-only (IRC) clients.
+    let ctx = voice_ctx_with("#lounge").await;
+    let mut alice = ready(&ctx, "alice").await;
+    alice.send("@label=j JOIN #lounge");
+    assert_eq!(
+        alice
+            .expect_err(ErrCode::NoSuchTarget)
+            .await
+            .label
+            .as_deref(),
+        Some("j")
+    );
 }
 
 #[tokio::test]
 async fn voice_join_offers_token_and_announces_to_members() {
-    let ctx = ctx_voice(&["#general"], &[]);
-    let mut bob = joined(&ctx, "bob", "#general").await;
-    let mut alice = joined(&ctx, "alice", "#general").await;
+    let ctx = voice_ctx_with("#lounge").await;
+
+    // bob joins voice first (subscribing to the room).
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("VOICE JOIN #lounge");
+    assert!(matches!(bob.recv().await.event, Event::VoiceOffer { .. }));
 
     // alice joins voice → labeled VOICE OFFER with a token, endpoint absent.
-    alice.send("@label=v1 VOICE JOIN #general");
+    let mut alice = ready(&ctx, "alice").await;
+    alice.send("@label=v1 VOICE JOIN #lounge");
     let reply = alice.recv().await;
     assert_eq!(reply.label.as_deref(), Some("v1"));
     let Event::VoiceOffer {
@@ -3380,11 +3428,11 @@ async fn voice_join_offers_token_and_announces_to_members() {
     else {
         panic!("expected VOICE OFFER, got {reply:?}");
     };
-    assert_eq!(channel.as_str(), "#general");
+    assert_eq!(channel.as_str(), "#lounge");
     assert!(token.starts_with("vtok-"), "token: {token}");
     assert!(endpoint.is_none());
 
-    // bob (a co-member) sees alice enter voice, not muted (open channel).
+    // bob (already in the room) sees alice enter voice, not muted (open channel).
     let reply = next_voice_state(&mut bob).await;
     let Event::VoiceState {
         user,
@@ -3400,7 +3448,7 @@ async fn voice_join_offers_token_and_announces_to_members() {
     assert!(!*muted);
 
     // alice negotiates: her SDP offer gets the SFU's answer back as VOICE DESC.
-    alice.send("@label=v2 VOICE DESC #general :v=0\\r\\nmy-offer");
+    alice.send("@label=v2 VOICE DESC #lounge :v=0\\r\\nmy-offer");
     let reply = alice.recv().await;
     assert_eq!(reply.label.as_deref(), Some("v2"));
     let Event::VoiceDesc { sdp, .. } = &reply.event else {
@@ -3409,7 +3457,7 @@ async fn voice_join_offers_token_and_announces_to_members() {
     assert_eq!(sdp, "answer-to:v=0\r\nmy-offer");
 
     // alice leaves → labeled VOICE STATE leave ack; bob sees the leave too.
-    alice.send("@label=v3 VOICE LEAVE #general");
+    alice.send("@label=v3 VOICE LEAVE #lounge");
     let reply = alice.recv().await;
     assert_eq!(reply.label.as_deref(), Some("v3"));
     assert!(matches!(
@@ -3423,23 +3471,28 @@ async fn voice_join_offers_token_and_announces_to_members() {
     );
 
     // Leaving again → nothing to leave (uniform NO-SUCH-TARGET).
-    alice.send("VOICE LEAVE #general");
+    alice.send("VOICE LEAVE #lounge");
     alice.expect_err(ErrCode::NoSuchTarget).await;
 }
 
 #[tokio::test]
 async fn voice_muted_member_joins_but_renders_muted() {
-    let ctx = ctx_voice(&["#general"], &["boss"]);
+    let ctx = ctx_voice(&[], &["boss"]);
     let mut boss = ready_op(&ctx, "boss").await;
-    let mut bob = joined(&ctx, "bob", "#general").await;
-    let mut alice = joined(&ctx, "alice", "#general").await;
+    boss.send("CHANNEL CREATE #lounge voice");
+    assert!(matches!(boss.recv().await.event, Event::Policy { .. }));
 
     // A network-wide mute (M7) removes `speak` but not the join itself.
     boss.send("@label=m MUTE * alice");
     let reply = drain_until_label(&mut boss, "m").await;
     assert!(matches!(reply.event, Event::Moderated { .. }));
 
-    alice.send("VOICE JOIN #general");
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("VOICE JOIN #lounge");
+    assert!(matches!(bob.recv().await.event, Event::VoiceOffer { .. }));
+
+    let mut alice = ready(&ctx, "alice").await;
+    alice.send("VOICE JOIN #lounge");
     assert!(matches!(alice.recv().await.event, Event::VoiceOffer { .. }));
 
     // bob sees alice join voice, flagged muted (can't speak).
@@ -3452,17 +3505,18 @@ async fn voice_muted_member_joins_but_renders_muted() {
 
 #[tokio::test]
 async fn voice_banned_member_cannot_join() {
-    let ctx = ctx_voice(&["#general"], &["boss"]);
+    let ctx = ctx_voice(&[], &["boss"]);
     let mut boss = ready_op(&ctx, "boss").await;
-    let mut alice = joined(&ctx, "alice", "#general").await;
+    boss.send("CHANNEL CREATE #lounge voice");
+    assert!(matches!(boss.recv().await.event, Event::Policy { .. }));
 
-    // A `*`-scope ban covers #general but doesn't force-part her (only a
-    // channel-scope ban ejects) — so she is a member yet barred from voice.
+    // A `*`-scope ban covers #lounge — she is barred from voice.
     boss.send("@label=b BAN * alice");
     let reply = drain_until_label(&mut boss, "b").await;
     assert!(matches!(reply.event, Event::Moderated { .. }));
 
-    alice.send("@label=v VOICE JOIN #general");
+    let mut alice = ready(&ctx, "alice").await;
+    alice.send("@label=v VOICE JOIN #lounge");
     let reply = alice.expect_err(ErrCode::Forbidden).await;
     assert_eq!(reply.label.as_deref(), Some("v"));
 }
