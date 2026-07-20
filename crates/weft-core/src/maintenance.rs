@@ -8,7 +8,9 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 use weft_proto::{ChannelName, RetentionPolicy};
-use weft_store::{BlobHash, BlobStore, EventStore, MediaStore, NamespaceStore, ReportStore, Scope};
+use weft_store::{
+    BlobHash, BlobStore, EventStore, MediaStore, NamespaceStore, ProfileStore, ReportStore, Scope,
+};
 
 /// §13 grace before an orphaned blob is GC'd — an uploaded-but-not-yet-posted
 /// blob survives this window (it has no references until the MSG lands).
@@ -41,6 +43,7 @@ pub fn spawn_maintenance(
     reports: Arc<dyn ReportStore>,
     media_refs: Arc<dyn MediaStore>,
     blobs: Arc<dyn BlobStore>,
+    profiles: Arc<dyn ProfileStore>,
     channels: Vec<(ChannelName, RetentionPolicy)>,
     dm_policy: RetentionPolicy,
     config: MaintenanceConfig,
@@ -65,7 +68,7 @@ pub fn spawn_maintenance(
             .await;
             // §13 collect blobs orphaned past the grace window.
             let cutoff = unix_now_ms().saturating_sub(MEDIA_GC_GRACE_MS);
-            let gc = gc_orphan_blobs(&media_refs, &blobs, cutoff).await;
+            let gc = gc_orphan_blobs(&media_refs, &blobs, &profiles, cutoff).await;
             if gc > 0 {
                 info!(collected = gc, "orphaned media blobs GC'd (§13)");
             }
@@ -93,6 +96,7 @@ pub fn spawn_maintenance(
 pub async fn gc_orphan_blobs(
     media_refs: &Arc<dyn MediaStore>,
     blobs: &Arc<dyn BlobStore>,
+    profiles: &Arc<dyn ProfileStore>,
     cutoff_ms: u64,
 ) -> usize {
     let orphans = match media_refs.orphans(cutoff_ms).await {
@@ -104,6 +108,10 @@ pub async fn gc_orphan_blobs(
     };
     let mut removed = 0;
     for hash in orphans {
+        // §10.3 an avatar is referenced by a profile, not a message — keep it.
+        if profiles.avatar_exists(&hash).await.unwrap_or(false) {
+            continue;
+        }
         if let Some(parsed) = BlobHash::parse(&hash) {
             if let Err(e) = blobs.delete(&parsed).await {
                 error!("blob delete failed: {e}");

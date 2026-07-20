@@ -3,16 +3,13 @@
   // voice-room roster (speaking ring + mute badges). Self-contained — it drives
   // the WebRTC controller in `voice.svelte.ts` directly, not through AppCtx.
   import { voice, joinVoice, leaveVoice, toggleMute } from "$lib/voice.svelte";
+  import Avatar from "$lib/components/Avatar.svelte";
 
   let { channel }: { channel: string } = $props();
 
   // Are we in *this* channel's voice room?
   const here = $derived(voice.channel === channel);
   const roster = $derived(Object.values(voice.participants));
-
-  function initials(name: string): string {
-    return name.slice(0, 2).toUpperCase();
-  }
 </script>
 
 <div class="voice-bar">
@@ -38,7 +35,7 @@
     <ul class="voice-roster">
       {#each roster as p (p.user)}
         <li class="voice-member" class:speaking={p.speaking}>
-          <span class="voice-avatar">{initials(p.user)}</span>
+          <span class="voice-avatar"><Avatar account={p.user} /></span>
           <span class="voice-name">{p.user}{p.self ? " (you)" : ""}</span>
           {#if p.muted}<span class="voice-flag" title="Muted" aria-hidden="true">🔇</span>{/if}
         </li>

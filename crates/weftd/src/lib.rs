@@ -585,6 +585,7 @@ where
         + weft_store::MediaStore
         + weft_store::MediaBlocklistStore
         + weft_store::RoleStore
+        + weft_store::ProfileStore
         + 'static,
 {
     for (name, policy, kind) in seed {
@@ -639,6 +640,7 @@ where
     let events: Arc<dyn EventStore> = store.clone();
     let reports: Arc<dyn weft_store::ReportStore> = store.clone();
     let media_refs: Arc<dyn weft_store::MediaStore> = store.clone();
+    let profiles: Arc<dyn weft_store::ProfileStore> = store.clone();
     let namespaces: Arc<dyn weft_store::NamespaceStore> = store;
     let tasks = vec![weft_core::spawn_maintenance(
         events,
@@ -646,6 +648,7 @@ where
         reports,
         media_refs,
         Arc::clone(&blobs),
+        profiles,
         channels.clone(),
         dm_policy,
         maintenance,

@@ -309,6 +309,23 @@ fn presence(conn: State<'_, Conn>, status: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn profile_set(
+    conn: State<'_, Conn>,
+    display: Option<String>,
+    avatar: Option<String>,
+) -> Result<(), String> {
+    conn.send(weft::build_profile_set(
+        display.as_deref(),
+        avatar.as_deref(),
+    )?)
+}
+
+#[tauri::command]
+fn profiles_query(conn: State<'_, Conn>, accounts: Vec<String>) -> Result<(), String> {
+    conn.send(weft::build_profiles_query(accounts)?)
+}
+
+#[tauri::command]
 fn mark(conn: State<'_, Conn>, channel: String, msgid: String) -> Result<(), String> {
     conn.send(weft::build_mark(&channel, &msgid)?)
 }
@@ -588,6 +605,8 @@ pub fn run() {
             enroll_device,
             has_device_key,
             join,
+            profile_set,
+            profiles_query,
             ns_join,
             ns_create,
             ns_meta,

@@ -72,6 +72,10 @@ export interface AppCtx {
 
   // ---- helpers ----
   initials(n: string): string;
+  /** §10.3 a fetchable avatar URL for an account, or null → render initials. */
+  avatarUrl(account: string): string | null;
+  /** §10.3 an account's display name, falling back to the canonical handle. */
+  displayName(account: string): string;
   chanShort(n: string): string;
   peerOf(n: string): string;
   dotClass(acct: string): string;

@@ -381,8 +381,13 @@ async fn media_attachment_message_gates_fetch_and_gcs_on_delete() {
     assert!(matches!(ada.recv().await.event, Event::Deleted { .. }));
 
     // A GC pass (cutoff in the far future ⇒ grace elapsed) collects the orphan.
-    let removed =
-        weft_core::gc_orphan_blobs(&server.ctx().media_refs, &server.ctx().blobs, u64::MAX).await;
+    let removed = weft_core::gc_orphan_blobs(
+        &server.ctx().media_refs,
+        &server.ctx().blobs,
+        &server.ctx().profiles,
+        u64::MAX,
+    )
+    .await;
     assert!(removed >= 1, "GC should collect the now-orphaned blob");
     assert!(
         fetch_fails(&ada, &ada_bearer, &hash).await,
@@ -588,7 +593,13 @@ async fn media_image_probes_dimensions_and_generates_thumbnail() {
     // Deleting the message orphans BOTH; one GC pass collects them together.
     ada.send(&format!("DELETE {msgid}")).await;
     assert!(matches!(ada.recv().await.event, Event::Deleted { .. }));
-    weft_core::gc_orphan_blobs(&server.ctx().media_refs, &server.ctx().blobs, u64::MAX).await;
+    weft_core::gc_orphan_blobs(
+        &server.ctx().media_refs,
+        &server.ctx().blobs,
+        &server.ctx().profiles,
+        u64::MAX,
+    )
+    .await;
     assert!(fetch_fails(&ada, &bearer, &hash).await, "image GC'd");
     assert!(
         fetch_fails(&ada, &bearer, &thumb_hash).await,
@@ -1884,6 +1895,152 @@ async fn federated_media_mirrors_over_the_bridge() {
         ada.blob_download(&ada_bearer, &hash, None).await,
         png,
         "mirrored bytes match the origin's"
+    );
+
+    bridge.abort();
+    f.shutdown().await;
+    h.shutdown().await;
+    let _ = std::fs::remove_file(&f_key_path);
+    let _ = std::fs::remove_file(&h_key_path);
+}
+
+/// §10.3 federated **display profiles** over two live weftds: bob on F sets his
+/// display name + avatar; the home-network-signed profile crosses the bridge, H
+/// verifies it against F's key, stores it keyed by `bob@test.example`, and
+/// mirrors the avatar blob — so ada on H sees bob's name + avatar, served by H.
+#[tokio::test]
+async fn federated_profile_and_avatar_over_the_bridge() {
+    let f_kp = weft_core::Keypair::generate();
+    let h_kp = weft_core::Keypair::generate();
+    let f_key_path = std::env::temp_dir().join("weft-prof-f.key");
+    let h_key_path = std::env::temp_dir().join("weft-prof-h.key");
+    std::fs::write(&f_key_path, f_kp.seed_b64()).unwrap();
+    std::fs::write(&h_key_path, h_kp.seed_b64()).unwrap();
+
+    let f = start_with(&["#general"], |c| {
+        c.identity.key_file = Some(f_key_path.clone());
+        c.federation.auto_accept = true;
+        c.peers = vec![weftd::config::Peer {
+            network: "home.example".to_string(),
+            endpoint: "h.invalid:1".to_string(),
+            key: h_kp.public().to_b64(),
+        }];
+    })
+    .await;
+    let f_net: weft_proto::NetworkName = "test.example".parse().unwrap();
+
+    let h = start_with(&["#general"], |c| {
+        c.network = "home.example".to_string();
+        c.identity.key_file = Some(h_key_path.clone());
+        c.operators = vec!["admin".to_string()];
+        c.peers = vec![weftd::config::Peer {
+            network: "test.example".to_string(),
+            endpoint: f.quic_addr.to_string(),
+            key: f_kp.public().to_b64(),
+        }];
+    })
+    .await;
+    let h_net: weft_proto::NetworkName = "home.example".parse().unwrap();
+
+    let mut bob = QuicClient::connect(f.quic_addr).await;
+    bob.ready("bob").await;
+    bob.join("#general").await;
+    let mut ada = QuicClient::connect(h.quic_addr).await;
+    ada.ready("ada").await;
+    ada.join("#general").await;
+
+    let mut admin = QuicClient::connect(h.quic_addr).await;
+    admin.ready("admin").await;
+    admin.send("BRIDGE PROPOSE #general test.example").await;
+    assert!(matches!(admin.recv().await.event, Event::Manifest { .. }));
+
+    let endpoint = weft_transport::insecure::client_endpoint(weft_transport::ALPN).unwrap();
+    let ctx = h.ctx().clone();
+    let f_addr = f.quic_addr;
+    let links = h.peer_links();
+    let bridge = tokio::spawn(async move {
+        weftd::dialer::run_peer_bridge(
+            &endpoint,
+            f_addr,
+            &f_net,
+            f_kp.public(),
+            &h_kp,
+            &h_net,
+            ctx,
+            links,
+        )
+        .await
+    });
+    bob.recv_until(|r| matches!(r.event, Event::Manifest { .. }))
+        .await;
+    ada.recv_until(|r| matches!(r.event, Event::Manifest { .. }))
+        .await;
+
+    // bob uploads an avatar + sets his profile (display name with a space).
+    let img =
+        image::RgbImage::from_fn(48, 48, |x, y| image::Rgb([(x * 5) as u8, (y * 5) as u8, 9]));
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let png = png.into_inner();
+    let (_uri, avatar_hash) = upload_blob(&mut bob, "image/png", &png).await;
+    bob.send(&format!(
+        "@display=Bob\\sF;avatar={avatar_hash} PROFILE SET"
+    ))
+    .await;
+    bob.recv_until(|r| matches!(r.event, Event::Profile { .. }))
+        .await; // his own ack
+
+    // H verifies + stores bob's federated profile (keyed by his handle).
+    let mut stored = None;
+    for _ in 0..50 {
+        if let Ok(Some(p)) = h.ctx().profiles.profile("bob@test.example").await {
+            stored = Some(p);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let profile = stored.expect("H stores bob's federated profile");
+    assert_eq!(profile.display.as_deref(), Some("Bob F"));
+    assert_eq!(profile.avatar.as_deref(), Some(avatar_hash.as_str()));
+
+    // The avatar blob mirrors to H (BLAKE3-verified).
+    let mut mirrored = false;
+    for _ in 0..50 {
+        if matches!(
+            h.ctx().media_refs.blob_meta(&avatar_hash).await,
+            Ok(Some(_))
+        ) {
+            mirrored = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(mirrored, "H must mirror bob's avatar");
+
+    // ada on H queries bob's profile and gets his name + avatar.
+    ada.send("@label=q PROFILES bob@test.example").await;
+    let reply = ada
+        .recv_until(|r| matches!(r.event, Event::Profile { .. }))
+        .await;
+    let Event::Profile {
+        user,
+        display,
+        avatar,
+    } = &reply.event
+    else {
+        unreachable!()
+    };
+    assert_eq!(user.to_string(), "bob@test.example");
+    assert_eq!(display.as_deref(), Some("Bob F"));
+    assert_eq!(avatar.as_deref(), Some(avatar_hash.as_str()));
+
+    // ada fetches bob's avatar bytes from H (never touching F).
+    let ada_bearer = h.ctx().mint_media_bearer("ada".parse().unwrap());
+    assert_eq!(
+        ada.blob_download(&ada_bearer, &avatar_hash, None).await,
+        png
     );
 
     bridge.abort();

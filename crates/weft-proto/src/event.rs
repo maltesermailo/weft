@@ -396,6 +396,17 @@ pub enum Event {
         deaf: bool,
         speaking: bool,
     },
+    /// `PROFILE <user@network>` with `@display=`/`@avatar=` tags (§10.3) — a
+    /// display profile (nick + avatar hash), broadcast on change and in reply to
+    /// `PROFILES`. Fully qualified (`user@network`) so a **federated** user's
+    /// profile is representable; a missing tag = that field is unset. Over a
+    /// bridge the line also carries a `sig=` tag (the home-network `SignedProfile`),
+    /// stripped before re-broadcast to local clients.
+    Profile {
+        user: UserRef,
+        display: Option<String>,
+        avatar: Option<String>,
+    },
     /// `VOICE DESC <#chan> :<sdp>` (§16) — the SFU's SDP **answer** to the
     /// client's `VOICE DESC` offer. Symmetric with the command (spec §16 uses
     /// `VOICE DESC` both directions); the raw SDP rides the trailing.
@@ -965,6 +976,14 @@ impl Event {
                     reason: line.tags.get("reason").filter(|v| !v.is_empty()).cloned(),
                 })
             }
+            "PROFILE" => {
+                let mut args = Args::new(line, "PROFILE");
+                Ok(Event::Profile {
+                    user: args.req("user")?.parse()?,
+                    display: line.tags.get("display").cloned(),
+                    avatar: line.tags.get("avatar").cloned(),
+                })
+            }
             "VOICE" => {
                 let mut args = Args::new(line, "VOICE");
                 let sub = args.req("subcommand")?.to_ascii_uppercase();
@@ -1462,6 +1481,19 @@ impl Event {
                 vec!["CAND".to_string(), channel.to_string()],
                 Some(candidate.clone()),
             ),
+            Event::Profile {
+                user,
+                display,
+                avatar,
+            } => {
+                if let Some(display) = display {
+                    tags.insert("display".to_string(), display.clone());
+                }
+                if let Some(avatar) = avatar {
+                    tags.insert("avatar".to_string(), avatar.clone());
+                }
+                ("PROFILE", vec![user.to_string()], None)
+            }
             Event::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown event"));
             }
@@ -2122,6 +2154,34 @@ mod tests {
             by: Some("alice@peer.example".to_string()),
             reason: None,
         }));
+    }
+
+    #[test]
+    fn profile_event_round_trips() {
+        let full = Reply::with_label(
+            Event::Profile {
+                user: "ada@hda.example".parse().unwrap(),
+                display: Some("Ada L.".into()),
+                avatar: Some("b3-abc".into()),
+            },
+            "p1",
+        );
+        assert!(full.serialize().unwrap().contains("avatar=b3-abc"));
+        round_trip(&full);
+        // Avatar-only, no display; a federated user's fully-qualified handle.
+        round_trip(&Reply::new(Event::Profile {
+            user: "bob@peer.example".parse().unwrap(),
+            display: None,
+            avatar: Some("b3-xyz".into()),
+        }));
+        // Bare (both unset) — a cleared profile.
+        let bare = Reply::new(Event::Profile {
+            user: "eve@hda.example".parse().unwrap(),
+            display: None,
+            avatar: None,
+        });
+        assert_eq!(bare.serialize().unwrap(), "PROFILE eve@hda.example");
+        round_trip(&bare);
     }
 
     #[test]

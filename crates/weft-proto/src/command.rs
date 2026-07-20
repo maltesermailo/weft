@@ -460,6 +460,17 @@ pub enum Command {
         channel: ChannelName,
         candidate: String,
     },
+    /// `PROFILE SET` with `@display=`/`@avatar=` tags (§10.3) — set your own
+    /// display name + avatar (the avatar's BLAKE3 hash). A **present** tag sets
+    /// the field (empty value clears it); an **absent** tag leaves it unchanged
+    /// (partial update). Tags escape spaces, so a display name may contain them.
+    ProfileSet {
+        display: Option<String>,
+        avatar: Option<String>,
+    },
+    /// `PROFILES <account> [account...]` (§10.3) — query display profiles; the
+    /// server answers a `PROFILE` event per known account.
+    ProfilesQuery { accounts: Vec<String> },
     /// Any verb outside the known set. Servers ignore it silently (§4).
     Unknown { verb: String },
 }
@@ -1296,6 +1307,36 @@ impl Command {
                     }),
                 }
             }
+            "PROFILE" => {
+                let mut args = Args::new(line, "PROFILE");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    // Present tag (even empty) = set/clear; absent = leave as-is.
+                    "SET" => Ok(Command::ProfileSet {
+                        display: line.tags.get("display").cloned(),
+                        avatar: line.tags.get("avatar").cloned(),
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "PROFILE",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
+            "PROFILES" => {
+                let mut args = Args::new(line, "PROFILES");
+                let mut accounts = Vec::new();
+                while let Some(a) = args.opt() {
+                    accounts.push(a.to_string());
+                }
+                if accounts.is_empty() {
+                    return Err(ParseError::MissingParam {
+                        verb: "PROFILES",
+                        what: "account",
+                    });
+                }
+                Ok(Command::ProfilesQuery { accounts })
+            }
             "VOICE" => {
                 let mut args = Args::new(line, "VOICE");
                 let sub = args.req("subcommand")?.to_ascii_uppercase();
@@ -1898,6 +1939,16 @@ impl Command {
                 vec!["CAND".to_string(), channel.to_string()],
                 Some(candidate.clone()),
             ),
+            Command::ProfileSet { display, avatar } => {
+                if let Some(display) = display {
+                    tags.insert("display".to_string(), display.clone());
+                }
+                if let Some(avatar) = avatar {
+                    tags.insert("avatar".to_string(), avatar.clone());
+                }
+                ("PROFILE", vec!["SET".to_string()], None)
+            }
+            Command::ProfilesQuery { accounts } => ("PROFILES", accounts.clone(), None),
             Command::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown command"));
             }
@@ -2839,6 +2890,42 @@ mod tests {
         assert!(Request::parse("VOICE JOIN").is_err());
         assert!(Request::parse("VOICE DESC #general").is_err());
         assert!(Request::parse("VOICE FROB #general").is_err());
+    }
+
+    #[test]
+    fn profile_verbs_round_trip() {
+        // Full set: display (with a space, escaped in the tag) + avatar.
+        let set = Request::with_label(
+            Command::ProfileSet {
+                display: Some("Ada L.".into()),
+                avatar: Some("b3-abc".into()),
+            },
+            "p1",
+        );
+        let wire = set.serialize().unwrap();
+        assert!(wire.contains("display=Ada\\sL."), "{wire}");
+        assert!(wire.contains("avatar=b3-abc"), "{wire}");
+        round_trip(&set);
+
+        // Partial update: avatar only (display left unchanged → absent tag).
+        round_trip(&Request::new(Command::ProfileSet {
+            display: None,
+            avatar: Some("b3-xyz".into()),
+        }));
+        // Clear display: a present-but-empty tag distinguishes clear from absent.
+        round_trip(&Request::new(Command::ProfileSet {
+            display: Some(String::new()),
+            avatar: None,
+        }));
+
+        round_trip(&Request::with_label(
+            Command::ProfilesQuery {
+                accounts: vec!["ada".into(), "bob".into()],
+            },
+            "q1",
+        ));
+        assert!(Request::parse("PROFILES").is_err()); // needs ≥1 account
+        assert!(Request::parse("PROFILE FROB").is_err()); // bad subcommand
     }
 
     #[test]

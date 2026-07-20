@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getApp, type Member } from "$lib/context";
+  import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   const members = $derived(app.activeChannel?.members ?? []);
   const statusOf = (name: string) =>
@@ -16,8 +17,8 @@
 {#snippet row(m: Member)}
   <div class="member-row" class:member-offline={!isOnline(m.name)} role="listitem" oncontextmenu={(e) => app.memberCtx(e, m.name)}>
     <button class="member-id" onclick={(e) => app.openProfile(m.name, e)}>
-      <div class="avatar">{app.initials(m.name)}<span class="dot {statusOf(m.name)} corner"></span></div>
-      <span class="mname">{m.name}</span>
+      <div class="avatar"><Avatar account={m.name} /><span class="dot {statusOf(m.name)} corner"></span></div>
+      <span class="mname">{app.displayName(m.name)}</span>
       {#if app.badgeFor(m.name, app.active)?.owner}<span class="cap-badge owner">owner</span>
       {:else if app.badgeFor(m.name, app.active)?.mod}<span class="cap-badge mod">mod</span>{/if}
       {#if m.origin === "federated"}<span class="cap-badge bridged">br</span>{/if}

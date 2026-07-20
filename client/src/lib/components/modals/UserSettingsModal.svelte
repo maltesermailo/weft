@@ -1,8 +1,36 @@
 <script lang="ts">
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
+  import * as weft from "$lib/weft";
+  import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
+
+  // §10.3 profile editor. Prefill the display draft with the current name (empty
+  // if unset, so we don't accidentally re-set the handle as a display name).
+  const current = app.displayName(app.account);
+  let displayDraft = $state(current === app.account ? "" : current);
+  let uploading = $state(false);
+  let fileInput = $state<HTMLInputElement>();
+
+  function saveDisplay() {
+    weft.profileSet({ display: displayDraft.trim() }).catch((e) => app.toast(String(e), "error"));
+  }
+  async function onAvatarPicked(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    uploading = true;
+    try {
+      const res = await weft.upload(file);
+      await weft.profileSet({ avatar: weft.mediaHash(res.media) });
+    } catch (err) {
+      app.toast(String(err), "error");
+    } finally {
+      uploading = false;
+      input.value = "";
+    }
+  }
 </script>
 
 <div class="settings-overlay" role="dialog" aria-modal="true" transition:fade|global={{ duration: 150 }}>
@@ -23,6 +51,22 @@
         <h1>Account</h1>
         <p class="so-sub">Your identity on this network.</p>
         <div class="set-row"><span>Identity</span><b>{app.account}@{app.network}</b></div>
+        <div class="section-sep"></div>
+        <div class="field-label">Profile</div>
+        <p class="so-sub">Your display name and avatar, shown to people who share a server with you (§10.3).</p>
+        <div class="profile-edit">
+          <button class="avatar prof-avatar" title="Change avatar" onclick={() => fileInput?.click()}>
+            <Avatar account={app.account} />
+          </button>
+          <div class="profile-fields">
+            <input class="prof-input" bind:value={displayDraft} maxlength="128" placeholder="Display name (optional)" onkeydown={(e) => e.key === "Enter" && saveDisplay()} />
+            <div class="profile-actions">
+              <button class="ok-btn" onclick={saveDisplay}>Save name</button>
+              <button class="set-btn" onclick={() => fileInput?.click()}>{uploading ? "Uploading…" : "Upload avatar"}</button>
+            </div>
+          </div>
+        </div>
+        <input type="file" accept="image/*" bind:this={fileInput} onchange={onAvatarPicked} hidden />
         <div class="section-sep"></div>
         <div class="field-label">Status</div>
         <div class="status-inline">
@@ -57,3 +101,40 @@
     </div>
   </main>
 </div>
+
+<style>
+  .profile-edit {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 8px;
+  }
+  .prof-avatar {
+    width: 64px;
+    height: 64px;
+    border-radius: 12px;
+    padding: 0;
+    cursor: pointer;
+    font-size: 20px;
+  }
+  .profile-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+  }
+  .prof-input {
+    padding: 7px 10px;
+    border-radius: 7px;
+    border: 1px solid var(--border-hair-strong);
+    background: var(--bg-2, rgba(255, 255, 255, 0.03));
+    color: var(--text, inherit);
+    font-size: 0.9rem;
+  }
+  .profile-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+</style>

@@ -188,6 +188,13 @@ export type WeftEvent =
       by: string | null;
       reason: string | null;
     }
+  | {
+      kind: "profile";
+      account: string;
+      network: string;
+      display: string | null;
+      avatar: string | null;
+    }
   | { kind: "voice-offer"; channel: string; token: string; endpoint: string | null }
   | {
       kind: "voice-state";
@@ -251,6 +258,15 @@ export async function notify(title: string, body: string) {
 
 export function join(channel: string) {
   return invoke("join", { channel });
+}
+
+// §10.3 display profiles. `profileSet` omits a key to leave that field
+// unchanged, sends "" to clear it, or a value to set it (avatar = a blob hash).
+export function profileSet(opts: { display?: string; avatar?: string }) {
+  return invoke("profile_set", opts);
+}
+export function profilesQuery(accounts: string[]) {
+  return invoke("profiles_query", { accounts });
 }
 
 // §16 WEFT-RT voice signaling. The SDP/ICE payloads ride these control
@@ -399,8 +415,17 @@ export async function upload(file: File | Blob): Promise<UploadResult> {
 
 /** Resolve a `weft-media://origin/hash` reference to a fetchable URL. */
 export function mediaUrl(ref: string): string {
+  return avatarUrl(mediaHash(ref));
+}
+
+/** The BLAKE3 hash portion of a `weft-media://origin/hash` reference. */
+export function mediaHash(ref: string): string {
   const rest = ref.replace(/^weft-media:\/\//, "");
-  const hash = rest.slice(rest.indexOf("/") + 1);
+  return rest.slice(rest.indexOf("/") + 1);
+}
+
+/** §10.3 a fetchable URL for an avatar (or any) blob hash, home-network only. */
+export function avatarUrl(hash: string): string {
   return `${mediaOrigin()}/media/${hash}?t=${encodeURIComponent(mediaBearer)}`;
 }
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getApp } from "$lib/context";
+  import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
 
   const STATUSES: { value: string; label: string }[] = [
@@ -16,7 +17,7 @@
     <div class="user-menu">
       <div class="um-head">
         <span class="avatar status-avatar">
-          {app.initials(app.account)}
+          <Avatar account={app.account} />
           <span class="dot {app.myStatus} corner"></span>
         </span>
         <span class="who">

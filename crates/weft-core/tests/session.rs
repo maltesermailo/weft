@@ -3293,6 +3293,90 @@ async fn roles_are_explicit_membership_not_derived() {
     );
 }
 
+// ---- §10.3 display profiles (M-prof-3) ----
+
+#[tokio::test]
+async fn profile_set_acks_and_broadcasts_to_co_members() {
+    let ctx = ctx(&["#general"]);
+    let mut bob = joined(&ctx, "bob", "#general").await;
+    let mut alice = joined(&ctx, "alice", "#general").await;
+
+    // alice sets her profile (display name with a space, escaped in the tag).
+    alice.send("@label=p;display=Ada\\sL.;avatar=b3-ada PROFILE SET");
+    let reply = alice.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("p"));
+    let Event::Profile {
+        user,
+        display,
+        avatar,
+    } = &reply.event
+    else {
+        panic!("expected PROFILE ack, got {reply:?}");
+    };
+    assert_eq!(user.account.as_str(), "alice");
+    assert_eq!(user.network.as_str(), "test.example"); // qualified with our network
+    assert_eq!(display.as_deref(), Some("Ada L."));
+    assert_eq!(avatar.as_deref(), Some("b3-ada"));
+
+    // bob (a co-member) sees alice's new profile (unlabeled broadcast).
+    let reply = loop {
+        let r = bob.recv().await;
+        if matches!(r.event, Event::Profile { .. }) {
+            break r;
+        }
+    };
+    assert!(matches!(
+        &reply.event,
+        Event::Profile { user, avatar, .. }
+            if user.account.as_str() == "alice" && avatar.as_deref() == Some("b3-ada")
+    ));
+    assert_eq!(reply.label, None); // broadcast copies carry no label (§3.5)
+}
+
+#[tokio::test]
+async fn profile_partial_update_and_query() {
+    let ctx = ctx(&["#general"]);
+    let mut alice = joined(&ctx, "alice", "#general").await;
+
+    alice.send("@display=Ada;avatar=b3-1 PROFILE SET");
+    assert!(matches!(alice.recv().await.event, Event::Profile { .. }));
+    // Partial update: change only the avatar; display is left intact.
+    alice.send("@avatar=b3-2 PROFILE SET");
+    assert!(matches!(alice.recv().await.event, Event::Profile { .. }));
+
+    // Query it back.
+    alice.send("@label=q PROFILES alice bob");
+    let reply = alice.recv().await;
+    let Event::Profile {
+        user,
+        display,
+        avatar,
+    } = &reply.event
+    else {
+        panic!("expected PROFILE, got {reply:?}");
+    };
+    assert_eq!(user.account.as_str(), "alice");
+    assert_eq!(display.as_deref(), Some("Ada")); // preserved through the avatar-only update
+    assert_eq!(avatar.as_deref(), Some("b3-2"));
+    // bob has no profile → omitted (not an error).
+}
+
+#[tokio::test]
+async fn profile_clear_via_empty_tag() {
+    let ctx = ctx(&["#general"]);
+    let mut alice = joined(&ctx, "alice", "#general").await;
+
+    alice.send("@display=Ada PROFILE SET");
+    assert!(matches!(alice.recv().await.event, Event::Profile { .. }));
+    // A present-but-empty tag clears the field.
+    alice.send("@display= PROFILE SET");
+    let reply = alice.recv().await;
+    assert!(matches!(
+        &reply.event,
+        Event::Profile { display, .. } if display.is_none()
+    ));
+}
+
 // ---- §16 WEFT-RT voice signaling (M-voice-1) ----
 
 /// A stand-in SFU: it authorizes nothing (core already did) — it just mints a

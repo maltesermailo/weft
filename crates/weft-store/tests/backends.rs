@@ -13,8 +13,8 @@ use weft_store::{
     HistoryItem, InviteRecord, InviteStore, MediaBlockRecord, MediaBlocklistStore, MediaStore,
     MembershipStore, MemoryStore, ModKind, ModRecord, ModerationStore, NamespaceRecord,
     NamespaceStore, NetblockRecord, NetblockStore, Page, PeerRecord, PeerStore, PendingRecovery,
-    PinStore, RedeemOutcome, ReportRecord, ReportResolution, ReportStore, RoleDef, RoleStore,
-    Scope,
+    PinStore, ProfileStore, RedeemOutcome, ReportRecord, ReportResolution, ReportStore, RoleDef,
+    RoleStore, Scope,
 };
 
 fn user(name: &str) -> UserRef {
@@ -76,6 +76,7 @@ where
         + PinStore
         + MembershipStore
         + MediaStore
+        + ProfileStore
         + RoleStore,
 {
     let chan: Scope = Scope::Channel(format!("#suite-{tag}").parse().unwrap());
@@ -1307,6 +1308,58 @@ where
         .unwrap();
     store.drop_refs_before(&mchan, 5_000).await.unwrap();
     assert!(store.blob_scopes(&h_b).await.unwrap().is_empty());
+
+    // -- §10.3 profiles: set, read, batch, last-writer-wins --
+    let pa = format!("ada-{tag}");
+    let pb = format!("bob-{tag}@peer.example"); // a federated handle
+    assert!(store.profile(&pa).await.unwrap().is_none());
+    store
+        .set_profile(
+            &pa,
+            weft_store::ProfileRecord {
+                display: Some("Ada".into()),
+                avatar: Some("b3-ada".into()),
+                updated: 100,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_profile(
+            &pb,
+            weft_store::ProfileRecord {
+                display: None,
+                avatar: Some("b3-bob".into()),
+                updated: 100,
+            },
+        )
+        .await
+        .unwrap();
+    let got = store.profile(&pa).await.unwrap().unwrap();
+    assert_eq!(got.display.as_deref(), Some("Ada"));
+    assert_eq!(got.avatar.as_deref(), Some("b3-ada"));
+    // Replace (last-writer-wins) — a new avatar, display cleared.
+    store
+        .set_profile(
+            &pa,
+            weft_store::ProfileRecord {
+                display: None,
+                avatar: Some("b3-ada2".into()),
+                updated: 200,
+            },
+        )
+        .await
+        .unwrap();
+    let got = store.profile(&pa).await.unwrap().unwrap();
+    assert_eq!(got.display, None);
+    assert_eq!(got.avatar.as_deref(), Some("b3-ada2"));
+    assert_eq!(got.updated, 200);
+    // Batch fetch skips the absent account.
+    let batch = store
+        .profiles(&[pa.clone(), pb.clone(), format!("ghost-{tag}")])
+        .await
+        .unwrap();
+    assert_eq!(batch.len(), 2);
 }
 
 #[tokio::test]

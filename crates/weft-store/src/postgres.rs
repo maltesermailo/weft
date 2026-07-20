@@ -19,12 +19,12 @@ use crate::compact::compaction_plan;
 use crate::traits::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaBlocklistStore,
     MediaStore, MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore,
-    PinStore, ReportStore, RoleStore, HOLD_RADIUS,
+    PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
 };
 use crate::types::{
     ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, MediaBlockRecord, ModKind,
-    ModRecord, NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome,
-    ReportRecord, ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
+    ModRecord, NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, ProfileRecord,
+    RedeemOutcome, ReportRecord, ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 
@@ -2297,5 +2297,73 @@ impl MediaStore for PgStore {
             .await
             .map_err(backend_err)?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ProfileStore for PgStore {
+    async fn set_profile(&self, account: &str, profile: ProfileRecord) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO weft_profiles (account, display, avatar, updated_ms)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (account) DO UPDATE
+              SET display = EXCLUDED.display,
+                  avatar = EXCLUDED.avatar,
+                  updated_ms = EXCLUDED.updated_ms
+            "#,
+        )
+        .bind(account)
+        .bind(profile.display.as_deref())
+        .bind(profile.avatar.as_deref())
+        .bind(profile.updated as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn profile(&self, account: &str) -> Result<Option<ProfileRecord>, StoreError> {
+        let row = sqlx::query("SELECT * FROM weft_profiles WHERE account = $1")
+            .bind(account)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(row.map(|row| profile_from_row(&row)))
+    }
+
+    async fn profiles(
+        &self,
+        accounts: &[String],
+    ) -> Result<Vec<(String, ProfileRecord)>, StoreError> {
+        if accounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query("SELECT * FROM weft_profiles WHERE account = ANY($1)")
+            .bind(accounts)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(rows
+            .iter()
+            .map(|row| (row.get::<String, _>("account"), profile_from_row(row)))
+            .collect())
+    }
+
+    async fn avatar_exists(&self, hash: &str) -> Result<bool, StoreError> {
+        let row = sqlx::query("SELECT 1 FROM weft_profiles WHERE avatar = $1 LIMIT 1")
+            .bind(hash)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(row.is_some())
+    }
+}
+
+fn profile_from_row(row: &sqlx::postgres::PgRow) -> ProfileRecord {
+    ProfileRecord {
+        display: row.get("display"),
+        avatar: row.get("avatar"),
+        updated: row.get::<i64, _>("updated_ms") as u64,
     }
 }

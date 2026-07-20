@@ -191,6 +191,28 @@ Chain 8: boot with Postgres — `weftd::start` → backend match →
 | DM behavior | `directory.rs` + session `on_direct`/`on_msg` |
 | Verification kinds/flows | store substrate exists (`Verification`); wire flow = spec decision first |
 
+## M-prof addendum — §10.3 display profiles (nick + avatar)
+
+A profile = display name + avatar (the avatar's BLAKE3 hash → a `weft-media://`
+blob). New load-bearing pieces:
+- `weft-crypto/src/profile.rs` — `SignedProfile` (home-network-key-signed CBOR,
+  avatar-hash-bound; models `manifest.rs`). Used at federation (M-prof-5).
+- `weft-store` — `ProfileStore` + `ProfileRecord` (`kind`-less per-account row),
+  migration 0022; `avatar_exists` powers the fetch gate + GC skip.
+- `weft-core/src/session/profile.rs` — `on_profile_set` (partial update →
+  `ctx.profiles.set_profile` → labeled ack + `announce_as` to co-members) and
+  `on_profiles_query`. `ctx.profiles` is the port; `ServerCtx::may_fetch` lets any
+  authed session fetch an avatar blob (§10.3 semi-public); `maintenance ::
+  gc_orphan_blobs` skips avatar hashes so avatars aren't GC'd.
+
+| Change | Touch |
+|---|---|
+| Profile wire form | `weft-proto` command.rs (`PROFILE SET`/`PROFILES`) + event.rs (`PROFILE`) **+ round-trip test first** |
+| Profile storage | `weft-store` `ProfileStore`/`ProfileRecord` (mem + PG + migration + contract) |
+| Profile authz/broadcast | `weft-core/src/session/profile.rs`; avatar fetch gate in `context.rs :: may_fetch`; GC skip in `maintenance.rs` |
+| Profile federation | send: `session/federation.rs :: on_bridge_event` (signs + forwards `PROFILE sig=…`); receive: `on_bridge_line` routes `PROFILE`→`ingest_bridged`→`ingest_profile` (verify vs peer key + mirror avatar). `SignedProfile` in weft-crypto; `Event::Profile` carries a `UserRef` |
+| Avatar rendering (client) | `Avatar.svelte` (image-or-initials, uses `app.avatarUrl`); `+page.svelte` `profiles` store + `avatarUrl`/`displayName`/`queryProfile`; edit in `UserSettingsModal` (`weft.profileSet` + `upload()`); wrappers in `weft.ts` (`profileSet`/`profilesQuery`/`avatarUrl`) |
+
 ## M-voice addendum — §16 WEFT-RT voice signaling (M-voice-0/1a)
 
 Voice is a **projection over the same session/actor machinery**, not a new

@@ -45,6 +45,7 @@ mod federation;
 mod invites;
 mod moderation;
 mod namespaces;
+mod profile;
 mod relay;
 mod roles;
 mod voice;
@@ -1207,6 +1208,11 @@ impl<S: ControlStream> Session<S> {
             | Command::AuthKey { .. }
             | Command::AuthProof { .. }
             | Command::Register { .. } => self.not_authed(label, "already authenticated").await,
+            // §10.3 display profiles.
+            Command::ProfileSet { display, avatar } => {
+                self.on_profile_set(label, display, avatar, account).await
+            }
+            Command::ProfilesQuery { accounts } => self.on_profiles_query(label, accounts).await,
             // §16 WEFT-RT voice signaling. The SFU backend is installed by weftd;
             // a zero-voice server answers `UNSUPPORTED` inside these handlers.
             Command::VoiceJoin { channel } => self.on_voice_join(label, channel, account).await,

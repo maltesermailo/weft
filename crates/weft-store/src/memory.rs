@@ -13,12 +13,12 @@ use crate::compact::compaction_plan;
 use crate::traits::{
     AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaBlocklistStore,
     MediaStore, MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore,
-    PinStore, ReportStore, RoleStore, HOLD_RADIUS,
+    PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
 };
 use crate::types::{
     ChannelRecord, EventRecord, GrantRecord, InviteRecord, MediaBlockRecord, ModKind, ModRecord,
-    NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome,
-    ReportRecord, ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
+    NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, ProfileRecord,
+    RedeemOutcome, ReportRecord, ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
 };
 use crate::StoreError;
 use weft_proto::{ContentState, ReportStatus};
@@ -86,6 +86,8 @@ struct Inner {
     blobs: HashMap<String, BlobRecord>,
     /// §13 media reference rows: (scope, msgid, blob hash).
     media_refs: Vec<(Scope, MsgId, String)>,
+    /// §10.3 account handle → display profile (nick + avatar hash).
+    profiles: HashMap<String, ProfileRecord>,
 }
 
 #[derive(Default)]
@@ -1506,6 +1508,49 @@ impl MediaStore for MemoryStore {
     async fn forget_blob(&self, hash: &str) -> Result<(), StoreError> {
         self.inner.lock().expect("store lock").blobs.remove(hash);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ProfileStore for MemoryStore {
+    async fn set_profile(&self, account: &str, profile: ProfileRecord) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .expect("store lock")
+            .profiles
+            .insert(account.to_string(), profile);
+        Ok(())
+    }
+
+    async fn profile(&self, account: &str) -> Result<Option<ProfileRecord>, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("store lock")
+            .profiles
+            .get(account)
+            .cloned())
+    }
+
+    async fn profiles(
+        &self,
+        accounts: &[String],
+    ) -> Result<Vec<(String, ProfileRecord)>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(accounts
+            .iter()
+            .filter_map(|a| inner.profiles.get(a).map(|p| (a.clone(), p.clone())))
+            .collect())
+    }
+
+    async fn avatar_exists(&self, hash: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("store lock")
+            .profiles
+            .values()
+            .any(|p| p.avatar.as_deref() == Some(hash)))
     }
 }
 

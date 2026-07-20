@@ -4,12 +4,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use weft_crypto::{Attestation, Capability, Grant, Keypair, PublicKey, Subject, TokenScope};
+use weft_crypto::{
+    Attestation, Capability, Grant, Keypair, Profile, PublicKey, SignedProfile, Subject, TokenScope,
+};
 use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, RetentionPolicy};
 use weft_store::{
     AccountStore, BlobStore, CapabilityStore, ChannelStore, EventStore, InviteStore,
     MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
-    NetblockStore, PeerStore, PinStore, ReportStore, RoleStore, StoreError,
+    NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, StoreError,
 };
 
 use crate::accounts::Accounts;
@@ -132,6 +134,8 @@ pub struct ServerCtx {
     pub(crate) memberships: Arc<dyn MembershipStore>,
     /// Role definitions — named capability-token bundles per scope (§6.5).
     pub(crate) roles: Arc<dyn RoleStore>,
+    /// §10.3 display profiles (nick + avatar) keyed by account handle.
+    pub profiles: Arc<dyn ProfileStore>,
     /// §6.1 live presence, in-memory only (never stored, never bridged).
     /// account → last non-invisible status; served with MEMBERS for correct
     /// roster dots.
@@ -268,6 +272,7 @@ impl ServerCtx {
             + MediaStore
             + MediaBlocklistStore
             + RoleStore
+            + ProfileStore
             + 'static,
     {
         let events: Arc<dyn EventStore> = store.clone();
@@ -284,6 +289,7 @@ impl ServerCtx {
         let pins: Arc<dyn PinStore> = store.clone();
         let memberships: Arc<dyn MembershipStore> = store.clone();
         let roles: Arc<dyn RoleStore> = store.clone();
+        let profiles: Arc<dyn ProfileStore> = store.clone();
         let namespaces: Arc<dyn NamespaceStore> = store;
         let registry = Registry::spawn(
             channels,
@@ -318,6 +324,7 @@ impl ServerCtx {
             pins,
             memberships,
             roles,
+            profiles,
             presence: std::sync::Mutex::new(std::collections::HashMap::new()),
             blobs,
             media_refs,
@@ -441,6 +448,22 @@ impl ServerCtx {
     /// Our own network name as the validated type (manifests name their peer).
     pub(crate) fn network(&self) -> &NetworkName {
         &self.info.network
+    }
+
+    /// §10.3 sign a display profile with our network key so a remote can verify a
+    /// federated user's profile against our well-known key (like manifests).
+    pub(crate) fn sign_profile(&self, profile: &Profile) -> SignedProfile {
+        profile.sign(&self.identity)
+    }
+
+    /// §10.3 store a federated user's profile received over a bridge (already
+    /// signature-verified by the caller), keyed by its `user@network` handle.
+    pub(crate) async fn store_federated_profile(
+        &self,
+        handle: &str,
+        record: weft_store::ProfileRecord,
+    ) {
+        let _ = self.profiles.set_profile(handle, record).await;
     }
 
     // ---- capability enforcement (§10.4, invariant 4) ----
@@ -693,6 +716,10 @@ impl ServerCtx {
     /// (DM). A gated/absent blob is uniformly "not found" to the caller
     /// (invariant 1). *(The `view`-cap path for non-members is a follow-up.)*
     pub async fn may_fetch(&self, account: &Account, hash: &str) -> bool {
+        // §10.3 avatars are semi-public — any authed session may fetch one.
+        if self.profiles.avatar_exists(hash).await.unwrap_or(false) {
+            return true;
+        }
         let Ok(scopes) = self.media_refs.blob_scopes(hash).await else {
             return false;
         };

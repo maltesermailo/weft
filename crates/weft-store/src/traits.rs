@@ -580,3 +580,29 @@ pub trait MediaStore: Send + Sync {
     /// Forget a blob's tracking row after its bytes are deleted. Idempotent.
     async fn forget_blob(&self, hash: &str) -> Result<(), StoreError>;
 }
+
+/// §10.3 display profiles (nick + avatar) keyed by account handle. A local
+/// account is keyed by its bare name; a federated user by `account@network`.
+#[async_trait]
+pub trait ProfileStore: Send + Sync {
+    /// Insert or replace `account`'s profile (last-writer-wins). Idempotent.
+    async fn set_profile(
+        &self,
+        account: &str,
+        profile: crate::ProfileRecord,
+    ) -> Result<(), StoreError>;
+
+    /// One account's profile, if set.
+    async fn profile(&self, account: &str) -> Result<Option<crate::ProfileRecord>, StoreError>;
+
+    /// The profiles of several accounts at once (for a roster snapshot); absent
+    /// accounts are simply omitted.
+    async fn profiles(
+        &self,
+        accounts: &[String],
+    ) -> Result<Vec<(String, crate::ProfileRecord)>, StoreError>;
+
+    /// Is `hash` some account's avatar? Avatar blobs are fetchable by any authed
+    /// session (§10.3, semi-public) and exempt from orphan GC while referenced.
+    async fn avatar_exists(&self, hash: &str) -> Result<bool, StoreError>;
+}

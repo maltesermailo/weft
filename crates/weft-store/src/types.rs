@@ -123,6 +123,19 @@ pub struct ChannelRecord {
     pub kind: ChannelKind,
 }
 
+/// §10.3 a per-account display profile: an optional display name (nick) and an
+/// optional avatar (the avatar blob's BLAKE3 **hash**, resolved to a
+/// `weft-media://` URI by the client). `updated` is unix-ms, last-writer-wins
+/// across a user's devices and the monotonic guard against a stale federated
+/// profile overwriting a newer one. Keyed by account handle (local name or a
+/// federated `account@network`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileRecord {
+    pub display: Option<String>,
+    pub avatar: Option<String>,
+    pub updated: u64,
+}
+
 /// A recorded capability grant (§6.5, §10.4). The server keeps these so an
 /// authed same-network account's caps are checkable without a token round-
 /// trip; the signed token returned to the client is for delegation and

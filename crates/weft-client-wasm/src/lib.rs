@@ -231,6 +231,26 @@ impl WeftClient {
             "channel_meta" => build_channel_meta(&arg("channel"), &arg("key"), &arg("value"))?,
             "channels" => build_channels(&arg("namespace"))?,
             "discover" => build_discover(opt("cursor"))?,
+            // ---- §10.3 profiles ----
+            "profile_set" => {
+                // Absent key = leave unchanged; present (even "") = set/clear.
+                build_profile_set(
+                    args.get("display").and_then(|v| v.as_str()),
+                    args.get("avatar").and_then(|v| v.as_str()),
+                )?
+            }
+            "profiles_query" => {
+                let accounts = args
+                    .get("accounts")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                build_profiles_query(accounts)?
+            }
             // ---- §16 voice signaling ----
             "voice_join" => build_voice_join(&arg("channel"))?,
             "voice_leave" => build_voice_leave(&arg("channel"))?,

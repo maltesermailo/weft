@@ -266,6 +266,9 @@
   // ---- DMs + presence (Phase 5) ----
   let homeView = $state(false); // sidebar shows DMs instead of channels
   let presence = $state<Record<string, string>>({}); // account → status
+  // §10.3 account → display profile (nick + avatar hash). Filled from PROFILE
+  // events (broadcast on change) + on-demand PROFILES queries.
+  let profiles = $state<Record<string, { display?: string; avatar?: string }>>({});
   let myStatus = $state("online");
   // Footer user menu (presence + settings + logout) and the user-settings page tab.
   let userMenu = $state(false);
@@ -646,6 +649,27 @@
   const peerOf = (key: string) => key.replace(/^@/, "");
   const dotClass = (acct: string) => `dot ${presence[acct] ?? "offline"}`;
 
+  // ---- §10.3 profile helpers ----
+  /** A fetchable avatar URL for an account, or null → render initials. */
+  const avatarUrl = (acct: string): string | null => {
+    const a = profiles[peerOf(acct)]?.avatar;
+    return a ? weft.avatarUrl(a) : null;
+  };
+  /** An account's display name, falling back to the bare account part (§10.3:
+   *  the canonical handle is always shown separately). */
+  const displayName = (acct: string): string => {
+    const key = peerOf(acct);
+    return profiles[key]?.display || key.split("@")[0];
+  };
+  /** Fetch a profile we don't have yet (deduped; own + co-members). */
+  function queryProfile(acct: string) {
+    const a = peerOf(acct);
+    if (a && profiles[a] === undefined) {
+      profiles[a] = {}; // mark requested so we don't re-query
+      weft.profilesQuery([a]).catch(() => {});
+    }
+  }
+
   function openDm(peer: string) {
     const key = "@" + peer.replace(/^@/, "");
     ensureChannel(key);
@@ -675,6 +699,7 @@
         reconnectAttempts = 0;
         ensureCapsAt(account, "*"); // learn operator status (federation gating)
         initVoice(account); // §16 wire the voice controller to the event stream
+        queryProfile(account); // §10.3 load our own profile
         // Remember creds so the next launch logs straight back in. NOTE: this
         // includes the password in localStorage — a dev convenience; the
         // hardening is OS-keychain storage in the backend.
@@ -733,6 +758,7 @@
             ch.members.push({ name: e.user, origin: e.network === network ? "local" : "federated" });
           }
           ensureCaps(e.user, e.channel); // for the roster badge
+          queryProfile(e.user); // §10.3 learn their display name + avatar
 
           if (e.user === account) {
             if (!active) active = e.channel;
@@ -763,6 +789,7 @@
         // Server-generated system messages (join/part, …) — a persistent line
         // that rides the normal message + history path, rendered Discord-style.
         const who = e.network === network ? e.sender : `${e.sender}@${e.network}`;
+        if (!e.system) queryProfile(who); // §10.3 the sender's avatar + display name
         const systemBody = e.system
           ? e.system === "join"
             ? `${who} joined`
@@ -826,6 +853,17 @@
               e.body.slice(0, 140),
             );
         }
+        break;
+      }
+      case "profile": {
+        // §10.3 a display profile (nick + avatar). Key local users by their bare
+        // handle, federated users by `account@network` (so same-name users on
+        // different networks don't collide).
+        const key = e.network === network ? e.account : `${e.account}@${e.network}`;
+        profiles[key] = {
+          display: e.display ?? undefined,
+          avatar: e.avatar ?? undefined,
+        };
         break;
       }
       case "presence":
@@ -1856,6 +1894,8 @@
     set dropTarget(v: { name: string; after: boolean } | null) { dropTarget = v; },
     moveChannel,
     initials,
+    avatarUrl,
+    displayName,
     chanShort,
     peerOf,
     dotClass,

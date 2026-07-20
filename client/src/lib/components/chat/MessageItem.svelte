@@ -3,6 +3,7 @@
   import { autofocus } from "$lib/actions";
   import { EMOJI, QUICK_EMOJI } from "$lib/emoji";
   import Attachment from "./Attachment.svelte";
+  import Avatar from "$lib/components/Avatar.svelte";
   import type { Msg } from "$lib/types";
 
   const app = getApp();
@@ -13,7 +14,8 @@
   <div class="msg-group"><div style="width:34px;flex-shrink:0"></div><div class="msg-body"><div class="msg-line system">{m.body}</div></div></div>
 {:else}
   <div class="msg-group" class:mention-hit={!m.own && app.mentionsMe(m.body)} id="msg-{m.key}" role="article" oncontextmenu={(e) => app.msgCtx(e, m)}>
-    <div class="avatar">{app.initials(m.author)}</div>
+    <!-- §10.3 avatar: local by bare handle, federated by `author@network`. -->
+    <div class="avatar"><Avatar account={m.net ? `${m.author}@${m.net}` : m.author} /></div>
     <div class="msg-body">
       {#if m.replyTo}
         {@const rep = app.activeChannel?.messages.find((x) => x.msgid === m.replyTo)}
@@ -25,13 +27,13 @@
       <div class="msg-meta">
         {#if m.net}
           <!-- Foreign sender: fully qualified, and no local profile to open. -->
-          <span class="author foreign" title="from {m.net}">{m.author}<span class="net-suffix">@{m.net}</span></span>
+          <span class="author foreign" title="from {m.net}">{app.displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></span>
           <!-- §11.11 recognition: a federated user's role(s) held on this network. -->
           {#each app.rolesOf(`${m.author}@${m.net}`, app.roleScopeOf(app.active)) as r (r.name)}
             <span class="role-pill" style="--role:{r.color}"><span class="role-dot"></span>{r.name}</span>
           {/each}
         {:else}
-          <button class="author author-btn" onclick={(e) => app.openProfile(m.author, e)}>{m.author}</button>
+          <button class="author author-btn" onclick={(e) => app.openProfile(m.author, e)}>{app.displayName(m.author)}</button>
         {/if}
         {#if !m.net && app.badgeFor(m.author, app.active)?.owner}<span class="cap-badge owner">owner</span>
         {:else if !m.net && app.badgeFor(m.author, app.active)?.mod}<span class="cap-badge mod">mod</span>{/if}

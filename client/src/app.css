@@ -795,6 +795,15 @@ button:disabled {
   font-weight: 500;
   flex-shrink: 0;
   color: var(--text-muted);
+  overflow: hidden; /* clip the avatar image to the rounded frame */
+}
+/* §10.3 an avatar image fills its `.avatar`-style frame (any size/radius). */
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+  display: block;
 }
 .sidebar-user .who {
   min-width: 0;

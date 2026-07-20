@@ -271,6 +271,18 @@ pub enum ClientEvent {
         by: Option<String>,
         reason: Option<String>,
     },
+    /// §10.3 `PROFILE <account>` — a display profile (nick + avatar hash) for an
+    /// account, broadcast on change and in reply to `PROFILES`. A `None` field is
+    /// unset; the client resolves `avatar` to a `weft-media://` URL, falling back
+    /// to initials.
+    Profile {
+        account: String,
+        /// The account's home network (so a federated profile is distinguishable
+        /// from a local one with the same handle).
+        network: String,
+        display: Option<String>,
+        avatar: Option<String>,
+    },
     /// §16 `VOICE OFFER <#chan> <token> [:endpoint]` — the answer to our
     /// `VOICE JOIN`: the media token + optional SFU endpoint hint. The UI then
     /// negotiates WebRTC (create an offer, send `VOICE DESC`).
@@ -648,6 +660,17 @@ pub fn on_line<E: EventSink>(
             action: action.to_string(),
             by: by.map(|a| a.to_string()),
             reason,
+        }),
+        // §10.3 display profiles.
+        Event::Profile {
+            user,
+            display,
+            avatar,
+        } => sink.emit(ClientEvent::Profile {
+            account: user.account.to_string(),
+            network: user.network.to_string(),
+            display,
+            avatar,
         }),
         // §16 WEFT-RT voice signaling.
         Event::VoiceOffer {
@@ -1431,6 +1454,30 @@ pub fn build_ns_join(name: &str) -> Result<String, String> {
     let name: weft_proto::NamespaceName =
         name.parse().map_err(|_| "bad namespace name".to_string())?;
     weft_proto::Request::new(weft_proto::Command::NsJoin { name })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+// ---- §10.3 display profiles ----
+
+/// `PROFILE SET` — set your own display name + avatar (§10.3). Each arg is
+/// `None` to leave that field unchanged, `Some("")` to clear it, or `Some(v)`
+/// to set it (`avatar` is the blob's BLAKE3 hash).
+pub fn build_profile_set(display: Option<&str>, avatar: Option<&str>) -> Result<String, String> {
+    Request::new(Command::ProfileSet {
+        display: display.map(String::from),
+        avatar: avatar.map(String::from),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `PROFILES <account>...` — query display profiles (§10.3).
+pub fn build_profiles_query(accounts: Vec<String>) -> Result<String, String> {
+    if accounts.is_empty() {
+        return Err("no accounts".to_string());
+    }
+    Request::new(Command::ProfilesQuery { accounts })
         .serialize()
         .map_err(|e| e.to_string())
 }
