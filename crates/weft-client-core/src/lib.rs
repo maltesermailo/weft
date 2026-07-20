@@ -284,11 +284,15 @@ pub enum ClientEvent {
         avatar: Option<String>,
     },
     /// §16 `VOICE OFFER <#chan> <token> [:endpoint]` — the answer to our
-    /// `VOICE JOIN`: the media token + optional SFU endpoint hint. The UI then
-    /// negotiates WebRTC (create an offer, send `VOICE DESC`).
+    /// `VOICE JOIN`. `mode` picks the media path: `"webrtc"` = negotiate with the
+    /// embedded SFU via `VOICE DESC` (token = media token); `"livekit"` = connect
+    /// the LiveKit SDK to `endpoint` (the server URL) with `token` (a LiveKit
+    /// access JWT) in `room`. `room` is set only for LiveKit.
     VoiceOffer {
         channel: String,
+        mode: String,
         token: String,
+        room: Option<String>,
         endpoint: Option<String>,
     },
     /// §16 `VOICE STATE <#chan> <user@net> <join|leave|update>` — voice-room
@@ -675,11 +679,15 @@ pub fn on_line<E: EventSink>(
         // §16 WEFT-RT voice signaling.
         Event::VoiceOffer {
             channel,
+            mode,
             token,
+            room,
             endpoint,
         } => sink.emit(ClientEvent::VoiceOffer {
             channel: channel.to_string(),
+            mode: mode.to_string(),
             token,
+            room,
             endpoint,
         }),
         Event::VoiceState {

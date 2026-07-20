@@ -123,7 +123,9 @@ impl<S: ControlStream> Session<S> {
             label,
             Event::VoiceOffer {
                 channel: channel.clone(),
+                mode: grant.mode,
                 token: grant.token,
+                room: grant.room,
                 endpoint: grant.endpoint,
             },
         )

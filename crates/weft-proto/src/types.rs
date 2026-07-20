@@ -239,6 +239,28 @@ wire_enum!(
 );
 
 wire_enum!(
+    /// `VOICE OFFER` media transport (§16). `webrtc` = the client negotiates
+    /// WebRTC directly with the server's embedded SFU via `VOICE DESC`/`CAND`.
+    /// `livekit` = the token is a LiveKit access JWT and the trailing is the
+    /// LiveKit server URL; the client connects with the LiveKit SDK and the
+    /// `DESC`/`CAND` handshake is unused. Absent tag defaults to `webrtc` so an
+    /// old offer stays valid.
+    VoiceTransport, "voice transport", {
+        Webrtc => "webrtc",
+        Livekit => "livekit",
+    }
+);
+
+// `wire_enum!` fixes the derive set (no `Default`), so this can't be a
+// `#[derive(Default)]` + `#[default]` — hence the manual impl.
+#[allow(clippy::derivable_impls)]
+impl Default for VoiceTransport {
+    fn default() -> Self {
+        Self::Webrtc
+    }
+}
+
+wire_enum!(
     /// `STREAM OFFER <media|backfill> …` payload kind (§13, §6). `media` is a
     /// content-addressed blob; `backfill` is bulk HISTORY streamed over the data
     /// plane (M-media-4). Both ride the same transport.

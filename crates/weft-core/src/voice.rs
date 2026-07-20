@@ -10,9 +10,11 @@
 //! server with none advertises no `features=voice` and answers voice verbs with
 //! `UNSUPPORTED`.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
-use weft_proto::{Account, ChannelName};
+use weft_proto::{Account, ChannelName, NetworkName, UserRef, VoiceTransport};
 
 /// An authorized voice join, handed to the backend after core's cap/membership/
 /// moderation checks pass. `session` is the caller's session id — the SFU keys
@@ -29,13 +31,17 @@ pub struct VoiceJoinReq {
     pub can_speak: bool,
 }
 
-/// What the backend returns for a `VOICE OFFER`: a short-lived media token
-/// (bearing the granted `speak`/`listen` scope) and an optional SFU endpoint
-/// hint. For an embedded SFU reachable at the session host the hint is `None`
-/// and the client negotiates against the same address via ICE.
+/// What the backend returns for a `VOICE OFFER`: the media transport, a
+/// short-lived token (bearing the granted `speak`/`listen` scope), and optional
+/// room + endpoint hints. For the embedded `webrtc` SFU reachable at the session
+/// host, `mode = Webrtc`, `room = None`, and the client negotiates against the
+/// same address via ICE. For `livekit`, `token` is the access JWT, `room` names
+/// the LiveKit room, and `endpoint` is the LiveKit server URL.
 #[derive(Debug, Clone)]
 pub struct VoiceGrant {
+    pub mode: VoiceTransport,
     pub token: String,
+    pub room: Option<String>,
     pub endpoint: Option<String>,
 }
 
@@ -94,4 +100,126 @@ pub trait VoiceBackend: Send + Sync {
 pub struct VoiceMember {
     pub account: Account,
     pub muted: bool,
+}
+
+/// The inputs for one LiveKit access-token JWT (M-lk-0). Pure data: the WEFT
+/// authz gate has already run, so `can_publish`/`can_subscribe` are the *result*
+/// of the `speak`/`listen`/mute checks, mapped straight to LiveKit grants.
+#[derive(Debug, Clone)]
+pub struct LiveKitTokenReq {
+    /// LiveKit room id (see [`livekit_room`]).
+    pub room: String,
+    /// Participant identity — the canonical `user@network`, so the client
+    /// resolves the avatar/display via §10.3 profiles.
+    pub identity: String,
+    /// `speak` held ∧ not muted ∧ (open ∨ has cap) → LiveKit `canPublish`.
+    pub can_publish: bool,
+    /// `listen` held (or open) → LiveKit `canSubscribe`.
+    pub can_subscribe: bool,
+    /// Token lifetime in seconds; the client re-`VOICE JOIN`s to refresh, which
+    /// re-runs the gate so a revoked cap / fresh mute takes effect at refresh.
+    pub ttl_secs: u64,
+}
+
+/// Port to the operator's LiveKit deployment. M-lk-0 needs only token minting —
+/// pure HS256 crypto over the shared API secret — but it stays a trait so the
+/// JWT signing (and the M-lk-2 async Room server API) lives in weftd (L3, may do
+/// I/O) while weft-core stays socket-free, and a mock drives the core tests.
+pub trait LiveKitAdmin: Send + Sync {
+    /// Mint a signed LiveKit access-token JWT for one participant.
+    fn access_token(&self, req: &LiveKitTokenReq) -> String;
+}
+
+/// The LiveKit room id for a channel: `wv:<network>:<channel>`. Stable across a
+/// call and collision-free across namespaces (the channel name already carries
+/// its `ns/`). It never exposes a title the joiner can't already see — they've
+/// passed the membership gate before a token is minted.
+pub fn livekit_room(network: &str, channel: &ChannelName) -> String {
+    format!("wv:{network}:{channel}")
+}
+
+/// A [`VoiceBackend`] that fulfils `VOICE JOIN` with a **LiveKit** access token
+/// rather than an in-server SFU negotiation (M-lk-0). Core still runs the full
+/// authz gate (caps / mute / ban / voice-kind) *before* calling `join`; this
+/// only mints the media credential and points the client at LiveKit. The WebRTC
+/// `describe`/`candidate` handshake is unused in this mode — the client talks to
+/// the LiveKit server directly with the SDK.
+pub struct LiveKitBackend {
+    admin: Arc<dyn LiveKitAdmin>,
+    /// LiveKit server URL handed to the client (`wss://…`) as the offer trailing.
+    url: String,
+    /// This network's name — for the room id and the participant identity.
+    network: NetworkName,
+    /// Access-token lifetime (seconds).
+    ttl_secs: u64,
+}
+
+impl LiveKitBackend {
+    pub fn new(
+        admin: Arc<dyn LiveKitAdmin>,
+        url: String,
+        network: NetworkName,
+        ttl_secs: u64,
+    ) -> Self {
+        Self {
+            admin,
+            url,
+            network,
+            ttl_secs,
+        }
+    }
+}
+
+#[async_trait]
+impl VoiceBackend for LiveKitBackend {
+    async fn join(&self, req: VoiceJoinReq) -> Result<VoiceGrant, VoiceError> {
+        let room = livekit_room(self.network.as_str(), &req.channel);
+        let identity = UserRef::new(req.account, self.network.clone()).to_string();
+
+        // The gate's decision maps one-to-one onto LiveKit grants (see the plan's
+        // cap→grant table): `can_speak` → canPublish; subscribe is always granted
+        // to a member that passed the `listen` gate above.
+        let token = self.admin.access_token(&LiveKitTokenReq {
+            room: room.clone(),
+            identity,
+            can_publish: req.can_speak,
+            can_subscribe: true,
+            ttl_secs: self.ttl_secs,
+        });
+
+        Ok(VoiceGrant {
+            mode: VoiceTransport::Livekit,
+            token,
+            room: Some(room),
+            endpoint: Some(self.url.clone()),
+        })
+    }
+
+    async fn describe(
+        &self,
+        _session: u64,
+        _channel: &ChannelName,
+        _sdp: String,
+    ) -> Result<String, VoiceError> {
+        // A LiveKit client negotiates with the LiveKit server, never with us.
+        Err(VoiceError::Unavailable)
+    }
+
+    async fn candidate(
+        &self,
+        _session: u64,
+        _channel: &ChannelName,
+        _candidate: String,
+    ) -> Result<(), VoiceError> {
+        Err(VoiceError::Unavailable)
+    }
+
+    async fn leave(&self, _session: u64, _channel: &ChannelName) {
+        // LiveKit reaps the participant on WebSocket disconnect; explicit removal
+        // (ban / kick) is the M-lk-2 Room server API, not this path.
+    }
+
+    async fn set_muted(&self, _session: u64, _channel: &ChannelName, _muted: bool) {
+        // M-lk-2 wires this to the LiveKit Room server API (mute_published_track).
+    }
 }

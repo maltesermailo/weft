@@ -6,11 +6,12 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use livekit_api::access_token::TokenVerifier;
 use tokio_tungstenite::tungstenite::Message;
-use weft_proto::{ErrCode, Event, Reply};
+use weft_proto::{ErrCode, Event, Reply, VoiceTransport};
 use weft_transport::insecure::client_endpoint;
 use weft_transport::QuicControlStream;
-use weftd::config::{ChannelConfig, Config, Identity, Listen};
+use weftd::config::{ChannelConfig, Config, Identity, Listen, LiveKit, VoiceBackendKind};
 
 // ---- harness ----
 
@@ -2273,6 +2274,126 @@ async fn voice_enabled_signaling_over_quic() {
         unreachable!()
     };
     assert_eq!(err.code, ErrCode::Malformed);
+
+    server.shutdown().await;
+}
+
+// ---- §16 M-lk-0: LiveKit voice backend (token minting, no `voice` feature) ----
+
+/// The shared LiveKit API secret, used to both sign (in weftd) and verify (here).
+const LIVEKIT_SECRET: &str = "livekit-shared-secret-xyz";
+
+/// Configure a weftd whose voice backend is LiveKit, seeding one voice channel
+/// (`#lounge`) plus one text channel (`#general`).
+async fn start_livekit_voice() -> weftd::Server {
+    start_with(&["#general"], |c| {
+        c.channels.push(ChannelConfig::Detailed {
+            name: "#lounge".to_string(),
+            policy: "retained:90d".to_string(),
+            kind: Some("voice".to_string()),
+        });
+        c.voice.enabled = true;
+        c.voice.backend = VoiceBackendKind::Livekit;
+        c.voice.livekit = LiveKit {
+            url: "wss://livekit.test.example".to_string(),
+            api_key: "APItest".to_string(),
+            api_secret: LIVEKIT_SECRET.to_string(),
+            token_ttl_secs: 600,
+        };
+    })
+    .await
+}
+
+/// With `backend = livekit`: WELCOME advertises voice, and `VOICE JOIN` answers a
+/// LiveKit-mode `VOICE OFFER` whose token is a genuine JWT — verifiable with the
+/// shared secret and carrying the room + publish/subscribe grants the authz gate
+/// mapped from this participant's caps.
+#[tokio::test]
+async fn voice_livekit_offer_mints_a_scoped_token() {
+    let server = start_livekit_voice().await;
+    let mut client = QuicClient::connect(server.quic_addr).await;
+
+    client.send("HELLO weft/1").await;
+    let Event::Welcome { features, .. } = client.recv().await.event else {
+        panic!("expected WELCOME");
+    };
+    assert!(
+        features.iter().any(|f| f == "voice"),
+        "livekit voice advertises the feature: {features:?}"
+    );
+    client.send(&format!("REGISTER ada :{PASSWORD}")).await;
+    client
+        .recv_until(|r| matches!(r.event, Event::Welcome { .. }))
+        .await;
+
+    // VOICE JOIN a voice channel → a LiveKit-mode VOICE OFFER (the labeled ack).
+    client.send("@label=j VOICE JOIN #lounge").await;
+    let reply = client
+        .recv_until(|r| matches!(r.event, Event::VoiceOffer { .. }))
+        .await;
+    let Event::VoiceOffer {
+        channel,
+        mode,
+        token,
+        room,
+        endpoint,
+    } = &reply.event
+    else {
+        unreachable!()
+    };
+    assert_eq!(reply.label.as_deref(), Some("j"));
+    assert_eq!(channel.as_str(), "#lounge");
+    assert_eq!(*mode, VoiceTransport::Livekit);
+    assert_eq!(endpoint.as_deref(), Some("wss://livekit.test.example"));
+    assert_eq!(room.as_deref(), Some("wv:test.example:#lounge"));
+
+    // The token is a real LiveKit access JWT: LiveKit's own `TokenVerifier`
+    // validates it under the shared secret, and its `video` grant maps 1:1 from
+    // the WEFT gate (open channel → publish).
+    let claims = TokenVerifier::with_api_key("APItest", LIVEKIT_SECRET)
+        .verify(token)
+        .expect("LiveKit JWT verifies with the shared secret");
+
+    assert_eq!(claims.sub, "ada@test.example", "identity = user@network");
+    assert_eq!(claims.video.room, "wv:test.example:#lounge");
+    assert!(claims.video.room_join);
+    assert!(claims.video.can_publish, "open voice channel → can_publish");
+    assert!(claims.video.can_subscribe);
+
+    // The signature is genuine: a different secret must not verify it.
+    let forged = TokenVerifier::with_api_key("APItest", "not-the-secret").verify(token);
+    assert!(
+        forged.is_err(),
+        "token must not verify under a wrong secret"
+    );
+
+    server.shutdown().await;
+}
+
+/// A `VOICE JOIN` on a *text* channel mints no token — it's the uniform
+/// NO-SUCH-TARGET (invariant 1), identical whether the channel is text, missing,
+/// or private. The gate refuses before the LiveKit backend is ever consulted.
+#[tokio::test]
+async fn voice_livekit_refuses_non_voice_channel() {
+    let server = start_livekit_voice().await;
+    let mut client = QuicClient::connect(server.quic_addr).await;
+
+    client.send("HELLO weft/1").await;
+    assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+    client.send(&format!("REGISTER ada :{PASSWORD}")).await;
+    client
+        .recv_until(|r| matches!(r.event, Event::Welcome { .. }))
+        .await;
+
+    client.send("@label=j VOICE JOIN #general").await;
+    let reply = client
+        .recv_until(|r| matches!(r.event, Event::Err(_)))
+        .await;
+    let Event::Err(err) = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(err.code, ErrCode::NoSuchTarget);
+    assert_eq!(reply.label.as_deref(), Some("j"));
 
     server.shutdown().await;
 }

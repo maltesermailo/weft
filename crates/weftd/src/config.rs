@@ -70,29 +70,76 @@ pub struct Media {
     pub dir: Option<PathBuf>,
 }
 
-/// §16 WEFT-RT voice. The embedded SFU is compiled only with the `voice` build
-/// feature; without it, `enabled = true` just logs a warning and voice stays
-/// off. `enabled = false` (the default) = a zero-voice, fully-conformant server.
+/// §16 voice. Two media planes select via `backend`:
+/// - `native` — the embedded WEFT-RT SFU (compiled only with the `voice` build
+///   feature; without it, `enabled = true` just logs a warning).
+/// - `livekit` — hand `VOICE JOIN` a LiveKit access token for an external,
+///   self-hosted LiveKit server (`[voice.livekit]`); needs no build feature.
+///
+/// `enabled = false` (the default) = a zero-voice, fully-conformant server.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Voice {
-    /// Turn the SFU on (also needs the `voice` build feature).
+    /// Turn voice on (the `native` backend also needs the `voice` build feature).
     pub enabled: bool,
-    /// UDP port range the SFU binds for media (its host/srflx candidates). Open
-    /// this range to the internet for voice to work behind NAT.
+    /// Which media plane to use (`native` | `livekit`).
+    pub backend: VoiceBackendKind,
+    /// UDP port range the native SFU binds for media (host/srflx candidates).
+    /// Open this range to the internet for voice to work behind NAT.
     pub udp_port_min: u16,
     pub udp_port_max: u16,
     /// STUN servers advertised to clients for server-reflexive candidates.
     pub stun: Vec<String>,
+    /// LiveKit connection details (used only when `backend = "livekit"`).
+    pub livekit: LiveKit,
+}
+
+/// The voice media plane. `native` = embedded WEFT-RT SFU; `livekit` = external
+/// LiveKit server the client reaches with the SDK using a weftd-minted token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceBackendKind {
+    #[default]
+    Native,
+    Livekit,
+}
+
+/// LiveKit deployment (`[voice.livekit]`). weftd signs access tokens with
+/// `api_secret` (HS256) — the same secret the operator gives their LiveKit — so
+/// weftd + LiveKit share a trust boundary (both run by the operator).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LiveKit {
+    /// LiveKit server URL handed to clients (`wss://livekit.example`).
+    pub url: String,
+    /// API key — the JWT `iss`.
+    pub api_key: String,
+    /// API secret — the HS256 signing key. Keep it out of logs.
+    pub api_secret: String,
+    /// Access-token lifetime (seconds); the client refreshes via `VOICE JOIN`.
+    pub token_ttl_secs: u64,
+}
+
+impl Default for LiveKit {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            api_key: String::new(),
+            api_secret: String::new(),
+            token_ttl_secs: 600,
+        }
+    }
 }
 
 impl Default for Voice {
     fn default() -> Self {
         Self {
             enabled: false,
+            backend: VoiceBackendKind::Native,
             udp_port_min: 40000,
             udp_port_max: 40100,
             stun: vec!["stun:stun.l.google.com:19302".to_string()],
+            livekit: LiveKit::default(),
         }
     }
 }

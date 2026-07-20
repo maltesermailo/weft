@@ -229,7 +229,9 @@ impl VoiceBackend for WebrtcSfu {
         // this is an opaque handle, not a bearer.
         let _ = req.account;
         Ok(VoiceGrant {
+            mode: weft_proto::VoiceTransport::Webrtc,
             token: format!("v{}-{}", req.session, req.channel),
+            room: None,
             endpoint: None,
         })
     }

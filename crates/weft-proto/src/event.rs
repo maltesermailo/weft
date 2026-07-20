@@ -10,7 +10,7 @@ use crate::policy::RetentionPolicy;
 use crate::types::{
     BridgeState, ChannelKind, ContentState, HistoryMode, MediaMode, MemberAction, ModAction,
     MsgMeta, PresenceStatus, ReactionOp, ReportScope, ResolveAction, TypingState, Visibility,
-    VoiceAction,
+    VoiceAction, VoiceTransport,
 };
 
 /// An event plus its optional `label` echo (§3.5). Only direct responses
@@ -373,14 +373,20 @@ pub enum Event {
         by: Option<String>,
         reason: Option<String>,
     },
-    /// `VOICE OFFER <#chan> <token> [:endpoint]` (§16, WEFT-RT) — the answer to
-    /// `VOICE JOIN`: a short-lived media token (bearing `speak`/`listen`) plus
-    /// the SFU endpoint/connection hints in the trailing (empty for an embedded
-    /// SFU reachable at the session host). The client then negotiates WebRTC via
-    /// `VOICE DESC`.
+    /// `[@mode=][@room=] VOICE OFFER <#chan> <token> [:endpoint]` (§16, WEFT-RT) —
+    /// the answer to `VOICE JOIN`: a short-lived media token (bearing
+    /// `speak`/`listen`) plus the SFU endpoint hints in the trailing.
+    ///
+    /// `mode` selects the media transport (default `webrtc`): for `webrtc` the
+    /// `token` is the SFU media token and the client negotiates via `VOICE DESC`;
+    /// for `livekit` the `token` is a LiveKit access JWT, `@room` names the
+    /// LiveKit room, the trailing is the LiveKit server URL, and the client
+    /// connects with the LiveKit SDK (no `DESC`/`CAND`).
     VoiceOffer {
         channel: ChannelName,
+        mode: VoiceTransport,
         token: String,
+        room: Option<String>,
         endpoint: Option<String>,
     },
     /// `VOICE STATE <#chan> <user@net> <join|leave|update>` (§16) — voice-room
@@ -990,7 +996,14 @@ impl Event {
                 match sub.as_str() {
                     "OFFER" => Ok(Event::VoiceOffer {
                         channel: args.req("channel")?.parse()?,
+                        mode: line
+                            .tags
+                            .get("mode")
+                            .map(|v| v.parse())
+                            .transpose()?
+                            .unwrap_or_default(),
                         token: args.req("token")?.to_string(),
+                        room: line.tags.get("room").filter(|v| !v.is_empty()).cloned(),
                         endpoint: args.trailing_opt(),
                     }),
                     "STATE" => Ok(Event::VoiceState {
@@ -1436,13 +1449,26 @@ impl Event {
             }
             Event::VoiceOffer {
                 channel,
+                mode,
                 token,
+                room,
                 endpoint,
-            } => (
-                "VOICE",
-                vec!["OFFER".to_string(), channel.to_string(), token.clone()],
-                endpoint.clone(),
-            ),
+            } => {
+                // `webrtc` is the default — omit the tag so an ordinary SFU offer
+                // stays byte-for-byte as before; emit it (and `@room`) only for
+                // LiveKit.
+                if *mode != VoiceTransport::Webrtc {
+                    tags.insert("mode".to_string(), mode.to_string());
+                }
+                if let Some(room) = room {
+                    tags.insert("room".to_string(), room.clone());
+                }
+                (
+                    "VOICE",
+                    vec!["OFFER".to_string(), channel.to_string(), token.clone()],
+                    endpoint.clone(),
+                )
+            }
             Event::VoiceState {
                 channel,
                 user,
@@ -2186,12 +2212,15 @@ mod tests {
 
     #[test]
     fn voice_events_round_trip() {
-        // VOICE OFFER with endpoint hints in the trailing, labeled as the
-        // direct answer to a VOICE JOIN.
+        // VOICE OFFER (webrtc, the default) with endpoint hints in the trailing,
+        // labeled as the direct answer to a VOICE JOIN. No `@mode`/`@room` tags —
+        // the wire form is unchanged from before LiveKit existed.
         let offer = Reply::with_label(
             Event::VoiceOffer {
                 channel: "#gaming/lounge".parse().unwrap(),
+                mode: VoiceTransport::Webrtc,
                 token: "vtok-01H".into(),
+                room: None,
                 endpoint: Some("stun:sfu.hda.example:3478".into()),
             },
             "v1",
@@ -2205,9 +2234,30 @@ mod tests {
         // Endpoint-less offer (embedded SFU, reachable at the session host).
         round_trip(&Reply::new(Event::VoiceOffer {
             channel: "#general".parse().unwrap(),
+            mode: VoiceTransport::Webrtc,
             token: "vtok-2".into(),
+            room: None,
             endpoint: None,
         }));
+
+        // VOICE OFFER (livekit) — `@mode`/`@room` tags, a JWT token, the LiveKit
+        // server URL in the trailing.
+        let lk = Reply::with_label(
+            Event::VoiceOffer {
+                channel: "#gaming/lounge".parse().unwrap(),
+                mode: VoiceTransport::Livekit,
+                token: "eyJhbGciOi.JWT.sig".into(),
+                room: Some("wv:hda.example:01H".into()),
+                endpoint: Some("wss://livekit.hda.example".into()),
+            },
+            "v2",
+        );
+        assert_eq!(
+            lk.serialize().unwrap(),
+            "@label=v2;mode=livekit;room=wv:hda.example:01H \
+             VOICE OFFER #gaming/lounge eyJhbGciOi.JWT.sig :wss://livekit.hda.example"
+        );
+        round_trip(&lk);
 
         // VOICE STATE flags emit only when set; a speaking participant.
         let speaking = Reply::new(Event::VoiceState {

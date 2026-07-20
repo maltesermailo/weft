@@ -10,6 +10,7 @@
 mod acceptor;
 pub mod config;
 pub mod dialer;
+pub mod livekit;
 pub mod media;
 pub mod telemetry;
 mod tls;
@@ -97,14 +98,57 @@ impl Server {
     }
 }
 
-/// §16 build the voice SFU backend from config, or `None` when voice is off /
-/// this build lacks the `voice` feature. A construction failure logs + degrades
-/// to no-voice rather than aborting the whole server.
-#[cfg(feature = "voice")]
-fn build_voice_sfu(cfg: &config::Voice) -> Option<std::sync::Arc<dyn weft_core::VoiceBackend>> {
+/// §16 build the voice backend from config, or `None` when voice is off / can't
+/// come up. Dispatches on `[voice] backend`: `native` = the embedded WEFT-RT SFU
+/// (feature-gated), `livekit` = a LiveKit token minter (no build feature). A
+/// construction failure logs + degrades to no-voice rather than aborting boot.
+fn build_voice_backend(
+    cfg: &config::Voice,
+    network: &weft_proto::NetworkName,
+) -> Option<Arc<dyn weft_core::VoiceBackend>> {
     if !cfg.enabled {
         return None;
     }
+    match cfg.backend {
+        config::VoiceBackendKind::Native => build_voice_sfu(cfg),
+        config::VoiceBackendKind::Livekit => build_livekit(cfg, network),
+    }
+}
+
+/// §16 M-lk-0: build the LiveKit backend — validate the `[voice.livekit]` config,
+/// then wrap the token signer in weft-core's `LiveKitBackend`. Missing config
+/// degrades to no-voice (never a half-configured server).
+fn build_livekit(
+    cfg: &config::Voice,
+    network: &weft_proto::NetworkName,
+) -> Option<Arc<dyn weft_core::VoiceBackend>> {
+    let lk = &cfg.livekit;
+    if lk.url.is_empty() || lk.api_key.is_empty() || lk.api_secret.is_empty() {
+        warn!("[voice] backend=livekit but [voice.livekit] url/api_key/api_secret is incomplete; voice disabled");
+        return None;
+    }
+
+    let signer = livekit::LiveKitSigner::new(lk.api_key.clone(), lk.api_secret.clone());
+    let ttl = if lk.token_ttl_secs == 0 {
+        600
+    } else {
+        lk.token_ttl_secs
+    };
+
+    info!(url = %lk.url, ttl_secs = ttl, "voice backend: LiveKit (§16, M-lk-0)");
+    Some(Arc::new(weft_core::LiveKitBackend::new(
+        Arc::new(signer),
+        lk.url.clone(),
+        network.clone(),
+        ttl,
+    )))
+}
+
+/// §16 build the embedded WEFT-RT SFU (`backend = native`). Feature-gated: a
+/// build without `voice` can't carry the webrtc stack, so it degrades with a
+/// warning.
+#[cfg(feature = "voice")]
+fn build_voice_sfu(cfg: &config::Voice) -> Option<Arc<dyn weft_core::VoiceBackend>> {
     match weft_rt::WebrtcSfu::new(weft_rt::SfuConfig {
         udp_port_min: cfg.udp_port_min,
         udp_port_max: cfg.udp_port_max,
@@ -125,10 +169,8 @@ fn build_voice_sfu(cfg: &config::Voice) -> Option<std::sync::Arc<dyn weft_core::
 }
 
 #[cfg(not(feature = "voice"))]
-fn build_voice_sfu(cfg: &config::Voice) -> Option<std::sync::Arc<dyn weft_core::VoiceBackend>> {
-    if cfg.enabled {
-        warn!("[voice] enabled in config but weftd was built without the `voice` feature");
-    }
+fn build_voice_sfu(_cfg: &config::Voice) -> Option<Arc<dyn weft_core::VoiceBackend>> {
+    warn!("[voice] backend=native but weftd was built without the `voice` feature");
     None
 }
 
@@ -195,10 +237,10 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
     // Seed copy for the outbound dialer (identity is consumed by ServerCtx).
     let identity_seed = identity.seed_b64();
 
-    // §16 build the voice SFU up front (feature-gated) so WELCOME advertises
-    // `features=voice` only when the SFU actually came up; it's installed into
-    // `ctx` once boot returns it.
-    let voice_sfu = build_voice_sfu(&config.voice);
+    // §16 build the voice backend up front (native SFU or LiveKit) so WELCOME
+    // advertises `features=voice` only when it actually came up; it's installed
+    // into `ctx` once boot returns it.
+    let voice_sfu = build_voice_backend(&config.voice, &network);
     let mut features = vec!["presence".to_string()]; // media/e2ee/backfill: later
     if voice_sfu.is_some() {
         features.push("voice".to_string());

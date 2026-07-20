@@ -9,15 +9,6 @@ edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
 
-# Tauri client release optimization. Cargo honors profiles only at the
-# workspace root, and per-package overrides can't set `lto`/`panic` (those are
-# whole-artifact settings) — so the client keeps opt-level/codegen-units/strip
-# here and forgoes LTO. This leaves the server crates' release builds untouched.
-[profile.release.package.client]
-opt-level = 3
-codegen-units = 1
-strip = true
-
 [workspace.dependencies]
 thiserror = "1"
 ulid = "1"
@@ -49,7 +40,6 @@ async-trait = "0.1"
 # sans-IO `sfu` crate is too immature (0.0.x). Uses rustls; keep it on the ring
 # provider to match the workspace (no aws-lc — ambiguous default, CLAUDE.md).
 webrtc = "0.17"
-subtle = "2"
 axum = "0.7"
 rustls-pemfile = "2"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros"] }
@@ -58,7 +48,4 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 # tests crawl and flake against client timeouts. Optimizing just the hash
 # crates keeps `cargo test` honest without touching production parameters.
 [profile.dev.package.argon2]
-opt-level = 3
-
-[profile.dev.package.blake2]
 opt-level = 3

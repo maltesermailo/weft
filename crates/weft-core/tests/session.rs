@@ -3387,7 +3387,9 @@ struct MockVoice;
 impl VoiceBackend for MockVoice {
     async fn join(&self, req: VoiceJoinReq) -> Result<VoiceGrant, VoiceError> {
         Ok(VoiceGrant {
+            mode: weft_proto::VoiceTransport::Webrtc,
             token: format!("vtok-{}-{}", req.channel, req.session),
+            room: None,
             endpoint: None,
         })
     }
@@ -3507,13 +3509,16 @@ async fn voice_join_offers_token_and_announces_to_members() {
     assert_eq!(reply.label.as_deref(), Some("v1"));
     let Event::VoiceOffer {
         channel,
+        mode,
         token,
         endpoint,
+        ..
     } = &reply.event
     else {
         panic!("expected VOICE OFFER, got {reply:?}");
     };
     assert_eq!(channel.as_str(), "#lounge");
+    assert_eq!(*mode, weft_proto::VoiceTransport::Webrtc);
     assert!(token.starts_with("vtok-"), "token: {token}");
     assert!(endpoint.is_none());
 
