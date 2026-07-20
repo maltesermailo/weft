@@ -179,21 +179,40 @@ H  spawns the relay participant → connects to F's LiveKit with the JWT
   with the right room+identity (and no-op for unknown/departed sessions); a
   session test asserts a channel-scope BAN ejects the target (co-member sees the
   VOICE STATE leave). weft-core 117 + voice_livekit 1; clippy clean.
-- **M-lk-3a — federation foundation (proto-first, fully verifiable).** Manifest
-  `voice`-mode (proto/crypto/store/core, mirrors `typing` end-to-end); the crypto
-  voice token (weft-crypto, modeled on `SignedManifest`); `VOICE REQUEST`/
-  `VOICE GRANT` bridge-verb codec; core `on_voice_request_in` returning a
-  `VOICE GRANT` iff `voice=on` ∧ ¬netblocked ∧ token authority (else
-  `NO-SUCH-TARGET`, invariant 1 timing). *Green:* codec round-trips + core tests +
-  two-live-weftd conformance that a `VOICE REQUEST` is granted iff authorized and
-  refused after `NETBLOCK` — **no media involved, all green here**.
-- **M-lk-3b — the relay participant (deployment-verified).** weftd's `LiveKitAdmin`
-  gains relay spawn/teardown; the relay (LiveKit Rust SDK) connects to F's LiveKit
-  with the granted JWT and per-participant-forwards both ways; one-hop + loop
-  prevention + debounced lifecycle + `SEVER`/`NETBLOCK` hard-stop. *Green here:*
-  the lifecycle/teardown logic is unit-tested against `MockLiveKitAdmin`; **actual
-  cross-network audio is verified on a real two-network deployment** (the one piece
-  that can't be CI-green, flagged honestly).
+- **M-lk-3a ✅ — federation foundation (proto-first, fully verifiable).** Manifest
+  `voice`-mode threaded end-to-end mirroring `typing` (crypto `Manifest` +
+  signing bytes; proto `Event::Manifest` + `BRIDGE PROPOSE`; core `build_manifest`
+  / `on_bridge_propose(_in)` / `manifest_event`; client-core + `weft.ts`). Crypto
+  `VoiceRelayGrant`/`SignedVoiceRelayGrant` (weft-crypto, modeled on
+  `SignedManifest` — network-key-signed, domain-separated tag, `valid_at` expiry).
+  `VOICE REQUEST <scope> <#chan>` (command) + `VOICE GRANT` (event, `url`/`room`/
+  `token`/`grant`/`ttl` tags) bridge-verb codec. Core `on_voice_request_in`
+  (bridge-dispatch): gate on ¬netblocked ∧ `bridge::is_forwardable` (invariant 3)
+  ∧ manifest `voice=on` ∧ a cascadable backend (`VoiceBackend::relay_grant`,
+  default `None`, LiveKit mints `relay@<grantee>`), else uniform `NO-SUCH-TARGET`
+  (invariant 1). Auto-federation (§11.10) opts `voice=on`; explicit operator
+  propose is strictest-safe (off). *Green:* proto round-trips (VOICE REQUEST/GRANT
+  + manifest voice), 4 crypto-token tests, and 2 bridge-session core tests
+  (grant-when-federated with a `StubLk` LiveKit backend + verifiable
+  `SignedVoiceRelayGrant`; refuse-when-`voice=off`/absent). weft-crypto 52,
+  weft-proto 88, weft-core 119; clippy + svelte-check clean. **No media.**
+- **M-lk-3b ◑ — the relay participant (control plane shipped; media deferred).**
+  The **control plane is CI-green**: a `VoiceRelay` driver seam + `RelaySpec`
+  (weft-core `voice.rs`); a relay **lifecycle manager** in `ServerCtx`
+  (`voice_relays` refcount + `relay_acquire`/`relay_release`/`relay_drop_peer`) —
+  start-once on the first local joiner, stop on the last, and **`SEVER`/`NETBLOCK`
+  hard-stop** wired into `on_bridge_sever_in` + `on_netblock_add` (invariant 7).
+  weftd installs a no-op **`LogRelay`** driver when `backend=livekit`, so the
+  server is complete + honest without libwebrtc. *Green:* a `MockRelay` lifecycle
+  test (refcount start-once/stop-on-empty + per-peer teardown leaving other peers'
+  relays alone). weft-core 120.
+  **Deferred (deployment, flagged):** the real media driver — a `livekit`
+  client-SDK (libwebrtc) `VoiceRelay` impl that connects both rooms of a
+  `RelaySpec` and per-participant-forwards (loop prevention, one hop) — a heavy,
+  platform-specific native dep, and the home-side trigger (`VOICE JOIN` on a
+  foreign voice channel → send `VOICE REQUEST` → `relay_acquire`). **Actual
+  cross-network audio is verifiable only on a real two-network deployment** — the
+  one piece that can't be CI-green, kept out of the default build by design.
 
 ## Risks / open questions
 

@@ -142,6 +142,7 @@ export type WeftEvent =
       history: string;
       media: string;
       typing: boolean;
+      voice: boolean;
     }
   | { kind: "netblocked"; network: string; reason: string | null }
   | { kind: "more"; cursor: string }

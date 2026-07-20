@@ -201,6 +201,13 @@ pub struct ServerCtx {
     /// source of the `VOICE STATE` snapshot a joiner gets, and how a moderator's
     /// `MUTE` finds a target's live voice sessions.
     voice_rooms: std::sync::Mutex<HashMap<ChannelName, HashMap<u64, crate::voice::VoiceMember>>>,
+    /// §16 M-lk-3b federated voice: the media-relay driver weftd installs (a
+    /// libwebrtc `livekit`-SDK relay, or the no-op default). `None` = no relaying.
+    voice_relay: std::sync::OnceLock<Arc<dyn crate::voice::VoiceRelay>>,
+    /// §16 M-lk-3b relay refcounts: `(peer, foreign-channel) → live local
+    /// members`. A relay starts on the first local joiner and stops on the last
+    /// (or on `SEVER`/`NETBLOCK`, invariant 7).
+    voice_relays: std::sync::Mutex<HashMap<(NetworkName, ChannelName), usize>>,
 }
 
 /// §11.8 a blob to mirror from a bridge peer, handed core→weftd.
@@ -347,12 +354,83 @@ impl ServerCtx {
             federate_cooldown: std::sync::Mutex::new(HashMap::new()),
             voice: std::sync::OnceLock::new(),
             voice_rooms: std::sync::Mutex::new(HashMap::new()),
+            voice_relay: std::sync::OnceLock::new(),
+            voice_relays: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
     /// weftd installs the §16 voice SFU backend (enables voice; `features=voice`).
     pub fn set_voice_backend(&self, backend: Arc<dyn crate::voice::VoiceBackend>) {
         let _ = self.voice.set(backend);
+    }
+
+    /// weftd installs the §16 M-lk-3b federated-voice relay driver.
+    pub fn set_voice_relay(&self, relay: Arc<dyn crate::voice::VoiceRelay>) {
+        let _ = self.voice_relay.set(relay);
+    }
+
+    /// §16 M-lk-3b: a local member joined the foreign voice channel `spec.channel`
+    /// (homed on `spec.peer`). Refcount it; on the **first** joiner start the media
+    /// relay bridging the peer's LiveKit room into ours. Idempotent per member —
+    /// the caller pairs it with [`relay_release`](Self::relay_release).
+    pub async fn relay_acquire(&self, spec: crate::voice::RelaySpec) {
+        let key = (spec.peer.clone(), spec.channel.clone());
+        let first = {
+            let mut relays = self.voice_relays.lock().expect("relay lock");
+            let count = relays.entry(key).or_insert(0);
+            *count += 1;
+            *count == 1
+        };
+        if first {
+            if let Some(driver) = self.voice_relay.get() {
+                driver.start(spec).await;
+            }
+        }
+    }
+
+    /// §16 M-lk-3b: a local member left the foreign voice channel. On the **last**
+    /// leaver, stop the relay.
+    pub async fn relay_release(&self, peer: &NetworkName, channel: &ChannelName) {
+        let key = (peer.clone(), channel.clone());
+        let last = {
+            let mut relays = self.voice_relays.lock().expect("relay lock");
+            match relays.get_mut(&key) {
+                Some(count) => {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        relays.remove(&key);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => false,
+            }
+        };
+        if last {
+            if let Some(driver) = self.voice_relay.get() {
+                driver.stop(peer, channel).await;
+            }
+        }
+    }
+
+    /// §16 M-lk-3b + invariant 7: tear down **every** relay to `peer` at once (a
+    /// `BRIDGE SEVER` or `NETBLOCK` stops the peer's media immediately, regardless
+    /// of local refcounts).
+    pub async fn relay_drop_peer(&self, peer: &NetworkName) {
+        let dropped: Vec<ChannelName> = {
+            let mut relays = self.voice_relays.lock().expect("relay lock");
+            let keys: Vec<_> = relays.keys().filter(|(p, _)| p == peer).cloned().collect();
+            for key in &keys {
+                relays.remove(key);
+            }
+            keys.into_iter().map(|(_, c)| c).collect()
+        };
+        if let Some(driver) = self.voice_relay.get() {
+            for channel in dropped {
+                driver.stop(peer, &channel).await;
+            }
+        }
     }
 
     /// The installed voice backend, or `None` on a zero-voice server (§16).
@@ -533,6 +611,15 @@ impl ServerCtx {
     /// Our own network name as the validated type (manifests name their peer).
     pub(crate) fn network(&self) -> &NetworkName {
         &self.info.network
+    }
+
+    /// §16 sign a voice-relay grant with our network key (like `sign_manifest`),
+    /// so the grantee can verify our authorization against our well-known key.
+    pub(crate) fn sign_voice_relay(
+        &self,
+        grant: &weft_crypto::VoiceRelayGrant,
+    ) -> weft_crypto::SignedVoiceRelayGrant {
+        grant.sign(&self.identity)
     }
 
     /// §10.3 sign a display profile with our network key so a remote can verify a

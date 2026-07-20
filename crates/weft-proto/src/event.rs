@@ -335,10 +335,11 @@ pub enum Event {
         note: Option<String>,
     },
     /// `MANIFEST <peer> <version> <state>` with `channels=`/`history=`/
-    /// `media=`/`typing=` tags — broadcast to affected members on any manifest
-    /// change (§6.6, §11.5). The event payload was left "as v0.8" in the spec;
-    /// resolved here (§6.6 amendment). `channels` lists the acked snapshot for
-    /// `live`/`added`, or the affected channel for `removed`.
+    /// `media=`/`typing=`/`voice=` tags — broadcast to affected members on any
+    /// manifest change (§6.6, §11.5). The event payload was left "as v0.8" in the
+    /// spec; resolved here (§6.6 amendment). `channels` lists the acked snapshot
+    /// for `live`/`added`, or the affected channel for `removed`. `voice` = §16
+    /// whether the snapshot's voice channels federate.
     Manifest {
         peer: NetworkName,
         version: u64,
@@ -347,6 +348,7 @@ pub enum Event {
         history: HistoryMode,
         media: MediaMode,
         typing: bool,
+        voice: bool,
     },
     /// `NETBLOCKED <network> [:reason]` — sent to bridge owners when a manifest
     /// is severed by a NETBLOCK (§11.6). Reason is included per the network's
@@ -426,6 +428,21 @@ pub enum Event {
     VoiceCand {
         channel: ChannelName,
         candidate: String,
+    },
+    /// `@grant=;room=;token=;ttl=;url= VOICE GRANT <#chan>` (§16 federated voice)
+    /// — a **bridge-only** answer to `VOICE REQUEST`: the peer authorizes the home
+    /// network to relay `channel`. `url`/`room`/`token` are the LiveKit server URL,
+    /// room id, and a LiveKit access JWT minted for the home relay; `grant` is the
+    /// b64 `SignedVoiceRelayGrant` (the peer's durable, offline-verifiable WEFT
+    /// authorization); `ttl` is the token lifetime in seconds. A refusal is the
+    /// uniform `NO-SUCH-TARGET`, never this event.
+    VoiceGrant {
+        channel: ChannelName,
+        url: String,
+        room: String,
+        token: String,
+        grant: String,
+        ttl: u64,
     },
     Err(ErrEvent),
     /// Any event outside the known set — MUST be ignored by clients.
@@ -953,6 +970,7 @@ impl Event {
                         .transpose()?
                         .unwrap_or(MediaMode::None),
                     typing: line.tags.get("typing").map(String::as_str) == Some("yes"),
+                    voice: line.tags.get("voice").map(String::as_str) == Some("yes"),
                 })
             }
             "NETBLOCKED" => {
@@ -1021,6 +1039,18 @@ impl Event {
                     "CAND" => Ok(Event::VoiceCand {
                         channel: args.req("channel")?.parse()?,
                         candidate: args.trailing_req("candidate")?.to_string(),
+                    }),
+                    "GRANT" => Ok(Event::VoiceGrant {
+                        channel: args.req("channel")?.parse()?,
+                        url: line.tags.get("url").cloned().unwrap_or_default(),
+                        room: line.tags.get("room").cloned().unwrap_or_default(),
+                        token: line.tags.get("token").cloned().unwrap_or_default(),
+                        grant: line.tags.get("grant").cloned().unwrap_or_default(),
+                        ttl: line
+                            .tags
+                            .get("ttl")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0),
                     }),
                     _ => Err(ParseError::BadParam {
                         verb: "VOICE",
@@ -1405,6 +1435,7 @@ impl Event {
                 history,
                 media,
                 typing,
+                voice,
             } => {
                 if !channels.is_empty() {
                     let list: Vec<String> = channels.iter().map(ChannelName::to_string).collect();
@@ -1415,6 +1446,10 @@ impl Event {
                 tags.insert(
                     "typing".to_string(),
                     if *typing { "yes" } else { "no" }.to_string(),
+                );
+                tags.insert(
+                    "voice".to_string(),
+                    if *voice { "yes" } else { "no" }.to_string(),
                 );
                 (
                     "MANIFEST",
@@ -1507,6 +1542,25 @@ impl Event {
                 vec!["CAND".to_string(), channel.to_string()],
                 Some(candidate.clone()),
             ),
+            Event::VoiceGrant {
+                channel,
+                url,
+                room,
+                token,
+                grant,
+                ttl,
+            } => {
+                tags.insert("url".to_string(), url.clone());
+                tags.insert("room".to_string(), room.clone());
+                tags.insert("token".to_string(), token.clone());
+                tags.insert("grant".to_string(), grant.clone());
+                tags.insert("ttl".to_string(), ttl.to_string());
+                (
+                    "VOICE",
+                    vec!["GRANT".to_string(), channel.to_string()],
+                    None,
+                )
+            }
             Event::Profile {
                 user,
                 display,
@@ -2094,6 +2148,7 @@ mod tests {
                 history: HistoryMode::Full,
                 media: MediaMode::MirrorMax(1_000_000),
                 typing: true,
+                voice: true,
             },
             "m1",
         );
@@ -2102,6 +2157,7 @@ mod tests {
         assert!(wire.contains("history=full"), "{wire}");
         assert!(wire.contains("media=mirror-max:1000000"), "{wire}");
         assert!(wire.contains("typing=yes"), "{wire}");
+        assert!(wire.contains("voice=yes"), "{wire}");
         assert!(wire.contains("MANIFEST hda.example 2 live"), "{wire}");
         round_trip(&live);
 
@@ -2114,6 +2170,7 @@ mod tests {
             history: HistoryMode::FromEpoch,
             media: MediaMode::None,
             typing: false,
+            voice: false,
         }));
         assert!(Reply::parse("MANIFEST hda.example notanumber live").is_err());
     }
@@ -2312,6 +2369,25 @@ mod tests {
             channel: "#general".parse().unwrap(),
             candidate: "candidate:2 1 UDP 2130706430 198.51.100.7 40000 typ srflx".into(),
         }));
+
+        // §16 federated voice: VOICE GRANT carries the relay credentials in tags.
+        let grant = Reply::with_label(
+            Event::VoiceGrant {
+                channel: "#lounge".parse().unwrap(),
+                url: "wss://livekit.fda.example".into(),
+                room: "wv:fda.example:#lounge".into(),
+                token: "eyJhbGciOi.JWT.sig".into(),
+                grant: "B64RELAYGRANT==".into(),
+                ttl: 600,
+            },
+            "vg",
+        );
+        let wire = grant.serialize().unwrap();
+        assert!(wire.contains("url=wss://livekit.fda.example"), "{wire}");
+        assert!(wire.contains("grant=B64RELAYGRANT=="), "{wire}");
+        assert!(wire.contains("ttl=600"), "{wire}");
+        assert!(wire.contains("VOICE GRANT #lounge"), "{wire}");
+        round_trip(&grant);
 
         assert!(Reply::parse("VOICE OFFER #general").is_err()); // token required
         assert!(Reply::parse("VOICE STATE #general alice@hda.example frob").is_err());

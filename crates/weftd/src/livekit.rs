@@ -16,9 +16,10 @@ use std::time::Duration;
 use livekit_api::access_token::{AccessToken, VideoGrants};
 use livekit_api::services::room::{RoomClient, UpdateParticipantOptions};
 use livekit_protocol::ParticipantPermission;
-use tracing::warn;
+use tracing::{info, warn};
+use weft_proto::{ChannelName, NetworkName};
 
-use weft_core::{LiveKitAdmin, LiveKitTokenReq};
+use weft_core::{LiveKitAdmin, LiveKitTokenReq, RelaySpec, VoiceRelay};
 
 /// Signs LiveKit access tokens and drives the Room server API for one
 /// deployment (all share the API key/secret the operator gives their LiveKit).
@@ -105,5 +106,31 @@ impl LiveKitAdmin for LiveKitSigner {
         if let Err(e) = self.room.remove_participant(room, identity).await {
             warn!(%room, %identity, "livekit remove_participant failed: {e}");
         }
+    }
+}
+
+/// §16 M-lk-3b: the default federated-voice relay driver — a **no-op** that logs
+/// what it would bridge. It keeps the server complete + honest (the WEFT-side
+/// relay lifecycle — refcount, `SEVER`/`NETBLOCK` teardown — all runs) without
+/// pulling libwebrtc. The real media relay is a `livekit`-client-SDK (libwebrtc)
+/// driver that connects both LiveKit rooms of the [`RelaySpec`] and forwards
+/// audio each way — a heavy, platform-specific, deployment-verified dependency,
+/// gated separately rather than compiled in by default.
+pub struct LogRelay;
+
+#[async_trait::async_trait]
+impl VoiceRelay for LogRelay {
+    async fn start(&self, spec: RelaySpec) {
+        info!(
+            peer = %spec.peer,
+            channel = %spec.channel,
+            remote_room = %spec.remote_room,
+            local_room = %spec.local_room,
+            "federated voice relay requested (no media driver installed — see M-lk-3b)"
+        );
+    }
+
+    async fn stop(&self, peer: &NetworkName, channel: &ChannelName) {
+        info!(%peer, %channel, "federated voice relay stopped");
     }
 }

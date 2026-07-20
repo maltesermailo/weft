@@ -17,6 +17,7 @@ pub(crate) fn build_manifest(
     history: HistoryMode,
     media: MediaMode,
     typing: bool,
+    voice: bool,
     created_ms: u64,
     updated_ms: u64,
 ) -> Manifest {
@@ -27,6 +28,7 @@ pub(crate) fn build_manifest(
         history: history.to_string(),
         media: media.to_string(),
         typing,
+        voice,
         created: created_ms,
         updated: updated_ms,
     }
@@ -89,6 +91,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             HistoryMode::FromEpoch,
             MediaMode::None,
+            false,
             false,
             0,
             0,

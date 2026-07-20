@@ -22,6 +22,7 @@ mod mirror;
 mod password;
 mod profile;
 mod rotation;
+mod voice;
 
 pub use attestation::Attestation;
 pub use caps::Capability;
@@ -35,6 +36,7 @@ pub use profile::{Profile, SignedProfile};
 pub use rotation::{
     sign_cancel, sign_transfer, verify_cancel, verify_transfer, RotationRecord, SignedRotation,
 };
+pub use voice::{SignedVoiceRelayGrant, VoiceRelayGrant};
 
 use thiserror::Error;
 

@@ -92,6 +92,20 @@ pub trait VoiceBackend: Send + Sync {
     /// the SFU, so a moderator's `MUTE` silences them live, not just at join.
     /// Idempotent; a no-op for an unknown session.
     async fn set_muted(&self, session: u64, channel: &ChannelName, muted: bool);
+
+    /// §16 federated voice: mint a media credential for a *foreign network's
+    /// relay* to join `channel`'s room and forward audio both ways (`grantee` is
+    /// that network's name, for the relay identity). Returns the grant plus its
+    /// TTL in seconds. `None` if this backend can't be relayed to — voice
+    /// federation needs a cascadable backend (LiveKit); the embedded SFU returns
+    /// `None`, so a `VOICE REQUEST` to it is refused.
+    async fn relay_grant(
+        &self,
+        _channel: &ChannelName,
+        _grantee: &str,
+    ) -> Option<(VoiceGrant, u64)> {
+        None
+    }
 }
 
 /// §16 a participant in a voice room, as the server tracks it for the roster
@@ -101,6 +115,47 @@ pub trait VoiceBackend: Send + Sync {
 pub struct VoiceMember {
     pub account: Account,
     pub muted: bool,
+}
+
+/// §16 M-lk-3b: the connection targets for one **federated voice relay** — a
+/// cascaded-SFU bridge between a foreign network's LiveKit room (where the
+/// foreign speakers are) and ours (where our local members are). Derived from a
+/// `VOICE GRANT` (the `remote_*` side, authorized by the peer) plus a
+/// home-minted credential (`local_*`). A [`VoiceRelay`] driver joins both rooms
+/// as a headless participant and forwards audio each way (per-participant, one
+/// hop — §11).
+#[derive(Debug, Clone)]
+pub struct RelaySpec {
+    /// The origin (foreign) network the relay bridges to.
+    pub peer: NetworkName,
+    /// The foreign voice channel being relayed.
+    pub channel: ChannelName,
+    /// Peer LiveKit: URL, room, and the JWT the peer granted our relay identity.
+    pub remote_url: String,
+    pub remote_room: String,
+    pub remote_token: String,
+    /// Home LiveKit: URL, room, and a JWT we mint for the relay in our own room.
+    pub local_url: String,
+    pub local_room: String,
+    pub local_token: String,
+}
+
+/// §16 M-lk-3b: the media-relay driver seam. A relay is a headless participant
+/// in *both* LiveKit rooms of a [`RelaySpec`], subscribing on each side and
+/// republishing to the other. The real driver (LiveKit's `livekit` client SDK,
+/// libwebrtc) is a heavy, deployment-verified impl behind a feature flag; a
+/// no-op driver keeps the server complete without it, and a mock drives the
+/// lifecycle tests. Keying by `(peer, channel)` is the manager's contract — the
+/// driver may assume `start` is called once before a matching `stop`.
+#[async_trait]
+pub trait VoiceRelay: Send + Sync {
+    /// Begin bridging the two rooms in `spec`. Best effort — a connection failure
+    /// is the driver's to log; the manager's refcount is unaffected.
+    async fn start(&self, spec: RelaySpec);
+
+    /// Tear the relay for `(peer, channel)` down (last local member left, or a
+    /// `SEVER`/`NETBLOCK`). Idempotent.
+    async fn stop(&self, peer: &NetworkName, channel: &ChannelName);
 }
 
 /// The inputs for one LiveKit access-token JWT (M-lk-0). Pure data: the WEFT
@@ -282,5 +337,28 @@ impl VoiceBackend for LiveKitBackend {
                 .set_participant_muted(&peer.room, &peer.identity, muted)
                 .await;
         }
+    }
+
+    async fn relay_grant(&self, channel: &ChannelName, grantee: &str) -> Option<(VoiceGrant, u64)> {
+        // The foreign relay joins our LiveKit room as `relay@<grantee>` and must
+        // both publish (forward the peer's speakers up to us) and subscribe (carry
+        // our speakers down). It is not a session, so it isn't tracked in `peers`.
+        let room = livekit_room(self.network.as_str(), channel);
+        let identity = format!("relay@{grantee}");
+        let token = self.admin.access_token(&LiveKitTokenReq {
+            room: room.clone(),
+            identity,
+            can_publish: true,
+            can_subscribe: true,
+            ttl_secs: self.ttl_secs,
+        });
+
+        let grant = VoiceGrant {
+            mode: VoiceTransport::Livekit,
+            token,
+            room: Some(room),
+            endpoint: Some(self.url.clone()),
+        };
+        Some((grant, self.ttl_secs))
     }
 }

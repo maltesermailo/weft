@@ -1156,9 +1156,10 @@ impl<S: ControlStream> Session<S> {
                 history,
                 media,
                 typing,
+                voice,
                 ..
             } => {
-                self.on_bridge_propose(label, scope, peer, history, media, typing, account)
+                self.on_bridge_propose(label, scope, peer, history, media, typing, voice, account)
                     .await
             }
             Command::BridgeAccept { peer, version } => {
@@ -1177,6 +1178,13 @@ impl<S: ControlStream> Session<S> {
             // session (peer → peer), never by a local client.
             Command::BridgeRequest { .. } => {
                 self.unsupported(label, "BRIDGE REQUEST is bridge-session-only")
+                    .await
+            }
+            // §16 VOICE REQUEST asks a *peer* to relay one of its voice channels;
+            // it only makes sense over an authenticated bridge session, never from
+            // a local client.
+            Command::VoiceRequest { .. } => {
+                self.unsupported(label, "VOICE REQUEST is bridge-session-only")
                     .await
             }
             // §11.10 FSESSION frames are spoken only over an authenticated bridge
@@ -1538,17 +1546,18 @@ impl<S: ControlStream> Session<S> {
 }
 
 /// Build a `MANIFEST` event from a stored peering (§6.6). Decodes the current
-/// manifest blob for the history/media/typing bounds.
+/// manifest blob for the history/media/typing/voice bounds.
 fn manifest_event(record: &PeerRecord, state: BridgeState, channels: &[String]) -> Event {
-    let (history, media, typing) = SignedManifest::from_b64(&record.manifest)
+    let (history, media, typing, voice) = SignedManifest::from_b64(&record.manifest)
         .map(|s| {
             (
                 s.manifest.history.parse().unwrap_or(HistoryMode::FromEpoch),
                 s.manifest.media.parse().unwrap_or(MediaMode::None),
                 s.manifest.typing,
+                s.manifest.voice,
             )
         })
-        .unwrap_or((HistoryMode::FromEpoch, MediaMode::None, false));
+        .unwrap_or((HistoryMode::FromEpoch, MediaMode::None, false, false));
     Event::Manifest {
         peer: record.peer.clone(),
         version: record.version,
@@ -1557,6 +1566,7 @@ fn manifest_event(record: &PeerRecord, state: BridgeState, channels: &[String]) 
         history,
         media,
         typing,
+        voice,
     }
 }
 

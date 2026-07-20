@@ -29,8 +29,9 @@ fn cbor(value: &impl Serialize) -> Vec<u8> {
 }
 
 /// The manifest body (§11.1). `history`/`media` are the wire string forms
-/// (`from-epoch`|`full`, `mirror`|`mirror-max:<bytes>`|`none`); `typing` is the
-/// `yes|no` flag as a bool. `created`/`updated` are unix-ms timestamps —
+/// (`from-epoch`|`full`, `mirror`|`mirror-max:<bytes>`|`none`); `typing`/`voice`
+/// are the `yes|no` flags as bools (`voice` = whether voice channels in the
+/// snapshot federate, §16). `created`/`updated` are unix-ms timestamps —
 /// `created` is the `from-epoch` backfill boundary (§11.7, cheap ULID compare).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
@@ -40,6 +41,7 @@ pub struct Manifest {
     pub history: String,
     pub media: String,
     pub typing: bool,
+    pub voice: bool,
     pub created: u64,
     pub updated: u64,
 }
@@ -56,6 +58,7 @@ impl Manifest {
             &self.history,
             &self.media,
             self.typing,
+            self.voice,
             self.created,
             self.updated,
         ))
@@ -89,6 +92,7 @@ struct Wire {
     history: String,
     media: String,
     typing: bool,
+    voice: bool,
     created: u64,
     updated: u64,
     signer: Vec<u8>,
@@ -125,6 +129,7 @@ impl SignedManifest {
             history: self.manifest.history.clone(),
             media: self.manifest.media.clone(),
             typing: self.manifest.typing,
+            voice: self.manifest.voice,
             created: self.manifest.created,
             updated: self.manifest.updated,
             signer: self.signer.as_bytes().to_vec(),
@@ -144,6 +149,7 @@ impl SignedManifest {
                 history: wire.history,
                 media: wire.media,
                 typing: wire.typing,
+                voice: wire.voice,
                 created: wire.created,
                 updated: wire.updated,
             },
@@ -166,6 +172,7 @@ mod tests {
             history: "from-epoch".to_string(),
             media: "mirror-max:1048576".to_string(),
             typing: true,
+            voice: true,
             created: 1_700_000_000_000,
             updated: 1_700_000_000_000,
         }

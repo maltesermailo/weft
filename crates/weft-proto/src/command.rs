@@ -346,15 +346,17 @@ pub enum Command {
     /// server then challenges to prove control of the token's subject key,
     /// reusing the §6.1 `CHALLENGE`/`AUTH PROOF` flow.
     AuthBridge { network: NetworkName, token: String },
-    /// `BRIDGE PROPOSE <scope> <peer> [history=] [media=] [typing=]` with the
-    /// signed manifest in a `manifest=<b64>` tag (§6.6, §11.1). `scope` is
-    /// `#chan|ns:<name>|*`, validated by the capability layer.
+    /// `BRIDGE PROPOSE <scope> <peer> [history=] [media=] [typing=] [voice=]` with
+    /// the signed manifest in a `manifest=<b64>` tag (§6.6, §11.1). `scope` is
+    /// `#chan|ns:<name>|*`, validated by the capability layer. `voice` (§16) opts
+    /// the scope's voice channels into federation.
     BridgePropose {
         scope: String,
         peer: NetworkName,
         history: HistoryMode,
         media: MediaMode,
         typing: bool,
+        voice: bool,
         manifest: Option<String>,
     },
     /// `BRIDGE ACCEPT <peer> <version>` — live on mutual ack (§6.6).
@@ -460,6 +462,13 @@ pub enum Command {
         channel: ChannelName,
         candidate: String,
     },
+    /// `VOICE REQUEST <scope> <#chan>` (§16 federated voice) — a **bridge-only**
+    /// verb: the home network asks a peer to relay one of the peer's voice
+    /// channels. The peer answers `VOICE GRANT` iff the channel is in the acked
+    /// manifest with `voice=on` and the requester isn't netblocked, else
+    /// `NO-SUCH-TARGET` (invariant 1). `scope` is the manifest scope the request
+    /// rides (`#chan|ns:<name>|*`).
+    VoiceRequest { scope: String, channel: ChannelName },
     /// `PROFILE SET` with `@display=`/`@avatar=` tags (§10.3) — set your own
     /// display name + avatar (the avatar's BLAKE3 hash). A **present** tag sets
     /// the field (empty value clears it); an **absent** tag leaves it unchanged
@@ -1134,10 +1143,11 @@ impl Command {
                         let scope = args.req("scope")?.to_string();
                         let peer = args.req("peer")?.parse()?;
                         // Strictest-safe defaults (§11.1): no history, no media,
-                        // no typing unless the proposal opts in.
+                        // no typing, no voice unless the proposal opts in.
                         let mut history = HistoryMode::FromEpoch;
                         let mut media = MediaMode::None;
                         let mut typing = false;
+                        let mut voice = false;
                         while let Some(param) = args.opt() {
                             if let Some(v) = param.strip_prefix("history=") {
                                 history = v.parse()?;
@@ -1145,6 +1155,8 @@ impl Command {
                                 media = v.parse()?;
                             } else if let Some(v) = param.strip_prefix("typing=") {
                                 typing = yes_no("BRIDGE", "typing", v)?;
+                            } else if let Some(v) = param.strip_prefix("voice=") {
+                                voice = yes_no("BRIDGE", "voice", v)?;
                             }
                         }
                         Ok(Command::BridgePropose {
@@ -1153,6 +1165,7 @@ impl Command {
                             history,
                             media,
                             typing,
+                            voice,
                             manifest: line.tags.get("manifest").filter(|v| !v.is_empty()).cloned(),
                         })
                     }
@@ -1354,6 +1367,10 @@ impl Command {
                     "CAND" => Ok(Command::VoiceCand {
                         channel: args.req("channel")?.parse()?,
                         candidate: args.trailing_req("candidate")?.to_string(),
+                    }),
+                    "REQUEST" => Ok(Command::VoiceRequest {
+                        scope: args.req("scope")?.to_string(),
+                        channel: args.req("channel")?.parse()?,
                     }),
                     _ => Err(ParseError::BadParam {
                         verb: "VOICE",
@@ -1810,6 +1827,7 @@ impl Command {
                 history,
                 media,
                 typing,
+                voice,
                 manifest,
             } => {
                 if let Some(manifest) = manifest {
@@ -1824,6 +1842,7 @@ impl Command {
                         format!("history={history}"),
                         format!("media={media}"),
                         format!("typing={}", if *typing { "yes" } else { "no" }),
+                        format!("voice={}", if *voice { "yes" } else { "no" }),
                     ],
                     None,
                 )
@@ -1938,6 +1957,11 @@ impl Command {
                 "VOICE",
                 vec!["CAND".to_string(), channel.to_string()],
                 Some(candidate.clone()),
+            ),
+            Command::VoiceRequest { scope, channel } => (
+                "VOICE",
+                vec!["REQUEST".to_string(), scope.clone(), channel.to_string()],
+                None,
             ),
             Command::ProfileSet { display, avatar } => {
                 if let Some(display) = display {
@@ -2659,6 +2683,7 @@ mod tests {
                 history: HistoryMode::Full,
                 media: MediaMode::MirrorMax(1_048_576),
                 typing: true,
+                voice: true,
                 manifest: Some("B64MANIFEST==".into()),
             },
             "b1",
@@ -2666,7 +2691,7 @@ mod tests {
         let wire = propose.serialize().unwrap();
         assert!(wire.contains("manifest=B64MANIFEST=="), "{wire}");
         assert!(
-            wire.contains("BRIDGE PROPOSE #general hda.example history=full media=mirror-max:1048576 typing=yes"),
+            wire.contains("BRIDGE PROPOSE #general hda.example history=full media=mirror-max:1048576 typing=yes voice=yes"),
             "{wire}"
         );
         round_trip(&propose);
@@ -2681,6 +2706,7 @@ mod tests {
                 history: HistoryMode::FromEpoch,
                 media: MediaMode::None,
                 typing: false,
+                voice: false,
                 manifest: None,
             }
         );
@@ -2886,9 +2912,24 @@ mod tests {
             candidate: "candidate:1 1 UDP 2130706431 192.0.2.1 54321 typ host".to_string(),
         }));
 
+        // §16 federated voice: the bridge-only VOICE REQUEST.
+        let req = Request::with_label(
+            Command::VoiceRequest {
+                scope: "ns:gaming".into(),
+                channel: "#gaming/lounge".parse().unwrap(),
+            },
+            "vr",
+        );
+        assert_eq!(
+            req.serialize().unwrap(),
+            "@label=vr VOICE REQUEST ns:gaming #gaming/lounge"
+        );
+        round_trip(&req);
+
         // Missing channel / SDP are hard errors; unknown subcommand too.
         assert!(Request::parse("VOICE JOIN").is_err());
         assert!(Request::parse("VOICE DESC #general").is_err());
+        assert!(Request::parse("VOICE REQUEST ns:gaming").is_err()); // channel required
         assert!(Request::parse("VOICE FROB #general").is_err());
     }
 

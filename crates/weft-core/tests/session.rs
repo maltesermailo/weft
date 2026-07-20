@@ -8,8 +8,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use weft_core::{
-    run_session, Attestation, ControlStream, Keypair, MemoryStore, ServerCtx, ServerInfo,
-    VoiceBackend, VoiceError, VoiceGrant, VoiceJoinReq,
+    run_session, Attestation, ControlStream, Keypair, LiveKitAdmin, LiveKitBackend,
+    LiveKitTokenReq, MemoryStore, RelaySpec, ServerCtx, ServerInfo, VoiceBackend, VoiceError,
+    VoiceGrant, VoiceJoinReq, VoiceRelay,
 };
 use weft_proto::RetentionPolicy;
 use weft_proto::{ErrCode, Event, MemberAction, Reply, VoiceAction};
@@ -1987,6 +1988,7 @@ fn peer_manifest(key: &Keypair, channels: &[&str]) -> String {
         history: "from-epoch".to_string(),
         media: "none".to_string(),
         typing: false,
+        voice: false,
         created: 0,
         updated: 0,
     }
@@ -3706,4 +3708,202 @@ async fn voice_ban_ejects_the_target_from_the_room() {
         &leave.event,
         Event::VoiceState { user, .. } if user.account.as_str() == "alice"
     ));
+}
+
+// ---- §16 M-lk-3a: federated voice (VOICE REQUEST → VOICE GRANT gating) ----
+
+/// A stand-in LiveKit admin: mints an opaque token, records nothing.
+struct StubLk;
+
+#[async_trait::async_trait]
+impl LiveKitAdmin for StubLk {
+    fn access_token(&self, req: &LiveKitTokenReq) -> String {
+        format!("jwt:{}:{}", req.room, req.identity)
+    }
+    async fn set_participant_muted(&self, _room: &str, _identity: &str, _muted: bool) {}
+    async fn remove_participant(&self, _room: &str, _identity: &str) {}
+}
+
+/// An open-federation ctx with a LiveKit voice backend installed.
+fn ctx_livekit_federation() -> Arc<ServerCtx> {
+    let ctx = ctx_open_federation(&["#lounge"], &[]);
+    ctx.set_voice_backend(Arc::new(LiveKitBackend::new(
+        Arc::new(StubLk),
+        "wss://livekit.test.example".to_string(),
+        "test.example".parse().unwrap(),
+        600,
+    )));
+    ctx
+}
+
+/// A v1 manifest naming us as peer, with the §16 `voice` flag set as requested.
+fn peer_manifest_voice(key: &Keypair, channels: &[&str], voice: bool) -> String {
+    weft_core::Manifest {
+        peer: "test.example".to_string(),
+        version: 1,
+        channels: channels.iter().map(|c| c.to_string()).collect(),
+        history: "from-epoch".to_string(),
+        media: "none".to_string(),
+        typing: false,
+        voice,
+        created: 0,
+        updated: 0,
+    }
+    .sign(key)
+    .to_b64()
+}
+
+/// Propose + auto-ack `channels` with an explicit `voice` flag (peer → us).
+async fn propose_voice(bridge: &mut Client, key: &Keypair, channels: &[&str], voice: bool) {
+    let chan = channels[0];
+    bridge.send(&format!(
+        "@manifest={} BRIDGE PROPOSE {chan} test.example",
+        peer_manifest_voice(key, channels, voice)
+    ));
+    let ack = bridge.recv_raw().await;
+    assert!(ack.contains("BRIDGE ACCEPT test.example 1"), "{ack}");
+}
+
+#[tokio::test]
+async fn voice_request_grants_when_the_channel_is_voice_federated() {
+    let key = Keypair::generate();
+    let ctx = ctx_livekit_federation();
+    let mut bridge = bridged_peer(&ctx, "test.example", &key).await;
+
+    // The bridge is acked with #lounge federating voice (voice=on).
+    propose_voice(&mut bridge, &key, &["#lounge"], true).await;
+
+    // The peer asks us to relay #lounge → we answer VOICE GRANT with the LiveKit
+    // credentials + a signed relay grant.
+    bridge.send("@label=vr VOICE REQUEST * #lounge");
+    let reply = drain_until_label(&mut bridge, "vr").await;
+    let Event::VoiceGrant {
+        channel,
+        url,
+        room,
+        token,
+        grant,
+        ttl,
+    } = &reply.event
+    else {
+        panic!("expected VOICE GRANT, got {reply:?}");
+    };
+    assert_eq!(channel.as_str(), "#lounge");
+    assert_eq!(url, "wss://livekit.test.example");
+    assert_eq!(room, "wv:test.example:#lounge");
+    assert!(token.starts_with("jwt:"), "livekit token: {token}");
+    assert_eq!(*ttl, 600);
+
+    // The relay grant verifies against our network key, naming the peer grantee.
+    let signed = weft_crypto::SignedVoiceRelayGrant::from_b64(grant).expect("decode grant");
+    assert!(signed.verify());
+    assert_eq!(signed.grant.grantee, "test.example");
+    assert_eq!(signed.grant.channel, "#lounge");
+}
+
+#[tokio::test]
+async fn voice_request_refused_when_voice_not_federated() {
+    // §16 invariant 1: a channel bridged with voice=off is indistinguishable from
+    // a non-existent one — both are NO-SUCH-TARGET, no VOICE GRANT.
+    let key = Keypair::generate();
+    let ctx = ctx_livekit_federation();
+    let mut bridge = bridged_peer(&ctx, "test.example", &key).await;
+    propose_voice(&mut bridge, &key, &["#lounge"], false).await;
+
+    // voice=off → refused.
+    bridge.send("@label=a VOICE REQUEST * #lounge");
+    let a = drain_until_label(&mut bridge, "a").await;
+    assert!(
+        matches!(&a.event, Event::Err(e) if e.code == ErrCode::NoSuchTarget),
+        "{a:?}"
+    );
+
+    // A channel absent from the manifest → the same refusal.
+    bridge.send("@label=b VOICE REQUEST * #nope");
+    let b = drain_until_label(&mut bridge, "b").await;
+    assert!(
+        matches!(&b.event, Event::Err(e) if e.code == ErrCode::NoSuchTarget),
+        "{b:?}"
+    );
+}
+
+// ---- §16 M-lk-3b: the federated-voice relay lifecycle manager ----
+
+/// A stand-in relay driver: records start/stop instead of running libwebrtc.
+#[derive(Default)]
+struct MockRelay {
+    started: std::sync::Mutex<Vec<(String, String)>>, // (peer, channel)
+    stopped: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl VoiceRelay for MockRelay {
+    async fn start(&self, spec: RelaySpec) {
+        self.started
+            .lock()
+            .unwrap()
+            .push((spec.peer.to_string(), spec.channel.to_string()));
+    }
+    async fn stop(&self, peer: &weft_proto::NetworkName, channel: &weft_proto::ChannelName) {
+        self.stopped
+            .lock()
+            .unwrap()
+            .push((peer.to_string(), channel.to_string()));
+    }
+}
+
+fn relay_spec(peer: &str, channel: &str) -> RelaySpec {
+    RelaySpec {
+        peer: peer.parse().unwrap(),
+        channel: channel.parse().unwrap(),
+        remote_url: "wss://f".into(),
+        remote_room: "wv:fda.example:c".into(),
+        remote_token: "rt".into(),
+        local_url: "wss://h".into(),
+        local_room: "wv:test.example:c".into(),
+        local_token: "lt".into(),
+    }
+}
+
+#[tokio::test]
+async fn relay_lifecycle_refcounts_then_drops_by_peer() {
+    let ctx = ctx(&[]);
+    let relay = Arc::new(MockRelay::default());
+    ctx.set_voice_relay(relay.clone());
+
+    let f: weft_proto::NetworkName = "fda.example".parse().unwrap();
+    let lounge: weft_proto::ChannelName = "#lounge".parse().unwrap();
+
+    // Two local members of the same foreign channel → the relay starts once.
+    ctx.relay_acquire(relay_spec("fda.example", "#lounge"))
+        .await;
+    ctx.relay_acquire(relay_spec("fda.example", "#lounge"))
+        .await;
+    assert_eq!(relay.started.lock().unwrap().len(), 1);
+
+    // One leaves → still live (no stop).
+    ctx.relay_release(&f, &lounge).await;
+    assert!(relay.stopped.lock().unwrap().is_empty());
+
+    // The last leaves → stop.
+    ctx.relay_release(&f, &lounge).await;
+    assert_eq!(
+        *relay.stopped.lock().unwrap(),
+        vec![("fda.example".to_string(), "#lounge".to_string())]
+    );
+
+    // A SEVER/NETBLOCK drops every relay to a peer regardless of refcount, and
+    // leaves other peers' relays alone.
+    ctx.relay_acquire(relay_spec("fda.example", "#a")).await;
+    ctx.relay_acquire(relay_spec("fda.example", "#b")).await;
+    ctx.relay_acquire(relay_spec("other.example", "#c")).await;
+    ctx.relay_drop_peer(&f).await;
+
+    let stopped = relay.stopped.lock().unwrap();
+    assert!(stopped.iter().any(|(p, c)| p == "fda.example" && c == "#a"));
+    assert!(stopped.iter().any(|(p, c)| p == "fda.example" && c == "#b"));
+    assert!(
+        !stopped.iter().any(|(_, c)| c == "#c"),
+        "other peer's relay survives: {stopped:?}"
+    );
 }

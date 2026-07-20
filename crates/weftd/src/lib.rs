@@ -350,6 +350,12 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
     // advertised in WELCOME features above).
     if let Some(sfu) = voice_sfu {
         ctx.set_voice_backend(sfu);
+        // §16 M-lk-3b: federated voice only cascades on LiveKit. Install the
+        // (no-op) relay driver so the WEFT-side relay lifecycle runs; the real
+        // libwebrtc media driver is a deployment add-on.
+        if config.voice.backend == config::VoiceBackendKind::Livekit {
+            ctx.set_voice_relay(Arc::new(livekit::LogRelay));
+        }
     }
 
     // TLS: one hot-swappable resolver, fed from ACME / a PEM file / self-signed.

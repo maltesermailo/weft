@@ -133,15 +133,19 @@ impl<S: ControlStream> Session<S> {
                 history,
                 media,
                 typing,
+                voice,
                 manifest,
                 ..
             } => {
-                self.on_bridge_propose_in(peer, key, scope, history, media, typing, manifest)
+                self.on_bridge_propose_in(peer, key, scope, history, media, typing, voice, manifest)
                     .await
             }
             Command::BridgeAccept { version, .. } => self.on_bridge_accept_in(peer, version).await,
             Command::BridgeSever { .. } => self.on_bridge_sever_in(peer).await,
             Command::BridgeRequest { ns } => self.on_bridge_request_in(peer, label, ns).await,
+            Command::VoiceRequest { scope, channel } => {
+                self.on_voice_request_in(peer, label, scope, channel).await
+            }
             Command::FSession { fsid, op } => self.on_fsession(&peer, fsid, op).await,
             // §11.7 federated backfill: the peer pulls history over the bridge.
             Command::History {
@@ -222,6 +226,7 @@ impl<S: ControlStream> Session<S> {
         _history: HistoryMode,
         _media: MediaMode,
         _typing: bool,
+        _voice: bool,
         manifest: Option<String>,
     ) -> io::Result<Flow> {
         let Some(blob) = manifest else {
@@ -301,6 +306,8 @@ impl<S: ControlStream> Session<S> {
         for (_, forwarder) in self.bridged.drain() {
             forwarder.abort();
         }
+        // §16 M-lk-3b: a severed bridge stops the peer's federated voice too.
+        self.ctx.relay_drop_peer(&peer).await;
         Ok(Flow::Continue)
     }
 
@@ -340,13 +347,17 @@ impl<S: ControlStream> Session<S> {
         // public namespace wants its existing scrollback (§11.7 backfill), not
         // just messages from the moment they federated. `from-epoch` would floor
         // backfill at the manifest's creation and hide everything already posted.
-        let (history, media, typing) = (
+        // §16 a public, federating namespace shares its voice channels too, so the
+        // auto-federation offer sets `voice=on` (a foreign user who joins the ns can
+        // then relay its voice rooms). `typing` stays off (noisy/low-value).
+        let (history, media, typing, voice) = (
             weft_proto::HistoryMode::Full,
             weft_proto::MediaMode::None,
             false,
+            true,
         );
         let record = match self
-            .store_bridge_proposal(&peer, scope, &channels, history, media, typing)
+            .store_bridge_proposal(&peer, scope, &channels, history, media, typing, voice)
             .await
         {
             Ok(record) => record,
@@ -358,11 +369,87 @@ impl<S: ControlStream> Session<S> {
             history,
             media,
             typing,
+            voice,
             manifest: Some(record.manifest.clone()),
         };
         if let Ok(line) = Request::new(cmd).serialize() {
             self.stream.send_line(&line).await?;
         }
+        Ok(Flow::Continue)
+    }
+
+    /// §16 a peer asks us to relay one of *our* voice channels (`VOICE REQUEST`).
+    /// Gate on invariant 3 (the channel is in the acked+current manifest) + the
+    /// manifest `voice` flag + the peer not being netblocked (invariant 7), then
+    /// mint the relay credentials and answer `VOICE GRANT`. Every refusal is the
+    /// uniform NO-SUCH-TARGET (invariant 1) — the requester can't distinguish
+    /// "no such channel" from "voice not offered" from "you're blocked".
+    pub(super) async fn on_voice_request_in(
+        &mut self,
+        peer: NetworkName,
+        label: Option<String>,
+        _scope: String,
+        channel: ChannelName,
+    ) -> io::Result<Flow> {
+        // A netblocked peer gets nothing (invariant 7, uniform-1 timing).
+        if self
+            .ctx
+            .netblocks
+            .is_netblocked(&peer)
+            .await
+            .unwrap_or(false)
+        {
+            return self.no_such_target(label).await;
+        }
+
+        // The channel must be forwardable to this peer (acked ∩ current,
+        // invariant 3) AND the manifest must opt voice channels in (`voice=on`).
+        let Ok(Some(record)) = self.ctx.peers.peer(&peer).await else {
+            return self.no_such_target(label).await;
+        };
+        if !bridge::is_forwardable(&record, channel.as_str()) {
+            return self.no_such_target(label).await;
+        }
+        let voice_on = SignedManifest::from_b64(&record.manifest)
+            .map(|s| s.manifest.voice)
+            .unwrap_or(false);
+        if !voice_on {
+            return self.no_such_target(label).await;
+        }
+
+        // Mint the media credential — needs a cascadable backend (LiveKit); the
+        // embedded SFU can't be relayed to, so a request against it is refused.
+        let Some(backend) = self.ctx.voice_backend().cloned() else {
+            return self.no_such_target(label).await;
+        };
+        let Some((grant, ttl_secs)) = backend.relay_grant(&channel, peer.as_str()).await else {
+            return self.no_such_target(label).await;
+        };
+        let room = grant.room.clone().unwrap_or_default();
+        let url = grant.endpoint.clone().unwrap_or_default();
+
+        // Sign the durable, offline-verifiable WEFT-level authorization.
+        let now_ms = unix_now_ms();
+        let signed = self.ctx.sign_voice_relay(&weft_crypto::VoiceRelayGrant {
+            issuer: self.ctx.network().to_string(),
+            grantee: peer.to_string(),
+            channel: channel.to_string(),
+            room: room.clone(),
+            expiry: now_ms + ttl_secs.saturating_mul(1000),
+        });
+
+        self.send_event(
+            label,
+            Event::VoiceGrant {
+                channel,
+                url,
+                room,
+                token: grant.token,
+                grant: signed.to_b64(),
+                ttl: ttl_secs,
+            },
+        )
+        .await?;
         Ok(Flow::Continue)
     }
 
@@ -616,6 +703,7 @@ impl<S: ControlStream> Session<S> {
                     .parse()
                     .unwrap_or(weft_proto::MediaMode::None),
                 typing: signed.manifest.typing,
+                voice: signed.manifest.voice,
                 manifest: Some(record.manifest.clone()),
             };
             if let Ok(line) = Request::new(cmd).serialize() {
@@ -759,6 +847,7 @@ impl<S: ControlStream> Session<S> {
     /// Compile + sign a v1 manifest for `scope`'s `channels` and store it as a
     /// pending (un-acked) proposal to `peer`. Shared by the operator
     /// `BRIDGE PROPOSE` (§6.6) and the §11.10 auto-offer.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn store_bridge_proposal(
         &self,
         peer: &NetworkName,
@@ -767,9 +856,11 @@ impl<S: ControlStream> Session<S> {
         history: HistoryMode,
         media: MediaMode,
         typing: bool,
+        voice: bool,
     ) -> Result<PeerRecord, weft_store::StoreError> {
         let now = unix_now_ms();
-        let manifest = bridge::build_manifest(peer, 1, channels, history, media, typing, now, now);
+        let manifest =
+            bridge::build_manifest(peer, 1, channels, history, media, typing, voice, now, now);
         let record = PeerRecord {
             peer: peer.clone(),
             scope,
@@ -796,6 +887,7 @@ impl<S: ControlStream> Session<S> {
         history: HistoryMode,
         media: MediaMode,
         typing: bool,
+        voice: bool,
         account: Account,
     ) -> io::Result<Flow> {
         if self
@@ -824,7 +916,7 @@ impl<S: ControlStream> Session<S> {
         }
         let channels = self.scope_channels(&tscope).await;
         let record = match self
-            .store_bridge_proposal(&peer, scope, &channels, history, media, typing)
+            .store_bridge_proposal(&peer, scope, &channels, history, media, typing, voice)
             .await
         {
             Ok(record) => record,
@@ -969,6 +1061,8 @@ impl<S: ControlStream> Session<S> {
             peer.updated_ms = unix_now_ms();
             let _ = self.ctx.peers.upsert_peer(peer).await;
         }
+        // §16 M-lk-3b (invariant 7 "stop media"): drop the network's voice relays.
+        self.ctx.relay_drop_peer(&network).await;
         self.send_event(
             label,
             Event::Netblocked {

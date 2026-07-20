@@ -36,8 +36,8 @@ pub use registry::Registry;
 pub use session::{run_bridge_client, run_bridge_requester, run_session, SessionId};
 pub use stream::ControlStream;
 pub use voice::{
-    livekit_room, LiveKitAdmin, LiveKitBackend, LiveKitTokenReq, VoiceBackend, VoiceError,
-    VoiceGrant, VoiceJoinReq, VoiceMember,
+    livekit_room, LiveKitAdmin, LiveKitBackend, LiveKitTokenReq, RelaySpec, VoiceBackend,
+    VoiceError, VoiceGrant, VoiceJoinReq, VoiceMember, VoiceRelay,
 };
 pub use weft_store::{
     blob_hash, BlobHash, BlobMeta, BlobRecord, BlobStore, ChannelStore, MediaStore, MemBlobStore,

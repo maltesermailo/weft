@@ -174,6 +174,7 @@ pub enum ClientEvent {
         history: String,
         media: String,
         typing: bool,
+        voice: bool,
     },
     /// `NETBLOCKED <network> [:reason]` — a blocked network (§11.6).
     Netblocked {
@@ -726,6 +727,7 @@ pub fn on_line<E: EventSink>(
             history,
             media,
             typing,
+            voice,
         } => sink.emit(ClientEvent::Manifest {
             peer: peer.to_string(),
             version,
@@ -734,6 +736,7 @@ pub fn on_line<E: EventSink>(
             history: history.to_string(),
             media: media.to_string(),
             typing,
+            voice,
         }),
         Event::Netblocked { network, reason } => sink.emit(ClientEvent::Netblocked {
             network: network.to_string(),
@@ -902,6 +905,9 @@ pub fn build_bridge_propose(
         history,
         media,
         typing,
+        // §16 an explicit operator propose is strictest-safe (voice off); voice
+        // federation opts in via §11.10 auto-federation. A UI toggle is deferred.
+        voice: false,
         manifest: None,
     })
     .serialize()
