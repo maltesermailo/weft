@@ -235,10 +235,23 @@ a real webrtc SFU that forwards Opus between participants, behind a feature flag
   clean. **Not runtime-verified here** (getUserMedia + two-browser audio needs a
   real browser against a `--features voice` weftd) — but the SFU media path (1b)
   and the control path over the wire (1c) are already proven.
-- **M-voice-3 — desktop client (Tauri).** webrtc-rs client PeerConnection + `cpal`
-  capture/playback + an `opus` binding, the same UI. Cross-client web ↔ desktop
-  voice. *(Heaviest client lift — see risks: native audio has no built-in echo
-  cancellation / APM.)*
+- **M-voice-3 ✅ (2026-07-20) — desktop client (Tauri), via webview WebRTC.**
+  *Decision: use the system webview's WebRTC (libwebrtc — the same engine as
+  LiveKit, with full AEC/NS/AGC/jitter/congestion) rather than a native
+  webrtc-rs+cpal+Opus stack. Native would be **more** work for **less** quality
+  (webrtc-rs has no echo cancellation); the webview path is fastest *and* highest
+  quality and reuses M-voice-2's `voice.svelte.ts` unchanged.* Added the
+  `voice_join|leave|desc|cand` **Tauri commands** (so `invoke` routes on desktop),
+  the macOS mic-usage `Info.plist` (`NSMicrophoneUsageDescription`), and a
+  `with_webview` **permission handler** granting the WebKitGTK (Linux) webview's
+  `getUserMedia`. Quality polish in `voice.svelte.ts` (helps web too): explicit
+  `echoCancellation`/`noiseSuppression`/`autoGainControl` + Opus **in-band FEC +
+  DTX** SDP munging. *Green here:* client (macOS) builds, svelte-check 0/0, web
+  build, clippy clean. **Unverified (need real hardware):** the Linux/Windows
+  webview permission arms (cfg-gated, not compiled on the macOS dev box — the
+  WebKitGTK crate version must track wry's) and actual two-desktop audio. LiveKit
+  stays a future *server*-side option behind the `VoiceBackend` seam if scale
+  demands it, never a client rewrite.
 - **M-voice-4 — moderation + presence polish.** SFU-enforced mute/deafen tied to
   M7 (`MUTE` drops RTP live); server-side **active-speaker detection** feeding
   `VOICE-STATE`; a full `VOICE-STATE` **snapshot on (re)join** (mirrors the

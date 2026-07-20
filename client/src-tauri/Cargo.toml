@@ -30,6 +30,12 @@ weft-crypto = { path = "../../crates/weft-crypto" }
 weft-transport = { path = "../../crates/weft-transport", features = ["insecure-client"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util"] }
 
+# §16 voice: grant the WebKitGTK webview's getUserMedia permission (Linux only).
+# The version tracks wry's `webkit2gtk` so `PlatformWebview::inner()` returns a
+# matching type — bump this if a Tauri upgrade changes wry's version.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+
 # Release optimization lives at the workspace root as a per-package override
 # ([profile.release.package.client]) — Cargo ignores profiles in a non-root
 # member. `lto`/`panic` can't be set per-package, so they're omitted; if the

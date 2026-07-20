@@ -89,7 +89,11 @@ impl<S: ControlStream> Session<S> {
         line: &Line,
     ) -> io::Result<Flow> {
         match line.verb.as_str() {
-            "MESSAGE" | "EDITED" | "DELETED" | "REACTION" => self.on_ingest(&peer, line).await,
+            // §10.3 PROFILE is account-scoped (not channel-scoped) but still
+            // ingested — `ingest_bridged` verifies + stores the signed profile.
+            "MESSAGE" | "EDITED" | "DELETED" | "REACTION" | "PROFILE" => {
+                self.on_ingest(&peer, line).await
+            }
             // Remote membership / typing / presence / marks are informational;
             // not stored, not re-broadcast in M5b.
             "MEMBER" | "TYPING" | "PRESENCE" | "MARKED" | "POLICY" => Ok(Flow::Continue),
@@ -659,6 +663,31 @@ impl<S: ControlStream> Session<S> {
         let SessionEvent::Channel { event, .. } = event else {
             return Ok(()); // Lagged: a real bridge would resync (M5c)
         };
+        // §10.3 a *local* user's display profile forwards to the peer, signed
+        // with our network key (avatar bound by hash) so the peer can verify it.
+        if let Event::Profile {
+            user,
+            display,
+            avatar,
+        } = &event.event
+        {
+            if user.network.as_str() == self.ctx.network_name() {
+                let profile = weft_crypto::Profile {
+                    account: user.to_string(),
+                    display: display.clone(),
+                    avatar: avatar.clone(),
+                    updated: unix_now_ms(),
+                };
+                let sig = self.ctx.sign_profile(&profile).to_b64();
+                if let Ok(mut line) = Reply::new(event.event.clone()).to_line() {
+                    line.tags.insert("sig".to_string(), sig);
+                    if let Ok(serialized) = line.serialize() {
+                        self.stream.send_line(&serialized).await?;
+                    }
+                }
+            }
+            return Ok(());
+        }
         let ours = |id: &MsgId| id.origin().as_str() == self.ctx.network_name();
         let forward = match &event.event {
             // System messages (join/part lines) are local channel noise — not
@@ -1387,6 +1416,17 @@ impl ServerCtx {
         let Ok(reply) = Reply::from_line(line) else {
             return;
         };
+        // §10.3 a federated user's signed display profile (account-scoped, not
+        // channel-scoped) — verify + store + mirror the avatar, then done.
+        if let Event::Profile {
+            user,
+            display,
+            avatar,
+        } = &reply.event
+        {
+            self.ingest_profile(peer, line, user, display, avatar).await;
+            return;
+        }
         let Some((channel, record)) = ingest_record(peer, &reply.event) else {
             return;
         };
@@ -1410,6 +1450,62 @@ impl ServerCtx {
         }
         if let Some(handle) = self.registry.get(&channel) {
             handle.ingest(u64::MAX, record, reply.event).await;
+        }
+    }
+
+    /// §10.3 ingest a federated user's signed profile forwarded over the bridge:
+    /// verify the `SignedProfile` against the peer's network key + that it covers
+    /// exactly these fields, store it keyed by the `user@network` handle, and
+    /// mirror the avatar blob (§11.8, BLAKE3-verified by weftd's fetcher). No
+    /// local re-broadcast — the receiver's clients pull it via `PROFILES`.
+    async fn ingest_profile(
+        &self,
+        peer: &NetworkName,
+        line: &Line,
+        user: &UserRef,
+        display: &Option<String>,
+        avatar: &Option<String>,
+    ) {
+        // The handle must belong to the forwarding peer (origin authority).
+        if user.network.as_str() != peer.as_str() {
+            return;
+        }
+        let Some(sig) = line.tags.get("sig") else {
+            return;
+        };
+        let Ok(signed) = weft_crypto::SignedProfile::from_b64(sig) else {
+            return;
+        };
+        let Some(peer_key) = self.peer_key(peer) else {
+            return;
+        };
+        // Signed by the peer's network key AND covering exactly this profile.
+        if !signed.signed_by(peer_key)
+            || signed.profile.account != user.to_string()
+            || signed.profile.display.as_deref() != display.as_deref()
+            || signed.profile.avatar.as_deref() != avatar.as_deref()
+        {
+            return;
+        }
+
+        let handle = user.to_string();
+        self.store_federated_profile(
+            &handle,
+            weft_store::ProfileRecord {
+                display: display.clone(),
+                avatar: avatar.clone(),
+                updated: signed.profile.updated,
+            },
+        )
+        .await;
+        // Pull the avatar bytes so we can serve them locally (content-addressed,
+        // BLAKE3-verified). The mirror consumer ignores the channel field.
+        if let Some(hash) = avatar {
+            self.request_mirror(crate::MirrorRequest {
+                peer: peer.clone(),
+                hash: hash.clone(),
+                channel: "#avatars".parse().expect("valid placeholder channel"),
+            });
         }
     }
 

@@ -286,3 +286,4 @@ up, then `ctx.set_voice_backend` installs it. Conformance:
 | The SFU media engine (forwarding, codecs, ICE) | `weft-rt/src/sfu.rs` — run its tests with `cargo test -p weft-rt` |
 | Web voice UI / browser WebRTC | `client/src/lib/voice.svelte.ts` (the `$state` controller: getUserMedia + RTCPeerConnection + the JOIN→OFFER→DESC handshake) + `components/VoiceBar.svelte`; wired in `routes/+page.svelte` (`initVoice` on connect, `<VoiceBar>` in the members aside) |
 | Web voice wire glue | `weft-client-core/src/lib.rs` (`ClientEvent::Voice*` + `build_voice_*`) + `weft-client-wasm/src/lib.rs` dispatch + `client/src/lib/weft.ts` (`WeftEvent` union + `voice*` wrappers) |
+| Desktop voice (Tauri) | webview WebRTC — reuses `voice.svelte.ts`; `client/src-tauri/src/lib.rs` `voice_*` commands + `grant_media_permission` (`with_webview`, Linux WebKitGTK) + `Info.plist` mic string. Audio quality knobs (AEC/NS/AGC + Opus FEC/DTX) in `voice.svelte.ts` |

@@ -325,6 +325,28 @@ fn profiles_query(conn: State<'_, Conn>, accounts: Vec<String>) -> Result<(), St
     conn.send(weft::build_profiles_query(accounts)?)
 }
 
+// §16 WEFT-RT voice signaling. The media path is the webview's own WebRTC
+// (libwebrtc) — these just carry SDP/ICE over the control connection.
+#[tauri::command]
+fn voice_join(conn: State<'_, Conn>, channel: String) -> Result<(), String> {
+    conn.send(weft::build_voice_join(&channel)?)
+}
+
+#[tauri::command]
+fn voice_leave(conn: State<'_, Conn>, channel: String) -> Result<(), String> {
+    conn.send(weft::build_voice_leave(&channel)?)
+}
+
+#[tauri::command]
+fn voice_desc(conn: State<'_, Conn>, channel: String, sdp: String) -> Result<(), String> {
+    conn.send(weft::build_voice_desc(&channel, &sdp)?)
+}
+
+#[tauri::command]
+fn voice_cand(conn: State<'_, Conn>, channel: String, candidate: String) -> Result<(), String> {
+    conn.send(weft::build_voice_cand(&channel, &candidate)?)
+}
+
 #[tauri::command]
 fn mark(conn: State<'_, Conn>, channel: String, msgid: String) -> Result<(), String> {
     conn.send(weft::build_mark(&channel, &msgid)?)
@@ -592,12 +614,41 @@ fn send_raw(conn: State<'_, Conn>, line: String) -> Result<(), String> {
     conn.send(line)
 }
 
+/// §16 install the webview's media-permission handler so `getUserMedia` works
+/// for voice — Tauri v2 does not grant it automatically. macOS relies on the OS
+/// prompt (NSMicrophoneUsageDescription in Info.plist + the mic entitlement);
+/// Linux (WebKitGTK) needs the `permission-request` signal handled here.
+///
+/// NOTE: the non-macOS arms are cfg-gated and were **not** compile/run-verified
+/// from the macOS dev build — they need on-device checking (the WebKitGTK crate
+/// version must match wry's; a mismatch is the likely first thing to fix).
+#[allow(unused_variables)]
+fn grant_media_permission(webview: tauri::webview::PlatformWebview) {
+    #[cfg(target_os = "linux")]
+    {
+        use webkit2gtk::{PermissionRequestExt, WebViewExt};
+        // The user installed this app; grant its webview's permission requests
+        // (chiefly the mic for voice) rather than silently denying getUserMedia.
+        webview.inner().connect_permission_request(|_wv, req| {
+            req.allow();
+            true
+        });
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(Conn::default())
+        .setup(|app| {
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.with_webview(grant_media_permission);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             connect,
             client_config,
@@ -607,6 +658,10 @@ pub fn run() {
             join,
             profile_set,
             profiles_query,
+            voice_join,
+            voice_leave,
+            voice_desc,
+            voice_cand,
             ns_join,
             ns_create,
             ns_meta,

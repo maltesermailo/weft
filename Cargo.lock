@@ -865,6 +865,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tokio",
  "toml 0.8.2",
+ "webkit2gtk",
  "weft-client-core",
  "weft-crypto",
  "weft-proto",

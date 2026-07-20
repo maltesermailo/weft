@@ -153,7 +153,17 @@ async function onVoiceEvent(e: WeftEvent): Promise<void> {
 async function onOffer(channel: string, endpoint: string | null): Promise<void> {
   if (channel !== voice.channel) return;
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    // Best-quality capture: the webview's libwebrtc does echo cancellation,
+    // noise suppression, and auto gain when we ask for them (on by default in
+    // browsers, explicit here so desktop webviews enable them too).
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
   } catch {
     voice.error = "microphone permission denied";
     void leaveVoice();
@@ -173,7 +183,9 @@ async function onOffer(channel: string, endpoint: string | null): Promise<void> 
   };
 
   const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
+  // Turn on Opus in-band FEC (loss resilience) + DTX (silence suppression) for
+  // better quality on lossy links — libwebrtc honors these fmtp params.
+  await pc.setLocalDescription({ type: "offer", sdp: withOpusQuality(offer.sdp ?? "") });
   await waitIceComplete(pc);
   await voiceDesc(channel, pc.localDescription?.sdp ?? offer.sdp ?? "");
 
@@ -240,6 +252,25 @@ function waitIceComplete(conn: RTCPeerConnection): Promise<void> {
     }, 3000);
     conn.addEventListener("icegatheringstatechange", done);
   });
+}
+
+/** Enable Opus in-band FEC + DTX on the offer SDP's Opus fmtp line (adding one
+ *  if absent). Loss-concealment that materially improves audio on bad networks. */
+function withOpusQuality(sdp: string): string {
+  const pt = sdp.match(/a=rtpmap:(\d+)\s+opus\/48000/i)?.[1];
+  if (!pt) return sdp;
+  const want = "useinbandfec=1;usedtx=1";
+  const fmtp = new RegExp(`a=fmtp:${pt} (.*)`);
+  if (fmtp.test(sdp)) {
+    return sdp.replace(fmtp, (_m, params) =>
+      /useinbandfec/.test(params) ? `a=fmtp:${pt} ${params}` : `a=fmtp:${pt} ${params};${want}`,
+    );
+  }
+  // No fmtp line for Opus — add one right after its rtpmap.
+  return sdp.replace(
+    new RegExp(`(a=rtpmap:${pt} opus/48000/2\\r?\\n)`, "i"),
+    `$1a=fmtp:${pt} ${want}\r\n`,
+  );
 }
 
 function iceConfig(endpoint: string | null): RTCConfiguration {
