@@ -317,6 +317,37 @@ impl<S: ControlStream> Session<S> {
         }
     }
 
+    /// §6.7 remove `account` from `channel`'s voice room (a ban/kick): tear down
+    /// their backend peer (SFU slot / LiveKit participant → their media stops
+    /// server-side immediately) and announce their departure to the room. The
+    /// ejected client's own session state is left as-is — the LiveKit disconnect
+    /// / vanished SFU media is what enforces it; a `MODERATED` line already told
+    /// their client they were removed. No-op if they're not in voice here.
+    pub(super) async fn eject_channel_voice(&self, account: &Account, channel: &ChannelName) {
+        let Some(backend) = self.ctx.voice_backend().cloned() else {
+            return;
+        };
+        let Some(session) = self.ctx.voice_eject_account(channel, account) else {
+            return;
+        };
+
+        backend.leave(session, channel).await;
+
+        if let Some(handle) = self.ctx.registry.get(channel) {
+            let user = UserRef::new(account.clone(), self.ctx.info.network.clone());
+            handle
+                .announce(Event::VoiceState {
+                    channel: channel.clone(),
+                    user,
+                    action: VoiceAction::Leave,
+                    muted: false,
+                    deaf: false,
+                    speaking: false,
+                })
+                .await;
+        }
+    }
+
     /// A channel's kind (§16); `Text` if unknown — fails safe so a store hiccup
     /// never turns a text channel into a voice one.
     pub(super) async fn channel_kind(&self, channel: &ChannelName) -> ChannelKind {

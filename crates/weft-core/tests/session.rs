@@ -3671,3 +3671,39 @@ async fn voice_mute_silences_live_and_updates_the_room() {
             if user.account.as_str() == "alice" && *muted
     ));
 }
+
+#[tokio::test]
+async fn voice_ban_ejects_the_target_from_the_room() {
+    // §16 (M-lk-2) a channel-scope BAN removes the target from that channel's
+    // voice room (backend peer torn down); co-members see a VOICE STATE leave.
+    let ctx = ctx_voice(&[], &["boss"]);
+    let mut boss = ready_op(&ctx, "boss").await;
+    boss.send("CHANNEL CREATE #lounge voice");
+    assert!(matches!(boss.recv().await.event, Event::Policy { .. }));
+
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("VOICE JOIN #lounge");
+    assert!(matches!(bob.recv().await.event, Event::VoiceOffer { .. }));
+    let mut alice = ready(&ctx, "alice").await;
+    alice.send("VOICE JOIN #lounge");
+    assert!(matches!(alice.recv().await.event, Event::VoiceOffer { .. }));
+
+    // boss bans alice at the channel scope.
+    boss.send("@label=b BAN #lounge alice :raid");
+    assert!(matches!(
+        drain_until_label(&mut boss, "b").await.event,
+        Event::Moderated { .. }
+    ));
+
+    // bob (still in the room) sees alice ejected from voice.
+    let leave = loop {
+        let r = next_voice_state(&mut bob).await;
+        if matches!(&r.event, Event::VoiceState { action, .. } if *action == VoiceAction::Leave) {
+            break r;
+        }
+    };
+    assert!(matches!(
+        &leave.event,
+        Event::VoiceState { user, .. } if user.account.as_str() == "alice"
+    ));
+}

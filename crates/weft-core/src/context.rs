@@ -418,6 +418,28 @@ impl ServerCtx {
         hits
     }
 
+    /// §6.7 remove an account from one channel's voice roster (a ban/kick),
+    /// returning its session id so the caller can tear down the backend peer +
+    /// announce. Prunes the room when empty. `None` if they weren't in it.
+    pub(crate) fn voice_eject_account(
+        &self,
+        channel: &ChannelName,
+        account: &Account,
+    ) -> Option<u64> {
+        let mut rooms = self.voice_rooms.lock().expect("voice lock");
+        let room = rooms.get_mut(channel)?;
+        let session = room
+            .iter()
+            .find(|(_, member)| member.account == *account)
+            .map(|(session, _)| *session)?;
+
+        room.remove(&session);
+        if room.is_empty() {
+            rooms.remove(channel);
+        }
+        Some(session)
+    }
+
     /// weftd installs the auto-federation dialer sink (enables `FEDERATE`).
     pub fn set_auto_bridge_sink(&self, tx: tokio::sync::mpsc::UnboundedSender<AutoBridgeRequest>) {
         let _ = self.auto_bridge_tx.set(tx);

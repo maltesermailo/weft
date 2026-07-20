@@ -162,9 +162,23 @@ H  spawns the relay participant → connects to F's LiveKit with the JWT
   Desktop reuses it via the webview (M-voice-3 mic grant). `voice-offer`
   ClientEvent + `weft.ts` type carry `mode`/`room`. *Green:* svelte-check 0/0 +
   web build; **runtime = real LiveKit + two browsers** (deferred).
-- **M-lk-2 — moderation bridge.** `on_moderate` (MUTE/UNMUTE/ban) → the LiveKit
-  Room server API on the target's voice participant; ban/kick → `remove_participant`.
-  *Green:* core test that a MUTE issues the right Room-API call (mocked client).
+- **M-lk-2 ✅ — moderation bridge.** `LiveKitAdmin` gained async
+  `set_participant_muted` / `remove_participant` (the trait is now `#[async_trait]`,
+  token minting stays sync). `LiveKitBackend` keeps a session→(room,identity) map
+  from `join`, so the SFU-shaped `VoiceBackend::set_muted(session,…)` /
+  `leave(session,…)` translate to the identity-keyed Room API without widening the
+  trait. MUTE→mute (via M7 `mute_in_voice`), UNMUTE→unmute, leave/disconnect→
+  remove. **Ban/kick** now also eject from voice: `on_moderate` (channel-scope
+  ban) + `on_kick` → `eject_channel_voice` → `ctx.voice_eject_account` + backend
+  `leave` + VOICE STATE leave. weftd's `LiveKitSigner` implements the port with
+  `livekit_api::services::RoomClient`: mute = `update_participant` revoking
+  `can_publish` (server-enforced, matches the grant model); remove =
+  `remove_participant`. `services-tokio` + `rustls-tls-webpki-roots` resolve
+  reqwest onto **ring** (no aws-lc-rs — policy preserved). *Green:* a
+  `MockLiveKitAdmin` unit test asserts join/mute/unmute/remove hit the Room API
+  with the right room+identity (and no-op for unknown/departed sessions); a
+  session test asserts a channel-scope BAN ejects the target (co-member sees the
+  VOICE STATE leave). weft-core 117 + voice_livekit 1; clippy clean.
 - **M-lk-3a — federation foundation (proto-first, fully verifiable).** Manifest
   `voice`-mode (proto/crypto/store/core, mirrors `typing` end-to-end); the crypto
   voice token (weft-crypto, modeled on `SignedManifest`); `VOICE REQUEST`/

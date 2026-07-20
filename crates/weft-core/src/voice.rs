@@ -10,7 +10,8 @@
 //! server with none advertises no `features=voice` and answers voice verbs with
 //! `UNSUPPORTED`.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -121,13 +122,25 @@ pub struct LiveKitTokenReq {
     pub ttl_secs: u64,
 }
 
-/// Port to the operator's LiveKit deployment. M-lk-0 needs only token minting —
-/// pure HS256 crypto over the shared API secret — but it stays a trait so the
-/// JWT signing (and the M-lk-2 async Room server API) lives in weftd (L3, may do
-/// I/O) while weft-core stays socket-free, and a mock drives the core tests.
+/// Port to the operator's LiveKit deployment. Token minting is pure HS256 crypto
+/// (sync); the M-lk-2 moderation calls are async HTTP to LiveKit's Room server
+/// API. Both live behind this trait so the real impl (JWT + `reqwest`) stays in
+/// weftd (L3, may do I/O) while weft-core stays socket-free, and a mock drives
+/// the core tests.
+#[async_trait]
 pub trait LiveKitAdmin: Send + Sync {
     /// Mint a signed LiveKit access-token JWT for one participant.
     fn access_token(&self, req: &LiveKitTokenReq) -> String;
+
+    /// §6.7 mute (or unmute) all of a participant's published tracks live —
+    /// the LiveKit equivalent of the SFU dropping their inbound audio. Best
+    /// effort: a transport error is logged by the impl, not surfaced (the deny
+    /// list remains the source of truth, re-applied on the participant's next
+    /// join/token refresh).
+    async fn set_participant_muted(&self, room: &str, identity: &str, muted: bool);
+
+    /// Remove a participant from the room (ban / kick / disconnect). Best effort.
+    async fn remove_participant(&self, room: &str, identity: &str);
 }
 
 /// The LiveKit room id for a channel: `wv:<network>:<channel>`. Stable across a
@@ -152,6 +165,17 @@ pub struct LiveKitBackend {
     network: NetworkName,
     /// Access-token lifetime (seconds).
     ttl_secs: u64,
+    /// Session → (room, identity), recorded at `join`. Moderation is keyed by
+    /// session at the trait boundary (like the SFU), but LiveKit's Room API is
+    /// keyed by room + identity — this map bridges the two without widening the
+    /// `VoiceBackend` signatures.
+    peers: Mutex<HashMap<u64, LiveKitPeer>>,
+}
+
+#[derive(Clone)]
+struct LiveKitPeer {
+    room: String,
+    identity: String,
 }
 
 impl LiveKitBackend {
@@ -166,7 +190,16 @@ impl LiveKitBackend {
             url,
             network,
             ttl_secs,
+            peers: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn peer(&self, session: u64) -> Option<LiveKitPeer> {
+        self.peers
+            .lock()
+            .expect("livekit peers lock")
+            .get(&session)
+            .cloned()
     }
 }
 
@@ -175,6 +208,16 @@ impl VoiceBackend for LiveKitBackend {
     async fn join(&self, req: VoiceJoinReq) -> Result<VoiceGrant, VoiceError> {
         let room = livekit_room(self.network.as_str(), &req.channel);
         let identity = UserRef::new(req.account, self.network.clone()).to_string();
+
+        // Record the session's (room, identity) so a later moderation call —
+        // keyed by session — can address the LiveKit Room API.
+        self.peers.lock().expect("livekit peers lock").insert(
+            req.session,
+            LiveKitPeer {
+                room: room.clone(),
+                identity: identity.clone(),
+            },
+        );
 
         // The gate's decision maps one-to-one onto LiveKit grants (see the plan's
         // cap→grant table): `can_speak` → canPublish; subscribe is always granted
@@ -214,12 +257,30 @@ impl VoiceBackend for LiveKitBackend {
         Err(VoiceError::Unavailable)
     }
 
-    async fn leave(&self, _session: u64, _channel: &ChannelName) {
-        // LiveKit reaps the participant on WebSocket disconnect; explicit removal
-        // (ban / kick) is the M-lk-2 Room server API, not this path.
+    async fn leave(&self, session: u64, _channel: &ChannelName) {
+        // Actively remove the participant from the LiveKit room. Used both on a
+        // normal `VOICE LEAVE`/disconnect and on a ban/kick eject — LiveKit also
+        // reaps on WebSocket close, but a moderator-driven eject can't wait for
+        // the client to hang up. Drop the lock before awaiting (guard is !Send).
+        let peer = self
+            .peers
+            .lock()
+            .expect("livekit peers lock")
+            .remove(&session);
+        if let Some(peer) = peer {
+            self.admin
+                .remove_participant(&peer.room, &peer.identity)
+                .await;
+        }
     }
 
-    async fn set_muted(&self, _session: u64, _channel: &ChannelName, _muted: bool) {
-        // M-lk-2 wires this to the LiveKit Room server API (mute_published_track).
+    async fn set_muted(&self, session: u64, _channel: &ChannelName, muted: bool) {
+        // §6.7 live mute via the LiveKit Room server API. Best effort: if the
+        // session isn't a LiveKit peer (unknown / already gone), nothing to do.
+        if let Some(peer) = self.peer(session) {
+            self.admin
+                .set_participant_muted(&peer.room, &peer.identity, muted)
+                .await;
+        }
     }
 }

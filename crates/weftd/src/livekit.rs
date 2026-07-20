@@ -1,35 +1,60 @@
-//! §16 M-lk-0: the weftd side of the LiveKit voice backend — the `LiveKitAdmin`
-//! port implementation.
+//! §16 the weftd side of the LiveKit voice backend — the `LiveKitAdmin` port.
 //!
-//! weft-core's [`LiveKitBackend`](weft_core::LiveKitBackend) runs the WEFT authz
-//! gate and then asks this signer for a media credential. Minting uses LiveKit's
-//! own [`livekit_api::access_token`] builder (an HS256 JWT over the shared
-//! `api_secret`, `video` grant = room + publish/subscribe), so it stays pure —
-//! no I/O — which is why the port can be called synchronously from core. The
-//! M-lk-2 Room server API (mute/remove) will add the async, HTTP half here via
-//! `livekit_api::services`.
+//! Two halves, both using LiveKit's own `livekit-api` crate:
+//! - **M-lk-0 token minting** — `access_token` builds an HS256 access JWT
+//!   (`AccessToken` + `VideoGrants`); pure, no I/O, so it's a sync fn.
+//! - **M-lk-2 moderation** — `set_participant_muted` / `remove_participant` call
+//!   LiveKit's **Room server API** (`RoomClient`, HTTP over `reqwest` with the
+//!   ring rustls provider). A live mute revokes the participant's `can_publish`
+//!   via `update_participant` (server-enforced, matching the token grant model);
+//!   a ban/kick/leave removes them. Best effort — a transport failure is logged,
+//!   not surfaced: the deny-list stays authoritative and is re-applied on the
+//!   participant's next join/token refresh.
 
 use std::time::Duration;
 
 use livekit_api::access_token::{AccessToken, VideoGrants};
+use livekit_api::services::room::{RoomClient, UpdateParticipantOptions};
+use livekit_protocol::ParticipantPermission;
+use tracing::warn;
 
 use weft_core::{LiveKitAdmin, LiveKitTokenReq};
 
-/// Signs LiveKit access tokens with the deployment's shared API key/secret.
+/// Signs LiveKit access tokens and drives the Room server API for one
+/// deployment (all share the API key/secret the operator gives their LiveKit).
 pub struct LiveKitSigner {
     api_key: String,
     api_secret: String,
+    /// Room server API client (built once; holds a reqwest client).
+    room: RoomClient,
 }
 
 impl LiveKitSigner {
-    pub fn new(api_key: String, api_secret: String) -> Self {
+    pub fn new(api_key: String, api_secret: String, url: &str) -> Self {
+        // The Room API is HTTP; the client-facing `url` is a WebSocket URL, so
+        // swap the scheme (LiveKit serves both on the same host).
+        let host = http_host(url);
+        let room = RoomClient::with_api_key(&host, &api_key, &api_secret);
         Self {
             api_key,
             api_secret,
+            room,
         }
     }
 }
 
+/// `wss://…` → `https://…`, `ws://…` → `http://…`, anything else unchanged.
+fn http_host(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = url.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        url.to_string()
+    }
+}
+
+#[async_trait::async_trait]
 impl LiveKitAdmin for LiveKitSigner {
     fn access_token(&self, req: &LiveKitTokenReq) -> String {
         // The WEFT gate already decided publish/subscribe; map them straight onto
@@ -55,5 +80,30 @@ impl LiveKitAdmin for LiveKitSigner {
             .with_grants(grants)
             .to_jwt()
             .unwrap_or_default()
+    }
+
+    async fn set_participant_muted(&self, room: &str, identity: &str, muted: bool) {
+        // Revoke (or restore) publish rights — LiveKit unpublishes their tracks
+        // server-side, so muting can't be bypassed client-side. Subscribe stays
+        // on so a muted participant still hears the room.
+        let options = UpdateParticipantOptions {
+            permission: Some(ParticipantPermission {
+                can_subscribe: true,
+                can_publish: !muted,
+                can_publish_data: !muted,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        if let Err(e) = self.room.update_participant(room, identity, options).await {
+            warn!(%room, %identity, muted, "livekit mute (update_participant) failed: {e}");
+        }
+    }
+
+    async fn remove_participant(&self, room: &str, identity: &str) {
+        if let Err(e) = self.room.remove_participant(room, identity).await {
+            warn!(%room, %identity, "livekit remove_participant failed: {e}");
+        }
     }
 }

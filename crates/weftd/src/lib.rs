@@ -128,7 +128,7 @@ fn build_livekit(
         return None;
     }
 
-    let signer = livekit::LiveKitSigner::new(lk.api_key.clone(), lk.api_secret.clone());
+    let signer = livekit::LiveKitSigner::new(lk.api_key.clone(), lk.api_secret.clone(), &lk.url);
     let ttl = if lk.token_ttl_secs == 0 {
         600
     } else {

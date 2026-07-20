@@ -352,12 +352,14 @@ impl<S: ControlStream> Session<S> {
         if let Err(e) = outcome {
             return self.internal(label, &e).await;
         }
-        // A fresh channel-scope ban force-parts the target.
+        // A fresh channel-scope ban force-parts the target (text) and, §16,
+        // ejects them from that channel's voice room too.
         if add && kind == ModKind::Ban {
             if let Ok(channel) = scope.parse::<ChannelName>() {
                 if let Some(handle) = self.ctx.registry.get(&channel) {
                     handle.eject(target.clone()).await;
                 }
+                self.eject_channel_voice(&target, &channel).await;
             }
         }
         // §16 a MUTE/UNMUTE also silences/resumes the target live in any voice
@@ -409,6 +411,8 @@ impl<S: ControlStream> Session<S> {
             return self.no_such_target(label).await;
         };
         handle.eject(target.clone()).await;
+        // §16 a kick also removes them from the channel's voice room.
+        self.eject_channel_voice(&target, &channel).await;
         self.send_event(
             label,
             Event::Moderated {
