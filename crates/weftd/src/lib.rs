@@ -11,6 +11,7 @@ mod acceptor;
 pub mod config;
 pub mod dialer;
 pub mod livekit;
+pub mod mailer;
 pub mod media;
 pub mod telemetry;
 mod tls;
@@ -128,7 +129,14 @@ fn build_livekit(
         return None;
     }
 
-    let signer = livekit::LiveKitSigner::new(lk.api_key.clone(), lk.api_secret.clone(), &lk.url);
+    // Clients get `url` (the offer endpoint); weftd's own Room-API calls use
+    // `api_url` when set (the internal address), else fall back to `url`.
+    let api_url = if lk.api_url.is_empty() {
+        &lk.url
+    } else {
+        &lk.api_url
+    };
+    let signer = livekit::LiveKitSigner::new(lk.api_key.clone(), lk.api_secret.clone(), api_url);
     let ttl = if lk.token_ttl_secs == 0 {
         600
     } else {
@@ -356,6 +364,23 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         if config.voice.backend == config::VoiceBackendKind::Livekit {
             ctx.set_voice_relay(Arc::new(livekit::LogRelay));
         }
+    }
+
+    // §10.5 install the email sender for account verification: real SMTP when
+    // configured, else a dev log-mailer (records claims, prints the code).
+    if config.smtp.enabled && !config.smtp.host.is_empty() {
+        match mailer::SmtpMailer::new(&config.smtp) {
+            Ok(smtp) => {
+                info!(host = %config.smtp.host, "SMTP mailer enabled (§10.5)");
+                ctx.set_mailer(Arc::new(smtp));
+            }
+            Err(e) => {
+                warn!("SMTP mailer misconfigured, falling back to log-only: {e}");
+                ctx.set_mailer(Arc::new(mailer::LogMailer));
+            }
+        }
+    } else {
+        ctx.set_mailer(Arc::new(mailer::LogMailer));
     }
 
     // TLS: one hot-swappable resolver, fed from ACME / a PEM file / self-signed.

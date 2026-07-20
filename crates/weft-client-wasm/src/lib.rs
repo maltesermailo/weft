@@ -251,6 +251,11 @@ impl WeftClient {
                     .unwrap_or_default();
                 build_profiles_query(accounts)?
             }
+            // ---- §10.5 account verification ----
+            "verify_email" => build_verify_email(&arg("address"))?,
+            "verify_birthday" => build_verify_birthday(&arg("date"))?,
+            "verify_confirm" => build_verify_confirm(&arg("kind"), &arg("code"))?,
+            "verify_list" => build_verify_list()?,
             // ---- §16 voice signaling ----
             "voice_join" => build_voice_join(&arg("channel"))?,
             "voice_leave" => build_voice_leave(&arg("channel"))?,

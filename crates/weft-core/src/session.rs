@@ -21,7 +21,8 @@ use weft_proto::{
     Account, BridgeState, ChannelKind, ChannelName, Command, ContentState, ErrCode, ErrEvent,
     Event, FSessionOp, HistoryMode, Line, MediaMode, MemberAction, MessageEvent, ModAction, MsgId,
     MsgMeta, NamespaceName, NetworkName, ParseError, Reply, ReportScope, ReportStatus, Request,
-    ResolveAction, RetentionPolicy, StreamMode, Target, Ulid, UserRef, Visibility, MAX_LABEL_BYTES,
+    ResolveAction, RetentionPolicy, StreamMode, Target, Ulid, UserRef, VerifyState, Visibility,
+    MAX_LABEL_BYTES,
 };
 
 use weft_store::{
@@ -48,6 +49,7 @@ mod namespaces;
 mod profile;
 mod relay;
 mod roles;
+mod verify;
 mod voice;
 
 /// Process-unique connection identifier (also the actor-side member key).
@@ -1221,6 +1223,13 @@ impl<S: ControlStream> Session<S> {
                 self.on_profile_set(label, display, avatar, account).await
             }
             Command::ProfilesQuery { accounts } => self.on_profiles_query(label, accounts).await,
+            // §10.5 account verification (email code flow + self-attested birthday).
+            Command::VerifyEmail { address } => self.on_verify_email(label, address, account).await,
+            Command::VerifyBirthday { date } => self.on_verify_birthday(label, date, account).await,
+            Command::VerifyConfirm { kind, code } => {
+                self.on_verify_confirm(label, kind, code, account).await
+            }
+            Command::VerifyList => self.on_verify_list(label, account).await,
             // §16 WEFT-RT voice signaling. The SFU backend is installed by weftd;
             // a zero-voice server answers `UNSUPPORTED` inside these handlers.
             Command::VoiceJoin { channel } => self.on_voice_join(label, channel, account).await,

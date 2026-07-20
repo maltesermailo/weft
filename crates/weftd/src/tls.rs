@@ -37,9 +37,27 @@ pub async fn setup(
         return acme::setup(config, challenges).await;
     }
     if let Some(tls) = &config.tls {
-        let resolver = ReloadableCert::new(load_pem(&tls.cert, &tls.key)?);
+        // The cert may not exist yet at boot — e.g. a reverse proxy (Caddy) is
+        // still obtaining it into a shared volume. Start on a self-signed
+        // placeholder and let the file-watch task swap the real cert in when it
+        // appears (the None→exists mtime transition triggers a reload), the same
+        // graceful path ACME uses. So a missing file delays real TLS, never
+        // crashes boot.
+        let resolver = match load_pem(&tls.cert, &tls.key) {
+            Ok(ck) => {
+                info!(cert = %tls.cert.display(), "TLS: file certificate (hot-reload on change)");
+                ReloadableCert::new(ck)
+            }
+            Err(e) => {
+                warn!(
+                    cert = %tls.cert.display(),
+                    "TLS: certificate not loadable yet ({e:#}); self-signed placeholder until it appears"
+                );
+                let sans = vec![network.as_str().to_string(), "localhost".to_string()];
+                ReloadableCert::new(self_signed(sans)?)
+            }
+        };
         let task = spawn_file_watch(Arc::clone(&resolver), tls.cert.clone(), tls.key.clone());
-        info!(cert = %tls.cert.display(), "TLS: file certificate (hot-reload on change)");
         return Ok((resolver, Some(task)));
     }
     warn!("TLS: self-signed certificate (dev only — clients need allow_insecure)");

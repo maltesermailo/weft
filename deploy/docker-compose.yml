@@ -1,0 +1,74 @@
+name: weft
+
+# Full weft deployment: weftd (embedded web client) + PostgreSQL + LiveKit
+# (voice) + Caddy (TLS + reverse proxy). No .env — edit the config files:
+#   - weft.toml     (weftd)
+#   - livekit.yaml  (LiveKit keys)
+#   - Caddyfile     (domains)
+#   - POSTGRES_* below
+# `docker compose up -d --build`.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      # MUST MATCH the storage.url in weft.toml.
+      POSTGRES_USER: weft
+      POSTGRES_PASSWORD: change-me-postgres-password
+      POSTGRES_DB: weft
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U weft -d weft"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "50000-50020:50000-50020/udp"    # rtc media (direct, not proxied)
+
+  weftd:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    volumes:
+      - ./weft.toml:/etc/weft/weft.toml:ro
+      # Caddy's data (incl. its LE certs) mounted read-only at the same path Caddy
+      # uses (/data), so weftd can read the cert for QUIC (see weft.toml [tls]).
+      - caddy_data:/data:ro
+    ports:
+      - "4433:4433/udp"        # QUIC control plane (desktop/native clients)
+    # HTTP (8081) is reached via Caddy on the internal network — not published.
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - weftd
+      - livekit
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"          # HTTP/3 for the web client (optional)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # LE certs live here; shared read-only with weftd
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

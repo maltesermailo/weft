@@ -1,0 +1,19 @@
+# LiveKit server config (single-node). The `keys:` map below IS the api_key/secret
+# weftd uses — LiveKit's format is `<key-name>: <secret>`. It MUST MATCH weft.toml:
+#   livekit.yaml   keys:  devkey: <secret>
+#   weft.toml      [voice.livekit]  api_key = "devkey"   api_secret = "<secret>"
+port: 7880
+keys:
+  devkey: change-me-at-least-32-bytes-of-random-secret
+rtc:
+  tcp_port: 7881
+  # UDP media range — published by the container + open on the firewall. Widen
+  # for more concurrent participants.
+  port_range_start: 50000
+  port_range_end: 50020
+  # Advertise the host's public IP for candidates (single-host / cloud VM). Set
+  # `node_ip: <ip>` explicitly behind complex NAT.
+  use_external_ip: true
+logging:
+  level: info
+  json: false

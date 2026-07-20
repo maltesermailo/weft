@@ -89,7 +89,7 @@ Actor-per-channel, task-per-connection, `tokio::mpsc` inboxes + `broadcast` fan-
 
 Current focus: **auto-federation (§11.10) is feature-complete** — transparent, on-demand bridging on top of M5. A user types `network/namespace` (or a `weft://` link) and their server auto-establishes the bridge: `FEDERATE` → SSRF-guarded dial (well-known key fetch for unpinned domains) → `BRIDGE REQUEST` → the peer offers a signed manifest iff the ns is `public`+`federation`-open → auto-accept → mirror. All of P1–P4 shipped + tested. Remaining polish: foreign-invite auto-routing, a live connecting/failed UI state, per-device attestations on bridged events, and a two-live-weftd HTTPS-fetch conformance test (needs a real trusted cert).
 
-Parked owner requests (need spec design before implementation — §18 territory): email/age verification **wire flow** (store infrastructure exists: `weft_store::Verification`, claim→confirm lifecycle); web admin panel (would ride the axum surface in weftd).
+Parked owner requests (need spec design before implementation — §18 territory): web admin panel (would ride the axum surface in weftd). **Email/age verification ✅ shipped** (§10.5): `VERIFY EMAIL/CONFIRM/BIRTHDAY/LIST`, `VERIFIED` event, `Mailer` port + weftd `lettre` SMTP (`[smtp]` config) + dev log-mailer; email = mailed-code proof, birthday = self-attested, badge-only (no access gating yet).
 
 ## Deliberately deferred — do not add
 

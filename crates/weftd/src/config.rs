@@ -51,6 +51,44 @@ pub struct Config {
     pub media: Media,
     /// §16 voice SFU (off by default).
     pub voice: Voice,
+    /// §10.5 outbound SMTP for account (email) verification. Disabled → the
+    /// server records claims and logs the code (dev) but sends no mail.
+    pub smtp: Smtp,
+}
+
+/// §10.5 SMTP submission for verification emails. weftd connects out to this
+/// server (STARTTLS on 587 by default) to deliver one-time codes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Smtp {
+    /// Send verification email (also needs `host`/`from`). Off → log-only.
+    pub enabled: bool,
+    /// SMTP submission host (e.g. `smtp.example.com`).
+    pub host: String,
+    /// Submission port (587 STARTTLS by default; 465 = implicit TLS).
+    pub port: u16,
+    /// Whether the port is implicit-TLS (465) rather than STARTTLS (587).
+    pub implicit_tls: bool,
+    /// SMTP AUTH username (empty = no auth, e.g. a local relay).
+    pub username: String,
+    /// SMTP AUTH password. Keep it out of logs.
+    pub password: String,
+    /// `From:` address on verification mail (e.g. `noreply@example.com`).
+    pub from: String,
+}
+
+impl Default for Smtp {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: String::new(),
+            port: 587,
+            implicit_tls: false,
+            username: String::new(),
+            password: String::new(),
+            from: String::new(),
+        }
+    }
 }
 
 /// Embedded admin panel toggle. (Standalone `weft-admin` has its own config.)
@@ -110,8 +148,14 @@ pub enum VoiceBackendKind {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LiveKit {
-    /// LiveKit server URL handed to clients (`wss://livekit.example`).
+    /// LiveKit server URL handed to **clients** (`wss://livekit.example`) — the
+    /// public address browsers/apps connect to.
     pub url: String,
+    /// LiveKit **server-API** URL weftd itself calls for the Room API (mute/
+    /// remove) — the internal address (e.g. `http://livekit:7880` in Docker).
+    /// Empty → derived from `url` (scheme swapped). Set this when the public and
+    /// internal addresses differ (a reverse proxy / container network).
+    pub api_url: String,
     /// API key — the JWT `iss`.
     pub api_key: String,
     /// API secret — the HS256 signing key. Keep it out of logs.
@@ -124,6 +168,7 @@ impl Default for LiveKit {
     fn default() -> Self {
         Self {
             url: String::new(),
+            api_url: String::new(),
             api_key: String::new(),
             api_secret: String::new(),
             token_ttl_secs: 600,
@@ -381,6 +426,7 @@ impl Default for Config {
             admin: Admin::default(),
             media: Media::default(),
             voice: Voice::default(),
+            smtp: Smtp::default(),
         }
     }
 }

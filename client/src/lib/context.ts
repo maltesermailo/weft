@@ -213,7 +213,9 @@ export interface AppCtx {
   logout(): void;
 
   // ---- user settings (page overlay) ----
-  userTab: "account" | "appearance" | "connection";
+  userTab: "account" | "appearance" | "connection" | "verification";
+  /** §10.5 the caller's own verification claims, keyed by kind (email/birthday). */
+  readonly verifications: Record<string, { subject: string; state: string }>;
 
   // ---- server settings (ns overlay) ----
   nsTab: "overview" | "roles" | "members" | "bans" | "federation" | "recovery" | "danger";

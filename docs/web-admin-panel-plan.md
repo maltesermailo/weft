@@ -251,3 +251,78 @@ HTTPS.
 stands for a different goal — giving operators the *desktop admin UI* in a
 browser. This document is the plan for a **dedicated operator dashboard**, which
 is what "assess reports / list users / browse messages" actually needs.
+
+
+NEW PLAN
+
+# WEFT Loom Console — Feature Plan
+
+Scope decisions: deep coverage of federation ops, trust & keys, moderation & reports, and IRC gateway ops. The panel ships with the server for any WEFT admin, and it gets full control including destructive deletes. Those two decisions drive most of the architecture below — a panel that ships to strangers can't assume a trusted single operator, and destructive power over E2EE rooms needs careful framing since the server never sees plaintext.
+
+## 1. Architecture foundation
+
+**Admin API as a first-class surface.** The panel should be a pure client of a versioned admin API exposed by the server (e.g. `/_weft/admin/v1/…` over the same QUIC/HTTP stack, or a dedicated mTLS listener). Nothing in the panel talks to the database directly. This keeps the panel replaceable, makes every admin action scriptable, and means third parties can build their own tooling against the same API. Consider a seventh workspace crate (`weft-admin-api`) holding the route handlers and typed request/response structs, with the panel's static assets embedded via `include_dir!` so a single binary serves everything.
+
+**Panel authentication and RBAC.** Since any WEFT admin will run this, operator identity can't be hardcoded. Reuse WEFT's own primitives: an operator is a WEFT user whose device holds an *operator capability token* with scoped grants. Suggested roles as capability scopes rather than an enum: `admin.read` (observability), `admin.moderate` (structural actions), `admin.destroy` (deletes), `admin.federation`, `admin.keys`. This dogfoods the capability system and gives you fine-grained delegation for free — an admin can issue a read-only token to a junior moderator the same way users delegate room capabilities.
+
+**Admin audit trail (non-optional).** Every admin API call gets an append-only, hash-chained audit record: who, what, target, timestamp, request payload digest, previous-record hash. Because the panel ships to others, tamper-evidence matters more than it would for a personal tool. Surface this as the Audit Log view, filterable by operator, action type, and target.
+
+**Confirmation model for destructive actions.** Typed-name confirmation (retype the room name / handle) for deletes, plus a configurable soft-delete grace window (default 7 days) during which the object is tombstoned but recoverable. Optionally a two-operator rule for `admin.destroy` actions, off by default, for larger deployments.
+
+## 2. Lookup
+
+**Users.** Search by handle, user ID, device fingerprint, email, or IP. Detail page as mocked: account info, device list, capability tokens, flags, room memberships, report history, and DM/room metadata (never content — see §5). Add a "find related" pivot on IP and email domain like Fluxer has; it's genuinely useful for spam waves.
+
+**Rooms.** Search local and known-federated rooms. Detail: state chain head, MLS epoch, member list with per-member join path (direct, invite, gateway), media storage footprint, federation replication status per peer.
+
+**Applications/bots.** Registered bot accounts and their token scopes, with rate-limit class assignment.
+
+## 3. Federation ops
+
+**Peers view** (as mocked): every known peer with state (*woven / frayed / severed*), RTT, last handshake, protocol version, pinned server key fingerprint, and shared-room count. Actions: sever (block), re-weave (unblock), force re-handshake, and a peer detail page showing per-room replication lag.
+
+**Peer trust policy.** A server-wide setting choosing open federation, allowlist, or blocklist mode, editable here. Severing should support granularity: whole peer, or per-room (already in the mockup's room actions).
+
+**Transit queue.** The outbound/inbound replication backlog: per-peer queue depth, oldest pending event age, retry schedule. Actions: retry now, drop poisoned events (with audit record), pause a peer's queue. This is the page you'll live in when a peer is frayed.
+
+**Peer key rotation handling.** When a peer rotates its server signing key, surface it as a pending trust decision rather than silently accepting — TOFU with operator review.
+
+## 4. Trust & keys
+
+**Device registry.** Global device search by fingerprint. Per-device: Ed25519 key, MLS leaf positions across rooms, first/last seen, transport history. Revoking a device must show its blast radius before confirming: which rooms will rotate epochs, which sessions die.
+
+**Capability token inspector.** Paste or look up any token and see its parsed chain: issuer, scopes, delegation path back to the root grant, expiry, revocation status. Render the delegation graph visually for chains deeper than two hops — this becomes the debugging tool for "why can/can't user X do Y."
+
+**Revocation list management.** View and manage the server's published revocation set (devices and tokens), with propagation status per federation peer, so you can answer "does thread.example.net know this token is dead yet?"
+
+**Key transparency (later).** An optional Merkle log of device key changes per user, letting clients detect a malicious server swapping keys. Big feature, but it's the kind of thing that makes WEFT credible as an E2EE protocol; the admin panel would show the log head and inclusion-proof health.
+
+## 5. Moderation & reports
+
+**What "full control" means under E2EE.** The server holds ciphertext, state chains, and metadata — never plaintext. So destructive control is structural: you can delete a room's state and ciphertext blobs, kick members, sever replication, suspend accounts. Content-based moderation only works when a reporter voluntarily attaches decrypted excerpts to a report (the Matrix model), or on plaintext surfaces: profiles, room names/topics, invites, and the IRC gateway. The panel should be honest about this boundary in its UI copy — it's a selling point, not a limitation.
+
+**Reports queue.** User-filed reports with category, reporter, target, optional attached plaintext excerpt (signed by the reporter's device so excerpts can't be forged), and resolution workflow: claim, resolve with action, dismiss. Bulk actions for spam waves.
+
+**Account actions.** Suspend (login blocked, tokens frozen), shadow-limit (rate-limited, invisible to non-members), forced device logout, delete with grace window. Flags as in the mockup.
+
+**Room actions** (as mocked): rename, transfer founder, force epoch rotation, freeze (read-only), sever federation, delete with tombstone. Tombstones must federate so peers stop replicating and can show "removed by origin server."
+
+**Plaintext-surface filters.** Phrase bans and media-hash blocklists apply only where the server sees content: profiles, room metadata, unencrypted rooms if WEFT supports them, and gateway traffic. Keep them in a "Filters" section scoped explicitly to those surfaces.
+
+## 6. IRC gateway ops
+
+The gateway is the one place the server legitimately sees message plaintext, so it gets its own deeper toolset. Per-network config (servers, TLS, SASL), link status with reconnect/backoff state, channel↔room mappings with create/edit/unlink, puppet account overview (which WEFT users have IRC presence, nick collisions), flood/rate controls per network, and gateway-side content filters (this is where phrase bans genuinely work). A live gateway log tail with severity filtering rounds it out — netsplit debugging without SSH.
+
+## 7. Observability
+
+QUIC transport dashboard (connections, handshake failures, 0-RTT resumption rate, per-peer congestion stats), storage footprint by room and media type, and the admin audit log from §1. Skip full metrics dashboards — export Prometheus metrics and let admins bring Grafana; the panel only needs the views that drive decisions inside it.
+
+## 8. Suggested phasing
+
+**MVP (ship with first public server release):** admin API + operator capability auth, audit trail, user/room lookup and detail, account suspend/delete, room delete with tombstone, peers view with sever/re-weave, device revocation, reports queue.
+
+**v2:** transit queue tooling, capability token inspector, revocation propagation status, IRC gateway config and mappings, plaintext-surface filters, typed-confirmation and grace-window polish.
+
+**Later:** delegation graph visualization, key transparency log, two-operator rule, peer key rotation review flow, storage analytics.
+
+The MVP list is deliberately the set an admin needs on day one to run a public server responsibly: see what exists, remove what's abusive, control who they federate with, and prove afterward who did what.

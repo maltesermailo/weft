@@ -480,6 +480,17 @@ pub enum Command {
     /// `PROFILES <account> [account...]` (§10.3) — query display profiles; the
     /// server answers a `PROFILE` event per known account.
     ProfilesQuery { accounts: Vec<String> },
+    /// `VERIFY EMAIL <address>` (§10.5) — claim an email address; the server
+    /// mails a one-time code and records a `pending` claim (`VERIFIED … pending`).
+    VerifyEmail { address: String },
+    /// `VERIFY BIRTHDAY <YYYY-MM-DD>` (§10.5) — self-attest a birth date; recorded
+    /// and `confirmed` immediately (self-declared, not server-proven).
+    VerifyBirthday { date: String },
+    /// `VERIFY CONFIRM <kind> <code>` (§10.5) — prove a `pending` claim with the
+    /// mailed code; on match the claim becomes `confirmed`.
+    VerifyConfirm { kind: String, code: String },
+    /// `VERIFY LIST` (§10.5) — the caller's own claims, one `VERIFIED` per claim.
+    VerifyList,
     /// Any verb outside the known set. Servers ignore it silently (§4).
     Unknown { verb: String },
 }
@@ -1350,6 +1361,28 @@ impl Command {
                 }
                 Ok(Command::ProfilesQuery { accounts })
             }
+            "VERIFY" => {
+                let mut args = Args::new(line, "VERIFY");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "EMAIL" => Ok(Command::VerifyEmail {
+                        address: args.req("address")?.to_string(),
+                    }),
+                    "BIRTHDAY" => Ok(Command::VerifyBirthday {
+                        date: args.req("date")?.to_string(),
+                    }),
+                    "CONFIRM" => Ok(Command::VerifyConfirm {
+                        kind: args.req("kind")?.to_string(),
+                        code: args.req("code")?.to_string(),
+                    }),
+                    "LIST" => Ok(Command::VerifyList),
+                    _ => Err(ParseError::BadParam {
+                        verb: "VERIFY",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
             "VOICE" => {
                 let mut args = Args::new(line, "VOICE");
                 let sub = args.req("subcommand")?.to_ascii_uppercase();
@@ -1973,6 +2006,18 @@ impl Command {
                 ("PROFILE", vec!["SET".to_string()], None)
             }
             Command::ProfilesQuery { accounts } => ("PROFILES", accounts.clone(), None),
+            Command::VerifyEmail { address } => {
+                ("VERIFY", vec!["EMAIL".to_string(), address.clone()], None)
+            }
+            Command::VerifyBirthday { date } => {
+                ("VERIFY", vec!["BIRTHDAY".to_string(), date.clone()], None)
+            }
+            Command::VerifyConfirm { kind, code } => (
+                "VERIFY",
+                vec!["CONFIRM".to_string(), kind.clone(), code.clone()],
+                None,
+            ),
+            Command::VerifyList => ("VERIFY", vec!["LIST".to_string()], None),
             Command::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown command"));
             }
@@ -2967,6 +3012,34 @@ mod tests {
         ));
         assert!(Request::parse("PROFILES").is_err()); // needs ≥1 account
         assert!(Request::parse("PROFILE FROB").is_err()); // bad subcommand
+    }
+
+    #[test]
+    fn verify_verbs_round_trip() {
+        let email = Request::with_label(
+            Command::VerifyEmail {
+                address: "ada@example.com".into(),
+            },
+            "e1",
+        );
+        assert_eq!(
+            email.serialize().unwrap(),
+            "@label=e1 VERIFY EMAIL ada@example.com"
+        );
+        round_trip(&email);
+
+        round_trip(&Request::new(Command::VerifyBirthday {
+            date: "2000-05-15".into(),
+        }));
+        round_trip(&Request::new(Command::VerifyConfirm {
+            kind: "email".into(),
+            code: "482913".into(),
+        }));
+        round_trip(&Request::new(Command::VerifyList));
+
+        assert!(Request::parse("VERIFY EMAIL").is_err()); // address required
+        assert!(Request::parse("VERIFY CONFIRM email").is_err()); // code required
+        assert!(Request::parse("VERIFY FROB").is_err()); // bad subcommand
     }
 
     #[test]

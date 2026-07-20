@@ -1,8 +1,76 @@
-# Deploying weftd with real TLS
+# Deploying weft
 
-weftd's QUIC transport is **UDP + TLS 1.3, end to end** — a reverse proxy can't
-terminate it, so **weftd must hold the QUIC certificate itself.** There are two
-supported ways to give it one; pick one.
+Two layers here: a **Docker Compose stack** that brings up the whole system
+(weftd + PostgreSQL + LiveKit voice) from one `.env`, and a **TLS guide** for the
+QUIC certificate you need in production. Start with Compose; read the TLS section
+before going live.
+
+## Docker Compose — full stack (web client + Postgres + LiveKit + Caddy)
+
+Brings up everything: **weftd** built **with the embedded web client**
+(`--features web-ui`), **PostgreSQL**, **LiveKit** (voice), and **Caddy** (auto
+TLS + reverse proxy for HTTP/WebSocket). **No `.env`** — you edit plain config
+files directly.
+
+### 1. Point DNS at the box
+
+Two names must resolve to this host (A/AAAA records), and ports 80 + 443 must be
+reachable so Caddy can obtain Let's Encrypt certs:
+
+- `weft.example.com` → the web client + API
+- `livekit.weft.example.com` → LiveKit signaling (wss)
+
+### 2. Edit the config (four files, no templating)
+
+| File | Set |
+|---|---|
+| `weft.toml` | `network`, `operators`, `storage.url` password, `[voice.livekit]` `url`/keys, `[smtp]` |
+| `livekit.yaml` | `keys:` — **must match** `[voice.livekit] api_key/api_secret` |
+| `Caddyfile` | the two site addresses — **must match** `network` + LiveKit `url` |
+| `docker-compose.yml` | `POSTGRES_PASSWORD` — **must match** `weft.toml` `storage.url` |
+
+Generate strong secrets: `openssl rand -hex 32` (LiveKit secret + Postgres
+password). The "MUST MATCH" pairs are duplicated because there's no `.env` — keep
+them in sync.
+
+### 3. Up
+
+```bash
+cd deploy
+docker compose up -d --build
+```
+
+Open `https://weft.example.com` — the web client is served by weftd (embedded),
+talks WEFT over the same-origin `wss://weft.example.com/ws`. Register the handle
+you set as `operators[0]`; it holds every capability at `*` (§11.3).
+
+### How the pieces connect
+
+- **Caddy** terminates public TLS (443) and reverse-proxies `weft.example.com` →
+  `weftd:8081` (the SPA, `/ws`, `/.well-known/weft`, `/media`) and
+  `livekit.example.com` → `livekit:7880`. It auto-obtains + renews the certs.
+- **QUIC** (weftd `4433/udp`, for desktop/native clients) can't be proxied. weftd
+  reads Caddy's LE cert from the **shared `caddy_data` volume** for QUIC — enable
+  the `[tls]` block in `weft.toml` (path includes your domain). Boot tolerates the
+  cert not existing yet (self-signed placeholder → hot-swaps when Caddy writes it).
+- **LiveKit** signaling rides Caddy (wss); its **media** is UDP `50000-50020`
+  direct to the host (open these on your firewall; `use_external_ip` advertises
+  the host IP). weftd's own Room-API calls go internal to `http://livekit:7880`
+  (`api_url`).
+- **Federated (cross-network) voice** needs the libwebrtc relay driver, not in
+  this image by design (`docs/voice-livekit-plan.md`); same-network voice works
+  out of the box.
+
+Email verification (§10.5): set `[smtp] enabled = true` + the fields; otherwise
+weftd logs the code. Postgres data persists in the `pgdata` volume — back it up.
+
+---
+
+## Real TLS without Compose / for QUIC directly
+
+The Compose stack above already gives weftd its QUIC cert via Caddy's shared
+volume. If you run weftd **standalone** (no Caddy), it must hold the QUIC cert
+itself — **UDP + TLS 1.3, end to end**, which a proxy can't terminate. Two ways:
 
 ## Option A — built-in ACME (simplest, no proxy)
 

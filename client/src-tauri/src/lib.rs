@@ -325,6 +325,27 @@ fn profiles_query(conn: State<'_, Conn>, accounts: Vec<String>) -> Result<(), St
     conn.send(weft::build_profiles_query(accounts)?)
 }
 
+// §10.5 account verification.
+#[tauri::command]
+fn verify_email(conn: State<'_, Conn>, address: String) -> Result<(), String> {
+    conn.send(weft::build_verify_email(&address)?)
+}
+
+#[tauri::command]
+fn verify_birthday(conn: State<'_, Conn>, date: String) -> Result<(), String> {
+    conn.send(weft::build_verify_birthday(&date)?)
+}
+
+#[tauri::command]
+fn verify_confirm(conn: State<'_, Conn>, kind: String, code: String) -> Result<(), String> {
+    conn.send(weft::build_verify_confirm(&kind, &code)?)
+}
+
+#[tauri::command]
+fn verify_list(conn: State<'_, Conn>) -> Result<(), String> {
+    conn.send(weft::build_verify_list()?)
+}
+
 // §16 WEFT-RT voice signaling. The media path is the webview's own WebRTC
 // (libwebrtc) — these just carry SDP/ICE over the control connection.
 #[tauri::command]
@@ -658,6 +679,10 @@ pub fn run() {
             join,
             profile_set,
             profiles_query,
+            verify_email,
+            verify_birthday,
+            verify_confirm,
+            verify_list,
             voice_join,
             voice_leave,
             voice_desc,

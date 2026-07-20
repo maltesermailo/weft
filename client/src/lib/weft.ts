@@ -196,6 +196,7 @@ export type WeftEvent =
       display: string | null;
       avatar: string | null;
     }
+  | { kind: "verified"; claim_kind: string; subject: string; state: string }
   | {
       kind: "voice-offer";
       channel: string;
@@ -275,6 +276,20 @@ export function profileSet(opts: { display?: string; avatar?: string }) {
 }
 export function profilesQuery(accounts: string[]) {
   return invoke("profiles_query", { accounts });
+}
+
+// §10.5 account verification.
+export function verifyEmail(address: string) {
+  return invoke("verify_email", { address });
+}
+export function verifyBirthday(date: string) {
+  return invoke("verify_birthday", { date });
+}
+export function verifyConfirm(kind: string, code: string) {
+  return invoke("verify_confirm", { kind, code });
+}
+export function verifyList() {
+  return invoke("verify_list", {});
 }
 
 // §16 WEFT-RT voice signaling. The SDP/ICE payloads ride these control

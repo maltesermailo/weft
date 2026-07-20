@@ -2182,6 +2182,71 @@ async fn federated_backfill_streams_over_the_bridge() {
     let _ = std::fs::remove_file(&h_key_path);
 }
 
+// ---- §10.5 account verification (black-box over QUIC) ----
+
+/// The self-attested birthday + pending-email + list flow over a real server.
+/// The email *code* confirmation isn't checked here (the code is delivered by the
+/// mailer, out of band) — that round-trip is covered by the core session test.
+#[tokio::test]
+async fn verify_birthday_email_pending_and_list() {
+    let server = start_server(&["#general"]).await;
+    let mut client = QuicClient::connect(server.quic_addr).await;
+
+    client.send("HELLO weft/1").await;
+    assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+    client.send(&format!("REGISTER ada :{PASSWORD}")).await;
+    client
+        .recv_until(|r| matches!(r.event, Event::Welcome { .. }))
+        .await;
+
+    // Self-attested birthday → confirmed immediately.
+    client.send("@label=b VERIFY BIRTHDAY 2000-05-15").await;
+    let reply = client
+        .recv_until(|r| matches!(r.event, Event::Verified { .. }))
+        .await;
+    let Event::Verified {
+        kind,
+        subject,
+        state,
+    } = &reply.event
+    else {
+        unreachable!()
+    };
+    assert_eq!(kind, "birthday");
+    assert_eq!(subject, "2000-05-15");
+    assert_eq!(*state, weft_proto::VerifyState::Confirmed);
+    assert_eq!(reply.label.as_deref(), Some("b"));
+
+    // Email claim → pending (a code is mailed; the dev log-mailer just prints it).
+    client.send("@label=e VERIFY EMAIL ada@example.com").await;
+    let reply = client
+        .recv_until(|r| matches!(r.event, Event::Verified { .. }))
+        .await;
+    assert!(matches!(
+        &reply.event,
+        Event::Verified { kind, state, .. }
+            if kind == "email" && *state == weft_proto::VerifyState::Pending
+    ));
+
+    // LIST → both claims come back.
+    client.send("@label=l VERIFY LIST").await;
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..2 {
+        let reply = client
+            .recv_until(|r| matches!(r.event, Event::Verified { .. }))
+            .await;
+        if let Event::Verified { kind, .. } = &reply.event {
+            seen.insert(kind.clone());
+        }
+    }
+    assert!(
+        seen.contains("email") && seen.contains("birthday"),
+        "{seen:?}"
+    );
+
+    server.shutdown().await;
+}
+
 // ---- §16 WEFT-RT voice signaling (M-voice-1c) ----
 
 /// A zero-voice server (the default) advertises no `features=voice` and answers
@@ -2296,6 +2361,7 @@ async fn start_livekit_voice() -> weftd::Server {
         c.voice.backend = VoiceBackendKind::Livekit;
         c.voice.livekit = LiveKit {
             url: "wss://livekit.test.example".to_string(),
+            api_url: String::new(),
             api_key: "APItest".to_string(),
             api_secret: LIVEKIT_SECRET.to_string(),
             token_ttl_secs: 600,

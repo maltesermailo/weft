@@ -9,8 +9,8 @@ use crate::name::{Account, ChannelName, NamespaceName, NetworkName, Target, User
 use crate::policy::RetentionPolicy;
 use crate::types::{
     BridgeState, ChannelKind, ContentState, HistoryMode, MediaMode, MemberAction, ModAction,
-    MsgMeta, PresenceStatus, ReactionOp, ReportScope, ResolveAction, TypingState, Visibility,
-    VoiceAction, VoiceTransport,
+    MsgMeta, PresenceStatus, ReactionOp, ReportScope, ResolveAction, TypingState, VerifyState,
+    Visibility, VoiceAction, VoiceTransport,
 };
 
 /// An event plus its optional `label` echo (§3.5). Only direct responses
@@ -414,6 +414,16 @@ pub enum Event {
         user: UserRef,
         display: Option<String>,
         avatar: Option<String>,
+    },
+    /// `@state= VERIFIED <kind> <subject>` (§10.5) — an account-verification claim
+    /// state, sent **only to the claim's owner** (the subject is PII — email
+    /// address / birth date — never broadcast). `state` is `pending` (email code
+    /// mailed, awaiting `VERIFY CONFIRM`) or `confirmed`. Emitted on
+    /// `EMAIL`/`BIRTHDAY`/`CONFIRM` and one per claim for `VERIFY LIST`.
+    Verified {
+        kind: String,
+        subject: String,
+        state: VerifyState,
     },
     /// `VOICE DESC <#chan> :<sdp>` (§16) — the SFU's SDP **answer** to the
     /// client's `VOICE DESC` offer. Symmetric with the command (spec §16 uses
@@ -1008,6 +1018,19 @@ impl Event {
                     avatar: line.tags.get("avatar").cloned(),
                 })
             }
+            "VERIFIED" => {
+                let mut args = Args::new(line, "VERIFIED");
+                Ok(Event::Verified {
+                    kind: args.req("kind")?.to_string(),
+                    subject: args.req("subject")?.to_string(),
+                    state: line
+                        .tags
+                        .get("state")
+                        .map(|v| v.parse())
+                        .transpose()?
+                        .unwrap_or(VerifyState::Pending),
+                })
+            }
             "VOICE" => {
                 let mut args = Args::new(line, "VOICE");
                 let sub = args.req("subcommand")?.to_ascii_uppercase();
@@ -1573,6 +1596,14 @@ impl Event {
                     tags.insert("avatar".to_string(), avatar.clone());
                 }
                 ("PROFILE", vec![user.to_string()], None)
+            }
+            Event::Verified {
+                kind,
+                subject,
+                state,
+            } => {
+                tags.insert("state".to_string(), state.to_string());
+                ("VERIFIED", vec![kind.clone(), subject.clone()], None)
             }
             Event::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown event"));
@@ -2265,6 +2296,29 @@ mod tests {
         });
         assert_eq!(bare.serialize().unwrap(), "PROFILE eve@hda.example");
         round_trip(&bare);
+    }
+
+    #[test]
+    fn verified_event_round_trips() {
+        let pending = Reply::with_label(
+            Event::Verified {
+                kind: "email".into(),
+                subject: "ada@example.com".into(),
+                state: VerifyState::Pending,
+            },
+            "v1",
+        );
+        assert_eq!(
+            pending.serialize().unwrap(),
+            "@label=v1;state=pending VERIFIED email ada@example.com"
+        );
+        round_trip(&pending);
+
+        round_trip(&Reply::new(Event::Verified {
+            kind: "birthday".into(),
+            subject: "2000-05-15".into(),
+            state: VerifyState::Confirmed,
+        }));
     }
 
     #[test]

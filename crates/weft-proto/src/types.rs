@@ -261,6 +261,16 @@ impl Default for VoiceTransport {
 }
 
 wire_enum!(
+    /// `VERIFIED <kind> <subject>` claim state (§10.5 account verification).
+    /// `pending` = a claim awaiting proof (an email code not yet confirmed);
+    /// `confirmed` = proven (code matched) or self-attested (birthday).
+    VerifyState, "verify state", {
+        Pending => "pending",
+        Confirmed => "confirmed",
+    }
+);
+
+wire_enum!(
     /// `STREAM OFFER <media|backfill> …` payload kind (§13, §6). `media` is a
     /// content-addressed blob; `backfill` is bulk HISTORY streamed over the data
     /// plane (M-media-4). Both ride the same transport.

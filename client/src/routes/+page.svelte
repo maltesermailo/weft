@@ -270,9 +270,11 @@
   // events (broadcast on change) + on-demand PROFILES queries.
   let profiles = $state<Record<string, { display?: string; avatar?: string }>>({});
   let myStatus = $state("online");
+  // §10.5 the caller's own verification claims, keyed by kind (email/birthday).
+  let verifications = $state<Record<string, { subject: string; state: string }>>({});
   // Footer user menu (presence + settings + logout) and the user-settings page tab.
   let userMenu = $state(false);
-  let userTab = $state<"account" | "appearance" | "connection">("account");
+  let userTab = $state<"account" | "appearance" | "connection" | "verification">("account");
   let dmInput = $state("");
   // ---- discover dialog (Phase 6) ----
   let discoverOpen = $state(false);
@@ -700,6 +702,7 @@
         ensureCapsAt(account, "*"); // learn operator status (federation gating)
         initVoice(account); // §16 wire the voice controller to the event stream
         queryProfile(account); // §10.3 load our own profile
+        weft.verifyList().catch(() => {}); // §10.5 load our verification claims
         // Remember creds so the next launch logs straight back in. NOTE: this
         // includes the password in localStorage — a dev convenience; the
         // hardening is OS-keychain storage in the backend.
@@ -866,6 +869,10 @@
         };
         break;
       }
+      case "verified":
+        // §10.5 one of our own verification claims (email/birthday).
+        verifications[e.claim_kind] = { subject: e.subject, state: e.state };
+        break;
       case "presence":
         presence[e.user] = e.status;
         break;
@@ -2007,7 +2014,8 @@
     logout,
     // user settings (page overlay)
     get userTab() { return userTab; },
-    set userTab(v: "account" | "appearance" | "connection") { userTab = v; },
+    set userTab(v: "account" | "appearance" | "connection" | "verification") { userTab = v; },
+    get verifications() { return verifications; },
     // server settings (ns overlay)
     get nsTab() { return nsTab; },
     set nsTab(v: "overview" | "roles" | "members" | "bans" | "federation" | "recovery" | "danger") { nsTab = v; },

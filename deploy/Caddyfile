@@ -1,31 +1,21 @@
-# Caddy fronts the WEFT *HTTP* surface with automatic Let's Encrypt: the
-# /.well-known/weft discovery doc (§10.2), the /admin panel, and — with the P3
-# web embed (`[listen] web = true`, weftd built `--features web-ui`) — the
-# browser client at / plus its same-origin WebSocket at /ws.
+# Caddy fronts the WEFT + LiveKit HTTP/WebSocket surfaces with automatic Let's
+# Encrypt (needs public DNS for these names + ports 80/443 reachable). Edit the
+# two site addresses below to your domains — they MUST MATCH deploy/weft.toml.
 #
-# IMPORTANT: QUIC is NOT proxied here. weftd's native transport is QUIC (UDP +
-# TLS 1.3, end-to-end) — a reverse proxy cannot terminate it. weftd holds the
-# QUIC certificate itself: either built-in ACME (`[acme]` in weftd.toml) or a
-# shared cert file (see deploy/README.md). Caddy only handles TCP/HTTP.
+# QUIC is NOT proxied (a reverse proxy can't terminate weftd's UDP+TLS QUIC).
+# weftd holds the QUIC cert itself — it reads Caddy's cert from the shared
+# `caddy_data` volume (see the [tls] block in weft.toml). LiveKit's RTC *media*
+# (UDP 50000-50020) is also direct, not proxied — only its signaling is here.
 
+# The weftd HTTP surface: the embedded web client (/), same-origin /ws,
+# /.well-known/weft (§10.2), /media (§13). reverse_proxy upgrades WebSockets
+# transparently, so /ws needs no extra config.
 weft.example.com {
-	# Proxy the whole HTTP surface to weftd's HTTP listener
-	# ([listen] http = "127.0.0.1:8080"). This one rule covers the SPA (/),
-	# the wasm bundle (/wasm/*), /.well-known/weft, /admin, AND the WebSocket
-	# at /ws — Caddy's reverse_proxy upgrades WebSocket connections
-	# transparently, so no extra config is needed for /ws.
-	reverse_proxy 127.0.0.1:8080
+	reverse_proxy weftd:8081
 }
 
-# If you'd rather NOT serve the browser client here (API/well-known only), use
-# path-scoped handles instead — but then /ws must still be routed to weftd or the
-# web client can't connect:
-#
-# weft.example.com {
-# 	handle /.well-known/weft { reverse_proxy 127.0.0.1:8080 }
-# 	handle /admin*           { reverse_proxy 127.0.0.1:8080 }
-# 	handle /ws               { reverse_proxy 127.0.0.1:8080 }  # WebSocket
-# 	handle /wasm/*           { reverse_proxy 127.0.0.1:8080 }
-# 	handle /                 { reverse_proxy 127.0.0.1:8080 }  # SPA entry
-# 	handle { respond 404 }
-# }
+# LiveKit signaling (browsers connect wss://livekit.<domain> — this MUST MATCH
+# [voice.livekit] url in weft.toml). Media rides UDP direct to the host.
+livekit.weft.example.com {
+	reverse_proxy livekit:7880
+}

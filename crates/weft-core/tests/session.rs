@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use weft_core::{
     run_session, Attestation, ControlStream, Keypair, LiveKitAdmin, LiveKitBackend,
-    LiveKitTokenReq, MemoryStore, RelaySpec, ServerCtx, ServerInfo, VoiceBackend, VoiceError,
-    VoiceGrant, VoiceJoinReq, VoiceRelay,
+    LiveKitTokenReq, Mailer, MemoryStore, RelaySpec, ServerCtx, ServerInfo, VoiceBackend,
+    VoiceError, VoiceGrant, VoiceJoinReq, VoiceRelay,
 };
 use weft_proto::RetentionPolicy;
 use weft_proto::{ErrCode, Event, MemberAction, Reply, VoiceAction};
@@ -3824,6 +3824,112 @@ async fn voice_request_refused_when_voice_not_federated() {
     assert!(
         matches!(&b.event, Event::Err(e) if e.code == ErrCode::NoSuchTarget),
         "{b:?}"
+    );
+}
+
+// ---- §10.5 account verification (email code flow + self-attested birthday) ----
+
+/// A stand-in mailer: records the (address, code) instead of sending SMTP.
+#[derive(Default)]
+struct MockMailer {
+    sent: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl Mailer for MockMailer {
+    async fn send_code(&self, address: &str, code: &str) {
+        self.sent
+            .lock()
+            .unwrap()
+            .push((address.to_string(), code.to_string()));
+    }
+}
+
+#[tokio::test]
+async fn verify_email_code_flow_birthday_and_list() {
+    let ctx = ctx(&[]);
+    let mailer = Arc::new(MockMailer::default());
+    ctx.set_mailer(mailer.clone());
+    let mut ada = ready(&ctx, "ada").await;
+
+    // VERIFY EMAIL → a pending claim + a mailed one-time code.
+    ada.send("@label=e VERIFY EMAIL ada@example.com");
+    let reply = drain_until_label(&mut ada, "e").await;
+    assert!(
+        matches!(&reply.event,
+            Event::Verified { kind, subject, state }
+                if kind == "email" && subject == "ada@example.com"
+                   && *state == weft_proto::VerifyState::Pending),
+        "{reply:?}"
+    );
+    let (addr, code) = mailer
+        .sent
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("a code was mailed");
+    assert_eq!(addr, "ada@example.com");
+
+    // A wrong code is refused (FORBIDDEN), the claim stays pending.
+    ada.send("@label=w VERIFY CONFIRM email 0000000"); // 7 digits ≠ any 6-digit code
+    let w = drain_until_label(&mut ada, "w").await;
+    assert!(
+        matches!(&w.event, Event::Err(e) if e.code == ErrCode::Forbidden),
+        "{w:?}"
+    );
+
+    // The right code confirms it.
+    ada.send(&format!("@label=c VERIFY CONFIRM email {code}"));
+    let reply = drain_until_label(&mut ada, "c").await;
+    assert!(
+        matches!(&reply.event,
+            Event::Verified { kind, subject, state }
+                if kind == "email" && subject == "ada@example.com"
+                   && *state == weft_proto::VerifyState::Confirmed),
+        "{reply:?}"
+    );
+
+    // The code is single-use: replaying it now fails.
+    ada.send(&format!("@label=r VERIFY CONFIRM email {code}"));
+    let r = drain_until_label(&mut ada, "r").await;
+    assert!(
+        matches!(&r.event, Event::Err(e) if e.code == ErrCode::Forbidden),
+        "{r:?}"
+    );
+
+    // BIRTHDAY is self-attested → confirmed on the spot (no code).
+    ada.send("@label=b VERIFY BIRTHDAY 2000-05-15");
+    let reply = drain_until_label(&mut ada, "b").await;
+    assert!(
+        matches!(&reply.event,
+            Event::Verified { kind, state, .. }
+                if kind == "birthday" && *state == weft_proto::VerifyState::Confirmed),
+        "{reply:?}"
+    );
+    // A malformed birthday is rejected.
+    ada.send("@label=bad VERIFY BIRTHDAY not-a-date");
+    let bad = drain_until_label(&mut ada, "bad").await;
+    assert!(
+        matches!(&bad.event, Event::Err(e) if e.code == ErrCode::Malformed),
+        "{bad:?}"
+    );
+
+    // VERIFY LIST → both claims, both confirmed.
+    ada.send("@label=l VERIFY LIST");
+    let mut kinds = std::collections::HashSet::new();
+    for _ in 0..2 {
+        let reply = drain_until_label(&mut ada, "l").await;
+        if let Event::Verified { kind, state, .. } = &reply.event {
+            assert_eq!(*state, weft_proto::VerifyState::Confirmed);
+            kinds.insert(kind.clone());
+        }
+    }
+    assert_eq!(
+        kinds,
+        ["email".to_string(), "birthday".to_string()]
+            .into_iter()
+            .collect()
     );
 }
 

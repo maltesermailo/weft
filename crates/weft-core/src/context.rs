@@ -208,6 +208,11 @@ pub struct ServerCtx {
     /// members`. A relay starts on the first local joiner and stops on the last
     /// (or on `SEVER`/`NETBLOCK`, invariant 7).
     voice_relays: std::sync::Mutex<HashMap<(NetworkName, ChannelName), usize>>,
+    /// §10.5 the email sender weftd installs (SMTP, or a dev log-mailer).
+    mailer: std::sync::OnceLock<Arc<dyn crate::mailer::Mailer>>,
+    /// §10.5 pending email verification codes: `(account, kind) → (code,
+    /// expiry-ms)`. In-memory + short-lived — a restart just means re-request.
+    verify_codes: std::sync::Mutex<HashMap<(Account, String), (String, u64)>>,
 }
 
 /// §11.8 a blob to mirror from a bridge peer, handed core→weftd.
@@ -356,6 +361,8 @@ impl ServerCtx {
             voice_rooms: std::sync::Mutex::new(HashMap::new()),
             voice_relay: std::sync::OnceLock::new(),
             voice_relays: std::sync::Mutex::new(HashMap::new()),
+            mailer: std::sync::OnceLock::new(),
+            verify_codes: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -367,6 +374,55 @@ impl ServerCtx {
     /// weftd installs the §16 M-lk-3b federated-voice relay driver.
     pub fn set_voice_relay(&self, relay: Arc<dyn crate::voice::VoiceRelay>) {
         let _ = self.voice_relay.set(relay);
+    }
+
+    /// weftd installs the §10.5 email sender.
+    pub fn set_mailer(&self, mailer: Arc<dyn crate::mailer::Mailer>) {
+        let _ = self.mailer.set(mailer);
+    }
+
+    /// §10.5 record a pending verification code (replacing any prior one for the
+    /// `(account, kind)`), and mail it — if a mailer is installed. Best effort.
+    pub(crate) async fn verify_send_code(
+        &self,
+        account: &Account,
+        kind: &str,
+        address: &str,
+        code: String,
+        expiry_ms: u64,
+    ) {
+        self.verify_codes.lock().expect("verify lock").insert(
+            (account.clone(), kind.to_string()),
+            (code.clone(), expiry_ms),
+        );
+        if let Some(mailer) = self.mailer.get() {
+            mailer.send_code(address, &code).await;
+        }
+    }
+
+    /// §10.5 check a submitted verification code for `(account, kind)`: true iff it
+    /// matches and hasn't expired at `now_ms`. Consumes the code on success (and
+    /// prunes it on expiry) — a code is single-use.
+    pub(crate) fn verify_check_code(
+        &self,
+        account: &Account,
+        kind: &str,
+        code: &str,
+        now_ms: u64,
+    ) -> bool {
+        let key = (account.clone(), kind.to_string());
+        let mut codes = self.verify_codes.lock().expect("verify lock");
+        match codes.get(&key) {
+            Some((expected, expiry)) if now_ms < *expiry && expected == code => {
+                codes.remove(&key);
+                true
+            }
+            Some((_, expiry)) if now_ms >= *expiry => {
+                codes.remove(&key);
+                false
+            }
+            _ => false,
+        }
     }
 
     /// §16 M-lk-3b: a local member joined the foreign voice channel `spec.channel`

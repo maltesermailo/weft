@@ -95,6 +95,36 @@ impl Accounts {
     pub async fn marks(&self, account: &Account) -> Result<Vec<(String, MsgId)>, StoreError> {
         self.store.marks(account).await
     }
+
+    /// §10.5 record (or replace) a verification claim — starts unverified.
+    pub async fn upsert_verification(
+        &self,
+        account: &Account,
+        kind: &str,
+        subject: &str,
+    ) -> Result<(), StoreError> {
+        self.store.upsert_verification(account, kind, subject).await
+    }
+
+    /// §10.5 confirm a pending claim. `false` = no such claim.
+    pub async fn confirm_verification(
+        &self,
+        account: &Account,
+        kind: &str,
+        verified_at: u64,
+    ) -> Result<bool, StoreError> {
+        self.store
+            .confirm_verification(account, kind, verified_at)
+            .await
+    }
+
+    /// §10.5 the account's verification claims.
+    pub async fn verifications(
+        &self,
+        account: &Account,
+    ) -> Result<Vec<weft_store::Verification>, StoreError> {
+        self.store.verifications(account).await
+    }
 }
 
 #[cfg(test)]

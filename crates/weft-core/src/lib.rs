@@ -15,6 +15,7 @@ mod bridge;
 mod channel;
 mod context;
 mod directory;
+mod mailer;
 mod maintenance;
 mod media;
 mod registry;
@@ -28,6 +29,7 @@ pub use context::{
     Actor, AutoBridgeRequest, BackfillPull, BackfillReq, FederationConfig, MirrorRequest,
     ServerCtx, ServerInfo, PROTOCOL_VERSION,
 };
+pub use mailer::Mailer;
 pub use maintenance::{
     apply_due_recoveries, gc_orphan_blobs, spawn_maintenance, MaintenanceConfig,
 };

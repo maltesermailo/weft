@@ -1,0 +1,13 @@
+# Keep the Docker build context lean (context = repo root, see deploy/Dockerfile).
+# Build artifacts are regenerated inside the image; secrets/local state never ship.
+target/
+**/node_modules/
+client/build/
+client/.svelte-kit/
+client/static/wasm/
+client/src-tauri/target/
+.git/
+deploy/.env
+weftd.key
+*.log
+.DS_Store

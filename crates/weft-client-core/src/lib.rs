@@ -284,6 +284,14 @@ pub enum ClientEvent {
         display: Option<String>,
         avatar: Option<String>,
     },
+    /// §10.5 `VERIFIED <kind> <subject>` — one of the caller's own verification
+    /// claims (email/birthday), `state` = `pending`|`confirmed`. Owner-only.
+    /// (`claim_kind`, not `kind` — the enum's serde tag is already `kind`.)
+    Verified {
+        claim_kind: String,
+        subject: String,
+        state: String,
+    },
     /// §16 `VOICE OFFER <#chan> <token> [:endpoint]` — the answer to our
     /// `VOICE JOIN`. `mode` picks the media path: `"webrtc"` = negotiate with the
     /// embedded SFU via `VOICE DESC` (token = media token); `"livekit"` = connect
@@ -676,6 +684,16 @@ pub fn on_line<E: EventSink>(
             network: user.network.to_string(),
             display,
             avatar,
+        }),
+        // §10.5 account verification claims (owner-only).
+        Event::Verified {
+            kind,
+            subject,
+            state,
+        } => sink.emit(ClientEvent::Verified {
+            claim_kind: kind,
+            subject,
+            state: state.to_string(),
         }),
         // §16 WEFT-RT voice signaling.
         Event::VoiceOffer {
@@ -1492,6 +1510,41 @@ pub fn build_profiles_query(accounts: Vec<String>) -> Result<String, String> {
         return Err("no accounts".to_string());
     }
     Request::new(Command::ProfilesQuery { accounts })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `VERIFY EMAIL <address>` (§10.5) — claim an email; the server mails a code.
+pub fn build_verify_email(address: &str) -> Result<String, String> {
+    Request::new(Command::VerifyEmail {
+        address: address.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `VERIFY BIRTHDAY <YYYY-MM-DD>` (§10.5) — self-attest a birth date.
+pub fn build_verify_birthday(date: &str) -> Result<String, String> {
+    Request::new(Command::VerifyBirthday {
+        date: date.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `VERIFY CONFIRM <kind> <code>` (§10.5) — prove a claim with its mailed code.
+pub fn build_verify_confirm(kind: &str, code: &str) -> Result<String, String> {
+    Request::new(Command::VerifyConfirm {
+        kind: kind.to_string(),
+        code: code.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `VERIFY LIST` (§10.5) — the caller's own verification claims.
+pub fn build_verify_list() -> Result<String, String> {
+    Request::new(Command::VerifyList)
         .serialize()
         .map_err(|e| e.to_string())
 }

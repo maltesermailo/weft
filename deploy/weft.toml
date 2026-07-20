@@ -1,0 +1,71 @@
+# weftd config — edit this file directly, then `docker compose restart weftd`.
+# Values marked "MUST MATCH" are duplicated in docker-compose.yml / livekit.yaml /
+# Caddyfile (no .env file by design) — keep them in sync.
+
+# Your network's DNS name. MUST MATCH the site address in Caddyfile.
+network = "weft.example.com"
+# The bootstrap admin (§11.3) — register this handle first; it holds every
+# capability at `*`.
+operators = ["admin"]
+# §6.1 open registration so accounts can be created; "closed" to lock it.
+registration = "open"
+
+[listen]
+# QUIC control plane (desktop/native clients). Behind Caddy, browsers use /ws.
+quic = "0.0.0.0:4433"
+# HTTP: /.well-known/weft, /media, and — with `web = true` below — the embedded
+# web client (/) + its same-origin WebSocket (/ws). Caddy terminates TLS and
+# reverse-proxies to this (plain HTTP inside the network).
+http = "0.0.0.0:8081"
+# Serve the embedded browser client + the same-origin /ws on the http listener.
+# REQUIRED for the web client (the browser connects to wss://<host>/ws). Needs
+# the `web-ui` build feature (the Docker image is built with it).
+web = true
+
+# Certificates:
+#   • HTTP + WebSocket (the web client) — Caddy terminates TLS; weftd's HTTP
+#     listener above is plain HTTP behind it, so it needs no cert for that path.
+#   • QUIC (4433/udp, desktop/native clients) — a proxy can't terminate QUIC, so
+#     weftd holds the cert itself. Caddy obtains the Let's Encrypt cert into the
+#     shared `caddy_data` volume, mounted here read-only at /data (the same path
+#     Caddy uses); weftd loads it and hot-reloads on renewal. Boot tolerates the
+#     file not existing yet (self-signed placeholder until Caddy has written it).
+#
+# The paths below embed your domain — replace `weft.example.com` to MATCH
+# `network`. (Caddy stores ECC certs at this deterministic path for LE prod.)
+[tls]
+cert = "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/weft.example.com/weft.example.com.crt"
+key  = "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/weft.example.com/weft.example.com.key"
+
+[storage]
+backend = "postgres"
+# MUST MATCH the POSTGRES_* values in docker-compose.yml.
+url = "postgres://weft:change-me-postgres-password@postgres:5432/weft"
+
+# §16 voice via LiveKit. `url` is the PUBLIC address browsers connect to (wss,
+# via Caddy → livekit subdomain); `api_url` is the INTERNAL address weftd calls
+# for the Room API (mute/kick).
+#
+# api_key/api_secret MUST MATCH livekit.yaml's `keys:` map, where LiveKit's format
+# is `<key-name>: <secret>`. So here `api_key` = the key NAME and `api_secret` =
+# its value; in livekit.yaml that's `keys:\n  devkey: <the same secret>`.
+[voice]
+enabled = true
+backend = "livekit"
+
+[voice.livekit]
+url = "wss://livekit.weft.example.com"
+api_url = "http://livekit:7880"
+api_key = "devkey"
+api_secret = "change-me-at-least-32-bytes-of-random-secret"
+token_ttl_secs = 600
+
+# §10.5 email verification. enabled=false → the server records claims and logs the
+# code (dev). Set true + fill in to actually mail one-time codes.
+[smtp]
+enabled = false
+host = "smtp.example.com"
+port = 587
+username = ""
+password = ""
+from = "noreply@weft.example.com"
