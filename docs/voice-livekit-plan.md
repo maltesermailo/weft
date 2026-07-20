@@ -151,11 +151,17 @@ H  spawns the relay participant → connects to F's LiveKit with the JWT
   secret), and a text channel is refused NO-SUCH-TARGET (no token).
   weft-proto 88, weft-core 116, weftd conformance green; clippy clean (native +
   livekit paths).
-- **M-lk-1 — client Room swap (web + desktop).** `voice.svelte.ts` branches on
-  `mode`: for `livekit`, connect the LiveKit `Room` (publish mic, subscribe,
-  active-speaker + mute events, participant→WEFT-account identity). Renegotiation,
-  active-speaker, quality — free. Desktop reuses it via the webview (M-voice-3).
-  *Green here:* svelte-check + web build; **runtime = real LiveKit + two browsers**.
+- **M-lk-1 ✅ — client Room swap (web + desktop).** `voice.svelte.ts` branches on
+  the offer's `mode`: `webrtc` keeps the embedded-SFU path (renamed
+  `onWebrtcOffer`); `livekit` runs `onLiveKitOffer` — a **dynamically imported**
+  `livekit-client` `Room` (so the ~508 KB SDK is a lazy chunk, not in the main
+  bundle) with `adaptiveStream`/`dynacast` + AEC/NS/AGC capture defaults. Roster,
+  **active-speaker** (`ActiveSpeakersChanged`), and mute (`TrackMuted`/`Unmuted`)
+  all come from Room events; identity = `user@network` (self via `isLocal`);
+  `toggleMute` → `setMicrophoneEnabled`. Renegotiation + quality are the SDK's.
+  Desktop reuses it via the webview (M-voice-3 mic grant). `voice-offer`
+  ClientEvent + `weft.ts` type carry `mode`/`room`. *Green:* svelte-check 0/0 +
+  web build; **runtime = real LiveKit + two browsers** (deferred).
 - **M-lk-2 — moderation bridge.** `on_moderate` (MUTE/UNMUTE/ban) → the LiveKit
   Room server API on the target's voice participant; ban/kick → `remove_participant`.
   *Green:* core test that a MUTE issues the right Room-API call (mocked client).

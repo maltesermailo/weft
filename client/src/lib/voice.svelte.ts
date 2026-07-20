@@ -1,14 +1,19 @@
-// §16 WEFT-RT voice — the browser side. Signaling rides the WEFT control
-// stream (`voice*` commands + `voice-*` events); the media is an ordinary
-// browser WebRTC connection to the server's SFU. One voice room at a time.
+// §16 voice — the browser side. Signaling always rides the WEFT control stream
+// (`voice*` commands + `voice-*` events); the media plane depends on the server's
+// backend, carried by the `voice-offer`'s `mode`:
 //
-// Flow: `joinVoice` → server authorizes → `voice-offer` (media token) → we
-// getUserMedia + build a non-trickle offer → `voiceDesc` → the SFU answers with
-// a `voice-desc` → we set it as the remote description → Opus flows both ways.
-// The server is non-trickle (candidates ride the SDP), so we gather fully
-// before sending the offer and need no separate ICE exchange.
+//   • "webrtc"  — the embedded WEFT-RT SFU. We getUserMedia + build a non-trickle
+//     offer → `voiceDesc` → the SFU answers with `voice-desc` → Opus both ways.
+//     (Non-trickle: candidates ride the SDP, so we gather fully before sending.)
+//   • "livekit" — an external LiveKit server. The token is a LiveKit access JWT
+//     and the endpoint is the LiveKit URL; we connect the LiveKit SDK's `Room`,
+//     which handles publish/subscribe, renegotiation, active-speaker, and
+//     quality. The SDK is dynamically imported so it loads only on this path.
+//
+// One voice room at a time.
 
 import { voiceJoin, voiceLeave, voiceDesc, voiceCand, onWeft, type WeftEvent } from "./weft";
+import type { Room, Participant } from "livekit-client";
 
 export type VoiceParticipant = {
   user: string;
@@ -44,10 +49,18 @@ const RTC_CONFIG: RTCConfiguration = {
 };
 
 let account = "";
+let subscribed = false;
+
+// webrtc-path media state.
 let pc: RTCPeerConnection | null = null;
 let localStream: MediaStream | null = null;
 let audioEl: HTMLAudioElement | null = null;
-let subscribed = false;
+
+// livekit-path media state. `room` non-null ⇒ we're on the LiveKit path. Self is
+// identified by `participant.isLocal`; remote identities are the `user@network`
+// the token set, so the roster matches the WebRTC path's federated keys.
+let room: Room | null = null;
+const attached = new Set<HTMLMediaElement>();
 
 /** Wire the voice event handler once, and record who "we" are (for the roster).
  *  Call on connect. */
@@ -87,10 +100,15 @@ export async function leaveVoice(): Promise<void> {
   }
 }
 
-/** Toggle the local microphone (a client-side track disable; server-enforced
- *  mute is M-voice-4). */
+/** Toggle the local microphone. On LiveKit this (un)publishes the mic track and
+ *  the roster updates via the resulting `TrackMuted`/`TrackUnmuted`; on WebRTC
+ *  it disables the local track (server-enforced mute is M-voice-4 / M-lk-2). */
 export function toggleMute(): void {
   voice.muted = !voice.muted;
+  if (room) {
+    void room.localParticipant.setMicrophoneEnabled(!voice.muted);
+    return;
+  }
   if (localStream) {
     for (const t of localStream.getAudioTracks()) t.enabled = !voice.muted;
   }
@@ -99,6 +117,18 @@ export function toggleMute(): void {
 }
 
 function teardown(): void {
+  // LiveKit path.
+  if (room) {
+    void room.disconnect();
+    room = null;
+  }
+  for (const el of attached) {
+    el.srcObject = null;
+    el.remove();
+  }
+  attached.clear();
+
+  // WebRTC path.
   if (pc) {
     try {
       pc.close();
@@ -116,6 +146,7 @@ function teardown(): void {
     audioEl.remove();
     audioEl = null;
   }
+
   voice.channel = null;
   voice.connecting = false;
   voice.participants = {};
@@ -124,7 +155,7 @@ function teardown(): void {
 async function onVoiceEvent(e: WeftEvent): Promise<void> {
   switch (e.kind) {
     case "voice-offer":
-      await onOffer(e.channel, e.endpoint);
+      await onOffer(e);
       break;
     case "voice-desc":
       await onAnswer(e.channel, e.sdp);
@@ -149,8 +180,110 @@ async function onVoiceEvent(e: WeftEvent): Promise<void> {
   }
 }
 
-/** The server authorized the join: build the peer connection + offer. */
-async function onOffer(channel: string, endpoint: string | null): Promise<void> {
+/** The server authorized the join. Branch on the media plane it chose. */
+async function onOffer(e: Extract<WeftEvent, { kind: "voice-offer" }>): Promise<void> {
+  if (e.channel !== voice.channel) return;
+  if (e.mode === "livekit") {
+    await onLiveKitOffer(e.channel, e.endpoint, e.token);
+  } else {
+    await onWebrtcOffer(e.channel, e.endpoint);
+  }
+}
+
+/** LiveKit path: connect the SDK `Room` with the access token, publish the mic,
+ *  and mirror participants/speaking/mute into the roster from Room events. */
+async function onLiveKitOffer(
+  channel: string,
+  url: string | null,
+  token: string,
+): Promise<void> {
+  if (!url) {
+    voice.error = "voice server URL missing";
+    void leaveVoice();
+    return;
+  }
+  try {
+    const lk = await import("livekit-client");
+    // libwebrtc does AEC/NS/AGC; ask explicitly so desktop webviews enable them.
+    const r = new lk.Room({
+      adaptiveStream: true,
+      dynacast: true,
+      audioCaptureDefaults: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    room = r;
+
+    r.on(lk.RoomEvent.TrackSubscribed, (track) => {
+      if (track.kind === lk.Track.Kind.Audio) {
+        const el = track.attach();
+        el.autoplay = true;
+        attached.add(el);
+      }
+    });
+    r.on(lk.RoomEvent.TrackUnsubscribed, (track) => {
+      for (const el of track.detach()) {
+        attached.delete(el);
+        el.remove();
+      }
+    });
+    r.on(lk.RoomEvent.ParticipantConnected, (p) => upsertParticipant(p));
+    r.on(lk.RoomEvent.ParticipantDisconnected, (p) => {
+      delete voice.participants[p.identity];
+    });
+    r.on(lk.RoomEvent.ActiveSpeakersChanged, (speakers) => onSpeakers(speakers));
+    r.on(lk.RoomEvent.TrackMuted, (_pub, p) => upsertParticipant(p));
+    r.on(lk.RoomEvent.TrackUnmuted, (_pub, p) => upsertParticipant(p));
+    r.on(lk.RoomEvent.LocalTrackPublished, () => upsertParticipant(r.localParticipant));
+    r.on(lk.RoomEvent.Disconnected, () => {
+      if (room === r) teardown();
+    });
+
+    await r.connect(url, token);
+    // A leave (or a re-join) may have landed while we were connecting.
+    if (room !== r || voice.channel !== channel) {
+      await r.disconnect();
+      return;
+    }
+    await r.localParticipant.setMicrophoneEnabled(!voice.muted);
+
+    // Seed the full roster: self plus everyone already in the room.
+    upsertParticipant(r.localParticipant);
+    for (const p of r.remoteParticipants.values()) upsertParticipant(p);
+    voice.connecting = false;
+  } catch (err) {
+    voice.error =
+      err instanceof Error && err.name === "NotAllowedError"
+        ? "microphone permission denied"
+        : "voice connection failed";
+    void leaveVoice();
+  }
+}
+
+/** Reflect one LiveKit participant into the roster (keyed by `user@network`). */
+function upsertParticipant(p: Participant): void {
+  voice.participants[p.identity] = {
+    user: p.identity,
+    speaking: p.isSpeaking,
+    muted: !p.isMicrophoneEnabled,
+    deaf: false,
+    self: p.isLocal,
+  };
+}
+
+/** LiveKit active-speaker update: light exactly the speakers in the list. */
+function onSpeakers(speakers: Participant[]): void {
+  const talking = new Set(speakers.map((s) => s.identity));
+  for (const id of Object.keys(voice.participants)) {
+    const p = voice.participants[id];
+    if (p) p.speaking = talking.has(id);
+  }
+}
+
+/** WebRTC path (embedded SFU): build the peer connection + non-trickle offer. */
+async function onWebrtcOffer(channel: string, endpoint: string | null): Promise<void> {
   if (channel !== voice.channel) return;
   try {
     // Best-quality capture: the webview's libwebrtc does echo cancellation,

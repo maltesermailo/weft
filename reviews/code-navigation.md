@@ -283,6 +283,7 @@ up, then `ctx.set_voice_backend` installs it. Conformance:
 | Voice roster / snapshot / live-mute | `ServerCtx.voice_rooms` + `voice_room_join`/`leave`/`voice_set_muted` (context.rs); snapshot in `on_voice_join`; `mute_in_voice` (voice.rs) called from `on_moderate`; SFU drop = `WebrtcSfu::set_muted` (per-publisher `AtomicBool`) |
 | The SFU seam / a new backend | implement `VoiceBackend` (`weft-core/src/voice.rs`); native default in `weft-rt` |
 | LiveKit voice backend (M-lk-0) | `weft_core::LiveKitBackend` (voice.rs) mints via the `LiveKitAdmin` port; weftd's `LiveKitSigner` (`weftd/src/livekit.rs`) uses `livekit-api`'s `AccessToken`/`VideoGrants`; selected by `[voice] backend="livekit"` in `build_voice_backend` (weftd/lib.rs); `VOICE OFFER` `mode`/`room` carry it |
+| LiveKit client (M-lk-1) | `client/src/lib/voice.svelte.ts` branches on `mode`: `onLiveKitOffer` dynamically imports `livekit-client`, connects a `Room`, mirrors roster/active-speaker/mute from Room events; `onWebrtcOffer` = the old SFU path. Same `voice` `$state` + `VoiceBar.svelte` for both |
 | Voice wire form | `weft-proto` command.rs/event.rs **+ round-trip test first** |
 | Voice config / enabling | `weftd/src/config.rs :: Voice` + `lib.rs :: build_voice_sfu`; the `voice` feature in `weftd/Cargo.toml` |
 | The SFU media engine (forwarding, codecs, ICE) | `weft-rt/src/sfu.rs` — run its tests with `cargo test -p weft-rt` |

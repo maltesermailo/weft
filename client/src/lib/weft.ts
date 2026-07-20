@@ -195,7 +195,14 @@ export type WeftEvent =
       display: string | null;
       avatar: string | null;
     }
-  | { kind: "voice-offer"; channel: string; token: string; endpoint: string | null }
+  | {
+      kind: "voice-offer";
+      channel: string;
+      mode: string;
+      token: string;
+      room: string | null;
+      endpoint: string | null;
+    }
   | {
       kind: "voice-state";
       channel: string;
