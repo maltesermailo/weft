@@ -197,6 +197,10 @@ pub struct ServerCtx {
     /// `None` = this server has no voice (advertises no `features=voice`; voice
     /// verbs answer `UNSUPPORTED`). Set once at boot, like the sink ports.
     voice: std::sync::OnceLock<Arc<dyn crate::voice::VoiceBackend>>,
+    /// §16 the live voice roster per channel: `channel → session → member`. The
+    /// source of the `VOICE STATE` snapshot a joiner gets, and how a moderator's
+    /// `MUTE` finds a target's live voice sessions.
+    voice_rooms: std::sync::Mutex<HashMap<ChannelName, HashMap<u64, crate::voice::VoiceMember>>>,
 }
 
 /// §11.8 a blob to mirror from a bridge peer, handed core→weftd.
@@ -342,6 +346,7 @@ impl ServerCtx {
             backfill_demand: std::sync::Mutex::new(Vec::new()),
             federate_cooldown: std::sync::Mutex::new(HashMap::new()),
             voice: std::sync::OnceLock::new(),
+            voice_rooms: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -353,6 +358,64 @@ impl ServerCtx {
     /// The installed voice backend, or `None` on a zero-voice server (§16).
     pub(crate) fn voice_backend(&self) -> Option<&Arc<dyn crate::voice::VoiceBackend>> {
         self.voice.get()
+    }
+
+    /// §16 the current voice roster of a channel (for the join snapshot).
+    pub(crate) fn voice_roster(&self, channel: &ChannelName) -> Vec<crate::voice::VoiceMember> {
+        self.voice_rooms
+            .lock()
+            .expect("voice lock")
+            .get(channel)
+            .map(|room| room.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// §16 register a session as a voice-room member.
+    pub(crate) fn voice_room_join(
+        &self,
+        channel: &ChannelName,
+        session: u64,
+        member: crate::voice::VoiceMember,
+    ) {
+        self.voice_rooms
+            .lock()
+            .expect("voice lock")
+            .entry(channel.clone())
+            .or_default()
+            .insert(session, member);
+    }
+
+    /// §16 remove a session from a voice room (leave / disconnect). Prunes the
+    /// room when empty.
+    pub(crate) fn voice_room_leave(&self, channel: &ChannelName, session: u64) {
+        let mut rooms = self.voice_rooms.lock().expect("voice lock");
+        if let Some(room) = rooms.get_mut(channel) {
+            room.remove(&session);
+            if room.is_empty() {
+                rooms.remove(channel);
+            }
+        }
+    }
+
+    /// §6.7 flip an account's mute flag in every voice room it's in and return
+    /// those `(channel, session)`s — a moderator's `MUTE`/`UNMUTE` uses this to
+    /// silence/resume them at the SFU + reflect it in later snapshots.
+    pub(crate) fn voice_set_muted(
+        &self,
+        account: &Account,
+        muted: bool,
+    ) -> Vec<(ChannelName, u64)> {
+        let mut rooms = self.voice_rooms.lock().expect("voice lock");
+        let mut hits = Vec::new();
+        for (channel, room) in rooms.iter_mut() {
+            for (session, member) in room.iter_mut() {
+                if member.account == *account {
+                    member.muted = muted;
+                    hits.push((channel.clone(), *session));
+                }
+            }
+        }
+        hits
     }
 
     /// weftd installs the auto-federation dialer sink (enables `FEDERATE`).

@@ -360,6 +360,11 @@ impl<S: ControlStream> Session<S> {
                 }
             }
         }
+        // §16 a MUTE/UNMUTE also silences/resumes the target live in any voice
+        // room they're in — drop their audio at the SFU + flip the roster flag.
+        if kind == ModKind::Mute && self.ctx.voice_backend().is_some() {
+            self.mute_in_voice(&target, add).await;
+        }
         let action = match (kind, add) {
             (ModKind::Mute, true) => ModAction::Mute,
             (ModKind::Mute, false) => ModAction::Unmute,

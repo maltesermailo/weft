@@ -80,4 +80,18 @@ pub trait VoiceBackend: Send + Sync {
     /// The client left the room (explicit `VOICE LEAVE` or disconnect); tear the
     /// peer down. Idempotent — a leave for an unknown session is a no-op.
     async fn leave(&self, session: u64, channel: &ChannelName);
+
+    /// §6.7 server-side mute: drop (or resume) the participant's inbound audio at
+    /// the SFU, so a moderator's `MUTE` silences them live, not just at join.
+    /// Idempotent; a no-op for an unknown session.
+    async fn set_muted(&self, session: u64, channel: &ChannelName, muted: bool);
+}
+
+/// §16 a participant in a voice room, as the server tracks it for the roster
+/// snapshot + moderation. Speaking is transient (client-derived); the server
+/// tracks membership + mute state.
+#[derive(Debug, Clone)]
+pub struct VoiceMember {
+    pub account: Account,
+    pub muted: bool,
 }

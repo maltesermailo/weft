@@ -14,6 +14,7 @@
 //! M-voice-1c, so today a room converges cleanly when peers join in order.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -87,6 +88,10 @@ struct Room {
     /// session → the local track mirroring that session's inbound audio (what
     /// the room's other peers subscribe to).
     publishers: HashMap<u64, Arc<TrackLocalStaticRTP>>,
+    /// session → its mute flag (§6.7). The forward loop drops the peer's audio
+    /// while set; a moderator's `MUTE` flips it live, and a listen-only join
+    /// starts muted. Shared with the forward task so the flip is instant + cheap.
+    muted: HashMap<u64, Arc<AtomicBool>>,
 }
 
 /// The embedded WebRTC SFU. Cheap to clone the `Arc`; one instance per server.
@@ -162,14 +167,20 @@ impl VoiceBackend for WebrtcSfu {
                 })?,
         );
 
+        // A listen-only peer (no `speak`) starts muted — its audio is dropped at
+        // the SFU regardless of what it sends (invariant 4, server-enforced).
+        let muted = Arc::new(AtomicBool::new(!req.can_speak));
+
         // When this peer's audio arrives, mirror it into a local track the rest
-        // of the room subscribes to, and pump its RTP out.
+        // of the room subscribes to, and pump its RTP out (unless muted).
         let rooms = Arc::clone(&self.rooms);
         let channel = req.channel.clone();
         let session = req.session;
+        let track_muted = Arc::clone(&muted);
         pc.on_track(Box::new(move |track, _receiver, _transceiver| {
             let rooms = Arc::clone(&rooms);
             let channel = channel.clone();
+            let muted = Arc::clone(&track_muted);
             Box::pin(async move {
                 if track.kind() != RTPCodecType::Audio {
                     return;
@@ -186,9 +197,13 @@ impl VoiceBackend for WebrtcSfu {
                     }
                 }
                 debug!(%channel, session, "voice: publisher track live");
-                // Forward every RTP packet; webrtc-rs rewrites SSRC/PT per
-                // subscriber binding, so we forward the packet verbatim.
+                // Read every packet (to advance the stream) but forward only when
+                // not muted — a muted publisher is silenced at the SFU, so the
+                // mute is server-enforced, not client-cooperative.
                 while let Ok((packet, _)) = track.read_rtp().await {
+                    if muted.load(Ordering::Relaxed) {
+                        continue;
+                    }
                     if local.write_rtp(&packet).await.is_err() {
                         break;
                     }
@@ -204,17 +219,14 @@ impl VoiceBackend for WebrtcSfu {
 
         {
             let mut rooms = self.rooms.lock().await;
-            rooms
-                .entry(req.channel.clone())
-                .or_default()
-                .peers
-                .insert(req.session, pc);
+            let room = rooms.entry(req.channel.clone()).or_default();
+            room.peers.insert(req.session, pc);
+            room.muted.insert(req.session, muted);
         }
 
         // The media token: for the embedded SFU the credential is the session's
         // authenticated control stream (the SDP's ICE ufrag correlates back), so
-        // this is an opaque handle, not a bearer. `can_speak` is advisory here —
-        // a listen-only peer simply publishes no track.
+        // this is an opaque handle, not a bearer.
         let _ = req.account;
         Ok(VoiceGrant {
             token: format!("v{}-{}", req.session, req.channel),
@@ -308,6 +320,7 @@ impl VoiceBackend for WebrtcSfu {
                 return;
             };
             room.publishers.remove(&session);
+            room.muted.remove(&session);
             let pc = room.peers.remove(&session);
             if room.peers.is_empty() {
                 rooms.remove(channel);
@@ -316,6 +329,14 @@ impl VoiceBackend for WebrtcSfu {
         };
         if let Some(pc) = pc {
             let _ = pc.close().await;
+        }
+    }
+
+    async fn set_muted(&self, session: u64, channel: &ChannelName, muted: bool) {
+        let rooms = self.rooms.lock().await;
+        if let Some(flag) = rooms.get(channel).and_then(|r| r.muted.get(&session)) {
+            // The forward task reads this every packet — an instant, lock-free flip.
+            flag.store(muted, Ordering::Relaxed);
         }
     }
 }

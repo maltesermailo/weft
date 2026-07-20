@@ -280,6 +280,7 @@ up, then `ctx.set_voice_backend` installs it. Conformance:
 |---|---|
 | Channel kind (text/voice) | `weft-proto :: ChannelKind` + `CHANNEL CREATE`/`CHANNEL-LAYOUT`; store `kind` column (new migration) + `ChannelRecord`; the `join_one` reject + `on_voice_join` gate in weft-core |
 | Voice signaling authz | `weft-core/src/session/voice.rs` (never the SFU) |
+| Voice roster / snapshot / live-mute | `ServerCtx.voice_rooms` + `voice_room_join`/`leave`/`voice_set_muted` (context.rs); snapshot in `on_voice_join`; `mute_in_voice` (voice.rs) called from `on_moderate`; SFU drop = `WebrtcSfu::set_muted` (per-publisher `AtomicBool`) |
 | The SFU seam / a new backend (e.g. LiveKit) | implement `VoiceBackend` (`weft-core/src/voice.rs`); the default lives in `weft-rt` |
 | Voice wire form | `weft-proto` command.rs/event.rs **+ round-trip test first** |
 | Voice config / enabling | `weftd/src/config.rs :: Voice` + `lib.rs :: build_voice_sfu`; the `voice` feature in `weftd/Cargo.toml` |

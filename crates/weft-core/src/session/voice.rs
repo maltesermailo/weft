@@ -12,7 +12,7 @@ use super::*;
 
 use weft_proto::VoiceAction;
 
-use crate::voice::{VoiceError, VoiceJoinReq};
+use crate::voice::{VoiceError, VoiceJoinReq, VoiceMember};
 
 impl<S: ControlStream> Session<S> {
     /// `VOICE JOIN <#chan>` — authorize, reserve an SFU slot, answer
@@ -128,7 +128,33 @@ impl<S: ControlStream> Session<S> {
             },
         )
         .await?;
-        // A listen-only participant renders muted to the room.
+        // §16 snapshot: tell the joiner who's already in the room (before adding
+        // self), so a client that joins a populated room sees a full roster.
+        for member in self.ctx.voice_roster(&channel) {
+            let user = UserRef::new(member.account, self.ctx.info.network.clone());
+            self.send_event(
+                None,
+                Event::VoiceState {
+                    channel: channel.clone(),
+                    user,
+                    action: VoiceAction::Join,
+                    muted: member.muted,
+                    deaf: false,
+                    speaking: false,
+                },
+            )
+            .await?;
+        }
+        // Register self in the roster, then announce to the room. A listen-only
+        // participant renders muted.
+        self.ctx.voice_room_join(
+            &channel,
+            self.id,
+            VoiceMember {
+                account: account.clone(),
+                muted: !can_speak,
+            },
+        );
         self.announce_voice_state(&handle, &channel, &account, VoiceAction::Join, !can_speak)
             .await;
         Ok(Flow::Continue)
@@ -145,6 +171,7 @@ impl<S: ControlStream> Session<S> {
             return self.no_such_target(label).await;
         };
         room.forwarder.abort();
+        self.ctx.voice_room_leave(&channel, self.id);
         let State::Ready { account } = self.state.clone() else {
             unreachable!("voice verbs only dispatch in READY");
         };
@@ -243,6 +270,7 @@ impl<S: ControlStream> Session<S> {
     /// away). Called with the drained [`VoiceRoom`] from `cleanup`.
     pub(super) async fn teardown_voice(&self, channel: &ChannelName, room: VoiceRoom) {
         room.forwarder.abort();
+        self.ctx.voice_room_leave(channel, self.id);
         if let Some(backend) = self.ctx.voice_backend() {
             backend.leave(self.id, channel).await;
         }
@@ -260,6 +288,31 @@ impl<S: ControlStream> Session<S> {
                 speaking: false,
             })
             .await;
+    }
+
+    /// §6.7 apply a moderator's `MUTE`/`UNMUTE` to `account`'s live voice: drop
+    /// (or resume) their audio at the SFU in every room they're in, and broadcast
+    /// a `VOICE STATE update` so the room re-renders their mute badge.
+    pub(super) async fn mute_in_voice(&self, account: &Account, muted: bool) {
+        let Some(backend) = self.ctx.voice_backend().cloned() else {
+            return;
+        };
+        for (channel, session) in self.ctx.voice_set_muted(account, muted) {
+            backend.set_muted(session, &channel, muted).await;
+            if let Some(handle) = self.ctx.registry.get(&channel) {
+                let user = UserRef::new(account.clone(), self.ctx.info.network.clone());
+                handle
+                    .announce(Event::VoiceState {
+                        channel,
+                        user,
+                        action: VoiceAction::Update,
+                        muted,
+                        deaf: false,
+                        speaking: false,
+                    })
+                    .await;
+            }
+        }
     }
 
     /// A channel's kind (§16); `Text` if unknown — fails safe so a store hiccup

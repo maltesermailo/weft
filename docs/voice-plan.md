@@ -252,11 +252,22 @@ a real webrtc SFU that forwards Opus between participants, behind a feature flag
   WebKitGTK crate version must track wry's) and actual two-desktop audio. LiveKit
   stays a future *server*-side option behind the `VoiceBackend` seam if scale
   demands it, never a client rewrite.
-- **M-voice-4 — moderation + presence polish.** SFU-enforced mute/deafen tied to
-  M7 (`MUTE` drops RTP live); server-side **active-speaker detection** feeding
-  `VOICE-STATE`; a full `VOICE-STATE` **snapshot on (re)join** (mirrors the
-  `MARKED` reconnect-snapshot pattern); a `SLOW`-equivalent teardown for a stalled
-  peer (invariant 6 — never buffer unboundedly).
+- **M-voice-4 ✅ (2026-07-20, partial) — moderation + presence polish.** A
+  **server-side voice roster** (`ServerCtx.voice_rooms`: channel→session→member)
+  drives two things: (1) a **`VOICE STATE` snapshot on join** — the joiner now
+  learns who's already in the room (an existing-member `VOICE STATE` per member
+  follows the `VOICE OFFER`), fixing the empty-roster gap; (2) **M7 `MUTE`/`UNMUTE`
+  enforced live in voice** — `on_moderate` calls `mute_in_voice`, which flips the
+  roster flag, calls the new `VoiceBackend::set_muted` (the weft-rt SFU carries a
+  per-publisher `AtomicBool` the forward loop checks every packet — a muted peer's
+  audio is **dropped at the SFU**, server-enforced not client-cooperative; a
+  listen-only join also starts muted), and broadcasts a `VOICE STATE update` so
+  the room re-renders. The web client already renders both via its existing
+  `onState` handler — no client change. *Green:* 2 new networkless core tests
+  (snapshot, live-mute), weft-core 116, weft-rt 2, weftd voice conformance;
+  clippy clean. *Deferred (webrtc-heavy / hard to verify here):* active-speaker
+  detection, SFU-initiated renegotiation for late joiners, and the `SLOW`-style
+  stalled-peer teardown (invariant 6).
 - **M-voice-5 — federated voice (cascaded SFU).** The crypto voice token; the
   manifest **`voice`-mode** negotiation (alongside `media`); the home ↔ origin
   **relay over the bridge** (home SFU subscribes on behalf of local members and

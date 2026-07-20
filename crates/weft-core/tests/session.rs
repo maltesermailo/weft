@@ -3408,6 +3408,7 @@ impl VoiceBackend for MockVoice {
         Ok(())
     }
     async fn leave(&self, _session: u64, _channel: &weft_proto::ChannelName) {}
+    async fn set_muted(&self, _session: u64, _channel: &weft_proto::ChannelName, _muted: bool) {}
 }
 
 fn ctx_voice(channels: &[&str], operators: &[&str]) -> Arc<ServerCtx> {
@@ -3531,10 +3532,10 @@ async fn voice_join_offers_token_and_announces_to_members() {
     assert_eq!(*action, VoiceAction::Join);
     assert!(!*muted);
 
-    // alice negotiates: her SDP offer gets the SFU's answer back as VOICE DESC.
+    // alice negotiates: her SDP offer gets the SFU's answer back as VOICE DESC
+    // (skipping the roster snapshot she also received on join).
     alice.send("@label=v2 VOICE DESC #lounge :v=0\\r\\nmy-offer");
-    let reply = alice.recv().await;
-    assert_eq!(reply.label.as_deref(), Some("v2"));
+    let reply = drain_until_label(&mut alice, "v2").await;
     let Event::VoiceDesc { sdp, .. } = &reply.event else {
         panic!("expected VOICE DESC answer, got {reply:?}");
     };
@@ -3542,8 +3543,7 @@ async fn voice_join_offers_token_and_announces_to_members() {
 
     // alice leaves → labeled VOICE STATE leave ack; bob sees the leave too.
     alice.send("@label=v3 VOICE LEAVE #lounge");
-    let reply = alice.recv().await;
-    assert_eq!(reply.label.as_deref(), Some("v3"));
+    let reply = drain_until_label(&mut alice, "v3").await;
     assert!(matches!(
         &reply.event,
         Event::VoiceState { action, user, .. }
@@ -3603,4 +3603,66 @@ async fn voice_banned_member_cannot_join() {
     alice.send("@label=v VOICE JOIN #lounge");
     let reply = alice.expect_err(ErrCode::Forbidden).await;
     assert_eq!(reply.label.as_deref(), Some("v"));
+}
+
+#[tokio::test]
+async fn voice_join_receives_roster_snapshot() {
+    // §16 (M-voice-4) a joiner learns who's already in the room, not just future
+    // arrivals — a VOICE STATE snapshot follows the OFFER.
+    let ctx = voice_ctx_with("#lounge").await;
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("VOICE JOIN #lounge");
+    assert!(matches!(bob.recv().await.event, Event::VoiceOffer { .. }));
+
+    let mut alice = ready(&ctx, "alice").await;
+    alice.send("@label=j VOICE JOIN #lounge");
+    assert!(matches!(
+        drain_until_label(&mut alice, "j").await.event,
+        Event::VoiceOffer { .. }
+    ));
+    // The snapshot names the existing member (bob), unlabeled.
+    let snap = next_voice_state(&mut alice).await;
+    assert!(matches!(
+        &snap.event,
+        Event::VoiceState { user, action, .. }
+            if user.account.as_str() == "bob" && *action == VoiceAction::Join
+    ));
+    assert_eq!(snap.label, None);
+}
+
+#[tokio::test]
+async fn voice_mute_silences_live_and_updates_the_room() {
+    // §16 (M-voice-4) a moderator's MUTE of a voice participant drops their audio
+    // at the SFU and broadcasts a VOICE STATE `update` so the room re-renders.
+    let ctx = ctx_voice(&[], &["boss"]);
+    let mut boss = ready_op(&ctx, "boss").await;
+    boss.send("CHANNEL CREATE #lounge voice");
+    assert!(matches!(boss.recv().await.event, Event::Policy { .. }));
+
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("VOICE JOIN #lounge");
+    assert!(matches!(bob.recv().await.event, Event::VoiceOffer { .. }));
+    let mut alice = ready(&ctx, "alice").await;
+    alice.send("VOICE JOIN #lounge");
+    assert!(matches!(alice.recv().await.event, Event::VoiceOffer { .. }));
+
+    // boss mutes alice at the channel scope.
+    boss.send("@label=m MUTE #lounge alice");
+    assert!(matches!(
+        drain_until_label(&mut boss, "m").await.event,
+        Event::Moderated { .. }
+    ));
+
+    // bob (in the room) sees alice's live mute as a VOICE STATE update.
+    let upd = loop {
+        let r = next_voice_state(&mut bob).await;
+        if matches!(&r.event, Event::VoiceState { action, .. } if *action == VoiceAction::Update) {
+            break r;
+        }
+    };
+    assert!(matches!(
+        &upd.event,
+        Event::VoiceState { user, muted, .. }
+            if user.account.as_str() == "alice" && *muted
+    ));
 }
