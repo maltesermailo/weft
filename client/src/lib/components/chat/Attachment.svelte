@@ -8,13 +8,18 @@
 
   const url = $derived(app.mediaUrl(uri));
   const name = $derived(uri.split("/").pop()?.slice(0, 16) ?? "file");
-  // §13 attachments carry only a content-addressed URI (no mime yet), so probe
-  // the Content-Type with a 1-byte ranged fetch to pick the right renderer.
+  // §13 attachments carry only a content-addressed URI (no mime). Probe the
+  // Content-Type to pick the right renderer — but a probe `fetch()` is subject
+  // to CORS/preflight (the Range header) while `<img>`/`<video>` display
+  // cross-origin freely. So if the probe is blocked or fails, we *guess* image
+  // and let the media tag's own `onerror` fall back — never pre-empting a real
+  // image with a download link just because the probe couldn't read a header.
   let kind = $state<"loading" | "image" | "video" | "audio" | "file">("loading");
 
   onMount(async () => {
     try {
       const r = await fetch(url, { headers: { Range: "bytes=0-0" } });
+      if (!r.ok) throw new Error(`probe ${r.status}`);
       const ct = r.headers.get("content-type") ?? "";
       kind = ct.startsWith("image/")
         ? "image"
@@ -24,18 +29,20 @@
             ? "audio"
             : "file";
     } catch {
-      kind = "file";
+      // Probe blocked/failed — optimistically render an image; the tag's
+      // onerror chain (image → video → file) recovers if it isn't one.
+      kind = "image";
     }
   });
 </script>
 
 {#if kind === "image"}
   <button class="att-image" onclick={() => openLightbox(url, name)} aria-label="Open image">
-    <img src={url} alt="attachment" loading="lazy" />
+    <img src={url} alt="attachment" loading="lazy" onerror={() => (kind = "video")} />
   </button>
 {:else if kind === "video"}
   <!-- svelte-ignore a11y_media_has_caption -->
-  <video class="att-video" src={url} controls preload="metadata"></video>
+  <video class="att-video" src={url} controls preload="metadata" onerror={() => (kind = "file")}></video>
 {:else if kind === "audio"}
   <audio class="att-audio" src={url} controls preload="metadata"></audio>
 {:else if kind === "file"}

@@ -254,6 +254,43 @@ impl EventStore for PgStore {
         Ok(records)
     }
 
+    async fn unread_counts(
+        &self,
+        scope: &Scope,
+        account: &Account,
+        since: Ulid,
+    ) -> Result<(u64, u64), StoreError> {
+        // ULID text sorts in time order, so `ulid > $2` is "newer than the
+        // marker". Own messages (sender account = $4) never count. Mentions
+        // scan the body — mirror MemoryStore's substring match exactly.
+        let mention_pat = format!("%@{account}%");
+        let row = sqlx::query(
+            r#"
+            SELECT
+                count(*) AS unread,
+                count(*) FILTER (
+                    WHERE body LIKE $3 OR body LIKE '%@everyone%' OR body LIKE '%@here%'
+                ) AS mentions
+            FROM weft_events
+            WHERE scope = $1
+              AND kind = 0
+              AND system IS NULL
+              AND ulid > $2
+              AND split_part(sender, '@', 1) <> $4
+            "#,
+        )
+        .bind(scope.as_key())
+        .bind(since.to_string())
+        .bind(&mention_pat)
+        .bind(account.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        let unread: i64 = row.get("unread");
+        let mentions: i64 = row.get("mentions");
+        Ok((unread as u64, mentions as u64))
+    }
+
     async fn children(
         &self,
         scope: &Scope,

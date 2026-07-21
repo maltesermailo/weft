@@ -892,6 +892,7 @@ impl<S: ControlStream> Session<S> {
                 Ok(Flow::Continue)
             }
             Command::Mark { channel, msgid } => self.on_mark(label, channel, msgid, account).await,
+            Command::Unread { channel } => self.on_unread(label, channel, account).await,
             // Pagination (`cursor`) isn't needed at reference channel sizes —
             // the roster is served in one batch.
             Command::Members { channel, .. } => self.on_members(label, channel).await,

@@ -174,6 +174,36 @@ impl EventStore for MemoryStore {
             .collect())
     }
 
+    async fn unread_counts(
+        &self,
+        scope: &Scope,
+        account: &Account,
+        since: Ulid,
+    ) -> Result<(u64, u64), StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let at_account = format!("@{account}");
+        let mut unread = 0u64;
+        let mut mentions = 0u64;
+        for (_, record) in inner.events.range(Self::scope_range(&scope.as_key())) {
+            // Only real (non-system) root messages from other senders, newer
+            // than the marker, count — join/part system rows never do.
+            let crate::types::EventKind::Message { body, meta } = &record.kind else {
+                continue;
+            };
+            if meta.system.is_some()
+                || record.msgid.ulid() <= since
+                || record.sender.account == *account
+            {
+                continue;
+            }
+            unread += 1;
+            if body.contains(&at_account) || body.contains("@everyone") || body.contains("@here") {
+                mentions += 1;
+            }
+        }
+        Ok((unread, mentions))
+    }
+
     async fn find_root(&self, ulid: Ulid) -> Result<Option<EventRecord>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner

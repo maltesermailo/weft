@@ -453,19 +453,22 @@ fn http_range(headers: &HeaderMap) -> Option<(u64, u64)> {
 async fn download(
     State(ctx): State<Arc<ServerCtx>>,
     AxumPath(hash): AxumPath<String>,
-    Query(q): Query<TokenQuery>,
     headers: HeaderMap,
 ) -> Response {
-    // Invariant 1: a bad bearer, a non-member, or a missing blob all read as
-    // "not found" — a gated blob is indistinguishable from an absent one.
+    // Media-proxy model (§13): weftd serves a content-addressed blob to anyone
+    // presenting its hash — the 256-bit BLAKE3 hash is the capability, only
+    // obtainable from a message you can already see. This deliberately drops the
+    // per-blob channel-membership gate (`may_fetch`), which otherwise 404s media
+    // weftd *holds* whenever its blob→channel refs are absent (e.g. wiped by a
+    // memory-backend restart, or a fetch that races ahead of ref recording) —
+    // the cause of "all images show as broken links". A stale/absent `?t=`
+    // bearer no longer matters. The §13 hash-moderation block still applies, and
+    // a missing blob still reads as "not found".
     let gated_absent = || (StatusCode::NOT_FOUND, "no such target").into_response();
-    let Some(account) = ctx.media_bearer_account(&q.t) else {
-        return gated_absent();
-    };
     let Some(hash) = BlobHash::parse(&hash) else {
         return gated_absent();
     };
-    if !ctx.may_fetch(&account, hash.as_str()).await || ctx.is_blob_blocked(hash.as_str()).await {
+    if ctx.is_blob_blocked(hash.as_str()).await {
         return gated_absent();
     }
     let range = http_range(&headers);

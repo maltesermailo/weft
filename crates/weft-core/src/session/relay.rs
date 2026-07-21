@@ -823,10 +823,69 @@ impl<S: ControlStream> Session<S> {
             },
         )
         .await?;
+        // Refreshed unread counts (now read up to `msgid`) ride the marker sync
+        // to the account's *other* devices, so reading on one clears the badge
+        // on all. The marking device already knows it read, so it isn't pushed.
+        let (unread, mentions) = self
+            .ctx
+            .events
+            .unread_counts(&Scope::Channel(channel.clone()), &account, msgid.ulid())
+            .await
+            .unwrap_or((0, 0));
         self.ctx
             .directory
-            .mark_sync(self.id, account, channel, msgid)
+            .mark_sync(self.id, account, channel, msgid, unread, mentions)
             .await;
+        Ok(Flow::Continue)
+    }
+
+    /// `UNREAD [<#chan>]` (§6.3) — reply with server-computed unread counts for
+    /// the given channel (must be joined) or every joined channel. One
+    /// `UNREAD-COUNTS` event per channel.
+    pub(super) async fn on_unread(
+        &mut self,
+        label: Option<String>,
+        channel: Option<ChannelName>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let channels: Vec<ChannelName> = match channel {
+            Some(c) => {
+                if !self.joined.contains_key(&c) {
+                    return self.not_member_cap(label, &c, "view").await;
+                }
+                vec![c]
+            }
+            None => self.joined.keys().cloned().collect(),
+        };
+        let marks = match self.ctx.accounts.marks(&account).await {
+            Ok(marks) => marks,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        for chan in channels {
+            let since = marks
+                .iter()
+                .find(|(target, _)| target == chan.as_str())
+                .map(|(_, msgid)| msgid.ulid())
+                .unwrap_or_else(|| Ulid::from_parts(0, 0));
+            let (unread, mentions) = match self
+                .ctx
+                .events
+                .unread_counts(&Scope::Channel(chan.clone()), &account, since)
+                .await
+            {
+                Ok(counts) => counts,
+                Err(e) => return self.internal(label, &e).await,
+            };
+            self.send_event(
+                label.clone(),
+                Event::UnreadCounts {
+                    channel: chan,
+                    unread,
+                    mentions,
+                },
+            )
+            .await?;
+        }
         Ok(Flow::Continue)
     }
 }

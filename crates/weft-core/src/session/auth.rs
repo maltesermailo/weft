@@ -86,8 +86,32 @@ impl<S: ControlStream> Session<S> {
             Ok(marks) => {
                 for (target, msgid) in marks {
                     if let Ok(channel) = target.parse::<ChannelName>() {
-                        self.send_event(None, Event::Marked { channel, msgid })
+                        self.send_event(
+                            None,
+                            Event::Marked {
+                                channel: channel.clone(),
+                                msgid: msgid.clone(),
+                            },
+                        )
+                        .await?;
+                        // §6.3 unread snapshot: authoritative counts since the
+                        // marker, so the client's badges survive reconnect.
+                        if let Ok((unread, mentions)) = self
+                            .ctx
+                            .events
+                            .unread_counts(&Scope::Channel(channel.clone()), &account, msgid.ulid())
+                            .await
+                        {
+                            self.send_event(
+                                None,
+                                Event::UnreadCounts {
+                                    channel,
+                                    unread,
+                                    mentions,
+                                },
+                            )
                             .await?;
+                        }
                     }
                 }
             }

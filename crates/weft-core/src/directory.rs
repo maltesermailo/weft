@@ -85,12 +85,16 @@ enum Cmd {
         emoji: String,
         add: bool,
     },
-    /// §6.3: fan a fresh read marker out to the account's *other* sessions.
+    /// §6.3: fan a fresh read marker (and the refreshed unread counts) out to
+    /// the account's *other* sessions. The marking device already knows it
+    /// read, so it is skipped.
     MarkSync {
         origin: SessionId,
         account: Account,
         channel: ChannelName,
         msgid: MsgId,
+        unread: u64,
+        mentions: u64,
     },
     /// Push an account-addressed event to every live session of `account`
     /// (§6.7 report delivery to a known handler/reporter). Fire-and-forget —
@@ -237,6 +241,8 @@ impl Directory {
         account: Account,
         channel: ChannelName,
         msgid: MsgId,
+        unread: u64,
+        mentions: u64,
     ) {
         let _ = self
             .inbox
@@ -245,6 +251,8 @@ impl Directory {
                 account,
                 channel,
                 msgid,
+                unread,
+                mentions,
             })
             .await;
     }
@@ -438,9 +446,12 @@ impl Actor {
                 account,
                 channel,
                 msgid,
+                unread,
+                mentions,
             } => {
                 // The marking session already got its labeled echo; this
-                // syncs the account's other devices only.
+                // syncs the account's other devices only — both the new marker
+                // and the refreshed unread counts, so their badges update.
                 for (session, queue) in self.sessions.get(&account).into_iter().flatten() {
                     if *session == origin {
                         continue;
@@ -452,6 +463,17 @@ impl Actor {
                             event: Event::Marked {
                                 channel: channel.clone(),
                                 msgid: msgid.clone(),
+                            },
+                        },
+                    );
+                    push(
+                        queue,
+                        DirectEvent {
+                            origin,
+                            event: Event::UnreadCounts {
+                                channel: channel.clone(),
+                                unread,
+                                mentions,
                             },
                         },
                     );

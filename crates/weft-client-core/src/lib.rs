@@ -99,6 +99,13 @@ pub enum ClientEvent {
         channel: String,
         msgid: String,
     },
+    /// `UNREAD-COUNTS <#chan> <unread> <mentions>` — server-computed unread
+    /// tally for a channel (§6.3), authoritative over the client's live tally.
+    UnreadCounts {
+        channel: String,
+        unread: u64,
+        mentions: u64,
+    },
     /// `PINNED <#chan> <msgid>` — a message was pinned (§7).
     Pinned {
         channel: String,
@@ -493,6 +500,15 @@ pub fn on_line<E: EventSink>(
         Event::Marked { channel, msgid } => sink.emit(ClientEvent::Marked {
             channel: channel.to_string(),
             msgid: msgid.to_string(),
+        }),
+        Event::UnreadCounts {
+            channel,
+            unread,
+            mentions,
+        } => sink.emit(ClientEvent::UnreadCounts {
+            channel: channel.to_string(),
+            unread,
+            mentions,
         }),
         Event::Pinned { channel, msgid, by } => sink.emit(ClientEvent::Pinned {
             channel: channel.to_string(),

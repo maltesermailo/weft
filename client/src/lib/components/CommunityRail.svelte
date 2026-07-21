@@ -10,12 +10,12 @@
   <div class="rail-divider"></div>
   <div class="rail-communities">
     <div class="comm-tile" class:active={!app.homeView && app.activeServer === ""} class:muted={app.serverMuted("")} title={app.network}>
-      <button onclick={() => app.selectServer("")} oncontextmenu={(e) => app.serverCtx(e, "")}>{app.initials(app.network)}</button>
+      <button onclick={() => app.selectServer("")}>{app.initials(app.network)}</button>
       <span class="trust-mark signed" title="Connected network"></span>
     </div>
     {#each app.serverNamespaces as ns (ns)}
       <div class="comm-tile" class:active={!app.homeView && app.activeServer === ns} class:muted={app.serverMuted(ns)} title={ns}>
-        <button onclick={() => app.selectServer(ns)} oncontextmenu={(e) => app.serverCtx(e, ns)}>{app.initials(ns)}</button>
+        <button onclick={() => app.selectServer(ns)}>{app.initials(ns)}</button>
         {#if app.serverMentionCount(ns)}<span class="tile-badge mention">{app.serverMentionCount(ns)}</span>
         {:else if app.serverUnread(ns) && !app.serverMuted(ns)}<span class="tile-badge"></span>{/if}
       </div>

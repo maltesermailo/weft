@@ -68,28 +68,30 @@ Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
 - [x] **Unread counts** — channels show a numeric `@`-mention count, the
   server rail rolls those up into a numeric badge, and DMs show an unread
   message count. (Non-mention channel unread stays a bold/pill, Discord-style.)
-  *Client-side tally only* — true server-authoritative counts (survive
-  reload/reconnect, sync across devices) are a Tier 2 item.
+  Now backed by **server-authoritative counts** (see Tier 2, shipped) — the
+  client seeds from `UNREAD-COUNTS` and keeps a live tally between pushes.
 
 ### Notifications
-- [x] **Per-channel / per-server notification prefs** — right-click a channel
-  or server tile → All messages / Only @mentions / Mute. Persisted per-user
-  in localStorage, respected by both desktop notifications and the unread
-  indicators (muted scopes dim and stop badging). Cross-device sync of prefs
+- [x] **Per-namespace notification prefs** — a **Notification Settings modal**
+  (sidebar-header menu → per namespace) with All messages / Only @mentions /
+  Nothing. Persisted per-user in localStorage, respected by both desktop
+  notifications and the unread indicators (muted namespaces dim + stop
+  badging). Set per namespace (not per channel). Cross-device sync of prefs
   still wants a small server store later; per-`@everyone` suppression not yet.
 
 ## Tier 2 — the features people name when comparing to Discord
 
-- [ ] **Server-controlled unread counts** — today's counts (Tier 1) are a
-  client-side tally of messages seen live while a channel is inactive: they
-  reset on reload, miss anything received while disconnected, don't sync
-  across devices, and can't reflect true unread-since-`MARK`. Move the count
-  server-side: on top of the existing `MARK`/`MARKED` read marker (§9.7),
-  have the server report unread (and mention) counts per channel from the
-  marker to the newest event — a field on the channel snapshot / a dedicated
-  `UNREAD`-style response, recomputed on `MARK`. Client then renders the
-  authoritative number instead of its own tally. Needs a proto/store/core
-  change (count between two ULIDs, mention-scan) + the client swap.
+- [x] **Server-controlled unread counts** — shipped (2026-07-21). New
+  `UNREAD [<#chan>]` verb → `UNREAD-COUNTS <#chan> <unread> <mentions>`
+  event; `EventStore::unread_counts(scope, account, since)` counts non-own,
+  non-system roots after the `MARK` marker (mem + PG, shared contract).
+  Pushed unsolicited: a per-channel snapshot after each `MARKED` on login,
+  and a fresh count on the cross-device `MARK` sync. Client treats it as
+  authoritative (survives reload/reconnect, syncs across devices), keeping a
+  live +1 tally between pushes; mute stays a client-only preference. Proto
+  round-trips + store contract + core black-box tests all green; spec §6.3
+  amended. *Deferred:* structured mentions (the count uses a body-text
+  heuristic) and a per-message live push (client increments locally instead).
 - [ ] **Message search** — nothing client-side and **no server verb** (the
   biggest server prerequisite on this list; Postgres full-text over the
   event store would do for v1).

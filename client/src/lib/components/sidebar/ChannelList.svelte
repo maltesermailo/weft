@@ -44,7 +44,6 @@
           {/if}
           <span class="ci-name">{app.chanShort(ch.name)}</span>
           {#if app.mentionCount[ch.name]}<span class="mention-badge">{app.mentionCount[ch.name]}</span>{/if}
-          {#if app.isMuted(ch.name)}<span class="mute-icon" title="Muted" aria-label="Muted">🔕</span>{/if}
           <span class="dot {meta.cls} chan-ret" title={meta.label}></span>
         </button>
         {#if ch.voice && voice.channel === ch.name}

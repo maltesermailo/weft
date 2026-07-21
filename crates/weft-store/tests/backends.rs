@@ -410,6 +410,69 @@ where
         ]
     );
 
+    // -- server-computed unread counts (§6.3) --
+    let unread_scope: Scope = Scope::Channel(format!("#unread-{tag}").parse().unwrap());
+    let reader: Account = format!("reader-{tag}").parse().unwrap();
+    let msg = |scope: &Scope, at: u64, sender: &str, body: String| {
+        record(
+            scope,
+            at,
+            at,
+            sender,
+            EventKind::Message {
+                body,
+                meta: MsgMeta::default(),
+            },
+        )
+    };
+    // A join/part system row must never count toward unread.
+    let sys = record(
+        &unread_scope,
+        150_000,
+        150_000,
+        "bob",
+        EventKind::Message {
+            body: String::new(),
+            meta: MsgMeta {
+                system: Some("join".into()),
+                ..MsgMeta::default()
+            },
+        },
+    );
+    for rec in [
+        msg(&unread_scope, 100_000, "bob", "hello".into()),
+        sys,
+        msg(&unread_scope, 200_000, "bob", format!("@{reader} ping")),
+        msg(&unread_scope, 300_000, &reader.to_string(), "my own note".into()),
+        msg(&unread_scope, 400_000, "bob", "@everyone standup".into()),
+    ] {
+        store.append(rec).await.unwrap();
+    }
+    // No marker: every non-own root is unread; two mention the reader.
+    assert_eq!(
+        store
+            .unread_counts(&unread_scope, &reader, Ulid::from_parts(0, 0))
+            .await
+            .unwrap(),
+        (3, 2),
+    );
+    // Marker at 200_000: the own note is excluded, only @everyone remains.
+    assert_eq!(
+        store
+            .unread_counts(&unread_scope, &reader, msgid(200_000).ulid())
+            .await
+            .unwrap(),
+        (1, 1),
+    );
+    // Read to the end → nothing unread.
+    assert_eq!(
+        store
+            .unread_counts(&unread_scope, &reader, msgid(400_000).ulid())
+            .await
+            .unwrap(),
+        (0, 0),
+    );
+
     // -- verification claims (infrastructure only) --
     store
         .upsert_verification(&ada, "email", "ada@example.org")

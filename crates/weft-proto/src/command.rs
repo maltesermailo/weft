@@ -113,6 +113,9 @@ pub enum Command {
     },
     /// `MARK <#chan> <msgid>` — read marker (§6.3).
     Mark { channel: ChannelName, msgid: MsgId },
+    /// `UNREAD [<#chan>]` — request server-computed unread counts (§6.3).
+    /// No channel = every joined channel.
+    Unread { channel: Option<ChannelName> },
     /// `MEMBERS <#chan> [cursor]` — roster snapshot (§6.3), membership-gated.
     Members {
         channel: ChannelName,
@@ -634,6 +637,12 @@ impl Command {
                 Ok(Command::Mark {
                     channel: args.req("channel")?.parse()?,
                     msgid: args.req("msgid")?.parse()?,
+                })
+            }
+            "UNREAD" => {
+                let mut args = Args::new(line, "UNREAD");
+                Ok(Command::Unread {
+                    channel: args.opt().map(|s| s.parse()).transpose()?,
                 })
             }
             "MEMBERS" => {
@@ -1461,6 +1470,11 @@ impl Command {
             Command::Mark { channel, msgid } => {
                 ("MARK", vec![channel.to_string(), msgid.to_string()], None)
             }
+            Command::Unread { channel } => (
+                "UNREAD",
+                channel.iter().map(|c| c.to_string()).collect(),
+                None,
+            ),
             Command::Members { channel, cursor } => (
                 "MEMBERS",
                 std::iter::once(channel.to_string())
@@ -2147,6 +2161,10 @@ mod tests {
         round_trip(&Request::new(Command::Mark {
             channel: "#general".parse().unwrap(),
             msgid: MSGID.parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::Unread { channel: None }));
+        round_trip(&Request::new(Command::Unread {
+            channel: Some("#general".parse().unwrap()),
         }));
         round_trip(&Request::new(Command::Members {
             channel: "#general".parse().unwrap(),

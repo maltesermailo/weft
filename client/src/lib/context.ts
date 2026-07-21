@@ -56,6 +56,15 @@ export interface AppCtx {
   isMuted(channel: string): boolean;
   /** Notifications silenced for this whole server/namespace. */
   serverMuted(ns: string): boolean;
+  /** Notification level for a scope key ("ns:<name>" or "net"). */
+  notifLevelOf(scopeKey: string): string;
+  /** Set the notification level for a scope key. */
+  setNotifLevel(scopeKey: string, level: string): void;
+  /** The active namespace's scope key + display label (for the modal). */
+  notifScopeKey(): string;
+  notifScopeLabel(): string;
+  notifSettingsOpen: boolean;
+  openNotifSettings(): void;
   readonly discovered: Record<
     string,
     {
@@ -94,7 +103,6 @@ export interface AppCtx {
 
   // ---- context menus ----
   chanCtx(e: MouseEvent, ch: Channel): void;
-  serverCtx(e: MouseEvent, ns: string): void;
   memberCtx(e: MouseEvent, name: string): void;
   catCtx(e: MouseEvent, cat: string): void;
 

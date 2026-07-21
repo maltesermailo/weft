@@ -32,6 +32,7 @@
   import UserSettingsModal from "$lib/components/modals/UserSettingsModal.svelte";
   import FederationPanel from "$lib/components/modals/FederationPanel.svelte";
   import ServerSettingsModal from "$lib/components/modals/ServerSettingsModal.svelte";
+  import NotificationSettingsModal from "$lib/components/modals/NotificationSettingsModal.svelte";
 
   // ---- connection + form state ----
   type Status = "connect" | "connecting" | "online";
@@ -124,27 +125,12 @@
     }
     openCtx(e, items);
   }
-  const check = (on: boolean) => (on ? "✓ " : "");
   function chanCtx(e: MouseEvent, ch: Channel) {
-    const lvl = notifLevel(ch.name);
     openCtx(e, [
       { label: "Mark as read", run: () => markRead(ch.name) },
-      { label: `${check(lvl === "all")}Notify: all messages`, run: () => setNotifLevel(ch.name, "all") },
-      { label: `${check(lvl === "mentions")}Notify: only @mentions`, run: () => setNotifLevel(ch.name, "mentions") },
-      { label: `${check(lvl === "nothing")}Mute channel`, run: () => setNotifLevel(ch.name, "nothing") },
       { label: "Permissions", run: () => openChanPerms(ch.name) },
       { label: "Copy name", run: () => navigator.clipboard?.writeText(ch.name) },
       { label: "Leave", danger: true, run: () => weft.part(ch.name).catch(() => {}) },
-    ]);
-  }
-  // Right-click a server tile: per-user notification default for the whole server.
-  function serverCtx(e: MouseEvent, ns: string) {
-    const scope = ns ? `ns:${ns}` : "net";
-    const lvl = notifPrefs[scope] ?? "mentions";
-    openCtx(e, [
-      { label: `${check(lvl === "all")}Notify: all messages`, run: () => setNotifLevel(scope, "all") },
-      { label: `${check(lvl === "mentions")}Notify: only @mentions`, run: () => setNotifLevel(scope, "mentions") },
-      { label: `${check(lvl === "nothing")}Mute server`, run: () => setNotifLevel(scope, "nothing") },
     ]);
   }
   function memberCtx(e: MouseEvent, name: string) {
@@ -272,10 +258,10 @@
     if (mentionCount[name]) mentionCount[name] = 0;
   }
 
-  // ---- notification preferences (Tier 1 · per-user, localStorage) ----
-  // Level per scope: a channel key (`#…`/`@dm`), a namespace (`ns:<name>`), or
-  // `net` (top-level network default). Effective level = channel ?? ns ?? net ??
-  // "mentions" (the default preserves "only DMs/@mentions ping" behavior).
+  // ---- notification preferences (per-user, localStorage) ----
+  // Set per **namespace** (`ns:<name>`, or `net` for top-level) in the
+  // Notification Settings modal — not per channel. Effective level =
+  // namespace ?? "mentions" (the default keeps "only DMs/@mentions ping").
   type NotifLevel = "all" | "mentions" | "nothing";
   const NOTIF_KEY = "weft:notif-prefs";
   const loadNotifPrefs = (): Record<string, NotifLevel> => {
@@ -286,15 +272,16 @@
     }
   };
   let notifPrefs = $state<Record<string, NotifLevel>>(loadNotifPrefs());
+  // The namespace scope key for a channel (or the network for top-level).
   const scopeKeyOf = (channel: string) => {
     const ns = nsOf(channel);
     return ns ? `ns:${ns}` : "net";
   };
-  function notifLevel(channel: string): NotifLevel {
-    return notifPrefs[channel] ?? notifPrefs[scopeKeyOf(channel)] ?? "mentions";
-  }
+  const notifLevel = (channel: string): NotifLevel =>
+    notifPrefs[scopeKeyOf(channel)] ?? "mentions";
   const isMuted = (channel: string) => notifLevel(channel) === "nothing";
-  const serverMuted = (ns: string) => notifPrefs[ns ? `ns:${ns}` : "net"] === "nothing";
+  const serverMuted = (ns: string) => (notifPrefs[ns ? `ns:${ns}` : "net"] ?? "mentions") === "nothing";
+  const notifLevelOf = (scopeKey: string): NotifLevel => notifPrefs[scopeKey] ?? "mentions";
   function setNotifLevel(scope: string, level: NotifLevel) {
     notifPrefs[scope] = level;
     notifPrefs = { ...notifPrefs };
@@ -303,6 +290,15 @@
     } catch {
       /* private mode — in-memory only */
     }
+  }
+  // ---- notification-settings modal (per-namespace) ----
+  let notifSettingsOpen = $state(false);
+  // The scope the modal edits = the active server (namespace, or the network).
+  const notifScopeKey = () => (activeServer ? `ns:${activeServer}` : "net");
+  const notifScopeLabel = () => activeServer || network;
+  function openNotifSettings() {
+    notifSettingsOpen = true;
+    serverMenu = false;
   }
   let active = $state("");
   let joinInput = $state("");
@@ -963,6 +959,19 @@
         const ch = channels[e.channel];
         if (ch) ch.lastRead = e.msgid;
         markRead(e.channel);
+        break;
+      }
+      case "unread-counts": {
+        // Server-authoritative unread tally (§6.3) — the login snapshot and
+        // cross-device MARK pushes override the client's live tally, so counts
+        // survive reload/reconnect and stay in sync across devices. The channel
+        // being viewed is read (auto-mark handles it); muted scopes stay silent.
+        if (e.channel !== active && !isMuted(e.channel)) {
+          unreadCount[e.channel] = e.unread;
+          unreadMap[e.channel] = e.unread > 0;
+          mentionCount[e.channel] = e.mentions;
+          mentionMap[e.channel] = e.mentions > 0;
+        }
         break;
       }
       case "chanmeta": {
@@ -2040,6 +2049,13 @@
     get mentionCount() { return mentionCount; },
     isMuted,
     serverMuted,
+    notifLevelOf,
+    setNotifLevel,
+    notifScopeKey,
+    notifScopeLabel,
+    get notifSettingsOpen() { return notifSettingsOpen; },
+    set notifSettingsOpen(v: boolean) { notifSettingsOpen = v; },
+    openNotifSettings,
     get discovered() { return discovered; },
     get discoverCursor() { return discoverCursor; },
     scopesFor,
@@ -2062,7 +2078,6 @@
     serverMentionCount,
     retentionMeta,
     chanCtx,
-    serverCtx,
     memberCtx,
     catCtx,
     get serverMenu() { return serverMenu; },
@@ -2348,6 +2363,10 @@
 
     {#if nsSettingsOpen}
       <ServerSettingsModal onclose={() => (nsSettingsOpen = false)} />
+    {/if}
+
+    {#if notifSettingsOpen}
+      <NotificationSettingsModal onclose={() => (notifSettingsOpen = false)} />
     {/if}
   </div>
 {/if}

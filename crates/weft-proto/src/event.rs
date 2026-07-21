@@ -135,6 +135,14 @@ pub enum Event {
         channel: ChannelName,
         msgid: MsgId,
     },
+    /// `UNREAD-COUNTS <#chan> <unread> <mentions>` — server-computed unread
+    /// tally for a channel since the account's read marker (§6.3). One event
+    /// per channel; a snapshot is several, optionally `BATCH`-wrapped.
+    UnreadCounts {
+        channel: ChannelName,
+        unread: u64,
+        mentions: u64,
+    },
     /// `PINNED <#chan> <msgid>` with optional `by=` — a message was pinned (§7).
     Pinned {
         channel: ChannelName,
@@ -599,6 +607,27 @@ impl Event {
                 Ok(Event::Marked {
                     channel: args.req("channel")?.parse()?,
                     msgid: args.req("msgid")?.parse()?,
+                })
+            }
+            "UNREAD-COUNTS" => {
+                let mut args = Args::new(line, "UNREAD-COUNTS");
+                let channel = args.req("channel")?.parse()?;
+                let unread = args.req("unread")?;
+                let unread = unread.parse().map_err(|_| ParseError::BadParam {
+                    verb: "UNREAD-COUNTS",
+                    what: "unread",
+                    value: unread.to_string(),
+                })?;
+                let mentions = args.req("mentions")?;
+                let mentions = mentions.parse().map_err(|_| ParseError::BadParam {
+                    verb: "UNREAD-COUNTS",
+                    what: "mentions",
+                    value: mentions.to_string(),
+                })?;
+                Ok(Event::UnreadCounts {
+                    channel,
+                    unread,
+                    mentions,
                 })
             }
             "MEDIA" => {
@@ -1158,6 +1187,19 @@ impl Event {
             Event::Marked { channel, msgid } => {
                 ("MARKED", vec![channel.to_string(), msgid.to_string()], None)
             }
+            Event::UnreadCounts {
+                channel,
+                unread,
+                mentions,
+            } => (
+                "UNREAD-COUNTS",
+                vec![
+                    channel.to_string(),
+                    unread.to_string(),
+                    mentions.to_string(),
+                ],
+                None,
+            ),
             Event::MediaToken { token } => {
                 ("MEDIA", vec!["TOKEN".to_string(), token.clone()], None)
             }
@@ -1784,6 +1826,25 @@ mod tests {
             channel: "#general".parse().unwrap(),
             msgid: MSGID.parse().unwrap(),
         }));
+        // Zero and non-zero counts both round-trip (numeric middle params).
+        round_trip(&Reply::new(Event::UnreadCounts {
+            channel: "#general".parse().unwrap(),
+            unread: 0,
+            mentions: 0,
+        }));
+        let counts = Reply::with_label(
+            Event::UnreadCounts {
+                channel: "#general".parse().unwrap(),
+                unread: 12,
+                mentions: 3,
+            },
+            "u1",
+        );
+        assert_eq!(
+            counts.serialize().unwrap(),
+            "@label=u1 UNREAD-COUNTS #general 12 3"
+        );
+        round_trip(&counts);
         round_trip(&Reply::new(Event::Pinned {
             channel: "#general".parse().unwrap(),
             msgid: MSGID.parse().unwrap(),

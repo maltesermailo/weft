@@ -27,6 +27,18 @@ pub trait EventStore: Send + Sync {
     async fn children(&self, scope: &Scope, roots: &[Ulid])
         -> Result<Vec<EventRecord>, StoreError>;
 
+    /// Server-computed unread tally for `account` in `scope` since the read
+    /// marker `since` (§6.3): `(unread, mentions)`, where `unread` counts root
+    /// messages from *other* senders with a ULID strictly after `since`, and
+    /// `mentions` is the subset whose body references the account (`@account`)
+    /// or `@everyone`/`@here`. Own messages never count as unread.
+    async fn unread_counts(
+        &self,
+        scope: &Scope,
+        account: &Account,
+        since: Ulid,
+    ) -> Result<(u64, u64), StoreError>;
+
     /// Locate a root by its ULID across scopes — EDIT/DELETE/REACT arrive
     /// with only a msgid (§6.4).
     async fn find_root(&self, ulid: Ulid) -> Result<Option<EventRecord>, StoreError>;

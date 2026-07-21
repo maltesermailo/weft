@@ -202,6 +202,7 @@ Signed NS verbs (`TRANSFER`, `RECOVERY CANCEL`) carry the root signature in a `@
 | `MEMBERS` | `MEMBERS <#chan> [cursor]` | membership | Paginated; bridge peers see remote members only as they've appeared. |
 | `TYPING` | `TYPING <#chan> <start\|stop>` | `send` | Never stored; rate-limited (1/3 s RECOMMENDED); bridged only under manifest `typing: yes`. |
 | `MARK` | `MARK <#chan> <msgid>` | membership | Account-scoped read marker, synced via `MARKED`; survives `ephemeral`. |
+| `UNREAD` | `UNREAD [<#chan>]` | membership | Request server-computed unread counts → one `UNREAD-COUNTS` per channel. No channel = every joined channel. Absent channel must be joined, else `NO-SUCH-TARGET`. |
 
 ### 6.4 Messaging (C)
 
@@ -309,6 +310,7 @@ Bridge sessions authenticate with `AUTH BRIDGE` (§11.2). Every bridge change em
 | `MEMBER <#chan> <user@net> <join\|part>` | `display=`, `count=` | `count=` = member count after the change (the §6.3 JOIN response) |
 | `TYPING <#chan> <user@net> <start\|stop>` | | never stored |
 | `MARKED <#chan> <msgid>` | | read-marker sync to the account's own sessions |
+| `UNREAD-COUNTS <#chan> <unread> <mentions>` | | server-computed unread tally since the read marker; pushed on login + on `MARK` to the account's own sessions |
 | `PRESENCE <user@net> <online\|away\|dnd\|invisible>` | | never bridged |
 | `POLICY <#chan> <policy>` | | sent on join and on policy change |
 | `CHANMETA` | | as v0.8 |
@@ -371,7 +373,7 @@ UTF-8, optional `fmt=md` (CommonMark subset); oversize → `TOO-LARGE`, never tr
 Server-stamped via ULIDs; client clocks untrusted.
 
 ### 9.7 Client reconnect (RECOMMENDED)
-Backoff 1→60 s jittered → `HELLO` → `AUTH KEY` → server sends `MEMBER`/`POLICY` snapshots (membership is server-side) → per channel `HISTORY after=<last msgid>` (render `truncated` as a visible gap) → resend unacked labels → `MARKED` snapshot restores read state.
+Backoff 1→60 s jittered → `HELLO` → `AUTH KEY` → server sends `MEMBER`/`POLICY` snapshots (membership is server-side) → per channel `HISTORY after=<last msgid>` (render `truncated` as a visible gap) → resend unacked labels → `MARKED` snapshot restores read state (each marked channel is followed by an `UNREAD-COUNTS` so badges survive the reconnect).
 
 ---
 
@@ -612,6 +614,8 @@ Optional server-side RFC 2812 + IRCv3 gateway (:6697 TLS); the gateway is the ho
 ## Appendix A — Decision history
 
 v0.1 core design → v0.2 namespaces + manifest bridging → v0.3 user-owned namespaces, visibility, invites → v0.4 NETBLOCK → v0.5 backfill + `history` flag → v0.6 media, mirroring, WEFT-IRC → v0.7 implementability audit → v0.8 consolidation → v0.9 namespace recovery ladder + message compaction → **v0.10 message reporting: home-network routing, retention holds, honest e2ee/ephemeral limits, bridge forwarding (this document)**.
+
+*Amendment (server-controlled unread counts, §6.3)*: adds **`UNREAD [<#chan>]`** → one **`UNREAD-COUNTS <#chan> <unread> <mentions>`** per channel, the server-computed tally of root messages newer than the account's read marker (`MARK`). `unread` counts only real messages from *other* senders — own messages and `join`/`part` system rows are excluded; `mentions` is the subset whose body references the account (`@account`) or `@everyone`/`@here` (a body-text heuristic — there is no structured mention field). Store method `EventStore::unread_counts(scope, account, since)`; no migration (reuses the existing events + the `system` column, and the `MARK` marker on `AccountStore`). The counts are **pushed unsolicited**: a per-channel `UNREAD-COUNTS` follows each `MARKED` in the §9.7 login snapshot, and a fresh count rides the cross-device `MARK` sync to the account's *other* sessions (the marking device already knows it read). This makes the client badge authoritative — it survives reload/reconnect and stays consistent across devices; the client keeps a live +1 tally between pushes (self-healing on the next `MARK`/reconnect). Notification-mute is a **client-only** preference (localStorage) — the server counts every channel and the client suppresses muted scopes.
 
 *Amendments (M4-6 implementation — namespace recovery ladder, §2.4)*: signed NS verbs carry their signature in a `@sig=<b64>` tag. NS TRANSFER (rung 1) is verified against the namespace's stored root **key** — the one place same-network namespace authority is cryptographically enforced (not just table-based). NS RECOVER takes a base64 `SignedRotation` (a `{namespace, new-root-key, new-owner}` record + collected signatures, deterministic-CBOR, domain-separated from transfer/cancel); the server picks the rung by whose signatures verify — quorum ≥ m → rung 2 (7-day delay), else operator (network-key) signed → rung 3 (30-day delay), else FORBIDDEN. A second RECOVER while one is pending → CONFLICT. NS RECOVERY CANCEL is a root-signed veto (`weft-ns-cancel` domain). The delay window is applied by a scheduled task (alongside maintenance): at eta the root key + owner rotate and a `root-history` entry is appended (rung-3 marked operator-initiated forever). NS-META gains `recovery-set=yes` / `recovery=pending;recovery-eta=<ms>;recovery-rung=2|3`. **Same-network limitation (honest):** the recovery announcement is *reflected* on NS-META (queryable) but not yet *pushed* to all members — a push needs an ns-member broadcast (a follow-up); the invariant-9 guarantees that ARE enforced: no silent rotation path (every rotation is TRANSFER-signed or delayed+recorded), root-cancellable window, and permanent operator-initiated marking.
 

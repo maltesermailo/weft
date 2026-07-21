@@ -724,11 +724,6 @@ button:disabled {
 .channel-item.muted:hover {
   opacity: 0.7;
 }
-.mute-icon {
-  font-size: 11px;
-  opacity: 0.7;
-  flex-shrink: 0;
-}
 .channel-item .dm-name {
   flex: 1;
   text-align: left;

@@ -106,6 +106,7 @@ export type WeftEvent =
   | { kind: "typing"; channel: string; user: string; state: string }
   | { kind: "presence"; user: string; status: string }
   | { kind: "marked"; channel: string; msgid: string }
+  | { kind: "unread-counts"; channel: string; unread: number; mentions: number }
   | { kind: "pinned"; channel: string; msgid: string; by: string | null }
   | { kind: "unpinned"; channel: string; msgid: string }
   | { kind: "caps"; account: string; scope: string; caps: string }

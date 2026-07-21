@@ -1072,6 +1072,62 @@ async fn mark_syncs_across_devices_and_snapshots_on_login() {
 }
 
 #[tokio::test]
+async fn unread_counts_report_and_push_on_mark() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    // A second device for ada, to observe the cross-device counts push.
+    let mut ada2 = connect(&ctx);
+    ada2.send("HELLO weft/1");
+    ada2.recv().await;
+    ada2.send(&format!("AUTH PASSWORD ada :{PASSWORD}"));
+    ada2.recv().await; // WELCOME
+    // bob's join is a system message — it must NOT count as unread below.
+    let mut bob = joined(&ctx, "bob", "#general").await;
+
+    // bob posts two messages; the second mentions ada.
+    say(&mut bob, "#general", "hello there").await;
+    let m2 = say(&mut bob, "#general", "@ada ping").await;
+
+    // ada requests unread counts — the two real messages, one a mention; bob's
+    // join system row is excluded.
+    ada.send("@label=u1 UNREAD #general");
+    let ev = loop {
+        let e = ada.recv().await;
+        if matches!(&e.event, Event::UnreadCounts { .. }) && e.label.as_deref() == Some("u1") {
+            break e;
+        }
+    };
+    assert!(
+        matches!(&ev.event,
+            Event::UnreadCounts { channel, unread: 2, mentions: 1 }
+            if channel.to_string() == "#general"),
+        "got {ev:?}"
+    );
+
+    // Reading up to the newest message zeroes the count; the OTHER device
+    // (not the marking one) gets the refreshed count so its badge clears.
+    ada.send(&format!("MARK #general {m2}"));
+    assert!(matches!(ada.recv().await.event, Event::Marked { .. })); // own echo
+    let synced = loop {
+        let e = ada2.recv().await;
+        if matches!(&e.event, Event::UnreadCounts { .. }) {
+            break e;
+        }
+    };
+    assert!(
+        matches!(
+            &synced.event,
+            Event::UnreadCounts { unread: 0, mentions: 0, .. }
+        ),
+        "expected zeroed counts synced to the other device, got {synced:?}"
+    );
+
+    // UNREAD requires membership.
+    ada.send("UNREAD #ghost");
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
 async fn presence_relays_to_co_members_but_never_invisible() {
     let ctx = ctx(&["#general"]);
     let mut ada = joined(&ctx, "ada", "#general").await;
