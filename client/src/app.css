@@ -717,6 +717,31 @@ button:disabled {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
+/* Tier 1: muted channels/servers are dimmed; the mute icon sits by the name. */
+.channel-item.muted {
+  opacity: 0.45;
+}
+.channel-item.muted:hover {
+  opacity: 0.7;
+}
+.mute-icon {
+  font-size: 11px;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.channel-item .dm-name {
+  flex: 1;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.comm-tile.muted {
+  opacity: 0.5;
+}
+.comm-tile.muted:hover {
+  opacity: 1;
+}
 .channel-item.active {
   background: var(--bg-panel-raised);
   color: var(--text-primary);

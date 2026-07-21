@@ -32,10 +32,11 @@ Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
 
 ## Tier 1 — first-hour gaps (users hit these immediately)
 
-> **Sprint A shipped ✅ (2026-07-21)** — fenced code blocks, spoilers,
-> paste/drag-drop upload, and the NEW/day dividers all landed (client-only,
-> build + typecheck clean). Remaining Tier 1: syntax highlighting, link
-> embeds, audio player/lightbox, unread counts, notification prefs.
+> **Sprints A + B shipped ✅ (2026-07-21)** — fenced code blocks, spoilers,
+> paste/drag-drop upload, NEW/day dividers, audio player + image lightbox,
+> unread counts, and per-channel/server notification prefs all landed
+> (client-only, build + typecheck clean). **Only link previews/embeds remain
+> in Tier 1** — and that one needs a server-side unfurl proxy (below).
 
 ### Messaging rendering
 - [x] **Fenced code blocks** — ` ``` `/`~~~` blocks with a language label,
@@ -43,31 +44,52 @@ Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
   untouched. **Syntax highlighting** still pending (needs a highlighter dep;
   deferred). Headings/lists/blockquotes still not rendered.
 - [ ] **Link previews / embeds** — URLs render as bare links; no
-  OpenGraph unfurl, no inline embed of pasted image/video URLs. Do the
-  unfurl **server-side** (client-side fetch leaks IPs / hits CORS).
+  OpenGraph unfurl, no inline embed of pasted image/video URLs. **The only
+  Tier 1 item left**, and it needs a **server-side unfurl proxy** — a new
+  weftd axum endpoint (`GET /unfurl?url=`) reusing `dialer::is_dialable`
+  (invariant 13, SSRF), fetching OpenGraph/Twitter-card tags + image
+  dimensions, with a cache. Client-side fetch is a non-starter (leaks the
+  user's IP to arbitrary hosts, hits CORS). Needs Jannik's sign-off on the
+  new HTTP surface before building.
 - [x] **Paste & drag-drop upload** — Ctrl+V clipboard files and drop-onto-
   composer both feed the shared upload path (`addFiles`), with a "Drop files
   to attach" overlay; still capped at 10/message.
 - [x] **Spoilers** — `||text||` renders hidden, click/Enter to reveal
   (delegated `spoilerReveal` action). Spoiler-tagged *attachments* not yet.
-- [~] **Audio player + image lightbox** — audio attachments fall through to
-  a generic download chip; images open raw, no gallery. Client-only.
+- [x] **Audio player + image lightbox** — `audio/*` attachments render an
+  inline `<audio controls>`; clicking an image opens a fullscreen lightbox
+  (Esc / backdrop to close, "open original" link).
 
 ### Timeline orientation
 - [x] **"NEW messages" divider + day-date separators** — per-day date
   dividers (Today/Yesterday/full date) from the ULID timestamp, plus a red
   "New messages" line anchored to the read marker as of channel-open
   (frozen while reading, re-anchors on switch).
-- [~] **Unread counts** — badges are boolean dot/`@`, not numbers.
+- [x] **Unread counts** — channels show a numeric `@`-mention count, the
+  server rail rolls those up into a numeric badge, and DMs show an unread
+  message count. (Non-mention channel unread stays a bold/pill, Discord-style.)
+  *Client-side tally only* — true server-authoritative counts (survive
+  reload/reconnect, sync across devices) are a Tier 2 item.
 
 ### Notifications
-- [ ] **Per-channel / per-server notification prefs** — mute, all /
-  mentions-only / nothing, suppress `@everyone`. Nothing exists; desktop
-  notifications are hardcoded. Client-first; cross-device sync of prefs
-  wants a small server store later.
+- [x] **Per-channel / per-server notification prefs** — right-click a channel
+  or server tile → All messages / Only @mentions / Mute. Persisted per-user
+  in localStorage, respected by both desktop notifications and the unread
+  indicators (muted scopes dim and stop badging). Cross-device sync of prefs
+  still wants a small server store later; per-`@everyone` suppression not yet.
 
 ## Tier 2 — the features people name when comparing to Discord
 
+- [ ] **Server-controlled unread counts** — today's counts (Tier 1) are a
+  client-side tally of messages seen live while a channel is inactive: they
+  reset on reload, miss anything received while disconnected, don't sync
+  across devices, and can't reflect true unread-since-`MARK`. Move the count
+  server-side: on top of the existing `MARK`/`MARKED` read marker (§9.7),
+  have the server report unread (and mention) counts per channel from the
+  marker to the newest event — a field on the channel snapshot / a dedicated
+  `UNREAD`-style response, recomputed on `MARK`. Client then renders the
+  authoritative number instead of its own tally. Needs a proto/store/core
+  change (count between two ULIDs, mention-scan) + the client swap.
 - [ ] **Message search** — nothing client-side and **no server verb** (the
   biggest server prerequisite on this list; Postgres full-text over the
   event store would do for v1).

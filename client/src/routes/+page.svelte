@@ -19,6 +19,7 @@
   import ChatTopbar from "$lib/components/chat/ChatTopbar.svelte";
   import MessageList from "$lib/components/chat/MessageList.svelte";
   import Composer from "$lib/components/chat/Composer.svelte";
+  import Lightbox from "$lib/components/chat/Lightbox.svelte";
   import CreateChannelModal from "$lib/components/modals/CreateChannelModal.svelte";
   import CreateCategoryModal from "$lib/components/modals/CreateCategoryModal.svelte";
   import ReportsQueueModal from "$lib/components/modals/ReportsQueueModal.svelte";
@@ -123,12 +124,27 @@
     }
     openCtx(e, items);
   }
+  const check = (on: boolean) => (on ? "✓ " : "");
   function chanCtx(e: MouseEvent, ch: Channel) {
+    const lvl = notifLevel(ch.name);
     openCtx(e, [
       { label: "Mark as read", run: () => markRead(ch.name) },
+      { label: `${check(lvl === "all")}Notify: all messages`, run: () => setNotifLevel(ch.name, "all") },
+      { label: `${check(lvl === "mentions")}Notify: only @mentions`, run: () => setNotifLevel(ch.name, "mentions") },
+      { label: `${check(lvl === "nothing")}Mute channel`, run: () => setNotifLevel(ch.name, "nothing") },
       { label: "Permissions", run: () => openChanPerms(ch.name) },
       { label: "Copy name", run: () => navigator.clipboard?.writeText(ch.name) },
       { label: "Leave", danger: true, run: () => weft.part(ch.name).catch(() => {}) },
+    ]);
+  }
+  // Right-click a server tile: per-user notification default for the whole server.
+  function serverCtx(e: MouseEvent, ns: string) {
+    const scope = ns ? `ns:${ns}` : "net";
+    const lvl = notifPrefs[scope] ?? "mentions";
+    openCtx(e, [
+      { label: `${check(lvl === "all")}Notify: all messages`, run: () => setNotifLevel(scope, "all") },
+      { label: `${check(lvl === "mentions")}Notify: only @mentions`, run: () => setNotifLevel(scope, "mentions") },
+      { label: `${check(lvl === "nothing")}Mute server`, run: () => setNotifLevel(scope, "nothing") },
     ]);
   }
   function memberCtx(e: MouseEvent, name: string) {
@@ -246,9 +262,47 @@
   // when a badge clears, independent of the channelGroups derivation.
   let unreadMap = $state<Record<string, boolean>>({});
   let mentionMap = $state<Record<string, boolean>>({});
+  // Numeric unread / mention tallies (Tier 1) — the badges show counts, not dots.
+  let unreadCount = $state<Record<string, number>>({});
+  let mentionCount = $state<Record<string, number>>({});
   function markRead(name: string) {
     if (unreadMap[name]) unreadMap[name] = false;
     if (mentionMap[name]) mentionMap[name] = false;
+    if (unreadCount[name]) unreadCount[name] = 0;
+    if (mentionCount[name]) mentionCount[name] = 0;
+  }
+
+  // ---- notification preferences (Tier 1 · per-user, localStorage) ----
+  // Level per scope: a channel key (`#…`/`@dm`), a namespace (`ns:<name>`), or
+  // `net` (top-level network default). Effective level = channel ?? ns ?? net ??
+  // "mentions" (the default preserves "only DMs/@mentions ping" behavior).
+  type NotifLevel = "all" | "mentions" | "nothing";
+  const NOTIF_KEY = "weft:notif-prefs";
+  const loadNotifPrefs = (): Record<string, NotifLevel> => {
+    try {
+      return JSON.parse(localStorage.getItem(NOTIF_KEY) ?? "{}");
+    } catch {
+      return {};
+    }
+  };
+  let notifPrefs = $state<Record<string, NotifLevel>>(loadNotifPrefs());
+  const scopeKeyOf = (channel: string) => {
+    const ns = nsOf(channel);
+    return ns ? `ns:${ns}` : "net";
+  };
+  function notifLevel(channel: string): NotifLevel {
+    return notifPrefs[channel] ?? notifPrefs[scopeKeyOf(channel)] ?? "mentions";
+  }
+  const isMuted = (channel: string) => notifLevel(channel) === "nothing";
+  const serverMuted = (ns: string) => notifPrefs[ns ? `ns:${ns}` : "net"] === "nothing";
+  function setNotifLevel(scope: string, level: NotifLevel) {
+    notifPrefs[scope] = level;
+    notifPrefs = { ...notifPrefs };
+    try {
+      localStorage.setItem(NOTIF_KEY, JSON.stringify(notifPrefs));
+    } catch {
+      /* private mode — in-memory only */
+    }
   }
   let active = $state("");
   let joinInput = $state("");
@@ -617,6 +671,12 @@
     Object.keys(unreadMap).some((n) => unreadMap[n] && nsOf(n) === ns && n !== active);
   const serverMention = (ns: string) =>
     Object.keys(mentionMap).some((n) => mentionMap[n] && nsOf(n) === ns && n !== active);
+  // Total mentions across a server's channels, for the rail's numeric badge.
+  const serverMentionCount = (ns: string) =>
+    Object.keys(mentionCount).reduce(
+      (sum, n) => (nsOf(n) === ns && n !== active ? sum + (mentionCount[n] ?? 0) : sum),
+      0,
+    );
   // Discord-style grouping for the *active server*: by CHANNEL-LAYOUT category
   // (position-ordered), uncategorized under "Channels".
   let channelGroups = $derived.by(() => {
@@ -855,16 +915,24 @@
           }
         }
         const pinged = !e.own && mentionsMe(e.body);
-        if (!e.own && key !== active) {
+        const level = notifLevel(key);
+        // A muted scope shows no unread indicator; others tally unread/mentions.
+        if (!e.own && key !== active && level !== "nothing") {
           unreadMap[key] = true;
-          if (pinged) mentionMap[key] = true;
+          unreadCount[key] = (unreadCount[key] ?? 0) + 1;
+          if (pinged) {
+            mentionMap[key] = true;
+            mentionCount[key] = (mentionCount[key] ?? 0) + 1;
+          }
         }
-        // Desktop notification for a DM or a mention while unfocused.
+        // Desktop notification while unfocused, gated by the scope's level:
+        // "all" → every message, "mentions" → DMs/@mentions only, "nothing" → none.
         if (!e.own && !document.hasFocus()) {
           const dm = e.target.startsWith("@");
+          const notify = level === "all" || (level === "mentions" && (dm || pinged));
           // Qualify a foreign sender so the notification isn't ambiguous.
           const who = e.network !== network ? `${e.sender}@${e.network}` : e.sender;
-          if (dm || pinged)
+          if (notify)
             weft.notify(
               dm ? `DM from ${who}` : `${who} in ${chanShort(key)}`,
               e.body.slice(0, 140),
@@ -952,11 +1020,18 @@
           cur.name = e.new;
           channels[e.new] = cur;
           delete channels[e.old];
-          for (const map of [unreadMap, mentionMap] as Record<string, boolean>[]) {
+          for (const map of [unreadMap, mentionMap, unreadCount, mentionCount] as Record<
+            string,
+            boolean | number
+          >[]) {
             if (map[e.old] !== undefined) {
               map[e.new] = map[e.old];
               delete map[e.old];
             }
+          }
+          if (notifPrefs[e.old] !== undefined) {
+            notifPrefs[e.new] = notifPrefs[e.old];
+            delete notifPrefs[e.old];
           }
           cacheChanLayout(e.new, cur.category, cur.position ?? 0);
           if (active === e.old) active = e.new;
@@ -1961,6 +2036,10 @@
     get presence() { return presence; },
     get unreadMap() { return unreadMap; },
     get mentionMap() { return mentionMap; },
+    get unreadCount() { return unreadCount; },
+    get mentionCount() { return mentionCount; },
+    isMuted,
+    serverMuted,
     get discovered() { return discovered; },
     get discoverCursor() { return discoverCursor; },
     scopesFor,
@@ -1980,8 +2059,10 @@
     badgeFor,
     serverUnread,
     serverMention,
+    serverMentionCount,
     retentionMeta,
     chanCtx,
+    serverCtx,
     memberCtx,
     catCtx,
     get serverMenu() { return serverMenu; },
@@ -2150,6 +2231,7 @@
     <div class="reconnect-banner">Connection lost — reconnecting…</div>
   {/if}
   <Toasts {toasts} />
+  <Lightbox />
   {#if federating}
     <div class="federating-banner">
       <span class="fed-spinner"></span>

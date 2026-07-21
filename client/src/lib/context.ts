@@ -50,6 +50,12 @@ export interface AppCtx {
   readonly presence: Record<string, string>;
   readonly unreadMap: Record<string, boolean>;
   readonly mentionMap: Record<string, boolean>;
+  readonly unreadCount: Record<string, number>;
+  readonly mentionCount: Record<string, number>;
+  /** Notifications silenced for this channel (level "nothing"). */
+  isMuted(channel: string): boolean;
+  /** Notifications silenced for this whole server/namespace. */
+  serverMuted(ns: string): boolean;
   readonly discovered: Record<
     string,
     {
@@ -83,10 +89,12 @@ export interface AppCtx {
   badgeFor(account: string, scope: string): Badge | undefined;
   serverUnread(ns: string): boolean;
   serverMention(ns: string): boolean;
+  serverMentionCount(ns: string): number;
   retentionMeta: Record<string, RetentionMeta>;
 
   // ---- context menus ----
   chanCtx(e: MouseEvent, ch: Channel): void;
+  serverCtx(e: MouseEvent, ns: string): void;
   memberCtx(e: MouseEvent, name: string): void;
   catCtx(e: MouseEvent, cat: string): void;
 
