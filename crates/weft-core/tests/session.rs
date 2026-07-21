@@ -1128,6 +1128,77 @@ async fn unread_counts_report_and_push_on_mark() {
 }
 
 #[tokio::test]
+async fn search_returns_matching_messages_newest_first() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+
+    say(&mut ada, "#general", "deploy the reference server").await;
+    say(&mut ada, "#general", "lunch time").await;
+    say(&mut ada, "#general", "revised DEPLOY plan").await;
+
+    ada.send("@label=s1 SEARCH #general :deploy");
+    let start = ada.recv().await;
+    assert_eq!(start.label.as_deref(), Some("s1"));
+    assert!(matches!(start.event, Event::BatchStart { .. }));
+
+    let mut bodies = Vec::new();
+    loop {
+        match ada.recv().await.event {
+            Event::Message(m) => bodies.push(m.body.clone()),
+            Event::BatchEnd { .. } => break,
+            _ => {}
+        }
+    }
+    // Both "deploy" messages, case-insensitive, newest-first; "lunch time" and
+    // ada's join system row are excluded.
+    assert_eq!(
+        bodies,
+        vec![
+            "revised DEPLOY plan".to_string(),
+            "deploy the reference server".to_string(),
+        ]
+    );
+
+    // Search requires membership.
+    ada.send("SEARCH #ghost :x");
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn history_thread_filter_returns_only_the_thread() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+
+    let root = say(&mut ada, "#general", "thread root").await;
+    // A reply tagged into the thread.
+    ada.send(&format!("@thread={root} MSG #general :reply in thread"));
+    assert!(matches!(ada.recv().await.event, Event::Message(_))); // own echo
+    // An unrelated channel message (not in the thread).
+    say(&mut ada, "#general", "unrelated chatter").await;
+
+    ada.send(&format!("@label=t1 HISTORY #general thread={root}"));
+    let start = ada.recv().await;
+    assert_eq!(start.label.as_deref(), Some("t1"));
+    assert!(matches!(start.event, Event::BatchStart { .. }));
+    let mut bodies = Vec::new();
+    loop {
+        match ada.recv().await.event {
+            Event::Message(m) => bodies.push(m.body.clone()),
+            Event::BatchEnd { .. } => break,
+            _ => {}
+        }
+    }
+    // Root + its reply, oldest-first; the unrelated message is excluded.
+    assert_eq!(
+        bodies,
+        vec![
+            "thread root".to_string(),
+            "reply in thread".to_string(),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn presence_relays_to_co_members_but_never_invisible() {
     let ctx = ctx(&["#general"]);
     let mut ada = joined(&ctx, "ada", "#general").await;

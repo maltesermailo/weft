@@ -41,6 +41,8 @@ export interface AppCtx {
     | undefined;
   goHome(): void;
   selectServer(ns: string): void;
+  /** Select a server tile and open its header menu (rail right-click). */
+  openServerMenu(ns: string): void;
   open(name: string): void; // set active + mark read
   openDiscover(): void;
   federate(target: string): void; // §11.10 join a foreign namespace on demand
@@ -140,6 +142,28 @@ export interface AppCtx {
   openPins(): void;
   openReports(): void;
   partActive(): void;
+
+  // ---- message search (§6.4) ----
+  searchOpen: boolean;
+  readonly searchQuery: string;
+  readonly searchScope: string;
+  readonly searchResults: Msg[];
+  readonly searching: boolean;
+  openSearch(): void;
+  runSearch(query: string): void;
+  jumpToResult(m: Msg): void;
+
+  // ---- threads (§9.4) ----
+  readonly threadRoot: Msg | null;
+  readonly threadMessages: Msg[];
+  threadComposer: string;
+  /** The active channel's messages excluding thread replies (main timeline). */
+  readonly visibleMessages: Msg[];
+  /** Number of loaded replies in a message's thread (for the indicator). */
+  threadCount(msgid?: string): number;
+  openThread(root: Msg): void;
+  closeThread(): void;
+  sendThread(): void;
 
   // ---- message list / items ----
   readonly loadingHistory: string | null;

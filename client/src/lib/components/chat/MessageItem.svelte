@@ -62,6 +62,13 @@
           {/each}
         </div>
       {/if}
+      {#if app.active.startsWith("#") && app.threadCount(m.msgid) > 0}
+        {@const n = app.threadCount(m.msgid)}
+        <button class="thread-indicator" onclick={() => app.openThread(m)}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+          {n} {n === 1 ? "reply" : "replies"}
+        </button>
+      {/if}
     </div>
     {#if m.msgid && app.editingKey !== m.key}
       <div class="msg-actions">
@@ -71,6 +78,11 @@
         <button class="msg-act" title="Reply" aria-label="Reply" onclick={() => (app.replyTo = m)}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 17 4 12l5-5" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg>
         </button>
+        {#if app.active.startsWith("#")}
+          <button class="msg-act" title="Reply in thread" aria-label="Reply in thread" onclick={() => app.openThread(m)}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /><path d="M8 9h8M8 13h5" /></svg>
+          </button>
+        {/if}
         {#if app.active.startsWith("#")}
           <button class="msg-act" class:on={app.activeChannel?.pinnedIds?.includes(m.msgid ?? "")} title={app.activeChannel?.pinnedIds?.includes(m.msgid ?? "") ? "Unpin" : "Pin"} aria-label="Pin" onclick={() => app.togglePin(m)}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg>

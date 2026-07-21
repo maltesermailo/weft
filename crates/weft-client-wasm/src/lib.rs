@@ -241,18 +241,19 @@ impl WeftClient {
                             .collect()
                     })
                     .unwrap_or_default();
-                build_msg(&arg("target"), &arg("body"), opt("replyTo"), attachments)?
+                build_msg(&arg("target"), &arg("body"), opt("replyTo"), attachments, opt("thread"))?
             }
             "edit" => build_edit(&arg("msgid"), &arg("body"))?,
             "delete" => build_delete(&arg("msgid"))?,
             "react" => build_react(&arg("msgid"), &arg("emoji"), flag("add"))?,
-            "history" => build_history(&arg("target"), opt("before"))?,
+            "history" => build_history(&arg("target"), opt("before"), opt("thread"))?,
             "typing" => build_typing(&arg("channel"), flag("active"))?,
             "presence" => build_presence(&arg("status"))?,
             "mark" => build_mark(&arg("channel"), &arg("msgid"))?,
             "members" => build_members(&arg("channel"))?,
             "pin" => build_pin(&arg("msgid"), flag("pinned"))?,
             "pins" => build_pins(&arg("channel"))?,
+            "search" => build_search(&arg("channel"), &arg("query"))?,
             // ---- caps / roles ----
             "caps" => build_caps(&arg("account"), &arg("scope"))?,
             "grant" => build_grant(&arg("subject"), &arg("scope"), &arg("caps"))?,

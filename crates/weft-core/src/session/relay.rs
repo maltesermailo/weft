@@ -510,9 +510,6 @@ impl<S: ControlStream> Session<S> {
         limit: Option<u32>,
         thread: Option<MsgId>,
     ) -> io::Result<Flow> {
-        if thread.is_some() {
-            return self.unsupported(label, "thread filter lands in M6").await;
-        }
         // §6.4: channel history needs membership; DM history is
         // participant-by-construction (the scope key contains the caller).
         let (scope, policy, target) = match target {
@@ -543,30 +540,45 @@ impl<S: ControlStream> Session<S> {
             // §5.2 relay-only: nothing stored, and saying so is mandatory.
             (Vec::new(), true)
         } else {
-            let page = weft_store::Page {
-                before: before.as_ref().map(|m| m.ulid()),
-                after: after.as_ref().map(|m| m.ulid()),
-                limit,
-            };
-            let roots = match self.ctx.events.roots(&scope, page).await {
-                Ok(roots) => roots,
-                Err(e) => return self.internal(label, &e).await,
+            // §9.4 a `thread=<root>` filter returns just that thread (the root +
+            // its replies, oldest-first); otherwise the normal paged window.
+            let roots = match &thread {
+                Some(root) => match self.ctx.events.thread_roots(&scope, root, limit).await {
+                    Ok(roots) => roots,
+                    Err(e) => return self.internal(label, &e).await,
+                },
+                None => {
+                    let page = weft_store::Page {
+                        before: before.as_ref().map(|m| m.ulid()),
+                        after: after.as_ref().map(|m| m.ulid()),
+                        limit,
+                    };
+                    match self.ctx.events.roots(&scope, page).await {
+                        Ok(roots) => roots,
+                        Err(e) => return self.internal(label, &e).await,
+                    }
+                }
             };
             let root_ulids: Vec<_> = roots.iter().map(|r| r.msgid.ulid()).collect();
             let children = match self.ctx.events.children(&scope, &root_ulids).await {
                 Ok(children) => children,
                 Err(e) => return self.internal(label, &e).await,
             };
-            let watermark = match self.ctx.events.purged_before(&scope).await {
-                Ok(watermark) => watermark,
-                Err(e) => return self.internal(label, &e).await,
-            };
             let items = weft_store::materialize(roots, children);
-            // §6.4: `truncated` marks retention gaps — set when this page
-            // ran out of data (not merely full) while the window's older
-            // edge reaches into the purged region.
-            let window_floor_ms = after.as_ref().map(|m| m.timestamp_ms()).unwrap_or(0);
-            let truncated = items.len() < limit && watermark.is_some_and(|w| window_floor_ms < w);
+            let truncated = if thread.is_some() {
+                // A full thread page may have more replies upstream.
+                items.len() >= limit
+            } else {
+                // §6.4: `truncated` marks retention gaps — set when this page ran
+                // out of data (not merely full) while the window's older edge
+                // reaches into the purged region.
+                let watermark = match self.ctx.events.purged_before(&scope).await {
+                    Ok(watermark) => watermark,
+                    Err(e) => return self.internal(label, &e).await,
+                };
+                let window_floor_ms = after.as_ref().map(|m| m.timestamp_ms()).unwrap_or(0);
+                items.len() < limit && watermark.is_some_and(|w| window_floor_ms < w)
+            };
             (items, truncated)
         };
 
@@ -779,6 +791,68 @@ impl<S: ControlStream> Session<S> {
                     )
                     .await?;
                 }
+            }
+        }
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+                compacted: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// §6.4 `SEARCH <#chan> :<query>`: membership-gated message search. Returns
+    /// the matching messages as a `BATCH` of `MESSAGE` (like PINS/HISTORY), so
+    /// the client folds them exactly as it renders any message.
+    pub(super) async fn on_search(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        query: String,
+    ) -> io::Result<Flow> {
+        if !self.joined.contains_key(&channel) {
+            return self.not_member_cap(label, &channel, "view").await;
+        }
+        const SEARCH_LIMIT: usize = 50;
+        let query = query.trim();
+        // An empty query would substring-match everything — return no results.
+        let hits = if query.is_empty() {
+            Vec::new()
+        } else {
+            match self
+                .ctx
+                .events
+                .search(&Scope::Channel(channel.clone()), query, SEARCH_LIMIT)
+                .await
+            {
+                Ok(hits) => hits,
+                Err(e) => return self.internal(label, &e).await,
+            }
+        };
+
+        self.batches += 1;
+        let id = format!("s{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for record in hits {
+            if let EventKind::Message { body, meta } = record.kind {
+                self.send_event(
+                    None,
+                    Event::Message(Box::new(weft_proto::MessageEvent {
+                        target: Target::Channel(channel.clone()),
+                        sender: record.sender,
+                        msgid: record.msgid,
+                        body,
+                        meta,
+                        edited: None,
+                        edited_at: None,
+                    })),
+                )
+                .await?;
             }
         }
         self.send_event(

@@ -109,6 +109,17 @@ mod spa {
     /// `_app/*` assets are immutable regardless, so this costs almost nothing.
     pub(super) async fn serve(uri: Uri) -> Response {
         let path = uri.path().trim_start_matches('/');
+        // `/admin*` is a server-owned namespace: reaching the SPA fallback means
+        // the admin router isn't mounted (`[admin] enabled = false`). Serving the
+        // chat client here would masquerade as "/admin works" — return a clear
+        // 404 instead so the misconfiguration is obvious.
+        if path == "admin" || path.starts_with("admin/") {
+            return (
+                StatusCode::NOT_FOUND,
+                "admin panel is disabled — set `[admin] enabled = true` in the weftd config",
+            )
+                .into_response();
+        }
         let path = if path.is_empty() { "index.html" } else { path };
         let no_cache = (header::CACHE_CONTROL, "no-cache");
         if let Some(file) = Assets::get(path) {

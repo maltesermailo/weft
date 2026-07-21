@@ -20,11 +20,13 @@
   import MessageList from "$lib/components/chat/MessageList.svelte";
   import Composer from "$lib/components/chat/Composer.svelte";
   import Lightbox from "$lib/components/chat/Lightbox.svelte";
+  import ThreadPanel from "$lib/components/chat/ThreadPanel.svelte";
   import CreateChannelModal from "$lib/components/modals/CreateChannelModal.svelte";
   import CreateCategoryModal from "$lib/components/modals/CreateCategoryModal.svelte";
   import ReportsQueueModal from "$lib/components/modals/ReportsQueueModal.svelte";
   import InviteLinkModal from "$lib/components/modals/InviteLinkModal.svelte";
   import PinsModal from "$lib/components/modals/PinsModal.svelte";
+  import SearchModal from "$lib/components/modals/SearchModal.svelte";
   import DiscoverModal from "$lib/components/modals/DiscoverModal.svelte";
   import ReportModal from "$lib/components/modals/ReportModal.svelte";
   import ChannelSettings from "$lib/components/modals/ChannelSettings.svelte";
@@ -373,6 +375,20 @@
   let pinsList = $state<Msg[]>([]);
   let loadingPins: string | null = null;
   let pinsBuf: Msg[] = [];
+  // ---- message search (§6.4) — results arrive as a BATCH like pins ----
+  let searchOpen = $state(false);
+  let searchQuery = $state("");
+  let searchScope = $state(""); // the channel searched
+  let searchResults = $state<Msg[]>([]);
+  let searching = $state(false);
+  let loadingSearch: string | null = null; // channel whose result batch is inbound
+  let searchBuf: Msg[] = [];
+  // ---- threads (§9.4) — a side panel showing one thread (root + replies) ----
+  let threadRoot = $state<Msg | null>(null);
+  let threadMessages = $state<Msg[]>([]);
+  let threadComposer = $state("");
+  let loadingThread: string | null = null; // root msgid whose thread batch is inbound
+  let threadBuf: Msg[] = [];
   // ---- capability badges (§10.4 CAPS), keyed `account|scope` ----
   let capsFor = $state<Record<string, { owner: boolean; mod: boolean; list: string[] }>>({});
   const capsInflight = new Set<string>();
@@ -702,6 +718,12 @@
       active = first?.name ?? "";
     }
   }
+  // Right-click a rail tile: select the server and open its header menu (the
+  // same Create Invite / Notification / Server Settings menu as clicking the name).
+  function openServerMenu(ns: string) {
+    selectServer(ns);
+    serverMenu = true;
+  }
   // Fetch a namespace's layout + categories from the server whenever it
   // becomes active (covers reload — the client keeps no category state).
   const layoutFetched = new Set<string>();
@@ -880,14 +902,18 @@
           edited: e.edited,
           md: e.md && !e.system,
           replyTo: e.reply_to ?? undefined,
+          thread: e.thread ?? undefined,
           bridged: e.network !== network,
           net: !e.system && e.network !== network ? e.network : undefined,
           attachments: e.attachments?.length ? e.attachments : undefined,
         });
-        // Batch messages buffer until BATCH END. A PINS batch (loadingPins set)
-        // routes to the pins buffer; a HISTORY batch to the history buffer.
+        // Batch messages buffer until BATCH END. A SEARCH batch routes to the
+        // search buffer, a PINS batch (loadingPins) to the pins buffer, else a
+        // HISTORY batch to the history buffer.
         if (e.history) {
-          if (loadingPins) pinsBuf.push(msg);
+          if (loadingThread) threadBuf.push(msg);
+          else if (loadingSearch) searchBuf.push(msg);
+          else if (loadingPins) pinsBuf.push(msg);
           else historyBuf.push(msg);
           break;
         }
@@ -895,6 +921,15 @@
         // Dedupe: history backfill may re-deliver a live message.
         if (e.msgid && ch.messages.some((m) => m.msgid === e.msgid)) break;
         ch.messages.push(msg);
+        // If this is a live reply in the open thread, show it in the panel too.
+        if (
+          threadRoot &&
+          key === active &&
+          msg.thread === threadRoot.msgid &&
+          !threadMessages.some((m) => m.msgid === msg.msgid)
+        ) {
+          threadMessages = [...threadMessages, msg];
+        }
         if (key.startsWith("#")) {
           if (e.network !== network) {
             // §11.11 recognition: fetch a federated author's roles here (once)
@@ -1125,6 +1160,19 @@
           if (scope) rolesByScope[scope] = roleBuf;
           roleBuf = [];
           currentBatchId = "";
+          break;
+        }
+        if (loadingThread) {
+          threadMessages = threadBuf;
+          threadBuf = [];
+          loadingThread = null;
+          break;
+        }
+        if (loadingSearch) {
+          searchResults = searchBuf;
+          searchBuf = [];
+          loadingSearch = null;
+          searching = false;
           break;
         }
         if (loadingPins) {
@@ -1908,6 +1956,74 @@
     weft.pins(active).catch(() => {});
   }
 
+  // ---- message search (§6.4) ----
+  function openSearch() {
+    if (!active.startsWith("#")) return;
+    searchQuery = "";
+    searchResults = [];
+    searchScope = active;
+    searchOpen = true;
+  }
+  function runSearch(query: string) {
+    const q = query.trim();
+    if (!q || !active.startsWith("#")) return;
+    searchQuery = q;
+    searchScope = active;
+    searchResults = [];
+    searchBuf = [];
+    searching = true;
+    loadingSearch = active;
+    weft.search(active, q).catch((e) => {
+      loadingSearch = null;
+      searching = false;
+      toast(String(e), "error");
+    });
+  }
+  function jumpToResult(m: Msg) {
+    searchOpen = false;
+    jumpTo(m.msgid); // best-effort: scrolls if the message is loaded in the timeline
+  }
+
+  // ---- threads (§9.4) ----
+  // How many loaded replies a root has (its thread size), for the indicator.
+  const threadCount = (msgid?: string): number =>
+    !msgid || !activeChannel ? 0 : activeChannel.messages.filter((m) => m.thread === msgid).length;
+  function openThread(root: Msg) {
+    if (!root.msgid) return;
+    threadRoot = root;
+    threadMessages = [root];
+    threadComposer = "";
+    loadingThread = root.msgid;
+    weft.history(active, undefined, root.msgid).catch((e) => {
+      loadingThread = null;
+      toast(String(e), "error");
+    });
+  }
+  function closeThread() {
+    threadRoot = null;
+    threadMessages = [];
+    loadingThread = null;
+    threadBuf = [];
+  }
+  function sendThread() {
+    const text = threadComposer.trim();
+    if (!text || !threadRoot?.msgid || !active) return;
+    weft
+      .sendMessage(active, text, undefined, [], threadRoot.msgid)
+      .then(() => (threadComposer = ""))
+      .catch((e) => toast(String(e), "error"));
+  }
+  // Main timeline hides thread replies (they live in the thread panel), Discord-style.
+  const visibleMessages = $derived(activeChannel?.messages.filter((m) => !m.thread) ?? []);
+  // Close the thread panel when the active channel changes.
+  let threadChannel = "";
+  $effect(() => {
+    if (active !== threadChannel) {
+      threadChannel = active;
+      closeThread();
+    }
+  });
+
   // Namespace admin
   function openNsSettings() {
     const meta = discovered[activeServer];
@@ -2039,6 +2155,7 @@
     get activeNsMeta() { return activeNsMeta; },
     goHome: () => (homeView = true),
     selectServer,
+    openServerMenu,
     open: (name: string) => { active = name; markRead(name); },
     openDiscover,
     get channels() { return channels; },
@@ -2104,6 +2221,26 @@
     openPins,
     openReports,
     partActive: () => weft.part(active).catch(() => {}),
+    // search
+    get searchOpen() { return searchOpen; },
+    set searchOpen(v: boolean) { searchOpen = v; },
+    get searchQuery() { return searchQuery; },
+    get searchScope() { return searchScope; },
+    get searchResults() { return searchResults; },
+    get searching() { return searching; },
+    openSearch,
+    runSearch,
+    jumpToResult,
+    // threads
+    get threadRoot() { return threadRoot; },
+    get threadMessages() { return threadMessages; },
+    get threadComposer() { return threadComposer; },
+    set threadComposer(v: string) { threadComposer = v; },
+    get visibleMessages() { return visibleMessages; },
+    threadCount,
+    openThread,
+    closeThread,
+    sendThread,
     // message list / items
     get loadingHistory() { return loadingHistory; },
     get editingKey() { return editingKey; },
@@ -2247,6 +2384,7 @@
   {/if}
   <Toasts {toasts} />
   <Lightbox />
+  <ThreadPanel />
   {#if federating}
     <div class="federating-banner">
       <span class="fed-spinner"></span>
@@ -2325,6 +2463,10 @@
 
     {#if pinsOpen}
       <PinsModal onclose={() => (pinsOpen = false)} />
+    {/if}
+
+    {#if searchOpen}
+      <SearchModal onclose={() => (searchOpen = false)} />
     {/if}
 
     {#if newChanOpen}

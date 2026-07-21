@@ -25,6 +25,9 @@
   // and for yourself only when you own the scope — there wearing a role is
   // purely cosmetic, since the owner already holds every capability.
   const canAssignRoles = $derived(allRoles.length > 0 && (!isSelf || iAmOwner));
+  // Roles this account doesn't hold yet — the "+" dropdown's options.
+  const unheldRoles = $derived(allRoles.filter((r) => !myRoles.some((h) => h.name === r.name)));
+  let roleMenuOpen = $state(false);
 
   // §6.7 moderation controls: scope (channel/namespace/network) + optional reason.
   let modScope = $state(app.scopesFor()[0]);
@@ -52,37 +55,36 @@
       </div>
       <div class="profile-handle">{target}@{app.network} · <span class="pres-{pr}">{pr}</span></div>
 
-      {#if canAssignRoles}
+      {#if myRoles.length || canAssignRoles || targetIsOwner}
         <div class="profile-divider"></div>
         <div class="profile-section-label">Roles</div>
         <div class="role-pills">
-          {#each allRoles as r (r.name)}
-            {@const held = myRoles.some((h) => h.name === r.name)}
-            <button
-              class="role-pill clickable"
-              class:held
-              style="--role: {r.color}"
-              title={held ? `Remove ${r.name}` : `Assign ${r.name}`}
-              onclick={() => (held ? app.unassignRoleFrom(target, r) : app.assignRoleTo(target, r))}>
-              <span class="role-dot"></span>{r.name}{#if held}<span class="pill-x">×</span>{/if}
-            </button>
-          {/each}
-        </div>
-        <div class="role-hint">
-          {#if targetIsOwner && isSelf}Owner — you already hold every permission; roles here are just cosmetic.{:else}Click to assign · click again to remove{/if}
-        </div>
-      {:else if myRoles.length}
-        <div class="profile-divider"></div>
-        <div class="profile-section-label">Roles</div>
-        <div class="role-pills">
+          <!-- Discord-style: show only the roles this member holds; the "+" adds. -->
           {#each myRoles as r (r.name)}
-            <span class="role-pill" style="--role: {r.color}"><span class="role-dot"></span>{r.name}</span>
+            <span class="role-pill" style="--role: {r.color}">
+              <span class="role-dot"></span>{r.name}
+              {#if canAssignRoles}<button class="pill-x" title="Remove {r.name}" aria-label="Remove {r.name}" onclick={() => app.unassignRoleFrom(target, r)}>×</button>{/if}
+            </span>
           {/each}
+          {#if canAssignRoles && unheldRoles.length}
+            <div class="role-add-wrap">
+              <button class="role-add" title="Add role" aria-label="Add role" onclick={() => (roleMenuOpen = !roleMenuOpen)}>+</button>
+              {#if roleMenuOpen}
+                <button class="role-add-backdrop" aria-label="Close" onclick={() => (roleMenuOpen = false)}></button>
+                <div class="role-add-menu">
+                  {#each unheldRoles as r (r.name)}
+                    <button class="role-add-item" onclick={() => { app.assignRoleTo(target, r); roleMenuOpen = false; }}>
+                      <span class="role-dot" style="--role: {r.color}"></span>{r.name}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/if}
         </div>
-      {:else if targetIsOwner}
-        <div class="profile-divider"></div>
-        <div class="profile-section-label">Roles</div>
-        <div class="role-hint">Owner — holds all permissions.</div>
+        {#if targetIsOwner}
+          <div class="role-hint">Owner — holds every permission{#if isSelf}; roles here are cosmetic{/if}.</div>
+        {/if}
       {/if}
 
       <div class="profile-divider"></div>

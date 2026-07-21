@@ -24,6 +24,8 @@ export type Msg = {
   md?: boolean;
   /// msgid this replies to (§9.3).
   replyTo?: string;
+  /// Root msgid this message belongs to, when it's a thread reply (§9.4).
+  thread?: string;
   /// Sender is from a federated peer network.
   bridged?: boolean;
   /// The sender's network when foreign (`author@net` disambiguates federated

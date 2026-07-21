@@ -473,6 +473,120 @@ where
         (0, 0),
     );
 
+    // -- message search (§6.4) --
+    let search_scope: Scope = Scope::Channel(format!("#search-{tag}").parse().unwrap());
+    store
+        .append(msg(&search_scope, 10_000, "bob", "the Deploy plan is ready".into()))
+        .await
+        .unwrap();
+    store
+        .append(msg(&search_scope, 20_000, "bob", "lunch break".into()))
+        .await
+        .unwrap();
+    store
+        .append(msg(&search_scope, 30_000, "bob", "revised deploy timeline".into()))
+        .await
+        .unwrap();
+    // A join/part system row must never surface in search.
+    store
+        .append(record(
+            &search_scope,
+            25_000,
+            25_000,
+            "bob",
+            EventKind::Message {
+                body: "deploy".into(),
+                meta: MsgMeta {
+                    system: Some("join".into()),
+                    ..MsgMeta::default()
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    // Case-insensitive substring, newest-first, system rows excluded.
+    let hits = store.search(&search_scope, "deploy", 10).await.unwrap();
+    let bodies: Vec<String> = hits
+        .iter()
+        .map(|r| match &r.kind {
+            EventKind::Message { body, .. } => body.clone(),
+            _ => String::new(),
+        })
+        .collect();
+    assert_eq!(
+        bodies,
+        vec![
+            "revised deploy timeline".to_string(),
+            "the Deploy plan is ready".to_string(),
+        ]
+    );
+    // The limit caps results.
+    assert_eq!(store.search(&search_scope, "deploy", 1).await.unwrap().len(), 1);
+    // A deleted message drops out of results.
+    store
+        .append(record(
+            &search_scope,
+            40_000,
+            30_000,
+            "bob",
+            EventKind::Delete,
+        ))
+        .await
+        .unwrap();
+    let after_delete = store.search(&search_scope, "deploy", 10).await.unwrap();
+    assert_eq!(after_delete.len(), 1, "deleted root must not appear");
+    // No match → empty.
+    assert!(store.search(&search_scope, "zzz-none", 10).await.unwrap().is_empty());
+
+    // -- threads (§9.4) --
+    let thread_scope: Scope = Scope::Channel(format!("#thread-{tag}").parse().unwrap());
+    let root_id = msgid(500_000);
+    let threaded = |at: u64, body: &str| {
+        record(
+            &thread_scope,
+            at,
+            at,
+            "bob",
+            EventKind::Message {
+                body: body.to_string(),
+                meta: MsgMeta {
+                    thread: Some(root_id.clone()),
+                    ..MsgMeta::default()
+                },
+            },
+        )
+    };
+    store
+        .append(msg(&thread_scope, 500_000, "bob", "thread root".into()))
+        .await
+        .unwrap();
+    store.append(msg(&thread_scope, 510_000, "bob", "unrelated".into())).await.unwrap();
+    store.append(threaded(600_000, "first reply")).await.unwrap();
+    store.append(threaded(700_000, "second reply")).await.unwrap();
+    // Root + its replies, oldest-first; the unrelated message is excluded.
+    let thread = store.thread_roots(&thread_scope, &root_id, 50).await.unwrap();
+    let thread_bodies: Vec<String> = thread
+        .iter()
+        .map(|r| match &r.kind {
+            EventKind::Message { body, .. } => body.clone(),
+            _ => String::new(),
+        })
+        .collect();
+    assert_eq!(
+        thread_bodies,
+        vec![
+            "thread root".to_string(),
+            "first reply".to_string(),
+            "second reply".to_string(),
+        ]
+    );
+    // A root with no replies returns just itself.
+    let lonely = store
+        .thread_roots(&thread_scope, &msgid(510_000), 50)
+        .await
+        .unwrap();
+    assert_eq!(lonely.len(), 1);
+
     // -- verification claims (infrastructure only) --
     store
         .upsert_verification(&ada, "email", "ada@example.org")

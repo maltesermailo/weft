@@ -291,6 +291,75 @@ impl EventStore for PgStore {
         Ok((unread as u64, mentions as u64))
     }
 
+    async fn search(
+        &self,
+        scope: &Scope,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, StoreError> {
+        // Escape LIKE metacharacters so a query like "50%" or "a_b" is literal;
+        // the value is still bound (no SQL injection), this is just wildcards.
+        let pattern = format!(
+            "%{}%",
+            query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM weft_events e
+            WHERE e.scope = $1
+              AND e.kind = 0
+              AND e.system IS NULL
+              AND e.body ILIKE $2 ESCAPE '\'
+              AND NOT EXISTS (
+                SELECT 1 FROM weft_events d
+                WHERE d.scope = e.scope AND d.root_ulid = e.ulid AND d.kind = 2
+              )
+            ORDER BY e.ulid DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(scope.as_key())
+        .bind(&pattern)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.iter()
+            .map(Self::record_from_row)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    async fn thread_roots(
+        &self,
+        scope: &Scope,
+        root: &MsgId,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, StoreError> {
+        // The root itself (by ulid) plus replies (thread = the root's full msgid),
+        // oldest-first. `thread` stores the full `origin/ULID` msgid string.
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM weft_events
+            WHERE scope = $1 AND kind = 0 AND (ulid = $2 OR thread = $3)
+            ORDER BY ulid ASC
+            LIMIT $4
+            "#,
+        )
+        .bind(scope.as_key())
+        .bind(root.ulid().to_string())
+        .bind(root.to_string())
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.iter()
+            .map(Self::record_from_row)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
     async fn children(
         &self,
         scope: &Scope,

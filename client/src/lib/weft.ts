@@ -99,6 +99,7 @@ export type WeftEvent =
       history: boolean;
       edited: boolean;
       reply_to: string | null;
+      thread: string | null;
       md: boolean;
       attachments: string[];
       system: string | null;
@@ -363,9 +364,10 @@ export function nsRecover(name: string, rotation: string) {
   return invoke("ns_recover", { name, rotation });
 }
 
-/// Request a page of history for `target`, older than `before` if given.
-export function history(target: string, before?: string) {
-  return invoke("history", { target, before: before ?? null });
+/// Request a page of history for `target`, older than `before` if given, or a
+/// single thread's messages when `thread` (the root msgid) is set (§9.4).
+export function history(target: string, before?: string, thread?: string) {
+  return invoke("history", { target, before: before ?? null, thread: thread ?? null });
 }
 
 export function edit(msgid: string, body: string) {
@@ -389,12 +391,14 @@ export function sendMessage(
   body: string,
   replyTo?: string,
   attachments?: string[],
+  thread?: string,
 ) {
   return invoke("send_message", {
     target,
     body,
     replyTo: replyTo ?? null,
     attachments: attachments ?? [],
+    thread: thread ?? null,
   });
 }
 
@@ -475,6 +479,11 @@ export function pin(msgid: string, pinned: boolean) {
 
 export function pins(channel: string) {
   return invoke("pins", { channel });
+}
+
+/// §6.4 message search in a channel; results arrive as a BATCH of messages.
+export function search(channel: string, query: string) {
+  return invoke("search", { channel, query });
 }
 
 export function caps(account: string, scope: string) {

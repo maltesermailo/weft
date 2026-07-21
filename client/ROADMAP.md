@@ -92,10 +92,24 @@ Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
   round-trips + store contract + core black-box tests all green; spec §6.3
   amended. *Deferred:* structured mentions (the count uses a body-text
   heuristic) and a per-message live push (client increments locally instead).
-- [ ] **Message search** — nothing client-side and **no server verb** (the
-  biggest server prerequisite on this list; Postgres full-text over the
-  event store would do for v1).
-- [ ] **Threads** — absent entirely; spec parks it at M6+. Server + client.
+- [x] **Message search** — shipped (2026-07-22). `SEARCH <#chan> :<query>`
+  verb → a `BATCH` of matching messages (newest-first, ≤50), membership-gated;
+  `EventStore::search` (case-insensitive substring, mem + PG shared contract,
+  tombstones + system rows excluded); client search modal (topbar 🔍) with a
+  results list + jump-to. Proto round-trip + store contract + core black-box
+  tests green; spec §6.4 amended. *Deferred:* Postgres `tsvector` ranking
+  (substring for now), namespace-wide search, and loading context around a
+  jumped-to result that isn't in the timeline yet.
+- [x] **Threads** — shipped (2026-07-22). Built on the existing `thread=`
+  message tag: the server's `HISTORY thread=<root>` filter (was stubbed)
+  now returns a thread via `EventStore::thread_roots` (mem + PG shared
+  contract); client-core carries `thread` on messages + send + history;
+  the client shows a **thread side panel** (root + replies + composer),
+  a "N replies" indicator on roots, a "reply in thread" action, and hides
+  thread replies from the main timeline (Discord-style). Store contract +
+  core black-box tests green; spec §9.4 amended. *Deferred:* server-side
+  reply counts (client tallies from loaded messages), thread mute/notif,
+  and a dedicated thread list.
 - [ ] **Custom / per-namespace emoji** — picker is a hardcoded unicode set;
   no upload, `:name:` autocomplete, skin tones, or recently-used. Needs a
   server emoji registry (media store can host the images) + client work.

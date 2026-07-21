@@ -263,8 +263,13 @@ fn ns_recovery_cancel(
 
 /// Request a page of history for `target`, older than `before` if given (§6.4).
 #[tauri::command]
-fn history(conn: State<'_, Conn>, target: String, before: Option<String>) -> Result<(), String> {
-    conn.send(weft::build_history(&target, before)?)
+fn history(
+    conn: State<'_, Conn>,
+    target: String,
+    before: Option<String>,
+    thread: Option<String>,
+) -> Result<(), String> {
+    conn.send(weft::build_history(&target, before, thread)?)
 }
 
 #[tauri::command]
@@ -289,12 +294,14 @@ fn send_message(
     body: String,
     reply_to: Option<String>,
     attachments: Option<Vec<String>>,
+    thread: Option<String>,
 ) -> Result<(), String> {
     conn.send(weft::build_msg(
         &target,
         &body,
         reply_to,
         attachments.unwrap_or_default(),
+        thread,
     )?)
 }
 
@@ -511,6 +518,11 @@ fn pin(conn: State<'_, Conn>, msgid: String, pinned: bool) -> Result<(), String>
 #[tauri::command]
 fn pins(conn: State<'_, Conn>, channel: String) -> Result<(), String> {
     conn.send(weft::build_pins(&channel)?)
+}
+
+#[tauri::command]
+fn search(conn: State<'_, Conn>, channel: String, query: String) -> Result<(), String> {
+    conn.send(weft::build_search(&channel, &query)?)
 }
 
 #[tauri::command]
@@ -733,6 +745,7 @@ pub fn run() {
             members,
             pin,
             pins,
+            search,
             caps,
             part,
             channel_create,

@@ -442,16 +442,27 @@ async fn media_posting_and_gated_fetch_over_http() {
     assert_eq!(status, 206);
     assert_eq!(head, b"http");
 
-    // Non-member bearer AND bad bearer both → 404 (gated == absent, invariant 1).
+    // §13 media-proxy model: the HTTP path serves a content-addressed blob to
+    // anyone presenting its hash (the hash is the capability). A non-member
+    // bearer, and even a bogus one, succeed — the per-blob membership gate
+    // applies only on the native QUIC data plane (tested separately).
     let bob = server.ctx().mint_media_bearer("bob".parse().unwrap());
     assert_eq!(
         http_get(http, &format!("/media/{hash}?t={bob}"), None)
             .await
             .0,
-        404
+        200
     );
     assert_eq!(
         http_get(http, &format!("/media/{hash}?t=nope"), None)
+            .await
+            .0,
+        200
+    );
+    // A blob that doesn't exist still reads as not-found.
+    let absent = "0".repeat(64);
+    assert_eq!(
+        http_get(http, &format!("/media/{absent}?t={bearer}"), None)
             .await
             .0,
         404

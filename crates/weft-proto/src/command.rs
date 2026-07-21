@@ -127,6 +127,9 @@ pub enum Command {
     Unpin { msgid: MsgId },
     /// `PINS <#chan>` — list pinned messages (§6.4), membership-gated.
     Pins { channel: ChannelName },
+    /// `SEARCH <#chan> :<query>` — full-text message search in a channel
+    /// (§6.4), membership-gated. Matching messages return as a `BATCH`.
+    Search { channel: ChannelName, query: String },
     /// `CAPS <account> <scope>` — query an account's effective caps at a scope
     /// (§10.4). Public: any member may ask (caps aren't secret). → `CAPS` event.
     Caps { account: Account, scope: String },
@@ -661,6 +664,13 @@ impl Command {
             "PINS" => Ok(Command::Pins {
                 channel: Args::new(line, "PINS").req("channel")?.parse()?,
             }),
+            "SEARCH" => {
+                let mut args = Args::new(line, "SEARCH");
+                Ok(Command::Search {
+                    channel: args.req("channel")?.parse()?,
+                    query: args.trailing_req("query")?.to_string(),
+                })
+            }
             "CAPS" => {
                 let mut args = Args::new(line, "CAPS");
                 Ok(Command::Caps {
@@ -1485,6 +1495,11 @@ impl Command {
             Command::Pin { msgid } => ("PIN", vec![msgid.to_string()], None),
             Command::Unpin { msgid } => ("UNPIN", vec![msgid.to_string()], None),
             Command::Pins { channel } => ("PINS", vec![channel.to_string()], None),
+            Command::Search { channel, query } => (
+                "SEARCH",
+                vec![channel.to_string()],
+                Some(query.clone()),
+            ),
             Command::Caps { account, scope } => {
                 ("CAPS", vec![account.to_string(), scope.clone()], None)
             }
@@ -2182,6 +2197,10 @@ mod tests {
         }));
         round_trip(&Request::new(Command::Pins {
             channel: "#general".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::Search {
+            channel: "#general".parse().unwrap(),
+            query: "deploy plan v2".to_string(),
         }));
         round_trip(&Request::new(Command::Caps {
             account: "ada".parse().unwrap(),

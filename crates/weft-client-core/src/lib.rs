@@ -80,6 +80,8 @@ pub enum ClientEvent {
         edited: bool,
         /// `reply-to=` — the msgid this replies to (§9.3), if any.
         reply_to: Option<String>,
+        /// `thread=` — the root msgid this message belongs to (§9.4), if any.
+        thread: Option<String>,
         /// `fmt=md` — render the body as markdown (§9.4).
         md: bool,
     },
@@ -462,6 +464,7 @@ pub fn on_line<E: EventSink>(
             history: *in_batch,
             edited: m.edited.is_some(),
             reply_to: m.meta.reply_to.as_ref().map(|r| r.to_string()),
+            thread: m.meta.thread.as_ref().map(|t| t.to_string()),
             md: m.meta.fmt.as_deref() == Some("md"),
             attachments: m.meta.attachments.clone(),
             system: m.meta.system.clone(),
@@ -801,6 +804,7 @@ pub fn build_msg(
     body: &str,
     reply_to: Option<String>,
     attachments: Vec<String>,
+    thread: Option<String>,
 ) -> Result<String, String> {
     let target: Target = target.parse().map_err(|_| "bad target".to_string())?;
     let reply_to = match reply_to.filter(|r| !r.is_empty()) {
@@ -810,10 +814,18 @@ pub fn build_msg(
         ),
         None => None,
     };
+    let thread = match thread.filter(|t| !t.is_empty()) {
+        Some(t) => Some(
+            t.parse::<MsgId>()
+                .map_err(|_| "bad thread msgid".to_string())?,
+        ),
+        None => None,
+    };
     let meta = weft_proto::MsgMeta {
         // The client composes in markdown; tag it so peers render it (§9.4).
         fmt: Some("md".to_string()),
         reply_to,
+        thread,
         attachments,
         ..Default::default()
     };
@@ -1166,6 +1178,18 @@ pub fn build_pins(channel: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// `SEARCH <#chan> :<query>` — message search; matches return as a `BATCH`.
+pub fn build_search(channel: &str, query: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::Search {
+        channel,
+        query: query.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
 /// `MEMBERS <#chan>` — request the roster snapshot (§6.3).
 pub fn build_members(channel: &str) -> Result<String, String> {
     let channel: weft_proto::ChannelName =
@@ -1354,9 +1378,14 @@ pub fn build_react(msgid: &str, emoji: &str, add: bool) -> Result<String, String
     Request::new(cmd).serialize().map_err(|e| e.to_string())
 }
 
-/// `HISTORY <target> [before=] limit=50` — a backfill page (§6.4). `before` is
-/// the oldest msgid already held, for scroll-up paging.
-pub fn build_history(target: &str, before: Option<String>) -> Result<String, String> {
+/// `HISTORY <target> [before=] [thread=] limit=50` — a backfill page (§6.4).
+/// `before` is the oldest msgid already held (scroll-up paging); `thread`
+/// restricts to a single thread (§9.4).
+pub fn build_history(
+    target: &str,
+    before: Option<String>,
+    thread: Option<String>,
+) -> Result<String, String> {
     let target: Target = target.parse().map_err(|_| "bad target".to_string())?;
     let before = match before.filter(|b| !b.is_empty()) {
         Some(b) => Some(
@@ -1365,12 +1394,19 @@ pub fn build_history(target: &str, before: Option<String>) -> Result<String, Str
         ),
         None => None,
     };
+    let thread = match thread.filter(|t| !t.is_empty()) {
+        Some(t) => Some(
+            t.parse::<MsgId>()
+                .map_err(|_| "bad thread msgid".to_string())?,
+        ),
+        None => None,
+    };
     Request::new(Command::History {
         target,
         before,
         after: None,
         limit: Some(50),
-        thread: None,
+        thread,
     })
     .serialize()
     .map_err(|e| e.to_string())

@@ -204,6 +204,57 @@ impl EventStore for MemoryStore {
         Ok((unread, mentions))
     }
 
+    async fn search(
+        &self,
+        scope: &Scope,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let key = scope.as_key();
+        let needle = query.to_lowercase();
+        let hits: Vec<EventRecord> = inner
+            .events
+            .range(Self::scope_range(&key))
+            .rev() // newest-first
+            .map(|(_, record)| record)
+            .filter(|record| {
+                let crate::types::EventKind::Message { body, meta } = &record.kind else {
+                    return false;
+                };
+                meta.system.is_none()
+                    && !inner.deleted.contains(&(key.clone(), record.msgid.ulid()))
+                    && body.to_lowercase().contains(&needle)
+            })
+            .take(limit)
+            .cloned()
+            .collect();
+        Ok(hits)
+    }
+
+    async fn thread_roots(
+        &self,
+        scope: &Scope,
+        root: &MsgId,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let hits: Vec<EventRecord> = inner
+            .events
+            .range(Self::scope_range(&scope.as_key())) // ascending = oldest-first
+            .map(|(_, record)| record)
+            .filter(|record| {
+                let crate::types::EventKind::Message { meta, .. } = &record.kind else {
+                    return false;
+                };
+                &record.msgid == root || meta.thread.as_ref() == Some(root)
+            })
+            .take(limit)
+            .cloned()
+            .collect();
+        Ok(hits)
+    }
+
     async fn find_root(&self, ulid: Ulid) -> Result<Option<EventRecord>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner

@@ -43,6 +43,26 @@ pub trait EventStore: Send + Sync {
     /// with only a msgid (§6.4).
     async fn find_root(&self, ulid: Ulid) -> Result<Option<EventRecord>, StoreError>;
 
+    /// Message search within a scope (§6.4): non-system root messages whose
+    /// body contains `query` (case-insensitive substring), newest-first, capped
+    /// at `limit`. Deleted (tombstoned) roots are excluded.
+    async fn search(
+        &self,
+        scope: &Scope,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, StoreError>;
+
+    /// A thread's root messages (§9.4): the root itself plus every message
+    /// tagged `thread=<root>`, oldest-first, capped at `limit`. Children
+    /// (edits/reactions) are fetched separately via [`EventStore::children`].
+    async fn thread_roots(
+        &self,
+        scope: &Scope,
+        root: &MsgId,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, StoreError>;
+
     /// Root (`Message`) rows authored by `sender` (the `account@network` form),
     /// across every scope, newest-first. The operator admin surface only — the
     /// wire protocol is channel-scoped and never queries by author.

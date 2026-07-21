@@ -899,6 +899,7 @@ impl<S: ControlStream> Session<S> {
             Command::Pin { msgid } => self.on_pin(label, msgid, account, true).await,
             Command::Unpin { msgid } => self.on_pin(label, msgid, account, false).await,
             Command::Pins { channel } => self.on_pins(label, channel).await,
+            Command::Search { channel, query } => self.on_search(label, channel, query).await,
             Command::Caps {
                 account: subject,
                 scope,
