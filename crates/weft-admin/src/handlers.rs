@@ -14,82 +14,88 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use weft_proto::{Account, ChannelName, MsgId, ResolveAction, Ulid};
 use weft_store::{
-    materialize, HistoryItem, ModKind, ModRecord, Page, ReportResolution, Scope, StoreError,
+    materialize, AuditEntry, ModKind, ModRecord, Page, ReportResolution, Scope, StoreError,
 };
 
-use crate::AdminState;
+use crate::{dto, AdminState};
 
 /// All operator-gated routes (the auth layer is applied by `router`).
 pub fn routes() -> Router<AdminState> {
     Router::new()
-        .route("/api/me", get(me))
-        .route("/api/stats", get(stats))
-        .route("/api/reports", get(list_reports))
-        .route("/api/reports/:id", get(report_detail))
-        .route("/api/reports/:id/resolve", post(resolve_report))
-        .route("/api/accounts", get(list_accounts))
+        .route("/api/v1/me", get(me))
+        .route("/api/v1/stats", get(stats))
+        .route("/api/v1/reports", get(list_reports))
+        .route("/api/v1/reports/:id", get(report_detail))
+        .route("/api/v1/reports/:id/resolve", post(resolve_report))
+        .route("/api/v1/accounts", get(list_accounts))
         .route(
-            "/api/accounts/:name",
+            "/api/v1/accounts/:name",
             get(account_detail).delete(delete_account),
         )
-        .route("/api/accounts/:name/messages", get(account_messages))
-        .route("/api/channels", get(list_channels))
-        .route("/api/namespaces", get(list_namespaces))
-        .route("/api/grants", get(list_grants))
-        .route("/api/moderation", get(list_moderation).post(moderate))
-        .route("/api/peers", get(list_peers))
-        .route("/api/netblocks", get(list_netblocks).post(add_netblock))
+        .route("/api/v1/accounts/:name/messages", get(account_messages))
+        .route("/api/v1/channels", get(list_channels))
+        .route("/api/v1/namespaces", get(list_namespaces))
+        .route("/api/v1/grants", get(list_grants))
+        .route("/api/v1/moderation", get(list_moderation).post(moderate))
+        .route("/api/v1/peers", get(list_peers))
+        .route("/api/v1/netblocks", get(list_netblocks).post(add_netblock))
         .route(
-            "/api/netblocks/:network",
+            "/api/v1/netblocks/:network",
             axum::routing::delete(remove_netblock),
         )
         .route(
-            "/api/media-blocks",
+            "/api/v1/media-blocks",
             get(list_media_blocks).post(block_media),
         )
         .route(
-            "/api/media-blocks/:hash",
+            "/api/v1/media-blocks/:hash",
             axum::routing::delete(unblock_media),
         )
-        .route("/api/channels/:name/messages", get(browse_messages))
+        .route("/api/v1/channels/:name/messages", get(browse_messages))
         // msgids are `<network>/<ULID>` — they contain a slash, so capture the
         // whole tail with a wildcard.
         .route(
-            "/api/messages/*msgid",
+            "/api/v1/messages/*msgid",
             axum::routing::delete(delete_message),
         )
+        .route("/api/v1/audit", get(list_audit))
 }
 
 // ---- read ----
 
 async fn me(Extension(who): Extension<Account>, State(st): State<AdminState>) -> Response {
-    Json(json!({ "account": who.to_string(), "network": st.network })).into_response()
+    Json(dto::Me {
+        account: who.to_string(),
+        network: st.network.clone(),
+    })
+    .into_response()
 }
 
 async fn stats(State(st): State<AdminState>) -> Response {
     // Each count is a cheap list-and-len; the admin dashboard isn't a hot path.
     let counts = async {
-        Ok::<_, StoreError>(json!({
-            "accounts": st.accounts.list_accounts().await?.len(),
-            "channels": st.channels.list_channels().await?.len(),
-            "namespaces": st.namespaces.list_public(None, 10_000).await?.len(),
-            "open_reports": st
+        Ok::<_, StoreError>(dto::Stats {
+            accounts: st.accounts.list_accounts().await?.len(),
+            channels: st.channels.list_channels().await?.len(),
+            namespaces: st.namespaces.list_public(None, 10_000).await?.len(),
+            open_reports: st
                 .reports
                 .list_reports("*", Some(weft_proto::ReportStatus::Open), None, 10_000)
                 .await?
                 .len(),
-            "peers": st.peers.list_peers().await?.len(),
-            "netblocks": st.netblocks.list_netblocks().await?.len(),
-            "blocked_media": st.media_blocks.list_blocked_hashes().await?.len(),
-            "live_connections": st
+            peers: st.peers.list_peers().await?.len(),
+            netblocks: st.netblocks.list_netblocks().await?.len(),
+            blocked_media: st.media_blocks.list_blocked_hashes().await?.len(),
+            live_connections: st
                 .live_connections
                 .as_ref()
                 .map(|c| c.load(std::sync::atomic::Ordering::Relaxed)),
-        }))
+        })
     }
     .await;
     match counts {
@@ -105,40 +111,6 @@ struct ScopeQuery {
     limit: Option<usize>,
 }
 
-#[derive(Serialize)]
-struct ReportDto {
-    id: String,
-    msgid: String,
-    scope: String,
-    category: String,
-    state: String,
-    status: String,
-    // TODO(§6.7): honor per-config reporter anonymization before exposing.
-    reporter: String,
-    note: Option<String>,
-    filed_at_ms: u64,
-    resolution: Option<String>,
-}
-
-impl From<weft_store::ReportRecord> for ReportDto {
-    fn from(r: weft_store::ReportRecord) -> Self {
-        Self {
-            id: r.id,
-            msgid: r.msgid.to_string(),
-            scope: r.scope.as_key(),
-            category: r.category,
-            state: format!("{:?}", r.state).to_lowercase(),
-            status: format!("{:?}", r.status).to_lowercase(),
-            reporter: r.reporter.to_string(),
-            note: r.note,
-            filed_at_ms: r.filed_at_ms,
-            resolution: r
-                .resolution
-                .map(|res| format!("{:?}", res.action).to_lowercase()),
-        }
-    }
-}
-
 async fn list_reports(State(st): State<AdminState>, Query(q): Query<ScopeQuery>) -> Response {
     let scope = q.scope.as_deref().unwrap_or("*");
     match st
@@ -146,7 +118,9 @@ async fn list_reports(State(st): State<AdminState>, Query(q): Query<ScopeQuery>)
         .list_reports(scope, None, None, q.limit.unwrap_or(200))
         .await
     {
-        Ok(list) => Json(list.into_iter().map(ReportDto::from).collect::<Vec<_>>()).into_response(),
+        Ok(list) => {
+            Json(list.into_iter().map(dto::Report::from).collect::<Vec<_>>()).into_response()
+        }
         Err(e) => internal(e),
     }
 }
@@ -163,7 +137,10 @@ async fn report_detail(State(st): State<AdminState>, Path(id): Path<String>) -> 
 /// Context is the retention-held roots (invariant 11 keeps them queryable); if
 /// none are held, just the reported message. e2ee / purged content simply won't
 /// resolve — shown as absent, never reconstructed (invariant 8).
-async fn report_with_context(st: &AdminState, id: &str) -> Result<Option<Value>, StoreError> {
+async fn report_with_context(
+    st: &AdminState,
+    id: &str,
+) -> Result<Option<dto::ReportDetail>, StoreError> {
     let Some(report) = st.reports.report(id).await? else {
         return Ok(None);
     };
@@ -181,16 +158,16 @@ async fn report_with_context(st: &AdminState, id: &str) -> Result<Option<Value>,
         }
     }
     let children = st.events.children(&scope, &root_ulids).await?;
-    let context: Vec<Value> = materialize(roots, children)
+    let context = materialize(roots, children)
         .into_iter()
-        .map(msg_dto)
+        .map(dto::Msg::from)
         .collect();
 
-    Ok(Some(json!({
-        "report": ReportDto::from(report),
-        "reported_msgid": reported_msgid,
-        "context": context,
-    })))
+    Ok(Some(dto::ReportDetail {
+        report: dto::Report::from(report),
+        reported_msgid,
+        context,
+    }))
 }
 
 /// Enriched account list: name, ULID, operator flag, caps at `*`, and whether
@@ -220,14 +197,14 @@ async fn list_accounts(State(st): State<AdminState>) -> Response {
             let banned = star_mod
                 .iter()
                 .any(|m| m.account == account && matches!(m.kind, ModKind::Ban));
-            out.push(json!({
-                "account": account.to_string(),
-                "ulid": ulid,
-                "operator": st.auth.operators.contains(&account),
-                "caps": caps_by_ulid.get(&ulid).cloned().unwrap_or_default(),
-                "muted": muted,
-                "banned": banned,
-            }));
+            out.push(dto::AccountSummary {
+                operator: st.auth.operators.contains(&account),
+                caps: caps_by_ulid.get(&ulid).cloned().unwrap_or_default(),
+                muted,
+                banned,
+                account: account.to_string(),
+                ulid,
+            });
         }
         Ok::<_, StoreError>(out)
     }
@@ -249,12 +226,18 @@ async fn account_detail(State(st): State<AdminState>, Path(name): Path<String>) 
         let Some(ulid) = st.accounts.account_ulid(&account).await? else {
             return Ok(None);
         };
-        let grants: Vec<Value> = st
+        let grants: Vec<dto::Grant> = st
             .caps
             .grants_for(&ulid)
             .await?
             .into_iter()
-            .map(|g| json!({ "scope": g.scope, "caps": g.caps, "epoch": g.epoch, "expiry": g.expiry }))
+            .map(|g| dto::Grant {
+                subject: None,
+                scope: g.scope,
+                caps: g.caps,
+                epoch: g.epoch,
+                expiry: g.expiry,
+            })
             .collect();
         let memberships: Vec<String> = st
             .memberships
@@ -263,23 +246,33 @@ async fn account_detail(State(st): State<AdminState>, Path(name): Path<String>) 
             .into_iter()
             .map(|c| c.to_string())
             .collect();
-        let verifications: Vec<Value> = st
+        let verifications: Vec<dto::Verification> = st
             .accounts
             .verifications(&account)
             .await?
             .into_iter()
-            .map(|v| json!({ "kind": v.kind, "subject": v.subject, "verified": v.verified_at.is_some() }))
+            .map(|v| dto::Verification {
+                kind: v.kind,
+                subject: v.subject,
+                verified: v.verified_at.is_some(),
+            })
             .collect();
-        Ok::<_, StoreError>(Some(json!({
-            "account": account.to_string(),
-            "ulid": ulid,
-            "operator": st.auth.operators.contains(&account),
-            "grants": grants,
-            "memberships": memberships,
-            "verifications": verifications,
-            "muted": st.moderation.is_moderated(&account, &["*".to_string()], ModKind::Mute).await?,
-            "banned": st.moderation.is_moderated(&account, &["*".to_string()], ModKind::Ban).await?,
-        })))
+        Ok::<_, StoreError>(Some(dto::AccountDetail {
+            operator: st.auth.operators.contains(&account),
+            grants,
+            memberships,
+            verifications,
+            muted: st
+                .moderation
+                .is_moderated(&account, &["*".to_string()], ModKind::Mute)
+                .await?,
+            banned: st
+                .moderation
+                .is_moderated(&account, &["*".to_string()], ModKind::Ban)
+                .await?,
+            account: account.to_string(),
+            ulid,
+        }))
     }
     .await;
     match detail {
@@ -303,7 +296,17 @@ async fn delete_account(
         return (StatusCode::FORBIDDEN, "cannot delete your own account").into_response();
     }
     match st.accounts.delete_account(&account).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            audit(
+                &st,
+                &who,
+                "account.delete",
+                &account.to_string(),
+                &json!({ "account": account.to_string() }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (StatusCode::NOT_FOUND, "no such account").into_response(),
         Err(e) => internal(e),
     }
@@ -329,17 +332,18 @@ async fn account_messages(
         Ok(rows) => Json(
             rows.into_iter()
                 .map(|r| {
+                    let at_ms = r.msgid.timestamp_ms();
                     let body = match r.kind {
                         weft_store::EventKind::Message { body, .. } => body,
                         _ => String::new(),
                     };
-                    json!({
-                        "msgid": r.msgid.to_string(),
-                        "scope": r.scope.as_key(),
-                        "sender": r.sender.to_string(),
-                        "body": body,
-                        "at_ms": r.msgid.timestamp_ms(),
-                    })
+                    dto::AccountMessage {
+                        msgid: r.msgid.to_string(),
+                        scope: r.scope.as_key(),
+                        sender: r.sender.to_string(),
+                        body,
+                        at_ms,
+                    }
                 })
                 .collect::<Vec<_>>(),
         )
@@ -353,7 +357,10 @@ async fn list_channels(State(st): State<AdminState>) -> Response {
         Ok(chans) => Json(
             chans
                 .into_iter()
-                .map(|(name, policy)| json!({ "name": name.to_string(), "policy": policy.to_string() }))
+                .map(|(name, policy)| dto::Channel {
+                    name: name.to_string(),
+                    policy: policy.to_string(),
+                })
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -366,16 +373,7 @@ async fn list_moderation(State(st): State<AdminState>, Query(q): Query<ScopeQuer
     match st.moderation.list_moderation(scope).await {
         Ok(list) => Json(
             list.into_iter()
-                .map(|m| {
-                    json!({
-                        "scope": m.scope,
-                        "account": m.account.to_string(),
-                        "kind": format!("{:?}", m.kind).to_lowercase(),
-                        "actor": m.actor,
-                        "reason": m.reason,
-                        "at_ms": m.at_ms,
-                    })
-                })
+                .map(dto::Moderation::from)
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -409,6 +407,14 @@ async fn moderate(
         return match (&st.live, req.scope.parse::<ChannelName>()) {
             (Some(live), Ok(channel)) => {
                 live.eject(&channel, &account).await;
+                audit(
+                    &st,
+                    &who,
+                    "moderation.kick",
+                    &format!("{}/{account}", req.scope),
+                    &json!({ "scope": req.scope, "account": account.to_string() }),
+                )
+                .await;
                 StatusCode::NO_CONTENT.into_response()
             }
             (None, _) => (
@@ -455,6 +461,15 @@ async fn moderate(
             live.eject(&channel, &account).await;
         }
     }
+
+    audit(
+        &st,
+        &who,
+        &format!("moderation.{}", req.verb),
+        &format!("{}/{account}", req.scope),
+        &json!({ "scope": req.scope, "account": account.to_string(), "verb": req.verb }),
+    )
+    .await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -483,7 +498,17 @@ async fn resolve_report(
         hold_release_at: now + 7 * 24 * 60 * 60 * 1000, // §12.1 grace
     };
     match st.reports.resolve_report(&id, resolution).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            audit(
+                &st,
+                &who,
+                "report.resolve",
+                &id,
+                &json!({ "action": req.action }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (StatusCode::NOT_FOUND, "no such report").into_response(),
         Err(e) => internal(e),
     }
@@ -493,15 +518,7 @@ async fn list_namespaces(State(st): State<AdminState>) -> Response {
     match st.namespaces.list_public(None, 500).await {
         Ok(list) => Json(
             list.into_iter()
-                .map(|n| {
-                    json!({
-                        "name": n.name.to_string(),
-                        "owner": n.owner.to_string(),
-                        "visibility": n.visibility,
-                        "title": n.title,
-                        "description": n.description,
-                    })
-                })
+                .map(dto::Namespace::from)
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -514,14 +531,12 @@ async fn list_grants(State(st): State<AdminState>, Query(q): Query<ScopeQuery>) 
     match st.caps.grants_at_scope(scope).await {
         Ok(list) => Json(
             list.into_iter()
-                .map(|g| {
-                    json!({
-                        "subject": g.subject,
-                        "scope": g.scope,
-                        "caps": g.caps,
-                        "epoch": g.epoch,
-                        "expiry": g.expiry,
-                    })
+                .map(|g| dto::Grant {
+                    subject: Some(g.subject),
+                    scope: g.scope,
+                    caps: g.caps,
+                    epoch: g.epoch,
+                    expiry: g.expiry,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -546,7 +561,7 @@ async fn browse_messages(
     }
 }
 
-async fn browse(st: &AdminState, scope: Scope, limit: usize) -> Result<Vec<Value>, StoreError> {
+async fn browse(st: &AdminState, scope: Scope, limit: usize) -> Result<Vec<dto::Msg>, StoreError> {
     let page = Page {
         before: None,
         after: None,
@@ -557,37 +572,8 @@ async fn browse(st: &AdminState, scope: Scope, limit: usize) -> Result<Vec<Value
     let children = st.events.children(&scope, &root_ulids).await?;
     Ok(materialize(roots, children)
         .into_iter()
-        .map(msg_dto)
+        .map(dto::Msg::from)
         .collect())
-}
-
-/// Render one materialized item as JSON (shared by browse + report context).
-fn msg_dto(item: HistoryItem) -> Value {
-    match item {
-        HistoryItem::Message {
-            msgid,
-            sender,
-            body,
-            edited,
-            reactions,
-            ..
-        } => json!({
-            "msgid": msgid.to_string(),
-            "sender": sender.to_string(),
-            "body": body,
-            "at_ms": msgid.timestamp_ms(),
-            "edited": edited.map(|(count, at_ms)| json!({ "count": count, "at_ms": at_ms })),
-            "reactions": reactions
-                .iter()
-                .map(|r| json!({ "emoji": r.emoji, "count": r.count }))
-                .collect::<Vec<_>>(),
-        }),
-        HistoryItem::Tombstone { msgid, by } => json!({
-            "msgid": msgid.to_string(),
-            "deleted": true,
-            "by": by.to_string(),
-        }),
-    }
 }
 
 /// Operator delete-any: tombstone the message via its channel actor.
@@ -607,6 +593,14 @@ async fn delete_message(
         return (StatusCode::BAD_REQUEST, "bad msgid").into_response();
     };
     if live.delete_message(&id, &who).await {
+        audit(
+            &st,
+            &who,
+            "message.delete",
+            &id.to_string(),
+            &json!({ "msgid": id.to_string() }),
+        )
+        .await;
         StatusCode::NO_CONTENT.into_response()
     } else {
         (
@@ -621,21 +615,7 @@ async fn delete_message(
 
 async fn list_peers(State(st): State<AdminState>) -> Response {
     match st.peers.list_peers().await {
-        Ok(list) => Json(
-            list.into_iter()
-                .map(|p| {
-                    json!({
-                        "peer": p.peer.to_string(),
-                        "scope": p.scope,
-                        "version": p.version,
-                        "acked": p.acked_manifest.is_some(),
-                        "severed": p.severed,
-                        "updated_ms": p.updated_ms,
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
+        Ok(list) => Json(list.into_iter().map(dto::Peer::from).collect::<Vec<_>>()).into_response(),
         Err(e) => internal(e),
     }
 }
@@ -644,14 +624,7 @@ async fn list_netblocks(State(st): State<AdminState>) -> Response {
     match st.netblocks.list_netblocks().await {
         Ok(list) => Json(
             list.into_iter()
-                .map(|n| {
-                    json!({
-                        "network": n.network.to_string(),
-                        "reason": n.reason,
-                        "actor": n.actor,
-                        "added_ms": n.added_ms,
-                    })
-                })
+                .map(dto::Netblock::from)
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -673,6 +646,7 @@ async fn add_netblock(
     let Ok(network) = req.network.parse::<weft_proto::NetworkName>() else {
         return (StatusCode::BAD_REQUEST, "bad network").into_response();
     };
+    let net_str = network.to_string();
     match st
         .netblocks
         .add_netblock(weft_store::NetblockRecord {
@@ -683,17 +657,41 @@ async fn add_netblock(
         })
         .await
     {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            audit(
+                &st,
+                &who,
+                "netblock.add",
+                &net_str,
+                &json!({ "network": net_str }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => internal(e),
     }
 }
 
-async fn remove_netblock(State(st): State<AdminState>, Path(network): Path<String>) -> Response {
+async fn remove_netblock(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Path(network): Path<String>,
+) -> Response {
     let Ok(network) = network.parse::<weft_proto::NetworkName>() else {
         return (StatusCode::BAD_REQUEST, "bad network").into_response();
     };
     match st.netblocks.remove_netblock(&network).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            audit(
+                &st,
+                &who,
+                "netblock.remove",
+                &network.to_string(),
+                &json!({ "network": network.to_string() }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (StatusCode::NOT_FOUND, "not blocked").into_response(),
         Err(e) => internal(e),
     }
@@ -705,14 +703,7 @@ async fn list_media_blocks(State(st): State<AdminState>) -> Response {
     match st.media_blocks.list_blocked_hashes().await {
         Ok(list) => Json(
             list.into_iter()
-                .map(|b| {
-                    json!({
-                        "hash": b.hash,
-                        "reason": b.reason,
-                        "actor": b.actor,
-                        "added_ms": b.added_ms,
-                    })
-                })
+                .map(dto::MediaBlock::from)
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -750,17 +741,83 @@ async fn block_media(
         })
         .await
     {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            audit(&st, &who, "media.block", hash, &json!({ "hash": hash })).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => internal(e),
     }
 }
 
-async fn unblock_media(State(st): State<AdminState>, Path(hash): Path<String>) -> Response {
+async fn unblock_media(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Path(hash): Path<String>,
+) -> Response {
     match st.media_blocks.unblock_hash(&hash).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            audit(&st, &who, "media.unblock", &hash, &json!({ "hash": hash })).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (StatusCode::NOT_FOUND, "not blocked").into_response(),
         Err(e) => internal(e),
     }
+}
+
+// ---- WC1 audit trail ----
+
+#[derive(Deserialize)]
+struct AuditQuery {
+    operator: Option<String>,
+    action: Option<String>,
+    limit: Option<usize>,
+}
+
+/// The hash-chained audit log, newest-first, optionally filtered by operator
+/// and/or action. Each row carries its chain fields so a reader can verify the
+/// log wasn't tampered with (recompute `hash`, follow `prev_hash`).
+async fn list_audit(State(st): State<AdminState>, Query(q): Query<AuditQuery>) -> Response {
+    match st
+        .audit
+        .list_audit(
+            q.operator.as_deref(),
+            q.action.as_deref(),
+            q.limit.unwrap_or(200),
+        )
+        .await
+    {
+        Ok(list) => {
+            Json(list.into_iter().map(dto::Audit::from).collect::<Vec<_>>()).into_response()
+        }
+        Err(e) => internal(e),
+    }
+}
+
+/// Emit an audit record for a completed write action. The payload is digested,
+/// never stored raw (it may carry reasons/notes). A store failure is logged but
+/// never fails the action the operator already performed — the audit log is a
+/// record of what happened, and the mutation has already happened.
+async fn audit(st: &AdminState, who: &Account, action: &str, target: &str, payload: &Value) {
+    let entry = AuditEntry {
+        operator: who.to_string(),
+        action: action.to_string(),
+        target: target.to_string(),
+        ts_ms: now_ms(),
+        payload_digest: hex(&Sha256::digest(payload.to_string().as_bytes())),
+    };
+    if let Err(e) = st.audit.append_audit(entry).await {
+        tracing::error!("audit append failed for {action} on {target}: {e}");
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 // ---- helpers ----

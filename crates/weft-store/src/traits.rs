@@ -9,9 +9,10 @@ use weft_proto::NamespaceName;
 use weft_proto::NetworkName;
 
 use crate::types::{
-    ChannelRecord, EventRecord, GrantRecord, InviteRecord, MediaBlockRecord, ModKind, ModRecord,
-    NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, RedeemOutcome,
-    ReportRecord, ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
+    AuditEntry, AuditRecord, ChannelRecord, EventRecord, GrantRecord, InviteRecord,
+    MediaBlockRecord, ModKind, ModRecord, NamespaceRecord, NetblockRecord, Page, PeerRecord,
+    PendingRecovery, RedeemOutcome, ReportRecord, ReportResolution, RoleDef, RootHistoryEntry,
+    Scope, Verification,
 };
 use crate::StoreError;
 
@@ -457,6 +458,27 @@ pub trait MediaBlocklistStore: Send + Sync {
     async fn is_hash_blocked(&self, hash: &str) -> Result<bool, StoreError>;
 
     async fn list_blocked_hashes(&self) -> Result<Vec<MediaBlockRecord>, StoreError>;
+}
+
+/// WC1 admin audit trail. Append-only + hash-chained (tamper-evident): the
+/// panel ships to strangers, so "prove afterward who did what" matters more than
+/// for a personal tool. `append_audit` is the single writer of the chain — it
+/// computes `seq`/`prev_hash`/`hash` atomically, exactly as the channel actor is
+/// the single writer of ULID order.
+#[async_trait]
+pub trait AuditStore: Send + Sync {
+    /// Append one event, linking it to the tail of the chain. Returns the
+    /// committed record (with its computed `seq`/`prev_hash`/`hash`).
+    async fn append_audit(&self, entry: AuditEntry) -> Result<AuditRecord, StoreError>;
+
+    /// The log, newest-first, optionally filtered by exact operator and/or
+    /// action. Bounded by `limit`.
+    async fn list_audit(
+        &self,
+        operator: Option<&str>,
+        action: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AuditRecord>, StoreError>;
 }
 
 /// §6.4 pinned messages, per channel. Pins are a small set keyed by channel;

@@ -9,9 +9,9 @@ use weft_proto::{
     RetentionPolicy, Ulid, UserRef,
 };
 use weft_store::{
-    materialize, AccountStore, CapabilityStore, ChannelStore, EventKind, EventRecord, EventStore,
-    HistoryItem, InviteRecord, InviteStore, MediaBlockRecord, MediaBlocklistStore, MediaStore,
-    MembershipStore, MemoryStore, ModKind, ModRecord, ModerationStore, NamespaceRecord,
+    materialize, AccountStore, AuditStore, CapabilityStore, ChannelStore, EventKind, EventRecord,
+    EventStore, HistoryItem, InviteRecord, InviteStore, MediaBlockRecord, MediaBlocklistStore,
+    MediaStore, MembershipStore, MemoryStore, ModKind, ModRecord, ModerationStore, NamespaceRecord,
     NamespaceStore, NetblockRecord, NetblockStore, Page, PeerRecord, PeerStore, PendingRecovery,
     PinStore, ProfileStore, RedeemOutcome, ReportRecord, ReportResolution, ReportStore, RoleDef,
     RoleStore, Scope,
@@ -77,7 +77,8 @@ where
         + MembershipStore
         + MediaStore
         + ProfileStore
-        + RoleStore,
+        + RoleStore
+        + AuditStore,
 {
     let chan: Scope = Scope::Channel(format!("#suite-{tag}").parse().unwrap());
     let ada: Account = format!("ada-{tag}").parse().unwrap();
@@ -1026,6 +1027,69 @@ where
     assert!(store.unblock_hash(&bad_hash).await.unwrap());
     assert!(!store.is_hash_blocked(&bad_hash).await.unwrap());
     assert!(!store.unblock_hash(&bad_hash).await.unwrap());
+
+    // ---- WC1 admin audit trail: append is hash-chained, list is
+    //      newest-first + filterable, and any tamper is recomputable-detectable ----
+    let audit_op = format!("op-{tag}");
+    let mut appended = Vec::new();
+    for (action, target) in [
+        ("moderation.ban", "#chan/bob"),
+        ("account.delete", "carol"),
+        ("netblock.add", "evil.example"),
+    ] {
+        let rec = store
+            .append_audit(weft_store::AuditEntry {
+                operator: audit_op.clone(),
+                action: action.to_string(),
+                target: target.to_string(),
+                ts_ms: 1_700_000_000_000,
+                payload_digest: format!("digest-{action}"),
+            })
+            .await
+            .unwrap();
+        appended.push(rec);
+    }
+    // Consecutive appends form a chain: monotonic seq, each prev_hash == the
+    // predecessor's hash, and each hash recomputes from its own fields.
+    for w in appended.windows(2) {
+        assert_eq!(w[1].seq, w[0].seq + 1, "monotonic seq");
+        assert_eq!(w[1].prev_hash, w[0].hash, "chain link");
+    }
+    for rec in &appended {
+        let expected = weft_store::audit_hash(
+            rec.seq,
+            &rec.operator,
+            &rec.action,
+            &rec.target,
+            rec.ts_ms,
+            &rec.payload_digest,
+            &rec.prev_hash,
+        );
+        assert_eq!(rec.hash, expected, "hash recomputes from fields");
+    }
+    // Listing is newest-first, scoped by this run's operator; action narrows it.
+    let listed = store.list_audit(Some(&audit_op), None, 100).await.unwrap();
+    assert_eq!(listed.len(), 3);
+    assert_eq!(listed[0].action, "netblock.add", "newest first");
+    assert_eq!(listed[2].action, "moderation.ban", "oldest last");
+    let filtered = store
+        .list_audit(Some(&audit_op), Some("account.delete"), 100)
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].target, "carol");
+    // Tamper detection: flip a stored field and the hash no longer recomputes.
+    let tampered = &appended[1];
+    let recomputed = weft_store::audit_hash(
+        tampered.seq,
+        &tampered.operator,
+        &tampered.action,
+        "someone-else", // was "carol"
+        tampered.ts_ms,
+        &tampered.payload_digest,
+        &tampered.prev_hash,
+    );
+    assert_ne!(recomputed, tampered.hash, "tamper breaks the chain hash");
 
     // ---- §6.7 moderation deny-list ----
     let bob: Account = format!("bob-{tag}").parse().unwrap();

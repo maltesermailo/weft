@@ -414,27 +414,42 @@ block/unblock media). Self-contained `ui/index.html` (`include_str!`), `Live`
 port for kick/eject + delete-any. This already covers roughly half of §8's
 "MVP" bucket; the milestones below are what turns it into the WEFT Console.
 
-### WC1 ☐ — API contract + audit spine
+### WC1 ✅ — API contract + audit spine
 
-The foundation everything destructive rides on. Three pieces:
+The foundation everything destructive rides on. All three pieces shipped:
 
-- **Versioned, typed API.** Move handlers behind `/admin/api/v1/*`; lift the
-  ad-hoc JSON into named request/response structs in a `types` module. Per §0
-  this stays in the single `weft-admin` crate (the `weft-admin-api` crate split
-  is deferred until a real third-party client exists — YAGNI). Versioning the
-  prefix costs nothing and unblocks the split later.
-- **Design-pack SPA shell.** Port `design/admin/` into `ui/index.html`: the
-  layout shell (selvage + grouped sidebar + operator header), `weft.css`
-  embedded, and the client-side router/renderer that turns the design's
-  `{{…}}`/`@each` templates into `fetch("/admin/api/v1/…")`-driven views (§0
-  front-end decision). This is the visual substrate every later page reuses.
-- **Hash-chained audit trail (non-optional, §1).** Every write handler appends
-  an audit record `{operator, action, target, ts, payload-digest, prev-hash}`
-  to an append-only, tamper-evident log — a new small `AuditStore` role (mem +
-  PG + contract test, PG migration). Read-only `GET /audit?operator=&action=&
-  target=` + an Audit Log view. Retrofit the WC0 write actions to emit records.
-  Landing this first means every later destructive milestone is audited by
-  construction, not as an afterthought.
+- **Hash-chained audit trail ✅ (non-optional, §1).** Shipped: a new
+  `AuditStore` store role (`AuditEntry`/`AuditRecord` + a shared pure
+  `audit_hash` — blake3, mem + PG both compute it identically, like
+  `compaction_plan`), append-only + hash-chained (`seq`/`prev_hash`/`hash`; PG
+  serializes appends under a `pg_advisory_xact_lock`), migration `0023_audit`,
+  and a mem+PG contract case proving chain-linkage, newest-first filtered
+  listing, and tamper-detection. Every WC0 write handler (moderate/kick, resolve,
+  account-delete, message-delete, netblock ±, media ±) now emits a record via an
+  `audit()` helper that digests the payload (reasons/notes are **never** stored
+  raw). Read-only `GET /admin/api/v1/audit?operator=&action=` + `tests/api.rs`
+  `write_actions_land_in_the_audit_log`.
+- **Versioned, typed API ✅.** All routes sit behind `/admin/api/v1/*` (handlers
+  + login/logout + the SPA's `API` base + the conformance/e2e tests). Every
+  response is now a named `#[derive(Serialize)]` struct in `weft-admin::dto`
+  (`Me`, `Stats`, `AccountSummary`/`AccountDetail`, `Grant`, `Report`/
+  `ReportDetail`, `Msg` (untagged message/tombstone), `Peer`, `Netblock`,
+  `MediaBlock`, `Audit`, …) with `From<StoreRecord>` conversions — no ad-hoc
+  `json!` responses remain (only the audit **payload digests** still use `json!`,
+  which is correct). Per §0 this stays in the single `weft-admin` crate; the
+  `dto` module is the seam a `weft-admin-api` split would lift out later.
+- **Design-pack SPA shell ✅.** `ui/index.html` rebuilt on the `design/admin/`
+  system: `weft.css` embedded, the selvage strip, the WEFT wordmark + **grouped
+  sidebar** (Lookup / Federation / Trust & Keys / Moderation / Gateways /
+  Observability — the design IA, with `soon`-tagged placeholders for the
+  not-yet-built pages so the roadmap is visible), the operator header (woven
+  weft-line + `OPERATOR` pill + op identity from `/me`), and cards (shuttle bars),
+  `.kv` grids, `.result` lookup rows, `.knot` peer states (woven/frayed/severed),
+  and the `.btn`/`.pill` vocabulary. All views are `fetch("/admin/api/v1/…")`-
+  driven (the design's form-posts became fetch calls, per §0) — every existing
+  action preserved. **New Audit Log screen** surfaces the WC1 chain. Verified by
+  rendering each view in a browser against stubbed fixtures (dashboard, users,
+  audit, peers, detail). Uses **Channels/Namespaces** copy, not "Rooms" (§0).
 
 ### WC2 ☐ — capability RBAC (adopted)
 

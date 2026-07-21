@@ -294,3 +294,19 @@ up, then `ctx.set_voice_backend` installs it. Conformance:
 | Web voice UI / browser WebRTC | `client/src/lib/voice.svelte.ts` (the `$state` controller: getUserMedia + RTCPeerConnection + the JOIN→OFFER→DESC handshake) + `components/VoiceBar.svelte`; wired in `routes/+page.svelte` (`initVoice` on connect, `<VoiceBar>` in the members aside) |
 | Web voice wire glue | `weft-client-core/src/lib.rs` (`ClientEvent::Voice*` + `build_voice_*`) + `weft-client-wasm/src/lib.rs` dispatch + `client/src/lib/weft.ts` (`WeftEvent` union + `voice*` wrappers) |
 | Desktop voice (Tauri) | webview WebRTC — reuses `voice.svelte.ts`; `client/src-tauri/src/lib.rs` `voice_*` commands + `grant_media_permission` (`with_webview`, Linux WebKitGTK) + `Info.plist` mic string. Audio quality knobs (AEC/NS/AGC + Opus FEC/DTX) in `voice.svelte.ts` |
+
+## WEFT Console addendum — `weft-admin` (the operator web panel)
+
+Operator-only web admin (`docs/web-admin-panel-plan.md`). An axum router +
+embedded SPA over the store roles — never speaks the wire protocol. weftd mounts
+it on the HTTP listener (`[admin] enabled`), sharing the in-process stores +
+live registry.
+
+| Change | Touch |
+|---|---|
+| A new admin endpoint | `weft-admin/src/handlers.rs :: routes()` (all under `/admin/api/v1/*`) + a handler fn; reads go straight to a store role on `AdminState`, live actions via the `Live` port. Responses are typed `#[derive(Serialize)]` structs in `weft-admin/src/dto.rs` (add one + a `From<StoreRecord>`), never ad-hoc `json!` |
+| Operator auth / session cookie | `weft-admin/src/auth.rs` (HMAC over `account\|exp`, `require_operator` middleware injects the acting `Account`) |
+| A live action (kick/eject, delete-any) | the `Live` trait (`weft-admin/src/lib.rs`); weftd's adapter = `LiveRegistry` (`weftd/src/lib.rs`) over the channel registry |
+| The SPA | `weft-admin/ui/index.html` (`include_str!`; single `const API = "/admin/api/v1"` fetch base). Design target: `design/admin/` (`weft.css` + templates) |
+| Audit trail (WC1) | `AuditStore` (`weft-store/src/traits.rs`) + `AuditEntry`/`AuditRecord`/`audit_hash` (shared pure blake3 chain, `types.rs`), mem + PG (advisory-lock append) + migration `0023_audit`; every write handler emits via `handlers.rs :: audit()` (payload digested, never raw); `GET /admin/api/v1/audit`. Contract: `backends.rs` audit block; e2e: `weft-admin/tests/api.rs :: write_actions_land_in_the_audit_log` |
+| A new store role on the panel | add the `Arc<dyn …>` field to `AdminState` + its `from_store` bound (`weft-admin/src/lib.rs`), and to weftd's generic store bound in `run`/`serve` (`weftd/src/lib.rs`) |

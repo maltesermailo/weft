@@ -12,14 +12,15 @@
 //! reporter identity hidden (invariant 12).
 
 pub mod auth;
+mod dto;
 mod handlers;
 
 use std::sync::Arc;
 
 use axum::Router;
 use weft_store::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, MediaBlocklistStore, MembershipStore,
-    ModerationStore, NamespaceStore, NetblockStore, PeerStore, ReportStore,
+    AccountStore, AuditStore, CapabilityStore, ChannelStore, EventStore, MediaBlocklistStore,
+    MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore, ReportStore,
 };
 
 pub use auth::AuthConfig;
@@ -56,6 +57,7 @@ pub struct AdminState {
     pub(crate) netblocks: Arc<dyn NetblockStore>,
     pub(crate) peers: Arc<dyn PeerStore>,
     pub(crate) media_blocks: Arc<dyn MediaBlocklistStore>,
+    pub(crate) audit: Arc<dyn AuditStore>,
     pub(crate) auth: Arc<AuthConfig>,
     pub(crate) network: String,
     /// Live connection count, when the API shares the weftd process (embedded);
@@ -81,6 +83,7 @@ impl AdminState {
             + NetblockStore
             + PeerStore
             + MediaBlocklistStore
+            + AuditStore
             + 'static,
     {
         Self {
@@ -94,7 +97,8 @@ impl AdminState {
             memberships: store.clone(),
             netblocks: store.clone(),
             peers: store.clone(),
-            media_blocks: store,
+            media_blocks: store.clone(),
+            audit: store,
             auth: Arc::new(auth),
             network,
             live_connections: None,
@@ -125,8 +129,8 @@ pub fn router(state: AdminState) -> Router {
     ));
     let inner = Router::new()
         .route("/", axum::routing::get(spa))
-        .route("/api/login", axum::routing::post(auth::login))
-        .route("/api/logout", axum::routing::post(auth::logout))
+        .route("/api/v1/login", axum::routing::post(auth::login))
+        .route("/api/v1/logout", axum::routing::post(auth::logout))
         .merge(protected)
         .with_state(state);
     Router::new().nest("/admin", inner)

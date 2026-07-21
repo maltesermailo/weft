@@ -11,14 +11,15 @@ use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, Retent
 use crate::blob::BlobRecord;
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaBlocklistStore,
-    MediaStore, MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore,
-    PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
+    AccountStore, AuditStore, CapabilityStore, ChannelStore, EventStore, InviteStore,
+    MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
+    NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
 };
 use crate::types::{
-    ChannelRecord, EventRecord, GrantRecord, InviteRecord, MediaBlockRecord, ModKind, ModRecord,
-    NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, ProfileRecord,
-    RedeemOutcome, ReportRecord, ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
+    audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventRecord, GrantRecord, InviteRecord,
+    MediaBlockRecord, ModKind, ModRecord, NamespaceRecord, NetblockRecord, Page, PeerRecord,
+    PendingRecovery, ProfileRecord, RedeemOutcome, ReportRecord, ReportResolution, RoleDef,
+    RootHistoryEntry, Scope, Verification, AUDIT_GENESIS,
 };
 use crate::StoreError;
 use weft_proto::{ContentState, ReportStatus};
@@ -70,6 +71,9 @@ struct Inner {
     netblocks: HashMap<NetworkName, NetblockRecord>,
     /// blocked BLAKE3 media hash → blocklist entry (§13, content-addressed).
     blocked_hashes: HashMap<String, MediaBlockRecord>,
+    /// WC1 admin audit log, in append order — index i is `seq == i + 1`. The
+    /// `Vec` position IS the chain order (single-writer, like ULID minting).
+    audit: Vec<AuditRecord>,
     /// (scope, account, kind) → moderation deny record (§6.7).
     moderation: HashMap<(String, Account, ModKind), ModRecord>,
     /// channel → pinned msgids, ordered by ULID (§6.4).
@@ -1425,6 +1429,63 @@ impl MediaBlocklistStore for MemoryStore {
             .collect();
         blocks.sort_by(|a, b| a.hash.cmp(&b.hash));
         Ok(blocks)
+    }
+}
+
+#[async_trait]
+impl AuditStore for MemoryStore {
+    async fn append_audit(&self, entry: AuditEntry) -> Result<AuditRecord, StoreError> {
+        let mut inner = self.inner.lock().unwrap();
+
+        let seq = inner.audit.len() as u64 + 1;
+        let prev_hash = inner
+            .audit
+            .last()
+            .map(|r| r.hash.clone())
+            .unwrap_or_else(|| AUDIT_GENESIS.to_string());
+        let hash = audit_hash(
+            seq,
+            &entry.operator,
+            &entry.action,
+            &entry.target,
+            entry.ts_ms,
+            &entry.payload_digest,
+            &prev_hash,
+        );
+
+        let record = AuditRecord {
+            seq,
+            operator: entry.operator,
+            action: entry.action,
+            target: entry.target,
+            ts_ms: entry.ts_ms,
+            payload_digest: entry.payload_digest,
+            prev_hash,
+            hash,
+        };
+        inner.audit.push(record.clone());
+        Ok(record)
+    }
+
+    async fn list_audit(
+        &self,
+        operator: Option<&str>,
+        action: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AuditRecord>, StoreError> {
+        let rows = self
+            .inner
+            .lock()
+            .unwrap()
+            .audit
+            .iter()
+            .rev() // newest-first
+            .filter(|r| operator.map_or(true, |o| r.operator == o))
+            .filter(|r| action.map_or(true, |a| r.action == a))
+            .take(limit)
+            .cloned()
+            .collect();
+        Ok(rows)
     }
 }
 

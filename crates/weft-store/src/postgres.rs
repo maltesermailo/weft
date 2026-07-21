@@ -17,14 +17,15 @@ use weft_proto::{
 
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, CapabilityStore, ChannelStore, EventStore, InviteStore, MediaBlocklistStore,
-    MediaStore, MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore,
-    PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
+    AccountStore, AuditStore, CapabilityStore, ChannelStore, EventStore, InviteStore,
+    MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
+    NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
 };
 use crate::types::{
-    ChannelRecord, EventKind, EventRecord, GrantRecord, InviteRecord, MediaBlockRecord, ModKind,
-    ModRecord, NamespaceRecord, NetblockRecord, Page, PeerRecord, PendingRecovery, ProfileRecord,
-    RedeemOutcome, ReportRecord, ReportResolution, RoleDef, RootHistoryEntry, Scope, Verification,
+    audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventKind, EventRecord, GrantRecord,
+    InviteRecord, MediaBlockRecord, ModKind, ModRecord, NamespaceRecord, NetblockRecord, Page,
+    PeerRecord, PendingRecovery, ProfileRecord, RedeemOutcome, ReportRecord, ReportResolution,
+    RoleDef, RootHistoryEntry, Scope, Verification, AUDIT_GENESIS,
 };
 use crate::StoreError;
 
@@ -1944,6 +1945,107 @@ impl MediaBlocklistStore for PgStore {
                     reason: row.get("reason"),
                     added_ms: row.get::<i64, _>("added_ms") as u64,
                     actor: row.get("actor"),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Serializes audit appends so `seq`/`prev_hash` are read-modify-written
+/// atomically. A session (xact) advisory lock keyed to this constant — held
+/// only for the append transaction — is enough at admin-write volume.
+const AUDIT_LOCK_KEY: i64 = 0x7745_4654_4155_4454; // "WEFTAUDT"
+
+#[async_trait]
+impl AuditStore for PgStore {
+    async fn append_audit(&self, entry: AuditEntry) -> Result<AuditRecord, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(backend_err)?;
+
+        // Take the chain lock, then read the tail — released on commit/rollback.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(AUDIT_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend_err)?;
+        let tail: Option<(i64, String)> =
+            sqlx::query_as("SELECT seq, hash FROM weft_audit ORDER BY seq DESC LIMIT 1")
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(backend_err)?;
+
+        let seq = tail.as_ref().map(|(s, _)| *s as u64 + 1).unwrap_or(1);
+        let prev_hash = tail
+            .map(|(_, h)| h)
+            .unwrap_or_else(|| AUDIT_GENESIS.to_string());
+        let hash = audit_hash(
+            seq,
+            &entry.operator,
+            &entry.action,
+            &entry.target,
+            entry.ts_ms,
+            &entry.payload_digest,
+            &prev_hash,
+        );
+
+        sqlx::query(
+            "INSERT INTO weft_audit \
+             (seq, operator, action, target, ts_ms, payload_digest, prev_hash, hash) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        )
+        .bind(seq as i64)
+        .bind(&entry.operator)
+        .bind(&entry.action)
+        .bind(&entry.target)
+        .bind(entry.ts_ms as i64)
+        .bind(&entry.payload_digest)
+        .bind(&prev_hash)
+        .bind(&hash)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend_err)?;
+        tx.commit().await.map_err(backend_err)?;
+
+        Ok(AuditRecord {
+            seq,
+            operator: entry.operator,
+            action: entry.action,
+            target: entry.target,
+            ts_ms: entry.ts_ms,
+            payload_digest: entry.payload_digest,
+            prev_hash,
+            hash,
+        })
+    }
+
+    async fn list_audit(
+        &self,
+        operator: Option<&str>,
+        action: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AuditRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM weft_audit \
+             WHERE ($1::text IS NULL OR operator = $1) \
+               AND ($2::text IS NULL OR action = $2) \
+             ORDER BY seq DESC LIMIT $3",
+        )
+        .bind(operator)
+        .bind(action)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.iter()
+            .map(|row| {
+                Ok(AuditRecord {
+                    seq: row.get::<i64, _>("seq") as u64,
+                    operator: row.get("operator"),
+                    action: row.get("action"),
+                    target: row.get("target"),
+                    ts_ms: row.get::<i64, _>("ts_ms") as u64,
+                    payload_digest: row.get("payload_digest"),
+                    prev_hash: row.get("prev_hash"),
+                    hash: row.get("hash"),
                 })
             })
             .collect()

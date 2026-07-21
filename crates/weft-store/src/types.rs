@@ -354,6 +354,64 @@ pub struct MediaBlockRecord {
     pub actor: String,
 }
 
+/// A caller-supplied admin audit event. The chain fields (`seq`, `prev_hash`,
+/// `hash`) are computed by the store on append — the caller only describes what
+/// happened. `payload_digest` is a hex digest of the request body (the store
+/// never holds the raw payload, which may carry reasons/notes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEntry {
+    /// The operator account that performed the action.
+    pub operator: String,
+    /// A dotted action slug, e.g. `moderation.ban`, `account.delete`.
+    pub action: String,
+    /// The object acted on (account, msgid, channel, network, hash…).
+    pub target: String,
+    pub ts_ms: u64,
+    /// Hex digest of the request payload — recoverable only with the payload.
+    pub payload_digest: String,
+}
+
+/// A committed, hash-chained admin audit record (WC1). Each record's [`hash`]
+/// covers its own fields **and** the previous record's hash, so any tampering
+/// or deletion in the middle of the log breaks the chain from that point on.
+///
+/// [`hash`]: AuditRecord::hash
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRecord {
+    /// 1-based monotonic sequence — the single-writer append order.
+    pub seq: u64,
+    pub operator: String,
+    pub action: String,
+    pub target: String,
+    pub ts_ms: u64,
+    pub payload_digest: String,
+    /// The previous record's `hash` ([`AUDIT_GENESIS`] for `seq == 1`).
+    pub prev_hash: String,
+    /// `blake3(canonical(this record) ‖ prev_hash)`, hex — see [`audit_hash`].
+    pub hash: String,
+}
+
+/// The `prev_hash` of the first audit record (64 hex zeros — no predecessor).
+pub const AUDIT_GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Compute an audit record's chain link. Deterministic and backend-shared (like
+/// `compaction_plan`) so the memory and Postgres logs are byte-identical: any
+/// backend that stored the same events produces the same chain. Newline-joined
+/// canonical form over controlled fields (none contain newlines).
+pub fn audit_hash(
+    seq: u64,
+    operator: &str,
+    action: &str,
+    target: &str,
+    ts_ms: u64,
+    payload_digest: &str,
+    prev_hash: &str,
+) -> String {
+    let canonical =
+        format!("{seq}\n{operator}\n{action}\n{target}\n{ts_ms}\n{payload_digest}\n{prev_hash}");
+    blake3::hash(canonical.as_bytes()).to_hex().to_string()
+}
+
 /// Result of an atomic redeem attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedeemOutcome {
