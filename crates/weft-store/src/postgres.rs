@@ -549,6 +549,27 @@ impl AccountStore for PgStore {
         Ok(names.into_iter().filter_map(|n| n.parse().ok()).collect())
     }
 
+    async fn set_suspended(&self, account: &Account, suspended: bool) -> Result<bool, StoreError> {
+        let result = sqlx::query("UPDATE weft_accounts SET suspended = $2 WHERE name = $1")
+            .bind(account.as_str())
+            .bind(suspended)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn is_suspended(&self, account: &Account) -> Result<bool, StoreError> {
+        Ok(
+            sqlx::query_scalar::<_, bool>("SELECT suspended FROM weft_accounts WHERE name = $1")
+                .bind(account.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?
+                .unwrap_or(false),
+        )
+    }
+
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError> {
         let exists: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM weft_accounts WHERE name = $1)")

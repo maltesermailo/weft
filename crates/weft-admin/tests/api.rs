@@ -685,6 +685,210 @@ async fn peer_detail_parses_manifest_and_shows_shared_channels() {
     assert!(body.contains("\"netblocked\":false"), "{body}");
 }
 
+#[tokio::test]
+async fn token_inspector_parses_chain_and_flags_revocation() {
+    use weft_crypto::{Capability, Grant, Keypair, Subject, TokenScope};
+    use weft_store::CapabilityStore;
+
+    let store = Arc::new(MemoryStore::default());
+    store
+        .register(
+            &"admin".parse().unwrap(),
+            PasswordHash::new(PASSWORD).as_phc(),
+        )
+        .await
+        .unwrap();
+
+    // A root token at ns:gaming, issued at epoch 0, far-future expiry.
+    let authority = Keypair::generate();
+    let holder = Keypair::generate();
+    let token = Grant {
+        issuer: authority.public(),
+        subject: Subject::Key(holder.public()),
+        scope: TokenScope::parse("ns:gaming").unwrap(),
+        caps: vec![Capability::Send, Capability::Ban],
+        epoch: 0,
+        expiry: 4_000_000_000,
+        parent: None,
+    }
+    .sign(&authority);
+    let b64 = token.to_b64();
+
+    // Bump the scope's epoch so the epoch-0 token is now revoked.
+    store.bump_epoch("ns:gaming").await.unwrap();
+
+    let auth = auth::config(
+        b"a-test-session-secret".to_vec(),
+        ["admin".parse().unwrap()],
+    );
+    let app = weft_admin::router(AdminState::from_store(store, auth, "test.net".into()));
+    let cookie = session(&app).await;
+
+    let body = body_string(
+        app.oneshot(post_json(
+            "/admin/api/v1/tokens/inspect",
+            &cookie,
+            &format!(r#"{{"tokens":["{b64}"]}}"#),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    // Parsed fields, rooted, not expired, but revoked by the epoch bump.
+    assert!(
+        body.contains("ns:gaming") && body.contains("send") && body.contains("ban"),
+        "{body}"
+    );
+    assert!(
+        body.contains("\"rooted\":true") && body.contains("\"revoked\":true"),
+        "{body}"
+    );
+    assert!(
+        body.contains("\"expired\":false") && body.contains("\"chain_linked\":true"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn revocation_epoch_bumps_and_is_audited() {
+    let app = build().await;
+    let cookie = session(&app).await;
+
+    // Fresh scope starts at epoch 0.
+    let before = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/v1/revocations?scope=ns:x", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(before.contains("\"epoch\":0"), "{before}");
+
+    // Bump → epoch 1.
+    let bumped = body_string(
+        app.clone()
+            .oneshot(post_json(
+                "/admin/api/v1/revocations",
+                &cookie,
+                r#"{"scope":"ns:x"}"#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(bumped.contains("\"epoch\":1"), "{bumped}");
+
+    // The bump is recorded in the audit log.
+    let audit = body_string(
+        app.oneshot(get(
+            "/admin/api/v1/audit?action=revocation.bump",
+            Some(&cookie),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(audit.contains("ns:x"), "{audit}");
+}
+
+#[tokio::test]
+async fn account_suspend_toggles_flag_blocks_self_and_panel_login() {
+    let app = build().await; // operator "admin" + non-operator "mallory"
+    let cookie = session(&app).await;
+
+    // Suspend mallory → the account list flags her; unsuspend clears it.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/mallory/suspend",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let list = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/v1/accounts", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        list.contains("mallory") && list.contains("\"suspended\":true"),
+        "{list}"
+    );
+
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/mallory/unsuspend",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // An operator can't suspend themselves (avoid locking themselves out).
+    let res = app
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/admin/suspend",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn suspended_operator_cannot_log_into_the_panel() {
+    // Two operators; one suspends the other, who can then no longer log in.
+    let store = Arc::new(MemoryStore::default());
+    for name in ["admin", "second"] {
+        store
+            .register(&name.parse().unwrap(), PasswordHash::new(PASSWORD).as_phc())
+            .await
+            .unwrap();
+    }
+    let auth = auth::config(
+        b"a-test-session-secret".to_vec(),
+        ["admin".parse().unwrap(), "second".parse().unwrap()],
+    );
+    let app = weft_admin::router(AdminState::from_store(store, auth, "test.net".into()));
+
+    // `second` can log in initially.
+    assert_eq!(
+        app.clone()
+            .oneshot(login("second", PASSWORD))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    // admin suspends `second`.
+    let cookie = session(&app).await;
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/second/suspend",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    // Now `second`'s login is refused (uniform 401).
+    assert_eq!(
+        app.oneshot(login("second", PASSWORD))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
 async fn build_with_live(live: Arc<dyn weft_admin::Live>) -> axum::Router {
     let store = Arc::new(MemoryStore::default());
     let admin: weft_proto::Account = "admin".parse().unwrap();
@@ -858,6 +1062,7 @@ async fn read_only_admin_reads_but_cannot_write() {
         .unwrap();
     assert_eq!(destroy.status(), StatusCode::FORBIDDEN);
     let federation = app
+        .clone()
         .oneshot(post_json(
             "/admin/api/v1/netblocks",
             &cookie,
@@ -866,6 +1071,16 @@ async fn read_only_admin_reads_but_cannot_write() {
         .await
         .unwrap();
     assert_eq!(federation.status(), StatusCode::FORBIDDEN);
+    // WC6 trust & keys require admin.keys.
+    let keys = app
+        .oneshot(post_json(
+            "/admin/api/v1/revocations",
+            &cookie,
+            r#"{"scope":"*"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(keys.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

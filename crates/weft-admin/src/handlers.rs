@@ -40,6 +40,8 @@ pub fn routes() -> Router<AdminState> {
         )
         .route("/api/v1/accounts/:name/messages", get(account_messages))
         .route("/api/v1/accounts/:name/restore", post(restore_account))
+        .route("/api/v1/accounts/:name/suspend", post(suspend_account))
+        .route("/api/v1/accounts/:name/unsuspend", post(unsuspend_account))
         .route("/api/v1/channels", get(list_channels))
         .route("/api/v1/channels/:name/detail", get(channel_detail))
         .route("/api/v1/namespaces", get(list_namespaces))
@@ -69,6 +71,11 @@ pub fn routes() -> Router<AdminState> {
             axum::routing::delete(delete_message),
         )
         .route("/api/v1/audit", get(list_audit))
+        .route("/api/v1/tokens/inspect", post(inspect_tokens))
+        .route(
+            "/api/v1/revocations",
+            get(get_revocations).post(bump_revocation),
+        )
 }
 
 // ---- read ----
@@ -208,12 +215,14 @@ async fn list_accounts(State(st): State<AdminState>) -> Response {
                 .iter()
                 .any(|m| m.account == account && matches!(m.kind, ModKind::Ban));
             let deletion_scheduled = st.accounts.deletion_scheduled(&account).await?;
+            let suspended = st.accounts.is_suspended(&account).await?;
             out.push(dto::AccountSummary {
                 operator: st.auth.operators.contains(&account),
                 caps: caps_by_ulid.get(&ulid).cloned().unwrap_or_default(),
                 muted,
                 banned,
                 deletion_scheduled,
+                suspended,
                 account: account.to_string(),
                 ulid,
             });
@@ -303,6 +312,7 @@ async fn account_detail(State(st): State<AdminState>, Path(name): Path<String>) 
                 .is_moderated(&account, &["*".to_string()], ModKind::Ban)
                 .await?,
             deletion_scheduled: st.accounts.deletion_scheduled(&account).await?,
+            suspended: st.accounts.is_suspended(&account).await?,
             devices,
             related,
             account: account.to_string(),
@@ -456,6 +466,66 @@ async fn list_channels(State(st): State<AdminState>) -> Response {
         .into_response(),
         Err(e) => internal(e),
     }
+}
+
+/// WC7: suspend (or unsuspend) an account. A suspended account can't
+/// authenticate (uniform AUTH-FAILED at the session layer), freezing its tokens.
+/// `admin.moderate`, audited. `suspend` picks the direction via the last path
+/// segment. Blocks self-suspend (don't lock yourself out).
+async fn set_suspended(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(name): Path<String>,
+    suspend: bool,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Ok(account) = name.parse::<Account>() else {
+        return (StatusCode::BAD_REQUEST, "bad account").into_response();
+    };
+    if suspend && account == who {
+        return (StatusCode::FORBIDDEN, "cannot suspend your own account").into_response();
+    }
+    match st.accounts.set_suspended(&account, suspend).await {
+        Ok(true) => {
+            let action = if suspend {
+                "account.suspend"
+            } else {
+                "account.unsuspend"
+            };
+            audit(
+                &st,
+                &who,
+                action,
+                &account.to_string(),
+                &json!({ "account": account.to_string() }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, "no such account").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+async fn suspend_account(
+    st: State<AdminState>,
+    who: Extension<Account>,
+    scopes: Extension<AdminScopes>,
+    name: Path<String>,
+) -> Response {
+    set_suspended(st, who, scopes, name, true).await
+}
+
+async fn unsuspend_account(
+    st: State<AdminState>,
+    who: Extension<Account>,
+    scopes: Extension<AdminScopes>,
+    name: Path<String>,
+) -> Response {
+    set_suspended(st, who, scopes, name, false).await
 }
 
 /// WC4 channel lookup detail: retention policy + the persistent member roster
@@ -1018,6 +1088,168 @@ async fn list_audit(State(st): State<AdminState>, Query(q): Query<AuditQuery>) -
     {
         Ok(list) => {
             Json(list.into_iter().map(dto::Audit::from).collect::<Vec<_>>()).into_response()
+        }
+        Err(e) => internal(e),
+    }
+}
+
+// ---- WC6 trust & keys: capability-token inspector + revocation epochs ----
+
+#[derive(Deserialize)]
+struct InspectReq {
+    /// Root→leaf capability tokens (base64), one delegation link each.
+    tokens: Vec<String>,
+}
+
+/// Render a token subject for display (never used for authorization).
+fn render_subject(subject: &weft_crypto::Subject) -> String {
+    match subject {
+        weft_crypto::Subject::Key(k) => format!("key {}", fingerprint_hex(k.as_bytes())),
+        weft_crypto::Subject::Account(ulid) => format!("account {ulid}"),
+        weft_crypto::Subject::Foreign(user) => format!("foreign {user}"),
+        weft_crypto::Subject::Unbound => "unbound (invite)".to_string(),
+    }
+}
+
+/// WC6 capability-token inspector: parse a delegation chain and describe each
+/// link (issuer, subject, scope, caps, expiry, revocation status, parent
+/// linkage). A debugging tool — it does not assert authority (that's the
+/// enforcement layer + the scope authority key); it reports what the tokens say
+/// plus expiry/epoch status from the store. `admin.keys`.
+async fn inspect_tokens(
+    State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
+    Json(req): Json<InspectReq>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Keys) {
+        return r;
+    }
+    if req.tokens.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no tokens").into_response();
+    }
+
+    let mut parsed = Vec::with_capacity(req.tokens.len());
+    for raw in &req.tokens {
+        match weft_crypto::Token::from_b64(raw.trim()) {
+            Ok(tok) => parsed.push(tok),
+            Err(e) => {
+                return Json(dto::TokenInspection {
+                    links: Vec::new(),
+                    chain_linked: false,
+                    error: Some(format!("parse error: {e}")),
+                })
+                .into_response()
+            }
+        }
+    }
+
+    let now = now_ms() / 1000; // token expiry/epoch are unix seconds
+    let mut chain_linked = parsed[0].grant.parent.is_none(); // root must be unparented
+    let mut links = Vec::with_capacity(parsed.len());
+    for (i, tok) in parsed.iter().enumerate() {
+        let g = &tok.grant;
+        let current_epoch = st.caps.scope_epoch(&g.scope.as_str()).await.unwrap_or(0);
+        let parent_linked = if i == 0 {
+            g.parent.is_none()
+        } else {
+            g.parent == Some(parsed[i - 1].hash())
+        };
+        if !parent_linked {
+            chain_linked = false;
+        }
+        links.push(dto::TokenLink {
+            issuer_fingerprint: fingerprint_hex(g.issuer.as_bytes()),
+            subject: render_subject(&g.subject),
+            scope: g.scope.as_str(),
+            caps: g.caps.iter().map(|c| c.to_string()).collect(),
+            epoch: g.epoch,
+            expiry: g.expiry,
+            expired: g.expiry != 0 && g.expiry < now,
+            rooted: g.parent.is_none(),
+            parent_linked,
+            revoked: g.epoch < current_epoch,
+            token_hash: fingerprint_hex(&tok.hash()),
+        });
+    }
+
+    Json(dto::TokenInspection {
+        links,
+        chain_linked,
+        error: None,
+    })
+    .into_response()
+}
+
+/// WC6 revocation set: a scope's current epoch + the grants a bump invalidates.
+/// `admin.keys`.
+async fn get_revocations(
+    State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
+    Query(q): Query<ScopeQuery>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Keys) {
+        return r;
+    }
+    let scope = q.scope.as_deref().unwrap_or("*");
+    let out = async {
+        let epoch = st.caps.scope_epoch(scope).await?;
+        let grants = st
+            .caps
+            .grants_at_scope(scope)
+            .await?
+            .into_iter()
+            .map(|g| dto::Grant {
+                subject: Some(g.subject),
+                scope: g.scope,
+                caps: g.caps,
+                epoch: g.epoch,
+                expiry: g.expiry,
+            })
+            .collect();
+        Ok::<_, StoreError>(dto::RevocationScope {
+            scope: scope.to_string(),
+            epoch,
+            grants,
+        })
+    }
+    .await;
+    match out {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct BumpReq {
+    scope: String,
+}
+
+/// WC6: bump a scope's revocation epoch — invalidates every grant/token issued
+/// before it (§10.4). `admin.keys`, audited.
+async fn bump_revocation(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Json(req): Json<BumpReq>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Keys) {
+        return r;
+    }
+    match st.caps.bump_epoch(&req.scope).await {
+        Ok(epoch) => {
+            audit(
+                &st,
+                &who,
+                "revocation.bump",
+                &req.scope,
+                &json!({ "scope": req.scope, "epoch": epoch }),
+            )
+            .await;
+            Json(dto::EpochBumped {
+                scope: req.scope,
+                epoch,
+            })
+            .into_response()
         }
         Err(e) => internal(e),
     }

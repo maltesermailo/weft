@@ -35,6 +35,8 @@ struct AccountRecord {
     verifications: HashMap<String, (String, Option<u64>)>,
     /// WC3 soft delete: scheduled hard-delete time (ms), `None` when not pending.
     purge_at: Option<u64>,
+    /// WC7 moderation: suspended accounts can't authenticate.
+    suspended: bool,
 }
 
 /// The domain of an email address — the lowercased part after the last `@`
@@ -325,6 +327,7 @@ impl AccountStore for MemoryStore {
                 marks: HashMap::new(),
                 verifications: HashMap::new(),
                 purge_at: None,
+                suspended: false,
             },
         );
         Ok(true)
@@ -410,6 +413,27 @@ impl AccountStore for MemoryStore {
             .collect();
         due.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         Ok(due)
+    }
+
+    async fn set_suspended(&self, account: &Account, suspended: bool) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        match inner.accounts.get_mut(account) {
+            Some(record) => {
+                record.suspended = suspended;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn is_suspended(&self, account: &Account) -> Result<bool, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("store lock")
+            .accounts
+            .get(account)
+            .is_some_and(|r| r.suspended))
     }
 
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError> {

@@ -50,6 +50,20 @@ impl Accounts {
         self.store.account_ulid(account).await
     }
 
+    /// WC7: whether the account is suspended (blocked from authenticating).
+    pub async fn is_suspended(&self, account: &Account) -> Result<bool, StoreError> {
+        self.store.is_suspended(account).await
+    }
+
+    /// WC7: suspend/unsuspend an account. False iff unknown.
+    pub async fn set_suspended(
+        &self,
+        account: &Account,
+        suspended: bool,
+    ) -> Result<bool, StoreError> {
+        self.store.set_suspended(account, suspended).await
+    }
+
     /// Constant-time, uniform: a missing (or corrupt) stored hash verifies
     /// — and fails — against the dummy instead of returning early.
     pub async fn verify_password(

@@ -369,6 +369,15 @@ where
     assert!(store.schedule_deletion(&dan, 50_000).await.unwrap());
     assert!(store.due_deletions(60_000).await.unwrap().contains(&dan));
     assert!(!store.schedule_deletion(&cara, 1).await.unwrap()); // unknown → false
+
+    // WC7 suspend: toggleable flag; unknown account → false.
+    assert!(!store.is_suspended(&dan).await.unwrap());
+    assert!(store.set_suspended(&dan, true).await.unwrap());
+    assert!(store.is_suspended(&dan).await.unwrap());
+    assert!(store.set_suspended(&dan, false).await.unwrap());
+    assert!(!store.is_suspended(&dan).await.unwrap());
+    assert!(!store.set_suspended(&cara, true).await.unwrap()); // unknown
+
     assert!(store.delete_account(&dan).await.unwrap());
     assert!(!store.list_accounts().await.unwrap().contains(&dan));
 

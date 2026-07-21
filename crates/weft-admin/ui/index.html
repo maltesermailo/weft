@@ -87,9 +87,9 @@ h1{font-size:22px;font-weight:700;letter-spacing:-.01em}
 .ok{color:var(--teal)} .warn{color:var(--amber)} .bad{color:var(--madder)}
 
 .search-row{display:flex;gap:10px;margin-bottom:18px}
-input[type=text],input[type=search],input[type=email],input[type=password],input[type=number],select{flex:1;background:var(--warp-1);border:1px solid var(--line);border-radius:6px;color:var(--linen);font-family:var(--mono);font-size:13px;padding:10px 13px;width:100%}
-input::placeholder{color:var(--flax-dim)}
-input:focus,select:focus{outline:none;border-color:var(--thread)}
+input[type=text],input[type=search],input[type=email],input[type=password],input[type=number],select,textarea{flex:1;background:var(--warp-1);border:1px solid var(--line);border-radius:6px;color:var(--linen);font-family:var(--mono);font-size:13px;padding:10px 13px;width:100%}
+input::placeholder,textarea::placeholder{color:var(--flax-dim)}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--thread)}
 
 .result{display:flex;align-items:center;gap:16px;padding:16px 18px}
 .result + .result{border-top:1px solid var(--line-soft)}
@@ -343,8 +343,26 @@ const screens = {
         list.map((g) => ({ cells: [`<span class="fp">${esc(short(g.subject))}</span>`, `<span class="mono">${esc(g.scope)}</span>`, capChips(g.caps), g.epoch, g.expiry ? when(g.expiry * 1000) : "—"] }))));
     $("#gScope").addEventListener("keydown", (e) => { if (e.key === "Enter") screens.grants($("#gScope").value.trim() || "*"); });
   },
-  devices: () => placeholder("Devices", "WC6", "Global device registry: fingerprints, keys, first/last seen, revoke-with-blast-radius. Gated on E2EE/MLS."),
-  revocations: () => placeholder("Revocations", "WC6", "The published device/token revocation set with per-peer propagation status."),
+  tokens() {
+    set(hrow("Capability Tokens") + note("Paste a capability token — or a root→leaf delegation chain, one per line — to inspect its issuer, scope, caps, expiry, and revocation status (§10.4). A debugging tool: it reports what the tokens say, not whether the enforcement layer would honor them.") +
+      `<div class="form-row"><textarea id="tokIn" class="mono" rows="4" placeholder="base64 token(s), one per line (root first)" style="min-height:88px;resize:vertical"></textarea></div>
+       <div class="form-row"><button class="btn primary" data-action="inspectTokens">Inspect</button></div>
+       <div id="tokOut"></div>`);
+  },
+  async revocations(scope = "*") {
+    const r = await api("/revocations?scope=" + encodeURIComponent(scope));
+    const canBump = can("admin.keys");
+    const bump = canBump
+      ? `<div class="action danger" style="padding:16px 0 0"><h3>Bump epoch</h3><p>Revokes every grant and capability token at this scope issued before epoch ${r.epoch + 1}. Irreversible — a scope-wide kill switch.</p><div class="row"><button class="btn danger" data-action="bumpRevocation" data-id="${esc(r.scope)}">Bump to epoch ${r.epoch + 1}</button></div></div>`
+      : "";
+    set(hrow("Revocations", `scope ${esc(r.scope)}`) + note("A scope's revocation epoch (§10.4). Bumping it invalidates every grant and token issued at an earlier epoch.") +
+      `<div class="form-row"><input type="text" id="revScope" value="${esc(r.scope)}" placeholder="scope (#chan / ns:x / *)" class="grow" /><button class="btn primary" data-action="loadRevocations">Load</button></div>` +
+      card("Current epoch", `<div class="kv"><div class="k">Scope</div><div class="v mono">${esc(r.scope)}</div><div class="k">Epoch</div><div class="v mono">${r.epoch}</div></div>${bump}`) +
+      cardTable("Grants at this scope", r.grants.length, ["Subject", "Caps", "Epoch", "Expiry"],
+        r.grants.map((g) => ({ cells: [`<span class="fp">${esc(short(g.subject))}</span>`, capChips(g.caps), g.epoch, g.expiry ? when(g.expiry * 1000) : "—"] }))));
+    $("#revScope").addEventListener("keydown", (e) => { if (e.key === "Enter") screens.revocations($("#revScope").value.trim() || "*"); });
+  },
+  devices: () => placeholder("Devices", "WC6", "Global device registry: fingerprints, MLS leaves, first/last seen, revoke-with-blast-radius. Gated on E2EE/MLS."),
 
   // ---- Moderation ----
   async reports() {
@@ -405,7 +423,7 @@ function renderUsers(q) {
   if (!list.length) { $("#userList").innerHTML = `<div class="card-b"><div class="placeholder">No accounts match "${esc(q)}".</div></div>`; return; }
   $("#userList").innerHTML = list.map((u) => {
     const initials = esc(u.account.slice(0, 2).toUpperCase());
-    const state = u.deletion_scheduled ? `<span class="knot severed">pending delete</span>` : u.banned ? `<span class="knot severed">banned</span>` : u.muted ? `<span class="knot frayed">muted</span>` : `<span class="knot woven">active</span>`;
+    const state = u.suspended ? `<span class="knot severed">suspended</span>` : u.deletion_scheduled ? `<span class="knot severed">pending delete</span>` : u.banned ? `<span class="knot severed">banned</span>` : u.muted ? `<span class="knot frayed">muted</span>` : `<span class="knot woven">active</span>`;
     const tags = `${u.operator ? pill("operator", "gold") : ""}${(u.caps || []).map((c) => pill(c)).join("")}`;
     return `<div class="result">
       <div class="r-avatar u">${initials}</div>
@@ -465,7 +483,7 @@ async function openUser(name) {
   // WC4 flags card: account state as SCREAMING_SNAKE toggles (design .flags).
   const flag = (name, on) => `<label class="flag ${on ? "on" : ""}"><span class="box"></span>${name}</label>`;
   const flags = card("Account flags", `<div class="flags">
-    ${flag("OPERATOR", u.operator)}${flag("MUTED", u.muted)}${flag("BANNED", u.banned)}${flag("PENDING_DELETE", !!u.deletion_scheduled)}
+    ${flag("OPERATOR", u.operator)}${flag("SUSPENDED", u.suspended)}${flag("MUTED", u.muted)}${flag("BANNED", u.banned)}${flag("PENDING_DELETE", !!u.deletion_scheduled)}
   </div>`);
 
   // WC4 devices card: enrolled Ed25519 fingerprints.
@@ -485,6 +503,14 @@ async function openUser(name) {
     : "";
 
   const messages = card(`Messages`, msgs.length ? msgs.map(userMsgCard).join("") : `<div class="placeholder">No messages authored (or all purged).</div>`, msgs.length);
+
+  // WC7 account moderation: suspend / unsuspend (login-block).
+  let moderation = "";
+  if (can("admin.moderate")) {
+    moderation = card("Account moderation", u.suspended
+      ? `<div class="action"><h3>Suspended</h3><p>This account is blocked from authenticating — its capability tokens are frozen (it can't open a session). Unsuspend to restore access.</p><div class="row"><button class="btn" data-action="unsuspendUser" data-id="${esc(u.account)}">Unsuspend</button></div></div>`
+      : `<div class="action"><h3>Suspend</h3><p>Blocks the account from authenticating (uniform AUTH-FAILED), freezing its tokens. Reversible. Already-connected sessions persist until they disconnect.</p><div class="row"><button class="btn danger" data-action="suspendUser" data-id="${esc(u.account)}">Suspend</button></div></div>`);
+  }
 
   // WC3 danger zone: pending-deletion banner + restore, else a typed-name
   // confirmation to schedule a (recoverable) soft delete.
@@ -507,8 +533,8 @@ async function openUser(name) {
   }
 
   set(`<a class="crumb" data-action="back" data-x="users">← back to Users</a>` +
-    `<div class="h-row"><h1>${esc(u.account)}</h1><span class="id">${stateTags}${u.deletion_scheduled ? " " + pill("pending delete", "bad") : ""}</span></div>` +
-    kv + flags + devices + grants + related + messages + danger);
+    `<div class="h-row"><h1>${esc(u.account)}</h1><span class="id">${stateTags}${u.suspended ? " " + pill("suspended", "bad") : ""}${u.deletion_scheduled ? " " + pill("pending delete", "bad") : ""}</span></div>` +
+    kv + flags + devices + grants + related + messages + moderation + danger);
 }
 
 async function openPeer(name) {
@@ -564,6 +590,32 @@ async function openChannel(name) {
     card("History", `<button class="btn primary" data-action="browseChan" data-id="${esc(c.name)}">Browse messages</button>`));
 }
 
+async function inspectTokens() {
+  const raw = ($("#tokIn")?.value || "").trim();
+  const out = $("#tokOut");
+  if (!raw || !out) return;
+  const tokens = raw.split("\n").map((s) => s.trim()).filter(Boolean);
+  try {
+    const r = await api("/tokens/inspect", { method: "POST", body: JSON.stringify({ tokens }) });
+    if (r.error) { out.innerHTML = `<div class="placeholder">${esc(r.error)}</div>`; return; }
+    const chainLine = r.links.length > 1
+      ? `<div class="pager">chain linkage: ${r.chain_linked ? '<span class="ok">intact</span>' : '<span class="bad">broken</span>'}</div>`
+      : "";
+    out.innerHTML = r.links.map((l, i) => {
+      const badges = `${l.rooted ? pill("root", "gold") : pill("child", "neutral")}${l.expired ? pill("expired", "bad") : ""}${l.revoked ? pill("revoked", "bad") : ""}${!l.parent_linked ? pill("unlinked", "bad") : ""}`;
+      return card(`Link ${i + 1} · ${esc(l.scope)}`, `<div class="kv">
+        <div class="k">Issuer</div><div class="v"><span class="fp">${esc(l.issuer_fingerprint)}</span></div>
+        <div class="k">Subject</div><div class="v mono">${esc(l.subject)}</div>
+        <div class="k">Caps</div><div class="v">${capChips(l.caps)}</div>
+        <div class="k">Epoch</div><div class="v mono">${l.epoch}</div>
+        <div class="k">Expiry</div><div class="v">${l.expiry ? `<span class="mono">${when(l.expiry * 1000)}</span>` : '<span class="dim">none</span>'} ${l.expired ? '<span class="bad">expired</span>' : ''}</div>
+        <div class="k">Status</div><div class="v">${badges}</div>
+        <div class="k">Hash</div><div class="v"><span class="fp">${esc(l.token_hash)}</span></div>
+      </div>`);
+    }).join("") + chainLine;
+  } catch (e) { out.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+
 async function browseDm(aArg, bArg) {
   const a = (aArg || $("#dmA")?.value || "").trim();
   const b = (bArg || $("#dmB")?.value || "").trim();
@@ -613,6 +665,13 @@ const clicks = {
   browseDm: () => browseDm(),
   browseChan: (el) => { go("messages").then(() => browse(el.dataset.id)); },
   grantScope: () => screens.grants($("#gScope").value.trim() || "*"),
+  inspectTokens: () => inspectTokens(),
+  loadRevocations: () => screens.revocations($("#revScope").value.trim() || "*"),
+  bumpRevocation: async (el) => {
+    if (!confirm(`Bump the revocation epoch for "${el.dataset.id}"? This invalidates every grant and capability token issued before the new epoch. Irreversible.`)) return;
+    try { await api("/revocations", { method: "POST", body: JSON.stringify({ scope: el.dataset.id }) }); screens.revocations(el.dataset.id); }
+    catch (e) { alert(e.message); }
+  },
   moderate: () => doModerate(),
   delUser: async (el) => {
     const name = el.dataset.id;
@@ -626,6 +685,15 @@ const clicks = {
   },
   restoreUser: async (el) => {
     try { await api(`/accounts/${encodeURIComponent(el.dataset.id)}/restore`, { method: "POST" }); openUser(el.dataset.id); }
+    catch (e) { alert(e.message); }
+  },
+  suspendUser: async (el) => {
+    if (!confirm(`Suspend "${el.dataset.id}"? They'll be blocked from authenticating (reversible).`)) return;
+    try { await api(`/accounts/${encodeURIComponent(el.dataset.id)}/suspend`, { method: "POST" }); openUser(el.dataset.id); }
+    catch (e) { alert(e.message); }
+  },
+  unsuspendUser: async (el) => {
+    try { await api(`/accounts/${encodeURIComponent(el.dataset.id)}/unsuspend`, { method: "POST" }); openUser(el.dataset.id); }
     catch (e) { alert(e.message); }
   },
   delMsg: async (el) => {
@@ -658,7 +726,7 @@ const NAV = [
   { label: "", items: [["dash", "Dashboard"]] },
   { label: "Lookup", items: [["users", "Users"], ["channels", "Channels"], ["namespaces", "Namespaces"], ["messages", "Messages"]] },
   { label: "Federation", items: [["peers", "Peers"], ["netblocks", "Netblocks"], ["transit", "Transit Queue", "WC5"], ["remoteChannels", "Remote Channels", "WC5"]] },
-  { label: "Trust & Keys", items: [["grants", "Grants"], ["devices", "Devices", "WC6"], ["revocations", "Revocations", "WC6"]] },
+  { label: "Trust & Keys", items: [["grants", "Grants"], ["tokens", "Capability Tokens"], ["revocations", "Revocations"], ["devices", "Devices", "WC6"]] },
   { label: "Moderation", items: [["reports", "Reports"], ["moderation", "Moderation"], ["media", "Media Blocklist"], ["phraseBans", "Phrase Bans", "WC7"]] },
   { label: "Gateways", items: [["irc", "IRC Bridge", "WC8"]] },
   { label: "Observability", items: [["audit", "Audit Log"], ["transport", "QUIC Transport", "WC9"]] },

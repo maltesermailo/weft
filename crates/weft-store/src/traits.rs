@@ -110,6 +110,15 @@ pub trait AccountStore: Send + Sync {
     /// maintenance finalize list.
     async fn due_deletions(&self, now_ms: u64) -> Result<Vec<Account>, StoreError>;
 
+    /// WC7 moderation: suspend/unsuspend an account. A suspended account can't
+    /// authenticate (uniform `AUTH-FAILED`) — its tokens are effectively frozen
+    /// because it can't open a session to exercise them. Idempotent; false iff
+    /// the account is unknown.
+    async fn set_suspended(&self, account: &Account, suspended: bool) -> Result<bool, StoreError>;
+
+    /// Whether the account is currently suspended (`false` also covers unknown).
+    async fn is_suspended(&self, account: &Account) -> Result<bool, StoreError>;
+
     /// Idempotent; false iff the account is unknown.
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError>;
 

@@ -589,28 +589,66 @@ reusing `POST`/`DELETE /netblocks`. Test:
   model rejects a changed key and accept-any trusts it. A "pending trust
   decision" queue is new state + flow.
 
-### WC6 ☐ — trust & keys (gated on E2EE/MLS)
+### WC6 ◑ — trust & keys (device/MLS parts gated on E2EE)
 
-§4: device registry (global fingerprint search, per-device keys + first/last
-seen, **revoke-with-blast-radius** preview), capability-token inspector (parse
-the delegation chain: issuer → scopes → path → expiry → revocation status), and
-revocation-list management with per-peer propagation status. **Gate:** the
-device/MLS-leaf and key-transparency parts assume openmls/E2EE, which `CLAUDE.md`
-lists as **deliberately deferred (M6+)**. Ship the capability-token inspector and
-the revocation-set management now (both exist today in weft-crypto/weft-store);
-park the MLS-leaf/device-epoch views until E2EE lands.
+**Shipped — capability-token inspector:** `POST /tokens/inspect` parses a token
+(or a root→leaf chain, `weft_crypto::Token::from_b64`) and describes each link —
+issuer key fingerprint, subject (`key`/`account`/`foreign`/`unbound`), scope,
+caps, epoch, expiry (+ `expired`), `rooted`, `parent_linked` (each child's
+`parent` hash matches the prior token's `hash()`), and **revoked** (issue epoch
+< the scope's current epoch via `scope_epoch`). The `chain_linked` flag reports
+overall linkage. `admin.keys`. SPA "Capability Tokens" screen (paste → link
+cards with root/expired/revoked badges) — the "why can/can't X do Y" debugger.
+It reports what the tokens *say*, not authority (that's the enforcement layer).
 
-### WC7 ☐ — moderation depth
+**Shipped — revocation-set management:** `GET /revocations?scope=` returns a
+scope's current epoch + the grants a bump would invalidate; `POST /revocations`
+**bumps the epoch** (`CapabilityStore::bump_epoch` — invalidates every grant/
+token issued earlier, §10.4), audited (`revocation.bump`). `admin.keys`. SPA
+"Revocations" screen (scope → epoch + affected grants + a danger "Bump to epoch
+N" kill-switch). Tests: `token_inspector_parses_chain_and_flags_revocation`,
+`revocation_epoch_bumps_and_is_audited`, and the `admin.keys` denial in the
+read-only-admin RBAC test. Browser-verified both screens.
 
-§5, beyond WC0's mute/ban/kick/delete. **Account:** suspend (login blocked +
-tokens frozen), shadow-limit (rate-limited, invisible to non-members), forced
-device logout — each an audited store mutation + live broadcast. **Room:**
-rename, transfer founder, freeze (read-only), delete-with-**federating**
-tombstone (peers stop replicating, show "removed by origin"). Force epoch
-rotation is **parked on E2EE/MLS** (see WC6). **Reports:** bulk actions for spam
-waves; verify reporter-attached excerpt signatures (§5 — excerpts signed by the
-reporter's device so they can't be forged). Reporter confidentiality (invariant
-12) stays enforced throughout.
+**Deferred — device registry & key transparency (E2EE-gated, per the plan):**
+global device fingerprint search, per-device MLS leaves, revoke-with-blast-
+radius, and per-peer revocation propagation status assume openmls/MLS (M6+). A
+basic device *list* exists on the user detail (WC4); the global registry + the
+MLS/propagation views wait for E2EE. "Devices" stays a `WC6`-tagged placeholder.
+
+### WC7 ◑ — moderation depth
+
+**Shipped — account suspend (the headline WC3 deferred here):** `AccountStore::
+set_suspended`/`is_suspended` (migration `0025`, `suspended` bool, mem + PG +
+contract). A suspended account **can't authenticate** — the check sits at
+`welcome_authed`, the single chokepoint every AUTH method routes through, and
+returns the uniform `AUTH-FAILED` (anti-enumeration; looks like bad creds). Its
+tokens are thereby **frozen** (no session ⇒ no way to exercise them). Admin:
+`POST /accounts/:name/suspend` / `/unsuspend` (`admin.moderate`, audited,
+no-self-suspend); the admin panel login itself also refuses a suspended account.
+Account list/detail carry `suspended`; the SPA shows a `suspended` knot, a
+`SUSPENDED` flag, and an "Account moderation → Suspend/Unsuspend" card. Tests:
+store contract, admin e2e (flag toggle + self-suspend + panel-login block), and
+a **wire-level conformance test** (`suspended_account_cannot_authenticate` —
+register → suspend → `AUTH PASSWORD` returns `AUTH-FAILED` → unsuspend →
+`WELCOME`). Browser-verified.
+
+**Remaining (deferred):**
+- **Forced immediate device logout** — suspend blocks *new* logins; already-
+  connected sessions persist until they disconnect. Cutting them mid-session
+  needs a per-session close signal (the account directory is DM-delivery only,
+  `pub(crate)`); noted as the follow-on.
+- **Shadow-limit** (rate-limited + invisible to non-members) — needs
+  rate-limiting infra beyond the existing `THROTTLED` plumbing + visibility
+  gating; parked.
+- **Room actions** (rename, transfer founder, freeze, federating tombstone) —
+  live channel-actor re-keying (rename), root-key succession (transfer =
+  `NS TRANSFER`, not admin fiat), enforcement flags (freeze), and federation
+  teardown (tombstone) each need their own plumbing; channel delete rides the
+  WC3 typed-name gate when built. Force epoch rotation is E2EE-gated (WC6).
+- **Reports: bulk actions** + reporter-excerpt signature verification — the
+  latter needs the §5 signed-excerpt report format (not built). Reporter
+  confidentiality (invariant 12) stays enforced throughout regardless.
 
 ### WC8 ☐ — IRC gateway ops
 

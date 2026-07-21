@@ -1135,6 +1135,51 @@ async fn wrong_password_and_closed_registration() {
     server.shutdown().await;
 }
 
+/// WC7: a suspended account can't authenticate — uniform AUTH-FAILED at the
+/// session chokepoint — and unsuspending restores access.
+#[tokio::test]
+async fn suspended_account_cannot_authenticate() {
+    let server = start_server(&["#general"]).await;
+
+    // Register ada.
+    let mut c = QuicClient::connect(server.quic_addr).await;
+    c.send("HELLO weft/1").await;
+    c.recv().await;
+    c.send(&format!("REGISTER ada :{PASSWORD}")).await;
+    assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+
+    // Suspend her via the server context.
+    let ada: weft_proto::Account = "ada".parse().unwrap();
+    server
+        .ctx()
+        .accounts
+        .set_suspended(&ada, true)
+        .await
+        .unwrap();
+
+    // A fresh AUTH PASSWORD is now rejected — same code as bad credentials.
+    let mut c2 = QuicClient::connect(server.quic_addr).await;
+    c2.send("HELLO weft/1").await;
+    c2.recv().await;
+    c2.send(&format!("AUTH PASSWORD ada :{PASSWORD}")).await;
+    assert!(matches!(&c2.recv().await.event, Event::Err(e) if e.code == ErrCode::AuthFailed));
+
+    // Unsuspend → auth works again.
+    server
+        .ctx()
+        .accounts
+        .set_suspended(&ada, false)
+        .await
+        .unwrap();
+    let mut c3 = QuicClient::connect(server.quic_addr).await;
+    c3.send("HELLO weft/1").await;
+    c3.recv().await;
+    c3.send(&format!("AUTH PASSWORD ada :{PASSWORD}")).await;
+    assert!(matches!(c3.recv().await.event, Event::Welcome { .. }));
+
+    server.shutdown().await;
+}
+
 /// "Real certs": the operator-supplied PEM path must produce a working
 /// QUIC endpoint (self-signed here, but exercising exactly the load path).
 #[tokio::test]

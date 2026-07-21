@@ -153,6 +153,10 @@ pub async fn login(State(st): State<AdminState>, Json(req): Json<LoginReq>) -> R
         Some(s) if s.has(AdminScope::Read) => {}
         _ => return unauthorized(),
     }
+    // WC7: a suspended account can't use the panel either (uniform failure).
+    if st.accounts.is_suspended(&account).await.unwrap_or(false) {
+        return unauthorized();
+    }
 
     let token = make_token(&st.auth.secret, &account, now() + SESSION_TTL_SECS);
     let cookie = format!(

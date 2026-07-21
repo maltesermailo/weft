@@ -44,6 +44,8 @@ pub struct AccountSummary {
     pub banned: bool,
     /// WC3: scheduled hard-delete time (ms) when pending deletion, else `None`.
     pub deletion_scheduled: Option<u64>,
+    /// WC7: the account is suspended (blocked from authenticating).
+    pub suspended: bool,
 }
 
 /// `DELETE /accounts/:name` response — the account was scheduled for deletion
@@ -86,6 +88,8 @@ pub struct AccountDetail {
     pub banned: bool,
     /// WC3: scheduled hard-delete time (ms) when pending deletion, else `None`.
     pub deletion_scheduled: Option<u64>,
+    /// WC7: the account is suspended (blocked from authenticating).
+    pub suspended: bool,
     /// WC4: enrolled device fingerprints (truncated hex of the Ed25519 pubkey).
     pub devices: Vec<String>,
     /// WC4 "find related": other accounts sharing this account's email domain
@@ -384,6 +388,59 @@ impl From<MediaBlockRecord> for MediaBlock {
             added_ms: b.added_ms,
         }
     }
+}
+
+/// One link of an inspected capability-token chain (WC6). Self-describing — the
+/// operator debugging tool for "why can/can't X do Y" (§10.4).
+#[derive(Serialize)]
+pub struct TokenLink {
+    /// The signing key's fingerprint (root = scope authority; child = parent's
+    /// subject key).
+    pub issuer_fingerprint: String,
+    /// Rendered subject: `key <fp>` / `account <ulid>` / `foreign <user>` /
+    /// `unbound (invite)`.
+    pub subject: String,
+    pub scope: String,
+    pub caps: Vec<String>,
+    /// The scope revocation epoch this token was issued at.
+    pub epoch: u64,
+    /// Unix seconds; `0` = no expiry.
+    pub expiry: u64,
+    pub expired: bool,
+    /// This is a root token (unparented, signed by the scope authority).
+    pub rooted: bool,
+    /// `parent` hash links to the previous token in the chain (root: unparented).
+    pub parent_linked: bool,
+    /// The token's issue epoch is behind the scope's current epoch — revoked.
+    pub revoked: bool,
+    /// Short content-hash fingerprint, for reference.
+    pub token_hash: String,
+}
+
+/// `POST /tokens/inspect` — the parsed delegation chain (WC6).
+#[derive(Serialize)]
+pub struct TokenInspection {
+    pub links: Vec<TokenLink>,
+    /// Every child links to its parent's hash and the root is unparented.
+    pub chain_linked: bool,
+    /// A parse error, if the input wasn't a valid token chain.
+    pub error: Option<String>,
+}
+
+/// `GET /revocations?scope=` — a scope's current revocation epoch and the grants
+/// a bump would invalidate (WC6).
+#[derive(Serialize)]
+pub struct RevocationScope {
+    pub scope: String,
+    pub epoch: u64,
+    pub grants: Vec<Grant>,
+}
+
+/// `POST /revocations` — the scope's new epoch after a bump.
+#[derive(Serialize)]
+pub struct EpochBumped {
+    pub scope: String,
+    pub epoch: u64,
 }
 
 /// One row of `GET /audit` — a hash-chained audit record (`ts_ms` surfaces as

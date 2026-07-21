@@ -52,6 +52,18 @@ impl<S: ControlStream> Session<S> {
         account: Account,
         attestation: Option<String>,
     ) -> io::Result<Flow> {
+        // WC7: a suspended account can't authenticate. Uniform AUTH-FAILED (it
+        // looks exactly like bad credentials — anti-enumeration, §6.1). This is
+        // the single chokepoint every AUTH method routes through.
+        if self
+            .ctx
+            .accounts
+            .is_suspended(&account)
+            .await
+            .unwrap_or(false)
+        {
+            return self.auth_failed(label).await;
+        }
         let welcome = Event::Welcome {
             network: self.ctx.info.network.clone(),
             features: Vec::new(),
