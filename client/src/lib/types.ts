@@ -9,6 +9,8 @@ export type Msg = {
   author: string;
   body: string;
   time: string;
+  /// Epoch ms for day grouping / the unread divider (from the ULID, or arrival).
+  ts: number;
   own: boolean;
   system?: boolean;
   /// Origin msgid — the target for edit / delete / react / reply. Absent on

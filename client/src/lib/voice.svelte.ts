@@ -30,6 +30,8 @@ type VoiceModel = {
   connecting: boolean;
   /** Local microphone mute. */
   muted: boolean;
+  /** Deafen: all incoming audio silenced (implies muted while active). */
+  deafened: boolean;
   /** Room roster keyed by account. */
   participants: Record<string, VoiceParticipant>;
   /** Last error (mic denied, a rejected join, …); shown then cleared by the UI. */
@@ -40,6 +42,7 @@ export const voice = $state<VoiceModel>({
   channel: null,
   connecting: false,
   muted: false,
+  deafened: false,
   participants: {},
   error: null,
 });
@@ -56,6 +59,9 @@ const RTC_CONFIG: RTCConfiguration = {
 
 let account = "";
 let subscribed = false;
+
+// Mic state captured when deafening, so un-deafen can restore it (deafen mutes).
+let micBeforeDeafen = false;
 
 // webrtc-path media state.
 let pc: RTCPeerConnection | null = null;
@@ -122,6 +128,33 @@ export function toggleMute(): void {
   if (me) me.muted = voice.muted;
 }
 
+/** Toggle deafen: silence every incoming stream so you hear nothing. Deafen also
+ *  mutes the mic (Discord-style); un-deafening restores the mic to its pre-deafen
+ *  state. Muting is local playback — the server and peers keep sending, we just
+ *  don't play it. */
+export function toggleDeafen(): void {
+  voice.deafened = !voice.deafened;
+  applyDeafen();
+
+  if (voice.deafened) {
+    micBeforeDeafen = voice.muted;
+    if (!voice.muted) toggleMute();
+  } else if (!micBeforeDeafen && voice.muted) {
+    toggleMute();
+  }
+
+  const me = voice.participants[account];
+  if (me) me.deaf = voice.deafened;
+}
+
+/** Push the current deafen state onto every remote audio element. Both media
+ *  planes play remote audio through elements we own (`attached` for LiveKit,
+ *  `audioEl` for WebRTC), so muting those is the whole of "hear nothing." */
+function applyDeafen(): void {
+  if (audioEl) audioEl.muted = voice.deafened;
+  for (const el of attached) el.muted = voice.deafened;
+}
+
 function teardown(): void {
   // LiveKit path.
   if (room) {
@@ -156,6 +189,8 @@ function teardown(): void {
   voice.channel = null;
   voice.connecting = false;
   voice.participants = {};
+  voice.deafened = false;
+  micBeforeDeafen = false;
 }
 
 async function onVoiceEvent(e: WeftEvent): Promise<void> {
@@ -228,6 +263,7 @@ async function onLiveKitOffer(
       if (track.kind === lk.Track.Kind.Audio) {
         const el = track.attach();
         el.autoplay = true;
+        el.muted = voice.deafened;
         attached.add(el);
       }
     });
@@ -326,6 +362,7 @@ async function onWebrtcOffer(channel: string, endpoint: string | null): Promise<
   // Remote audio playback: attach the SFU-forwarded stream to a hidden element.
   audioEl = document.createElement("audio");
   audioEl.autoplay = true;
+  audioEl.muted = voice.deafened;
   pc.ontrack = (ev) => {
     if (audioEl && ev.streams[0]) audioEl.srcObject = ev.streams[0];
   };
@@ -384,9 +421,11 @@ function onState(e: Extract<WeftEvent, { kind: "voice-state" }>): void {
     };
   }
 
-  // The channel we're in also feeds voice.participants (the LiveKit path's
-  // roster) so the joined VoiceBar stays in sync on the WebRTC backend too.
-  if (e.channel === voice.channel) {
+  // The channel we're in also feeds voice.participants — but only on the WebRTC
+  // backend. On the LiveKit path the SDK's Room events are the sole authority on
+  // that roster; folding `voice-state` in as well double-lists any peer whose
+  // LiveKit identity and server account key aren't byte-identical.
+  if (e.channel === voice.channel && !room) {
     if (e.action === "leave") delete voice.participants[e.user];
     else voice.participants[e.user] = { ...roster[e.user] };
   }

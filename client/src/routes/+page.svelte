@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import * as weft from "$lib/weft";
   import type { Msg, Channel, CtxItem, RoleDefC } from "$lib/types";
   import { provideApp } from "$lib/context";
@@ -26,7 +26,6 @@
   import PinsModal from "$lib/components/modals/PinsModal.svelte";
   import DiscoverModal from "$lib/components/modals/DiscoverModal.svelte";
   import ReportModal from "$lib/components/modals/ReportModal.svelte";
-  import RolesDialog from "$lib/components/modals/RolesDialog.svelte";
   import ChannelSettings from "$lib/components/modals/ChannelSettings.svelte";
   import ProfileCard from "$lib/components/modals/ProfileCard.svelte";
   import UserSettingsModal from "$lib/components/modals/UserSettingsModal.svelte";
@@ -137,7 +136,6 @@
     openCtx(e, [
       { label: "Message", run: () => openDm(name) },
       { label: "Profile", run: () => openProfile(name) },
-      { label: "Roles", run: () => openRoles(name) },
       { label: "Mute", run: () => moderate("mute", name) },
       { label: "Ban", danger: true, run: () => moderate("ban", name) },
     ]);
@@ -285,7 +283,6 @@
   let reportTarget = $state<Msg | null>(null); // message being reported (ReportModal)
   let reportsOpen = $state(false);
   let reportQueue = $state<Record<string, Extract<weft.WeftEvent, { kind: "report-filed" }>>>({});
-  let rolesTarget = $state<string | null>(null); // member for the RolesDialog
   let profileTarget = $state<string | null>(null); // member profile popout
   let inviteLink = $state<string | null>(null);
   let inviteId = $state<string | null>(null); // for INVITE REVOKE
@@ -475,9 +472,6 @@
   let nsDesc = $state("");
   let nsVis = $state("public");
   let nsDelegSubject = $state("");
-  let nsDelegCaps = $state<string[]>(["mute", "kick"]);
-  const toggleDelegCap = (c: string) =>
-    (nsDelegCaps = nsDelegCaps.includes(c) ? nsDelegCaps.filter((x) => x !== c) : [...nsDelegCaps, c]);
   let nsNewOwner = $state("");
   let nsRecM = $state(2);
   let nsRecKeys = $state("");
@@ -527,16 +521,35 @@
   // encode its 48-bit ms timestamp. Gives correct times for backfilled history
   // (Phase 1), not just live arrival.
   const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-  function msgTime(msgid: string): string {
-    const ulid = msgid.split("/").pop() ?? "";
-    if (ulid.length < 10) return clock();
+  // Decode a msgid's ULID timestamp to epoch ms, or null if it isn't a ULID.
+  function msgEpoch(msgid: string | undefined): number | null {
+    const ulid = msgid?.split("/").pop() ?? "";
+    if (ulid.length < 10) return null;
     let ms = 0;
     for (let i = 0; i < 10; i++) {
       const v = CROCKFORD.indexOf(ulid[i].toUpperCase());
-      if (v < 0) return clock();
+      if (v < 0) return null;
       ms = ms * 32 + v;
     }
-    return hhmm(new Date(ms));
+    return ms;
+  }
+  function msgTime(msgid: string): string {
+    const ms = msgEpoch(msgid);
+    return ms === null ? clock() : hhmm(new Date(ms));
+  }
+  // ---- day separators (Tier 1) ----
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const dayKey = (ts: number) => startOfDay(new Date(ts));
+  function dayLabel(ts: number): string {
+    const diff = Math.round((startOfDay(new Date()) - dayKey(ts)) / 86_400_000);
+    if (diff === 0) return "Today";
+    if (diff === 1) return "Yesterday";
+    return new Date(ts).toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    });
   }
   const retentionOf = (policy: string) => {
     if (policy.startsWith("retained")) return "retained";
@@ -805,6 +818,7 @@
           body: systemBody ?? e.body,
           system: e.system ? true : undefined,
           time: msgTime(e.msgid),
+          ts: msgEpoch(e.msgid) ?? Date.now(),
           own: e.own && !e.system,
           msgid: e.msgid,
           edited: e.edited,
@@ -1100,7 +1114,7 @@
         const fed = e.by && e.by.includes("@") && e.by.split("@")[1] !== network;
         const who = e.by ? ` by ${e.by}${fed ? " (via federation)" : ""}` : "";
         const why = e.reason ? ` (${e.reason})` : "";
-        ch?.messages.push(mkMsg({ author: "", body: `${e.account} ${e.action}d${who} — ${e.scope}${why}`, time: clock(), own: false, system: true }));
+        ch?.messages.push(mkMsg({ author: "", body: `${e.account} ${e.action}d${who} — ${e.scope}${why}`, time: clock(), ts: Date.now(), own: false, system: true }));
         break;
       }
       case "error":
@@ -1169,7 +1183,7 @@
 
   function sys(body: string) {
     if (activeChannel)
-      activeChannel.messages.push(mkMsg({ author: "", body, time: clock(), own: false, system: true }));
+      activeChannel.messages.push(mkMsg({ author: "", body, time: clock(), ts: Date.now(), own: false, system: true }));
   }
 
   /// A capability-gated moderation action (§10.4). These are **server-side**:
@@ -1228,28 +1242,51 @@
   // ---- §13 media attachments ----
   let pendingAttachments = $state<{ uri: string; name: string; mime: string; thumb: string | null }[]>([]);
 
+  // Upload a batch of files into the pending tray (shared by the picker, paste,
+  // and drag-drop). Caps at 10 per message (§13); a failure toasts, not throws.
+  async function addFiles(files: Iterable<File>) {
+    if (!active) return;
+    for (const file of files) {
+      if (pendingAttachments.length >= 10) {
+        toast("up to 10 attachments per message", "error");
+        break;
+      }
+      try {
+        const up = await weft.upload(file);
+        pendingAttachments = [
+          ...pendingAttachments,
+          { uri: up.media, name: file.name || "pasted-file", mime: file.type, thumb: up.thumb },
+        ];
+      } catch (e) {
+        toast(`upload failed: ${e}`, "error");
+      }
+    }
+  }
+
   function attachFile() {
     const input = document.createElement("input");
     input.type = "file";
     input.multiple = true;
-    input.onchange = async () => {
-      for (const file of Array.from(input.files ?? [])) {
-        if (pendingAttachments.length >= 10) {
-          toast("up to 10 attachments per message", "error");
-          break;
-        }
-        try {
-          const up = await weft.upload(file);
-          pendingAttachments = [
-            ...pendingAttachments,
-            { uri: up.media, name: file.name, mime: file.type, thumb: up.thumb },
-          ];
-        } catch (e) {
-          toast(`upload failed: ${e}`, "error");
-        }
-      }
-    };
+    input.onchange = () => addFiles(Array.from(input.files ?? []));
     input.click();
+  }
+
+  // Paste an image/file from the clipboard straight into the tray (§13).
+  function pasteFiles(e: ClipboardEvent) {
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (files.length) {
+      e.preventDefault();
+      addFiles(files);
+    }
+  }
+
+  // Drop files onto the composer/chat area to attach them.
+  function dropFiles(e: DragEvent) {
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (files.length) {
+      e.preventDefault();
+      addFiles(files);
+    }
   }
 
   function removeAttachment(i: number) {
@@ -1380,12 +1417,13 @@
     (mine ? weft.unreact(m.msgid, emoji) : weft.react(m.msgid, emoji)).catch(() => {});
   }
 
-  // ---- markdown (Phase 4) ----
-  // Inline-only, escape-first: safe to feed {@html} because HTML is neutralised
-  // before any markdown token is turned back into a tag.
+  // ---- markdown (Phase 4 · Tier 1) ----
+  // Escape-first: safe to feed {@html} because HTML is neutralised before any
+  // markdown token is turned back into a tag.
   const escapeHtml = (s: string) =>
     s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  function renderMd(text: string): string {
+  // Inline formatting for a run of text with no fenced blocks.
+  function renderInline(text: string): string {
     let s = escapeHtml(text);
     s = s.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
@@ -1400,10 +1438,37 @@
       /(^|\s)(https?:\/\/[^\s<]+)/g,
       '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>',
     );
+    // ||spoiler|| → click-to-reveal (revealed by a delegated handler in the list).
+    s = s.replace(
+      /\|\|([\s\S]+?)\|\|/g,
+      '<span class="spoiler" role="button" tabindex="0" title="Spoiler — click to reveal">$1</span>',
+    );
     // @mentions → pills; a mention of me / @everyone / @here highlights.
     s = s.replace(/@(everyone|here|[a-z0-9][a-z0-9._-]*)/gi, (_full, name: string) => {
       const me = name === account || name === "everyone" || name === "here";
       return `<span class="mention${me ? " me" : ""}">@${name}</span>`;
+    });
+    return s;
+  }
+  // Full render: lift out ``` / ~~~ fenced code blocks (their contents are
+  // rendered verbatim), inline-format the rest, then splice the blocks back in.
+  function renderMd(text: string): string {
+    const blocks: { lang: string; code: string }[] = [];
+    const lifted = text.replace(
+      /(?:```|~~~)([a-zA-Z0-9+#.-]*)\n?([\s\S]*?)(?:```|~~~)/g,
+      (_m, lang: string, code: string) => {
+        const i = blocks.length;
+        blocks.push({ lang: lang.trim(), code: code.replace(/\n$/, "") });
+        return ` CB${i} `;
+      },
+    );
+
+    let s = renderInline(lifted);
+
+    s = s.replace(/ CB(\d+) /g, (_m, i: string) => {
+      const b = blocks[+i];
+      const label = b.lang ? `<span class="code-lang">${escapeHtml(b.lang)}</span>` : "";
+      return `<pre class="code-block">${label}<code>${escapeHtml(b.code)}</code></pre>`;
     });
     return s;
   }
@@ -1510,6 +1575,32 @@
     }
   });
 
+  // ---- unread "New messages" divider (Tier 1) ----
+  // Anchored to the read marker as it stood when we opened the channel, so it
+  // holds its place while we read (unlike lastRead, which advances) and re-
+  // anchors when we switch channels. Defined *before* the auto-mark effect below
+  // so it captures lastRead before that effect advances it.
+  let newDividerFor = "";
+  let newBoundary = $state<number | null>(null); // epoch ms; NEW line before the first newer msg
+  $effect(() => {
+    const a = active;
+    if (a === newDividerFor) return;
+    newDividerFor = a;
+    newBoundary = untrack(() => {
+      const lr = channels[a]?.lastRead;
+      return lr ? msgEpoch(lr) : null;
+    });
+  });
+  // The render key of the message the NEW divider sits before, or null.
+  const newDividerKey = $derived.by(() => {
+    if (newBoundary === null) return null;
+    for (const m of activeChannel?.messages ?? []) {
+      if (m.system || m.own) continue;
+      if (m.ts > newBoundary) return m.key;
+    }
+    return null;
+  });
+
   // Viewing a channel clears its unread badge and advances the read marker
   // (MARK, synced across our devices — §9.7).
   $effect(() => {
@@ -1563,10 +1654,6 @@
     weft.reportsList(activeServer ? `ns:${activeServer}` : "*").catch(() => {});
   }
 
-  // Roles (RolesDialog owns its form)
-  function openRoles(member: string) {
-    rolesTarget = member;
-  }
 
   // Invites
   function mintInvite() {
@@ -1661,10 +1748,6 @@
 
   // ---- per-channel permissions (§6.5 grants at #chan scope, §6.7 restricted) ----
   let chanPermsCh = $state<string | null>(null);
-  let permSubject = $state("");
-  let permCaps = $state<string[]>(["send"]);
-  const togglePermCap = (c: string) =>
-    (permCaps = permCaps.includes(c) ? permCaps.filter((x) => x !== c) : [...permCaps, c]);
   function chanNsScope() {
     const ns = nsOf(chanPermsCh ?? "");
     return ns ? `ns:${ns}` : "*";
@@ -1682,8 +1765,6 @@
   }
   function openChanPerms(channel: string) {
     chanPermsCh = channel;
-    permSubject = "";
-    permCaps = ["send"];
     fetchRoles(chanNsScope()); // the namespace's roles
     fetchRoles(channel); // this channel's role-permissions
   }
@@ -1695,17 +1776,6 @@
       .channelMeta(chanPermsCh, "posting", next ? "restricted" : "open")
       .then(() => (ch.restricted = next))
       .catch((e) => toast(String(e), "error"));
-  }
-  function grantChanCaps() {
-    if (!chanPermsCh || !permSubject.trim() || !permCaps.length) return;
-    // Confirmed by the CAPS event; a cap failure never confirms and its ERR toasts.
-    expectSuccess(`caps:${permSubject.trim()}|${chanPermsCh}`, `Permissions updated for ${permSubject.trim()}`);
-    weft.grant(permSubject.trim(), chanPermsCh, permCaps.join(",")).catch((e) => toast(String(e), "error"));
-  }
-  function revokeChanCaps() {
-    if (!chanPermsCh || !permSubject.trim() || !permCaps.length) return;
-    expectSuccess(`caps:${permSubject.trim()}|${chanPermsCh}`, `Permissions updated for ${permSubject.trim()}`);
-    weft.revoke(permSubject.trim(), chanPermsCh, permCaps.join(",")).catch((e) => toast(String(e), "error"));
   }
 
   // ---- admin channel move (drag-and-drop) ----
@@ -1761,7 +1831,6 @@
     nsDesc = meta?.description ?? "";
     nsVis = meta?.visibility ?? "public";
     nsDelegSubject = "";
-    nsDelegCaps = ["mute", "kick"];
     nsNewOwner = "";
     nsRecKeys = "";
     nsTab = "overview";
@@ -1812,10 +1881,6 @@
       selectServer(f.ns);
     }
   });
-  function doDelegate() {
-    const s = nsDelegSubject.trim();
-    if (s && nsDelegCaps.length) weft.nsDelegate(activeServer, s, nsDelegCaps.join(",")).catch(() => {});
-  }
   function doTransfer() {
     const o = nsNewOwner.trim();
     if (o && confirm(`Transfer ownership of ${activeServer} to ${o}? This is signed by your root key and cannot be undone.`))
@@ -1930,7 +1995,6 @@
     newCat: () => { newCatName = ""; newCatOpen = true; serverMenu = false; },
     openProfile,
     openDm,
-    openRoles,
     moderate,
     openSettings: () => { userTab = "account"; settingsOpen = true; userMenu = false; },
     toast,
@@ -1966,6 +2030,9 @@
     msgCtx,
     renderMd,
     mentionsMe,
+    dayKey,
+    dayLabel,
+    get newDividerKey() { return newDividerKey; },
     // composer
     get composer() { return composer; },
     set composer(v: string) { composer = v; },
@@ -1975,6 +2042,8 @@
     pickMention,
     get pendingAttachments() { return pendingAttachments; },
     attachFile,
+    pasteFiles,
+    dropFiles,
     removeAttachment,
     mediaUrl: weft.mediaUrl,
     get mentionQuery() { return mentionQuery; },
@@ -1987,17 +2056,11 @@
     isOwnerAt,
     assignRoleTo,
     unassignRoleFrom,
-    // channel permissions
-    get permSubject() { return permSubject; },
-    set permSubject(v: string) { permSubject = v; },
-    get permCaps() { return permCaps; },
-    togglePermCap,
+    // channel permissions (role-based only)
     chanNsScope,
     chanRoleCaps,
     toggleChanRoleCap,
     toggleRestricted,
-    grantChanCaps,
-    revokeChanCaps,
     // federation (operator)
     get isOperator() { return isOperator; },
     get netblocks() { return netblocks; },
@@ -2041,8 +2104,6 @@
     toggleNewRoleCap,
     get nsDelegSubject() { return nsDelegSubject; },
     set nsDelegSubject(v: string) { nsDelegSubject = v; },
-    get nsDelegCaps() { return nsDelegCaps; },
-    toggleDelegCap,
     get nsNewOwner() { return nsNewOwner; },
     set nsNewOwner(v: string) { nsNewOwner = v; },
     get nsRecM() { return nsRecM; },
@@ -2059,7 +2120,6 @@
     createRole,
     deleteRole,
     assignRole,
-    doDelegate,
     showRecoveryKey,
     startRecovery,
     cosignRecovery,
@@ -2157,9 +2217,6 @@
       <ReportModal target={reportTarget} onclose={() => (reportTarget = null)} />
     {/if}
 
-    {#if rolesTarget}
-      <RolesDialog target={rolesTarget} onclose={() => (rolesTarget = null)} />
-    {/if}
 
     {#if reportsOpen}
       <ReportsQueueModal onclose={() => (reportsOpen = false)} />

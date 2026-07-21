@@ -2,83 +2,132 @@
 
 Gap analysis of the Tauri/SvelteKit client against a Discord-class experience,
 mapped to WEFT protocol verbs. `[ ]` = not started · `[~]` = partial.
+Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
 
 ## Where it is today (implemented)
 
-- **Connect**: login / register (host, account, password), keepalive, auth-error surfacing.
-- **One network** in the community rail (single connection).
-- **Channels**: live list grouped by *retention policy*; join a `#channel` or a namespace (`NS JOIN`); manual join box.
-- **Messages**: live `MESSAGE` render, own-echo, day separator, composer (Enter/Shift+Enter), `EDITED` shown as a new line, `MODERATED` as a system line.
-- **Members**: flat list from observed joins; local/federated origin dot; mute/ban buttons.
-- **Slash commands**: `/ban /kick /mute /unmute /join /part /help`.
-- **Backend commands**: `connect, join, ns_join, send_message, send_raw`.
-- **Events wired**: connected, auth-failed, closed, policy, member, message, edited, moderated, error. (`deleted`, `reaction`/`reactions`, `pong`→raw are **not** handled.)
+- **Messaging**: history/scrollback (HISTORY/BATCH, infinite scroll), edit/delete,
+  reactions (pills + picker), replies with jump-to-quote, typing indicators,
+  pins (+ pins panel), inline markdown (bold/italic/code/strike/links),
+  @mention pills + autocomplete + highlight, file attachments via picker
+  (image/video/file render), desktop notifications (DMs + mentions).
+- **Navigation**: community rail (network + namespace tiles, unread/mention
+  rollups), category-grouped channel list with drag-drop reordering, member
+  roster (MEMBERS verb, presence dots, owner/mod/bridged badges), DM list,
+  Ctrl+K quick switcher, right-click context menus, unread bolding + `@`
+  badges synced via MARK/MARKED.
+- **Voice**: join/leave voice channels, mute, speaking indicators, inline
+  rosters; embedded SFU + LiveKit backends.
+- **Identity & admin**: login/register + device-key auth, presence menu,
+  profile cards, display name + avatar upload, email/birthday verification,
+  namespace create (on-device root key) / settings / roles / delegation /
+  recovery quorum / transfer / delete, channel settings (topic, retention,
+  restricted posting, per-role caps), invites (mint/revoke/redeem),
+  moderation (mute/ban/kick UI + slash commands), report flow + mod queue,
+  federation panels (bridges, netblocks, auto-federation toggle).
+- **Platform**: auto-reconnect with banner, session persistence + auto-login,
+  toasts, dark/light theme, server-side admin panel (weft-admin).
 
 ---
 
-## Tier 1 — core chat parity (makes it a usable Discord-like client)
+## Tier 1 — first-hour gaps (users hit these immediately)
 
-- [ ] **Message history / scrollback** — `HISTORY` + `BATCH`. Load on channel open; infinite-scroll older. *Biggest gap: today only live messages exist.* Use ULID-derived timestamps (arrival time is wrong for history).
-- [ ] **Delete** — `DELETE` verb + **handle the `deleted` event** (currently ignored, so deleted messages linger). Hover action + tombstone render.
-- [ ] **Edit own message** — `EDIT`; up-arrow / hover pencil; render `edited ×N` indicator (proto already carries it).
-- [ ] **Reactions** — `REACT`/`UNREACT` + render `REACTION`/`REACTIONS` (currently fall into `raw`). Emoji picker; reaction pills (design CSS exists).
-- [ ] **Replies** — `reply-to=` tag; quoted-snippet render (design `.reply-thread` markup exists).
-- [ ] **Typing indicators** — `TYPING start/stop` on input; render "X is typing…" from `TYPING` events.
-- [ ] **Markdown rendering** — `fmt=md`; bold/italic/code/links. Discord-style.
-- [ ] **Message grouping** — collapse consecutive messages from one author; hover toolbar.
-- [ ] **Direct messages** — `MSG @user`; DM list, DM conversations, open-DM from a member; the "home" rail button is currently inert.
-- [ ] **Presence** — set own status (`PRESENCE online/away/dnd/invisible`) + render others' status dots from `PRESENCE` events.
+> **Sprint A shipped ✅ (2026-07-21)** — fenced code blocks, spoilers,
+> paste/drag-drop upload, and the NEW/day dividers all landed (client-only,
+> build + typecheck clean). Remaining Tier 1: syntax highlighting, link
+> embeds, audio player/lightbox, unread counts, notification prefs.
 
-## Tier 2 — servers, channels, membership
+### Messaging rendering
+- [x] **Fenced code blocks** — ` ``` `/`~~~` blocks with a language label,
+  content rendered verbatim (escape-first, XSS-safe), inner markdown left
+  untouched. **Syntax highlighting** still pending (needs a highlighter dep;
+  deferred). Headings/lists/blockquotes still not rendered.
+- [ ] **Link previews / embeds** — URLs render as bare links; no
+  OpenGraph unfurl, no inline embed of pasted image/video URLs. Do the
+  unfurl **server-side** (client-side fetch leaks IPs / hits CORS).
+- [x] **Paste & drag-drop upload** — Ctrl+V clipboard files and drop-onto-
+  composer both feed the shared upload path (`addFiles`), with a "Drop files
+  to attach" overlay; still capped at 10/message.
+- [x] **Spoilers** — `||text||` renders hidden, click/Enter to reveal
+  (delegated `spoilerReveal` action). Spoiler-tagged *attachments* not yet.
+- [~] **Audio player + image lightbox** — audio attachments fall through to
+  a generic download chip; images open raw, no gallery. Client-only.
 
-- [ ] **Multiple namespaces/networks** in the community rail — connect to several, switch between them (currently one tile only). Discord's server list.
-- [ ] **Join dialog** — a proper "Add a server" modal: `DISCOVER` public namespaces, join by name, create. (Replaces the bare join box.)
-- [ ] **Namespace channel layout** — `CHANNELS <ns>` → `CHANNEL-LAYOUT` (categories + position). Group channels by **category** (Discord), not retention.
-- [ ] **Unread / read state** — `MARK`/`MARKED`; bold unread channels, unread divider, mention badges. (Design has static unread pills.)
-- [ ] **Channel management** — `CHANNEL CREATE / META (topic|view-gated|posting|category|position) / POLICY / DELETE`; right-click + settings. Show channel **topic** in the topbar (currently empty).
-- [ ] **Leave channel** — `PART` button/right-click (only `/part` today).
-- [ ] **Member roster** — full list (needs `MEMBERS` verb, see Protocol gaps); currently only observed joins. Group by role/capability (design: Root / Delegated / Members).
-- [ ] **User profile popover** — click a member → key, roles, DM button.
-- [ ] **Display names / avatars** — `display=` on `MEMBER`; render display identity, not just account.
+### Timeline orientation
+- [x] **"NEW messages" divider + day-date separators** — per-day date
+  dividers (Today/Yesterday/full date) from the ULID timestamp, plus a red
+  "New messages" line anchored to the read marker as of channel-open
+  (frozen while reading, re-anchors on switch).
+- [~] **Unread counts** — badges are boolean dot/`@`, not numbers.
 
-## Tier 3 — roles, moderation, admin
+### Notifications
+- [ ] **Per-channel / per-server notification prefs** — mute, all /
+  mentions-only / nothing, suppress `@everyone`. Nothing exists; desktop
+  notifications are hardcoded. Client-first; cross-device sync of prefs
+  wants a small server store later.
 
-- [ ] **Roles & permissions** — `GRANT`/`REVOKE` UI (Discord roles). Capability badges on messages (owner/mod/bridged — design exists, needs cap data).
-- [ ] **Invites** — `INVITE MINT/REVOKE/REDEEM`; invite links, redeem-on-join.
-- [ ] **Reporting** — `REPORT` (right-click a message); mod queue `REPORTS LIST/RESOLVE`.
-- [ ] **Moderation polish** — reason dialog, ban/mute list view, unban/unmute UI (beyond slash), restricted-posting toggle (`CHANNEL META posting`).
-- [ ] **Namespace settings** — `NS META/VISIBILITY/DELEGATE/DELETE`; server-settings panel.
-- [ ] **Create namespace** — `NS CREATE` with **client-side Ed25519 root keypair** generation (backend crypto) + submit pubkey.
+## Tier 2 — the features people name when comparing to Discord
 
-## Tier 4 — identity & account
+- [ ] **Message search** — nothing client-side and **no server verb** (the
+  biggest server prerequisite on this list; Postgres full-text over the
+  event store would do for v1).
+- [ ] **Threads** — absent entirely; spec parks it at M6+. Server + client.
+- [ ] **Custom / per-namespace emoji** — picker is a hardcoded unicode set;
+  no upload, `:name:` autocomplete, skin tones, or recently-used. Needs a
+  server emoji registry (media store can host the images) + client work.
+- [~] **Voice depth** — today: join/leave/mute/**deafen**/speaking rings.
+  Missing: **screen share, video, per-user volume, device selection,
+  push-to-talk**. LiveKit (M-lk-1/2/3) gives screenshare/video nearly free —
+  cheapest "wow" gap to close.
+- [ ] **Group DMs** — DMs are strictly 1:1. Needs protocol design (spec §18
+  territory) — flag, don't build.
+- [ ] **Custom status text · per-server nicknames · bios** — profile has one
+  global display name + avatar + presence enum. Nickname-per-namespace and
+  bio need small server/store additions.
 
-- [ ] **Logout / disconnect / switch account** — the gear icon is inert.
-- [ ] **Account settings** — password, **device keys** (`AUTH KEY/PROOF/ENROLL`), show attestation/key (design shows an `ed25519:…` line).
-- [ ] **Multiple accounts** across networks.
+## Tier 3 — polish & platform
 
-## Tier 5 — platform & polish (Tauri)
-
-- [ ] **Desktop notifications** — mentions/DMs (Tauri notification plugin).
-- [ ] **Reconnect** — auto-reconnect with a status banner (today it drops to the connect screen).
-- [ ] **Persistence** — remember servers/accounts, auto-connect on launch (Tauri store).
-- [ ] **Search** — message search (needs a server verb or HISTORY scan).
-- [ ] **Quick switcher** (Ctrl+K), keyboard shortcuts.
-- [ ] **Context menus** — message / channel / member / server right-click.
-- [ ] **Toasts** — proper error surfacing (errors currently land as system lines in the chat pane).
-- [ ] **Settings panel**, theme, window/tray polish, link previews, loading/empty states.
+- [ ] **Collapsible categories** (persisted per-user) — trivial client fix;
+  drag-reorder already works.
+- [ ] **Slash-command autocomplete** — a `/` popup menu; commands are the
+  main mod surface but undiscoverable today. Client-only, cheap, high
+  perceived quality.
+- [~] **Accessibility** — modal focus-trap, reduced-motion, keyboard nav in
+  emoji/member pickers (aria-labels exist, little else).
+- [ ] **Settings depth** — notification prefs, keybind customization, audio
+  device selection, font scaling/density, language. Appearance is a
+  dark/light toggle only.
+- [ ] **Mobile / responsive layout** — fixed three-column grid, no
+  breakpoints; a rival needs at least a narrow-window mode.
+- [ ] **Credential hardening** — password sits in localStorage (flagged
+  in-code as dev-only); OS keychain before any public release.
+- [ ] **Jump-to-date** — scroll-paging only.
 
 ## Federation surfacing (WEFT-specific, no Discord analog)
 
-- [ ] Trust marks (signed / bridged) on the community rail from real manifest state (design has them).
-- [ ] Bridged-message badges; bridged-member origin.
-- [ ] Operator tools: `BRIDGE PROPOSE/ACCEPT/…`, `NETBLOCK` admin panel.
+- [~] Trust marks (signed / bridged) on the community rail from real
+  manifest state; bridged badges exist on messages/members.
+- [ ] Foreign-invite auto-routing; live connecting/failed bridge state.
 
 ---
 
+## Suggested order
+
+1. **Client sprint A**: paste/drag-drop upload · code blocks · NEW/day
+   dividers · spoilers — transforms daily feel, zero server work.
+2. **Client sprint B**: notification muting · unread counts · slash
+   autocomplete · collapsible categories.
+3. **Search** — server verb first, then UI. The headline feature gap.
+4. **LiveKit M-lk-1/2/3** — screenshare/video/deafen/devices ride in.
+5. Park **threads, group DMs, custom emoji** as spec-design items (§18) —
+   all three touch the wire protocol.
+
 ## Protocol gaps (need server/proto work *before* the client can use them)
 
-- [ ] **`MEMBERS`** full-roster query — mentioned in spec §6.3 but **not a wire command** yet. Needed for a real member list.
-- [ ] **`PIN`** — the `pin` capability exists but there is **no `PIN` verb**. Needed for pinned messages.
-- [ ] **Media / attachments** — M6 (BLAKE3, `STREAM`), deferred. Blocks image/file messages.
-- [ ] **Voice channels** — M6 (WEFT-RT), deferred.
-- [ ] **Message search backend** — no verb; would need HISTORY scan or a new search command.
+- [ ] **Search verb** — no wire command; HISTORY scan or a new command.
+- [ ] **Threads** — no wire model (M6+).
+- [ ] **Emoji registry** — no verb for custom-emoji upload/list.
+- [ ] **Group DMs** — no multi-party DM target (§18).
+- [ ] **Notification-pref sync** — optional small store for cross-device
+  mute state.
+- [ ] **Nickname-per-namespace / bio fields** — profile store additions.

@@ -4,6 +4,7 @@
   import { getApp } from "$lib/context";
   import * as weft from "$lib/weft";
   import { CHAN_CAPS, RETENTION_OPTIONS } from "$lib/constants";
+  import CapChecklist from "$lib/components/CapChecklist.svelte";
   const app = getApp();
   let { channel, onclose }: { channel: string; onclose: () => void } = $props();
 
@@ -97,32 +98,14 @@
         <div class="field-label">Role permissions</div>
         <p class="so-sub">Give a namespace role extra capabilities in this channel. Assigning the role applies them to the member.</p>
         {#each app.rolesByScope[app.chanNsScope()] ?? [] as role (role.name)}
-          <div class="role-perm-row">
+          <div class="role-perm-block">
             <span class="role-pill" style="--role:{role.color}"><span class="role-dot"></span>{role.name}</span>
-            <div class="cap-chips">
-              {#each CHAN_CAPS as c (c)}
-                <button type="button" class="cap-chip sm" class:on={app.chanRoleCaps(role.name).includes(c)} onclick={() => app.toggleChanRoleCap(role, c)}>{c}</button>
-              {/each}
-            </div>
+            <CapChecklist caps={CHAN_CAPS} selected={app.chanRoleCaps(role.name)} onToggle={(c) => app.toggleChanRoleCap(role, c)} />
           </div>
         {:else}
           <div class="empty-hint">No namespace roles yet — create some in Server Settings → Roles.</div>
         {/each}
-
-        <div class="section-sep"></div>
-        <div class="field-label">Grant to a specific account</div>
-        <label class="fld">Account <input bind:value={app.permSubject} placeholder="account" /></label>
-        <div class="fld">Capabilities (this channel only)
-          <div class="cap-chips">
-            {#each CHAN_CAPS as c (c)}
-              <button type="button" class="cap-chip" class:on={app.permCaps.includes(c)} onclick={() => app.togglePermCap(c)}>{c}</button>
-            {/each}
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button class="danger-btn" disabled={!app.permSubject.trim() || !app.permCaps.length} onclick={app.revokeChanCaps}>Revoke</button>
-          <button class="ok-btn" disabled={!app.permSubject.trim() || !app.permCaps.length} onclick={app.grantChanCaps}>Grant</button>
-        </div>
+        <p class="so-sub">Capabilities are granted only through roles — assign a member a role to give them these permissions.</p>
       {:else if tab === "danger"}
         <h1>Delete channel</h1>
         <p class="so-sub">Removes the channel and its history. This cannot be undone.</p>

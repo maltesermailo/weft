@@ -102,7 +102,6 @@ export interface AppCtx {
   // ---- members ----
   openProfile(name: string, e?: MouseEvent): void;
   openDm(name: string): void;
-  openRoles(name: string): void;
   moderate(kind: string, name: string, scope?: string, reason?: string): void;
 
   // ---- user footer ----
@@ -144,6 +143,12 @@ export interface AppCtx {
   msgCtx(e: MouseEvent, m: Msg): void;
   renderMd(body: string): string;
   mentionsMe(body: string): boolean;
+  /** Day-bucket key (start-of-day epoch ms) for grouping messages under a date divider. */
+  dayKey(ts: number): number;
+  /** Human date-divider label ("Today" / "Yesterday" / "Monday, July 21, 2026"). */
+  dayLabel(ts: number): string;
+  /** Render key of the message the "New messages" divider sits before, or null. */
+  readonly newDividerKey: number | null;
 
   // ---- composer ----
   composer: string;
@@ -154,6 +159,10 @@ export interface AppCtx {
   // ---- media (§13) ----
   readonly pendingAttachments: { uri: string; name: string; mime: string; thumb: string | null }[];
   attachFile(): void;
+  /** Attach image/files pasted into the composer. */
+  pasteFiles(e: ClipboardEvent): void;
+  /** Attach files dropped onto the composer/chat area. */
+  dropFiles(e: DragEvent): void;
   removeAttachment(i: number): void;
   /** Resolve a `weft-media://…` reference to a fetchable URL. */
   mediaUrl(ref: string): string;
@@ -169,16 +178,11 @@ export interface AppCtx {
   assignRoleTo(acct: string, role: RoleDefC): void;
   unassignRoleFrom(acct: string, role: RoleDefC): void;
 
-  // ---- channel permissions (ChannelPermissions modal) ----
-  permSubject: string;
-  readonly permCaps: string[];
-  togglePermCap(c: string): void;
+  // ---- channel permissions (ChannelSettings modal — role-based only) ----
   chanNsScope(): string;
   chanRoleCaps(name: string): string[];
   toggleChanRoleCap(role: RoleDefC, cap: string): void;
   toggleRestricted(): void;
-  grantChanCaps(): void;
-  revokeChanCaps(): void;
 
   // ---- federation (§11, operator) ----
   readonly isOperator: boolean;
@@ -231,8 +235,6 @@ export interface AppCtx {
   readonly newRoleCaps: string[];
   toggleNewRoleCap(c: string): void;
   nsDelegSubject: string;
-  readonly nsDelegCaps: string[];
-  toggleDelegCap(c: string): void;
   nsNewOwner: string;
   nsRecM: number;
   nsRecKeys: string;
@@ -244,7 +246,6 @@ export interface AppCtx {
   createRole(): void;
   deleteRole(name: string): void;
   assignRole(name: string): void;
-  doDelegate(): void;
   showRecoveryKey(): void;
   startRecovery(): void;
   cosignRecovery(): void;

@@ -916,6 +916,37 @@ button:disabled {
   height: 1px;
   background: var(--border-hair);
 }
+/* Tier 1: date divider between days + the unread "New messages" line. */
+.day-sep.date span {
+  padding: 1px 8px;
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.new-sep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 6px;
+}
+.new-sep::before {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--danger);
+}
+.new-sep span {
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
 .msg-group {
   position: relative;
   display: flex;
@@ -1004,6 +1035,53 @@ button:disabled {
 }
 .msg-line a:hover {
   text-decoration: underline;
+}
+/* Tier 1: fenced code blocks. */
+.msg-line .code-block {
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: #12141a;
+  border: 1px solid var(--border-hair-strong);
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.msg-line .code-block code {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+}
+.msg-line .code-lang {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+/* Tier 1: ||spoilers|| — hidden until clicked. */
+.spoiler {
+  border-radius: 4px;
+  padding: 0 3px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+.spoiler:not(.revealed) {
+  background: #23262f;
+  color: transparent;
+  cursor: pointer;
+}
+.spoiler:not(.revealed) * {
+  color: transparent !important;
+  background: transparent !important;
+  border-color: transparent !important;
+}
+.spoiler.revealed {
+  background: color-mix(in srgb, var(--text-faint) 22%, transparent);
 }
 
 /* reply quote above a message */
@@ -1328,23 +1406,15 @@ button:disabled {
   gap: 6px;
   margin-top: 4px;
 }
-.role-perm-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 0;
-  flex-wrap: wrap;
+.role-perm-block {
+  padding: 14px 0;
 }
-.role-perm-row .role-pill {
-  flex-shrink: 0;
-  min-width: 96px;
+.role-perm-block .role-pill {
+  display: inline-flex;
+  margin-bottom: 6px;
 }
-.role-perm-row + .role-perm-row {
+.role-perm-block + .role-perm-block {
   border-top: 1px solid color-mix(in srgb, var(--border-hair-strong) 40%, transparent);
-}
-.cap-chip.sm {
-  padding: 3px 8px;
-  font-size: 11px;
 }
 .check-row {
   display: flex;
@@ -1744,6 +1814,7 @@ button:disabled {
 }
 .so-content {
   max-width: 620px;
+  margin-inline: auto;
 }
 .so-content h1 {
   font-size: 20px;
@@ -2309,8 +2380,27 @@ button:disabled {
   background: #232733;
 }
 .composer-wrap {
+  position: relative;
   padding: 12px 20px 16px;
   flex-shrink: 0;
+}
+/* Tier 1: drag-and-drop file upload overlay. */
+.composer-wrap .drop-hint {
+  position: absolute;
+  inset: 6px 20px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-panel));
+  color: var(--accent);
+  font-weight: 600;
+  pointer-events: none;
+}
+.composer-wrap.drag-active .composer {
+  border-color: var(--accent);
 }
 .composer {
   background: var(--bg-panel-raised);

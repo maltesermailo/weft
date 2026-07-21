@@ -14,7 +14,17 @@
 
   const b = $derived(app.badgeFor(target, app.active));
   const pr = $derived(app.presence[target] ?? "offline");
-  const myRoles = $derived(app.rolesOf(target, app.roleScopeOf(app.active)));
+  const scope = $derived(app.roleScopeOf(app.active));
+  const myRoles = $derived(app.rolesOf(target, scope));
+  const allRoles = $derived(app.rolesByScope[scope] ?? []);
+  const isSelf = $derived(target === app.account);
+  const iAmOwner = $derived(app.isOwnerAt(app.account, scope));
+  const targetIsOwner = $derived(app.isOwnerAt(target, scope));
+  // Roles are the only capability source, so assigning one is a privileged act:
+  // offer it for other accounts (the server enforces the caller's authority),
+  // and for yourself only when you own the scope — there wearing a role is
+  // purely cosmetic, since the owner already holds every capability.
+  const canAssignRoles = $derived(allRoles.length > 0 && (!isSelf || iAmOwner));
 
   // §6.7 moderation controls: scope (channel/namespace/network) + optional reason.
   let modScope = $state(app.scopesFor()[0]);
@@ -42,12 +52,7 @@
       </div>
       <div class="profile-handle">{target}@{app.network} · <span class="pres-{pr}">{pr}</span></div>
 
-      {#if app.isOwnerAt(target, app.roleScopeOf(app.active))}
-        <div class="profile-divider"></div>
-        <div class="profile-section-label">Roles</div>
-        <div class="role-hint">Owner — holds all permissions.</div>
-      {:else if target !== app.account && (app.rolesByScope[app.roleScopeOf(app.active)] ?? []).length}
-        {@const allRoles = app.rolesByScope[app.roleScopeOf(app.active)] ?? []}
+      {#if canAssignRoles}
         <div class="profile-divider"></div>
         <div class="profile-section-label">Roles</div>
         <div class="role-pills">
@@ -63,7 +68,9 @@
             </button>
           {/each}
         </div>
-        <div class="role-hint">Click to assign · click again to remove</div>
+        <div class="role-hint">
+          {#if targetIsOwner && isSelf}Owner — you already hold every permission; roles here are just cosmetic.{:else}Click to assign · click again to remove{/if}
+        </div>
       {:else if myRoles.length}
         <div class="profile-divider"></div>
         <div class="profile-section-label">Roles</div>
@@ -72,15 +79,16 @@
             <span class="role-pill" style="--role: {r.color}"><span class="role-dot"></span>{r.name}</span>
           {/each}
         </div>
+      {:else if targetIsOwner}
+        <div class="profile-divider"></div>
+        <div class="profile-section-label">Roles</div>
+        <div class="role-hint">Owner — holds all permissions.</div>
       {/if}
 
       <div class="profile-divider"></div>
       <div class="profile-actions">
         {#if target !== app.account}
           <button class="pf-primary" onclick={() => { app.openDm(target); onclose(); }}>Message</button>
-          <div class="pf-row">
-            <button class="pf-secondary" onclick={() => { app.openRoles(target); onclose(); }}>Manage roles</button>
-          </div>
           <div class="pf-mod">
             <div class="profile-section-label">Moderation</div>
             <div class="pf-mod-inputs">

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getApp } from "$lib/context";
+  import { spoilerReveal } from "$lib/actions";
   import MessageItem from "./MessageItem.svelte";
 
   const app = getApp();
@@ -12,7 +13,7 @@
   } = $props();
 </script>
 
-<div class="message-scroll" bind:this={scrollEl} {onscroll}>
+<div class="message-scroll" bind:this={scrollEl} {onscroll} use:spoilerReveal>
   {#key app.active}
     <div class="view-fade">
       {#if app.activeChannel}
@@ -23,7 +24,14 @@
         {:else if app.activeChannel.historyLoaded && !app.activeChannel.hasMore}
           <div class="day-sep">beginning of {app.activeChannel.name}</div>
         {/if}
-        {#each app.activeChannel.messages as m (m.key)}
+        {#each app.activeChannel.messages as m, i (m.key)}
+          {@const prev = app.activeChannel.messages[i - 1]}
+          {#if !prev || app.dayKey(prev.ts) !== app.dayKey(m.ts)}
+            <div class="day-sep date"><span>{app.dayLabel(m.ts)}</span></div>
+          {/if}
+          {#if m.key === app.newDividerKey}
+            <div class="new-sep"><span>New messages</span></div>
+          {/if}
           <MessageItem {m} />
         {/each}
       {:else}

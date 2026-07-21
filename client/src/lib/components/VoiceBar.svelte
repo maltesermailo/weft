@@ -2,7 +2,7 @@
   // §16 voice controls for one channel: join/leave, local mute, and the live
   // voice-room roster (speaking ring + mute badges). Self-contained — it drives
   // the WebRTC controller in `voice.svelte.ts` directly, not through AppCtx.
-  import { voice, joinVoice, leaveVoice, toggleMute } from "$lib/voice.svelte";
+  import { voice, joinVoice, leaveVoice, toggleMute, toggleDeafen } from "$lib/voice.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
 
   let { channel }: { channel: string } = $props();
@@ -21,11 +21,20 @@
         <button
           class="voice-btn"
           class:active={voice.muted}
-          title={voice.muted ? "Unmute" : "Mute"}
-          aria-label={voice.muted ? "Unmute" : "Mute"}
+          title={voice.muted ? "Unmute microphone" : "Mute microphone"}
+          aria-label={voice.muted ? "Unmute microphone" : "Mute microphone"}
           onclick={toggleMute}
         >
           {voice.muted ? "🔇" : "🎙️"}
+        </button>
+        <button
+          class="voice-btn deafen"
+          class:active={voice.deafened}
+          title={voice.deafened ? "Undeafen" : "Deafen (hear nothing)"}
+          aria-label={voice.deafened ? "Undeafen" : "Deafen"}
+          onclick={toggleDeafen}
+        >
+          🎧
         </button>
         <button class="voice-btn leave" title="Leave voice" aria-label="Leave voice" onclick={leaveVoice}>
           Leave
@@ -38,6 +47,7 @@
           <span class="voice-avatar"><Avatar account={p.user} /></span>
           <span class="voice-name">{p.user}{p.self ? " (you)" : ""}</span>
           {#if p.muted}<span class="voice-flag" title="Muted" aria-hidden="true">🔇</span>{/if}
+          {#if p.deaf}<span class="voice-flag deaf" title="Deafened" aria-hidden="true">🎧</span>{/if}
         </li>
       {/each}
     </ul>
@@ -162,6 +172,20 @@
   .voice-flag {
     font-size: 0.7rem;
     opacity: 0.7;
+  }
+  /* Deafened reads as a headphone with a red slash, distinct from the mute icon. */
+  .voice-flag.deaf {
+    position: relative;
+  }
+  .voice-flag.deaf::after {
+    content: "";
+    position: absolute;
+    left: -1px;
+    right: -1px;
+    top: 50%;
+    height: 2px;
+    background: #e0645c;
+    transform: rotate(-20deg);
   }
   .voice-error {
     font-size: 0.72rem;

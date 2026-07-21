@@ -1,9 +1,31 @@
 <script lang="ts">
   import { getApp } from "$lib/context";
   const app = getApp();
+
+  // Drag-and-drop file upload: highlight the composer while a file hovers.
+  let dragActive = $state(false);
+  function onDragOver(e: DragEvent) {
+    if (!app.active || !e.dataTransfer?.types.includes("Files")) return;
+    e.preventDefault();
+    dragActive = true;
+  }
+  function onDrop(e: DragEvent) {
+    dragActive = false;
+    app.dropFiles(e);
+  }
 </script>
 
-<div class="composer-wrap">
+<div
+  class="composer-wrap"
+  class:drag-active={dragActive}
+  ondragover={onDragOver}
+  ondragleave={() => (dragActive = false)}
+  ondrop={onDrop}
+  role="group"
+>
+  {#if dragActive}
+    <div class="drop-hint">Drop files to attach</div>
+  {/if}
   {#if app.mentionQuery !== null && app.mentionMatches.length}
     <div class="mention-pop">
       {#each app.mentionMatches as name, i (name)}
@@ -45,6 +67,7 @@
       bind:value={app.composer}
       onkeydown={app.composerKey}
       oninput={app.onComposerInput}
+      onpaste={app.pasteFiles}
     ></textarea>
     <button class="icon-btn" title="Send" aria-label="Send message" onclick={app.doSend}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 2 11 13" /><path d="M22 2 15 22l-4-9-9-4 20-7z" /></svg>

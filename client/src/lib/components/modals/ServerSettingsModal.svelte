@@ -3,6 +3,7 @@
   import { getApp } from "$lib/context";
   import * as weft from "$lib/weft";
   import { CAPS, ROLE_COLORS } from "$lib/constants";
+  import CapChecklist from "$lib/components/CapChecklist.svelte";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 
@@ -88,15 +89,12 @@
             <button class="color-dot" class:on={app.newRoleColor === c} style="background:{c}" aria-label="color {c}" onclick={() => (app.newRoleColor = c)}></button>
           {/each}
         </div>
-        <div class="cap-chips">
-          {#each CAPS as c (c)}
-            <button type="button" class="cap-chip" class:on={app.newRoleCaps.includes(c)} onclick={() => app.toggleNewRoleCap(c)}>{c}</button>
-          {/each}
-        </div>
+        <div class="field-label">Permissions</div>
+        <CapChecklist caps={CAPS} selected={app.newRoleCaps} onToggle={app.toggleNewRoleCap} />
         <div class="modal-actions"><button class="ok-btn" disabled={!app.newRoleName.trim() || !app.newRoleCaps.length} onclick={app.createRole}>Create role</button></div>
       {:else if app.nsTab === "members"}
         <h1>Members &amp; roles</h1>
-        <p class="so-sub">Assign a role (grants its token bundle) or delegate individual capabilities.</p>
+        <p class="so-sub">Roles are the only way to grant capabilities. Assign one and its token bundle applies to the member.</p>
         <div class="field-label">Account</div>
         <input class="text-input" bind:value={app.nsDelegSubject} placeholder="account or account@network (federated)" />
         <div class="section-sep"></div>
@@ -108,14 +106,6 @@
             <div class="empty-hint">No roles defined — create some in the Roles tab.</div>
           {/each}
         </div>
-        <div class="section-sep"></div>
-        <div class="field-label">Or delegate individual capabilities</div>
-        <div class="cap-chips">
-          {#each CAPS as c (c)}
-            <button type="button" class="cap-chip" class:on={app.nsDelegCaps.includes(c)} onclick={() => app.toggleDelegCap(c)}>{c}</button>
-          {/each}
-        </div>
-        <div class="modal-actions"><button class="ok-btn" onclick={app.doDelegate}>Grant capabilities</button></div>
       {:else if app.nsTab === "bans"}
         <h1>Bans &amp; mutes</h1>
         <p class="so-sub">Accounts denied at <code>ns:{app.activeServer}</code>. A <b>ban</b> blocks join + posting; a <b>mute</b> blocks posting. Lifting one takes effect immediately.</p>
