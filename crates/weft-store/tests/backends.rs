@@ -353,12 +353,34 @@ where
     // Deleting an unknown account is a no-op false.
     assert!(!store.delete_account(&cara).await.unwrap());
 
+    // WC3 soft delete: schedule → pending → cancel restores → re-schedule →
+    // `due_deletions` surfaces it once its window elapses → finalize hard-deletes.
+    let dan: Account = format!("dan-{tag}").parse().unwrap();
+    assert!(store.register(&dan, "phc-dan").await.unwrap());
+    assert!(store.deletion_scheduled(&dan).await.unwrap().is_none());
+    assert!(store.schedule_deletion(&dan, 100_000).await.unwrap());
+    assert_eq!(store.deletion_scheduled(&dan).await.unwrap(), Some(100_000));
+    assert!(!store.due_deletions(99_999).await.unwrap().contains(&dan)); // not yet
+                                                                         // Restore clears it; a second cancel is a no-op false.
+    assert!(store.cancel_deletion(&dan).await.unwrap());
+    assert!(store.deletion_scheduled(&dan).await.unwrap().is_none());
+    assert!(!store.cancel_deletion(&dan).await.unwrap());
+    // Re-schedule in the past → due, and the finalize (hard delete) works.
+    assert!(store.schedule_deletion(&dan, 50_000).await.unwrap());
+    assert!(store.due_deletions(60_000).await.unwrap().contains(&dan));
+    assert!(!store.schedule_deletion(&cara, 1).await.unwrap()); // unknown → false
+    assert!(store.delete_account(&dan).await.unwrap());
+    assert!(!store.list_accounts().await.unwrap().contains(&dan));
+
     let device = [7u8; 32];
     assert!(!store.device_enrolled(&ada, &device).await.unwrap());
     assert!(store.enroll_device(&ada, device).await.unwrap());
     assert!(store.enroll_device(&ada, device).await.unwrap()); // idempotent
     assert!(store.device_enrolled(&ada, &device).await.unwrap());
     assert!(!store.enroll_device(&bob, device).await.unwrap()); // unknown account
+                                                                // Device list (WC4): enrolled pubkeys; unknown account is empty.
+    assert_eq!(store.devices(&ada).await.unwrap(), vec![device]);
+    assert!(store.devices(&bob).await.unwrap().is_empty());
 
     store
         .set_mark(&ada, "#general", &msgid(3_000))
@@ -408,6 +430,33 @@ where
     let reset = store.verifications(&ada).await.unwrap();
     assert_eq!(reset[0].subject, "new@example.org");
     assert_eq!(reset[0].verified_at, None);
+
+    // accounts_by_email_domain (WC4 "find related"): case-insensitive match on
+    // the part after `@`, verified or pending. Tag-unique domain keeps the PG
+    // re-run isolated.
+    let domain = format!("mail-{tag}.test");
+    store
+        .upsert_verification(&ada, "email", &format!("ada@{domain}"))
+        .await
+        .unwrap();
+    let eve: Account = format!("eve-{tag}").parse().unwrap();
+    let frank: Account = format!("frank-{tag}").parse().unwrap();
+    store.register(&eve, "phc-eve").await.unwrap();
+    store.register(&frank, "phc-frank").await.unwrap();
+    store
+        .upsert_verification(&eve, "email", &format!("eve@{domain}"))
+        .await
+        .unwrap();
+    store
+        .upsert_verification(&frank, "email", &format!("frank@other-{tag}.test"))
+        .await
+        .unwrap();
+    // Uppercase query proves case-insensitivity; `frank` (other domain) excluded.
+    let related = store
+        .accounts_by_email_domain(&domain.to_uppercase())
+        .await
+        .unwrap();
+    assert_eq!(related, vec![ada.clone(), eve.clone()]);
 
     // -- channels: seed + load (the boot path) --
     let name: weft_proto::ChannelName = format!("#chan-{tag}").parse().unwrap();

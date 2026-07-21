@@ -33,6 +33,19 @@ struct AccountRecord {
     marks: HashMap<String, MsgId>,
     /// kind → (subject, verified_at).
     verifications: HashMap<String, (String, Option<u64>)>,
+    /// WC3 soft delete: scheduled hard-delete time (ms), `None` when not pending.
+    purge_at: Option<u64>,
+}
+
+/// The domain of an email address — the lowercased part after the last `@`
+/// (empty if there is none). Matches PG's `split_part(subject,'@',2)`.
+fn email_domain(email: &str) -> String {
+    email
+        .rsplit('@')
+        .next()
+        .filter(|_| email.contains('@'))
+        .unwrap_or("")
+        .to_lowercase()
 }
 
 #[derive(Default)]
@@ -311,6 +324,7 @@ impl AccountStore for MemoryStore {
                 devices: Vec::new(),
                 marks: HashMap::new(),
                 verifications: HashMap::new(),
+                purge_at: None,
             },
         );
         Ok(true)
@@ -353,6 +367,51 @@ impl AccountStore for MemoryStore {
         Ok(true)
     }
 
+    async fn schedule_deletion(
+        &self,
+        account: &Account,
+        purge_at_ms: u64,
+    ) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        match inner.accounts.get_mut(account) {
+            Some(record) => {
+                record.purge_at = Some(purge_at_ms);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn cancel_deletion(&self, account: &Account) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .accounts
+            .get_mut(account)
+            .is_some_and(|r| r.purge_at.take().is_some()))
+    }
+
+    async fn deletion_scheduled(&self, account: &Account) -> Result<Option<u64>, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("store lock")
+            .accounts
+            .get(account)
+            .and_then(|r| r.purge_at))
+    }
+
+    async fn due_deletions(&self, now_ms: u64) -> Result<Vec<Account>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut due: Vec<Account> = inner
+            .accounts
+            .iter()
+            .filter(|(_, r)| r.purge_at.is_some_and(|at| at <= now_ms))
+            .map(|(a, _)| a.clone())
+            .collect();
+        due.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(due)
+    }
+
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         match inner.accounts.get_mut(account) {
@@ -376,6 +435,34 @@ impl AccountStore for MemoryStore {
             .accounts
             .get(account)
             .is_some_and(|record| record.devices.contains(device)))
+    }
+
+    async fn devices(&self, account: &Account) -> Result<Vec<[u8; 32]>, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("store lock")
+            .accounts
+            .get(account)
+            .map(|r| r.devices.clone())
+            .unwrap_or_default())
+    }
+
+    async fn accounts_by_email_domain(&self, domain: &str) -> Result<Vec<Account>, StoreError> {
+        let want = domain.to_lowercase();
+        let inner = self.inner.lock().expect("store lock");
+        let mut out: Vec<Account> = inner
+            .accounts
+            .iter()
+            .filter(|(_, r)| {
+                r.verifications
+                    .get("email")
+                    .is_some_and(|(subject, _)| email_domain(subject) == want)
+            })
+            .map(|(a, _)| a.clone())
+            .collect();
+        out.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(out)
     }
 
     async fn set_mark(

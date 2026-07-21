@@ -9,7 +9,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 use weft_proto::{ChannelName, RetentionPolicy};
 use weft_store::{
-    BlobHash, BlobStore, EventStore, MediaStore, NamespaceStore, ProfileStore, ReportStore, Scope,
+    AccountStore, BlobHash, BlobStore, EventStore, MediaStore, NamespaceStore, ProfileStore,
+    ReportStore, Scope,
 };
 
 /// §13 grace before an orphaned blob is GC'd — an uploaded-but-not-yet-posted
@@ -44,6 +45,7 @@ pub fn spawn_maintenance(
     media_refs: Arc<dyn MediaStore>,
     blobs: Arc<dyn BlobStore>,
     profiles: Arc<dyn ProfileStore>,
+    accounts: Arc<dyn AccountStore>,
     channels: Vec<(ChannelName, RetentionPolicy)>,
     dm_policy: RetentionPolicy,
     config: MaintenanceConfig,
@@ -75,6 +77,14 @@ pub fn spawn_maintenance(
             let applied = apply_due_recoveries(&namespaces, unix_now_ms()).await;
             if applied > 0 {
                 info!(applied, "namespace recoveries applied (§2.4)");
+            }
+            // WC3: finalize accounts whose soft-delete grace window has elapsed.
+            let purged_accounts = purge_due_deletions(&accounts, unix_now_ms()).await;
+            if purged_accounts > 0 {
+                info!(
+                    purged_accounts,
+                    "scheduled account deletions finalized (WC3)"
+                );
             }
             // §12.1: release retention holds whose report has resolved past
             // its grace window, so purge/compaction can resume on that
@@ -162,6 +172,28 @@ pub async fn apply_due_recoveries(namespaces: &Arc<dyn NamespaceStore>, now_ms: 
     applied
 }
 
+/// WC3: hard-delete every account whose soft-delete grace window has elapsed
+/// (`purge_at_ms <= now_ms`). Idempotent per tick; returns the count. Split out
+/// so it is unit-testable without waiting the grace window.
+pub async fn purge_due_deletions(accounts: &Arc<dyn AccountStore>, now_ms: u64) -> u64 {
+    let due = match accounts.due_deletions(now_ms).await {
+        Ok(due) => due,
+        Err(e) => {
+            error!("scheduled-deletion scan failed: {e}");
+            return 0;
+        }
+    };
+    let mut purged = 0;
+    for account in due {
+        match accounts.delete_account(&account).await {
+            Ok(true) => purged += 1,
+            Ok(false) => {} // already gone
+            Err(e) => error!(%account, "scheduled account delete failed: {e}"),
+        }
+    }
+    purged
+}
+
 async fn run_pass(
     store: &Arc<dyn EventStore>,
     media_refs: &Arc<dyn MediaStore>,
@@ -219,4 +251,32 @@ fn unix_now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use weft_store::{AccountStore, MemoryStore};
+
+    #[tokio::test]
+    async fn purge_due_deletions_finalizes_only_past_windows() {
+        let store = Arc::new(MemoryStore::default());
+        let past: weft_proto::Account = "past".parse().unwrap();
+        let future: weft_proto::Account = "future".parse().unwrap();
+        for a in [&past, &future] {
+            store.register(a, "phc").await.unwrap();
+        }
+        // `past` is due at now=1_000; `future` isn't.
+        store.schedule_deletion(&past, 500).await.unwrap();
+        store.schedule_deletion(&future, 5_000).await.unwrap();
+
+        let accounts: Arc<dyn AccountStore> = store.clone();
+        let purged = purge_due_deletions(&accounts, 1_000).await;
+
+        assert_eq!(purged, 1);
+        assert!(!store.list_accounts().await.unwrap().contains(&past));
+        assert!(store.list_accounts().await.unwrap().contains(&future));
+        // Idempotent: nothing new to purge on the next tick at the same time.
+        assert_eq!(purge_due_deletions(&accounts, 1_000).await, 0);
+    }
 }

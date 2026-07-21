@@ -186,7 +186,7 @@ td.actions{text-align:right;white-space:nowrap}
         <div class="op-addr" id="opAddr"></div>
       </div>
     </div>
-    <span class="op-role">Operator</span>
+    <span id="role"></span>
     <div class="spacer"></div>
     <button class="btn" id="logout">Sign out</button>
   </header>
@@ -220,6 +220,12 @@ const pill = (s, cls = "") => `<span class="pill ${cls}">${esc(s)}</span>`;
 // The current detail view re-renders itself after a mutation.
 let refresh = () => {};
 
+// WC2 RBAC: the scopes the logged-in admin holds (from /me). The server
+// enforces regardless; the SPA hides controls it can't use.
+let SCOPES = [];
+const can = (scope) => SCOPES.includes(scope);
+const readonlyNote = (scope) => `<div class="placeholder">Read-only — you don't hold <span class="mono">${scope}</span>.</div>`;
+
 async function api(path, opts = {}) {
   const res = await fetch(API + path, { credentials: "same-origin", headers: { "Content-Type": "application/json" }, ...opts });
   if (res.status === 401) { showLogin(); throw new Error("unauthorized"); }
@@ -250,11 +256,11 @@ const card = (title, bodyHtml, count) =>
 
 const capChips = (caps) => `<div class="chips">${(caps || []).map((c) => pill(c)).join("")}</div>`;
 
+const delBtn = (msgid) => can("admin.destroy") ? `<button class="btn small danger" data-action="delMsg" data-id="${esc(msgid)}" style="float:right">delete</button>` : "";
 function msgCard(m, reported = false) {
   if (m.deleted) return `<div class="msg"><span class="del">deleted by ${esc(m.by)}</span></div>`;
   const reacts = (m.reactions || []).map((r) => `${esc(r.emoji)} ${r.count}`).join("   ");
-  const del = `<button class="btn small danger" data-action="delMsg" data-id="${esc(m.msgid)}" style="float:right">delete</button>`;
-  return `<div class="msg ${reported ? "reported" : ""}"><div class="h">${esc(m.sender)} · ${when(m.at_ms)}${m.edited ? " · edited" : ""}${del}</div>${esc(m.body)}${reacts ? `<div class="react">${reacts}</div>` : ""}</div>`;
+  return `<div class="msg ${reported ? "reported" : ""}"><div class="h">${esc(m.sender)} · ${when(m.at_ms)}${m.edited ? " · edited" : ""}${delBtn(m.msgid)}</div>${esc(m.body)}${reacts ? `<div class="react">${reacts}</div>` : ""}</div>`;
 }
 const placeholder = (title, milestone, what) =>
   set(hrow(esc(title)) + `<div class="placeholder">${esc(what)}<br><br>Ships in <b>${esc(milestone)}</b> — this screen is part of the planned WEFT Console but its server surface isn't built yet.</div>`);
@@ -285,7 +291,7 @@ const screens = {
     const list = await api("/channels");
     set(hrow("Channels", `${list.length} channels`) + note("Every channel in the store — config seeds plus runtime-created.") +
       cardTable("Channels", list.length, ["Channel", "Retention"],
-        list.map((c) => ({ cells: [`<span class="mono">${esc(c.name)}</span>`, pill(c.policy, "neutral"), act(`<button class="btn small" data-action="browseChan" data-id="${esc(c.name)}">messages</button>`)] })), true));
+        list.map((c) => ({ action: "channel", id: c.name, cells: [`<span class="mono">${esc(c.name)}</span>`, pill(c.policy, "neutral"), act(`<button class="btn small" data-action="browseChan" data-id="${esc(c.name)}">messages</button>`)] })), true));
   },
   async namespaces() {
     const list = await api("/namespaces");
@@ -294,9 +300,12 @@ const screens = {
         list.map((n) => ({ cells: [`<span class="mono">${esc(n.name)}</span>`, esc(n.owner), pill(n.visibility, "neutral"), esc(n.title || "")] }))));
   },
   messages() {
-    set(hrow("Messages") + note("Browse a channel's materialized history (final bodies, edits, reactions, tombstones — non-e2ee only).") +
-      `<div class="form-row"><input type="text" id="chan" class="grow" placeholder="#namespace/channel" /><button class="btn primary" data-action="browse">Browse</button></div><div id="msgs"></div>`);
+    set(hrow("Messages") + note("Browse materialized history — a channel, or a DM thread between two accounts. Content is readable only where the server holds plaintext; an e2ee target shows \"unavailable by policy\".") +
+      `<div class="form-row"><input type="text" id="chan" class="grow" placeholder="#namespace/channel" /><button class="btn primary" data-action="browse">Browse channel</button></div>
+       <div class="form-row"><input type="text" id="dmA" placeholder="account" /><span class="hint" style="align-self:center">↔</span><input type="text" id="dmB" placeholder="account" /><button class="btn primary" data-action="browseDm">Browse DM</button></div>
+       <div id="msgs"></div>`);
     $("#chan").addEventListener("keydown", (e) => { if (e.key === "Enter") browse(); });
+    $("#dmB").addEventListener("keydown", (e) => { if (e.key === "Enter") browseDm(); });
   },
 
   // ---- Federation ----
@@ -305,6 +314,7 @@ const screens = {
     set(hrow("Peers", `${peers.length} known`) + note("Bridge peers (§11) and their manifest state.") +
       cardTable("Bridge peers", peers.length, ["Peer", "Scope", "State", "Ver", "Updated"],
         peers.map((p) => ({
+          action: "peer", id: p.peer,
           cells: [`<span class="mono">${esc(p.peer)}</span>`, esc(p.scope),
             p.severed ? `<span class="knot severed">severed</span>` : p.acked ? `<span class="knot woven">woven</span>` : `<span class="knot idle">pending</span>`,
             `<span class="mono">${esc(p.version)}</span>`, `<span class="mono">${when(p.updated_ms)}</span>`],
@@ -312,10 +322,14 @@ const screens = {
   },
   async netblocks() {
     const blocks = await api("/netblocks");
+    const fed = can("admin.federation");
+    const form = fed
+      ? `<div class="form-row"><input type="text" id="nbNet" placeholder="network (e.g. evil.example)" /><input type="text" id="nbReason" class="grow" placeholder="reason (optional)" /><button class="btn danger" data-action="addNetblock">Block network</button></div>`
+      : readonlyNote("admin.federation");
     set(hrow("Netblocks", `${blocks.length} blocked`) + note("Network-wide blocklist (§11.6). Name-keyed — key rotation can't evade it.") +
-      `<div class="form-row"><input type="text" id="nbNet" placeholder="network (e.g. evil.example)" /><input type="text" id="nbReason" class="grow" placeholder="reason (optional)" /><button class="btn danger" data-action="addNetblock">Block network</button></div>` +
+      form +
       cardTable("Blocked networks", blocks.length, ["Network", "Reason", "By", "Added"],
-        blocks.map((b) => ({ cells: [`<span class="mono">${esc(b.network)}</span>`, esc(b.reason || ""), esc(b.actor), `<span class="mono">${when(b.added_ms)}</span>`, act(`<button class="btn small" data-action="rmNetblock" data-id="${esc(b.network)}">unblock</button>`)] })), true));
+        blocks.map((b) => ({ cells: [`<span class="mono">${esc(b.network)}</span>`, esc(b.reason || ""), esc(b.actor), `<span class="mono">${when(b.added_ms)}</span>`, fed ? act(`<button class="btn small" data-action="rmNetblock" data-id="${esc(b.network)}">unblock</button>`) : ""] })), true));
   },
   transit: () => placeholder("Transit Queue", "WC5", "Per-peer replication backlog: queue depth, oldest pending age, retry / drop-poisoned / pause."),
   remoteChannels: () => placeholder("Remote Channels", "WC5", "Federated channels replicated from peers, with per-peer replication lag."),
@@ -342,24 +356,31 @@ const screens = {
   async moderation() {
     const list = await api("/moderation?scope=*");
     const verbs = ["mute", "ban", "unmute", "unban", "kick"].map((v) => `<option>${v}</option>`).join("");
+    const form = can("admin.moderate")
+      ? `<div class="form-row">
+          <select id="mVerb">${verbs}</select>
+          <input type="text" id="mScope" placeholder="scope" />
+          <input type="text" id="mAcct" placeholder="account" />
+          <input type="text" id="mReason" class="grow" placeholder="reason (optional)" />
+          <button class="btn danger" data-action="moderate">Apply</button>
+        </div>`
+      : readonlyNote("admin.moderate");
     set(hrow("Moderation") + note("Deny-list at any scope (#chan / ns:x / *). Kick and channel-scope ban force-part live sessions.") +
-      `<div class="form-row">
-        <select id="mVerb">${verbs}</select>
-        <input type="text" id="mScope" placeholder="scope" />
-        <input type="text" id="mAcct" placeholder="account" />
-        <input type="text" id="mReason" class="grow" placeholder="reason (optional)" />
-        <button class="btn danger" data-action="moderate">Apply</button>
-      </div>` +
+      form +
       cardTable("Active at scope *", list.length, ["Kind", "Account", "Scope", "By", "Reason", "When"],
         list.map((r) => ({ cells: [pill(r.kind, r.kind === "ban" ? "bad" : "warn"), esc(r.account), `<span class="mono">${esc(r.scope)}</span>`, esc(r.actor), esc(r.reason || ""), `<span class="mono">${when(r.at_ms)}</span>`] }))));
   },
   async media() {
     const list = await api("/media-blocks");
+    const mod_ = can("admin.moderate");
+    const form = mod_
+      ? `<div class="form-row"><input type="text" id="mbHash" class="grow" placeholder="BLAKE3 hash" /><input type="text" id="mbReason" placeholder="reason (e.g. csam)" /><button class="btn danger" data-action="blockMedia">Block hash</button></div>`
+      : readonlyNote("admin.moderate");
     set(hrow("Media Blocklist", `${list.length} blocked`) +
       note("Blocked BLAKE3 hashes (§13). A blocked hash is dead on arrival — re-upload, fetch, and mirror are rejected.") +
-      `<div class="form-row"><input type="text" id="mbHash" class="grow" placeholder="BLAKE3 hash" /><input type="text" id="mbReason" placeholder="reason (e.g. csam)" /><button class="btn danger" data-action="blockMedia">Block hash</button></div>` +
+      form +
       cardTable("Blocked media", list.length, ["Hash", "Reason", "By", "Added"],
-        list.map((b) => ({ cells: [`<span class="fp">${esc(short(b.hash))}</span>`, esc(b.reason || ""), esc(b.actor), `<span class="mono">${when(b.added_ms)}</span>`, act(`<button class="btn small" data-action="unblockMedia" data-id="${esc(b.hash)}">unblock</button>`)] })), true));
+        list.map((b) => ({ cells: [`<span class="fp">${esc(short(b.hash))}</span>`, esc(b.reason || ""), esc(b.actor), `<span class="mono">${when(b.added_ms)}</span>`, mod_ ? act(`<button class="btn small" data-action="unblockMedia" data-id="${esc(b.hash)}">unblock</button>`) : ""] })), true));
   },
   phraseBans: () => placeholder("Phrase Bans", "WC7", "Phrase filters for the surfaces the server sees in plaintext: profiles, channel metadata, the IRC gateway."),
 
@@ -384,7 +405,7 @@ function renderUsers(q) {
   if (!list.length) { $("#userList").innerHTML = `<div class="card-b"><div class="placeholder">No accounts match "${esc(q)}".</div></div>`; return; }
   $("#userList").innerHTML = list.map((u) => {
     const initials = esc(u.account.slice(0, 2).toUpperCase());
-    const state = u.banned ? `<span class="knot severed">banned</span>` : u.muted ? `<span class="knot frayed">muted</span>` : `<span class="knot woven">active</span>`;
+    const state = u.deletion_scheduled ? `<span class="knot severed">pending delete</span>` : u.banned ? `<span class="knot severed">banned</span>` : u.muted ? `<span class="knot frayed">muted</span>` : `<span class="knot woven">active</span>`;
     const tags = `${u.operator ? pill("operator", "gold") : ""}${(u.caps || []).map((c) => pill(c)).join("")}`;
     return `<div class="result">
       <div class="r-avatar u">${initials}</div>
@@ -407,16 +428,18 @@ async function openReport(id) {
     || `<div class="placeholder">Content unavailable — expired, purged, or e2ee (never reconstructed).</div>`;
   const btns = ["dismissed", "content-removed", "user-actioned", "escalated"]
     .map((a) => `<button class="btn" data-action="resolve" data-id="${esc(id)}" data-x="${a}">${a}</button>`).join("");
+  const resolve = can("admin.moderate")
+    ? card("Resolve", `<div class="btn-row">${btns}</div>`)
+    : card("Resolve", readonlyNote("admin.moderate"));
   set(`<a class="crumb" data-action="back" data-x="reports">← back to Reports</a>` +
     hrow(`${esc(r.category)} ${pill(r.status, "neutral")}`, esc(r.scope)) +
     note(`Reported by ${esc(r.reporter)} · ${when(r.filed_at_ms)}${r.note ? " · " + esc(r.note) : ""}`) +
     card("Reported message + context", ctx) +
-    card("Resolve", `<div class="btn-row">${btns}</div>`));
+    resolve);
 }
 
 function userMsgCard(m) {
-  const del = `<button class="btn small danger" data-action="delMsg" data-id="${esc(m.msgid)}" style="float:right">delete</button>`;
-  return `<div class="msg"><div class="h"><span class="mono">${esc(m.scope)}</span> · ${when(m.at_ms)}${del}</div>${esc(m.body)}</div>`;
+  return `<div class="msg"><div class="h"><span class="mono">${esc(m.scope)}</span> · ${when(m.at_ms)}${delBtn(m.msgid)}</div>${esc(m.body)}</div>`;
 }
 
 async function openUser(name) {
@@ -439,17 +462,124 @@ async function openUser(name) {
     <div class="k">Memberships</div><div class="v">${mem}</div>
   </div>`);
 
+  // WC4 flags card: account state as SCREAMING_SNAKE toggles (design .flags).
+  const flag = (name, on) => `<label class="flag ${on ? "on" : ""}"><span class="box"></span>${name}</label>`;
+  const flags = card("Account flags", `<div class="flags">
+    ${flag("OPERATOR", u.operator)}${flag("MUTED", u.muted)}${flag("BANNED", u.banned)}${flag("PENDING_DELETE", !!u.deletion_scheduled)}
+  </div>`);
+
+  // WC4 devices card: enrolled Ed25519 fingerprints.
+  const devices = (u.devices || []).length
+    ? cardTable("Devices", u.devices.length, ["Fingerprint"],
+        u.devices.map((f) => ({ cells: [`<span class="fp">${esc(f)}</span>`] })))
+    : card("Devices", `<div class="placeholder">No enrolled devices.</div>`);
+
   const grants = (u.grants || []).length
     ? cardTable("Capability grants", u.grants.length, ["Scope", "Caps", "Epoch", "Expiry"],
         u.grants.map((g) => ({ cells: [`<span class="mono">${esc(g.scope)}</span>`, capChips(g.caps), g.epoch, g.expiry ? when(g.expiry * 1000) : "—"] })))
     : card("Capability grants", `<div class="placeholder">No grants.</div>`);
 
+  // WC4 "find related": accounts sharing this account's email domain.
+  const related = (u.related || []).length
+    ? card("Related accounts", `<p class="hint" style="margin-bottom:10px">Share this account's email domain — useful during spam waves.</p><div class="chips">${u.related.map((a) => `<button class="btn small" data-action="user" data-id="${esc(a)}">${esc(a)}</button>`).join(" ")}</div>`, u.related.length)
+    : "";
+
   const messages = card(`Messages`, msgs.length ? msgs.map(userMsgCard).join("") : `<div class="placeholder">No messages authored (or all purged).</div>`, msgs.length);
 
+  // WC3 danger zone: pending-deletion banner + restore, else a typed-name
+  // confirmation to schedule a (recoverable) soft delete.
+  let danger = "";
+  if (u.deletion_scheduled) {
+    danger = card("Deletion scheduled", `<div class="action danger">
+      <h3>Pending hard delete</h3>
+      <p>Permanent deletion at <b>${when(u.deletion_scheduled)}</b>. Memberships, grants, and moderation records are removed then; posted messages are kept. Restore to cancel.</p>
+      <div class="row"><button class="btn" data-action="restoreUser" data-id="${esc(u.account)}">Restore account</button></div>
+    </div>`);
+  } else if (can("admin.destroy")) {
+    danger = card("Danger zone", `<div class="action danger">
+      <h3>Delete account</h3>
+      <p>Schedules a hard delete after a grace window, recoverable until then. Type the exact account name to confirm.</p>
+      <div class="row">
+        <input type="text" id="delConfirm" placeholder="Type ${esc(u.account)} to confirm" aria-label="Type the exact name to confirm deletion" />
+        <button class="btn danger solid" data-action="delUser" data-id="${esc(u.account)}">Delete account</button>
+      </div>
+    </div>`);
+  }
+
   set(`<a class="crumb" data-action="back" data-x="users">← back to Users</a>` +
-    `<div class="h-row"><h1>${esc(u.account)}</h1><span class="id">${stateTags}</span>
-       <span class="meta"><button class="btn danger" data-action="delUser" data-id="${esc(u.account)}">Delete account</button></span></div>` +
-    kv + grants + messages);
+    `<div class="h-row"><h1>${esc(u.account)}</h1><span class="id">${stateTags}${u.deletion_scheduled ? " " + pill("pending delete", "bad") : ""}</span></div>` +
+    kv + flags + devices + grants + related + messages + danger);
+}
+
+async function openPeer(name) {
+  refresh = () => openPeer(name);
+  const p = await api("/peers/" + encodeURIComponent(name) + "/detail");
+  const stateKnot = p.severed ? `<span class="knot severed">severed</span>` : p.acked ? `<span class="knot woven">woven</span>` : `<span class="knot idle">pending</span>`;
+  const kv = card("Peer", `<div class="kv">
+    <div class="k">Scope</div><div class="v mono">${esc(p.scope)}</div>
+    <div class="k">State</div><div class="v">${stateKnot}</div>
+    <div class="k">Manifest version</div><div class="v mono">${p.version}</div>
+    <div class="k">Acked</div><div class="v">${p.acked ? "yes" : '<span class="warn">not yet</span>'}</div>
+    <div class="k">First seen</div><div class="v mono">${when(p.created_ms)}</div>
+    <div class="k">Updated</div><div class="v mono">${when(p.updated_ms)}</div>
+    <div class="k">Netblocked</div><div class="v">${p.netblocked ? '<span class="bad">yes</span>' : "no"}</div>
+  </div>`);
+
+  let manifest;
+  if (p.manifest) {
+    const m = p.manifest;
+    manifest = card("Signed manifest", `<div class="kv">
+      <div class="k">Pinned key</div><div class="v"><span class="fp">${esc(m.key_fingerprint)}</span> ${m.verified ? '<span class="ok">verified</span>' : '<span class="bad">unverified</span>'}</div>
+      <div class="k">History</div><div class="v mono">${esc(m.history)}</div>
+      <div class="k">Media</div><div class="v mono">${esc(m.media)}</div>
+      <div class="k">Typing / Voice</div><div class="v mono">${m.typing ? "typing" : "—"}${m.voice ? " · voice" : ""}</div>
+    </div>`) +
+      cardTable("Shared channels", m.channels.length, ["Channel"], m.channels.map((c) => ({ cells: [`<span class="mono">${esc(c)}</span>`] })));
+  } else {
+    manifest = card("Signed manifest", `<div class="placeholder">No parseable manifest on record.</div>`);
+  }
+
+  // Sever / re-weave via netblock (§11.6) — the real peer-sever mechanism.
+  let actions = "";
+  if (can("admin.federation")) {
+    actions = card("Federation control", p.netblocked
+      ? `<div class="action"><h3>Re-weave (unblock)</h3><p>Remove the network block so this peer can bridge again (§11.6).</p><div class="row"><button class="btn" data-action="reweavePeer" data-id="${esc(p.peer)}">Re-weave</button></div></div>`
+      : `<div class="action danger"><h3>Sever (netblock)</h3><p>Netblock this peer network: reject its bridge auth + proposals, sever manifests, and drop its ingestion (§11.6, invariant 7).</p><div class="row"><button class="btn danger" data-action="severPeer" data-id="${esc(p.peer)}">Sever</button></div></div>`);
+  }
+
+  set(`<a class="crumb" data-action="back" data-x="peers">← back to Peers</a>` +
+    hrow(esc(p.peer), esc(p.scope)) + kv + manifest + actions);
+}
+
+async function openChannel(name) {
+  refresh = () => openChannel(name);
+  const c = await api("/channels/" + encodeURIComponent(name) + "/detail");
+  const members = (c.members || []).length
+    ? card("Members", `<p class="hint" style="margin-bottom:10px">Persistent roster (§6.3) — offline members included.</p><div class="chips">${c.members.map((m) => `<button class="btn small" data-action="user" data-id="${esc(m)}">${esc(m)}</button>`).join(" ")}</div>`, c.members.length)
+    : card("Members", `<div class="placeholder">No persistent members.</div>`);
+  set(`<a class="crumb" data-action="back" data-x="channels">← back to Channels</a>` +
+    hrow(esc(c.name), esc(c.policy)) +
+    card("Channel", `<div class="kv"><div class="k">Retention</div><div class="v mono">${esc(c.policy)}</div></div>`) +
+    members +
+    card("History", `<button class="btn primary" data-action="browseChan" data-id="${esc(c.name)}">Browse messages</button>`));
+}
+
+async function browseDm(aArg, bArg) {
+  const a = (aArg || $("#dmA")?.value || "").trim();
+  const b = (bArg || $("#dmB")?.value || "").trim();
+  if (!a || !b) return;
+  if ($("#dmA")) { $("#dmA").value = a; $("#dmB").value = b; }
+  refresh = () => browseDm(a, b);
+  try {
+    const r = await api(`/dms/${encodeURIComponent(a)}/${encodeURIComponent(b)}/messages?limit=100`);
+    const t = $("#msgs");
+    if (!t) return;
+    if (r.unavailable) {
+      t.innerHTML = `<div class="placeholder">Unavailable by policy — this network's DMs are <span class="mono">${esc(r.policy)}</span> (end-to-end encrypted). Plaintext is never held server-side.</div>`;
+      return;
+    }
+    t.innerHTML = r.messages.length ? r.messages.map((m) => msgCard(m)).join("") : `<div class="placeholder">No messages.</div>`;
+  } catch (e) { const t = $("#msgs"); if (t) t.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 
 async function browse(chanArg) {
@@ -475,15 +605,27 @@ async function doModerate() {
 const clicks = {
   report: (el) => openReport(el.dataset.id),
   user: (el) => openUser(el.dataset.id),
+  channel: (el) => openChannel(el.dataset.id),
+  peer: (el) => openPeer(el.dataset.id),
   back: (el) => go(el.dataset.x),
   resolve: async (el) => { await api(`/reports/${encodeURIComponent(el.dataset.id)}/resolve`, { method: "POST", body: JSON.stringify({ action: el.dataset.x }) }); go("reports"); },
   browse: () => browse(),
+  browseDm: () => browseDm(),
   browseChan: (el) => { go("messages").then(() => browse(el.dataset.id)); },
   grantScope: () => screens.grants($("#gScope").value.trim() || "*"),
   moderate: () => doModerate(),
   delUser: async (el) => {
-    if (!confirm(`Delete account "${el.dataset.id}"? Their memberships, grants, and moderation records are removed; posted messages remain.`)) return;
-    try { await api("/accounts/" + encodeURIComponent(el.dataset.id), { method: "DELETE" }); go("users"); }
+    const name = el.dataset.id;
+    // Typed-name confirmation (server also enforces `?confirm=`).
+    const typed = ($("#delConfirm")?.value || "").trim();
+    if (typed !== name) { alert(`Type the exact account name (“${name}”) to confirm.`); return; }
+    try {
+      await api(`/accounts/${encodeURIComponent(name)}?confirm=${encodeURIComponent(typed)}`, { method: "DELETE" });
+      openUser(name); // re-render into the pending-deletion state
+    } catch (e) { alert(e.message); }
+  },
+  restoreUser: async (el) => {
+    try { await api(`/accounts/${encodeURIComponent(el.dataset.id)}/restore`, { method: "POST" }); openUser(el.dataset.id); }
     catch (e) { alert(e.message); }
   },
   delMsg: async (el) => {
@@ -497,6 +639,8 @@ const clicks = {
     catch (e) { alert(e.message); }
   },
   rmNetblock: async (el) => { try { await api("/netblocks/" + encodeURIComponent(el.dataset.id), { method: "DELETE" }); go("netblocks"); } catch (e) { alert(e.message); } },
+  severPeer: async (el) => { try { await api("/netblocks", { method: "POST", body: JSON.stringify({ network: el.dataset.id, reason: "severed via peer detail" }) }); openPeer(el.dataset.id); } catch (e) { alert(e.message); } },
+  reweavePeer: async (el) => { try { await api("/netblocks/" + encodeURIComponent(el.dataset.id), { method: "DELETE" }); openPeer(el.dataset.id); } catch (e) { alert(e.message); } },
   blockMedia: async () => {
     const hash = $("#mbHash").value.trim(); if (!hash) return;
     try { await api("/media-blocks", { method: "POST", body: JSON.stringify({ hash, reason: $("#mbReason").value.trim() || null }) }); go("media"); }
@@ -551,8 +695,16 @@ $("#logout").addEventListener("click", async () => { try { await api("/logout", 
 async function start() {
   try {
     WHO = await api("/me");
+    SCOPES = WHO.scopes || [];
     $("#opName").textContent = WHO.account;
     $("#opAddr").textContent = `${WHO.account}@${WHO.network}`;
+    // Full-scope operators show the OPERATOR pill; a delegated admin shows its
+    // held scopes instead, so it's clear what this session can do.
+    const full = ["admin.read", "admin.moderate", "admin.destroy", "admin.federation", "admin.keys"];
+    const isOperator = full.every((s) => SCOPES.includes(s));
+    $("#role").innerHTML = isOperator
+      ? `<span class="op-role">Operator</span>`
+      : SCOPES.map((s) => `<span class="pill gold">${esc(s.replace("admin.", ""))}</span>`).join(" ");
     showApp(); go("dash");
   } catch { showLogin(); }
 }

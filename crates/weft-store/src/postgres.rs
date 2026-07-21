@@ -500,6 +500,55 @@ impl AccountStore for PgStore {
         Ok(true)
     }
 
+    async fn schedule_deletion(
+        &self,
+        account: &Account,
+        purge_at_ms: u64,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query("UPDATE weft_accounts SET purge_at_ms = $2 WHERE name = $1")
+            .bind(account.as_str())
+            .bind(purge_at_ms as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn cancel_deletion(&self, account: &Account) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE weft_accounts SET purge_at_ms = NULL \
+             WHERE name = $1 AND purge_at_ms IS NOT NULL",
+        )
+        .bind(account.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn deletion_scheduled(&self, account: &Account) -> Result<Option<u64>, StoreError> {
+        let at: Option<i64> =
+            sqlx::query_scalar("SELECT purge_at_ms FROM weft_accounts WHERE name = $1")
+                .bind(account.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?
+                .flatten();
+        Ok(at.map(|v| v as u64))
+    }
+
+    async fn due_deletions(&self, now_ms: u64) -> Result<Vec<Account>, StoreError> {
+        let names: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM weft_accounts \
+             WHERE purge_at_ms IS NOT NULL AND purge_at_ms <= $1 ORDER BY name",
+        )
+        .bind(now_ms as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(names.into_iter().filter_map(|n| n.parse().ok()).collect())
+    }
+
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError> {
         let exists: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM weft_accounts WHERE name = $1)")
@@ -534,6 +583,34 @@ impl AccountStore for PgStore {
         .fetch_one(&self.pool)
         .await
         .map_err(backend_err)
+    }
+
+    async fn devices(&self, account: &Account) -> Result<Vec<[u8; 32]>, StoreError> {
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT pubkey FROM weft_devices WHERE account = $1 ORDER BY pubkey",
+        )
+        .bind(account.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        // A pubkey column is exactly 32 bytes; skip anything malformed.
+        Ok(rows
+            .into_iter()
+            .filter_map(|v| <[u8; 32]>::try_from(v.as_slice()).ok())
+            .collect())
+    }
+
+    async fn accounts_by_email_domain(&self, domain: &str) -> Result<Vec<Account>, StoreError> {
+        let names: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT account FROM weft_verifications \
+             WHERE kind = 'email' AND lower(split_part(subject, '@', 2)) = lower($1) \
+             ORDER BY account",
+        )
+        .bind(domain)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(names.into_iter().filter_map(|n| n.parse().ok()).collect())
     }
 
     async fn set_mark(

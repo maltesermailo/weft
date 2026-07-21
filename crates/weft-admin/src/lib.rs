@@ -60,12 +60,23 @@ pub struct AdminState {
     pub(crate) audit: Arc<dyn AuditStore>,
     pub(crate) auth: Arc<AuthConfig>,
     pub(crate) network: String,
+    /// WC3 soft-delete grace window (ms). An account delete is *scheduled*
+    /// `delete_grace_ms` in the future (recoverable until the maintenance pass
+    /// finalizes it). Default 7 days.
+    pub(crate) delete_grace_ms: u64,
+    /// The network's uniform DM retention policy (§9.5). WC4 DM-thread browse
+    /// gates on it: an `e2ee` policy is "unavailable by policy" (invariant 8),
+    /// never materialized. Default `Ephemeral` (non-e2ee).
+    pub(crate) dm_policy: weft_proto::RetentionPolicy,
     /// Live connection count, when the API shares the weftd process (embedded);
     /// `None` standalone (a separate process can't see it).
     pub(crate) live_connections: Option<Arc<std::sync::atomic::AtomicUsize>>,
     /// Live-server actions (kick/eject via the channel actors) — embedded only.
     pub(crate) live: Option<Arc<dyn Live>>,
 }
+
+/// Default WC3 soft-delete grace window: 7 days.
+pub const DEFAULT_DELETE_GRACE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 impl AdminState {
     /// Build from a single concrete backend (`MemoryStore`/`PgStore`). The store
@@ -101,9 +112,23 @@ impl AdminState {
             audit: store,
             auth: Arc::new(auth),
             network,
+            delete_grace_ms: DEFAULT_DELETE_GRACE_MS,
+            dm_policy: weft_proto::RetentionPolicy::Ephemeral,
             live_connections: None,
             live: None,
         }
+    }
+
+    /// Override the WC3 soft-delete grace window (default 7 days).
+    pub fn with_delete_grace_ms(mut self, ms: u64) -> Self {
+        self.delete_grace_ms = ms;
+        self
+    }
+
+    /// Set the network DM retention policy (WC4 DM-thread browse e2ee gate).
+    pub fn with_dm_policy(mut self, policy: weft_proto::RetentionPolicy) -> Self {
+        self.dm_policy = policy;
+        self
     }
 
     /// Embedded mode: attach the weftd live-connection counter for `/stats`.
@@ -125,7 +150,7 @@ impl AdminState {
 pub fn router(state: AdminState) -> Router {
     let protected = handlers::routes().route_layer(axum::middleware::from_fn_with_state(
         state.clone(),
-        auth::require_operator,
+        auth::require_admin,
     ));
     let inner = Router::new()
         .route("/", axum::routing::get(spa))

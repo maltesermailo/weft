@@ -315,6 +315,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 ns_quota,
                 federation.clone(),
                 config.admin.enabled,
+                config.admin.delete_grace_days,
             )
             .await?
         }
@@ -342,6 +343,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 ns_quota,
                 federation.clone(),
                 config.admin.enabled,
+                config.admin.delete_grace_days,
             )
             .await?
         }
@@ -636,6 +638,7 @@ async fn boot<S>(
     ns_quota: u64,
     federation: weft_core::FederationConfig,
     admin_enabled: bool,
+    admin_delete_grace_days: u64,
 ) -> anyhow::Result<(
     Arc<ServerCtx>,
     Vec<(weft_proto::ChannelName, weft_proto::RetentionPolicy)>,
@@ -706,6 +709,8 @@ where
         });
         weft_admin::router(
             weft_admin::AdminState::from_store(Arc::clone(&store), auth, network)
+                .with_delete_grace_ms(admin_delete_grace_days * 24 * 60 * 60 * 1000)
+                .with_dm_policy(dm_policy)
                 .with_live(live)
                 .with_live_connections(Arc::clone(&ctx.connections)),
         )
@@ -715,6 +720,7 @@ where
     let reports: Arc<dyn weft_store::ReportStore> = store.clone();
     let media_refs: Arc<dyn weft_store::MediaStore> = store.clone();
     let profiles: Arc<dyn weft_store::ProfileStore> = store.clone();
+    let accounts: Arc<dyn weft_store::AccountStore> = store.clone();
     let namespaces: Arc<dyn weft_store::NamespaceStore> = store;
     let tasks = vec![weft_core::spawn_maintenance(
         events,
@@ -723,6 +729,7 @@ where
         media_refs,
         Arc::clone(&blobs),
         profiles,
+        accounts,
         channels.clone(),
         dm_policy,
         maintenance,

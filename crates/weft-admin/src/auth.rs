@@ -24,10 +24,110 @@ const COOKIE: &str = "weft_admin";
 const SESSION_TTL_SECS: u64 = 12 * 60 * 60;
 
 /// Operator auth policy. `secret` signs session cookies (the network signing key
-/// when embedded; a config value standalone). `operators` gate who may log in.
+/// when embedded; a config value standalone). `operators` (config `[operators]`)
+/// auto-hold **every** admin scope — the bootstrap admins.
 pub struct AuthConfig {
     pub secret: Vec<u8>,
     pub operators: HashSet<Account>,
+}
+
+/// The admin capability scopes (WC2). RBAC replaces the old binary operator:
+/// operators (config) hold all; delegated admins hold a subset via `admin`-scope
+/// capability grants (dogfoods §10.4 — `GRANT admin admin.moderate <account>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AdminScope {
+    /// Observability — every read. The baseline for any panel access.
+    Read,
+    /// Structural moderation: mute/ban/kick, resolve reports, media blocks.
+    Moderate,
+    /// Irreversible: delete account, delete message.
+    Destroy,
+    /// Federation controls: netblocks (peers/transit later).
+    Federation,
+    /// Device/token/revocation management (reserved for WC6).
+    Keys,
+}
+
+impl AdminScope {
+    pub const ALL: [AdminScope; 5] = [
+        AdminScope::Read,
+        AdminScope::Moderate,
+        AdminScope::Destroy,
+        AdminScope::Federation,
+        AdminScope::Keys,
+    ];
+
+    /// The canonical wire string (also the capability name at scope `admin`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AdminScope::Read => "admin.read",
+            AdminScope::Moderate => "admin.moderate",
+            AdminScope::Destroy => "admin.destroy",
+            AdminScope::Federation => "admin.federation",
+            AdminScope::Keys => "admin.keys",
+        }
+    }
+
+    /// Parse a capability string — accepts the full `admin.read` or bare `read`.
+    fn from_cap(cap: &str) -> Option<AdminScope> {
+        AdminScope::ALL.into_iter().find(|s| {
+            let full = s.as_str();
+            cap == full || cap == full.trim_start_matches("admin.")
+        })
+    }
+}
+
+/// The set of admin scopes an account holds this request. Injected into request
+/// extensions by [`require_admin`]; handlers read it to gate writes.
+#[derive(Debug, Clone, Default)]
+pub struct AdminScopes(HashSet<AdminScope>);
+
+impl AdminScopes {
+    /// Every scope — an operator (config), or a `*`/`admin.*` grant.
+    pub fn all() -> Self {
+        Self(AdminScope::ALL.into_iter().collect())
+    }
+
+    pub fn has(&self, scope: AdminScope) -> bool {
+        self.0.contains(&scope)
+    }
+
+    /// The held scopes as sorted wire strings (for `/me`).
+    pub fn as_strings(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.0.iter().map(|s| s.as_str().to_string()).collect();
+        v.sort();
+        v
+    }
+}
+
+/// Compute an account's admin scopes. Operators (config) hold all; otherwise the
+/// live (unexpired) `admin`-scope capability grants for the account's ULID.
+/// `None` = holds no admin access at all. Revocation is by `REVOKE` (the grant
+/// row disappears) or expiry — both reflected here on the next request.
+pub(crate) async fn admin_scopes(st: &AdminState, account: &Account) -> Option<AdminScopes> {
+    if st.auth.operators.contains(account) {
+        return Some(AdminScopes::all());
+    }
+
+    let ulid = st.accounts.account_ulid(account).await.ok()??;
+    let grants = st.caps.grants_for(&ulid).await.ok()?;
+    let now = now();
+
+    let mut set = HashSet::new();
+    for grant in grants.into_iter().filter(|g| g.scope == "admin") {
+        if grant.expiry.is_some_and(|e| e < now) {
+            continue; // expired grant — ignore
+        }
+        for cap in &grant.caps {
+            if cap == "*" || cap == "admin.*" {
+                set.extend(AdminScope::ALL);
+            } else if let Some(scope) = AdminScope::from_cap(cap) {
+                set.insert(scope);
+            }
+        }
+    }
+
+    (!set.is_empty()).then_some(AdminScopes(set))
 }
 
 #[derive(Deserialize)]
@@ -36,20 +136,22 @@ pub struct LoginReq {
     password: String,
 }
 
-/// `POST /api/login` — verify password + operator status, set the session cookie.
+/// `POST /api/login` — verify password + admin access, set the session cookie.
 pub async fn login(State(st): State<AdminState>, Json(req): Json<LoginReq>) -> Response {
     // Uniform failure — never distinguish "no such account" from "bad password"
-    // from "not an operator" (anti-enumeration, mirrors AUTH-FAILED).
+    // from "not an admin" (anti-enumeration, mirrors AUTH-FAILED).
     let Ok(account) = req.account.parse::<Account>() else {
         return unauthorized();
     };
-    if !st.auth.operators.contains(&account) {
-        return unauthorized();
-    }
     let ok = matches!(st.accounts.password_phc(&account).await, Ok(Some(phc))
         if PasswordHash::from_phc(&phc).map(|h| h.verify(&req.password)).unwrap_or(false));
     if !ok {
         return unauthorized();
+    }
+    // Panel access requires the `admin.read` baseline (operators auto-hold it).
+    match admin_scopes(&st, &account).await {
+        Some(s) if s.has(AdminScope::Read) => {}
+        _ => return unauthorized(),
     }
 
     let token = make_token(&st.auth.secret, &account, now() + SESSION_TTL_SECS);
@@ -69,13 +171,12 @@ pub async fn logout() -> Response {
     ([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response()
 }
 
-/// Gate `/api/*`: a valid session cookie for a current operator. Injects the
-/// acting `Account` into request extensions for handlers (the moderator).
-pub async fn require_operator(
-    State(st): State<AdminState>,
-    mut req: Request,
-    next: Next,
-) -> Response {
+/// Gate `/api/*`: a valid session cookie for a current admin (holds the
+/// `admin.read` baseline). Injects the acting `Account` **and** its
+/// [`AdminScopes`] into request extensions — handlers read the scopes to gate
+/// writes. The gate is uniform 401 (anti-enumeration); per-scope write denials
+/// are 403 inside the handlers.
+pub async fn require_admin(State(st): State<AdminState>, mut req: Request, next: Next) -> Response {
     let account = req
         .headers()
         .get(header::COOKIE)
@@ -83,9 +184,13 @@ pub async fn require_operator(
         .and_then(session_cookie)
         .and_then(|tok| verify_token(&st.auth.secret, &tok));
 
-    match account {
-        Some(account) if st.auth.operators.contains(&account) => {
+    let Some(account) = account else {
+        return unauthorized();
+    };
+    match admin_scopes(&st, &account).await {
+        Some(scopes) if scopes.has(AdminScope::Read) => {
             req.extensions_mut().insert(account);
+            req.extensions_mut().insert(scopes);
             next.run(req).await
         }
         _ => unauthorized(),

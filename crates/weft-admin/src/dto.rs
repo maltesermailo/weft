@@ -9,11 +9,14 @@ use weft_store::{
     PeerRecord, ReactionSummary, ReportRecord,
 };
 
-/// `GET /me` — who the session belongs to.
+/// `GET /me` — who the session belongs to, and the admin scopes they hold
+/// (WC2). The SPA hides actions whose scope is absent; the server enforces
+/// regardless.
 #[derive(Serialize)]
 pub struct Me {
     pub account: String,
     pub network: String,
+    pub scopes: Vec<String>,
 }
 
 /// `GET /stats` — dashboard counters. `live_connections` is `None` standalone
@@ -39,6 +42,15 @@ pub struct AccountSummary {
     pub caps: Vec<String>,
     pub muted: bool,
     pub banned: bool,
+    /// WC3: scheduled hard-delete time (ms) when pending deletion, else `None`.
+    pub deletion_scheduled: Option<u64>,
+}
+
+/// `DELETE /accounts/:name` response — the account was scheduled for deletion
+/// (WC3 soft delete), finalized at `purge_at` unless restored first.
+#[derive(Serialize)]
+pub struct DeletionScheduled {
+    pub purge_at: u64,
 }
 
 /// A capability grant. `subject` is present in the scope-wide `GET /grants`
@@ -72,6 +84,33 @@ pub struct AccountDetail {
     pub verifications: Vec<Verification>,
     pub muted: bool,
     pub banned: bool,
+    /// WC3: scheduled hard-delete time (ms) when pending deletion, else `None`.
+    pub deletion_scheduled: Option<u64>,
+    /// WC4: enrolled device fingerprints (truncated hex of the Ed25519 pubkey).
+    pub devices: Vec<String>,
+    /// WC4 "find related": other accounts sharing this account's email domain
+    /// (empty when it has no email claim). The spam-wave pivot.
+    pub related: Vec<String>,
+}
+
+/// `GET /channels/:name` — channel lookup detail (WC4). Members are the
+/// persistent roster (§6.3), offline members included.
+#[derive(Serialize)]
+pub struct ChannelDetail {
+    pub name: String,
+    pub policy: String,
+    pub members: Vec<String>,
+}
+
+/// `GET /dms/:a/:b/messages` — a DM thread browse (WC4, §0 content boundary).
+/// `unavailable` is `true` when the DM policy is `e2ee`: no plaintext is held
+/// or materialized (invariant 8), so `messages` is empty.
+#[derive(Serialize)]
+pub struct ThreadBrowse {
+    pub participants: [String; 2],
+    pub policy: String,
+    pub unavailable: bool,
+    pub messages: Vec<Msg>,
 }
 
 /// One row of `GET /accounts/:name/messages`.
@@ -273,6 +312,38 @@ impl From<PeerRecord> for Peer {
             updated_ms: p.updated_ms,
         }
     }
+}
+
+/// `GET /peers/:peer` — federation peer detail (WC5). Parses the stored signed
+/// manifest for the shared channel set, pinned key, and negotiated modes.
+/// `netblocked` ties in the §11.6 sever mechanism (a netblock is how you sever a
+/// whole peer network).
+#[derive(Serialize)]
+pub struct PeerDetail {
+    pub peer: String,
+    pub scope: String,
+    pub version: u64,
+    pub acked: bool,
+    pub severed: bool,
+    pub netblocked: bool,
+    pub created_ms: u64,
+    pub updated_ms: u64,
+    pub manifest: Option<PeerManifest>,
+}
+
+/// The parsed signed manifest a peer bridges under (§11.3).
+#[derive(Serialize)]
+pub struct PeerManifest {
+    /// Pinned signing-key fingerprint (truncated hex of the Ed25519 pubkey).
+    pub key_fingerprint: String,
+    /// The embedded signature self-verifies over the manifest body.
+    pub verified: bool,
+    /// Shared channels — the "shared-room count" is `channels.len()`.
+    pub channels: Vec<String>,
+    pub history: String,
+    pub media: String,
+    pub typing: bool,
+    pub voice: bool,
 }
 
 /// One row of `GET /netblocks`.

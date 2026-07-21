@@ -92,10 +92,23 @@ impl Default for Smtp {
 }
 
 /// Embedded admin panel toggle. (Standalone `weft-admin` has its own config.)
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Admin {
     pub enabled: bool,
+    /// WC3 soft-delete grace window (days). An operator account delete is
+    /// *scheduled* this many days out and is recoverable until then; the
+    /// maintenance pass finalizes it. Default 7.
+    pub delete_grace_days: u64,
+}
+
+impl Default for Admin {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            delete_grace_days: 7,
+        }
+    }
 }
 
 /// §13 media (content-addressed blobs). Fetched home-network-only; the data

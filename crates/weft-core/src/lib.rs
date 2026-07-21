@@ -31,7 +31,8 @@ pub use context::{
 };
 pub use mailer::Mailer;
 pub use maintenance::{
-    apply_due_recoveries, gc_orphan_blobs, spawn_maintenance, MaintenanceConfig,
+    apply_due_recoveries, gc_orphan_blobs, purge_due_deletions, spawn_maintenance,
+    MaintenanceConfig,
 };
 pub use media::{parse_media_uri, UploadGrant, MEDIA_MAX_BYTES};
 pub use registry::Registry;

@@ -451,52 +451,143 @@ The foundation everything destructive rides on. All three pieces shipped:
   rendering each view in a browser against stubbed fixtures (dashboard, users,
   audit, peers, detail). Uses **Channels/Namespaces** copy, not "Rooms" (§0).
 
-### WC2 ☐ — capability RBAC (adopted)
+### WC2 ✅ — capability RBAC (adopted)
 
-**Decided:** adopt scoped admin capability tokens, reversing WC0's binary
-"operator = cap at `*`" model (this supersedes the operator-only stance in §10
-below). Scopes (§1): `admin.read` / `admin.moderate` / `admin.destroy` /
-`admin.federation` / `admin.keys`. Login mints a session carrying the caller's
-admin scopes;
-middleware gates each route by the scope it requires. `*`-operators auto-hold
-every scope (back-compat, zero-config for existing deployments). This dogfoods
-the capability system and gives delegated read-only moderator tokens for free.
-Because the panel ships to strangers (a public server can't assume one trusted
-operator), this is the milestone that makes "full control including destructive
-deletes" safe to hand out granularly. Depends on nothing but WC1's typed layer.
+**Shipped:** scoped admin capability tokens replace WC0's binary "operator =
+cap at `*`" (supersedes the operator-only stance in §10 below). Scopes:
+`admin.read` / `admin.moderate` / `admin.destroy` / `admin.federation` /
+`admin.keys` (`auth::AdminScope`). Sources: config **operators auto-hold all**
+(zero-config back-compat); delegated admins hold a subset via **`admin`-scope
+capability grants keyed by account ULID** — dogfooding §10.4, so
+`GRANT admin admin.moderate <account>` (or `REVOKE`) manages a junior moderator
+with the same machinery users delegate room caps. `admin_scopes()` computes the
+live set each request (operators → all; else unexpired `admin` grants; `*`/
+`admin.*` → all), so revoke/expiry take effect immediately.
 
-### WC3 ☐ — destructive-action safety
+Enforcement: `require_admin` middleware authenticates + requires the
+**`admin.read` baseline** (uniform 401, anti-enumeration) and injects the
+caller's `AdminScopes`; each **write handler** guards its scope (`require(&scopes,
+AdminScope::…)` → **403** if missing) — reads (moderate) · deletes (destroy) ·
+netblocks (federation) · media/report-resolve (moderate). Login now admits any
+account with the read baseline, not just config operators. `GET /me` returns the
+held scopes; the **SPA hides controls it can't use** (a read-only admin sees
+"Read-only — you don't hold `admin.moderate`" and its held scopes as header
+pills instead of the `OPERATOR` badge — the server enforces regardless).
 
-Wrap the deletes (already live in WC0) in the §1 confirmation model:
-server-enforced **typed-name confirmation** (the DELETE body must echo the
-target's name/handle), a configurable **soft-delete grace window** (default 7 d:
-tombstone + recoverable, a purge job finalizes after the window), and an
-**optional two-operator rule** for `admin.destroy` (off by default; for larger
-deployments). Retrofits account-delete, message-delete, and the forthcoming
-room-delete behind one gate.
+Tests: `read_only_admin_reads_but_cannot_write` (403 on every write scope),
+`moderate_admin_moderates_but_cannot_destroy`, `a_registered_non_admin_cannot_
+log_in` — plus the 8 operator-path tests still green (operators auto-hold all).
+Browser-verified the read-only UI. `admin.keys` is reserved (no endpoints until
+WC6). **[refinement]** epoch-revocation of admin grants relies on `REVOKE`
+removing the row; bulk `bump_epoch` invalidation isn't wired for the `admin`
+scope yet.
 
-### WC4 ☐ — lookup depth (users & rooms)
+### WC3 ◑ — destructive-action safety
 
-Enrich the WC0 detail pages (§2). **User:** device list + Ed25519 fingerprints,
-capability tokens held, flags, and a "find related" pivot on email domain.
-*(IP-pivot is parked — the transport layer doesn't surface/persist client IPs
-yet; needs plumbing in `run_session`, flag before building.)* **Channel/room:**
-member list with per-member join path (direct / invite / gateway), media storage
-footprint, per-peer federation replication status. **Content browse** (§0
-boundary): WC0 already materializes channel history; this extends the same view
-to **non-E2EE DMs**, with `e2ee` targets rendered "unavailable by policy"
-(invariant 8) — a per-target retention-policy check, not a per-role gate.
+The account hard-delete — the one truly irreversible panel action — is now
+gated. **Shipped:**
 
-### WC5 ☐ — federation ops
+- **Typed-name confirmation ✅ (server-enforced).** `DELETE /accounts/:name`
+  requires `?confirm=<name>` to echo the account name (400 otherwise); the
+  no-self-delete rule is checked first. The SPA renders the design's danger
+  zone: a "Type <name> to confirm" input + solid-red Delete button.
+- **Soft-delete grace window ✅ (configurable, default 7 d).** DELETE now
+  *schedules* the hard-delete `delete_grace_ms` out (`AccountStore::
+  schedule_deletion`/`cancel_deletion`/`deletion_scheduled`/`due_deletions` —
+  mem + PG + contract, migration `0024`, nullable `purge_at_ms`). The account
+  keeps working during the window and is **recoverable** via
+  `POST /accounts/:name/restore`. The `weft-core` maintenance loop finalizes due
+  accounts (`purge_due_deletions`, split-out + unit-tested like the other
+  passes). `[admin] delete_grace_days` config → `AdminState::with_delete_grace_ms`.
+  The account list/detail carry `deletion_scheduled`; the SPA shows a
+  "pending delete" knot + a "Deletion scheduled → Restore" card. All audited
+  (`account.schedule_delete` / `account.restore`).
 
-Build out §3 on top of the WC0 peers list. Enrich **Peers** (state
-woven/frayed/severed, RTT, last handshake, protocol version, pinned key
-fingerprint, shared-room count) + actions (sever, re-weave, force re-handshake).
-**Transit queue** — per-peer backlog depth, oldest-pending age, retry schedule;
-actions retry-now / drop-poisoned (audited) / pause. **Peer key rotation** as a
-TOFU review queue: a rotated peer signing key surfaces as a pending trust
-decision, not a silent accept. This is the page an admin lives in when a peer is
-frayed.
+Tests: `account_delete_is_typed_name_confirmed_and_self_delete_blocked`,
+`account_delete_schedules_a_grace_window_and_restores`, the store contract
+soft-delete block, and `weft-core::purge_due_deletions_finalizes_only_past_
+windows`. Browser-verified both danger-zone states.
+
+**Remaining (deferred):**
+- **Two-operator rule** for `admin.destroy` (off by default) — needs a
+  pending-approval flow (first approver records intent, second executes); its
+  own state + endpoints.
+- **Message-delete** already soft-deletes (tombstone via the channel actor) and
+  is scope-gated + audited, so it doesn't need the grace machinery; a typed-name
+  gate doesn't fit a ULID. **Channel/namespace delete** (WC7) will reuse the
+  same typed-name `?confirm=` gate + (where a hard purge applies) the grace
+  window.
+- **Login-block during the grace window** is intentionally *not* here — a
+  scheduled account still functions until finalize; blocking access is the WC7
+  **suspend** action, not soft-delete.
+
+### WC4 ◑ — lookup depth (users & channels)
+
+**Shipped — user detail depth (§2 "User"):**
+- **Device list ✅** — `AccountStore::devices` (mem + PG + contract); the detail
+  renders each enrolled Ed25519 pubkey as a truncated grouped-hex fingerprint
+  (`device_fingerprint`, display-only).
+- **Flags card ✅** — account state (`OPERATOR`/`MUTED`/`BANNED`/`PENDING_DELETE`)
+  as the design's `.flags` toggle grid (client-side, from existing data).
+- **Capability tokens held ✅** — the grants-across-scopes card (already WC0).
+- **"Find related" ✅** — `AccountStore::accounts_by_email_domain` (case-
+  insensitive on the part after `@`, mem + PG + contract); `account_detail`
+  returns `related` (same-domain accounts, minus self), rendered as clickable
+  pivots — the spam-wave tool.
+
+**Shipped — channel detail:** new `GET /channels/:name/detail` (policy + the
+persistent member roster via `MembershipStore::members`) + an SPA channel-detail
+view (clickable from the channels list; members pivot to user details; "browse
+messages" link). Test: `account_detail_carries_devices_and_related_and_channel_
+roster`. Browser-verified user + channel detail.
+
+**Remaining (deferred — not yet tracked/plumbed):**
+- **IP-pivot** — parked; the transport layer doesn't surface/persist client IPs
+  (needs `run_session` plumbing).
+- **Per-member join path** (direct / invite / gateway), **media storage
+  footprint** per channel, **per-peer replication status** — none are tracked or
+  aggregated today; each needs new store instrumentation. Channel detail ships
+  the roster now; these are additive.
+- **Content browse for non-E2EE DMs ✅** (§0) — `GET /dms/:a/:b/messages`
+  materializes the thread for a participant pair (`Scope::dm` normalizes order).
+  The §0 gate is real: `AdminState.dm_policy` (wired from weftd `dm_policy`) —
+  when it's `e2ee` the response is `unavailable: true` with **no** messages
+  materialized (invariant 8), and the SPA shows "unavailable by policy". The
+  Messages screen gained a DM row (two accounts → browse). Test:
+  `dm_thread_browse_reads_non_e2ee_and_gates_e2ee`; browser-verified both states.
+
+Deferred to later WC milestones (need new instrumentation): IP-pivot, per-member
+join path, media storage footprint, per-peer replication status.
+
+### WC5 ◑ — federation ops
+
+**Shipped — peer detail:** clicking a peer opens `GET /peers/:name/detail`,
+which parses the stored **signed manifest** (`weft_crypto::SignedManifest::
+from_b64`) into the operator-relevant facts: the **pinned key fingerprint**
+(`fingerprint_hex` of the signer pubkey) + `verified` self-auth, the **shared
+channel set** (= "shared-room count"), and the negotiated `history`/`media`/
+`typing`/`voice` modes — plus the record's scope/version/acked/severed/
+created/updated and whether the peer is **netblocked**. SPA peer-detail view
+with the woven/frayed/severed knot vocabulary.
+
+**Shipped — sever / re-weave:** wired to the existing **NETBLOCK** endpoints —
+because at the network level a netblock *is* the §11.6 sever (reject bridge auth
++ proposals, sever manifests, drop ingestion; invariant 7). The peer detail
+shows a "Sever (netblock)" / "Re-weave (unblock)" action (`admin.federation`),
+reusing `POST`/`DELETE /netblocks`. Test:
+`peer_detail_parses_manifest_and_shows_shared_channels`; browser-verified.
+
+**Remaining (deferred — need instrumentation that doesn't exist yet):**
+- **RTT + last-handshake** — no transport-level timing is surfaced/persisted
+  (needs connection instrumentation, like WC4's IP-pivot).
+- **Transit queue** (backlog depth, oldest-pending age, retry / drop-poisoned /
+  pause) — forwarding is live (mpsc/broadcast), not a persisted queue; there's
+  nothing to inspect until an outbound queue is materialized.
+- **Force re-handshake** — a live dialer action; needs a federation analog of
+  the channel `Live` port.
+- **Peer key-rotation TOFU review** — no pending-review state; today the pinned
+  model rejects a changed key and accept-any trusts it. A "pending trust
+  decision" queue is new state + flow.
 
 ### WC6 ☐ — trust & keys (gated on E2EE/MLS)
 

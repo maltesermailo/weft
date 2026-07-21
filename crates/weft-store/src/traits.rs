@@ -87,6 +87,29 @@ pub trait AccountStore: Send + Sync {
     /// separate action (delete message / block hash). Returns false if unknown.
     async fn delete_account(&self, account: &Account) -> Result<bool, StoreError>;
 
+    /// WC3 soft delete: schedule the account to be hard-deleted at `purge_at_ms`
+    /// (a grace window during which it's recoverable via [`cancel_deletion`]).
+    /// Idempotent — reschedules if already pending. False iff the account is
+    /// unknown. The account keeps working until the maintenance pass finalizes.
+    ///
+    /// [`cancel_deletion`]: AccountStore::cancel_deletion
+    async fn schedule_deletion(
+        &self,
+        account: &Account,
+        purge_at_ms: u64,
+    ) -> Result<bool, StoreError>;
+
+    /// Cancel a scheduled deletion (restore). False iff not currently scheduled.
+    async fn cancel_deletion(&self, account: &Account) -> Result<bool, StoreError>;
+
+    /// The scheduled purge time (ms) if the account is pending deletion, else
+    /// `None`. `Ok(None)` also covers an unknown account.
+    async fn deletion_scheduled(&self, account: &Account) -> Result<Option<u64>, StoreError>;
+
+    /// Accounts whose scheduled purge time is at/before `now_ms` — the
+    /// maintenance finalize list.
+    async fn due_deletions(&self, now_ms: u64) -> Result<Vec<Account>, StoreError>;
+
     /// Idempotent; false iff the account is unknown.
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError>;
 
@@ -95,6 +118,15 @@ pub trait AccountStore: Send + Sync {
         account: &Account,
         device: &[u8; 32],
     ) -> Result<bool, StoreError>;
+
+    /// Every enrolled device pubkey (Ed25519) for the account — the operator
+    /// device-list view (WC4). Empty if none / unknown account.
+    async fn devices(&self, account: &Account) -> Result<Vec<[u8; 32]>, StoreError>;
+
+    /// Accounts holding an email verification claim in `domain` (the part after
+    /// `@`, case-insensitive) — the "find related" spam-wave pivot (WC4, §2).
+    /// Both verified and pending claims count. Sorted by name.
+    async fn accounts_by_email_domain(&self, domain: &str) -> Result<Vec<Account>, StoreError>;
 
     /// §6.3 MARK: account-scoped read marker per target; survives
     /// `ephemeral` (markers are account data, not channel data).

@@ -22,6 +22,7 @@ use weft_store::{
     materialize, AuditEntry, ModKind, ModRecord, Page, ReportResolution, Scope, StoreError,
 };
 
+use crate::auth::{AdminScope, AdminScopes};
 use crate::{dto, AdminState};
 
 /// All operator-gated routes (the auth layer is applied by `router`).
@@ -38,11 +39,14 @@ pub fn routes() -> Router<AdminState> {
             get(account_detail).delete(delete_account),
         )
         .route("/api/v1/accounts/:name/messages", get(account_messages))
+        .route("/api/v1/accounts/:name/restore", post(restore_account))
         .route("/api/v1/channels", get(list_channels))
+        .route("/api/v1/channels/:name/detail", get(channel_detail))
         .route("/api/v1/namespaces", get(list_namespaces))
         .route("/api/v1/grants", get(list_grants))
         .route("/api/v1/moderation", get(list_moderation).post(moderate))
         .route("/api/v1/peers", get(list_peers))
+        .route("/api/v1/peers/:name/detail", get(peer_detail))
         .route("/api/v1/netblocks", get(list_netblocks).post(add_netblock))
         .route(
             "/api/v1/netblocks/:network",
@@ -57,6 +61,7 @@ pub fn routes() -> Router<AdminState> {
             axum::routing::delete(unblock_media),
         )
         .route("/api/v1/channels/:name/messages", get(browse_messages))
+        .route("/api/v1/dms/:a/:b/messages", get(browse_dm))
         // msgids are `<network>/<ULID>` — they contain a slash, so capture the
         // whole tail with a wildcard.
         .route(
@@ -68,10 +73,15 @@ pub fn routes() -> Router<AdminState> {
 
 // ---- read ----
 
-async fn me(Extension(who): Extension<Account>, State(st): State<AdminState>) -> Response {
+async fn me(
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    State(st): State<AdminState>,
+) -> Response {
     Json(dto::Me {
         account: who.to_string(),
         network: st.network.clone(),
+        scopes: scopes.as_strings(),
     })
     .into_response()
 }
@@ -197,11 +207,13 @@ async fn list_accounts(State(st): State<AdminState>) -> Response {
             let banned = star_mod
                 .iter()
                 .any(|m| m.account == account && matches!(m.kind, ModKind::Ban));
+            let deletion_scheduled = st.accounts.deletion_scheduled(&account).await?;
             out.push(dto::AccountSummary {
                 operator: st.auth.operators.contains(&account),
                 caps: caps_by_ulid.get(&ulid).cloned().unwrap_or_default(),
                 muted,
                 banned,
+                deletion_scheduled,
                 account: account.to_string(),
                 ulid,
             });
@@ -246,16 +258,36 @@ async fn account_detail(State(st): State<AdminState>, Path(name): Path<String>) 
             .into_iter()
             .map(|c| c.to_string())
             .collect();
-        let verifications: Vec<dto::Verification> = st
-            .accounts
-            .verifications(&account)
-            .await?
+        let verification_records = st.accounts.verifications(&account).await?;
+        // WC4 "find related": accounts sharing this account's email domain.
+        let related = match verification_records.iter().find(|v| v.kind == "email") {
+            Some(email) => {
+                let domain = email.subject.rsplit('@').next().unwrap_or("");
+                st.accounts
+                    .accounts_by_email_domain(domain)
+                    .await?
+                    .into_iter()
+                    .filter(|a| a != &account)
+                    .map(|a| a.to_string())
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        let verifications: Vec<dto::Verification> = verification_records
             .into_iter()
             .map(|v| dto::Verification {
                 kind: v.kind,
                 subject: v.subject,
                 verified: v.verified_at.is_some(),
             })
+            .collect();
+        // WC4 device list: truncated fingerprint of each enrolled Ed25519 pubkey.
+        let devices: Vec<String> = st
+            .accounts
+            .devices(&account)
+            .await?
+            .iter()
+            .map(device_fingerprint)
             .collect();
         Ok::<_, StoreError>(Some(dto::AccountDetail {
             operator: st.auth.operators.contains(&account),
@@ -270,6 +302,9 @@ async fn account_detail(State(st): State<AdminState>, Path(name): Path<String>) 
                 .moderation
                 .is_moderated(&account, &["*".to_string()], ModKind::Ban)
                 .await?,
+            deletion_scheduled: st.accounts.deletion_scheduled(&account).await?,
+            devices,
+            related,
             account: account.to_string(),
             ulid,
         }))
@@ -284,30 +319,85 @@ async fn account_detail(State(st): State<AdminState>, Path(name): Path<String>) 
 
 /// Operator hard-delete of an account (+ its per-account data; messages kept).
 /// An operator can't delete themselves (avoid locking out the live session).
+#[derive(Deserialize)]
+struct ConfirmQuery {
+    /// Typed-name confirmation — must echo the target's name (WC3).
+    confirm: Option<String>,
+}
+
+/// WC3 soft delete: **schedule** the account's hard-delete `delete_grace_ms` in
+/// the future (recoverable via `restore` until the maintenance pass finalizes
+/// it). Guarded by `admin.destroy` + **typed-name confirmation** (`?confirm=`
+/// must echo the account name) + the no-self-delete rule.
 async fn delete_account(
     State(st): State<AdminState>,
     Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
     Path(name): Path<String>,
+    Query(q): Query<ConfirmQuery>,
 ) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Destroy) {
+        return r;
+    }
     let Ok(account) = name.parse::<Account>() else {
         return (StatusCode::BAD_REQUEST, "bad account").into_response();
     };
     if account == who {
         return (StatusCode::FORBIDDEN, "cannot delete your own account").into_response();
     }
-    match st.accounts.delete_account(&account).await {
+    // Typed-name confirmation: the caller must prove intent by echoing the name.
+    if q.confirm.as_deref() != Some(name.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "confirmation does not match the account name",
+        )
+            .into_response();
+    }
+
+    let purge_at = now_ms() + st.delete_grace_ms;
+    match st.accounts.schedule_deletion(&account, purge_at).await {
         Ok(true) => {
             audit(
                 &st,
                 &who,
-                "account.delete",
+                "account.schedule_delete",
+                &account.to_string(),
+                &json!({ "account": account.to_string(), "purge_at": purge_at }),
+            )
+            .await;
+            Json(dto::DeletionScheduled { purge_at }).into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, "no such account").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// WC3: cancel a scheduled account deletion (restore). `admin.destroy`.
+async fn restore_account(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Destroy) {
+        return r;
+    }
+    let Ok(account) = name.parse::<Account>() else {
+        return (StatusCode::BAD_REQUEST, "bad account").into_response();
+    };
+    match st.accounts.cancel_deletion(&account).await {
+        Ok(true) => {
+            audit(
+                &st,
+                &who,
+                "account.restore",
                 &account.to_string(),
                 &json!({ "account": account.to_string() }),
             )
             .await;
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(false) => (StatusCode::NOT_FOUND, "no such account").into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "not scheduled for deletion").into_response(),
         Err(e) => internal(e),
     }
 }
@@ -368,6 +458,37 @@ async fn list_channels(State(st): State<AdminState>) -> Response {
     }
 }
 
+/// WC4 channel lookup detail: retention policy + the persistent member roster
+/// (§6.3, offline members included).
+async fn channel_detail(State(st): State<AdminState>, Path(name): Path<String>) -> Response {
+    let Ok(channel) = name.parse::<ChannelName>() else {
+        return (StatusCode::BAD_REQUEST, "bad channel name").into_response();
+    };
+    let detail = async {
+        let Some(record) = st.channels.channel(&channel).await? else {
+            return Ok(None);
+        };
+        let members: Vec<String> = st
+            .memberships
+            .members(&channel)
+            .await?
+            .into_iter()
+            .map(|a| a.to_string())
+            .collect();
+        Ok::<_, StoreError>(Some(dto::ChannelDetail {
+            name: channel.to_string(),
+            policy: record.policy.to_string(),
+            members,
+        }))
+    }
+    .await;
+    match detail {
+        Ok(Some(v)) => Json(v).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such channel").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
 async fn list_moderation(State(st): State<AdminState>, Query(q): Query<ScopeQuery>) -> Response {
     let scope = q.scope.as_deref().unwrap_or("*");
     match st.moderation.list_moderation(scope).await {
@@ -395,8 +516,12 @@ struct ModerateReq {
 async fn moderate(
     State(st): State<AdminState>,
     Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
     Json(req): Json<ModerateReq>,
 ) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
     let Ok(account) = req.account.parse::<Account>() else {
         return (StatusCode::BAD_REQUEST, "bad account").into_response();
     };
@@ -483,9 +608,13 @@ struct ResolveReq {
 async fn resolve_report(
     State(st): State<AdminState>,
     Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
     Path(id): Path<String>,
     Json(req): Json<ResolveReq>,
 ) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
     let Ok(action) = req.action.parse::<ResolveAction>() else {
         return (StatusCode::BAD_REQUEST, "unknown action").into_response();
     };
@@ -561,6 +690,41 @@ async fn browse_messages(
     }
 }
 
+/// WC4 DM-thread browse (§0 content boundary): the materialized conversation
+/// between two accounts. An `e2ee` DM policy is "unavailable by policy" — no
+/// plaintext is held or materialized (invariant 8).
+async fn browse_dm(
+    State(st): State<AdminState>,
+    Path((a, b)): Path<(String, String)>,
+    Query(q): Query<ScopeQuery>,
+) -> Response {
+    let (Ok(a), Ok(b)) = (a.parse::<Account>(), b.parse::<Account>()) else {
+        return (StatusCode::BAD_REQUEST, "bad account").into_response();
+    };
+    let scope = Scope::dm(a.clone(), b.clone());
+    let policy = st.dm_policy.to_string();
+
+    if matches!(st.dm_policy, weft_proto::RetentionPolicy::E2ee) {
+        return Json(dto::ThreadBrowse {
+            participants: [a.to_string(), b.to_string()],
+            policy,
+            unavailable: true,
+            messages: Vec::new(),
+        })
+        .into_response();
+    }
+    match browse(&st, scope, q.limit.unwrap_or(100)).await {
+        Ok(messages) => Json(dto::ThreadBrowse {
+            participants: [a.to_string(), b.to_string()],
+            policy,
+            unavailable: false,
+            messages,
+        })
+        .into_response(),
+        Err(e) => internal(e),
+    }
+}
+
 async fn browse(st: &AdminState, scope: Scope, limit: usize) -> Result<Vec<dto::Msg>, StoreError> {
     let page = Page {
         before: None,
@@ -580,8 +744,12 @@ async fn browse(st: &AdminState, scope: Scope, limit: usize) -> Result<Vec<dto::
 async fn delete_message(
     State(st): State<AdminState>,
     Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
     Path(msgid): Path<String>,
 ) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Destroy) {
+        return r;
+    }
     let Some(live) = &st.live else {
         return (
             StatusCode::NOT_IMPLEMENTED,
@@ -620,6 +788,52 @@ async fn list_peers(State(st): State<AdminState>) -> Response {
     }
 }
 
+/// WC5 peer detail: the record plus the parsed signed manifest (shared channels,
+/// pinned key fingerprint, negotiated history/media/typing/voice) and whether
+/// the peer's network is netblocked (§11.6 — a netblock is how you sever a peer).
+async fn peer_detail(State(st): State<AdminState>, Path(name): Path<String>) -> Response {
+    let Ok(network) = name.parse::<weft_proto::NetworkName>() else {
+        return (StatusCode::BAD_REQUEST, "bad network").into_response();
+    };
+    let detail = async {
+        let Some(rec) = st.peers.peer(&network).await? else {
+            return Ok(None);
+        };
+        let netblocked = st.netblocks.is_netblocked(&network).await?;
+        // Prefer the mutually-acked manifest; fall back to the current proposal.
+        let m_b64 = rec.acked_manifest.as_deref().unwrap_or(&rec.manifest);
+        let manifest =
+            weft_crypto::SignedManifest::from_b64(m_b64)
+                .ok()
+                .map(|sm| dto::PeerManifest {
+                    key_fingerprint: fingerprint_hex(sm.signer().as_bytes()),
+                    verified: sm.verify(),
+                    channels: sm.manifest.channels.clone(),
+                    history: sm.manifest.history.clone(),
+                    media: sm.manifest.media.clone(),
+                    typing: sm.manifest.typing,
+                    voice: sm.manifest.voice,
+                });
+        Ok::<_, StoreError>(Some(dto::PeerDetail {
+            peer: rec.peer.to_string(),
+            scope: rec.scope,
+            version: rec.version,
+            acked: rec.acked_manifest.is_some(),
+            severed: rec.severed,
+            netblocked,
+            created_ms: rec.created_ms,
+            updated_ms: rec.updated_ms,
+            manifest,
+        }))
+    }
+    .await;
+    match detail {
+        Ok(Some(v)) => Json(v).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such peer").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
 async fn list_netblocks(State(st): State<AdminState>) -> Response {
     match st.netblocks.list_netblocks().await {
         Ok(list) => Json(
@@ -641,8 +855,12 @@ struct NetblockReq {
 async fn add_netblock(
     State(st): State<AdminState>,
     Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
     Json(req): Json<NetblockReq>,
 ) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Federation) {
+        return r;
+    }
     let Ok(network) = req.network.parse::<weft_proto::NetworkName>() else {
         return (StatusCode::BAD_REQUEST, "bad network").into_response();
     };
@@ -675,8 +893,12 @@ async fn add_netblock(
 async fn remove_netblock(
     State(st): State<AdminState>,
     Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
     Path(network): Path<String>,
 ) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Federation) {
+        return r;
+    }
     let Ok(network) = network.parse::<weft_proto::NetworkName>() else {
         return (StatusCode::BAD_REQUEST, "bad network").into_response();
     };
@@ -725,8 +947,12 @@ struct BlockMediaReq {
 async fn block_media(
     State(st): State<AdminState>,
     Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
     Json(req): Json<BlockMediaReq>,
 ) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
     let hash = req.hash.trim();
     if hash.is_empty() {
         return (StatusCode::BAD_REQUEST, "empty hash").into_response();
@@ -752,8 +978,12 @@ async fn block_media(
 async fn unblock_media(
     State(st): State<AdminState>,
     Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
     Path(hash): Path<String>,
 ) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
     match st.media_blocks.unblock_hash(&hash).await {
         Ok(true) => {
             audit(&st, &who, "media.unblock", &hash, &json!({ "hash": hash })).await;
@@ -820,11 +1050,39 @@ fn hex(bytes: &[u8]) -> String {
         })
 }
 
+/// A short, human-readable key fingerprint: the first 10 bytes as uppercase
+/// hex, grouped in 4s (e.g. `7F2A 91C4 …`). Display/identification only — never
+/// used for authentication.
+fn fingerprint_hex(bytes: &[u8]) -> String {
+    let take = bytes.len().min(10);
+    hex(&bytes[..take])
+        .to_uppercase()
+        .as_bytes()
+        .chunks(4)
+        .map(|c| std::str::from_utf8(c).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The fingerprint of an enrolled Ed25519 device pubkey (WC4).
+fn device_fingerprint(pubkey: &[u8; 32]) -> String {
+    fingerprint_hex(pubkey)
+}
+
 // ---- helpers ----
 
 fn internal(e: impl std::fmt::Display) -> Response {
     tracing::error!("admin store error: {e}");
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+}
+
+/// WC2 write gate: returns a 403 response to short-circuit with unless the
+/// caller holds the required admin scope; `None` = allowed. Reads need no guard
+/// — the `require_admin` middleware already enforces the `admin.read` baseline
+/// for every `/api/v1/*` route.
+fn require(scopes: &AdminScopes, need: AdminScope) -> Option<Response> {
+    (!scopes.has(need))
+        .then(|| (StatusCode::FORBIDDEN, format!("requires {}", need.as_str())).into_response())
 }
 
 fn now_ms() -> u64 {
