@@ -1,0 +1,45 @@
+<!-- =========================================================
+     page-data-table.html — content slot for table views
+     (Federation Peers, Transit Queue, Devices, Revocations,
+     Reports, QUIC Transport, Audit Log).
+     Fills the `content` slot of layout.html.
+     ========================================================= -->
+
+<div class="h-row">
+  <h1>{{page_title}}</h1>
+  <span class="meta">{{summary}}</span> <!-- e.g. "4 known · quic/1" -->
+</div>
+
+<!-- optional filter bar: reuse .search-row with extra inputs/selects -->
+
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        <!-- @each col in columns --><th>{{col}}</th><!-- @end -->
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <!-- @each row in rows -->
+      <tr>
+        <td class="mono">{{primary_id}}</td>            <!-- peer host, event id -->
+        <td><span class="knot {{state}}">{{state}}</span></td>
+        <!-- state ∈ woven | frayed | severed | idle -->
+        <td class="mono">{{metric}}</td>                 <!-- RTT, queue depth -->
+        <td class="mono">{{timestamp}}</td>
+        <td class="mono">{{count}}</td>
+        <td><a class="btn small" href="{{detail_href}}">Inspect</a></td>
+      </tr>
+      <!-- @end -->
+    </tbody>
+  </table>
+</div>
+
+<!-- legend for knot states — include on any page using knots -->
+<div class="pager">
+  peer states:
+  <span class="ok">woven</span> = healthy ·
+  <span class="warn">frayed</span> = degraded ·
+  <span class="bad">severed</span> = blocked
+</div>

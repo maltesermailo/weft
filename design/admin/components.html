@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<!-- =========================================================
+     components.html — visual gallery of every component.
+     Open in a browser to see the design system rendered.
+     This file is reference-only; copy markup from here or
+     from the page-*.html templates.
+     ========================================================= -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Components · WEFT Console</title>
+<link rel="stylesheet" href="weft.css">
+<style>
+  /* gallery-only chrome, not part of the design system */
+  .g-section{margin-bottom:34px}
+  .g-label{font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--flax-dim);margin-bottom:10px}
+</style>
+</head>
+<body>
+
+<div class="selvage" aria-hidden="true"></div>
+
+<main>
+  <header>
+    <div class="op-ident">
+      <div class="op-avatar" aria-hidden="true"></div>
+      <div>
+        <div class="op-name">component gallery</div>
+        <div class="op-addr">weft.css · design system reference</div>
+      </div>
+    </div>
+    <span class="op-role">Operator</span>
+    <div class="spacer"></div>
+    <button class="btn">Sign out</button>
+  </header>
+
+  <div class="content">
+    <div class="content-inner">
+
+      <div class="h-row">
+        <h1>Components</h1>
+        <span class="meta">every pattern in weft.css</span>
+      </div>
+
+      <div class="g-section">
+        <div class="g-label">Buttons</div>
+        <button class="btn">Neutral</button>
+        <button class="btn primary">Primary — one per view</button>
+        <button class="btn danger">Danger outlined</button>
+        <button class="btn danger solid">Danger solid — deletes only</button>
+        <button class="btn small">Small</button>
+        <button class="btn small danger">Revoke</button>
+      </div>
+
+      <div class="g-section">
+        <div class="g-label">Knots — status vocabulary</div>
+        <span class="knot woven" style="margin-right:18px">woven</span>
+        <span class="knot frayed" style="margin-right:18px">frayed</span>
+        <span class="knot severed" style="margin-right:18px">severed</span>
+        <span class="knot idle">idle</span>
+      </div>
+
+      <div class="g-section">
+        <div class="g-label">Pills — capability scopes</div>
+        <span class="pill">room.write</span>
+        <span class="pill">msg.attach</span>
+        <span class="pill gold">invite.issue</span>
+        <span class="pill gold">admin.destroy</span>
+      </div>
+
+      <div class="g-section">
+        <div class="g-label">Card · key/value</div>
+        <div class="card">
+          <div class="card-h"><span class="shuttle"></span><h2>Account</h2></div>
+          <div class="card-b kv">
+            <div class="k">Handle</div><div class="v mono">nightishaman@loom.example.org</div>
+            <div class="k">Email</div><div class="v mono">jannik@example.de <span class="ok">verified</span></div>
+            <div class="k">Last transport</div><div class="v mono">quic/1 · 89.244.86.172:7443 <span class="dim">(0-RTT resumed)</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="g-section">
+        <div class="g-label">Card · table with fingerprints</div>
+        <div class="card">
+          <div class="card-h"><span class="shuttle"></span><h2>Devices</h2><span class="count">2 signed · Ed25519</span></div>
+          <table>
+            <thead><tr><th>Device</th><th>Fingerprint</th><th>State</th><th></th></tr></thead>
+            <tbody>
+              <tr>
+                <td>arch-desktop</td>
+                <td class="fp">7F2A 91C4 E80B D3F6 55A1</td>
+                <td><span class="knot woven">trusted</span></td>
+                <td><button class="btn small danger">Revoke</button></td>
+              </tr>
+              <tr>
+                <td>irc-gateway-link</td>
+                <td class="fp">9E55 4B21 FA0C 77D3 82E4</td>
+                <td><span class="knot idle">dormant</span></td>
+                <td><button class="btn small danger">Revoke</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="g-section">
+        <div class="g-label">Card · flags grid</div>
+        <div class="card">
+          <div class="card-h"><span class="shuttle"></span><h2>Account flags</h2></div>
+          <div class="card-b flags">
+            <div class="flag on"><span class="box"></span>OPERATOR</div>
+            <div class="flag"><span class="box"></span>SUSPENDED</div>
+            <div class="flag on"><span class="box"></span>GATEWAY_LINKED</div>
+            <div class="flag"><span class="box"></span>SHADOW_LIMITED</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="g-section">
+        <div class="g-label">Search row + result</div>
+        <div class="search-row">
+          <input type="search" value="kharak" aria-label="Search rooms">
+          <button class="btn primary">Search</button>
+        </div>
+        <div class="card">
+          <div class="result">
+            <div class="r-avatar">KD</div>
+            <div class="r-main">
+              <div class="r-name">#kharak-duum</div>
+              <div class="r-sub"><span>rm_01J9Z2C8QT4H</span><span>6 members</span><span>E2EE · MLS epoch 17</span></div>
+            </div>
+            <span class="knot woven">local</span>
+            <button class="btn small">View details</button>
+          </div>
+          <div class="result">
+            <div class="r-avatar u">NS</div>
+            <div class="r-main">
+              <div class="r-name">nightishaman</div>
+              <div class="r-sub"><span>nightishaman@loom.example.org</span><span>3 devices</span></div>
+            </div>
+            <span class="knot woven">active</span>
+            <button class="btn small">View details</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="g-section">
+        <div class="g-label">Moderation actions incl. danger zone</div>
+        <div class="card">
+          <div class="action">
+            <h3>Rotate MLS epoch</h3>
+            <p>Forces a key rotation for the room's device group.</p>
+            <div class="row"><button class="btn">Rotate now</button></div>
+          </div>
+          <div class="action danger">
+            <h3>Delete room</h3>
+            <p>Permanently removes the room after the 7-day grace window. This cannot be undone.</p>
+            <div class="row">
+              <input type="text" placeholder="Type #kharak-duum to confirm" aria-label="Type the exact name to confirm deletion">
+              <button class="btn danger solid">Delete room</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="g-section">
+        <div class="g-label">Empty state</div>
+        <div class="placeholder">no matches for "ghostweaver" — try a user id, device fingerprint, or email</div>
+      </div>
+
+    </div>
+  </div>
+</main>
+
+</body>
+</html>

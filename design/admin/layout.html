@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<!-- =========================================================
+     layout.html — page shell for every WEFT Console page.
+     Slots: nav (sidebar items), content (page body).
+     Placeholders: {{operator_name}}, {{operator_addr}},
+                   {{server_version}}
+     ========================================================= -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{page_title}} · WEFT Console</title>
+<link rel="stylesheet" href="weft.css">
+</head>
+<body>
+
+<div class="selvage" aria-hidden="true"></div>
+
+<aside>
+  <div class="wordmark">
+    <div class="weave">W<b>E</b>FT</div>
+    <div class="sub">weft console · {{server_version}}</div>
+  </div>
+  <nav aria-label="Admin sections">
+    <!-- @slot nav
+         Structure per group:
+         <div class="nav-group">
+           <div class="nav-label">{{group_label}}</div>
+           <a class="nav-item {{active_class}}" href="{{href}}"
+              aria-current="{{'page' if active}}">
+             <span class="tick">─</span>{{label}}
+           </a>
+         </div>
+         Groups (canonical order): Lookup, Federation, Trust & Keys,
+         Moderation, Gateways, Observability.
+    -->
+    <div class="nav-group">
+      <div class="nav-label">Lookup</div>
+      <a class="nav-item active" href="/admin/users" aria-current="page"><span class="tick">─</span>Users</a>
+      <a class="nav-item" href="/admin/channels"><span class="tick">─</span>Channels</a>
+      <a class="nav-item" href="/admin/applications"><span class="tick">─</span>Applications</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-label">Federation</div>
+      <a class="nav-item" href="/admin/peers"><span class="tick">─</span>Peers</a>
+      <a class="nav-item" href="/admin/transit"><span class="tick">─</span>Transit Queue</a>
+      <a class="nav-item" href="/admin/remote-channels"><span class="tick">─</span>Remote Channels</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-label">Trust &amp; Keys</div>
+      <a class="nav-item" href="/admin/devices"><span class="tick">─</span>Devices</a>
+      <a class="nav-item" href="/admin/tokens"><span class="tick">─</span>Capability Tokens</a>
+      <a class="nav-item" href="/admin/revocations"><span class="tick">─</span>Revocations</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-label">Moderation</div>
+      <a class="nav-item" href="/admin/reports"><span class="tick">─</span>Reports</a>
+      <a class="nav-item" href="/admin/phrase-bans"><span class="tick">─</span>Phrase Bans</a>
+      <a class="nav-item" href="/admin/media-blocklist"><span class="tick">─</span>Media Blocklist</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-label">Gateways</div>
+      <a class="nav-item" href="/admin/irc"><span class="tick">─</span>IRC Bridge</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-label">Observability</div>
+      <a class="nav-item" href="/admin/transport"><span class="tick">─</span>QUIC Transport</a>
+      <a class="nav-item" href="/admin/audit"><span class="tick">─</span>Audit Log</a>
+    </div>
+  </nav>
+</aside>
+
+<main>
+  <header>
+    <div class="op-ident">
+      <div class="op-avatar" aria-hidden="true"></div>
+      <div>
+        <div class="op-name">{{operator_name}}</div>
+        <div class="op-addr">{{operator_addr}}</div>
+      </div>
+    </div>
+    <span class="op-role">Operator</span>
+    <div class="spacer"></div>
+    <a class="btn" href="/admin/logout">Sign out</a>
+  </header>
+
+  <div class="content">
+    <div class="content-inner">
+      <!-- @slot content -->
+    </div>
+  </div>
+</main>
+
+</body>
+</html>

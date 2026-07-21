@@ -1,0 +1,80 @@
+<!-- =========================================================
+     page-detail.html — content slot for detail pages
+     (User detail, Room detail, IRC link status).
+     Compose the three card patterns below in any order/number:
+       1. key/value card   (.kv)
+       2. data table card  (table)
+       3. flags card       (.flags)
+     Fills the `content` slot of layout.html.
+     ========================================================= -->
+
+<a class="crumb" href="{{back_href}}">← back to {{back_label}}</a>
+
+<div class="h-row">
+  <h1>{{title}}</h1>
+  <span class="id">{{entity_id}}</span>
+</div>
+
+<!-- ---------- 1. key/value card ---------- -->
+<div class="card">
+  <div class="card-h"><span class="shuttle"></span><h2>{{section_title}}</h2></div>
+  <div class="card-b kv">
+    <!-- @each row in kv_rows -->
+    <div class="k">{{key}}</div>
+    <div class="v mono">{{value}}
+      <!-- optional inline status/annotation:
+           <span class="ok">verified</span>
+           <span class="warn">expiring</span>
+           <span class="bad">revoked</span>
+           <span class="dim">(secondary note)</span> -->
+    </div>
+    <!-- @end -->
+  </div>
+</div>
+
+<!-- ---------- 2. data table card ---------- -->
+<div class="card">
+  <div class="card-h">
+    <span class="shuttle"></span><h2>{{table_title}}</h2>
+    <span class="count">{{table_annotation}}</span> <!-- e.g. "3 signed · Ed25519" -->
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <!-- @each col in columns --><th>{{col}}</th><!-- @end -->
+        <th></th> <!-- trailing action column -->
+      </tr>
+    </thead>
+    <tbody>
+      <!-- @each row in rows -->
+      <tr>
+        <td>{{name}}</td>
+        <td class="fp">{{fingerprint}}</td>     <!-- .fp for key material -->
+        <td class="mono">{{mono_value}}</td>
+        <td><span class="knot {{status_class}}">{{status_label}}</span></td>
+        <td><button class="btn small danger" type="submit"
+                    form="{{action_form_id}}">Revoke</button></td>
+      </tr>
+      <!-- @end -->
+    </tbody>
+  </table>
+</div>
+
+<!-- ---------- capability scopes inside table cells ---------- -->
+<!-- <span class="pill">room.write</span>
+     <span class="pill">msg.attach</span>
+     <span class="pill gold">invite.issue</span>   gold = elevated scope -->
+
+<!-- ---------- 3. flags card ---------- -->
+<div class="card">
+  <div class="card-h"><span class="shuttle"></span><h2>Account flags</h2></div>
+  <div class="card-b flags">
+    <!-- @each flag in flags -->
+    <label class="flag {{'on' if flag.set}}">
+      <span class="box"></span>{{flag.name}}
+      <!-- real implementation: wrap in a form or wire a toggle;
+           flag names are SCREAMING_SNAKE, mono face is automatic -->
+    </label>
+    <!-- @end -->
+  </div>
+</div>

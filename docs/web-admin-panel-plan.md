@@ -255,9 +255,73 @@ is what "assess reports / list users / browse messages" actually needs.
 
 NEW PLAN
 
-# WEFT Loom Console — Feature Plan
+# WEFT Console — Feature Plan
 
 Scope decisions: deep coverage of federation ops, trust & keys, moderation & reports, and IRC gateway ops. The panel ships with the server for any WEFT admin, and it gets full control including destructive deletes. Those two decisions drive most of the architecture below — a panel that ships to strangers can't assume a trusted single operator, and destructive power over E2EE rooms needs careful framing since the server never sees plaintext.
+
+## 0. Design pack, front-end & content boundary (resolved)
+
+### Design pack
+
+The console's visual target is the template pack in **`design/admin/`**:
+`weft.css` (the entire "dyed thread" dark design system — single source of
+truth), `layout.html` (the shell: left **selvage** strip, grouped sidebar,
+operator header with the woven weft line), and four content templates —
+`page-search-list.html`, `page-detail.html`, `page-moderation.html`,
+`page-data-table.html` — plus `components.html` (a rendered gallery) and a
+`README.md` of conventions (type discipline, scarce gold accent, `knot` status
+vocabulary `woven|frayed|severed|idle`, typed-name confirmation on deletes).
+Build the real panel to match its class names and visual output.
+
+### Front-end: Client SPA on the JSON API (decided)
+
+**Resolved:** port the design pack into the **existing self-contained SPA that
+fetches the JSON API** — *not* server-side templating. Keep §10's API-first
+stance: `ui/index.html` grows to render the design's markup with `weft.css`
+inlined/embedded, and every action calls `fetch("/admin/api/v1/…")`. The
+pack's `method="post" action="{{endpoint}}"` forms become `fetch` POSTs; its
+`{{…}}` / `@each` / `@slot` placeholders become client-side rendering. This
+**supersedes** two suggestions written elsewhere: the design README's
+"Askama/Maud/Tera server-side templating" and NEW-PLAN §1's `include_dir` +
+separate `weft-admin-api` crate — we stay in the single `weft-admin` crate with
+a versioned `/admin/api/v1` prefix + a typed `types` module (WC1). The crate
+split stays deferred until a real third-party API client exists.
+
+### Content boundary: readable where the server holds plaintext (decided)
+
+The panel **can read message content wherever the server legitimately holds
+plaintext** — public/unlisted channels, any non-`e2ee` channel, and **non-E2EE
+DMs**. WC0 already browses channel messages and per-account authored messages;
+this extends the same materialized view to non-e2ee DMs. The gate is the
+channel/DM **retention policy**: an `e2ee` target shows "unavailable by policy"
+and the panel holds/reconstructs **no** plaintext for it (invariant 8, spec
+§14). Because E2EE (openmls) is **deferred (M6+)** in this codebase, today the
+`e2ee` branch is effectively empty and essentially all content is readable — but
+the check is written against the policy so it's correct the moment E2EE lands.
+This **amends** the NEW PLAN's "never content" framing in §2 and §5: content
+moderation is *not* limited to voluntarily-attached excerpts here — it's limited
+to non-e2ee surfaces, which is a superset (and, pre-E2EE, everything).
+
+### Sidebar groups → WC milestones
+
+| Design nav group | Pages | WC milestone |
+|---|---|---|
+| Lookup | Users · Channels · Applications | WC4 (+ WC0 users, content browse) |
+| Federation | Peers · Transit Queue · Remote Channels | WC5 |
+| Trust & Keys | Devices · Capability Tokens · Revocations | WC6 (device/MLS parts E2EE-gated) |
+| Moderation | Reports · Phrase Bans · Media Blocklist | WC7 (+ WC0 reports, media blocks) |
+| Gateways | IRC Bridge | WC8 |
+| Observability | QUIC Transport · Audit Log | WC9 (+ WC1 audit) |
+
+### Naming: "Channels" (decided)
+
+**Resolved:** UI copy uses **Channels** (and **Namespaces**) — the protocol +
+store nouns — not the design pack's "Rooms". Operators reason in the terms the
+wire uses. The design mocks + `page-*.html` templates still say "room" as
+reference prose; the build substitutes Channels/Namespaces (nav: `Channels`,
+`Remote Channels`). The `knot` weaving vocabulary (woven/frayed/severed) stays —
+it's status, not a noun. The "MLS epoch" / device-group surfaces the pack mocks
+show are E2EE-gated (WC6/WC7) — surface them only once openmls lands.
 
 ## 1. Architecture foundation
 
@@ -271,7 +335,7 @@ Scope decisions: deep coverage of federation ops, trust & keys, moderation & rep
 
 ## 2. Lookup
 
-**Users.** Search by handle, user ID, device fingerprint, email, or IP. Detail page as mocked: account info, device list, capability tokens, flags, room memberships, report history, and DM/room metadata (never content — see §5). Add a "find related" pivot on IP and email domain like Fluxer has; it's genuinely useful for spam waves.
+**Users.** Search by handle, user ID, device fingerprint, email, or IP. Detail page as mocked: account info, device list, capability tokens, flags, room memberships, report history, and DM/room metadata — plus **content** for non-e2ee channels and non-E2EE DMs (readable per the §0 content boundary; `e2ee` targets show metadata only). Add a "find related" pivot on IP and email domain like Fluxer has; it's genuinely useful for spam waves.
 
 **Rooms.** Search local and known-federated rooms. Detail: state chain head, MLS epoch, member list with per-member join path (direct, invite, gateway), media storage footprint, federation replication status per peer.
 
@@ -299,7 +363,7 @@ Scope decisions: deep coverage of federation ops, trust & keys, moderation & rep
 
 ## 5. Moderation & reports
 
-**What "full control" means under E2EE.** The server holds ciphertext, state chains, and metadata — never plaintext. So destructive control is structural: you can delete a room's state and ciphertext blobs, kick members, sever replication, suspend accounts. Content-based moderation only works when a reporter voluntarily attaches decrypted excerpts to a report (the Matrix model), or on plaintext surfaces: profiles, room names/topics, invites, and the IRC gateway. The panel should be honest about this boundary in its UI copy — it's a selling point, not a limitation.
+**What "full control" means under E2EE.** For **`e2ee`** channels the server holds only ciphertext, state chains, and metadata — never plaintext — so destructive control there is structural: delete state and ciphertext blobs, kick members, sever replication, suspend accounts. Content-based moderation of e2ee channels works only when a reporter voluntarily attaches decrypted excerpts to a report (the Matrix model). **For every non-e2ee channel and non-E2EE DM the server holds plaintext**, so the panel reads and moderates content directly (§0 content boundary) — as do the always-plaintext surfaces: profiles, channel names/topics, invites, and the IRC gateway. Pre-E2EE (openmls deferred, M6+) that non-e2ee path is *everything*. The panel should be honest about this boundary in its UI copy — the e2ee blind spot is a selling point, not a limitation.
 
 **Reports queue.** User-filed reports with category, reporter, target, optional attached plaintext excerpt (signed by the reporter's device so excerpts can't be forged), and resolution workflow: claim, resolve with action, dismiss. Bulk actions for spam waves.
 
@@ -326,3 +390,168 @@ QUIC transport dashboard (connections, handshake failures, 0-RTT resumption rate
 **Later:** delegation graph visualization, key transparency log, two-operator rule, peer key rotation review flow, storage analytics.
 
 The MVP list is deliberately the set an admin needs on day one to run a public server responsibly: see what exists, remove what's abusive, control who they federate with, and prove afterward who did what.
+
+## 9. Milestones (each independently shippable)
+
+The §8 buckets, sequenced into a concrete ladder against the **already-shipped
+`weft-admin` crate** (the "Shipped (embedded)" section at the top of this doc is
+the substrate — call it **WC0**). Each milestone below is a real diff you could
+ship and stop at. Status: ✅ done · ◑ partial · ☐ not started. Where a milestone
+depends on protocol machinery this repo hasn't built yet, it's flagged and
+parked — we don't fake a surface over a subsystem that doesn't exist.
+
+Naming: **WC** = WEFT Console, to avoid colliding with the protocol milestones
+(M0–M7, M-lk-*, M-media-*) in `CLAUDE.md`.
+
+### WC0 ✅ — embedded panel baseline (shipped)
+
+The current `weft-admin`: operator HMAC-cookie auth (operator = holds a cap at
+`*`), read views (stats, reports + retention-held context, accounts
+list/detail/messages, channels, namespaces, grants, moderation, peers,
+netblocks, media-blocks, channel-message browse) and write actions (resolve
+report, mute/ban/kick, delete account, delete message, add/remove netblock,
+block/unblock media). Self-contained `ui/index.html` (`include_str!`), `Live`
+port for kick/eject + delete-any. This already covers roughly half of §8's
+"MVP" bucket; the milestones below are what turns it into the WEFT Console.
+
+### WC1 ☐ — API contract + audit spine
+
+The foundation everything destructive rides on. Three pieces:
+
+- **Versioned, typed API.** Move handlers behind `/admin/api/v1/*`; lift the
+  ad-hoc JSON into named request/response structs in a `types` module. Per §0
+  this stays in the single `weft-admin` crate (the `weft-admin-api` crate split
+  is deferred until a real third-party client exists — YAGNI). Versioning the
+  prefix costs nothing and unblocks the split later.
+- **Design-pack SPA shell.** Port `design/admin/` into `ui/index.html`: the
+  layout shell (selvage + grouped sidebar + operator header), `weft.css`
+  embedded, and the client-side router/renderer that turns the design's
+  `{{…}}`/`@each` templates into `fetch("/admin/api/v1/…")`-driven views (§0
+  front-end decision). This is the visual substrate every later page reuses.
+- **Hash-chained audit trail (non-optional, §1).** Every write handler appends
+  an audit record `{operator, action, target, ts, payload-digest, prev-hash}`
+  to an append-only, tamper-evident log — a new small `AuditStore` role (mem +
+  PG + contract test, PG migration). Read-only `GET /audit?operator=&action=&
+  target=` + an Audit Log view. Retrofit the WC0 write actions to emit records.
+  Landing this first means every later destructive milestone is audited by
+  construction, not as an afterthought.
+
+### WC2 ☐ — capability RBAC (adopted)
+
+**Decided:** adopt scoped admin capability tokens, reversing WC0's binary
+"operator = cap at `*`" model (this supersedes the operator-only stance in §10
+below). Scopes (§1): `admin.read` / `admin.moderate` / `admin.destroy` /
+`admin.federation` / `admin.keys`. Login mints a session carrying the caller's
+admin scopes;
+middleware gates each route by the scope it requires. `*`-operators auto-hold
+every scope (back-compat, zero-config for existing deployments). This dogfoods
+the capability system and gives delegated read-only moderator tokens for free.
+Because the panel ships to strangers (a public server can't assume one trusted
+operator), this is the milestone that makes "full control including destructive
+deletes" safe to hand out granularly. Depends on nothing but WC1's typed layer.
+
+### WC3 ☐ — destructive-action safety
+
+Wrap the deletes (already live in WC0) in the §1 confirmation model:
+server-enforced **typed-name confirmation** (the DELETE body must echo the
+target's name/handle), a configurable **soft-delete grace window** (default 7 d:
+tombstone + recoverable, a purge job finalizes after the window), and an
+**optional two-operator rule** for `admin.destroy` (off by default; for larger
+deployments). Retrofits account-delete, message-delete, and the forthcoming
+room-delete behind one gate.
+
+### WC4 ☐ — lookup depth (users & rooms)
+
+Enrich the WC0 detail pages (§2). **User:** device list + Ed25519 fingerprints,
+capability tokens held, flags, and a "find related" pivot on email domain.
+*(IP-pivot is parked — the transport layer doesn't surface/persist client IPs
+yet; needs plumbing in `run_session`, flag before building.)* **Channel/room:**
+member list with per-member join path (direct / invite / gateway), media storage
+footprint, per-peer federation replication status. **Content browse** (§0
+boundary): WC0 already materializes channel history; this extends the same view
+to **non-E2EE DMs**, with `e2ee` targets rendered "unavailable by policy"
+(invariant 8) — a per-target retention-policy check, not a per-role gate.
+
+### WC5 ☐ — federation ops
+
+Build out §3 on top of the WC0 peers list. Enrich **Peers** (state
+woven/frayed/severed, RTT, last handshake, protocol version, pinned key
+fingerprint, shared-room count) + actions (sever, re-weave, force re-handshake).
+**Transit queue** — per-peer backlog depth, oldest-pending age, retry schedule;
+actions retry-now / drop-poisoned (audited) / pause. **Peer key rotation** as a
+TOFU review queue: a rotated peer signing key surfaces as a pending trust
+decision, not a silent accept. This is the page an admin lives in when a peer is
+frayed.
+
+### WC6 ☐ — trust & keys (gated on E2EE/MLS)
+
+§4: device registry (global fingerprint search, per-device keys + first/last
+seen, **revoke-with-blast-radius** preview), capability-token inspector (parse
+the delegation chain: issuer → scopes → path → expiry → revocation status), and
+revocation-list management with per-peer propagation status. **Gate:** the
+device/MLS-leaf and key-transparency parts assume openmls/E2EE, which `CLAUDE.md`
+lists as **deliberately deferred (M6+)**. Ship the capability-token inspector and
+the revocation-set management now (both exist today in weft-crypto/weft-store);
+park the MLS-leaf/device-epoch views until E2EE lands.
+
+### WC7 ☐ — moderation depth
+
+§5, beyond WC0's mute/ban/kick/delete. **Account:** suspend (login blocked +
+tokens frozen), shadow-limit (rate-limited, invisible to non-members), forced
+device logout — each an audited store mutation + live broadcast. **Room:**
+rename, transfer founder, freeze (read-only), delete-with-**federating**
+tombstone (peers stop replicating, show "removed by origin"). Force epoch
+rotation is **parked on E2EE/MLS** (see WC6). **Reports:** bulk actions for spam
+waves; verify reporter-attached excerpt signatures (§5 — excerpts signed by the
+reporter's device so they can't be forged). Reporter confidentiality (invariant
+12) stays enforced throughout.
+
+### WC8 ☐ — IRC gateway ops
+
+§6 — where external plaintext enters the server (and the one surface that stays
+plaintext even once channels go `e2ee`), so it gets its own toolset: per-network
+config (servers, TLS, SASL), link status +
+reconnect/backoff state, channel↔room mapping CRUD, puppet-account overview (WEFT
+users with IRC presence, nick collisions), per-network flood controls, and
+**gateway-side content filters** (phrase bans / media-hash blocklists — this is
+where content filtering genuinely works, vs. the E2EE surfaces where it can't).
+Live gateway log tail with severity filter. Builds on the shipped `weft-irc`
+crate.
+
+### WC9 ☐ — observability
+
+§7: a QUIC transport dashboard (connections, handshake failures, 0-RTT
+resumption rate, per-peer congestion), storage footprint by room and media type,
+and the WC1 audit log surfaced as a first-class view. Export Prometheus metrics
+and leave Grafana to admins — the panel only carries the views that drive
+decisions taken *inside* it.
+
+### Later (optional)
+
+Delegation-graph visualization (§4, for chains deeper than two hops),
+key-transparency Merkle log (§4 — big, but it's what makes WEFT credible as an
+E2EE protocol), two-operator-rule polish (§1), storage analytics (§7).
+
+### Mapping to §8
+
+| §8 bucket | Milestones |
+|---|---|
+| **MVP** | WC0 ✅ (auth, lookup, reports, suspend/delete, peers, device revoke) + WC1 (audit) + WC3 (delete safety) + WC5 (peers/sever/re-weave) |
+| **v2** | WC2 (RBAC) · WC4 (lookup depth) · WC5 (transit queue) · WC6 (token inspector, revocation) · WC7 (mod depth) · WC8 (IRC) |
+| **Later** | WC9 (observability) + the Later block above |
+
+### Cross-cutting notes
+
+- **Resolved (§0):** front-end = Client SPA on the JSON API (not server-side
+  templating); the design pack `design/admin/` is the visual target; the
+  `weft-admin-api` crate split stays deferred (single crate + `types` module);
+  UI copy uses **Channels/Namespaces**, not "Rooms".
+- **Resolved:** **capability RBAC is adopted** (WC2) — the `admin.*` scopes
+  replace the WC0 binary operator, `*`-operators auto-hold every scope. The scope
+  *names* still get a final ratify (spec §18 territory), but the model is settled.
+- **Honesty about E2EE:** WC6 and the epoch-rotation slice of WC7 assume MLS,
+  which is deferred. They're written into the ladder for completeness but gated —
+  don't build a device/epoch UI over a subsystem that doesn't exist yet.
+- Each milestone follows the repo convention: store change = trait + mem + PG +
+  one shared contract case + migration, then handler, then a `tests/api.rs`
+  end-to-end case; every write action emits an WC1 audit record once WC1 lands.

@@ -1,0 +1,341 @@
+/* ============================================================
+   WEFT Console — design system
+   Single source of truth for the admin panel's look.
+   Every template in this pack links this file. Do not inline
+   styles in templates; extend this sheet instead.
+   ============================================================ */
+
+:root{
+  /* -- palette: "dyed thread" ------------------------------- */
+  --warp-0:#131519;      /* deepest background (page)          */
+  --warp-1:#1A1D23;      /* panels / cards / sidebar           */
+  --warp-2:#22262F;      /* raised surfaces, hover states      */
+  --line:#2C313C;        /* input & button borders             */
+  --line-soft:#242832;   /* hairline dividers inside cards     */
+  --linen:#E7E2D6;       /* primary text                       */
+  --flax:#8E95A3;        /* secondary text                     */
+  --flax-dim:#5C6270;    /* faint text, labels, metadata       */
+  --thread:#D9A05B;      /* gold thread — the accent. Use for
+                            active nav, primary buttons, focus,
+                            checked states. Nothing else.      */
+  --thread-dim:#8a6a42;
+  --teal:#63A89F;        /* status: woven / healthy / verified */
+  --madder:#C75B52;      /* status: severed / danger           */
+  --amber:#C9A24B;       /* status: frayed / warning           */
+
+  /* -- type ------------------------------------------------- */
+  --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+  /* Convention: anything machine-readable (IDs, handles,
+     fingerprints, timestamps, addresses) is set in --mono.
+     Human prose and labels are --sans.                        */
+}
+
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{
+  background:var(--warp-0);
+  color:var(--linen);
+  font-family:var(--sans);
+  font-size:14px;
+  line-height:1.5;
+  display:flex;
+}
+::selection{background:var(--thread-dim);color:var(--linen)}
+
+/* ============================================================
+   SELVAGE — signature element.
+   The 6px woven strip on the far left edge of every page.
+   Never remove it; it is the visual identity of the console.
+   ============================================================ */
+.selvage{
+  width:6px;flex:none;
+  background:
+    repeating-linear-gradient(180deg,
+      var(--thread) 0 8px,
+      var(--warp-2) 8px 16px,
+      var(--teal) 16px 24px,
+      var(--warp-2) 24px 32px);
+  opacity:.55;
+}
+
+/* ============================================================
+   SIDEBAR
+   ============================================================ */
+aside{
+  width:232px;flex:none;
+  background:var(--warp-1);
+  border-right:1px solid var(--line-soft);
+  display:flex;flex-direction:column;
+  overflow-y:auto;
+}
+.wordmark{padding:20px 18px 16px;border-bottom:1px solid var(--line-soft)}
+.wordmark .weave{
+  font-family:var(--mono);
+  font-size:19px;font-weight:700;letter-spacing:.28em;
+  color:var(--linen);
+}
+.wordmark .weave b{color:var(--thread);font-weight:700}
+.wordmark .sub{
+  font-family:var(--mono);
+  font-size:10px;letter-spacing:.22em;text-transform:uppercase;
+  color:var(--flax-dim);margin-top:3px;
+}
+nav{padding:10px 0 24px}
+.nav-group{margin-top:14px}
+.nav-label{
+  font-family:var(--mono);
+  font-size:10px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--flax-dim);
+  padding:0 18px 6px;
+}
+.nav-item{
+  display:flex;align-items:center;gap:9px;
+  padding:7px 18px;
+  color:var(--flax);
+  cursor:pointer;border:0;background:none;width:100%;text-align:left;
+  font-family:var(--sans);font-size:13.5px;
+  border-left:2px solid transparent;
+  text-decoration:none;
+}
+.nav-item:hover{background:var(--warp-2);color:var(--linen)}
+.nav-item.active{
+  background:var(--warp-2);color:var(--linen);
+  border-left-color:var(--thread);
+}
+.nav-item .tick{font-family:var(--mono);font-size:11px;color:var(--flax-dim);width:10px}
+.nav-item.active .tick{color:var(--thread)}
+.nav-item:focus-visible{outline:2px solid var(--thread);outline-offset:-2px}
+
+/* ============================================================
+   MAIN COLUMN + HEADER
+   The header carries the "weft line": an interlaced two-color
+   dashed rule along its bottom edge. Keep it.
+   ============================================================ */
+main{flex:1;display:flex;flex-direction:column;min-width:0}
+header{
+  height:58px;flex:none;
+  background:var(--warp-1);
+  display:flex;align-items:center;gap:14px;
+  padding:0 22px;
+  position:relative;
+}
+header::after{
+  content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;
+  background:repeating-linear-gradient(90deg,
+    var(--thread) 0 14px, transparent 14px 20px,
+    var(--teal) 20px 34px, transparent 34px 40px);
+  opacity:.5;
+}
+.op-ident{display:flex;align-items:center;gap:11px}
+.op-avatar{
+  width:32px;height:32px;border-radius:50%;
+  background:repeating-linear-gradient(45deg,var(--thread-dim) 0 3px,var(--warp-2) 3px 6px);
+  border:1px solid var(--line);
+}
+.op-name{font-weight:600;font-size:13.5px}
+.op-addr{font-family:var(--mono);font-size:11px;color:var(--flax)}
+.op-role{
+  font-family:var(--mono);font-size:10px;letter-spacing:.14em;
+  color:var(--thread);border:1px solid var(--thread-dim);
+  border-radius:3px;padding:2px 7px;text-transform:uppercase;
+}
+header .spacer{flex:1}
+
+/* ============================================================
+   BUTTONS
+   .btn            neutral
+   .btn.primary    gold thread — one per view maximum
+   .btn.danger     outlined red; add .solid for filled red
+   .btn.small      table-row size
+   ============================================================ */
+.btn{
+  font-family:var(--sans);font-size:13px;font-weight:600;
+  background:var(--warp-2);color:var(--linen);
+  border:1px solid var(--line);border-radius:6px;
+  padding:7px 14px;cursor:pointer;
+  text-decoration:none;display:inline-block;
+}
+.btn:hover{border-color:var(--flax-dim)}
+.btn:focus-visible{outline:2px solid var(--thread);outline-offset:1px}
+.btn.primary{background:var(--thread);border-color:var(--thread);color:#1a1408}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.danger{background:transparent;border-color:var(--madder);color:var(--madder)}
+.btn.danger:hover{background:var(--madder);color:#1a0c0a}
+.btn.danger.solid{background:var(--madder);color:#1a0c0a}
+.btn.small{padding:4px 10px;font-size:12px}
+
+/* ============================================================
+   CONTENT AREA
+   ============================================================ */
+.content{flex:1;overflow-y:auto;padding:30px 34px 60px}
+.content-inner{max-width:940px;margin:0 auto}
+
+h1{font-size:22px;font-weight:700;letter-spacing:-.01em}
+.h-row{display:flex;align-items:baseline;gap:14px;margin-bottom:20px}
+.h-row .meta{font-family:var(--mono);font-size:11.5px;color:var(--flax-dim);margin-left:auto}
+.h-row .id{font-family:var(--mono);font-size:12px;color:var(--flax-dim)}
+.crumb{
+  font-family:var(--mono);font-size:11.5px;color:var(--flax);
+  background:none;border:0;cursor:pointer;padding:0;margin-bottom:14px;
+  display:inline-block;text-decoration:none;
+}
+.crumb:hover{color:var(--thread)}
+
+/* ============================================================
+   CARDS
+   Card headers carry the "shuttle": a short gold bar before
+   the title. Use .count for a muted mono annotation.
+   ============================================================ */
+.card{
+  background:var(--warp-1);
+  border:1px solid var(--line-soft);
+  border-radius:8px;
+  margin-bottom:18px;
+  overflow:hidden;
+}
+.card-h{
+  padding:14px 18px;
+  border-bottom:1px solid var(--line-soft);
+  display:flex;align-items:center;gap:10px;
+}
+.card-h h2{font-size:14.5px;font-weight:700}
+.card-h .shuttle{width:14px;height:3px;background:var(--thread);border-radius:2px;flex:none}
+.card-h .count{font-family:var(--mono);font-size:11px;color:var(--flax-dim)}
+.card-b{padding:16px 18px}
+
+/* -- key/value grid (detail pages) -------------------------- */
+.kv{display:grid;grid-template-columns:170px 1fr;gap:0}
+.kv > div{padding:9px 0;border-bottom:1px solid var(--line-soft);font-size:13.5px}
+.kv > div:nth-last-child(-n+2){border-bottom:0}
+.kv .k{color:var(--flax)}
+.kv .v{color:var(--linen)}
+.kv .v.mono, .mono{font-family:var(--mono);font-size:12.5px}
+.kv .v .dim{color:var(--flax-dim)}
+
+/* -- inline status text ------------------------------------- */
+.ok{color:var(--teal)}
+.warn{color:var(--amber)}
+.bad{color:var(--madder)}
+
+/* ============================================================
+   SEARCH + RESULT LIST
+   ============================================================ */
+.search-row{display:flex;gap:10px;margin-bottom:18px}
+input[type=text],input[type=search],input[type=email],input[type=number]{
+  flex:1;
+  background:var(--warp-1);
+  border:1px solid var(--line);
+  border-radius:6px;
+  color:var(--linen);
+  font-family:var(--mono);font-size:13px;
+  padding:10px 13px;
+  width:100%;
+}
+input::placeholder{color:var(--flax-dim)}
+input:focus{outline:none;border-color:var(--thread)}
+
+.result{display:flex;align-items:center;gap:16px;padding:16px 18px}
+.result + .result{border-top:1px solid var(--line-soft)}
+.r-avatar{
+  width:46px;height:46px;border-radius:8px;flex:none;
+  display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);font-weight:700;font-size:14px;
+  color:var(--warp-0);
+  background:repeating-linear-gradient(135deg,var(--teal) 0 4px,var(--thread) 4px 8px);
+}
+.r-avatar.u{background:repeating-linear-gradient(135deg,var(--thread) 0 4px,var(--warp-2) 4px 8px);color:var(--linen)}
+.r-main{flex:1;min-width:0}
+.r-name{font-weight:700;font-size:14.5px}
+.r-sub{font-family:var(--mono);font-size:11.5px;color:var(--flax);margin-top:2px}
+.r-sub span{margin-right:14px}
+
+/* ============================================================
+   TABLES
+   ============================================================ */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{
+  text-align:left;font-family:var(--mono);font-size:10.5px;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--flax-dim);
+  padding:10px 18px;border-bottom:1px solid var(--line-soft);font-weight:600;
+}
+td{padding:11px 18px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+tr:hover td{background:var(--warp-2)}
+.fp{font-family:var(--mono);font-size:11.5px;color:var(--flax);letter-spacing:.03em}
+
+/* ============================================================
+   KNOTS — status dots.
+   WEFT vocabulary: woven = healthy, frayed = degraded,
+   severed = blocked, idle = dormant. Use these words in the
+   UI; do not fall back to online/offline.
+   ============================================================ */
+.knot{display:inline-flex;align-items:center;gap:7px;font-size:12.5px}
+.knot::before{
+  content:"";width:8px;height:8px;border-radius:50%;
+  box-shadow:0 0 0 3px var(--warp-1), 0 0 0 4px currentColor;
+  background:currentColor;transform:scale(.8);
+}
+.knot.woven{color:var(--teal)}
+.knot.frayed{color:var(--amber)}
+.knot.severed{color:var(--madder)}
+.knot.idle{color:var(--flax-dim)}
+
+/* ============================================================
+   FLAGS — checkbox grid on detail pages (read/write)
+   ============================================================ */
+.flags{display:grid;grid-template-columns:1fr 1fr;gap:2px 30px}
+.flag{display:flex;align-items:center;gap:10px;padding:6px 0;font-family:var(--mono);font-size:12px;color:var(--flax)}
+.flag .box{
+  width:14px;height:14px;border:1px solid var(--line);border-radius:3px;flex:none;
+  display:flex;align-items:center;justify-content:center;
+}
+.flag.on{color:var(--linen)}
+.flag.on .box{background:var(--thread);border-color:var(--thread)}
+.flag.on .box::after{content:"\2713";color:#1a1408;font-size:10px;font-weight:700}
+
+/* ============================================================
+   MODERATION ACTION BLOCKS
+   Stacked form sections inside one card. Mark irreversible
+   ones with .danger on the .action wrapper.
+   ============================================================ */
+.action{padding:16px 18px;border-bottom:1px solid var(--line-soft)}
+.action:last-child{border-bottom:0}
+.action h3{font-size:13.5px;font-weight:700;margin-bottom:4px}
+.action p{font-size:12.5px;color:var(--flax);margin-bottom:11px;max-width:560px}
+.action .row{display:flex;gap:10px}
+.action.danger h3{color:var(--madder)}
+
+/* ============================================================
+   PILLS — capability scopes, feature tags
+   ============================================================ */
+.pill{
+  display:inline-block;font-family:var(--mono);font-size:10.5px;
+  letter-spacing:.08em;color:var(--teal);
+  border:1px solid #2f4b47;background:#1a2422;
+  border-radius:4px;padding:2px 8px;margin:0 6px 6px 0;
+}
+.pill.gold{color:var(--thread);border-color:#4b3d26;background:#241f16}
+
+/* ============================================================
+   MISC
+   ============================================================ */
+.pager{
+  display:flex;align-items:center;justify-content:center;gap:14px;margin-top:18px;
+  font-family:var(--mono);font-size:11.5px;color:var(--flax-dim);
+}
+.placeholder{
+  border:1px dashed var(--line);border-radius:8px;
+  padding:40px;text-align:center;color:var(--flax-dim);
+  font-family:var(--mono);font-size:12.5px;
+}
+
+@media (prefers-reduced-motion:no-preference){
+  .view-enter{animation:rise .18s ease-out}
+  @keyframes rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+}
+@media (max-width:860px){
+  aside{width:190px}
+  .kv{grid-template-columns:130px 1fr}
+  .flags{grid-template-columns:1fr}
+}

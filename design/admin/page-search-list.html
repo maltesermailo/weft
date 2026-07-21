@@ -1,0 +1,51 @@
+<!-- =========================================================
+     page-search-list.html — content slot for lookup pages
+     (Users, Rooms, Applications; also Phrase Bans / Media
+     Blocklist with an add-form above the list).
+     Fills the `content` slot of layout.html.
+     ========================================================= -->
+
+<div class="h-row">
+  <h1>{{page_title}}</h1>
+  <span class="meta">{{result_count}} results · {{index_scope}}</span>
+</div>
+
+<form class="search-row" method="get" action="{{search_action}}">
+  <input type="search" name="q" value="{{query}}"
+         placeholder="{{search_placeholder}}" aria-label="Search {{page_title}}">
+  <button class="btn primary" type="submit">Search</button>
+</form>
+
+<div class="card">
+  <!-- @each result in results -->
+  <div class="result">
+    <!-- .r-avatar for rooms (teal/gold weave), .r-avatar.u for users -->
+    <div class="r-avatar {{'u' if kind == 'user'}}">{{initials}}</div>
+    <div class="r-main">
+      <div class="r-name">{{display_name}}</div>
+      <div class="r-sub">
+        <!-- @each fact in facts --><span>{{fact}}</span><!-- @end -->
+        <!-- e.g. handle · device count · room count, or
+                  room id · member count · founder · MLS epoch -->
+      </div>
+    </div>
+    <span class="knot {{status_class}}">{{status_label}}</span>
+    <a class="btn small" href="{{detail_href}}">View details</a>
+  </div>
+  <!-- @end -->
+
+  <!-- @if results empty -->
+  <!--
+  <div class="card-b">
+    <div class="placeholder">no matches for "{{query}}" — try a user id,
+    device fingerprint, or email</div>
+  </div>
+  -->
+  <!-- @end -->
+</div>
+
+<div class="pager">
+  <a class="crumb" href="{{prev_href}}">← previous</a>
+  page {{page}} of {{page_count}}
+  <a class="crumb" href="{{next_href}}">next →</a>
+</div>

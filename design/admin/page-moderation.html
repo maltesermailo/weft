@@ -1,0 +1,64 @@
+<!-- =========================================================
+     page-moderation.html — content slot for action pages
+     (Room Actions, account suspend/delete, peer controls).
+     One card, stacked .action blocks. Order actions from
+     least to most destructive; .action.danger goes last.
+     Fills the `content` slot of layout.html.
+     ========================================================= -->
+
+<a class="crumb" href="{{back_href}}">← back to {{back_label}}</a>
+
+<div class="h-row">
+  <h1>{{target_name}}</h1>
+  <span class="id">{{target_id}} · moderation</span>
+</div>
+
+<div class="card">
+
+  <!-- ---------- action with a text input ---------- -->
+  <div class="action">
+    <h3>{{action_title}}</h3>
+    <p>{{action_description}}</p> <!-- one sentence: what happens, incl.
+                                       federation/MLS side effects -->
+    <form class="row" method="post" action="{{endpoint}}">
+      <input type="text" name="{{field}}" placeholder="{{field_placeholder}}">
+      <button class="btn" type="submit">{{verb}}</button>
+    </form>
+  </div>
+
+  <!-- ---------- action with no input ---------- -->
+  <div class="action">
+    <h3>Rotate MLS epoch</h3>
+    <p>Forces a key rotation for the room's device group. Removed devices
+       lose access to future messages.</p>
+    <form class="row" method="post" action="{{rotate_endpoint}}">
+      <button class="btn" type="submit">Rotate now</button>
+    </form>
+  </div>
+
+  <!-- ---------- structural danger (reversible-ish) ---------- -->
+  <div class="action">
+    <h3>Sever federation for this room</h3>
+    <p>Stops replicating this room to remote peers. Remote members go
+       read-only until re-woven.</p>
+    <form class="row" method="post" action="{{sever_endpoint}}">
+      <button class="btn danger" type="submit">Sever</button>
+    </form>
+  </div>
+
+  <!-- ---------- permanent delete: always last, always .danger,
+                  always typed-name confirmation ---------- -->
+  <div class="action danger">
+    <h3>Delete {{entity_kind}}</h3>
+    <p>Permanently removes {{entity_kind_article}} and all associated data
+       after the {{grace_days}}-day grace window. A tombstone federates to
+       peers. This cannot be undone.</p>
+    <form class="row" method="post" action="{{delete_endpoint}}">
+      <input type="text" name="confirm_name"
+             placeholder="Type {{target_name}} to confirm"
+             aria-label="Type the exact name to confirm deletion">
+      <button class="btn danger solid" type="submit">Delete {{entity_kind}}</button>
+    </form>
+  </div>
+
+</div>
