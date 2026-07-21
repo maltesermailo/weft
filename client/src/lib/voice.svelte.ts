@@ -44,6 +44,12 @@ export const voice = $state<VoiceModel>({
   error: null,
 });
 
+/** Live presence for *every* voice channel we can see (Discord-style), keyed by
+ *  channel then account. Populated from server `voice-state` pushes — the roster
+ *  shows under a voice channel even when we haven't joined. The channel we're in
+ *  is also mirrored into `voice.participants` (which the LiveKit path drives). */
+export const voiceRosters = $state<Record<string, Record<string, VoiceParticipant>>>({});
+
 const RTC_CONFIG: RTCConfiguration = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
@@ -170,9 +176,11 @@ async function onVoiceEvent(e: WeftEvent): Promise<void> {
       teardown();
       break;
     case "error":
-      // A voice verb was rejected (UNSUPPORTED / NO-SUCH-TARGET / FORBIDDEN)
-      // while we were mid-join — surface it and reset.
-      if (voice.connecting && voice.channel) {
+      // Only a *pre-media* error means the VOICE JOIN itself was rejected
+      // (UNSUPPORTED / NO-SUCH-TARGET / FORBIDDEN). Once the media connection is
+      // being established (a room/peer exists), the media path owns its own
+      // errors — an unrelated server error must not kick us out of voice.
+      if (voice.connecting && voice.channel && !room && !pc) {
         voice.error = e.text;
         teardown();
       }
@@ -237,8 +245,15 @@ async function onLiveKitOffer(
     r.on(lk.RoomEvent.TrackMuted, (_pub, p) => upsertParticipant(p));
     r.on(lk.RoomEvent.TrackUnmuted, (_pub, p) => upsertParticipant(p));
     r.on(lk.RoomEvent.LocalTrackPublished, () => upsertParticipant(r.localParticipant));
-    r.on(lk.RoomEvent.Disconnected, () => {
-      if (room === r) teardown();
+    r.on(lk.RoomEvent.Disconnected, (reason) => {
+      if (room !== r) return;
+      // Tell our own leave/teardown apart from a server-side drop (rejected
+      // token, removed, room gone) so the user learns *why* they dropped
+      // instead of being silently kicked.
+      if (reason !== undefined && reason !== lk.DisconnectReason.CLIENT_INITIATED) {
+        voice.error = "voice disconnected — check the LiveKit server URL and keys";
+      }
+      teardown();
     });
 
     await r.connect(url, token);
@@ -353,18 +368,28 @@ async function onCandidate(channel: string, candidate: string): Promise<void> {
 }
 
 function onState(e: Extract<WeftEvent, { kind: "voice-state" }>): void {
-  if (e.channel !== voice.channel) return;
+  // Presence for *any* voice channel we can see — drives the sidebar roster even
+  // when we're not in the call.
+  const roster = (voiceRosters[e.channel] ??= {});
   if (e.action === "leave") {
-    delete voice.participants[e.user];
-    return;
+    delete roster[e.user];
+    if (Object.keys(roster).length === 0) delete voiceRosters[e.channel];
+  } else {
+    roster[e.user] = {
+      user: e.user,
+      speaking: e.speaking,
+      muted: e.muted,
+      deaf: e.deaf,
+      self: e.user === account,
+    };
   }
-  voice.participants[e.user] = {
-    user: e.user,
-    speaking: e.speaking,
-    muted: e.muted,
-    deaf: e.deaf,
-    self: e.user === account,
-  };
+
+  // The channel we're in also feeds voice.participants (the LiveKit path's
+  // roster) so the joined VoiceBar stays in sync on the WebRTC backend too.
+  if (e.channel === voice.channel) {
+    if (e.action === "leave") delete voice.participants[e.user];
+    else voice.participants[e.user] = { ...roster[e.user] };
+  }
 }
 
 /** Non-trickle: resolve once ICE gathering finishes (bounded, so a stalled

@@ -79,7 +79,7 @@
 
         <div class="section-sep"></div>
         <div class="field-label">Retention</div>
-        <p class="so-sub">How long messages are kept (§6.3). Switching to/from <code>e2ee</code> needs an empty channel or a purge.</p>
+        <p class="so-sub">How long messages are kept. Switching to/from <code>e2ee</code> needs an empty channel or a purge.</p>
         <div class="cap-chips">
           {#each RETENTION_OPTIONS as o (o.value)}
             <button type="button" class="cap-chip" class:on={rec?.retention === o.key} onclick={() => setRetention(o.value)}>{o.label}</button>

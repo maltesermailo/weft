@@ -35,6 +35,11 @@ services:
       - "50000-50020:50000-50020/udp"    # rtc media (direct, not proxied)
 
   weftd:
+    # The published image (built + pushed by .github/workflows/docker.yml). Pull
+    # it with `docker compose pull weftd`. The `build:` block below still lets you
+    # build locally with the same tag (`docker compose build weftd`) if you'd
+    # rather not use the registry.
+    image: ghcr.io/maltesermailo/weft-weftd:latest
     build:
       context: ..
       dockerfile: deploy/Dockerfile

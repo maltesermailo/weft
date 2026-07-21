@@ -176,6 +176,70 @@ in `weft.toml`, back that up too — it's your network's signing key.
 
 ---
 
+## Prebuilt image (build on a fast machine, run on the server)
+
+The first build compiles Rust + the web client — slow, and RAM-hungry, on a small
+VPS. Build the image on your desktop and ship it instead.
+
+**⚠ Architecture must match the server.** If you build on Apple Silicon / arm64
+but the server is x86-64, add `--platform linux/amd64` (Docker Desktop /
+`buildx` cross-builds it).
+
+### Option A — save / load a tarball (no registry)
+
+On your desktop, in the repo:
+
+```bash
+# Cross-build for the server's arch if it differs from yours:
+docker build --platform linux/amd64 -f deploy/Dockerfile -t weft-weftd:latest .
+docker save weft-weftd:latest | gzip > weftd-image.tar.gz
+scp weftd-image.tar.gz  you@server:~/weft/deploy/
+```
+
+On the server:
+
+```bash
+cd ~/weft/deploy
+gunzip -c weftd-image.tar.gz | docker load     # loads weft-weftd:latest
+docker compose up -d                            # reuses it — no rebuild
+```
+
+`docker compose up` (without `--build`) uses the loaded `weft-weftd:latest`
+image; only postgres/livekit/caddy are pulled.
+
+### Option B — GitHub Container Registry (ghcr.io)
+
+**Automated (recommended):** `.github/workflows/docker.yml` builds + pushes
+`ghcr.io/<owner>/weft-weftd` on every push to the default branch (`:latest`), on
+`v*` tags (`:1.2.3`), and on manual dispatch — using the built-in `GITHUB_TOKEN`
+(no secrets to set up). After the first run, make the package **public** in your
+GitHub *Packages* settings so servers can pull it without logging in.
+
+**Manual:** create a PAT with `write:packages`, then from your machine:
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-username> --password-stdin
+docker build --platform linux/amd64 -f deploy/Dockerfile -t ghcr.io/<owner>/weft-weftd:latest .
+docker push ghcr.io/<owner>/weft-weftd:latest
+```
+
+**On the server**, point the weftd service at the registry image in
+`docker-compose.yml` and drop its `build:` block:
+
+```yaml
+  weftd:
+    image: ghcr.io/<owner>/weft-weftd:latest
+    # (remove the build: block)
+```
+
+Then (with `docker login ghcr.io` first if the package is private):
+
+```bash
+docker compose pull weftd && docker compose up -d
+```
+
+---
+
 ## How the pieces connect
 
 - **Caddy** terminates public TLS (443) and reverse-proxies `weft.example.com` →

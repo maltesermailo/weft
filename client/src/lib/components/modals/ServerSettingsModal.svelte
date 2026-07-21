@@ -118,7 +118,7 @@
         <div class="modal-actions"><button class="ok-btn" onclick={app.doDelegate}>Grant capabilities</button></div>
       {:else if app.nsTab === "bans"}
         <h1>Bans &amp; mutes</h1>
-        <p class="so-sub">Accounts denied at <code>ns:{app.activeServer}</code> (§6.7). A <b>ban</b> blocks join + posting; a <b>mute</b> blocks posting. Lifting one takes effect immediately.</p>
+        <p class="so-sub">Accounts denied at <code>ns:{app.activeServer}</code>. A <b>ban</b> blocks join + posting; a <b>mute</b> blocks posting. Lifting one takes effect immediately.</p>
         <div class="modal-list">
           {#each app.denyList() as d (d.kind + d.account)}
             <div class="ns-card">
@@ -137,9 +137,9 @@
         <div class="modal-actions"><button class="set-btn" onclick={app.refreshBans}>Refresh</button></div>
       {:else if app.nsTab === "federation"}
         <h1>Federation</h1>
-        <p class="so-sub">Bridge <b>{app.activeServer}</b>'s channels to a peer network (§11). You control this as the namespace owner — bridges are scoped to <code>ns:{app.activeServer}</code>, non-transitive, and every change notifies members.</p>
+        <p class="so-sub">Bridge <b>{app.activeServer}</b>'s channels to a peer network. You control this as the namespace owner — bridges are scoped to <code>ns:{app.activeServer}</code>, non-transitive, and every change notifies members.</p>
 
-        <div class="field-label">Auto-federation (§11.10)</div>
+        <div class="field-label">Auto-federation</div>
         <p class="so-sub">When open, another network can reach this namespace on demand — a user there references <code>{app.network}/{app.activeServer}</code> and their server auto-establishes the bridge. Requires <b>public</b> visibility.</p>
         <label class="fed-check" style="margin-bottom:14px">
           <input
@@ -191,7 +191,7 @@
         <p class="so-sub" style="margin-top:14px">Outbound bridge transmission needs the M5d dialer; inbound peering, accept, and sever work today. Network-wide defederation (blocking a peer network entirely) is a network-operator action.</p>
       {:else if app.nsTab === "recovery"}
         <h1>Recovery quorum</h1>
-        <p class="so-sub">§2.4 M-of-N root recovery. Share your recovery key, or co-sign and submit a rotation.</p>
+        <p class="so-sub">M-of-N root recovery. Share your recovery key, or co-sign and submit a rotation.</p>
         <div class="field-label">Threshold M</div>
         <input class="text-input" type="number" min="1" bind:value={app.nsRecM} />
         <div class="section-sep"></div>

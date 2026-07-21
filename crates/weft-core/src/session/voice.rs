@@ -44,6 +44,11 @@ impl<S: ControlStream> Session<S> {
                 backend.leave(self.id, &channel).await;
             }
         }
+        // A join supersedes a presence-watch — drop that forwarder so we don't
+        // hold two subscriptions to the same channel broadcast.
+        if let Some(forwarder) = self.voice_watches.remove(&channel) {
+            forwarder.abort();
+        }
 
         // §6.7 moderation: a ban denies voice outright; a mute removes `speak`.
         let scopes = covering_scopes(&channel);
@@ -265,6 +270,72 @@ impl<S: ControlStream> Session<S> {
                 .await?;
         }
         Ok(Flow::Continue)
+    }
+
+    /// §16 auto-subscribe this session to a voice channel's presence so its live
+    /// roster (who's in the call) just appears + updates — Discord-style, no
+    /// request. Called for each voice channel as the session loads a namespace's
+    /// layout (`CHANNELS`). Silent + gated on the join (`listen`) permission: a
+    /// channel the caller couldn't join (banned / no `listen`) is skipped, not
+    /// errored. Sends the current roster as a `VOICE STATE` snapshot; live
+    /// join/leave/mute then flow via the same broadcast voice participants
+    /// announce to. Idempotent — re-loading the layout re-snapshots without
+    /// duplicating the subscription.
+    pub(super) async fn auto_watch_voice(
+        &mut self,
+        channel: &ChannelName,
+        account: &Account,
+    ) -> io::Result<()> {
+        let Some(handle) = self.ctx.registry.get(channel) else {
+            return Ok(());
+        };
+        if self.channel_kind(channel).await != ChannelKind::Voice {
+            return Ok(());
+        }
+        // Join-permission gate — no presence for a channel you couldn't join.
+        let scopes = covering_scopes(channel);
+        if matches!(
+            self.ctx
+                .moderation
+                .is_moderated(account, &scopes, ModKind::Ban)
+                .await,
+            Ok(true)
+        ) {
+            return Ok(());
+        }
+        if !matches!(
+            self.voice_caps(channel, account, false).await,
+            Ok((true, _))
+        ) {
+            return Ok(());
+        }
+
+        // Subscribe once — skip if already joined (the join forwarder delivers
+        // presence) or already watching.
+        if !self.voice.contains_key(channel) && !self.voice_watches.contains_key(channel) {
+            if let Some(events) = handle.subscribe().await {
+                let forwarder = spawn_forwarder(channel.clone(), events, self.events_tx.clone());
+                self.voice_watches.insert(channel.clone(), forwarder);
+            }
+        }
+
+        // Snapshot the current roster (unlabeled presence push).
+        for member in self.ctx.voice_roster(channel) {
+            let user = UserRef::new(member.account, self.ctx.info.network.clone());
+            self.send_event(
+                None,
+                Event::VoiceState {
+                    channel: channel.clone(),
+                    user,
+                    action: VoiceAction::Join,
+                    muted: member.muted,
+                    deaf: false,
+                    speaking: false,
+                },
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// §16 disconnect cleanup: abort the room's forwarder, drop this session's

@@ -85,7 +85,7 @@
         <div class="set-row"><span>Identity</span><b>{app.account}@{app.network}</b></div>
         <div class="section-sep"></div>
         <div class="field-label">Profile</div>
-        <p class="so-sub">Your display name and avatar, shown to people who share a server with you (§10.3).</p>
+        <p class="so-sub">Your display name and avatar, shown to people who share a server with you.</p>
         <div class="profile-edit">
           <button class="avatar prof-avatar" title="Change avatar" onclick={() => fileInput?.click()}>
             <Avatar account={app.account} />
@@ -109,7 +109,7 @@
         {#if app.isOperator}
           <div class="section-sep"></div>
           <div class="field-label">Network defense</div>
-          <p class="so-sub">Block abusive peer networks and manage network-wide bridges (§11). Per-namespace federation lives in each namespace's Server Settings.</p>
+          <p class="so-sub">Block abusive peer networks and manage network-wide bridges. Per-namespace federation lives in each namespace's Server Settings.</p>
           <button class="set-btn" onclick={app.openFederation}>Open network federation</button>
         {/if}
       {:else if app.userTab === "appearance"}
@@ -122,7 +122,7 @@
         </div>
       {:else if app.userTab === "verification"}
         <h1>Verification</h1>
-        <p class="so-sub">Verify your email and age. Only you can see these — they're never shown to other members (§10.5).</p>
+        <p class="so-sub">Verify your email and age. Only you can see these — they're never shown to other members.</p>
 
         <div class="field-label">Email</div>
         {#if app.verifications.email}

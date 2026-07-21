@@ -12,6 +12,8 @@ crate-type = ["cdylib", "rlib"]
 # build. Excluded from `default-members` (it only builds for wasm32).
 [dependencies]
 weft-client-core = { path = "../weft-client-core" }
+# §10.2/§6.2 client-held keys (namespace root, device) — generated in the browser.
+weft-crypto = { path = "../weft-crypto" }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 serde = { workspace = true }
@@ -20,7 +22,7 @@ serde-wasm-bindgen = "0.6"
 
 [dependencies.web-sys]
 version = "0.3"
-features = ["WebSocket", "MessageEvent", "CloseEvent", "ErrorEvent", "BinaryType", "Window", "Location"]
+features = ["WebSocket", "MessageEvent", "CloseEvent", "ErrorEvent", "BinaryType", "Window", "Location", "Storage"]
 
 
 # wasm32 entropy: getrandom is pulled at 0.2 (via ed25519-dalek) and 0.3 (via

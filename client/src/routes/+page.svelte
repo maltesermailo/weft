@@ -1598,7 +1598,12 @@
     const voice = newChanVoice;
     weft
       .channelCreate(full, voice ? undefined : newChanRet || undefined, voice ? "voice" : undefined)
-      // §16 voice channels aren't text-joinable — don't JOIN (that's NO-SUCH-TARGET).
+      // We just created it, so the server won't tell us its kind — record it
+      // locally so the sidebar shows a voice channel (joined via VOICE, not text).
+      .then(() => {
+        ensureChannel(full).voice = voice;
+      })
+      // Voice channels aren't text-joinable — don't JOIN (that's NO-SUCH-TARGET).
       .then(() => (voice ? undefined : weft.join(full)))
       .then(() => (cat ? weft.channelMeta(full, "category", cat) : undefined))
       // Announcement channel: everyone can view, only members with the `send`

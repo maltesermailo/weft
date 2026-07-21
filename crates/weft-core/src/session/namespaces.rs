@@ -653,11 +653,11 @@ impl<S: ControlStream> Session<S> {
             Ok(None) => return self.no_such_target(label).await,
             Err(e) => return self.internal(label, &e).await,
         };
+        let State::Ready { account } = self.state.clone() else {
+            unreachable!("on_channels only dispatched in READY");
+        };
         // Private namespaces are invisible unless you belong (view cap).
         if record.visibility == "private" {
-            let State::Ready { account } = self.state.clone() else {
-                unreachable!("on_channels only dispatched in READY");
-            };
             let scope = TokenScope::Namespace(namespace.to_string());
             let member = self
                 .ctx
@@ -682,16 +682,22 @@ impl<S: ControlStream> Session<S> {
             Err(e) => return self.internal(label, &e).await,
         };
         for (name, record) in channels {
+            let kind = record.kind;
             self.send_event(
                 label.clone(),
                 Event::ChannelLayout {
-                    channel: name,
+                    channel: name.clone(),
                     category: record.category,
                     position: record.position,
-                    kind: record.kind,
+                    kind,
                 },
             )
             .await?;
+            // §16 voice channels: auto-subscribe this session to their live
+            // presence so the roster appears + updates without a request.
+            if kind == ChannelKind::Voice {
+                self.auto_watch_voice(&name, &account).await?;
+            }
         }
         Ok(Flow::Continue)
     }

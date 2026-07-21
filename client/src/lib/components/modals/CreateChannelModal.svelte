@@ -43,7 +43,7 @@
     </datalist>
     <label class="check-row">
       <input type="checkbox" bind:checked={voice} />
-      <span>🔊 Voice channel — members connect to talk; no text, and hidden from IRC clients (§16)</span>
+      <span>🔊 Voice channel — members connect to talk; no text, and hidden from IRC clients</span>
     </label>
     {#if !voice}
       <label class="fld">Retention

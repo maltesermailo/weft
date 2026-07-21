@@ -1,8 +1,10 @@
 <script lang="ts">
   import { getApp } from "$lib/context";
-  import { voice, joinVoice } from "$lib/voice.svelte";
+  import { voice, voiceRosters, joinVoice } from "$lib/voice.svelte";
   import VoiceBar from "$lib/components/VoiceBar.svelte";
+  import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
+  const rosterOf = (name: string) => Object.values(voiceRosters[name] ?? {});
 </script>
 
 <div class="channel-scroll">
@@ -45,6 +47,16 @@
         </button>
         {#if ch.voice && voice.channel === ch.name}
           <div class="voice-inline"><VoiceBar channel={ch.name} /></div>
+        {:else if ch.voice && rosterOf(ch.name).length}
+          <ul class="vc-roster">
+            {#each rosterOf(ch.name) as p (p.user)}
+              <li class="vc-member" class:speaking={p.speaking}>
+                <span class="vc-avatar"><Avatar account={p.user} /></span>
+                <span class="vc-name">{p.user.split("@")[0]}</span>
+                {#if p.muted}<span class="vc-flag" title="Muted" aria-hidden="true">🔇</span>{/if}
+              </li>
+            {/each}
+          </ul>
         {/if}
       {/each}
     </div>
@@ -53,3 +65,49 @@
     <div class="empty-hint">No channels yet.<br />Join one below.</div>
   {/if}
 </div>
+
+<style>
+  /* Live "who's in voice" roster shown under a voice channel you haven't joined. */
+  .vc-roster {
+    list-style: none;
+    margin: 1px 0 4px 22px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .vc-member {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 4px;
+    border-radius: 5px;
+    font-size: 0.78rem;
+    color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  }
+  .vc-avatar {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-size: 0.5rem;
+    font-weight: 700;
+    background: var(--bg-4, rgba(255, 255, 255, 0.1));
+    outline: 2px solid transparent;
+    transition: outline-color 0.1s;
+  }
+  .vc-member.speaking .vc-avatar {
+    outline-color: #43b581;
+  }
+  .vc-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .vc-flag {
+    font-size: 0.62rem;
+    opacity: 0.7;
+  }
+</style>

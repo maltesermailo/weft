@@ -1,0 +1,54 @@
+name: Build and push weftd image
+
+# Builds the weftd container (embedded web client + voice) and pushes it to the
+# GitHub Container Registry. Runs on pushes to the default branch, on version
+# tags (v1.2.3), and on manual dispatch.
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # required to push to ghcr.io with the built-in token
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Compute tags/labels: :latest on the default branch, :<version> on a tag,
+      # plus :sha-<commit> always. The image name is lowercased automatically.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/weft-weftd
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,prefix=sha-
+
+      - name: Build and push (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache across runs so the heavy Rust + web build only rebuilds
+          # what changed.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

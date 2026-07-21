@@ -428,6 +428,10 @@ struct Session<S> {
     /// from `joined`). Drives SFU teardown + broadcast unsubscribe on `VOICE
     /// LEAVE` and on disconnect so no peer or forwarder is orphaned.
     voice: HashMap<ChannelName, VoiceRoom>,
+    /// §16 voice channels this session *watches* for presence (`VOICE WATCH`) —
+    /// live roster without joining the call. Each holds the broadcast forwarder;
+    /// aborted on unwatch / join / disconnect.
+    voice_watches: HashMap<ChannelName, JoinHandle<()>>,
     malformed_strikes: Vec<Instant>,
     last_inbound: Instant,
 }
@@ -473,6 +477,7 @@ impl<S: ControlStream> Session<S> {
             backfill_demand_rx,
             batches: 0,
             voice: HashMap::new(),
+            voice_watches: HashMap::new(),
             malformed_strikes: Vec::new(),
             last_inbound: Instant::now(),
         }
@@ -531,6 +536,11 @@ impl<S: ControlStream> Session<S> {
         // so the SFU drops them and members see a `VOICE STATE leave`.
         for (channel, room) in std::mem::take(&mut self.voice) {
             self.teardown_voice(&channel, room).await;
+        }
+        // §16 drop any presence-watch forwarders (no roster impact — a watcher
+        // isn't in the room).
+        for (_, forwarder) in std::mem::take(&mut self.voice_watches) {
+            forwarder.abort();
         }
         for (_, joined) in self.joined.drain() {
             joined.forwarder.abort();

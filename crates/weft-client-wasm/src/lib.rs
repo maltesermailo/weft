@@ -15,6 +15,35 @@ use wasm_bindgen::JsCast;
 use web_sys::{CloseEvent, MessageEvent, WebSocket};
 use weft_client_core as core;
 use weft_client_core::{ClientEvent, EventSink, Mode, Phase};
+use weft_crypto::Keypair;
+
+/// The browser's `localStorage`, or an error if unavailable/blocked.
+fn local_storage() -> Result<web_sys::Storage, String> {
+    web_sys::window()
+        .ok_or("no window object")?
+        .local_storage()
+        .map_err(|_| "localStorage is blocked".to_string())?
+        .ok_or_else(|| "no localStorage".to_string())
+}
+
+/// Load (or generate + persist) a client-held keypair under `key`. The 32-byte
+/// Ed25519 seed lives in `localStorage`; the server only ever sees the public
+/// key. Clearing site data loses the secret — for a namespace root that means
+/// losing TRANSFER/recovery ability (the same trade-off as the native client's
+/// key file, but browser storage is more volatile — back it up for real use).
+fn stored_key(key: &str) -> Result<Keypair, String> {
+    let store = local_storage()?;
+    if let Ok(Some(seed)) = store.get_item(key) {
+        if let Ok(kp) = Keypair::from_seed_b64(seed.trim()) {
+            return Ok(kp);
+        }
+    }
+    let kp = Keypair::generate();
+    store
+        .set_item(key, &kp.seed_b64())
+        .map_err(|_| "could not persist key to localStorage".to_string())?;
+    Ok(kp)
+}
 
 /// Deliver a parsed event to the JS callback (serde → `JsValue`).
 #[derive(Clone)]
@@ -174,10 +203,29 @@ impl WeftClient {
                 });
                 return serde_wasm_bindgen::to_value(&cfg).map_err(|e| e.to_string());
             }
-            // ---- key-dependent — need browser key storage (P4) ----
-            "enroll_device" | "has_device_key" | "ns_create" | "ns_transfer"
-            | "ns_recovery_cancel" | "recovery_pubkey" | "recovery_start" | "recovery_cosign" => {
-                return Err("device/namespace keys are not available in the web build yet".into());
+            // §6.2 create a namespace: generate (or reuse) the root keypair in the
+            // browser, persist the seed in localStorage, send only the public key.
+            "ns_create" => {
+                let network = self
+                    .conn
+                    .borrow()
+                    .as_ref()
+                    .map(|c| c.net_name.clone())
+                    .unwrap_or_default();
+                if network.is_empty() {
+                    return Err("not connected yet".into());
+                }
+                let name = arg("name");
+                let root = stored_key(&format!("weft:nskey:{network}:{name}"))?;
+                build_ns_create(&name, &arg("visibility"), &root.public().to_b64())?
+            }
+            // ---- other key-dependent ops still need browser key storage (P4) ----
+            "enroll_device" | "has_device_key" | "ns_transfer" | "ns_recovery_cancel"
+            | "recovery_pubkey" | "recovery_start" | "recovery_cosign" => {
+                return Err(
+                    "this key operation isn't available in the web build yet (use the desktop app)"
+                        .into(),
+                );
             }
             // ---- relay ----
             "send_raw" => arg("line"),
