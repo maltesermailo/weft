@@ -571,8 +571,10 @@ async function onNativeLiveKit(channel: string, url: string | null, token: strin
   nativeActive = true;
   try {
     await tauriInvoke("voice_native_connect", { url, token });
-  } catch {
-    voice.error = "voice connection failed";
+  } catch (e) {
+    // Surface the real Rust error (audio device / connect / publish) rather than
+    // a generic message, so failures are diagnosable.
+    voice.error = `voice failed — ${e}`;
     void leaveVoice();
   }
 }

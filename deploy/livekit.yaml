@@ -5,6 +5,12 @@
 port: 7880
 keys:
   devkey: change-me-at-least-32-bytes-of-random-secret
+# Active-speaker detection. The defaults (update_interval 400ms, smooth_intervals
+# 4) make the speaking ring lag ~half a second; these recompute + broadcast the
+# active set far more often and smooth less, so the ring reacts quickly.
+audio:
+  update_interval: 150
+  smooth_intervals: 2
 rtc:
   tcp_port: 7881
   # UDP media range — published by the container + open on the firewall. Widen

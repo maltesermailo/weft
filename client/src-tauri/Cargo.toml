@@ -32,7 +32,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"
 xcap = "0.9.7"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
-livekit = "0.7.53"
+# `native-tls` gives the LiveKit signal client wss:// support via the OS TLS
+# stack (Secure Transport on macOS) — the browser JS SDK gets TLS for free, but
+# the Rust SDK needs a TLS feature. Deliberately NOT rustls: the workspace pins
+# rustls to the ring provider, and a second rustls provider would clash, so we
+# keep LiveKit's TLS on a separate (native) stack.
+livekit = { version = "0.7.53", features = ["native-tls"] }
 futures-util = "0.3"
 nokhwa = { version = "0.10.11", features = ["input-native"] }
 
