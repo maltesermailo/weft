@@ -248,6 +248,10 @@ pub trait ChannelStore: Send + Sync {
         restricted: bool,
     ) -> Result<(), StoreError>;
 
+    /// WC7 freeze: a blanket posting lock that only `ns-admin` may talk through.
+    /// Orthogonal to `restricted` — a channel can be both, and the freeze wins.
+    async fn set_channel_frozen(&self, name: &ChannelName, frozen: bool) -> Result<(), StoreError>;
+
     /// CHANNEL DELETE. False = no such channel.
     async fn delete_channel(&self, name: &ChannelName) -> Result<bool, StoreError>;
 
@@ -375,6 +379,14 @@ pub trait NamespaceStore: Send + Sync {
 
     /// §11.10 NS META federation: toggle auto-federation reachability. No-op if
     /// the namespace is unknown.
+    /// WC7 full freeze: lock every channel in the namespace (owner + network
+    /// operators excepted). Orthogonal to the per-channel freeze.
+    async fn set_namespace_frozen(
+        &self,
+        name: &NamespaceName,
+        frozen: bool,
+    ) -> Result<(), StoreError>;
+
     async fn set_namespace_federation(
         &self,
         name: &NamespaceName,

@@ -38,6 +38,7 @@ pub fn routes() -> Router<AdminState> {
         .route("/api/v1/reports", get(list_reports))
         .route("/api/v1/reports/:id", get(report_detail))
         .route("/api/v1/reports/:id/resolve", post(resolve_report))
+        .route("/api/v1/reports/bulk-resolve", post(bulk_resolve_reports))
         .route("/api/v1/accounts", get(list_accounts))
         .route(
             "/api/v1/accounts/:name",
@@ -47,9 +48,24 @@ pub fn routes() -> Router<AdminState> {
         .route("/api/v1/accounts/:name/restore", post(restore_account))
         .route("/api/v1/accounts/:name/suspend", post(suspend_account))
         .route("/api/v1/accounts/:name/unsuspend", post(unsuspend_account))
+        .route(
+            "/api/v1/accounts/:name/disconnect",
+            post(disconnect_account),
+        )
         .route("/api/v1/channels", get(list_channels))
         .route("/api/v1/channels/:name/detail", get(channel_detail))
+        .route("/api/v1/channels/:name/freeze", post(freeze_channel))
+        .route("/api/v1/channels/:name/unfreeze", post(unfreeze_channel))
+        .route(
+            "/api/v1/channels/:name",
+            axum::routing::delete(delete_channel),
+        )
         .route("/api/v1/namespaces", get(list_namespaces))
+        .route("/api/v1/namespaces/:name/freeze", post(freeze_namespace))
+        .route(
+            "/api/v1/namespaces/:name/unfreeze",
+            post(unfreeze_namespace),
+        )
         .route("/api/v1/grants", get(list_grants))
         .route("/api/v1/moderation", get(list_moderation).post(moderate))
         .route("/api/v1/peers", get(list_peers))
@@ -775,19 +791,75 @@ async fn set_suspended(
             } else {
                 "account.unsuspend"
             };
+            // A suspension that leaves the account's current sessions running is
+            // only half a suspension — it could keep posting until it happened
+            // to disconnect. Cut them as part of the same action.
+            let cut = if suspend {
+                cut_sessions(&st, &account).await
+            } else {
+                0
+            };
             audit(
                 &st,
                 &who,
                 action,
                 &account.to_string(),
-                &json!({ "account": account.to_string() }),
+                &json!({ "account": account.to_string(), "sessions_closed": cut }),
             )
             .await;
-            StatusCode::NO_CONTENT.into_response()
+            Json(json!({ "sessions_closed": cut })).into_response()
         }
         Ok(false) => (StatusCode::NOT_FOUND, "no such account").into_response(),
         Err(e) => internal(e),
     }
+}
+
+/// Close an account's live sessions, if this process has the live server (the
+/// panel can run standalone, where there are no sessions to reach).
+async fn cut_sessions(st: &AdminState, account: &Account) -> usize {
+    match &st.live {
+        Some(live) => live.disconnect_account(account).await,
+        None => 0,
+    }
+}
+
+/// `POST /accounts/:name/disconnect` — WC7 forced device logout. Ends every live
+/// session without changing the account's state, so it can immediately sign back
+/// in; pair it with suspend to keep it out. `admin.moderate`, audited.
+async fn disconnect_account(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Ok(account) = name.parse::<Account>() else {
+        return (StatusCode::BAD_REQUEST, "bad account").into_response();
+    };
+    if st.live.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no live server in this process",
+        )
+            .into_response();
+    }
+    match st.accounts.account_ulid(&account).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such account").into_response(),
+        Err(e) => return internal(e),
+    }
+    let cut = cut_sessions(&st, &account).await;
+    audit(
+        &st,
+        &who,
+        "account.disconnect",
+        &account.to_string(),
+        &json!({ "account": account.to_string(), "sessions_closed": cut }),
+    )
+    .await;
+    Json(json!({ "sessions_closed": cut })).into_response()
 }
 
 async fn suspend_account(
@@ -829,6 +901,8 @@ async fn channel_detail(State(st): State<AdminState>, Path(name): Path<String>) 
             name: channel.to_string(),
             policy: record.policy.to_string(),
             members,
+            frozen: record.frozen,
+            restricted: record.restricted,
         }))
     }
     .await;
@@ -989,6 +1063,232 @@ async fn resolve_report(
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => (StatusCode::NOT_FOUND, "no such report").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct BulkResolveReq {
+    ids: Vec<String>,
+    /// dismissed | content-removed | user-actioned | escalated
+    action: String,
+    note: Option<String>,
+}
+
+/// `POST /reports/bulk-resolve` — WC7 bulk actions: apply one resolution to many
+/// reports (the spam-wave case, where a queue fills with the same complaint).
+/// Partial success is normal and reported honestly: each id's outcome comes back
+/// so the operator sees exactly what landed, rather than one all-or-nothing
+/// status hiding the ones that were already resolved or never existed.
+async fn bulk_resolve_reports(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Json(req): Json<BulkResolveReq>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Ok(action) = req.action.parse::<ResolveAction>() else {
+        return (StatusCode::BAD_REQUEST, "unknown action").into_response();
+    };
+    if req.ids.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no report ids given").into_response();
+    }
+    // A bounded batch: this is a moderation convenience, not a bulk-import API.
+    const MAX_BULK: usize = 500;
+    if req.ids.len() > MAX_BULK {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("at most {MAX_BULK} reports per call"),
+        )
+            .into_response();
+    }
+
+    let now = now_ms();
+    let (mut resolved, mut missing) = (Vec::new(), Vec::new());
+    for id in &req.ids {
+        let resolution = ReportResolution {
+            action,
+            note: req.note.clone(),
+            resolved_by: who.to_string(),
+            at_ms: now,
+            hold_release_at: now + 7 * 24 * 60 * 60 * 1000, // §12.1 grace
+        };
+        match st.reports.resolve_report(id, resolution).await {
+            Ok(true) => resolved.push(id.clone()),
+            // Already resolved or unknown — indistinguishable at the store, and
+            // both mean "this one didn't change".
+            Ok(false) => missing.push(id.clone()),
+            Err(e) => return internal(e),
+        }
+    }
+    audit(
+        &st,
+        &who,
+        "report.bulk_resolve",
+        &format!("{} reports", resolved.len()),
+        &json!({ "action": req.action, "resolved": resolved, "unchanged": missing }),
+    )
+    .await;
+    Json(json!({ "resolved": resolved, "unchanged": missing })).into_response()
+}
+
+// ---- WC7 room actions ----
+
+/// `POST /channels/:name/freeze` — lock a channel; only `ns-admin` may post.
+async fn freeze_channel(
+    st: State<AdminState>,
+    who: Extension<Account>,
+    scopes: Extension<AdminScopes>,
+    name: Path<String>,
+) -> Response {
+    set_frozen(st, who, scopes, name, true).await
+}
+
+/// `POST /channels/:name/unfreeze` — lift it.
+async fn unfreeze_channel(
+    st: State<AdminState>,
+    who: Extension<Account>,
+    scopes: Extension<AdminScopes>,
+    name: Path<String>,
+) -> Response {
+    set_frozen(st, who, scopes, name, false).await
+}
+
+async fn set_frozen(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(name): Path<String>,
+    frozen: bool,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Ok(channel) = name.parse::<ChannelName>() else {
+        return (StatusCode::BAD_REQUEST, "bad channel name").into_response();
+    };
+    match st.channels.channel(&channel).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such channel").into_response(),
+        Err(e) => return internal(e),
+    }
+    if let Err(e) = st.channels.set_channel_frozen(&channel, frozen).await {
+        return internal(e);
+    }
+    audit(
+        &st,
+        &who,
+        if frozen {
+            "channel.freeze"
+        } else {
+            "channel.unfreeze"
+        },
+        &channel.to_string(),
+        &json!({ "channel": channel.to_string() }),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST /namespaces/:name/freeze` — WC7 **full freeze**: lock every channel in
+/// a namespace. One rung above the per-channel freeze — only the namespace owner
+/// and network operators may post through it, so a delegated `ns-admin` can't
+/// talk (or quietly lift it). Applying it is `admin.destroy`, not `moderate`:
+/// silencing a whole community is not a routine moderation call.
+async fn freeze_namespace(
+    st: State<AdminState>,
+    who: Extension<Account>,
+    scopes: Extension<AdminScopes>,
+    name: Path<String>,
+) -> Response {
+    set_ns_frozen(st, who, scopes, name, true).await
+}
+
+/// `POST /namespaces/:name/unfreeze` — lift the full freeze.
+async fn unfreeze_namespace(
+    st: State<AdminState>,
+    who: Extension<Account>,
+    scopes: Extension<AdminScopes>,
+    name: Path<String>,
+) -> Response {
+    set_ns_frozen(st, who, scopes, name, false).await
+}
+
+async fn set_ns_frozen(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(name): Path<String>,
+    frozen: bool,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Destroy) {
+        return r;
+    }
+    let Ok(ns) = name.parse::<weft_proto::NamespaceName>() else {
+        return (StatusCode::BAD_REQUEST, "bad namespace name").into_response();
+    };
+    match st.namespaces.namespace(&ns).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such namespace").into_response(),
+        Err(e) => return internal(e),
+    }
+    if let Err(e) = st.namespaces.set_namespace_frozen(&ns, frozen).await {
+        return internal(e);
+    }
+    audit(
+        &st,
+        &who,
+        if frozen {
+            "namespace.freeze"
+        } else {
+            "namespace.unfreeze"
+        },
+        ns.as_str(),
+        &json!({ "namespace": ns.to_string() }),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `DELETE /channels/:name?confirm=<name>` — WC7 channel delete, reusing WC3's
+/// typed-name gate. Drops the channel record; its messages are purged with it by
+/// the store. Irreversible, so `admin.destroy`.
+async fn delete_channel(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(name): Path<String>,
+    Query(q): Query<ConfirmQuery>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Destroy) {
+        return r;
+    }
+    let Ok(channel) = name.parse::<ChannelName>() else {
+        return (StatusCode::BAD_REQUEST, "bad channel name").into_response();
+    };
+    // The typed-name gate: the caller must echo the exact channel name.
+    if q.confirm.as_deref() != Some(channel.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "confirm= must echo the exact channel name",
+        )
+            .into_response();
+    }
+    match st.channels.delete_channel(&channel).await {
+        Ok(true) => {
+            audit(
+                &st,
+                &who,
+                "channel.delete",
+                &channel.to_string(),
+                &json!({ "channel": channel.to_string() }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, "no such channel").into_response(),
         Err(e) => internal(e),
     }
 }

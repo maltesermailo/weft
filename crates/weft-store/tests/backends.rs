@@ -774,6 +774,16 @@ where
     assert_eq!(record.topic.as_deref(), Some("the topic"));
     assert!(record.view_gated);
     assert_eq!(record.policy.to_string(), "retained:7d");
+    // WC7 freeze: independent of `restricted` — both can hold at once.
+    assert!(!record.frozen && !record.restricted);
+    store.set_channel_frozen(&name, true).await.unwrap();
+    store.set_channel_restricted(&name, true).await.unwrap();
+    let record = store.channel(&name).await.unwrap().unwrap();
+    assert!(record.frozen && record.restricted);
+    store.set_channel_frozen(&name, false).await.unwrap();
+    let record = store.channel(&name).await.unwrap().unwrap();
+    assert!(!record.frozen, "unfreeze leaves `restricted` alone");
+    assert!(record.restricted);
     assert!(store.delete_channel(&name).await.unwrap());
     assert!(!store.delete_channel(&name).await.unwrap()); // idempotent-ish
     assert!(store.channel(&name).await.unwrap().is_none());
@@ -949,6 +959,7 @@ where
             pending_recovery: None,
             categories: Vec::new(),
             federation: false,
+            frozen: false,
         })
         .await
         .unwrap());
@@ -966,6 +977,7 @@ where
             pending_recovery: None,
             categories: Vec::new(),
             federation: false,
+            frozen: false,
         })
         .await
         .unwrap());
@@ -1001,6 +1013,14 @@ where
     store.set_namespace_federation(&ns, false).await.unwrap();
     assert!(!store.namespace(&ns).await.unwrap().unwrap().federation);
     store.set_namespace_federation(&ns, true).await.unwrap();
+
+    // WC7 full freeze toggles + persists, and is independent of `federation`.
+    assert!(!record.frozen);
+    store.set_namespace_frozen(&ns, true).await.unwrap();
+    let frozen = store.namespace(&ns).await.unwrap().unwrap();
+    assert!(frozen.frozen && frozen.federation, "orthogonal flags");
+    store.set_namespace_frozen(&ns, false).await.unwrap();
+    assert!(!store.namespace(&ns).await.unwrap().unwrap().frozen);
 
     // DISCOVER lists public namespaces, cursor-paginated.
     let page = store.list_public(None, 100).await.unwrap();
@@ -1075,6 +1095,7 @@ where
             pending_recovery: None,
             categories: Vec::new(),
             federation: false,
+            frozen: false,
         })
         .await
         .unwrap();

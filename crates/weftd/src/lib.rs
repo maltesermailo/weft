@@ -623,6 +623,10 @@ impl weft_admin::Live for LiveRegistry {
         handle.admin_delete(msgid.clone(), by.clone()).await;
         true
     }
+
+    async fn disconnect_account(&self, account: &weft_proto::Account) -> usize {
+        self.ctx.disconnect_account(account).await
+    }
 }
 
 /// Seed config channels into the store, load the full channel set back

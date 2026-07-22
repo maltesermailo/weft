@@ -114,6 +114,11 @@ pub struct ChannelRecord {
     /// `restricted` posting mode (§6.7): when set, `MSG` requires the `send`
     /// capability (grant/revoke governs who may post). Default `false` = open.
     pub restricted: bool,
+    /// WC7 **freeze**: a blanket, reversible posting lock. Unlike `restricted`
+    /// (which delegates "who may post" to the `send` capability), a frozen
+    /// channel refuses *everyone* except `ns-admin` holders — so a moderator can
+    /// still post the "locked because…" note while a thread cools off.
+    pub frozen: bool,
     /// Category name (a free label) grouping channels in a namespace.
     pub category: Option<String>,
     /// Sort order within the (namespace, category); default 0.
@@ -208,6 +213,12 @@ pub struct NamespaceRecord {
     /// namespace is auto-federation-reachable — a `BRIDGE REQUEST` for it is
     /// answered with a signed manifest. Default `false` (closed).
     pub federation: bool,
+    /// WC7 **full freeze**: a namespace-wide posting lock, one rung above the
+    /// per-channel freeze. Every channel in the namespace refuses messages from
+    /// everyone but the namespace **owner** and network operators — a delegated
+    /// `ns-admin` cannot talk through it (or lift it). For "the whole community
+    /// stops while we deal with this".
+    pub frozen: bool,
 }
 
 /// A recovery in flight: rotates to `new_root_key` + `new_owner` at `eta_ms`

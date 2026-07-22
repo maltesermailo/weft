@@ -109,6 +109,10 @@ pub struct ChannelDetail {
     pub name: String,
     pub policy: String,
     pub members: Vec<String>,
+    /// WC7 posting state: `frozen` refuses everyone but `ns-admin`; `restricted`
+    /// delegates posting to the `send` capability. Independent — both can hold.
+    pub frozen: bool,
+    pub restricted: bool,
 }
 
 /// `GET /dms/:a/:b/messages` — a DM thread browse (WC4, §0 content boundary).
@@ -171,6 +175,8 @@ pub struct Namespace {
     pub visibility: String,
     pub title: Option<String>,
     pub description: Option<String>,
+    /// WC7 full freeze — every channel locked to the owner + network operators.
+    pub frozen: bool,
 }
 
 impl From<NamespaceRecord> for Namespace {
@@ -181,6 +187,7 @@ impl From<NamespaceRecord> for Namespace {
             visibility: n.visibility,
             title: n.title,
             description: n.description,
+            frozen: n.frozen,
         }
     }
 }

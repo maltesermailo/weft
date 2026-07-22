@@ -324,9 +324,24 @@ const screens = {
   },
   async namespaces() {
     const list = await api("/namespaces");
-    set(hrow("Namespaces", `${list.length} public`) + note("Public and listed namespaces and their owners.") +
-      cardTable("Namespaces", list.length, ["Namespace", "Owner", "Visibility", "Title"],
-        list.map((n) => ({ cells: [`<span class="mono">${esc(n.name)}</span>`, esc(n.owner), pill(n.visibility, "neutral"), esc(n.title || "")] }))));
+    // WC7 full freeze is a whole-community action, so it sits behind
+    // `admin.destroy` — and only the owner can speak through it.
+    const act2 = (n) => can("admin.destroy")
+      ? act(n.frozen
+        ? `<button class="btn small" data-action="unfreezeNs" data-id="${esc(n.name)}">unfreeze</button>`
+        : `<button class="btn small danger" data-action="freezeNs" data-id="${esc(n.name)}">full freeze</button>`)
+      : "";
+    set(hrow("Namespaces", `${list.length} public`) +
+      note("Public and listed namespaces and their owners. A <b>full freeze</b> locks every channel in a namespace — only the owner and network operators can post, not delegated ns-admins.") +
+      cardTable("Namespaces", list.length, ["Namespace", "Owner", "Visibility", "State", "Title"],
+        list.map((n) => ({ cells: [
+          `<span class="mono">${esc(n.name)}</span>`,
+          esc(n.owner),
+          pill(n.visibility, "neutral"),
+          n.frozen ? pill("frozen", "bad") : "",
+          esc(n.title || ""),
+          act2(n),
+        ] }))));
   },
   messages() {
     set(hrow("Messages") + note("Browse materialized history — a channel, or a DM thread between two accounts. Content is readable only where the server holds plaintext; an e2ee target shows \"unavailable by policy\".") +
@@ -396,9 +411,27 @@ const screens = {
   // ---- Moderation ----
   async reports() {
     const list = await api("/reports?scope=*");
-    set(hrow("Reports", `${list.length} filed`) + note("Queue across all scopes. Open one for the reported message and its held context.") +
-      cardTable("Report queue", list.length, ["Category", "State", "Status", "Reporter", "Filed"],
-        list.map((r) => ({ action: "report", id: r.id, cells: [esc(r.category), pill(r.state, "neutral"), pill(r.status, r.status === "open" ? "warn" : "neutral"), esc(r.reporter), `<span class="mono">${when(r.filed_at_ms)}</span>`] }))));
+    const open = list.filter((r) => r.status === "open");
+    // WC7 bulk actions: tick the open ones and close them together — the
+    // spam-wave case, where the queue fills with the same complaint.
+    const bulk = can("admin.moderate") && open.length
+      ? card("Bulk resolve", `<div class="action">
+          <p>Applies one resolution to every ticked report. Reports already resolved (or since deleted) are reported back as unchanged rather than silently skipped.</p>
+          <div class="row">
+            <button class="btn small" data-action="selectAllReports">Select all open</button>
+            <select id="bulkAction"><option>dismissed</option><option>content-removed</option><option>user-actioned</option><option>escalated</option></select>
+            <input type="text" id="bulkNote" class="grow" placeholder="note (optional)" />
+            <button class="btn danger" data-action="bulkResolve">Resolve selected</button>
+          </div>
+        </div>`)
+      : "";
+    const tick = (r) => r.status === "open" && can("admin.moderate")
+      ? `<input type="checkbox" class="repBox" value="${esc(r.id)}" aria-label="Select report ${esc(r.id)}" onclick="event.stopPropagation()" />`
+      : "";
+    set(hrow("Reports", `${list.length} filed · ${open.length} open`) +
+      note("Queue across all scopes. Open one for the reported message and its held context.") + bulk +
+      cardTable("Report queue", list.length, ["", "Category", "State", "Status", "Reporter", "Filed"],
+        list.map((r) => ({ action: "report", id: r.id, cells: [tick(r), esc(r.category), pill(r.state, "neutral"), pill(r.status, r.status === "open" ? "warn" : "neutral"), esc(r.reporter), `<span class="mono">${when(r.filed_at_ms)}</span>`] }))));
   },
   async moderation() {
     const list = await api("/moderation?scope=*");
@@ -536,9 +569,12 @@ async function openUser(name) {
   // WC7 account moderation: suspend / unsuspend (login-block).
   let moderation = "";
   if (can("admin.moderate")) {
-    moderation = card("Account moderation", u.suspended
-      ? `<div class="action"><h3>Suspended</h3><p>This account is blocked from authenticating — its capability tokens are frozen (it can't open a session). Unsuspend to restore access.</p><div class="row"><button class="btn" data-action="unsuspendUser" data-id="${esc(u.account)}">Unsuspend</button></div></div>`
-      : `<div class="action"><h3>Suspend</h3><p>Blocks the account from authenticating (uniform AUTH-FAILED), freezing its tokens. Reversible. Already-connected sessions persist until they disconnect.</p><div class="row"><button class="btn danger" data-action="suspendUser" data-id="${esc(u.account)}">Suspend</button></div></div>`);
+    moderation = card("Account moderation",
+      (u.suspended
+        ? `<div class="action"><h3>Suspended</h3><p>This account is blocked from authenticating — its capability tokens are frozen (it can't open a session). Unsuspend to restore access.</p><div class="row"><button class="btn" data-action="unsuspendUser" data-id="${esc(u.account)}">Unsuspend</button></div></div>`
+        : `<div class="action"><h3>Suspend</h3><p>Blocks the account from authenticating (uniform AUTH-FAILED), freezing its tokens, and closes any sessions it currently has. Reversible.</p><div class="row"><button class="btn danger" data-action="suspendUser" data-id="${esc(u.account)}">Suspend</button></div></div>`) +
+      // WC7 forced logout, on its own: end the sessions without changing state.
+      `<div class="action"><h3>Force logout</h3><p>Closes every device this account has connected right now. It can sign straight back in — pair with Suspend to keep it out. Co-members see an ordinary disconnect.</p><div class="row"><button class="btn" data-action="disconnectUser" data-id="${esc(u.account)}">Disconnect all devices</button></div></div>`);
   }
 
   // WC3 danger zone: pending-deletion banner + restore, else a typed-name
@@ -664,11 +700,33 @@ async function openChannel(name) {
   const members = (c.members || []).length
     ? card("Members", `<p class="hint" style="margin-bottom:10px">Persistent roster (§6.3) — offline members included.</p><div class="chips">${c.members.map((m) => `<button class="btn small" data-action="user" data-id="${esc(m)}">${esc(m)}</button>`).join(" ")}</div>`, c.members.length)
     : card("Members", `<div class="placeholder">No persistent members.</div>`);
+  // WC7 room actions: freeze (reversible lock) and the typed-name delete.
+  let actions = "";
+  if (can("admin.moderate")) {
+    actions += card("Room actions", c.frozen
+      ? `<div class="action"><h3>Frozen</h3><p>Nobody can post here except <b>ns-admin</b> holders — so a moderator can still explain why. Unfreeze to reopen.</p><div class="row"><button class="btn" data-action="unfreezeChan" data-id="${esc(c.name)}">Unfreeze channel</button></div></div>`
+      : `<div class="action"><h3>Freeze</h3><p>Locks the channel: everyone but <b>ns-admin</b> holders is refused, whatever capabilities they hold. Reversible, and it leaves grants untouched.</p><div class="row"><button class="btn danger" data-action="freezeChan" data-id="${esc(c.name)}">Freeze channel</button></div></div>`);
+  }
+  if (can("admin.destroy")) {
+    actions += card("Danger zone", `<div class="action danger">
+      <h3>Delete channel</h3>
+      <p>Removes the channel and its stored messages. This is <b>not</b> recoverable. Type the exact channel name to confirm.</p>
+      <div class="row">
+        <input type="text" id="chanDelConfirm" placeholder="Type ${esc(c.name)} to confirm" aria-label="Type the exact channel name to confirm deletion" />
+        <button class="btn danger solid" data-action="delChan" data-id="${esc(c.name)}">Delete channel</button>
+      </div>
+    </div>`);
+  }
+  const state = `${c.frozen ? pill("frozen", "bad") : ""}${c.restricted ? pill("restricted", "warn") : ""}`;
   set(`<a class="crumb" data-action="back" data-x="channels">← back to Channels</a>` +
-    hrow(esc(c.name), esc(c.policy)) +
-    card("Channel", `<div class="kv"><div class="k">Retention</div><div class="v mono">${esc(c.policy)}</div></div>`) +
+    `<div class="h-row"><h1>${esc(c.name)}</h1><span class="id">${state}<span class="meta">${esc(c.policy)}</span></span></div>` +
+    card("Channel", `<div class="kv">
+      <div class="k">Retention</div><div class="v mono">${esc(c.policy)}</div>
+      <div class="k">Posting</div><div class="v">${c.frozen ? '<span class="bad">frozen — ns-admin only</span>' : c.restricted ? '<span class="warn">restricted — requires <span class="mono">send</span></span>' : "open"}</div>
+    </div>`) +
     members +
-    card("History", `<button class="btn primary" data-action="browseChan" data-id="${esc(c.name)}">Browse messages</button>`));
+    card("History", `<button class="btn primary" data-action="browseChan" data-id="${esc(c.name)}">Browse messages</button>`) +
+    actions);
 }
 
 async function inspectTokens() {
@@ -769,9 +827,20 @@ const clicks = {
     catch (e) { alert(e.message); }
   },
   suspendUser: async (el) => {
-    if (!confirm(`Suspend "${el.dataset.id}"? They'll be blocked from authenticating (reversible).`)) return;
-    try { await api(`/accounts/${encodeURIComponent(el.dataset.id)}/suspend`, { method: "POST" }); openUser(el.dataset.id); }
-    catch (e) { alert(e.message); }
+    if (!confirm(`Suspend "${el.dataset.id}"? They'll be blocked from authenticating and any connected devices are cut (reversible).`)) return;
+    try {
+      const r = await api(`/accounts/${encodeURIComponent(el.dataset.id)}/suspend`, { method: "POST" });
+      if (r && r.sessions_closed) alert(`Suspended — closed ${r.sessions_closed} live session(s).`);
+      openUser(el.dataset.id);
+    } catch (e) { alert(e.message); }
+  },
+  disconnectUser: async (el) => {
+    if (!confirm(`Disconnect every device of "${el.dataset.id}"? They can sign back in immediately.`)) return;
+    try {
+      const r = await api(`/accounts/${encodeURIComponent(el.dataset.id)}/disconnect`, { method: "POST" });
+      alert(r && r.sessions_closed ? `Closed ${r.sessions_closed} live session(s).` : "No live sessions.");
+      openUser(el.dataset.id);
+    } catch (e) { alert(e.message); }
   },
   unsuspendUser: async (el) => {
     try { await api(`/accounts/${encodeURIComponent(el.dataset.id)}/unsuspend`, { method: "POST" }); openUser(el.dataset.id); }
@@ -796,6 +865,39 @@ const clicks = {
     catch (e) { alert(e.message); }
   },
   unblockMedia: async (el) => { try { await api("/media-blocks/" + encodeURIComponent(el.dataset.id), { method: "DELETE" }); go("media"); } catch (e) { alert(e.message); } },
+  // WC7 room actions.
+  freezeChan: async (el) => { try { await api(`/channels/${encodeURIComponent(el.dataset.id)}/freeze`, { method: "POST" }); refresh(); } catch (e) { alert(e.message); } },
+  unfreezeChan: async (el) => { try { await api(`/channels/${encodeURIComponent(el.dataset.id)}/unfreeze`, { method: "POST" }); refresh(); } catch (e) { alert(e.message); } },
+  delChan: async (el) => {
+    const typed = ($("#chanDelConfirm")?.value || "").trim();
+    if (typed !== el.dataset.id) { alert(`Type the exact channel name (${el.dataset.id}) to confirm.`); return; }
+    if (!confirm(`Delete ${el.dataset.id} and its stored messages? This cannot be undone.`)) return;
+    try { await api(`/channels/${encodeURIComponent(el.dataset.id)}?confirm=${encodeURIComponent(typed)}`, { method: "DELETE" }); go("channels"); }
+    catch (e) { alert(e.message); }
+  },
+  freezeNs: async (el) => {
+    if (!confirm(`Full-freeze "${el.dataset.id}"? Every channel locks — only the namespace owner and network operators can post, not delegated ns-admins.`)) return;
+    try { await api(`/namespaces/${encodeURIComponent(el.dataset.id)}/freeze`, { method: "POST" }); go("namespaces"); }
+    catch (e) { alert(e.message); }
+  },
+  unfreezeNs: async (el) => { try { await api(`/namespaces/${encodeURIComponent(el.dataset.id)}/unfreeze`, { method: "POST" }); go("namespaces"); } catch (e) { alert(e.message); } },
+  selectAllReports: () => {
+    const boxes = [...document.querySelectorAll(".repBox")];
+    const allOn = boxes.every((b) => b.checked);
+    boxes.forEach((b) => (b.checked = !allOn)); // second click clears
+  },
+  bulkResolve: async () => {
+    const ids = [...document.querySelectorAll(".repBox")].filter((b) => b.checked).map((b) => b.value);
+    if (!ids.length) { alert("Select some reports first."); return; }
+    const action = $("#bulkAction").value;
+    if (!confirm(`Resolve ${ids.length} report(s) as "${action}"?`)) return;
+    try {
+      const r = await api("/reports/bulk-resolve", { method: "POST", body: JSON.stringify({ ids, action, note: ($("#bulkNote").value || "").trim() || null }) });
+      const missed = (r.unchanged || []).length;
+      alert(`Resolved ${(r.resolved || []).length}${missed ? ` — ${missed} unchanged (already resolved or gone)` : ""}.`);
+      go("reports");
+    } catch (e) { alert(e.message); }
+  },
   saveScopes: async (el) => {
     const scopes = [...document.querySelectorAll(".permBox")].filter((b) => b.checked).map((b) => b.value);
     try {

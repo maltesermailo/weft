@@ -120,6 +120,7 @@ impl<S: ControlStream> Session<S> {
             pending_recovery: None,
             categories: Vec::new(),
             federation: false, // §11.10 closed until the owner opts in
+            frozen: false,     // WC7 full freeze — an operator action, never default
         };
         match self.ctx.namespaces.create_namespace(record.clone()).await {
             Ok(true) => {
@@ -579,10 +580,19 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
-    /// NS RECOVER: submit a signed rotation; start the delay window. Rung 2
-    /// = quorum-signed (7 d), rung 3 = operator-signed (30 d). No silent
-    /// path — a rotation is only ever pending + announced here, or applied
-    /// by the scheduler, or vetoed (invariant 9).
+    /// NS RECOVER: submit a signed rotation. The rung follows from *whose*
+    /// signatures verify:
+    ///
+    /// - **Rung 2** — quorum-signed (§2.4 social recovery): starts a 7-day
+    ///   delay window, announced, and cancellable by a live root.
+    /// - **Rung 3** — signed by the **network key** (operator takeover): applies
+    ///   **immediately**, no window and nothing to cancel. This is the
+    ///   moderation seizure path, so waiting out a delay the abusing owner could
+    ///   veto would defeat it (Appendix A amends the spec's original 30 days).
+    ///
+    /// Still no *silent* path (invariant 9): every rotation is either announced
+    /// and left pending here, applied by the scheduler, vetoed — or, for rung 3,
+    /// applied and announced at once, marked operator-initiated forever.
     pub(super) async fn on_ns_recover(
         &mut self,
         label: Option<String>,
@@ -636,6 +646,35 @@ impl<S: ControlStream> Session<S> {
         } else {
             RECOVERY_DELAY_RUNG3_SECS
         };
+        // A zero-delay rung (§2.4 rung 3, operator takeover) applies *now*.
+        // Parking it as "pending" with an elapsed ETA would leave the namespace
+        // in the abuser's hands until the next maintenance tick — the opposite
+        // of what a moderation seizure is for. There is no window, so there is
+        // no pending state and nothing to cancel; the accountability that
+        // survives is the announcement + the permanent `root-history` mark.
+        if delay_secs == 0 {
+            let now_ms = unix_now() * 1000;
+            if let Err(e) = self
+                .ctx
+                .namespaces
+                .rotate_root(
+                    &name,
+                    &signed.record.new_owner,
+                    &signed.record.new_root_key.to_b64(),
+                    rung == 3, // operator_initiated — marked forever
+                    now_ms,
+                )
+                .await
+            {
+                return self.internal(label, &e).await;
+            }
+            info!(%name, rung, new_owner = %signed.record.new_owner, "namespace seized (§2.4 rung 3, immediate)");
+            let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
+            if let Some(record) = updated {
+                self.send_event(label, Self::ns_meta_event(&record)).await?;
+            }
+            return Ok(Flow::Continue);
+        }
         let eta_ms = unix_now() * 1000 + delay_secs * 1000;
         let pending = weft_store::PendingRecovery {
             new_root_key: signed.record.new_root_key.to_b64(),

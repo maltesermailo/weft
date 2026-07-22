@@ -75,6 +75,7 @@ async fn session(app: &axum::Router) -> String {
 struct MockLive {
     ejects: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     deletes: Arc<std::sync::Mutex<Vec<String>>>,
+    disconnects: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -88,6 +89,10 @@ impl weft_admin::Live for MockLive {
     async fn delete_message(&self, msgid: &weft_proto::MsgId, _by: &weft_proto::Account) -> bool {
         self.deletes.lock().unwrap().push(msgid.to_string());
         true
+    }
+    async fn disconnect_account(&self, account: &weft_proto::Account) -> usize {
+        self.disconnects.lock().unwrap().push(account.to_string());
+        2 // pretend the account had two devices connected
     }
 }
 
@@ -806,7 +811,8 @@ async fn account_suspend_toggles_flag_blocks_self_and_panel_login() {
         ))
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    // Suspend answers 200 with how many live sessions it cut (0 standalone).
+    assert_eq!(res.status(), StatusCode::OK);
     let list = body_string(
         app.clone()
             .oneshot(get("/admin/api/v1/accounts", Some(&cookie)))
@@ -828,7 +834,7 @@ async fn account_suspend_toggles_flag_blocks_self_and_panel_login() {
         ))
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(res.status(), StatusCode::OK);
 
     // An operator can't suspend themselves (avoid locking themselves out).
     let res = app
@@ -878,7 +884,7 @@ async fn suspended_operator_cannot_log_into_the_panel() {
         ))
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(res.status(), StatusCode::OK);
     // Now `second`'s login is refused (uniform 401).
     assert_eq!(
         app.oneshot(login("second", PASSWORD))
@@ -894,6 +900,14 @@ async fn build_with_live(live: Arc<dyn weft_admin::Live>) -> axum::Router {
     let admin: weft_proto::Account = "admin".parse().unwrap();
     store
         .register(&admin, PasswordHash::new(PASSWORD).as_phc())
+        .await
+        .unwrap();
+    // A non-operator target for the live actions (kick / disconnect / suspend).
+    store
+        .register(
+            &"mallory".parse().unwrap(),
+            PasswordHash::new(PASSWORD).as_phc(),
+        )
         .await
         .unwrap();
     let auth = auth::config(b"a-test-session-secret".to_vec(), [admin]);
@@ -1313,4 +1327,272 @@ async fn operator_promotion_guards_against_lockout() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn forced_logout_cuts_live_sessions_and_rides_along_with_suspend() {
+    // Standalone (no live server in this process): there are no sessions to
+    // reach, so say so rather than reporting a success that did nothing.
+    let app = build().await;
+    let cookie = session(&app).await;
+    let res = app
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/mallory/disconnect",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // Embedded: the live port is called and the cut count comes back.
+    let live = MockLive::default();
+    let app = build_with_live(Arc::new(live.clone())).await;
+    let cookie = session(&app).await;
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/mallory/disconnect",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(body_string(res).await.contains("\"sessions_closed\":2"));
+    assert_eq!(live.disconnects.lock().unwrap().as_slice(), &["mallory"]);
+
+    // An unknown account is a 404, not a silent no-op.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/nobody/disconnect",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Suspend cuts sessions in the same action — a suspension that left the
+    // account's current devices connected would only be half a suspension.
+    live.disconnects.lock().unwrap().clear();
+    let res = app
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/mallory/suspend",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(body_string(res).await.contains("\"sessions_closed\":2"));
+    assert_eq!(live.disconnects.lock().unwrap().as_slice(), &["mallory"]);
+}
+
+// ---- WC7 room actions + report bulk actions ----
+
+#[tokio::test]
+async fn channel_freeze_and_typed_name_delete() {
+    use weft_store::ChannelStore;
+    let store = Arc::new(MemoryStore::default());
+    let admin: weft_proto::Account = "admin".parse().unwrap();
+    store
+        .register(&admin, PasswordHash::new(PASSWORD).as_phc())
+        .await
+        .unwrap();
+    let channel: weft_proto::ChannelName = "#general".parse().unwrap();
+    store
+        .upsert_channel(
+            &channel,
+            weft_proto::RetentionPolicy::Permanent,
+            weft_proto::ChannelKind::Text,
+        )
+        .await
+        .unwrap();
+    let auth = auth::config(b"a-test-session-secret".to_vec(), [admin]);
+    let app = weft_admin::router(AdminState::from_store(
+        Arc::clone(&store),
+        auth,
+        "test.net".into(),
+    ));
+    let cookie = session(&app).await;
+
+    // Freeze → the flag lands and the detail reports it.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/channels/%23general/freeze",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert!(store.channel(&channel).await.unwrap().unwrap().frozen);
+    let detail = body_string(
+        app.clone()
+            .oneshot(get(
+                "/admin/api/v1/channels/%23general/detail",
+                Some(&cookie),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(detail.contains("\"frozen\":true"), "{detail}");
+
+    // Unfreeze is the exact inverse.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/channels/%23general/unfreeze",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert!(!store.channel(&channel).await.unwrap().unwrap().frozen);
+
+    // An unknown channel is a 404, not a silent success.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/channels/%23nope/freeze",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // WC3-style typed-name gate on delete: no confirm, and a wrong one, both 400.
+    for path in [
+        "/admin/api/v1/channels/%23general",
+        "/admin/api/v1/channels/%23general?confirm=%23wrong",
+    ] {
+        let res = app.clone().oneshot(del(path, &cookie)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{path}");
+    }
+    assert!(store.channel(&channel).await.unwrap().is_some());
+
+    // The exact name deletes it.
+    let res = app
+        .oneshot(del(
+            "/admin/api/v1/channels/%23general?confirm=%23general",
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert!(store.channel(&channel).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_full_namespace_freeze_needs_destroy_not_just_moderate() {
+    // Silencing an entire community is not a routine moderation call, so the
+    // full freeze sits behind `admin.destroy`.
+    let app = build_with_delegate(&["admin.read", "admin.moderate"]).await;
+    let cookie = login_as(&app, "delegate").await;
+    let res = app
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/gaming/freeze",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn reports_resolve_in_bulk_and_report_partial_outcomes() {
+    use weft_store::{ReportRecord, ReportStore, Scope};
+    let store = Arc::new(MemoryStore::default());
+    let admin: weft_proto::Account = "admin".parse().unwrap();
+    store
+        .register(&admin, PasswordHash::new(PASSWORD).as_phc())
+        .await
+        .unwrap();
+    // Three open reports in the same scope — the spam-wave shape.
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let id = format!("rep-{i}");
+        store
+            .file_report(ReportRecord {
+                id: id.clone(),
+                msgid: format!("test.net/01ARZ3NDEKTSV4RRFFQ69G5FA{i}")
+                    .parse()
+                    .unwrap(),
+                scope: Scope::Channel("#general".parse().unwrap()),
+                category: "spam".to_string(),
+                state: weft_proto::ContentState::Verified,
+                reporter: "ada".parse().unwrap(),
+                note: None,
+                queue_scopes: vec!["*".to_string()],
+                status: weft_proto::ReportStatus::Open,
+                filed_at_ms: 1,
+                held_roots: Vec::new(),
+                resolution: None,
+                holds_released: false,
+            })
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    let auth = auth::config(b"a-test-session-secret".to_vec(), [admin]);
+    let app = weft_admin::router(AdminState::from_store(
+        Arc::clone(&store),
+        auth,
+        "test.net".into(),
+    ));
+    let cookie = session(&app).await;
+
+    // Two real ids + one that doesn't exist: partial success is reported
+    // honestly rather than hidden behind one all-or-nothing status.
+    let body = format!(
+        r#"{{"ids":["{}","{}","ghost"],"action":"dismissed"}}"#,
+        ids[0], ids[1]
+    );
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/reports/bulk-resolve",
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let out = body_string(res).await;
+    assert!(out.contains("rep-0") && out.contains("rep-1"), "{out}");
+    assert!(out.contains("\"unchanged\":[\"ghost\"]"), "{out}");
+
+    // The two really are resolved; the untouched third is still open.
+    assert_eq!(
+        store.report(&ids[0]).await.unwrap().unwrap().status,
+        weft_proto::ReportStatus::Resolved
+    );
+    assert_eq!(
+        store.report(&ids[2]).await.unwrap().unwrap().status,
+        weft_proto::ReportStatus::Open
+    );
+
+    // An empty batch and an unknown action are both rejected up front.
+    for body in [
+        r#"{"ids":[],"action":"dismissed"}"#,
+        r#"{"ids":["rep-2"],"action":"vibes"}"#,
+    ] {
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/admin/api/v1/reports/bulk-resolve",
+                &cookie,
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
 }

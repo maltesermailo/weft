@@ -709,6 +709,7 @@ impl ChannelStore for MemoryStore {
                 topic: None,
                 view_gated: false,
                 restricted: false,
+                frozen: false,
                 category: None,
                 position: 0,
                 kind,
@@ -760,6 +761,14 @@ impl ChannelStore for MemoryStore {
         let mut inner = self.inner.lock().expect("store lock");
         if let Some(record) = inner.channels.get_mut(name) {
             record.restricted = restricted;
+        }
+        Ok(())
+    }
+
+    async fn set_channel_frozen(&self, name: &ChannelName, frozen: bool) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(record) = inner.channels.get_mut(name) {
+            record.frozen = frozen;
         }
         Ok(())
     }
@@ -1137,6 +1146,18 @@ impl NamespaceStore for MemoryStore {
         let mut inner = self.inner.lock().expect("store lock");
         if let Some(ns) = inner.namespaces.get_mut(name) {
             ns.visibility = visibility.to_string();
+        }
+        Ok(())
+    }
+
+    async fn set_namespace_frozen(
+        &self,
+        name: &NamespaceName,
+        frozen: bool,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(ns) = inner.namespaces.get_mut(name) {
+            ns.frozen = frozen;
         }
         Ok(())
     }

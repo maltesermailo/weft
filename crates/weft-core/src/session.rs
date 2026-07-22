@@ -77,10 +77,21 @@ const DEDUP_WINDOW: Duration = Duration::from_secs(300);
 /// §8: MALFORMED — close after 5 per 60 s.
 const MALFORMED_LIMIT: usize = 5;
 const MALFORMED_WINDOW: Duration = Duration::from_secs(60);
-/// §2.4 recovery delay windows: rung 2 (social quorum) 7 days, rung 3
-/// (operator last resort) 30 days.
+/// §2.4 recovery delay windows: rung 2 (social quorum) 7 days.
 const RECOVERY_DELAY_RUNG2_SECS: u64 = 7 * 24 * 3600;
-const RECOVERY_DELAY_RUNG3_SECS: u64 = 30 * 24 * 3600;
+/// §2.4 rung 3 (operator takeover) — **zero delay, by deployment decision**
+/// (spec Appendix A). The spec's original 30-day window made the rung useless
+/// for its actual job: seizing a namespace whose owner is *actively* abusing it.
+/// A moderator cannot wait a month, and the delay's purpose — letting a live
+/// root veto a hostile recovery — is exactly what must NOT happen when the root
+/// is the problem.
+///
+/// The two accountability properties that don't depend on the delay are kept,
+/// and they are what make this honest: the takeover is **announced** to members
+/// and is **permanently marked operator-initiated in `root-history`**, visible
+/// to every member and bridge peer forever. What is knowingly given up is the
+/// root's veto window (invariant 9's "delay + root-cancellable"). See §2.4.
+const RECOVERY_DELAY_RUNG3_SECS: u64 = 0;
 /// §6.7 report rate limit: RECOMMENDED 10 per rolling hour, per account.
 const REPORT_RATE_LIMIT: u64 = 10;
 const REPORT_RATE_WINDOW_MS: u64 = 3600 * 1000;
@@ -401,6 +412,11 @@ struct Session<S> {
     /// Account-scoped events (DMs, MARK sync) from the directory.
     direct_tx: mpsc::Sender<DirectEvent>,
     direct_rx: mpsc::Receiver<DirectEvent>,
+    /// WC7 forced logout: this session's own cancellation, handed to the account
+    /// directory at register time. Cancelling it drops the session out of its
+    /// loop and through the ordinary `cleanup` (so parts/voice leaves still
+    /// broadcast) — distinct from `ctx.shutdown`, which stops *every* session.
+    close: tokio_util::sync::CancellationToken,
     /// Labels of own DM commands awaiting their echo — the directory
     /// counterpart of each channel's `pending` FIFO, same ordering
     /// argument (one mpsc into one actor).
@@ -473,6 +489,7 @@ impl<S: ControlStream> Session<S> {
             events_rx,
             direct_tx,
             direct_rx,
+            close: tokio_util::sync::CancellationToken::new(),
             pending_direct: VecDeque::new(),
             registered: None,
             dedup: HashMap::new(),
@@ -516,6 +533,12 @@ impl<S: ControlStream> Session<S> {
                 // (a command in `on_line` runs to completion first), so no
                 // in-flight work is interrupted; `run_session` then cleans up.
                 _ = self.ctx.shutdown.cancelled() => return Ok(()),
+                // WC7 forced logout: an operator cut this session. Same shape as
+                // shutdown — leave the loop and let `cleanup` run.
+                _ = self.close.cancelled() => {
+                    debug!("session closed by operator");
+                    return Ok(());
+                }
             };
             match action {
                 Action::Line(None) => return Ok(()), // peer closed

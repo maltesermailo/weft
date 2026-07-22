@@ -79,7 +79,12 @@ impl<S: ControlStream> Session<S> {
         // Join the account directory (DM delivery, MARK sync)...
         self.ctx
             .directory
-            .register(account.clone(), self.id, self.direct_tx.clone())
+            .register(
+                account.clone(),
+                self.id,
+                self.direct_tx.clone(),
+                self.close.clone(),
+            )
             .await;
         // ...and restore read state (§9.7: MARKED snapshot after auth).
         match self.ctx.accounts.marks(&account).await {

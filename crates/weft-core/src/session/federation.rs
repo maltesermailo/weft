@@ -1178,22 +1178,49 @@ impl<S: ControlStream> Session<S> {
         {
             return Ok(Some((ErrCode::Forbidden, "muted")));
         }
-        let restricted = self
-            .ctx
-            .channel_store
-            .channel(channel)
-            .await?
-            .map(|c| c.restricted)
-            .unwrap_or(false);
-        if restricted {
-            let scope = TokenScope::Channel(channel.to_string());
-            if !self
+        // WC7 **full freeze** (namespace-wide) outranks everything below it:
+        // only the namespace *owner* and network operators may speak. A
+        // delegated `ns-admin` cannot — that's the point of the higher rung.
+        if let Some(ns) = channel_namespace(channel) {
+            if self
+                .ctx
+                .namespaces
+                .namespace(&ns)
+                .await?
+                .is_some_and(|n| n.frozen && &n.owner != account)
+                && !self
+                    .ctx
+                    .account_has_cap(
+                        account,
+                        &Capability::NsAdmin,
+                        &TokenScope::Wildcard,
+                        unix_now(),
+                    )
+                    .await?
+            {
+                return Ok(Some((ErrCode::Forbidden, "frozen")));
+            }
+        }
+
+        let record = self.ctx.channel_store.channel(channel).await?;
+        let scope = TokenScope::Channel(channel.to_string());
+        // WC7 freeze outranks the posting mode: a frozen channel takes nobody's
+        // messages but an `ns-admin`'s, so a moderator can still say why.
+        if record.as_ref().is_some_and(|c| c.frozen)
+            && !self
+                .ctx
+                .account_has_cap(account, &Capability::NsAdmin, &scope, unix_now())
+                .await?
+        {
+            return Ok(Some((ErrCode::Forbidden, "frozen")));
+        }
+        if record.map(|c| c.restricted).unwrap_or(false)
+            && !self
                 .ctx
                 .account_has_cap(account, &Capability::Send, &scope, unix_now())
                 .await?
-            {
-                return Ok(Some((ErrCode::CapRequired, "send")));
-            }
+        {
+            return Ok(Some((ErrCode::CapRequired, "send")));
         }
         Ok(None)
     }

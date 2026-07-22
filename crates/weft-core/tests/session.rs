@@ -14,6 +14,7 @@ use weft_core::{
 };
 use weft_proto::RetentionPolicy;
 use weft_proto::{ErrCode, Event, MemberAction, Reply, VoiceAction};
+use weft_store::{ChannelStore, NamespaceStore};
 
 struct MockStream {
     from_client: mpsc::UnboundedReceiver<String>,
@@ -145,26 +146,39 @@ fn ctx_full(
     registration_open: bool,
     operators: &[&str],
 ) -> Arc<ServerCtx> {
+    ctx_full_store(channels, registration_open, operators).0
+}
+
+/// Like [`ctx_full`], but also hands back the backing store — for the handful of
+/// tests that assert on state the wire has no verb for (e.g. the WC7 channel
+/// freeze, which is an admin-panel action).
+fn ctx_full_store(
+    channels: &[(&str, &str)],
+    registration_open: bool,
+    operators: &[&str],
+) -> (Arc<ServerCtx>, Arc<MemoryStore>) {
+    let store = Arc::new(MemoryStore::default());
     let info = ServerInfo {
         network: "test.example".parse().unwrap(),
         motd: Some("welcome!".to_string()),
         features: Vec::new(),
     };
-    Arc::new(ServerCtx::new(
+    let ctx = Arc::new(ServerCtx::new(
         info,
         channels
             .iter()
             .map(|(c, p)| (c.parse().unwrap(), p.parse::<RetentionPolicy>().unwrap())),
         Keypair::generate(),
         registration_open,
-        Arc::new(MemoryStore::default()),
+        Arc::clone(&store),
         Arc::new(weft_core::MemBlobStore::default()),
         "permanent".parse().unwrap(), // §9.5 DM default
         operators.iter().map(|o| o.parse().unwrap()),
         true, // §2.2 namespace creation open
         10,   // quota
         weft_core::FederationConfig::default(),
-    ))
+    ));
+    (ctx, store)
 }
 
 fn connect(ctx: &Arc<ServerCtx>) -> Client {
@@ -1987,6 +2001,113 @@ async fn recovery_applies_at_expiry_via_scheduler() {
     assert!(!history[0].operator_initiated);
 }
 
+#[tokio::test]
+async fn operator_takeover_seizes_the_namespace_immediately() {
+    use weft_core::NamespaceStore;
+    // §2.4 rung 3, zero delay (Appendix A amendment). The moderation case: the
+    // *owner* is the abuse, so the seizure must not sit in a window the owner
+    // could veto. What survives is accountability, not delay — the rotation is
+    // announced and permanently marked operator-initiated.
+    let store = Arc::new(MemoryStore::default());
+    let network_key = Keypair::generate();
+    let info = weft_core::ServerInfo {
+        network: "test.example".parse().unwrap(),
+        motd: None,
+        features: Vec::new(),
+    };
+    let ctx = Arc::new(ServerCtx::new(
+        info,
+        std::iter::empty(),
+        Keypair::from_seed_b64(&network_key.seed_b64()).unwrap(),
+        true,
+        Arc::clone(&store),
+        Arc::new(weft_core::MemBlobStore::default()),
+        "permanent".parse().unwrap(),
+        std::iter::empty::<weft_proto::Account>(),
+        true,
+        10,
+        weft_core::FederationConfig::default(),
+    ));
+
+    let root = Keypair::generate();
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!(
+        "@root={} NS CREATE gaming unlisted",
+        root.public().to_b64()
+    ));
+    ada.recv().await;
+
+    // The operator signs a rotation with the *network* key — that signature is
+    // what makes it rung 3. No recovery set is configured, so rung 2 can't apply.
+    let new_root = Keypair::generate();
+    let record = weft_crypto::RotationRecord {
+        namespace: "gaming".into(),
+        new_root_key: new_root.public(),
+        new_owner: "moderator".into(),
+    };
+    let signed = weft_crypto::SignedRotation {
+        record: record.clone(),
+        signatures: vec![record.sign(&network_key)],
+    };
+    ada.send(&format!("@label=r NS RECOVER gaming {}", signed.to_b64()));
+    let reply = drain_until_label(&mut ada, "r").await;
+    assert!(
+        matches!(&reply.event, Event::NsMeta { .. }),
+        "the takeover announces, got {reply:?}"
+    );
+
+    let ns_name: weft_proto::NamespaceName = "gaming".parse().unwrap();
+    let ns_store: Arc<dyn NamespaceStore> = store;
+    let seized = ns_store.namespace(&ns_name).await.unwrap().unwrap();
+    // Applied *now* — not parked as pending for a scheduler tick.
+    assert_eq!(seized.owner.as_str(), "moderator");
+    assert_eq!(seized.root_key, new_root.public().to_b64());
+    assert!(
+        seized.pending_recovery.is_none(),
+        "a zero-delay rung leaves no window to cancel"
+    );
+    // ...and there is nothing left for the scheduler to do.
+    assert_eq!(
+        weft_core::apply_due_recoveries(&ns_store, u64::MAX).await,
+        0
+    );
+
+    // The permanent audit mark — the property that replaces the delay.
+    let history = ns_store.root_history(&ns_name).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert!(
+        history[0].operator_initiated,
+        "a rung-3 seizure is marked operator-initiated forever"
+    );
+}
+
+#[tokio::test]
+async fn a_takeover_still_needs_the_network_key() {
+    // The zero delay removes the *window*, never the authorization. A rotation
+    // signed by a stranger is refused exactly as before.
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let root = Keypair::generate();
+    ada.send(&format!(
+        "@root={} NS CREATE gaming unlisted",
+        root.public().to_b64()
+    ));
+    ada.recv().await;
+
+    let impostor = Keypair::generate();
+    let record = weft_crypto::RotationRecord {
+        namespace: "gaming".into(),
+        new_root_key: Keypair::generate().public(),
+        new_owner: "mallory".into(),
+    };
+    let signed = weft_crypto::SignedRotation {
+        record: record.clone(),
+        signatures: vec![record.sign(&impostor)],
+    };
+    ada.send(&format!("@label=x NS RECOVER gaming {}", signed.to_b64()));
+    ada.expect_err(ErrCode::Forbidden).await;
+}
+
 // ---- §6.7 reporting + retention holds ----
 
 #[tokio::test]
@@ -2975,6 +3096,105 @@ async fn restricted_channel_gates_posting_on_send_cap() {
     bob.send("MSG #locked :now i can");
     loop {
         if matches!(bob.recv().await.event, Event::Message(ref m) if m.body == "now i can") {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_frozen_channel_takes_nobody_but_a_moderator() {
+    // WC7 room action. A freeze is a blanket lock, unlike `restricted` (which
+    // delegates posting to the `send` cap) — so holding `send` is *not* enough
+    // to talk through it, but an ns-admin can still post the reason.
+    let (ctx, store) = ctx_full_store(&[], true, &["mod"]);
+    let mut op = ready(&ctx, "mod").await;
+    op.send("CHANNEL CREATE #cooldown");
+    op.recv().await; // POLICY
+    op.send("JOIN #cooldown");
+    op.recv().await; // MEMBER
+    op.recv().await; // POLICY
+
+    let mut bob = joined(&ctx, "bob", "#cooldown").await;
+    op.recv().await; // bob's join broadcast
+                     // Give bob `send`, so the freeze — not a missing cap — is what stops him.
+    op.send("GRANT bob #cooldown send");
+    op.recv().await; // TOKEN
+
+    let channel: weft_proto::ChannelName = "#cooldown".parse().unwrap();
+    store.set_channel_frozen(&channel, true).await.unwrap();
+
+    bob.send("MSG #cooldown :can i talk");
+    let Event::Err(e) = bob.expect_err(ErrCode::Forbidden).await.event else {
+        panic!()
+    };
+    assert_eq!(e.context.as_deref(), Some("frozen"));
+
+    // The moderator (operator ⇒ holds ns-admin everywhere) still can.
+    op.send("MSG #cooldown :locked while we sort this out");
+    loop {
+        if matches!(op.recv().await.event, Event::Message(ref m) if m.body.starts_with("locked")) {
+            break;
+        }
+    }
+
+    // Unfreezing restores bob's access — the freeze is reversible and left his
+    // grant untouched.
+    store.set_channel_frozen(&channel, false).await.unwrap();
+    bob.send("MSG #cooldown :thanks");
+    loop {
+        if matches!(bob.recv().await.event, Event::Message(ref m) if m.body == "thanks") {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_full_namespace_freeze_admits_only_the_owner() {
+    // WC7 **full freeze** — the rung above a channel freeze. It locks every
+    // channel in a namespace and, unlike the channel freeze, a delegated
+    // `ns-admin` cannot talk through it either: only the namespace *owner* and
+    // network operators can. That distinction is the whole point, so it's what
+    // this asserts.
+    let (ctx, store) = ctx_full_store(&[], true, &[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    ada.send("CHANNEL CREATE #gaming/lobby");
+    ada.recv().await; // POLICY
+    ada.send("JOIN #gaming/lobby");
+    ada.recv().await; // MEMBER
+    ada.recv().await; // POLICY
+
+    // bob is a delegated ns-admin — full moderation authority in the namespace.
+    let mut bob = joined(&ctx, "bob", "#gaming/lobby").await;
+    ada.recv().await; // bob's join broadcast
+    ada.send("GRANT bob ns:gaming ns-admin");
+    ada.recv().await; // TOKEN
+
+    let ns: weft_proto::NamespaceName = "gaming".parse().unwrap();
+    store.set_namespace_frozen(&ns, true).await.unwrap();
+
+    // Even an ns-admin is silenced by a full freeze.
+    bob.send("MSG #gaming/lobby :i'm an admin though");
+    let Event::Err(e) = bob.expect_err(ErrCode::Forbidden).await.event else {
+        panic!()
+    };
+    assert_eq!(e.context.as_deref(), Some("frozen"));
+
+    // The owner still speaks.
+    ada.send("MSG #gaming/lobby :everything is paused");
+    loop {
+        if matches!(ada.recv().await.event, Event::Message(ref m) if m.body.starts_with("everything"))
+        {
+            break;
+        }
+    }
+
+    // Lifting it restores the namespace.
+    store.set_namespace_frozen(&ns, false).await.unwrap();
+    bob.send("MSG #gaming/lobby :back");
+    loop {
+        if matches!(bob.recv().await.event, Event::Message(ref m) if m.body == "back") {
             break;
         }
     }
@@ -4350,4 +4570,41 @@ async fn relay_lifecycle_refcounts_then_drops_by_peer() {
         !stopped.iter().any(|(_, c)| c == "#c"),
         "other peer's relay survives: {stopped:?}"
     );
+}
+
+#[tokio::test]
+async fn an_operator_disconnect_closes_the_session_and_drops_its_presence() {
+    // WC7 forced logout. Suspending an account only blocks *new* logins, so the
+    // panel also needs to cut the sessions it already has. A cut session must
+    // unwind through the ordinary cleanup, so co-members see exactly what any
+    // disconnect looks like — the member goes offline (persistent membership is
+    // retained, §6.3), never a ghost that stays lit.
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bob = joined(&ctx, "bob", "#general").await;
+    ada.recv().await; // bob's join broadcast
+
+    let account: weft_proto::Account = "bob".parse().unwrap();
+    assert_eq!(ctx.disconnect_account(&account).await, 1);
+
+    // bob's stream closes...
+    assert!(bob.closed().await);
+    // ...and ada sees him go offline.
+    let reply = loop {
+        let r = ada.recv().await;
+        if matches!(r.event, Event::Presence { .. }) {
+            break r;
+        }
+    };
+    let Event::Presence { user, status } = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(user.account.as_str(), "bob");
+    assert_eq!(*status, weft_proto::PresenceStatus::Offline);
+
+    // Idempotent: an account with nothing live cuts zero.
+    assert_eq!(ctx.disconnect_account(&account).await, 0);
+    // ada is untouched — a targeted logout is not a broadcast shutdown.
+    ada.send("@label=p PING :still here");
+    assert_eq!(ada.recv().await.label.as_deref(), Some("p"));
 }

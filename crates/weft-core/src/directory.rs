@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use ulid::Ulid;
 use weft_proto::{
@@ -42,6 +43,17 @@ enum Cmd {
         account: Account,
         session: SessionId,
         queue: mpsc::Sender<DirectEvent>,
+        /// Cancelled to force this session's loop to exit (WC7 forced logout).
+        close: CancellationToken,
+    },
+    /// WC7: cut every live session of `account` — the operator-side counterpart
+    /// to suspend, which only blocks *new* logins. Replies with how many were
+    /// closed. Each session's own loop observes the cancellation and runs its
+    /// ordinary `cleanup`, so co-members see a normal disconnect (presence
+    /// offline, voice leave) rather than a session that silently vanishes.
+    Disconnect {
+        account: Account,
+        reply: oneshot::Sender<usize>,
     },
     Deregister {
         account: Account,
@@ -108,6 +120,7 @@ impl Directory {
         account: Account,
         session: SessionId,
         queue: mpsc::Sender<DirectEvent>,
+        close: CancellationToken,
     ) {
         let _ = self
             .inbox
@@ -115,8 +128,27 @@ impl Directory {
                 account,
                 session,
                 queue,
+                close,
             })
             .await;
+    }
+
+    /// WC7 forced logout: close every live session of `account`, returning how
+    /// many were cut. Idempotent — an account with no sessions returns 0.
+    pub(crate) async fn disconnect(&self, account: &Account) -> usize {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .inbox
+            .send(Cmd::Disconnect {
+                account: account.clone(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return 0;
+        }
+        rx.await.unwrap_or(0)
     }
 
     pub(crate) async fn deregister(&self, account: Account, session: SessionId) {
@@ -277,12 +309,20 @@ pub(crate) fn spawn(
     Directory { inbox: inbox_tx }
 }
 
+/// One live session of an account: its direct-event queue plus the token that
+/// forces it to close (WC7).
+struct SessionEntry {
+    id: SessionId,
+    queue: mpsc::Sender<DirectEvent>,
+    close: CancellationToken,
+}
+
 struct Actor {
     network: NetworkName,
     dm_policy: RetentionPolicy,
     events: Arc<dyn EventStore>,
     accounts: Arc<dyn AccountStore>,
-    sessions: HashMap<Account, Vec<(SessionId, mpsc::Sender<DirectEvent>)>>,
+    sessions: HashMap<Account, Vec<SessionEntry>>,
     ulids: ulid::Generator,
 }
 
@@ -299,19 +339,37 @@ impl Actor {
                 account,
                 session,
                 queue,
+                close,
             } => {
                 self.sessions
                     .entry(account)
                     .or_default()
-                    .push((session, queue));
+                    .push(SessionEntry {
+                        id: session,
+                        queue,
+                        close,
+                    });
             }
             Cmd::Deregister { account, session } => {
                 if let Some(sessions) = self.sessions.get_mut(&account) {
-                    sessions.retain(|(id, _)| *id != session);
+                    sessions.retain(|s| s.id != session);
                     if sessions.is_empty() {
                         self.sessions.remove(&account);
                     }
                 }
+            }
+            Cmd::Disconnect { account, reply } => {
+                // Cancel only — each session deregisters itself as it unwinds
+                // through `cleanup`, so co-members still see the parts/leaves.
+                let n = self
+                    .sessions
+                    .get(&account)
+                    .map(|sessions| {
+                        sessions.iter().for_each(|s| s.close.cancel());
+                        sessions.len()
+                    })
+                    .unwrap_or(0);
+                let _ = reply.send(n);
             }
             Cmd::IsOnline { account, reply } => {
                 let _ = reply.send(self.sessions.contains_key(&account));
@@ -452,8 +510,9 @@ impl Actor {
                 // The marking session already got its labeled echo; this
                 // syncs the account's other devices only — both the new marker
                 // and the refreshed unread counts, so their badges update.
-                for (session, queue) in self.sessions.get(&account).into_iter().flatten() {
-                    if *session == origin {
+                for entry in self.sessions.get(&account).into_iter().flatten() {
+                    let queue = &entry.queue;
+                    if entry.id == origin {
                         continue;
                     }
                     push(
@@ -482,7 +541,8 @@ impl Actor {
             Cmd::Notify { account, event } => {
                 // origin 0 is never a real session id (they start at 1), so
                 // on_direct delivers this as a plain, unlabeled event.
-                for (_, queue) in self.sessions.get(&account).into_iter().flatten() {
+                for entry in self.sessions.get(&account).into_iter().flatten() {
+                    let queue = &entry.queue;
                     push(
                         queue,
                         DirectEvent {
@@ -497,12 +557,12 @@ impl Actor {
 
     /// Deliver to every session of both participants (once, if self-DM).
     fn deliver(&self, a: &Account, b: &Account, origin: SessionId, event: Event) {
-        let mut targets: Vec<&(SessionId, mpsc::Sender<DirectEvent>)> =
-            self.sessions.get(a).into_iter().flatten().collect();
+        let mut targets: Vec<&SessionEntry> = self.sessions.get(a).into_iter().flatten().collect();
         if b != a {
             targets.extend(self.sessions.get(b).into_iter().flatten());
         }
-        for (_, queue) in targets {
+        for entry in targets {
+            let queue = &entry.queue;
             push(
                 queue,
                 DirectEvent {

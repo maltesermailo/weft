@@ -959,6 +959,16 @@ impl ChannelStore for PgStore {
         Ok(())
     }
 
+    async fn set_channel_frozen(&self, name: &ChannelName, frozen: bool) -> Result<(), StoreError> {
+        sqlx::query("UPDATE weft_channels SET frozen = $2 WHERE name = $1")
+            .bind(name.as_str())
+            .bind(frozen)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
     async fn delete_channel(&self, name: &ChannelName) -> Result<bool, StoreError> {
         let result = sqlx::query("DELETE FROM weft_channels WHERE name = $1")
             .bind(name.as_str())
@@ -1075,6 +1085,8 @@ fn channel_from_row(row: &sqlx::postgres::PgRow) -> Result<ChannelRecord, StoreE
         topic: row.get("topic"),
         view_gated: row.get("view_gated"),
         restricted: row.get("restricted"),
+        // Pre-0029 rows predate the column; a missing value means "not frozen".
+        frozen: row.try_get("frozen").unwrap_or(false),
         category: row.get("category"),
         position: row.get::<Option<i64>, _>("position").unwrap_or(0),
         kind: row
@@ -1424,6 +1436,20 @@ impl NamespaceStore for PgStore {
         Ok(())
     }
 
+    async fn set_namespace_frozen(
+        &self,
+        name: &NamespaceName,
+        frozen: bool,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE weft_namespaces SET frozen = $2 WHERE name = $1")
+            .bind(name.as_str())
+            .bind(frozen)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
     async fn set_namespace_federation(
         &self,
         name: &NamespaceName,
@@ -1616,6 +1642,8 @@ fn namespace_from_row(row: &sqlx::postgres::PgRow) -> Result<NamespaceRecord, St
             .map(str::to_string)
             .collect(),
         federation: row.get("federation"),
+        // Pre-0030 rows predate the column; missing means "not frozen".
+        frozen: row.try_get("frozen").unwrap_or(false),
     })
 }
 

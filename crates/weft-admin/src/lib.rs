@@ -40,6 +40,14 @@ pub trait Live: Send + Sync {
     /// mints the tombstone (attributed to `by`) and broadcasts `DELETED`.
     /// Returns false if the message or its channel can't be found live.
     async fn delete_message(&self, msgid: &weft_proto::MsgId, by: &weft_proto::Account) -> bool;
+
+    /// WC7 forced logout: cut every live session of `account`, returning how
+    /// many were closed. Suspend only blocks *new* logins — this ends the
+    /// already-connected ones. Each session runs its ordinary cleanup, so
+    /// co-members observe a normal disconnect (presence goes offline, voice
+    /// rooms broadcast a leave); persistent membership is retained, exactly as
+    /// when the client's own network drops.
+    async fn disconnect_account(&self, account: &weft_proto::Account) -> usize;
 }
 
 /// The stores the admin API touches, as trait objects — one process's backend

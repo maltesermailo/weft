@@ -658,22 +658,77 @@ a **wire-level conformance test** (`suspended_account_cannot_authenticate` —
 register → suspend → `AUTH PASSWORD` returns `AUTH-FAILED` → unsuspend →
 `WELCOME`). Browser-verified.
 
+**Shipped — forced device logout.** Suspend blocked *new* logins but left the
+account's current sessions running, so a suspended user could keep posting until
+they happened to disconnect. Each session now carries its own
+`CancellationToken`, handed to the account directory at register time alongside
+its event queue; `Directory::disconnect` cancels every token for an account and
+reports how many it cut. The session observes it in the same `select!` arm shape
+as `ctx.shutdown` and leaves through the **ordinary `cleanup`**, so co-members
+see a normal disconnect (presence → offline, voice-room leave) and persistent
+membership is retained — identical to the client's own network dropping, not a
+session that silently vanishes. Surfaced as `ServerCtx::disconnect_account` →
+`Live::disconnect_account` (embedded only) → `POST /accounts/:name/disconnect`
+(`admin.moderate`, audited, 404 on unknown, 503 standalone). **Suspend now cuts
+sessions in the same action**; both return `{"sessions_closed":n}` (so suspend
+answers 200, not 204). SPA: a "Force logout → Disconnect all devices" card, and
+the suspend copy no longer says sessions persist. Tests:
+`weft-core::an_operator_disconnect_closes_the_session_and_drops_its_presence`
+(cut → stream closes → co-member sees `Presence offline`, idempotent, and an
+untouched second session still answers PING) and
+`weft-admin::forced_logout_cuts_live_sessions_and_rides_along_with_suspend`.
+
+**Shipped — room actions (freeze / full freeze / delete).** Two freeze rungs,
+deliberately different in who they admit:
+- **Channel freeze** (`ChannelRecord.frozen`, migration `0029`): a blanket,
+  reversible posting lock. Unlike `restricted` — which *delegates* "who may
+  post" to the `send` capability — a frozen channel refuses everyone except
+  `ns-admin` holders, so a moderator can still post the "locked because…" note.
+  Holding `send` is explicitly not enough. `POST /channels/:name/freeze` /
+  `/unfreeze` (`admin.moderate`).
+- **Namespace full freeze** (`NamespaceRecord.frozen`, migration `0030`): locks
+  every channel in a namespace, and a **delegated `ns-admin` cannot talk through
+  it or lift it** — only the namespace *owner* and network operators. Gated on
+  `admin.destroy`, not `moderate`: silencing a whole community is not a routine
+  call. `POST /namespaces/:name/freeze` / `/unfreeze`.
+
+Both enforce in **one place** — `Session::can_post`, the single posting gate —
+ordered full-freeze → channel-freeze → `restricted`, so the broader lock wins.
+**Channel delete** reuses WC3's typed-name gate (`DELETE /channels/:name?confirm=`,
+`admin.destroy`). Tests: `weft-core::a_frozen_channel_takes_nobody_but_a_moderator`
+(a `send`-holder is still refused; the moderator posts; unfreeze restores the
+grant untouched), `weft-core::a_full_namespace_freeze_admits_only_the_owner` (a
+delegated ns-admin *is* silenced — the distinguishing claim), the store contract
+cases (both flags orthogonal to `restricted`/`federation`), and
+`weft-admin::channel_freeze_and_typed_name_delete` +
+`a_full_namespace_freeze_needs_destroy_not_just_moderate`. SPA: a "Room actions"
+card + danger zone on channel detail, posting state in the header, and a
+full-freeze column/action on the Namespaces list.
+
+**Shipped — report bulk actions.** `POST /reports/bulk-resolve`
+(`{ids, action, note}`, `admin.moderate`, ≤500 per call) applies one resolution
+across a selection. Partial success is **reported honestly** rather than hidden
+behind an all-or-nothing status: the response is
+`{"resolved":[…],"unchanged":[…]}`, where `unchanged` covers ids that were
+already resolved or never existed (indistinguishable at the store). One audit
+row per batch. SPA: per-row tick boxes on open reports, a select-all toggle, and
+an action/note bar. Test:
+`reports_resolve_in_bulk_and_report_partial_outcomes`.
+
 **Remaining (deferred):**
-- **Forced immediate device logout** — suspend blocks *new* logins; already-
-  connected sessions persist until they disconnect. Cutting them mid-session
-  needs a per-session close signal (the account directory is DM-delivery only,
-  `pub(crate)`); noted as the follow-on.
+- **Channel rename / transfer founder / federating tombstone.** Rename needs
+  live channel-actor re-keying (the store's `rename_channel` exists; the
+  registry + member forwarders do not re-key from the panel). *Transfer founder
+  stays out on purpose*: succession is root-key-signed `NS TRANSFER` (§2.4), not
+  admin fiat — the panel must not be able to hand a namespace over. Federating
+  tombstone needs manifest teardown.
+- **Reporter-excerpt signature verification** — needs the §5 signed-excerpt
+  report format (not built).
 - **Shadow-limit** (rate-limited + invisible to non-members) — needs
   rate-limiting infra beyond the existing `THROTTLED` plumbing + visibility
   gating; parked.
-- **Room actions** (rename, transfer founder, freeze, federating tombstone) —
-  live channel-actor re-keying (rename), root-key succession (transfer =
-  `NS TRANSFER`, not admin fiat), enforcement flags (freeze), and federation
-  teardown (tombstone) each need their own plumbing; channel delete rides the
-  WC3 typed-name gate when built. Force epoch rotation is E2EE-gated (WC6).
-- **Reports: bulk actions** + reporter-excerpt signature verification — the
-  latter needs the §5 signed-excerpt report format (not built). Reporter
-  confidentiality (invariant 12) stays enforced throughout regardless.
+- **Force epoch rotation** is E2EE-gated (WC6). Reporter confidentiality
+  (invariant 12) stays enforced throughout regardless.
 
 ### WC8 ☐ — IRC gateway ops
 

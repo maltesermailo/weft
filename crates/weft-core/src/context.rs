@@ -371,6 +371,15 @@ impl ServerCtx {
         }
     }
 
+    /// WC7 forced logout: close every live session of `account`, returning how
+    /// many were cut. Each session unwinds through its ordinary cleanup, so
+    /// co-members see a normal disconnect (presence offline, voice leave) and
+    /// persistent membership is retained — identical to the client's own network
+    /// dropping. Suspending blocks *new* logins; this cuts the existing ones.
+    pub async fn disconnect_account(&self, account: &Account) -> usize {
+        self.directory.disconnect(account).await
+    }
+
     /// weftd installs the §16 voice SFU backend (enables voice; `features=voice`).
     pub fn set_voice_backend(&self, backend: Arc<dyn crate::voice::VoiceBackend>) {
         let _ = self.voice.set(backend);
