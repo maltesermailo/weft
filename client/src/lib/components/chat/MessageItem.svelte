@@ -104,7 +104,9 @@
         {/if}
       </div>
       {#if app.pickerKey === m.key}
-        <EmojiPicker onpick={(v) => app.toggleReaction(m, v)} />
+        <div class="reaction-picker-pop">
+          <EmojiPicker onpick={(v) => app.toggleReaction(m, v)} />
+        </div>
       {/if}
     {/if}
   </div>

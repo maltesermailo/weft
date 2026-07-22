@@ -1111,12 +1111,12 @@ button:disabled {
   right: 0;
   z-index: 30;
 }
-.composer-emoji-pop .emoji-picker {
-  position: static;
-  top: auto;
-  right: auto;
-  max-height: 340px;
-  overflow-y: auto;
+/* Reaction picker popover (anchored to a message's react action). */
+.reaction-picker-pop {
+  position: absolute;
+  top: 26px;
+  right: 8px;
+  z-index: 20;
 }
 /* Thread reply indicator under a root message (Discord-style). */
 .thread-indicator {

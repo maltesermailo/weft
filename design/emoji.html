@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Emoji Picker</title>
+  <style>
+    :root{
+      --bg-0:#1e1f22;      /* page behind the picker */
+      --bg-1:#2b2d31;      /* picker body */
+      --bg-2:#232428;      /* rail / preview bar */
+      --bg-3:#383a40;      /* hover cells, inactive chips */
+      --bg-input:#1e1f22;
+      --text:#dbdee1;
+      --text-dim:#949ba4;
+      --accent:#5865f2;    /* focused search ring */
+      --radius:8px;
+      --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+    }
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{
+      background:var(--bg-0);
+      font-family:var(--sans);
+      color:var(--text);
+      display:flex;align-items:center;justify-content:center;
+      min-height:100vh;padding:24px;
+    }
+
+    .picker{
+      width:500px;max-width:100%;
+      background:var(--bg-1);
+      border-radius:10px;
+      box-shadow:0 8px 24px rgba(0,0,0,.45);
+      display:flex;flex-direction:column;
+      height:560px;
+      overflow:hidden;
+    }
+
+    /* ---------- top tabs ---------- */
+    .tabs{display:flex;gap:6px;padding:14px 14px 10px}
+    .tab{
+      font-size:14px;font-weight:600;color:var(--text-dim);
+      background:none;border:0;cursor:pointer;
+      padding:5px 12px;border-radius:6px;font-family:var(--sans);
+    }
+    .tab:hover{color:var(--text);background:var(--bg-3)}
+    .tab.active{color:#fff;background:var(--bg-3)}
+
+    /* ---------- search ---------- */
+    .search-area{display:flex;align-items:center;gap:12px;padding:0 14px 12px}
+    .search{
+      flex:1;display:flex;align-items:center;gap:8px;
+      background:var(--bg-input);
+      border:1px solid var(--accent);
+      box-shadow:0 0 0 1px var(--accent);
+      border-radius:8px;padding:8px 12px;
+    }
+    .search svg{flex:none;opacity:.6}
+    .search input{
+      flex:1;background:none;border:0;outline:none;
+      color:var(--text);font-size:14px;font-family:var(--sans);
+    }
+    .search input::placeholder{color:var(--text-dim)}
+    .mood{font-size:26px;line-height:1;flex:none;cursor:pointer;filter:saturate(1.1)}
+
+    /* ---------- body: rail + grid ---------- */
+    .body{flex:1;display:flex;min-height:0}
+
+    .rail{
+      width:48px;flex:none;
+      background:var(--bg-2);
+      display:flex;flex-direction:column;align-items:center;
+      gap:10px;padding:12px 0;
+      overflow-y:auto;scrollbar-width:none;
+    }
+    .rail::-webkit-scrollbar{display:none}
+    .rail-item{
+      width:32px;height:32px;border-radius:50%;flex:none;
+      display:flex;align-items:center;justify-content:center;
+      font-size:17px;cursor:pointer;
+      background:var(--bg-3);
+      border:0;
+      filter:grayscale(1) opacity(.75);
+      overflow:hidden;
+    }
+    .rail-item:hover,.rail-item.active{filter:none;opacity:1}
+    .rail-item.clock{background:none;font-size:20px}
+
+    .grid-wrap{flex:1;overflow-y:auto;padding:6px 10px 10px}
+    .grid-wrap::-webkit-scrollbar{width:8px}
+    .grid-wrap::-webkit-scrollbar-thumb{background:var(--bg-2);border-radius:4px}
+
+    .section{padding-top:8px}
+    .section-h{
+      display:flex;align-items:center;gap:6px;
+      font-size:12px;font-weight:700;color:var(--text-dim);
+      text-transform:none;
+      padding:4px 4px 6px;cursor:pointer;user-select:none;
+    }
+    .section-h:hover{color:var(--text)}
+    .section-h .chev{font-size:10px}
+    .section-h .ico{font-size:13px}
+    .section-h img{width:16px;height:16px;border-radius:50%}
+
+    .grid{display:grid;grid-template-columns:repeat(9,1fr)}
+    .cell{
+      aspect-ratio:1;
+      display:flex;align-items:center;justify-content:center;
+      font-size:26px;line-height:1;
+      border:0;background:none;border-radius:6px;cursor:pointer;
+      font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;
+    }
+    .cell:hover{background:var(--bg-3)}
+    .cell .custom{
+      width:30px;height:30px;border-radius:6px;
+      background:var(--bg-3);
+      display:flex;align-items:center;justify-content:center;
+      font-size:16px;filter:saturate(.8);
+    }
+    .cell .custom.dimmed{filter:grayscale(.6) opacity(.55)}
+
+    /* ---------- preview bar ---------- */
+    .preview{
+      flex:none;height:48px;
+      background:var(--bg-2);
+      display:flex;align-items:center;gap:12px;
+      padding:0 14px;
+    }
+    .preview .face{font-size:22px;opacity:.85}
+    .preview .big{font-size:26px}
+    .preview .name{font-size:14px;font-weight:600;color:var(--text)}
+  </style>
+</head>
+<body>
+
+<div class="picker">
+
+  <div class="tabs">
+    <button class="tab">GIFs</button>
+    <button class="tab">Sticker</button>
+    <button class="tab active">Emojis</button>
+  </div>
+
+  <div class="search-area">
+    <div class="search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+        <circle cx="10.5" cy="10.5" r="6.5" stroke="#dbdee1" stroke-width="2"/>
+        <path d="M15.5 15.5 L21 21" stroke="#dbdee1" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <input type="text" value=":heart: :red_heart:" aria-label="Search emoji">
+    </div>
+    <span class="mood" title="Random emoji">👏</span>
+  </div>
+
+  <div class="body">
+
+    <div class="rail" aria-label="Emoji categories">
+      <button class="rail-item clock active" title="Häufig verwendet">🕐</button>
+      <button class="rail-item" title="Server">👧</button>
+      <button class="rail-item" title="Server">🎯</button>
+      <button class="rail-item" title="Server">🖥️</button>
+      <button class="rail-item" title="Server">🅽</button>
+      <button class="rail-item" title="Server">🌐</button>
+      <button class="rail-item" title="Server">🟢</button>
+      <button class="rail-item" title="OwO Bot Support">🦉</button>
+    </div>
+
+    <div class="grid-wrap">
+
+      <div class="section">
+        <div class="section-h"><span class="ico">🕐</span> Häufig verwendet <span class="chev">▾</span></div>
+        <div class="grid" id="grid-frequent">
+          <button class="cell">❤️</button>
+          <button class="cell"><span class="custom">⬆️</span></button>
+          <button class="cell">✅</button>
+          <button class="cell"><span class="custom dimmed">🖼️</span></button>
+          <button class="cell"><span class="custom dimmed">🐦</span></button>
+          <button class="cell">😭</button>
+          <button class="cell">💻</button>
+          <button class="cell">🏠</button>
+          <button class="cell">⚙️</button>
+
+          <button class="cell">🚀</button>
+          <button class="cell">🐛</button>
+          <button class="cell">🔫</button>
+          <button class="cell">🪄</button>
+          <button class="cell">☢️</button>
+          <button class="cell">✨</button>
+          <button class="cell">❣️</button>
+          <button class="cell">🔧</button>
+          <button class="cell">✈️</button>
+
+          <button class="cell">📦</button>
+          <button class="cell">📋</button>
+          <button class="cell">🏭</button>
+          <button class="cell">🛠️</button>
+          <button class="cell">⛄</button>
+          <button class="cell">😂</button>
+          <button class="cell">☺️</button>
+          <button class="cell">🥺</button>
+          <button class="cell">1️⃣</button>
+
+          <button class="cell">🥰</button>
+          <button class="cell">👉</button>
+          <button class="cell">🤨</button>
+          <button class="cell">2️⃣</button>
+          <button class="cell"><span class="custom">🧊</span></button>
+          <button class="cell">🔮</button>
+          <button class="cell">📞</button>
+          <button class="cell">👉</button>
+          <button class="cell">⚠️</button>
+
+          <button class="cell">🚨</button>
+          <button class="cell">😢</button>
+          <button class="cell">🤛</button>
+          <button class="cell">‼️</button>
+          <button class="cell">❓</button>
+          <button class="cell"><span class="custom">🐱</span></button>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-h"><span class="ico">🦉</span> OwO Bot Support <span class="chev">▾</span></div>
+        <div class="grid">
+          <button class="cell"><span class="custom dimmed">🎁</span></button>
+          <button class="cell"><span class="custom dimmed">🐾</span></button>
+          <button class="cell"><span class="custom dimmed">🪙</span></button>
+          <button class="cell"><span class="custom dimmed">🌟</span></button>
+          <button class="cell"><span class="custom dimmed">🎲</span></button>
+          <button class="cell"><span class="custom dimmed">🦴</span></button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="preview">
+    <span class="face">☺️</span>
+    <span class="big" id="pv-emoji">❤️</span>
+    <span class="name" id="pv-name">:heart: :red_heart:</span>
+  </div>
+
+</div>
+
+<script>
+  // clicking an emoji updates the preview bar
+  const names = {
+    "❤️":":heart: :red_heart:", "✅":":white_check_mark:", "😭":":sob:",
+    "💻":":computer:", "🏠":":house_with_garden:", "⚙️":":gear:",
+    "🚀":":rocket:", "🐛":":bug:", "🔫":":water_gun:", "🪄":":magic_wand:",
+    "☢️":":radioactive:", "✨":":sparkles:", "❣️":":heart_exclamation:",
+    "🔧":":wrench:", "✈️":":airplane:", "📦":":package:", "📋":":clipboard:",
+    "🏭":":factory:", "🛠️":":hammer_and_wrench:", "⛄":":snowman:",
+    "😂":":joy:", "☺️":":relaxed:", "🥺":":pleading_face:", "1️⃣":":one:",
+    "🥰":":smiling_face_with_hearts:", "👉":":point_right:", "🤨":":raised_eyebrow:",
+    "2️⃣":":two:", "🔮":":crystal_ball:", "📞":":telephone_receiver:",
+    "⚠️":":warning:", "🚨":":rotating_light:", "😢":":cry:",
+    "🤛":":left_facing_fist:", "‼️":":bangbang:", "❓":":question:"
+  };
+  document.querySelectorAll('.cell').forEach(c=>{
+    c.addEventListener('mouseenter',()=>setPreview(c));
+    c.addEventListener('click',()=>setPreview(c));
+  });
+  function setPreview(cell){
+    const custom = cell.querySelector('.custom');
+    const e = custom ? custom.textContent.trim() : cell.textContent.trim();
+    document.getElementById('pv-emoji').textContent = e;
+    document.getElementById('pv-name').textContent =
+            names[e] || (custom ? ':custom_emoji:' : ':emoji:');
+  }
+
+  // tab + rail active states (visual)
+  document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+  }));
+  document.querySelectorAll('.rail-item').forEach(r=>r.addEventListener('click',()=>{
+    document.querySelectorAll('.rail-item').forEach(x=>x.classList.remove('active'));
+    r.classList.add('active');
+  }));
+
+  // search filters the frequent grid by shortcode name
+  document.querySelector('.search input').addEventListener('input',e=>{
+    const q = e.target.value.toLowerCase().replace(/:/g,'').trim();
+    document.querySelectorAll('#grid-frequent .cell').forEach(c=>{
+      const custom = c.querySelector('.custom');
+      const emo = custom ? custom.textContent.trim() : c.textContent.trim();
+      const name = (names[emo]||'').toLowerCase();
+      c.style.display = (!q || name.includes(q)) ? '' : 'none';
+    });
+  });
+</script>
+</body>
+</html>

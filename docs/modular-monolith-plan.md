@@ -144,14 +144,42 @@ routes, dialers, or admin; no `weft-cluster` yet.
 
 1. Envelope types + deterministic-CBOR codec + round-trip tests (no I/O yet — the codec
    half is L0-testable).
-2. Node identity: `node.key` generation (`weftd keygen-node`), node-cert signing by the
-   network identity key (extend `weft-crypto`, same module family as `rotation.rs`).
+2. Node identity: per-node keys + node certs signed by the network identity key (extend
+   `weft-crypto`, same module family as `rotation.rs`), managed via the `weftd key`
+   utility below.
 3. QUIC listener/dialer with the handshake; maintained inter-node connections with
    reconnect/backoff (clone the shape of `dialer::dial_loop`).
 4. `ClusterClient` / `ClusterServer` handles that later phases register methods on.
 
+**Key-management utility: `weftd key …`** — a subcommand family modeled on the existing
+`weftd admin` CLI (no server boot, quiet output). Today the network identity key is a
+file the server silently creates on first boot (`[identity] key_file`,
+`load_or_generate_key` in `weftd/src/lib.rs`); operators have no way to inspect it,
+pre-generate it, or mint the cluster credentials P1 introduces. Subcommands:
+
+- `weftd key show [config.toml | --file <key>]` — resolve the key from config (or an
+  explicit path) and print the **public** key (base64, exactly the line a peer pastes
+  into `[[peers]] key = "…"`), a short fingerprint, and the file path. The secret seed
+  is printed only with an explicit `--secret` flag (backup/migration).
+- `weftd key generate [--file <path>]` — pre-create a network key (same on-disk format
+  `load_or_generate_key` reads); **refuses to overwrite** an existing file.
+- `weftd key node new <node-name>` — generate a node key and mint its node cert signed
+  by the network key, in one step (the normal way to add a cluster node).
+- `weftd key node sign <node.pub>` / `weftd key node verify <cert>` — re-issue a cert
+  for an existing node key; inspect/verify a cert against the network public key.
+- `weftd key rotate [config.toml]` — deliberate and loud: writes a new network key with
+  a timestamped backup of the old one, then prints the blast radius before asking for
+  confirmation — every peer's `[[peers]]` pin breaks until they re-pin; node certs must
+  all be re-minted (`node sign`); `/.well-known/weft` serves the new key immediately so
+  unpinned auto-federation self-heals; NETBLOCK entries elsewhere are **unaffected**
+  (name-keyed by design, invariant 7 — rotation never evades a block). A wire-level
+  rotation announcement to peers does not exist in the protocol; whether to add one is
+  spec §18 territory (⚖ §9.7).
+
 *Exit criteria*: two test processes complete the handshake, exchange a CALL round-trip
-and a SUB stream; a bad node cert is rejected; codec round-trip tests green.
+and a SUB stream; a bad node cert is rejected; codec round-trip tests green; `weftd key`
+subcommands covered by CLI tests (show/generate/no-overwrite; node new→sign→verify
+round-trip; rotate backup + refuses without confirmation).
 
 ### P2 — Media role (first real split)
 
@@ -358,13 +386,18 @@ bot swarm) as part of P0 so every later phase has numbers.
    min-account-shard. Pick one, spec-note it, test it.
 6. **Whether P4 happens at all soon** — see §7; P0–P3 stand alone and are the
    recommended near-term slice.
+7. **Network-key rotation signaling** (P1 `weftd key rotate`): today rotation means
+   manual re-pinning by every peer. A signed rotation-announcement event over live
+   bridges (old key signs the new key, mirroring the §2.4 root-rotation shape) would
+   automate it — but it is a protocol addition and belongs in spec §18 before any
+   implementation.
 
 ## Appendix: phase → test surface summary
 
 | Phase | New tests | Existing suite |
 |---|---|---|
 | P0 | role-gated boot matrix | green, byte-identical default |
-| P1 | cluster codec round-trips; handshake accept/reject | untouched |
+| P1 | cluster codec round-trips; handshake accept/reject; `weftd key` CLI tests | untouched |
 | P2 | 2-process media conformance; signed-token unit tests | media suite now exercises signed tokens |
 | P3 | 4-process federation conformance; NETBLOCK on split listener | two-live-weftd re-run split |
 | P4 | 2-chat-node conformance; cross-node ordering; cross-node SLOW resync; node-loss semantics | full suite on 1-node placement (degenerate case) |

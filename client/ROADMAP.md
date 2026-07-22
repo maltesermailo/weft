@@ -116,8 +116,12 @@ Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
   picker (custom images + the unicode set) for reactions **and** the composer,
   and `:name:` rendered as inline images in messages + reaction pills. Store
   contract + proto round-trip + core black-box tests green; spec §9.4 amended.
-  *Deferred:* `:name:` autocomplete, skin tones, recently-used, and live
-  propagation to other members (clients refetch on namespace select).
+  *Deferred:* `:name:` autocomplete, skin tones, recently-used, live
+  propagation to other members (clients refetch on namespace select), and
+  **federation** — custom emoji are home-network-only (like media), so a
+  `:name:` in a bridged message renders as literal text on the receiving
+  network (needs origin-namespace resolution + cross-bridge `EMOJI LIST` +
+  §11.8 media mirroring).
 - [~] **Voice depth** — today: join/leave/mute/**deafen**/speaking rings.
   Missing: **screen share, video, per-user volume, device selection,
   push-to-talk**. LiveKit (M-lk-1/2/3) gives screenshare/video nearly free —
