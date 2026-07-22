@@ -36,9 +36,7 @@ pub async fn run(args: &[String]) -> Result<()> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--config" => config_path = Some(it.next().context("--config needs a path")?.clone()),
-            "--password" => {
-                password = Some(it.next().context("--password needs a value")?.clone())
-            }
+            "--password" => password = Some(it.next().context("--password needs a value")?.clone()),
             "-h" | "--help" => {
                 println!("{HELP}");
                 return Ok(());
@@ -68,7 +66,9 @@ pub async fn run(args: &[String]) -> Result<()> {
             if pw.is_empty() {
                 bail!("password must not be empty");
             }
-            let created = store.register(&account, PasswordHash::new(&pw).as_phc()).await?;
+            let created = store
+                .register(&account, PasswordHash::new(&pw).as_phc())
+                .await?;
             store.set_operator(&account, true).await?;
             if created {
                 println!("created operator account `{account}`");
@@ -124,5 +124,7 @@ async fn connect(config_path: Option<String>) -> Result<PgStore> {
         .url
         .as_deref()
         .context("storage.url is required for the postgres backend")?;
-    PgStore::connect(url).await.context("connecting to postgres")
+    PgStore::connect(url)
+        .await
+        .context("connecting to postgres")
 }

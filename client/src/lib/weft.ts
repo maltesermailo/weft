@@ -113,7 +113,7 @@ export type WeftEvent =
   | { kind: "pinned"; channel: string; msgid: string; by: string | null }
   | { kind: "unpinned"; channel: string; msgid: string }
   | { kind: "caps"; account: string; scope: string; caps: string }
-  | { kind: "role"; scope: string; color: string; caps: string; name: string }
+  | { kind: "role"; scope: string; color: string; caps: string; hoist: boolean; position: number; name: string }
   | { kind: "role-member"; scope: string; account: string; roles: string }
   | { kind: "chanmeta"; channel: string; key: string; value: string }
   | {
@@ -515,11 +515,26 @@ export function revoke(subject: string, scope: string, caps: string) {
 export function roles(scope: string) {
   return invoke("roles", { scope });
 }
-export function roleCreate(scope: string, color: string, caps: string, name: string) {
-  return invoke("role_create", { scope, color, caps, name });
+export function roleCreate(
+  scope: string,
+  color: string,
+  caps: string,
+  hoist: boolean,
+  position: number,
+  name: string,
+) {
+  return invoke("role_create", { scope, color, caps, hoist, position, name });
+}
+/// Reorder roles: positions are set from the order of `names` (§6.5).
+export function rolesReorder(scope: string, names: string[]) {
+  return invoke("roles_reorder", { scope, order: names.join(",") });
 }
 export function roleDelete(scope: string, name: string) {
   return invoke("role_delete", { scope, name });
+}
+/// Rename a role in place — its members and granted caps come with it (§6.5).
+export function roleRename(scope: string, old: string, name: string) {
+  return invoke("role_rename", { scope, old, new: name });
 }
 export function roleAssign(scope: string, account: string, name: string) {
   return invoke("role_assign", { scope, account, name });

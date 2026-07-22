@@ -9,9 +9,44 @@
     const s = statusOf(name);
     return s !== "offline" && s !== "invisible";
   };
-  // Discord-style: online members first, offline greyed at the bottom.
-  const online = $derived(members.filter((m) => isOnline(m.name)));
-  const offline = $derived(members.filter((m) => !isOnline(m.name)));
+
+  // Roles live at the namespace scope; fetch each member's roles once so we can
+  // group by hoisted role (Discord-style).
+  const roleScope = $derived(app.nsRoleScope());
+  $effect(() => {
+    for (const m of members) app.ensureMemberRoles(m.name);
+  });
+
+  // Hoisted roles, already in position order (top = highest).
+  const hoisted = $derived((app.rolesByScope[roleScope] ?? []).filter((r) => r.hoist));
+
+  // A member's primary hoisted role = the highest (first in order) hoisted role
+  // they hold, or undefined.
+  function primaryHoist(name: string): string | undefined {
+    const held = new Set(app.rolesOf(name, roleScope).map((r) => r.name));
+    return hoisted.find((r) => held.has(r.name))?.name;
+  }
+
+  // Discord grouping: each hoisted role's ONLINE members, then everyone else
+  // online under "Online", then all offline under "Offline".
+  type Group = { key: string; label: string; color?: string; members: Member[] };
+  const groups = $derived.by<Group[]>(() => {
+    const online = members.filter((m) => isOnline(m.name));
+    const offline = members.filter((m) => !isOnline(m.name));
+    const out: Group[] = [];
+    const claimed = new Set<string>();
+    for (const role of hoisted) {
+      const inRole = online.filter((m) => !claimed.has(m.name) && primaryHoist(m.name) === role.name);
+      inRole.forEach((m) => claimed.add(m.name));
+      if (inRole.length) {
+        out.push({ key: `role:${role.name}`, label: role.name, color: role.color, members: inRole });
+      }
+    }
+    const restOnline = online.filter((m) => !claimed.has(m.name));
+    if (restOnline.length) out.push({ key: "online", label: "Online", members: restOnline });
+    if (offline.length) out.push({ key: "offline", label: "Offline", members: offline });
+    return out;
+  });
 </script>
 
 {#snippet row(m: Member)}
@@ -39,11 +74,7 @@
   </div>
 {/snippet}
 
-{#if online.length}
-  <div class="member-group-label">Online — {online.length}</div>
-  {#each online as m (m.name)}{@render row(m)}{/each}
-{/if}
-{#if offline.length}
-  <div class="member-group-label">Offline — {offline.length}</div>
-  {#each offline as m (m.name)}{@render row(m)}{/each}
-{/if}
+{#each groups as g (g.key)}
+  <div class="member-group-label" style={g.color ? `color:${g.color}` : ""}>{g.label} — {g.members.length}</div>
+  {#each g.members as m (m.name)}{@render row(m)}{/each}
+{/each}

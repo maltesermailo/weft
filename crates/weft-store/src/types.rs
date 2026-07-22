@@ -162,6 +162,10 @@ pub struct RoleDef {
     /// A display color, e.g. `#e8b93d`.
     pub color: String,
     pub caps: Vec<String>,
+    /// Discord-style: display this role's members as a separate member-list group.
+    pub hoist: bool,
+    /// Sort position (ascending) in the role list + member-list grouping.
+    pub position: i32,
 }
 
 /// A minted invite (§6.5): an unbound authorization redeemable up to

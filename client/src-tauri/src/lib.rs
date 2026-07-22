@@ -533,7 +533,12 @@ fn search(conn: State<'_, Conn>, channel: String, query: String) -> Result<(), S
 }
 
 #[tauri::command]
-fn emoji_add(conn: State<'_, Conn>, namespace: String, name: String, media: String) -> Result<(), String> {
+fn emoji_add(
+    conn: State<'_, Conn>,
+    namespace: String,
+    name: String,
+    media: String,
+) -> Result<(), String> {
     conn.send(weft::build_emoji_add(&namespace, &name, &media)?)
 }
 
@@ -564,14 +569,38 @@ fn role_create(
     scope: String,
     color: String,
     caps: String,
+    hoist: bool,
+    position: i32,
     name: String,
 ) -> Result<(), String> {
-    conn.send(weft::build_role_create(&scope, &color, &caps, &name)?)
+    conn.send(weft::build_role_create(
+        &scope, &color, &caps, hoist, position, &name,
+    )?)
+}
+
+#[tauri::command]
+fn roles_reorder(conn: State<'_, Conn>, scope: String, order: String) -> Result<(), String> {
+    let names: Vec<String> = order
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    conn.send(weft::build_roles_reorder(&scope, &names)?)
 }
 
 #[tauri::command]
 fn role_delete(conn: State<'_, Conn>, scope: String, name: String) -> Result<(), String> {
     conn.send(weft::build_role_delete(&scope, &name)?)
+}
+
+#[tauri::command]
+fn role_rename(
+    conn: State<'_, Conn>,
+    scope: String,
+    old: String,
+    new: String,
+) -> Result<(), String> {
+    conn.send(weft::build_role_rename(&scope, &old, &new)?)
 }
 
 #[tauri::command]
@@ -724,7 +753,12 @@ fn enable_wkwebview_screen_capture(wk: *mut objc2::runtime::AnyObject) {
         let count: usize = msg_send![list, count];
         for i in 0..count {
             let feat: *mut AnyObject = msg_send![list, objectAtIndex: i];
-            if feat.is_null() || !{ let r: bool = msg_send![feat, respondsToSelector: sel!(key)]; r } {
+            if feat.is_null()
+                || !{
+                    let r: bool = msg_send![feat, respondsToSelector: sel!(key)];
+                    r
+                }
+            {
                 continue;
             }
             let key: *mut NSString = msg_send![feat, key];
@@ -757,11 +791,15 @@ fn enable_wkwebview_screen_capture(wk: *mut objc2::runtime::AnyObject) {
         }
 
         let cls = class!(WKPreferences);
-        if { let r: bool = msg_send![cls, respondsToSelector: sel!(_experimentalFeatures)]; r } {
+        // Both feature lists are private API — probe before calling either.
+        let has_experimental: bool =
+            msg_send![cls, respondsToSelector: sel!(_experimentalFeatures)];
+        if has_experimental {
             let list: *mut AnyObject = msg_send![cls, _experimentalFeatures];
             enable_matching(prefs, list);
         }
-        if { let r: bool = msg_send![cls, respondsToSelector: sel!(_internalDebugFeatures)]; r } {
+        let has_debug: bool = msg_send![cls, respondsToSelector: sel!(_internalDebugFeatures)];
+        if has_debug {
             let list: *mut AnyObject = msg_send![cls, _internalDebugFeatures];
             enable_matching(prefs, list);
         }
@@ -828,7 +866,9 @@ pub fn run() {
             ns_recover,
             roles,
             role_create,
+            roles_reorder,
             role_delete,
+            role_rename,
             role_assign,
             role_unassign,
             roles_of,

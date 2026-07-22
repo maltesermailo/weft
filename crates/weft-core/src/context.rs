@@ -9,10 +9,9 @@ use weft_crypto::{
 };
 use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, RetentionPolicy};
 use weft_store::{
-    AccountStore, BlobStore, CapabilityStore, ChannelStore, EventStore, InviteStore,
+    AccountStore, BlobStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, InviteStore,
     MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
-    EmojiStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore,
-    StoreError,
+    NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, StoreError,
 };
 
 use crate::accounts::Accounts;

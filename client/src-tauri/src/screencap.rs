@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use serde::Serialize;
 use tauri::ipc::Channel;
-use xcap::image::{codecs::jpeg::JpegEncoder, imageops, DynamicImage, ExtendedColorType, RgbaImage};
+use xcap::image::{
+    codecs::jpeg::JpegEncoder, imageops, DynamicImage, ExtendedColorType, RgbaImage,
+};
 use xcap::{Monitor, Window};
 
 /// Shared "is a capture running" flag, managed by Tauri.
@@ -53,7 +55,12 @@ fn jpeg_data_url(img: &RgbaImage, max_w: u32, quality: u8) -> Option<String> {
 
     let mut buf = Vec::new();
     JpegEncoder::new_with_quality(&mut buf, quality)
-        .encode(rgb.as_raw(), rgb.width(), rgb.height(), ExtendedColorType::Rgb8)
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            ExtendedColorType::Rgb8,
+        )
         .ok()?;
     Some(format!(
         "data:image/jpeg;base64,{}",
@@ -114,9 +121,13 @@ pub async fn list_capture_sources() -> Result<Vec<CaptureSource>, String> {
 /// can't be captured (e.g. Screen-Recording permission not yet granted).
 #[tauri::command]
 pub async fn capture_source_thumb(id: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || grab(&id).and_then(|img| jpeg_data_url(&img, 320, 70)).unwrap_or_default())
-        .await
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        grab(&id)
+            .and_then(|img| jpeg_data_url(&img, 320, 70))
+            .unwrap_or_default()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Capture one frame of `screen:<id>` / `window:<id>`. Shared with the native

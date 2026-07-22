@@ -69,6 +69,11 @@ impl AdminScope {
     }
 
     /// Parse a capability string — accepts the full `admin.read` or bare `read`.
+    pub fn parse(cap: &str) -> Option<AdminScope> {
+        Self::from_cap(cap)
+    }
+
+    /// Parse a capability string — accepts the full `admin.read` or bare `read`.
     fn from_cap(cap: &str) -> Option<AdminScope> {
         AdminScope::ALL.into_iter().find(|s| {
             let full = s.as_str();
@@ -100,6 +105,15 @@ impl AdminScopes {
     }
 }
 
+/// Whether an account holds **operator** authority — the config seed set or the
+/// DB-backed flag (§10.4). Distinct from "holds every admin scope": a delegated
+/// `admin.*` grant also yields every scope, but only a true operator may change
+/// *who is an admin*. Gating permission management on this closes the
+/// privilege-escalation path where a delegated admin promotes itself.
+pub(crate) async fn is_operator(st: &AdminState, account: &Account) -> bool {
+    st.auth.operators.contains(account) || st.accounts.is_operator(account).await.unwrap_or(false)
+}
+
 /// Compute an account's admin scopes. Operators (config) hold all; otherwise the
 /// live (unexpired) `admin`-scope capability grants for the account's ULID.
 /// `None` = holds no admin access at all. Revocation is by `REVOKE` (the grant
@@ -107,9 +121,7 @@ impl AdminScopes {
 pub(crate) async fn admin_scopes(st: &AdminState, account: &Account) -> Option<AdminScopes> {
     // Operators hold all admin scopes — from the config seed set OR the
     // DB-backed flag (managed via `weftd admin`, §10.4).
-    if st.auth.operators.contains(account)
-        || st.accounts.is_operator(account).await.unwrap_or(false)
-    {
+    if is_operator(st, account).await {
         return Some(AdminScopes::all());
     }
 

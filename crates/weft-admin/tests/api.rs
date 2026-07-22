@@ -1115,3 +1115,202 @@ async fn a_registered_non_admin_cannot_log_in() {
     let res = app.oneshot(login("target", PASSWORD)).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ---- WC2 permission management (operator-only) ----
+
+#[tokio::test]
+async fn an_operator_sets_and_clears_delegated_admin_scopes() {
+    let app = build_with_delegate(&["admin.read"]).await;
+    let cookie = login_as(&app, "admin").await;
+
+    // Grant `target` moderate. `admin.read` rides along — a set without the
+    // baseline could not sign in, so the server adds it rather than issuing one.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/target/admin-scopes",
+            &cookie,
+            r#"{"scopes":["admin.moderate"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let admins = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/v1/admins", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(admins.contains("target"), "{admins}");
+    assert!(admins.contains("admin.moderate") && admins.contains("admin.read"));
+
+    // `target` can now sign in and moderate, proving the grant is live.
+    let t_cookie = login_as(&app, "target").await;
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/moderation",
+            &t_cookie,
+            r#"{"verb":"ban","scope":"*","account":"delegate"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // An empty set revokes panel access outright.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/target/admin-scopes",
+            &cookie,
+            r#"{"scopes":[]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let res = app.oneshot(login("target", PASSWORD)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn an_unknown_scope_is_rejected_rather_than_silently_dropped() {
+    let app = build_with_delegate(&["admin.read"]).await;
+    let cookie = login_as(&app, "admin").await;
+    let res = app
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/target/admin-scopes",
+            &cookie,
+            r#"{"scopes":["admin.moderat"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_delegated_admin_cannot_escalate_its_own_privileges() {
+    // The escalation guard: `delegate` holds *every* scope by grant, so a
+    // scope-based gate would let it promote itself. Permission management is
+    // operator-only, so all three routes must refuse it.
+    let app = build_with_delegate(&[
+        "admin.read",
+        "admin.moderate",
+        "admin.destroy",
+        "admin.federation",
+        "admin.keys",
+    ])
+    .await;
+    let cookie = login_as(&app, "delegate").await;
+
+    // It really does hold every scope (so this isn't passing for the wrong reason).
+    let me = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/v1/me", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(me.contains("admin.destroy"), "{me}");
+    assert!(
+        me.contains("\"operator\":false"),
+        "not a true operator: {me}"
+    );
+
+    for (path, body) in [
+        (
+            "/admin/api/v1/accounts/target/admin-scopes",
+            Some(r#"{"scopes":["admin.destroy"]}"#),
+        ),
+        ("/admin/api/v1/accounts/delegate/operator", None),
+        ("/admin/api/v1/accounts/admin/unoperator", None),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(post_json(path, &cookie, body.unwrap_or("{}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::FORBIDDEN,
+            "{path} must be operator-only"
+        );
+    }
+}
+
+#[tokio::test]
+async fn operator_promotion_guards_against_lockout() {
+    let app = build_with_delegate(&["admin.read"]).await;
+    let cookie = login_as(&app, "admin").await;
+
+    // Promote `target`, which then holds every scope implicitly.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/target/operator",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let t_cookie = login_as(&app, "target").await;
+    let me = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/v1/me", Some(&t_cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(me.contains("\"operator\":true"), "{me}");
+
+    // Editing an operator's scopes is a conflict — its authority is the flag,
+    // so a scope edit would appear to work while changing nothing.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/target/admin-scopes",
+            &cookie,
+            r#"{"scopes":["admin.read"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+
+    // Self-demotion is refused (you could not undo it).
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/target/unoperator",
+            &t_cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // A config-seeded operator can't be demoted from the panel — its authority
+    // lives in weftd.toml, so clearing the DB flag would be a no-op lie.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/admin/unoperator",
+            &t_cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+
+    // Demoting another (DB-flagged) operator is fine.
+    let res = app
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/target/unoperator",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+}

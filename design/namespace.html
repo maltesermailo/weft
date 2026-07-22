@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Namespace — Join or Create</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      background: #0D0E10;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      color: #F2F3F5;
+    }
+    input::placeholder { color: #4E5058; }
+    ::-webkit-scrollbar { display: none; }
+
+    .page {
+      min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      padding: 48px 16px; position: relative;
+    }
+    .glow {
+      position: fixed; inset: 0; pointer-events: none;
+      background: radial-gradient(ellipse 60% 40% at 50% 20%, rgba(88,101,242,0.08) 0%, transparent 70%);
+    }
+    .card {
+      position: relative; width: 100%; max-width: 380px;
+      background: #17181C; border: 1.5px solid rgba(255,255,255,0.07);
+      border-radius: 20px; padding: 32px 28px;
+      box-shadow: 0 32px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.03) inset;
+    }
+    .step { display: none; flex-direction: column; }
+    .step.active { display: flex; }
+
+    /* Choose */
+    .logo {
+      width: 56px; height: 56px; border-radius: 16px;
+      background: linear-gradient(135deg, #5865F2 0%, #7C3AED 100%);
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto 20px;
+    }
+    h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.3px; text-align: center; color: #F2F3F5; margin-bottom: 6px; }
+    .subtitle { font-size: 13px; color: #87898C; text-align: center; line-height: 1.6; margin-bottom: 28px; }
+    .options { display: flex; flex-direction: column; gap: 10px; }
+    .option-btn {
+      display: flex; align-items: center; gap: 14px;
+      background: #2B2D31; border: 1.5px solid rgba(255,255,255,0.06);
+      border-radius: 14px; padding: 14px 18px; cursor: pointer; text-align: left;
+      transition: background 0.15s, border-color 0.15s, transform 0.15s; width: 100%;
+    }
+    .option-btn:hover { transform: translateX(3px); }
+    .option-btn.join:hover   { background: rgba(88,101,242,0.12);  border-color: #5865F2; }
+    .option-btn.invite:hover { background: rgba(0,176,244,0.12);   border-color: #00B0F4; }
+    .option-btn.create:hover { background: rgba(35,165,90,0.12);   border-color: #23A55A; }
+    .option-icon {
+      width: 44px; height: 44px; border-radius: 12px;
+      background: rgba(255,255,255,0.05);
+      display: flex; align-items: center; justify-content: center;
+      color: #87898C; flex-shrink: 0; transition: background 0.15s, color 0.15s;
+    }
+    .option-btn.join:hover   .option-icon { background: rgba(88,101,242,0.15); color: #5865F2; }
+    .option-btn.invite:hover .option-icon { background: rgba(0,176,244,0.12);  color: #00B0F4; }
+    .option-btn.create:hover .option-icon { background: rgba(35,165,90,0.12);  color: #23A55A; }
+    .option-text { flex: 1; }
+    .option-label { font-size: 14px; font-weight: 600; color: #F2F3F5; margin-bottom: 2px; transition: color 0.15s; }
+    .option-btn.join:hover   .option-label { color: #5865F2; }
+    .option-btn.invite:hover .option-label { color: #00B0F4; }
+    .option-btn.create:hover .option-label { color: #23A55A; }
+    .option-desc { font-size: 12px; color: #87898C; line-height: 1.5; }
+    .chevron { color: #4E5058; flex-shrink: 0; transition: color 0.15s; }
+    .option-btn.join:hover   .chevron { color: #5865F2; }
+    .option-btn.invite:hover .chevron { color: #00B0F4; }
+    .option-btn.create:hover .chevron { color: #23A55A; }
+
+    /* Sub-steps */
+    .back-btn {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 12px; color: #87898C; background: none; border: none;
+      cursor: pointer; margin-bottom: 22px; transition: color 0.1s; padding: 0;
+    }
+    .back-btn:hover { color: #F2F3F5; }
+    .step-header { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+    .step-icon {
+      width: 36px; height: 36px; border-radius: 10px;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    h2 { font-size: 18px; font-weight: 700; color: #F2F3F5; }
+    .step-desc { font-size: 12px; color: #87898C; line-height: 1.6; margin-bottom: 20px; }
+    .field-label {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; color: #87898C; display: block; margin-bottom: 6px;
+    }
+    .input-wrap {
+      display: flex; align-items: center; gap: 8px;
+      background: #1E1F22; border: 1.5px solid rgba(255,255,255,0.06);
+      border-radius: 12px; padding: 11px 14px; transition: border-color 0.15s;
+    }
+    .input-wrap:focus-within { border-color: var(--fc, #5865F2); }
+    .input-wrap input {
+      background: none; border: none; outline: none;
+      font-size: 14px; color: #F2F3F5; flex: 1; min-width: 0; font-family: inherit;
+    }
+    .char-count { font-size: 12px; color: #4E5058; }
+    .cta {
+      width: 100%; padding: 13px; border-radius: 12px;
+      font-size: 14px; font-weight: 600; border: none; cursor: not-allowed;
+      background: #1E1F22; color: #4E5058;
+      transition: background 0.15s, color 0.15s; margin-top: 4px;
+    }
+    .cta.ready { cursor: pointer; }
+    .cta.ready:hover { filter: brightness(1.1); }
+
+    /* Join */
+    .ns-list { display: flex; flex-direction: column; gap: 8px; }
+    .ns-item {
+      display: flex; align-items: center; gap: 12px;
+      background: #1E1F22; border: 1.5px solid rgba(255,255,255,0.04);
+      border-radius: 12px; padding: 10px 14px; transition: border-color 0.12s;
+    }
+    .ns-item:hover { border-color: rgba(88,101,242,0.4); }
+    .ns-emoji {
+      width: 36px; height: 36px; border-radius: 10px; background: #2B2D31;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; flex-shrink: 0;
+    }
+    .ns-info { flex: 1; }
+    .ns-name { font-size: 13px; font-weight: 600; color: #F2F3F5; }
+    .ns-members { font-size: 11px; color: #87898C; }
+    .join-btn {
+      font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 8px;
+      border: none; background: rgba(88,101,242,0.15); color: #5865F2;
+      cursor: pointer; transition: background 0.12s, color 0.12s;
+    }
+    .join-btn:hover { background: #5865F2; color: #fff; }
+    .empty { text-align: center; font-size: 13px; color: #4E5058; padding: 24px 0; display: none; }
+
+    /* Invite */
+    .error-msg { font-size: 12px; color: #F23F43; margin-bottom: 10px; display: none; }
+    .success-box {
+      background: rgba(35,165,90,0.1); border: 1.5px solid rgba(35,165,90,0.3);
+      border-radius: 12px; padding: 12px 14px; font-size: 12px; font-weight: 600;
+      color: #23A55A; margin-bottom: 10px; display: none;
+    }
+
+    /* Create */
+    .icon-preview-row { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
+    .ns-icon-preview {
+      width: 60px; height: 60px; border-radius: 16px; background: #2B2D31;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px; font-weight: 700; color: #4E5058; flex-shrink: 0;
+      transition: background 0.2s, color 0.2s;
+    }
+    .icon-hint-title { font-size: 13px; font-weight: 600; color: #F2F3F5; margin-bottom: 2px; }
+    .icon-hint-sub { font-size: 12px; color: #87898C; line-height: 1.4; }
+    .access-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 22px; }
+    .access-btn {
+      display: flex; flex-direction: column; gap: 4px;
+      background: #1E1F22; border: 1.5px solid rgba(255,255,255,0.06);
+      border-radius: 12px; padding: 12px 14px; cursor: pointer; text-align: left;
+      transition: background 0.12s, border-color 0.12s;
+    }
+    .access-btn.sel-pub  { background: rgba(35,165,90,0.12);  border-color: #23A55A; }
+    .access-btn.sel-priv { background: rgba(88,101,242,0.12); border-color: #5865F2; }
+    .access-name { font-size: 12px; font-weight: 600; color: #87898C; transition: color 0.12s; }
+    .access-btn.sel-pub  .access-name { color: #23A55A; }
+    .access-btn.sel-priv .access-name { color: #5865F2; }
+    .access-desc { font-size: 11px; color: #87898C; line-height: 1.4; }
+    .created-box {
+      background: rgba(35,165,90,0.1); border: 1.5px solid rgba(35,165,90,0.3);
+      border-radius: 12px; padding: 12px 14px; font-size: 12px; font-weight: 600;
+      color: #23A55A; display: none;
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+  <div class="glow"></div>
+  <div class="card">
+
+    <!-- CHOOSE -->
+    <div class="step active" id="step-choose">
+      <div class="logo">
+        <svg width="22" height="22" viewBox="0 0 18 18" fill="none">
+          <path d="M9 2l1.5 4.5L15 8l-4.5 1.5L9 14l-1.5-4.5L3 8l4.5-1.5L9 2z" fill="white"/>
+        </svg>
+      </div>
+      <h1>Where do you want to go?</h1>
+      <p class="subtitle">Join a community, accept an invite, or build your own space from the ground up.</p>
+      <div class="options">
+        <button class="option-btn join" onclick="go('join')">
+          <div class="option-icon">
+            <svg width="24" height="24" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="16" cy="16" r="12"/><ellipse cx="16" cy="16" rx="5" ry="12"/>
+              <path d="M4 16h24" stroke-linecap="round"/><path d="M6 10h20M6 22h20" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="option-text">
+            <div class="option-label">Join a Namespace</div>
+            <div class="option-desc">Browse public namespaces and join communities by searching directly.</div>
+          </div>
+          <svg class="chevron" width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M6 3l5 5-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <button class="option-btn invite" onclick="go('invite')">
+          <div class="option-icon">
+            <svg width="24" height="24" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M13.5 18.5l5-5" stroke-linecap="round"/>
+              <path d="M10 21a5 5 0 010-7.07l2.12-2.12a5 5 0 017.07 7.07L17.07 21" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M22 11a5 5 0 010 7.07l-2.12 2.12a5 5 0 01-7.07-7.07L14.93 11" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div class="option-text">
+            <div class="option-label">Redeem Invite Link</div>
+            <div class="option-desc">Have an invite link? Paste it here to jump into a private namespace.</div>
+          </div>
+          <svg class="chevron" width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M6 3l5 5-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <button class="option-btn create" onclick="go('create')">
+          <div class="option-icon">
+            <svg width="24" height="24" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="16" cy="16" r="12"/>
+              <path d="M16 10v12M10 16h12" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="option-text">
+            <div class="option-label">Create a Namespace</div>
+            <div class="option-desc">Start your own community — set the name, icon, and access rules.</div>
+          </div>
+          <svg class="chevron" width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M6 3l5 5-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- JOIN -->
+    <div class="step" id="step-join">
+      <button class="back-btn" onclick="go('choose')">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Back
+      </button>
+      <div class="step-header">
+        <div class="step-icon" style="background:rgba(88,101,242,0.15);color:#5865F2;">
+          <svg width="20" height="20" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="16" cy="16" r="12"/><ellipse cx="16" cy="16" rx="5" ry="12"/>
+            <path d="M4 16h24" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h2>Join a Namespace</h2>
+      </div>
+      <p class="step-desc">Search public namespaces and hit Join to become a member instantly.</p>
+      <div class="input-wrap" style="--fc:#5865F2;margin-bottom:14px;">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="color:#87898C;flex-shrink:0;">
+          <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M10.5 10.5l3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+        <input type="text" placeholder="Search by name..." oninput="filterNS(this.value)" />
+      </div>
+      <div class="ns-list" id="ns-list"></div>
+      <div class="empty" id="join-empty"></div>
+    </div>
+
+    <!-- INVITE -->
+    <div class="step" id="step-invite">
+      <button class="back-btn" onclick="go('choose')">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Back
+      </button>
+      <div class="step-header">
+        <div class="step-icon" style="background:rgba(0,176,244,0.12);color:#00B0F4;">
+          <svg width="20" height="20" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M13.5 18.5l5-5" stroke-linecap="round"/>
+            <path d="M10 21a5 5 0 010-7.07l2.12-2.12a5 5 0 017.07 7.07L17.07 21" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M22 11a5 5 0 010 7.07l-2.12 2.12a5 5 0 01-7.07-7.07L14.93 11" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h2>Redeem Invite Link</h2>
+      </div>
+      <p class="step-desc">Paste an invite link below — it looks like <span style="color:#00B0F4;font-family:monospace;">ns.gg/AbCdEf</span> — and click Redeem to join.</p>
+      <div class="input-wrap" id="invite-wrap" style="--fc:#00B0F4;margin-bottom:10px;">
+        <input type="text" id="invite-input" placeholder="https://ns.gg/AbCdEf" style="font-family:'SF Mono','Fira Code',monospace;font-size:13px;" oninput="onInviteInput()" />
+      </div>
+      <div class="error-msg" id="invite-error">Invalid invite link. Check the URL and try again.</div>
+      <div class="success-box" id="invite-success">&#10003; You've joined the namespace! Redirecting…</div>
+      <button class="cta" id="invite-cta" onclick="redeemInvite()">Redeem Invite</button>
+    </div>
+
+    <!-- CREATE -->
+    <div class="step" id="step-create">
+      <button class="back-btn" onclick="go('choose')">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Back
+      </button>
+      <div class="step-header">
+        <div class="step-icon" style="background:rgba(35,165,90,0.12);color:#23A55A;">
+          <svg width="20" height="20" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="16" cy="16" r="12"/>
+            <path d="M16 10v12M10 16h12" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h2>Create a Namespace</h2>
+      </div>
+      <p class="step-desc">Give your namespace a name and choose who can find it. You can change everything later.</p>
+      <div class="icon-preview-row">
+        <div class="ns-icon-preview" id="ns-icon">
+          <svg width="22" height="22" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="16" cy="16" r="12"/><path d="M16 10v12M10 16h12" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div>
+          <div class="icon-hint-title">Namespace Icon</div>
+          <div class="icon-hint-sub">Auto-generated from name.<br>Upload a custom icon later.</div>
+        </div>
+      </div>
+      <label class="field-label">Namespace Name</label>
+      <div class="input-wrap" style="--fc:#23A55A;margin-bottom:18px;">
+        <input type="text" id="ns-name" placeholder="My Awesome Community" maxlength="32" oninput="onNameInput()" />
+        <span class="char-count" id="ns-char">0/32</span>
+      </div>
+      <label class="field-label">Access Type</label>
+      <div class="access-grid">
+        <button class="access-btn sel-pub" id="btn-pub" onclick="setAccess('pub')">
+          <span class="access-name">&#127760; Public</span>
+          <span class="access-desc">Anyone can search &amp; join</span>
+        </button>
+        <button class="access-btn" id="btn-priv" onclick="setAccess('priv')">
+          <span class="access-name">&#128274; Private</span>
+          <span class="access-desc">Invite only</span>
+        </button>
+      </div>
+      <button class="cta" id="create-cta" onclick="createNS()">Create Namespace</button>
+      <div class="created-box" id="created-box"></div>
+    </div>
+
+  </div>
+</div>
+<script>
+  function go(id) {
+    document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+    document.getElementById('step-' + id).classList.add('active');
+  }
+
+  // Join
+  const nsData = [
+    { e: '🎨', n: 'DesignTalks',      m: '14.2k' },
+    { e: '🟦', n: 'TypeScript HQ',    m: '98.7k' },
+    { e: '☕', n: 'Open Source Cafe', m: '6.1k'  },
+  ];
+  function renderNS(data) {
+    const list = document.getElementById('ns-list');
+    const empty = document.getElementById('join-empty');
+    list.innerHTML = data.map(d => `
+      <div class="ns-item">
+        <div class="ns-emoji">${d.e}</div>
+        <div class="ns-info">
+          <div class="ns-name">${d.n}</div>
+          <div class="ns-members">${d.m} members</div>
+        </div>
+        <button class="join-btn" onclick="joinNS(this)">Join</button>
+      </div>`).join('');
+    empty.style.display = data.length ? 'none' : 'block';
+    empty.textContent = 'No namespaces found.';
+  }
+  function filterNS(q) {
+    const f = q ? nsData.filter(d => d.n.toLowerCase().includes(q.toLowerCase())) : nsData;
+    renderNS(f);
+  }
+  function joinNS(btn) {
+    btn.textContent = '✓ Joined';
+    btn.style.cssText = 'background:rgba(35,165,90,0.15);color:#23A55A;font-size:12px;font-weight:600;padding:6px 12px;border-radius:8px;border:none;cursor:default;';
+    btn.disabled = true;
+  }
+  renderNS(nsData);
+
+  // Invite
+  function onInviteInput() {
+    const v = document.getElementById('invite-input').value.trim();
+    const cta = document.getElementById('invite-cta');
+    document.getElementById('invite-error').style.display = 'none';
+    document.getElementById('invite-success').style.display = 'none';
+    document.getElementById('invite-wrap').style.borderColor = v ? '#00B0F4' : 'rgba(255,255,255,0.06)';
+    if (v) { cta.classList.add('ready'); cta.style.background = '#00B0F4'; cta.style.color = '#fff'; }
+    else   { cta.classList.remove('ready'); cta.style.background = '#1E1F22'; cta.style.color = '#4E5058'; }
+  }
+  function redeemInvite() {
+    const v = document.getElementById('invite-input').value.trim();
+    if (!v) return;
+    const ok = v.includes('ns.gg/') || v.startsWith('https://');
+    document.getElementById('invite-error').style.display   = ok ? 'none' : 'block';
+    document.getElementById('invite-success').style.display = ok ? 'block' : 'none';
+    document.getElementById('invite-wrap').style.borderColor = ok ? '#23A55A' : '#F23F43';
+  }
+
+  // Create
+  function onNameInput() {
+    const v = document.getElementById('ns-name').value;
+    document.getElementById('ns-char').textContent = v.length + '/32';
+    const icon = document.getElementById('ns-icon');
+    if (v.trim()) {
+      const ini = v.trim().split(/\s+/).map(w => w[0]).join('').toUpperCase().slice(0,2);
+      icon.textContent = ini;
+      icon.style.background = 'linear-gradient(135deg,#23A55A 0%,#1a7d44 100%)';
+      icon.style.color = '#fff';
+      icon.style.fontSize = '20px';
+    } else {
+      icon.innerHTML = '<svg width="22" height="22" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2"><circle cx="16" cy="16" r="12"/><path d="M16 10v12M10 16h12" stroke-linecap="round"/></svg>';
+      icon.style.background = '#2B2D31'; icon.style.color = '#4E5058';
+    }
+    const cta = document.getElementById('create-cta');
+    if (v.trim()) { cta.classList.add('ready'); cta.style.background = '#23A55A'; cta.style.color = '#fff'; }
+    else          { cta.classList.remove('ready'); cta.style.background = '#1E1F22'; cta.style.color = '#4E5058'; }
+  }
+  function setAccess(t) {
+    document.getElementById('btn-pub').className  = 'access-btn' + (t === 'pub'  ? ' sel-pub'  : '');
+    document.getElementById('btn-priv').className = 'access-btn' + (t === 'priv' ? ' sel-priv' : '');
+  }
+  function createNS() {
+    const name = document.getElementById('ns-name').value.trim();
+    if (!name) return;
+    document.getElementById('create-cta').style.display = 'none';
+    const box = document.getElementById('created-box');
+    box.textContent = '✓ "' + name + '" is live! Setting up your channels…';
+    box.style.display = 'block';
+  }
+</script>
+</body>
+</html>

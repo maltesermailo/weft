@@ -76,6 +76,42 @@ impl Client {
         }
     }
 
+    /// Like [`Client::recv`], but tolerant of a long wait — for events driven by
+    /// a server *timer* (idle reaping) rather than by a peer's line. Under
+    /// `start_paused` the short `recv` deadline would otherwise be the next timer
+    /// to fire and would trip before the one under test.
+    async fn recv_slow(&mut self) -> Reply {
+        loop {
+            let raw = tokio::time::timeout(Duration::from_secs(600), self.from_server.recv())
+                .await
+                .expect("timed out waiting for a server line")
+                .expect("server closed the stream");
+            let reply = Reply::parse(&raw).expect("server sent an unparseable line");
+            if matches!(reply.event, Event::MediaToken { .. }) {
+                continue;
+            }
+            if matches!(&reply.event, Event::Message(m) if m.meta.system.is_some()) {
+                continue;
+            }
+            return reply;
+        }
+    }
+
+    /// Keep this client's session alive across a timer-driven test by PINGing on
+    /// the §3.4 cadence, the way a real client does. Returns the task; dropping
+    /// it stops the keepalive.
+    fn keepalive(&self) -> JoinHandle<()> {
+        let tx = self.to_server.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                if tx.send("PING :keepalive".to_string()).is_err() {
+                    return;
+                }
+            }
+        })
+    }
+
     /// True once the server closes our stream.
     async fn closed(&mut self) -> bool {
         tokio::time::timeout(Duration::from_secs(35), self.from_server.recv())
@@ -1081,7 +1117,7 @@ async fn unread_counts_report_and_push_on_mark() {
     ada2.recv().await;
     ada2.send(&format!("AUTH PASSWORD ada :{PASSWORD}"));
     ada2.recv().await; // WELCOME
-    // bob's join is a system message — it must NOT count as unread below.
+                       // bob's join is a system message — it must NOT count as unread below.
     let mut bob = joined(&ctx, "bob", "#general").await;
 
     // bob posts two messages; the second mentions ada.
@@ -1117,7 +1153,11 @@ async fn unread_counts_report_and_push_on_mark() {
     assert!(
         matches!(
             &synced.event,
-            Event::UnreadCounts { unread: 0, mentions: 0, .. }
+            Event::UnreadCounts {
+                unread: 0,
+                mentions: 0,
+                ..
+            }
         ),
         "expected zeroed counts synced to the other device, got {synced:?}"
     );
@@ -1173,7 +1213,7 @@ async fn history_thread_filter_returns_only_the_thread() {
     // A reply tagged into the thread.
     ada.send(&format!("@thread={root} MSG #general :reply in thread"));
     assert!(matches!(ada.recv().await.event, Event::Message(_))); // own echo
-    // An unrelated channel message (not in the thread).
+                                                                  // An unrelated channel message (not in the thread).
     say(&mut ada, "#general", "unrelated chatter").await;
 
     ada.send(&format!("@label=t1 HISTORY #general thread={root}"));
@@ -1191,10 +1231,7 @@ async fn history_thread_filter_returns_only_the_thread() {
     // Root + its reply, oldest-first; the unrelated message is excluded.
     assert_eq!(
         bodies,
-        vec![
-            "thread root".to_string(),
-            "reply in thread".to_string(),
-        ]
+        vec!["thread root".to_string(), "reply in thread".to_string(),]
     );
 }
 
@@ -1208,9 +1245,7 @@ async fn custom_emoji_add_list_remove_and_gating() {
 
     // Owner adds two emoji.
     ada.send("EMOJI ADD gaming partyblob weft-media://test.example/aaa");
-    assert!(
-        matches!(&ada.recv().await.event, Event::Emoji { name, .. } if name == "partyblob")
-    );
+    assert!(matches!(&ada.recv().await.event, Event::Emoji { name, .. } if name == "partyblob"));
     ada.send("EMOJI ADD gaming catjam weft-media://test.example/bbb");
     assert!(matches!(ada.recv().await.event, Event::Emoji { .. }));
 
@@ -3288,6 +3323,7 @@ async fn roles_define_list_and_assign_grants_the_bundle() {
         caps,
         color,
         scope,
+        ..
     } = &ev.event
     else {
         panic!("expected ROLE, got {ev:?}");
@@ -3343,6 +3379,87 @@ async fn role_assigns_to_a_foreign_user() {
     };
     assert_eq!(account, "alice@peer.example");
     assert_eq!(roles, "Moderator");
+}
+
+#[tokio::test]
+async fn renaming_a_role_keeps_its_members_and_caps() {
+    let ctx = ctx_ops(&["#general"], &["root"]);
+    let mut root = ready(&ctx, "root").await;
+    let _bob = ready(&ctx, "bob").await;
+
+    root.send("ROLE CREATE * #e8b93d mute,ban :Moderator");
+    root.recv().await; // BatchStart
+    root.recv().await; // Role
+    root.recv().await; // BatchEnd
+    root.send("@label=a ROLE ASSIGN * bob :Moderator");
+    root.recv().await; // Token
+
+    // Rename → the ROLES batch comes back under the new name, definition intact.
+    root.send("@label=r ROLE RENAME * :Moderator,Head Moderator");
+    assert!(matches!(root.recv().await.event, Event::BatchStart { .. }));
+    let ev = root.recv().await;
+    let Event::Role { name, caps, .. } = &ev.event else {
+        panic!("expected ROLE, got {ev:?}");
+    };
+    assert_eq!(name, "Head Moderator");
+    assert_eq!(caps, "mute,ban");
+    assert!(matches!(root.recv().await.event, Event::BatchEnd { .. }));
+
+    // Membership followed the rename — a rename must never un-role anyone.
+    root.send("ROLES-OF * bob");
+    let ev = root.recv().await;
+    let Event::RoleMember { roles, .. } = &ev.event else {
+        panic!("expected ROLE-MEMBER, got {ev:?}");
+    };
+    assert_eq!(roles, "Head Moderator");
+
+    // ...and the granted bundle is untouched (authority is caps, not the name).
+    root.send("@label=q CAPS bob *");
+    let ev = root.recv().await;
+    let Event::Caps { caps, .. } = &ev.event else {
+        panic!("expected CAPS, got {ev:?}");
+    };
+    assert!(caps.contains("mute") && caps.contains("ban"), "got {caps}");
+}
+
+#[tokio::test]
+async fn renaming_onto_an_existing_role_is_refused() {
+    let ctx = ctx_ops(&["#general"], &["root"]);
+    let mut root = ready(&ctx, "root").await;
+    for name in ["Moderator", "Helper"] {
+        root.send(&format!("ROLE CREATE * #e8b93d mute :{name}"));
+        root.recv().await;
+        root.recv().await;
+        if name == "Helper" {
+            root.recv().await; // second role in the batch
+        }
+        root.recv().await;
+    }
+    // Merging two bundles under one name is not a rename.
+    root.send("@label=x ROLE RENAME * :Helper,Moderator");
+    root.expect_err(ErrCode::Policy).await;
+
+    // An absent source is NO-SUCH-TARGET, same as any other hidden/absent target.
+    root.send("@label=y ROLE RENAME * :Ghost,Phantom");
+    root.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn role_rename_needs_admin_authority() {
+    let ctx = ctx_ops(&["#general"], &["root"]);
+    let mut root = ready(&ctx, "root").await;
+    root.send("ROLE CREATE * #fff send :Member");
+    root.recv().await;
+    root.recv().await;
+    root.recv().await;
+
+    let mut mallory = ready(&ctx, "mallory").await; // no caps
+    mallory.send("@label=x ROLE RENAME * :Member,Owner");
+    let reply = mallory.expect_err(ErrCode::CapRequired).await;
+    let Event::Err(err) = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(err.context.as_deref(), Some("ns-admin"));
 }
 
 #[tokio::test]
@@ -3665,6 +3782,56 @@ async fn voice_channel_is_not_text_joinable() {
         Some("j")
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_crashed_voice_client_leaves_the_roster_promptly() {
+    // §16 regression: a crashed client sends no FIN over QUIC (it's UDP), so the
+    // only signal the server gets is silence. A session *in a voice room* must
+    // therefore be reaped on the short voice deadline (~30 s), not the 120 s
+    // text one — else the caller haunts every co-member's roster for two minutes.
+    let ctx = voice_ctx_with("#lounge").await;
+
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("VOICE JOIN #lounge");
+    assert!(matches!(bob.recv().await.event, Event::VoiceOffer { .. }));
+    // bob is a *healthy* client: he keeps PINGing, so only alice goes quiet.
+    let _bob_alive = bob.keepalive();
+
+    let mut alice = ready(&ctx, "alice").await;
+    alice.send("VOICE JOIN #lounge");
+    assert!(matches!(alice.recv().await.event, Event::VoiceOffer { .. }));
+    let reply = next_voice_state(&mut bob).await; // alice entered
+    assert!(
+        matches!(&reply.event, Event::VoiceState { action, .. } if *action == VoiceAction::Join)
+    );
+
+    // alice "crashes": her client stops speaking entirely but never closes the
+    // stream — exactly what a dead QUIC peer looks like from the server. Holding
+    // `alice` keeps her sender alive, so this is silence, not a disconnect.
+    let started = tokio::time::Instant::now();
+
+    // bob learns she's gone, and well inside the 120 s text idle window.
+    let reply = loop {
+        let reply = bob.recv_slow().await;
+        if matches!(reply.event, Event::VoiceState { .. }) {
+            break reply;
+        }
+    };
+    let Event::VoiceState { user, action, .. } = &reply.event else {
+        unreachable!()
+    };
+    assert_eq!(user.account.as_str(), "alice");
+    assert_eq!(*action, VoiceAction::Leave);
+    let waited = started.elapsed();
+    assert!(
+        waited < READY_IDLE_SECS,
+        "ghost lingered {waited:?} — the voice deadline isn't being applied"
+    );
+    drop(alice);
+}
+
+/// The text-session idle ceiling, as a test-visible bound (see `READY_IDLE`).
+const READY_IDLE_SECS: Duration = Duration::from_secs(120);
 
 #[tokio::test]
 async fn voice_join_offers_token_and_announces_to_members() {

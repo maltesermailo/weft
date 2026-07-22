@@ -2384,13 +2384,12 @@ impl EmojiStore for PgStore {
         &self,
         namespace: &NamespaceName,
     ) -> Result<Vec<(String, String)>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT name, media FROM weft_emoji WHERE namespace = $1 ORDER BY name",
-        )
-        .bind(namespace.as_str())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(backend_err)?;
+        let rows =
+            sqlx::query("SELECT name, media FROM weft_emoji WHERE namespace = $1 ORDER BY name")
+                .bind(namespace.as_str())
+                .fetch_all(&self.pool)
+                .await
+                .map_err(backend_err)?;
         Ok(rows
             .iter()
             .map(|r| (r.get::<String, _>("name"), r.get::<String, _>("media")))
@@ -2477,18 +2476,37 @@ impl RoleStore for PgStore {
         name: &str,
         color: &str,
         caps: &[String],
+        hoist: bool,
+        position: i32,
     ) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO weft_roles (scope, name, color, caps) VALUES ($1,$2,$3,$4) \
-             ON CONFLICT (scope, name) DO UPDATE SET color = EXCLUDED.color, caps = EXCLUDED.caps",
+            "INSERT INTO weft_roles (scope, name, color, caps, hoist, position) \
+             VALUES ($1,$2,$3,$4,$5,$6) \
+             ON CONFLICT (scope, name) DO UPDATE SET color = EXCLUDED.color, \
+             caps = EXCLUDED.caps, hoist = EXCLUDED.hoist, position = EXCLUDED.position",
         )
         .bind(scope)
         .bind(name)
         .bind(color)
         .bind(caps.join(","))
+        .bind(hoist)
+        .bind(position)
         .execute(&self.pool)
         .await
         .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn reorder_roles(&self, scope: &str, order: &[String]) -> Result<(), StoreError> {
+        for (i, name) in order.iter().enumerate() {
+            sqlx::query("UPDATE weft_roles SET position = $1 WHERE scope = $2 AND name = $3")
+                .bind(i as i32)
+                .bind(scope)
+                .bind(name)
+                .execute(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        }
         Ok(())
     }
 
@@ -2508,13 +2526,45 @@ impl RoleStore for PgStore {
         Ok(())
     }
 
+    async fn rename_role(&self, scope: &str, old: &str, new: &str) -> Result<(), StoreError> {
+        if old == new {
+            return Ok(());
+        }
+        // One transaction: the definition and its assignments must never be
+        // observable under two different names (or under none).
+        let mut tx = self.pool.begin().await.map_err(backend_err)?;
+        let moved = sqlx::query("UPDATE weft_roles SET name = $1 WHERE scope = $2 AND name = $3")
+            .bind(new)
+            .bind(scope)
+            .bind(old)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend_err)?;
+        // Absent role ⇒ no-op; don't orphan assignments onto a nonexistent name.
+        if moved.rows_affected() > 0 {
+            sqlx::query(
+                "UPDATE weft_role_assignments SET name = $1 WHERE scope = $2 AND name = $3",
+            )
+            .bind(new)
+            .bind(scope)
+            .bind(old)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend_err)?;
+        }
+        tx.commit().await.map_err(backend_err)?;
+        Ok(())
+    }
+
     async fn roles(&self, scope: &str) -> Result<Vec<RoleDef>, StoreError> {
-        let rows =
-            sqlx::query("SELECT name, color, caps FROM weft_roles WHERE scope = $1 ORDER BY name")
-                .bind(scope)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(backend_err)?;
+        let rows = sqlx::query(
+            "SELECT name, color, caps, hoist, position FROM weft_roles \
+             WHERE scope = $1 ORDER BY position, name",
+        )
+        .bind(scope)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
         Ok(rows
             .iter()
             .map(|r| {
@@ -2527,6 +2577,8 @@ impl RoleStore for PgStore {
                         .filter(|s| !s.is_empty())
                         .map(str::to_string)
                         .collect(),
+                    hoist: r.get::<bool, _>("hoist"),
+                    position: r.get::<i32, _>("position"),
                 }
             })
             .collect())

@@ -241,7 +241,13 @@ impl WeftClient {
                             .collect()
                     })
                     .unwrap_or_default();
-                build_msg(&arg("target"), &arg("body"), opt("replyTo"), attachments, opt("thread"))?
+                build_msg(
+                    &arg("target"),
+                    &arg("body"),
+                    opt("replyTo"),
+                    attachments,
+                    opt("thread"),
+                )?
             }
             "edit" => build_edit(&arg("msgid"), &arg("body"))?,
             "delete" => build_delete(&arg("msgid"))?,
@@ -262,10 +268,24 @@ impl WeftClient {
             "grant" => build_grant(&arg("subject"), &arg("scope"), &arg("caps"))?,
             "revoke" => build_revoke(&arg("subject"), &arg("scope"), &arg("caps"))?,
             "roles" => build_roles(&arg("scope"))?,
-            "role_create" => {
-                build_role_create(&arg("scope"), &arg("color"), &arg("caps"), &arg("name"))?
-            }
+            "role_create" => build_role_create(
+                &arg("scope"),
+                &arg("color"),
+                &arg("caps"),
+                flag("hoist"),
+                num("position") as i32,
+                &arg("name"),
+            )?,
+            "roles_reorder" => build_roles_reorder(
+                &arg("scope"),
+                &arg("order")
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+            )?,
             "role_delete" => build_role_delete(&arg("scope"), &arg("name"))?,
+            "role_rename" => build_role_rename(&arg("scope"), &arg("old"), &arg("new"))?,
             "role_assign" => build_role_assign(&arg("scope"), &arg("account"), &arg("name"))?,
             "role_unassign" => build_role_unassign(&arg("scope"), &arg("account"), &arg("name"))?,
             "roles_of" => build_roles_of(&arg("scope"), &arg("account"))?,

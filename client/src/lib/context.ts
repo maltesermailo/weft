@@ -226,6 +226,7 @@ export interface AppCtx {
   // ---- roles (ProfileCard) ----
   readonly rolesByScope: Record<string, RoleDefC[]>;
   rolesOf(account: string, scope: string): RoleDefC[];
+  ensureMemberRoles(account: string): void;
   roleScopeOf(channel: string): string;
   isOwnerAt(account: string, scope: string): boolean;
   assignRoleTo(acct: string, role: RoleDefC): void;
@@ -286,6 +287,7 @@ export interface AppCtx {
   newRoleName: string;
   newRoleColor: string;
   readonly newRoleCaps: string[];
+  newRoleHoist: boolean;
   toggleNewRoleCap(c: string): void;
   nsDelegSubject: string;
   nsNewOwner: string;
@@ -297,6 +299,12 @@ export interface AppCtx {
   saveNsMeta(): void;
   nsSetFederation(open: boolean): void;
   createRole(): void;
+  moveRole(name: string, dir: -1 | 1): void;
+  /// Persist an arbitrary role order (drag-and-drop) — positions follow the list.
+  reorderRoles(names: string[]): void;
+  /// Apply an edit to an existing role. A changed `name` renames in place, so
+  /// the role keeps its members and issued caps (§6.5).
+  saveRole(role: RoleDefC, patch: { name: string; color: string; caps: string[]; hoist: boolean }): void;
   deleteRole(name: string): void;
   assignRole(name: string): void;
   showRecoveryKey(): void;

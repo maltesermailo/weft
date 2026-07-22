@@ -116,6 +116,16 @@ td.actions{text-align:right;white-space:nowrap}
 .flags{display:grid;grid-template-columns:1fr 1fr;gap:2px 30px}
 .flag{display:flex;align-items:center;gap:10px;padding:6px 0;font-family:var(--mono);font-size:12px;color:var(--flax)}
 
+/* WC2 permission picker: one togglable row per admin scope. */
+.perms{display:flex;flex-direction:column;gap:2px;margin:4px 0 2px}
+.perm{display:flex;align-items:flex-start;gap:11px;padding:9px 11px;border:1px solid var(--line-soft);border-radius:4px;cursor:pointer;background:var(--warp-1)}
+.perm:hover{border-color:var(--line)}
+.perm.on{border-color:var(--thread)}
+.perm input{margin-top:2px;accent-color:var(--thread);cursor:pointer;flex:none}
+.perm-t{display:flex;flex-direction:column;gap:2px;min-width:0}
+.perm-n{font-size:13px;font-weight:600;color:var(--linen)}
+.perm-d{font-size:12px;color:var(--flax)}
+
 .action{padding:16px 18px;border-bottom:1px solid var(--line-soft)}
 .action:last-child{border-bottom:0}
 .action h3{font-size:13.5px;font-weight:700;margin-bottom:4px}
@@ -276,6 +286,25 @@ const screens = {
         ${stat(s.live_connections, "Live now")}${stat(s.open_reports, "Open reports")}${stat(s.peers, "Bridge peers")}
         ${stat(s.netblocks, "Netblocks")}${stat(s.blocked_media, "Blocked media")}
       </div>`);
+  },
+
+  // ---- Access (WC2) ----
+  async admins() {
+    const list = await api("/admins");
+    const scopeChips = (s) => `<div class="chips">${s.map((x) => pill(x.replace("admin.", ""), "gold")).join("")}</div>`;
+    set(hrow("Permissions", `${list.length} with access`) +
+      note("Who can use this panel, and what they may do. Operators hold every scope and are the only accounts that can change permissions — open a user to edit theirs.") +
+      cardTable("Admins", list.length, ["Account", "Role", "Scopes", "Expires"],
+        list.map((a) => ({
+          action: "user", id: a.account,
+          cells: [
+            `<span class="mono">${esc(a.account)}</span>`,
+            a.operator ? pill(a.config_operator ? "operator (config)" : "operator", "gold") : pill("delegated", "neutral"),
+            scopeChips(a.scopes),
+            a.expiry ? when(a.expiry * 1000) : "—",
+          ],
+        })), true) +
+      (IS_OPERATOR ? "" : `<p class="hint">You hold delegated admin access, so permissions are read-only here.</p>`));
   },
 
   // ---- Lookup ----
@@ -532,9 +561,61 @@ async function openUser(name) {
     </div>`);
   }
 
+  // WC2 permissions: only a real operator may change who is an admin, so the
+  // card is hidden otherwise (the server enforces regardless).
+  let perms = "";
+  if (IS_OPERATOR) perms = permissionCard(u.account, u.operator, adminScopesOf(u));
+
   set(`<a class="crumb" data-action="back" data-x="users">← back to Users</a>` +
     `<div class="h-row"><h1>${esc(u.account)}</h1><span class="id">${stateTags}${u.suspended ? " " + pill("suspended", "bad") : ""}${u.deletion_scheduled ? " " + pill("pending delete", "bad") : ""}</span></div>` +
-    kv + flags + devices + grants + related + messages + moderation + danger);
+    kv + flags + devices + grants + perms + related + messages + moderation + danger);
+}
+
+// ---- WC2 permissions -------------------------------------------------------
+const ADMIN_SCOPES = [
+  ["admin.read", "Read", "Every read view. The baseline — required for any panel access."],
+  ["admin.moderate", "Moderate", "Mute/ban/kick, resolve reports, suspend accounts, media blocks."],
+  ["admin.destroy", "Destroy", "Irreversible: delete accounts and messages."],
+  ["admin.federation", "Federation", "Netblocks and peer controls."],
+  ["admin.keys", "Keys", "Device, token and revocation management."],
+];
+
+/// The account's delegated admin scopes, read off its `admin`-scope grant.
+function adminScopesOf(u) {
+  const g = (u.grants || []).find((g) => g.scope === "admin");
+  if (!g) return [];
+  if (g.caps.some((c) => c === "*" || c === "admin.*")) return ADMIN_SCOPES.map(([id]) => id);
+  return g.caps.filter((c) => ADMIN_SCOPES.some(([id]) => id === c));
+}
+
+function permissionCard(account, operator, held) {
+  if (operator) {
+    return card("Panel permissions", `<div class="action">
+      <h3>Operator</h3>
+      <p>Holds <b>every</b> admin scope implicitly, and is the only role that can change other accounts' permissions. Demote to manage its scopes individually.</p>
+      <div class="chips">${ADMIN_SCOPES.map(([id]) => pill(id, "gold")).join("")}</div>
+      <div class="row" style="margin-top:12px"><button class="btn danger" data-action="demote" data-id="${esc(account)}">Demote to regular admin</button></div>
+    </div>`);
+  }
+  // `admin.read` is locked on while any other scope is held — it's the panel
+  // baseline, so a set without it could not sign in (same rule server-side).
+  const othersHeld = held.some((h) => h !== "admin.read");
+  const boxes = ADMIN_SCOPES.map(([id, label, desc]) => {
+    const baseline = id === "admin.read";
+    const on = held.includes(id) || (baseline && othersHeld);
+    return `<label class="perm ${on ? "on" : ""}">
+       <input type="checkbox" class="permBox" value="${id}" ${on ? "checked" : ""} ${baseline ? 'data-baseline="1"' : ""} ${baseline && othersHeld ? "disabled" : ""} />
+       <span class="perm-t"><span class="perm-n">${esc(label)} <span class="mono dim">${esc(id)}</span></span><span class="perm-d">${esc(desc)}</span></span>
+     </label>`;
+  }).join("");
+  return card("Panel permissions", `<div class="action">
+    <p class="hint">Tick the scopes this account may use in the panel. Saving replaces its whole set; unticking everything removes panel access. <b>Read</b> is added automatically whenever any other scope is held.</p>
+    <div class="perms">${boxes}</div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn solid" data-action="saveScopes" data-id="${esc(account)}">Save permissions</button>
+      <button class="btn" data-action="promote" data-id="${esc(account)}">Promote to operator</button>
+    </div>
+  </div>`, held.length || undefined);
 }
 
 async function openPeer(name) {
@@ -715,10 +796,43 @@ const clicks = {
     catch (e) { alert(e.message); }
   },
   unblockMedia: async (el) => { try { await api("/media-blocks/" + encodeURIComponent(el.dataset.id), { method: "DELETE" }); go("media"); } catch (e) { alert(e.message); } },
+  saveScopes: async (el) => {
+    const scopes = [...document.querySelectorAll(".permBox")].filter((b) => b.checked).map((b) => b.value);
+    try {
+      await api(`/accounts/${encodeURIComponent(el.dataset.id)}/admin-scopes`, { method: "POST", body: JSON.stringify({ scopes }) });
+      refresh();
+    } catch (e) { alert(e.message); }
+  },
+  promote: async (el) => {
+    if (!confirm(`Promote ${el.dataset.id} to operator? Operators hold every admin scope and can change other accounts' permissions.`)) return;
+    try { await api(`/accounts/${encodeURIComponent(el.dataset.id)}/operator`, { method: "POST" }); refresh(); }
+    catch (e) { alert(e.message); }
+  },
+  demote: async (el) => {
+    if (!confirm(`Remove operator status from ${el.dataset.id}?`)) return;
+    try { await api(`/accounts/${encodeURIComponent(el.dataset.id)}/unoperator`, { method: "POST" }); refresh(); }
+    catch (e) { alert(e.message); }
+  },
 };
 main().addEventListener("click", (e) => {
   const el = e.target.closest("[data-action]");
   if (el && clicks[el.dataset.action]) { e.preventDefault(); clicks[el.dataset.action](el); }
+});
+
+// WC2 permission picker: keep the row highlight in sync, and mirror the server's
+// rule that `admin.read` rides along with any other scope (it's the panel
+// baseline — a set without it could not sign in).
+main().addEventListener("change", (e) => {
+  const box = e.target.closest(".permBox");
+  if (!box) return;
+  const all = [...document.querySelectorAll(".permBox")];
+  const read = all.find((b) => b.dataset.baseline);
+  if (read) {
+    const others = all.some((b) => b !== read && b.checked);
+    if (others) { read.checked = true; read.disabled = true; }
+    else { read.disabled = false; }
+  }
+  all.forEach((b) => b.closest(".perm").classList.toggle("on", b.checked));
 });
 
 // Sidebar (grouped nav, mirrors design/admin/layout.html) --------------------
@@ -728,6 +842,7 @@ const NAV = [
   { label: "Federation", items: [["peers", "Peers"], ["netblocks", "Netblocks"], ["transit", "Transit Queue", "WC5"], ["remoteChannels", "Remote Channels", "WC5"]] },
   { label: "Trust & Keys", items: [["grants", "Grants"], ["tokens", "Capability Tokens"], ["revocations", "Revocations"], ["devices", "Devices", "WC6"]] },
   { label: "Moderation", items: [["reports", "Reports"], ["moderation", "Moderation"], ["media", "Media Blocklist"], ["phraseBans", "Phrase Bans", "WC7"]] },
+  { label: "Access", items: [["admins", "Permissions"]] },
   { label: "Gateways", items: [["irc", "IRC Bridge", "WC8"]] },
   { label: "Observability", items: [["audit", "Audit Log"], ["transport", "QUIC Transport", "WC9"]] },
 ];
@@ -742,6 +857,8 @@ function buildNav() {
 
 // Nav + auth ----------------------------------------------------------------
 let WHO = { account: "", network: "" };
+/// True operator authority — gates the permission-management controls.
+let IS_OPERATOR = false;
 async function go(name) {
   document.querySelectorAll("#nav [data-view]").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   try { await screens[name](); } catch (e) { set(`<p class="err">${esc(e.message)}</p>`); }
@@ -766,17 +883,17 @@ async function start() {
     SCOPES = WHO.scopes || [];
     $("#opName").textContent = WHO.account;
     $("#opAddr").textContent = `${WHO.account}@${WHO.network}`;
-    // Full-scope operators show the OPERATOR pill; a delegated admin shows its
-    // held scopes instead, so it's clear what this session can do.
-    const full = ["admin.read", "admin.moderate", "admin.destroy", "admin.federation", "admin.keys"];
-    const isOperator = full.every((s) => SCOPES.includes(s));
-    $("#role").innerHTML = isOperator
+    // Operators show the OPERATOR pill; a delegated admin shows its held scopes
+    // instead, so it's clear what this session can do. `operator` is the real
+    // flag — a delegated `admin.*` grant holds every scope but is not one.
+    IS_OPERATOR = !!WHO.operator;
+    $("#role").innerHTML = IS_OPERATOR
       ? `<span class="op-role">Operator</span>`
       : SCOPES.map((s) => `<span class="pill gold">${esc(s.replace("admin.", ""))}</span>`).join(" ");
+    buildNav();
     showApp(); go("dash");
   } catch { showLogin(); }
 }
-buildNav();
 start();
 </script>
 </body>

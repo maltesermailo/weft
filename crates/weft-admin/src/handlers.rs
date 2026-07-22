@@ -22,8 +22,13 @@ use weft_store::{
     materialize, AuditEntry, ModKind, ModRecord, Page, ReportResolution, Scope, StoreError,
 };
 
-use crate::auth::{AdminScope, AdminScopes};
+use crate::auth::{is_operator, AdminScope, AdminScopes};
 use crate::{dto, AdminState};
+
+/// The capability scope delegated admin grants live at (§10.4 dogfooding —
+/// `GRANT admin admin.moderate <account>`). Also the key the panel reads and
+/// rewrites when an operator edits someone's permissions.
+const ADMIN_GRANT_SCOPE: &str = "admin";
 
 /// All operator-gated routes (the auth layer is applied by `router`).
 pub fn routes() -> Router<AdminState> {
@@ -70,6 +75,13 @@ pub fn routes() -> Router<AdminState> {
             "/api/v1/messages/*msgid",
             axum::routing::delete(delete_message),
         )
+        .route("/api/v1/admins", get(list_admins))
+        .route(
+            "/api/v1/accounts/:name/admin-scopes",
+            post(set_admin_scopes),
+        )
+        .route("/api/v1/accounts/:name/operator", post(promote_operator))
+        .route("/api/v1/accounts/:name/unoperator", post(demote_operator))
         .route("/api/v1/audit", get(list_audit))
         .route("/api/v1/tokens/inspect", post(inspect_tokens))
         .route(
@@ -85,10 +97,12 @@ async fn me(
     Extension(scopes): Extension<AdminScopes>,
     State(st): State<AdminState>,
 ) -> Response {
+    let operator = is_operator(&st, &who).await;
     Json(dto::Me {
         account: who.to_string(),
         network: st.network.clone(),
         scopes: scopes.as_strings(),
+        operator,
     })
     .into_response()
 }
@@ -464,6 +478,272 @@ async fn list_channels(State(st): State<AdminState>) -> Response {
                 .collect::<Vec<_>>(),
         )
         .into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+// ---- WC2 permission management (operator-only) ----
+
+/// Gate for changing *who is an admin*. Deliberately stricter than
+/// `AdminScope::Destroy`: a delegated `admin.*` grant confers every scope, so
+/// scope-gating this would let a delegated admin promote itself or mint peers.
+/// Only a real operator (config seed or DB flag) may edit permissions.
+async fn require_operator(st: &AdminState, who: &Account) -> Option<Response> {
+    (!is_operator(st, who).await).then(|| {
+        (
+            StatusCode::FORBIDDEN,
+            "only an operator can change admin permissions",
+        )
+            .into_response()
+    })
+}
+
+/// `GET /admins` — everyone with panel access: operators (config-seeded or
+/// flagged) plus accounts holding an `admin`-scope grant, with their scopes.
+async fn list_admins(State(st): State<AdminState>) -> Response {
+    let rows = async {
+        let mut out: Vec<dto::AdminEntry> = Vec::new();
+
+        // Operators: the config seed set ∪ the DB-flagged ones.
+        let flagged = st.accounts.list_operators().await?;
+        let mut operators: Vec<Account> = flagged.clone();
+        for a in &st.auth.operators {
+            if !operators.contains(a) {
+                operators.push(a.clone());
+            }
+        }
+        operators.sort_by_key(|a| a.to_string());
+        for account in operators {
+            out.push(dto::AdminEntry {
+                config_operator: st.auth.operators.contains(&account),
+                operator: true,
+                scopes: AdminScope::ALL.iter().map(|s| s.as_str().into()).collect(),
+                expiry: None,
+                account: account.to_string(),
+            });
+        }
+
+        // Delegated admins: `admin`-scope grants, keyed by account ULID. Grants
+        // are stored by ULID, so map each back to its handle for display.
+        for grant in st.caps.grants_at_scope(ADMIN_GRANT_SCOPE).await? {
+            let mut scopes: Vec<String> = Vec::new();
+            for cap in &grant.caps {
+                if cap == "*" || cap == "admin.*" {
+                    scopes = AdminScope::ALL.iter().map(|s| s.as_str().into()).collect();
+                    break;
+                }
+                if let Some(s) = AdminScope::parse(cap) {
+                    scopes.push(s.as_str().to_string());
+                }
+            }
+            if scopes.is_empty() {
+                continue;
+            }
+            scopes.sort();
+            let Some(account) = resolve_subject_handle(&st, &grant.subject).await? else {
+                continue; // a grant whose account is gone — nothing to show
+            };
+            if out.iter().any(|e| e.account == account) {
+                continue; // already listed as an operator (which outranks it)
+            }
+            out.push(dto::AdminEntry {
+                account,
+                operator: false,
+                config_operator: false,
+                scopes,
+                expiry: grant.expiry,
+            });
+        }
+        Ok::<_, StoreError>(out)
+    }
+    .await;
+    match rows {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// Map a grant subject (an account ULID) back to its account handle.
+async fn resolve_subject_handle(
+    st: &AdminState,
+    subject: &str,
+) -> Result<Option<String>, StoreError> {
+    for account in st.accounts.list_accounts().await? {
+        if st.accounts.account_ulid(&account).await?.as_deref() == Some(subject) {
+            return Ok(Some(account.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+#[derive(Deserialize)]
+struct SetScopesReq {
+    /// The complete scope set the account should hold — this *replaces* whatever
+    /// it had. An empty list revokes panel access entirely.
+    scopes: Vec<String>,
+}
+
+/// `POST /accounts/:name/admin-scopes` — set an account's delegated admin
+/// scopes (operator-only). Replaces the existing `admin` grant wholesale, so the
+/// body is the desired end state, not a delta.
+async fn set_admin_scopes(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Path(name): Path<String>,
+    Json(req): Json<SetScopesReq>,
+) -> Response {
+    if let Some(r) = require_operator(&st, &who).await {
+        return r;
+    }
+    let Ok(account) = name.parse::<Account>() else {
+        return (StatusCode::BAD_REQUEST, "bad account").into_response();
+    };
+
+    // Parse strictly: a typo'd scope must fail loudly, never silently grant less.
+    let mut caps: Vec<String> = Vec::new();
+    for raw in &req.scopes {
+        match AdminScope::parse(raw) {
+            Some(s) => caps.push(s.as_str().to_string()),
+            None => {
+                return (StatusCode::BAD_REQUEST, format!("unknown scope: {raw}")).into_response()
+            }
+        }
+    }
+    caps.sort();
+    caps.dedup();
+    // `admin.read` is the panel baseline — any other scope is unusable without
+    // it, so grant it implicitly rather than handing out a set that can't log in.
+    if !caps.is_empty() && !caps.iter().any(|c| c == AdminScope::Read.as_str()) {
+        caps.push(AdminScope::Read.as_str().to_string());
+        caps.sort();
+    }
+
+    // An operator's authority comes from the flag, not a grant — editing scopes
+    // for one would look like it worked while changing nothing.
+    if is_operator(&st, &account).await {
+        return (
+            StatusCode::CONFLICT,
+            "that account is an operator and already holds every scope — demote it first",
+        )
+            .into_response();
+    }
+
+    let ulid = match st.accounts.account_ulid(&account).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such account").into_response(),
+        Err(e) => return internal(e),
+    };
+
+    let result = async {
+        if caps.is_empty() {
+            st.caps
+                .revoke_grants(&ulid, ADMIN_GRANT_SCOPE, None)
+                .await?;
+        } else {
+            let epoch = st.caps.scope_epoch(ADMIN_GRANT_SCOPE).await?;
+            // `record_grant` replaces the (subject, scope) row, so this is a
+            // wholesale set — no stale scope survives an edit.
+            st.caps
+                .record_grant(&ulid, ADMIN_GRANT_SCOPE, &caps, epoch, None)
+                .await?;
+        }
+        Ok::<_, StoreError>(())
+    }
+    .await;
+    if let Err(e) = result {
+        return internal(e);
+    }
+
+    audit(
+        &st,
+        &who,
+        "admin.scopes",
+        &account.to_string(),
+        &json!({ "account": account.to_string(), "scopes": caps }),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST /accounts/:name/operator` — grant full operator authority.
+async fn promote_operator(
+    st: State<AdminState>,
+    who: Extension<Account>,
+    name: Path<String>,
+) -> Response {
+    set_operator_flag(st, who, name, true).await
+}
+
+/// `POST /accounts/:name/unoperator` — revoke it.
+async fn demote_operator(
+    st: State<AdminState>,
+    who: Extension<Account>,
+    name: Path<String>,
+) -> Response {
+    set_operator_flag(st, who, name, false).await
+}
+
+async fn set_operator_flag(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Path(name): Path<String>,
+    operator: bool,
+) -> Response {
+    if let Some(r) = require_operator(&st, &who).await {
+        return r;
+    }
+    let Ok(account) = name.parse::<Account>() else {
+        return (StatusCode::BAD_REQUEST, "bad account").into_response();
+    };
+    if !operator {
+        // Two lockout guards: never demote yourself (you'd lose the ability to
+        // undo it), and never remove the last operator (nobody could promote
+        // anyone again — the panel would be permanently un-administrable).
+        if account == who {
+            return (
+                StatusCode::FORBIDDEN,
+                "cannot remove your own operator status",
+            )
+                .into_response();
+        }
+        // A config-seeded operator's authority comes from weftd.toml; clearing
+        // the DB flag would not remove it, so say so instead of lying.
+        if st.auth.operators.contains(&account) {
+            return (
+                StatusCode::CONFLICT,
+                "that operator is seeded from weftd.toml — remove it there",
+            )
+                .into_response();
+        }
+        match st.accounts.list_operators().await {
+            Ok(ops) if ops.len() <= 1 && ops.contains(&account) && st.auth.operators.is_empty() => {
+                return (
+                    StatusCode::CONFLICT,
+                    "that is the last operator — promote another first",
+                )
+                    .into_response()
+            }
+            Ok(_) => {}
+            Err(e) => return internal(e),
+        }
+    }
+    match st.accounts.set_operator(&account, operator).await {
+        Ok(true) => {
+            audit(
+                &st,
+                &who,
+                if operator {
+                    "admin.promote"
+                } else {
+                    "admin.demote"
+                },
+                &account.to_string(),
+                &json!({ "account": account.to_string() }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, "no such account").into_response(),
         Err(e) => internal(e),
     }
 }

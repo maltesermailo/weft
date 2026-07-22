@@ -11,36 +11,35 @@
     toggleMute,
     toggleDeafen,
     stopCamera,
-    stopNativeVoiceCamera,
     startScreenShare,
     stopScreenShare,
-    stopNativeVoiceScreenshare,
     attachVideo,
     detachVideo,
     nativeVideoUrl,
     IS_DESKTOP,
     type VoiceParticipant,
   } from "$lib/voice.svelte";
-  import { voiceUI } from "$lib/voiceui.svelte";
+  import { voiceUI, openScreenMenu } from "$lib/voiceui.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
 
   const app = getApp();
-  // Camera + screen share: desktop publishes natively (Rust SDK), web uses the
-  // webview (device picker / getDisplayMedia). Both open a picker when turning on.
+  // Desktop always opens the picker — it lets you start, switch source/device,
+  // change quality, or stop. Web toggles directly (or opens the camera picker).
   const camClick = () => {
-    if (voice.cameraOn) {
-      IS_DESKTOP ? stopNativeVoiceCamera() : stopCamera();
-    } else {
+    if (IS_DESKTOP) {
       voiceUI.cameraPicker = true;
+    } else {
+      voice.cameraOn ? stopCamera() : (voiceUI.cameraPicker = true);
     }
   };
-  const screenClick = () => {
-    if (voice.sharingScreen) {
-      IS_DESKTOP ? stopNativeVoiceScreenshare() : stopScreenShare();
-    } else if (IS_DESKTOP) {
-      voiceUI.screenPicker = true;
+  // While sharing, the button opens the share menu (stop / switch / quality),
+  // anchored to itself — Discord's behavior. Otherwise it opens the picker.
+  const screenClick = (e: MouseEvent) => {
+    if (IS_DESKTOP) {
+      if (voice.sharingScreen) openScreenMenu(e.currentTarget as HTMLElement);
+      else voiceUI.screenPicker = true;
     } else {
-      startScreenShare();
+      voice.sharingScreen ? stopScreenShare() : startScreenShare();
     }
   };
 
@@ -142,7 +141,13 @@
       <button class="sc-btn" class:go={voice.cameraOn} title="Camera" aria-label="Camera" onclick={camClick}>
         📹<span>{voice.cameraOn ? "Stop Video" : "Video"}</span>
       </button>
-      <button class="sc-btn" class:go={voice.sharingScreen} title="Share screen" aria-label="Share screen" onclick={screenClick}>
+      <button
+        class="sc-btn"
+        class:go={voice.sharingScreen}
+        title={voice.sharingScreen ? "Screen share options" : "Share screen"}
+        aria-label="Share screen"
+        onclick={screenClick}
+      >
         🖥️<span>{voice.sharingScreen ? "Stop Share" : "Share"}</span>
       </button>
       <button class="sc-btn leave" title="Disconnect" aria-label="Disconnect" onclick={leaveVoice}>

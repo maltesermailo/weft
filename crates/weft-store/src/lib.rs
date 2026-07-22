@@ -30,10 +30,9 @@ pub use memory::MemoryStore;
 #[cfg(feature = "postgres")]
 pub use postgres::PgStore;
 pub use traits::{
-    AccountStore, AuditStore, CapabilityStore, ChannelStore, EventStore, InviteStore,
+    AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, InviteStore,
     MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
-    EmojiStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore,
-    HOLD_RADIUS,
+    NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
 };
 pub use types::{
     audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventKind, EventRecord, GrantRecord,

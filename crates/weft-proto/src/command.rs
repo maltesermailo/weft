@@ -191,10 +191,27 @@ pub enum Command {
         scope: String,
         color: String,
         caps: String,
+        /// Discord-style "display separately in the member list" (§6.5).
+        hoist: bool,
+        /// Sort position in the role list / member-list grouping (§6.5).
+        position: i32,
         name: String,
     },
+    /// `ROLE REORDER <scope> :<name1,name2,…>` — set every role's position from
+    /// its index in the list (§6.5).
+    RolesReorder { scope: String, order: Vec<String> },
     /// `ROLE DELETE <scope> :<name>` — remove a role definition (§6.5).
     RoleDelete { scope: String, name: String },
+    /// `ROLE RENAME <scope> :<old>,<new>` — change a role's display name while
+    /// keeping its definition *and every assignment of it* (§6.5). Roles are
+    /// keyed by name, so this is a store-level migration, not a delete+create.
+    /// Both names ride the trailing as a comma pair — the same convention
+    /// `ROLE REORDER` uses, so a role name may contain spaces but not a comma.
+    RoleRename {
+        scope: String,
+        old: String,
+        new: String,
+    },
     /// `ROLE ASSIGN <scope> <account> :<name>` — grant the role's token bundle
     /// to an account and record explicit membership (§6.5).
     RoleAssign {
@@ -824,6 +841,19 @@ impl Command {
                                 value: caps,
                             });
                         }
+                        // Optional metadata as key=value middle params (like
+                        // INVITE MINT): `hoist=1 pos=<n>`. Absent ⇒ defaults.
+                        let mut hoist = false;
+                        let mut position = 0i32;
+                        while let Some(param) = args.opt() {
+                            if let Some(v) = param.strip_prefix("hoist=") {
+                                hoist = v == "1"
+                                    || v.eq_ignore_ascii_case("yes")
+                                    || v.eq_ignore_ascii_case("true");
+                            } else if let Some(v) = param.strip_prefix("pos=") {
+                                position = v.parse().unwrap_or(0);
+                            }
+                        }
                         let name = line.trailing.clone().ok_or(ParseError::MissingParam {
                             verb: "ROLE",
                             what: "name",
@@ -832,9 +862,22 @@ impl Command {
                             scope,
                             color,
                             caps,
+                            hoist,
+                            position,
                             name,
                         })
                     }
+                    "REORDER" => Ok(Command::RolesReorder {
+                        scope: args.req("scope")?.to_string(),
+                        order: line
+                            .trailing
+                            .clone()
+                            .unwrap_or_default()
+                            .split(',')
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .collect(),
+                    }),
                     "DELETE" => Ok(Command::RoleDelete {
                         scope: args.req("scope")?.to_string(),
                         name: line.trailing.clone().ok_or(ParseError::MissingParam {
@@ -842,6 +885,32 @@ impl Command {
                             what: "name",
                         })?,
                     }),
+                    "RENAME" => {
+                        let scope = args.req("scope")?.to_string();
+                        let pair = line.trailing.clone().ok_or(ParseError::MissingParam {
+                            verb: "ROLE",
+                            what: "names",
+                        })?;
+                        // `<old>,<new>` — only the first comma splits, so neither
+                        // half may contain one (same constraint as REORDER).
+                        let (old, new) = pair.split_once(',').ok_or(ParseError::BadParam {
+                            verb: "ROLE",
+                            what: "names",
+                            value: pair.clone(),
+                        })?;
+                        if old.is_empty() || new.is_empty() {
+                            return Err(ParseError::BadParam {
+                                verb: "ROLE",
+                                what: "names",
+                                value: pair,
+                            });
+                        }
+                        Ok(Command::RoleRename {
+                            scope,
+                            old: old.to_string(),
+                            new: new.to_string(),
+                        })
+                    }
                     "ASSIGN" => Ok(Command::RoleAssign {
                         scope: args.req("scope")?.to_string(),
                         account: args.req("account")?.to_string(),
@@ -1538,11 +1607,9 @@ impl Command {
             Command::Pin { msgid } => ("PIN", vec![msgid.to_string()], None),
             Command::Unpin { msgid } => ("UNPIN", vec![msgid.to_string()], None),
             Command::Pins { channel } => ("PINS", vec![channel.to_string()], None),
-            Command::Search { channel, query } => (
-                "SEARCH",
-                vec![channel.to_string()],
-                Some(query.clone()),
-            ),
+            Command::Search { channel, query } => {
+                ("SEARCH", vec![channel.to_string()], Some(query.clone()))
+            }
             Command::Caps { account, scope } => {
                 ("CAPS", vec![account.to_string(), scope.clone()], None)
             }
@@ -1635,6 +1702,8 @@ impl Command {
                 scope,
                 color,
                 caps,
+                hoist,
+                position,
                 name,
             } => {
                 if !caps_ok(caps) {
@@ -1650,14 +1719,26 @@ impl Command {
                         scope.clone(),
                         color.clone(),
                         caps.clone(),
+                        format!("hoist={}", if *hoist { 1 } else { 0 }),
+                        format!("pos={position}"),
                     ],
                     Some(name.clone()),
                 )
             }
+            Command::RolesReorder { scope, order } => (
+                "ROLE",
+                vec!["REORDER".to_string(), scope.clone()],
+                Some(order.join(",")),
+            ),
             Command::RoleDelete { scope, name } => (
                 "ROLE",
                 vec!["DELETE".to_string(), scope.clone()],
                 Some(name.clone()),
+            ),
+            Command::RoleRename { scope, old, new } => (
+                "ROLE",
+                vec!["RENAME".to_string(), scope.clone()],
+                Some(format!("{old},{new}")),
             ),
             Command::RoleAssign {
                 scope,
@@ -2282,11 +2363,22 @@ mod tests {
             scope: "ns:gaming".to_string(),
             color: "#e8b93d".to_string(),
             caps: "mute,ban,kick,pin".to_string(),
+            hoist: true,
+            position: 3,
             name: "Head Moderator".to_string(),
+        }));
+        round_trip(&Request::new(Command::RolesReorder {
+            scope: "ns:gaming".to_string(),
+            order: vec!["Head Moderator".to_string(), "Member".to_string()],
         }));
         round_trip(&Request::new(Command::RoleDelete {
             scope: "ns:gaming".to_string(),
             name: "Head Moderator".to_string(),
+        }));
+        round_trip(&Request::new(Command::RoleRename {
+            scope: "ns:gaming".to_string(),
+            old: "Head Moderator".to_string(),
+            new: "Lead Mod".to_string(),
         }));
         round_trip(&Request::new(Command::RoleAssign {
             scope: "ns:gaming".to_string(),
@@ -2298,6 +2390,26 @@ mod tests {
             account: "bob".parse().unwrap(),
             name: "Head Moderator".to_string(),
         }));
+        // RENAME carries both names in the trailing; only the first comma
+        // splits, so a spaced name survives and a missing pair is rejected.
+        assert_eq!(
+            Request::parse("ROLE RENAME ns:gaming :Head Moderator,Lead Mod")
+                .unwrap()
+                .command,
+            Command::RoleRename {
+                scope: "ns:gaming".to_string(),
+                old: "Head Moderator".to_string(),
+                new: "Lead Mod".to_string(),
+            }
+        );
+        assert!(matches!(
+            Request::parse("ROLE RENAME ns:gaming :OnlyOne"),
+            Err(ParseError::BadParam { verb: "ROLE", .. })
+        ));
+        assert!(matches!(
+            Request::parse("ROLE RENAME ns:gaming :,Lead"),
+            Err(ParseError::BadParam { verb: "ROLE", .. })
+        ));
         round_trip(&Request::new(Command::RolesList {
             scope: "ns:gaming".to_string(),
         }));

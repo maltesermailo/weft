@@ -63,6 +63,15 @@ const PREAUTH_IDLE: Duration = Duration::from_secs(30);
 /// brief network stalls without a spurious reconnect; a genuinely dead socket is
 /// still reaped by the transport's own idle timeout.
 const READY_IDLE: Duration = Duration::from_secs(120);
+/// §16 idle ceiling for a session that is **in a voice room**. A crashed client
+/// is invisible to the transport — a dead QUIC peer sends no FIN (it's UDP), so
+/// the connection is only reaped at the idle timeout, and until then the caller
+/// lingers in every co-member's voice roster. A session in a call is by
+/// definition an active client PINGing every ~10 s (§3.4), so three missed
+/// keepalives is a confident "gone" and bounds the ghost to ~30 s. Tabs playing
+/// audio are exempt from browser timer throttling, so the throttling headroom
+/// that `READY_IDLE` allows for isn't needed here.
+const VOICE_IDLE: Duration = Duration::from_secs(30);
 /// §9.2: dedup MSG retries by (session, label) for 5 minutes.
 const DEDUP_WINDOW: Duration = Duration::from_secs(300);
 /// §8: MALFORMED — close after 5 per 60 s.
@@ -486,6 +495,9 @@ impl<S: ControlStream> Session<S> {
     async fn run(&mut self) -> io::Result<()> {
         loop {
             let limit = match self.state {
+                // §16 a session holding a voice room is reaped far sooner: a
+                // crashed client leaves no ghost in the roster for two minutes.
+                State::Ready { .. } if !self.voice.is_empty() => VOICE_IDLE,
                 State::Ready { .. } => READY_IDLE,
                 _ => PREAUTH_IDLE,
             };
@@ -941,13 +953,21 @@ impl<S: ControlStream> Session<S> {
                 scope,
                 color,
                 caps,
+                hoist,
+                position,
                 name,
             } => {
-                self.on_role_create(label, scope, color, caps, name, account)
+                self.on_role_create(label, scope, color, caps, hoist, position, name, account)
                     .await
+            }
+            Command::RolesReorder { scope, order } => {
+                self.on_roles_reorder(label, scope, order, account).await
             }
             Command::RoleDelete { scope, name } => {
                 self.on_role_delete(label, scope, name, account).await
+            }
+            Command::RoleRename { scope, old, new } => {
+                self.on_role_rename(label, scope, old, new, account).await
             }
             Command::RoleAssign {
                 scope,

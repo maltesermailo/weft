@@ -4,7 +4,15 @@
   // camera is already on.
   import { fade } from "svelte/transition";
   import { voiceUI } from "$lib/voiceui.svelte";
-  import { IS_DESKTOP, startCamera, startNativeVoiceCamera, listNativeCameras } from "$lib/voice.svelte";
+  import {
+    voice,
+    IS_DESKTOP,
+    startCamera,
+    stopCamera,
+    startNativeVoiceCamera,
+    stopNativeVoiceCamera,
+    listNativeCameras,
+  } from "$lib/voice.svelte";
 
   type Cam = { deviceId: string; label: string };
   let devices = $state<Cam[]>([]);
@@ -69,6 +77,12 @@
     stopPreview();
     voiceUI.cameraPicker = false;
   }
+  function turnOff() {
+    stopPreview();
+    if (IS_DESKTOP) void stopNativeVoiceCamera();
+    else void stopCamera();
+    voiceUI.cameraPicker = false;
+  }
 
   // Load on mount; the effect re-previews when the selection changes (web only —
   // desktop capture is native, no in-webview preview).
@@ -114,8 +128,13 @@
     {/if}
 
     <div class="modal-actions">
+      {#if voice.cameraOn}
+        <button class="cam-off" onclick={turnOff}>Turn off camera</button>
+      {/if}
       <button class="linkish" onclick={cancel}>Cancel</button>
-      <button class="picker-go" disabled={!devices.length} onclick={start}>Start camera</button>
+      <button class="picker-go" disabled={!devices.length} onclick={start}>
+        {voice.cameraOn ? "Switch camera" : "Start camera"}
+      </button>
     </div>
   </div>
 </div>
@@ -198,5 +217,18 @@
   .picker-go:disabled {
     opacity: 0.6;
     cursor: default;
+  }
+  .cam-off {
+    margin-right: auto;
+    background: #b3413b;
+    border: none;
+    border-radius: 8px;
+    color: #fff;
+    font-weight: 600;
+    padding: 8px 16px;
+    cursor: pointer;
+  }
+  .cam-off:hover {
+    background: #c94a43;
   }
 </style>

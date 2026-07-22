@@ -597,11 +597,8 @@ pub trait EmojiStore: Send + Sync {
     ) -> Result<(), StoreError>;
 
     /// Remove a namespace emoji. Returns false iff it didn't exist.
-    async fn remove_emoji(
-        &self,
-        namespace: &NamespaceName,
-        name: &str,
-    ) -> Result<bool, StoreError>;
+    async fn remove_emoji(&self, namespace: &NamespaceName, name: &str)
+        -> Result<bool, StoreError>;
 
     /// All emoji for a namespace as `(name, media)`, name-sorted.
     async fn list_emoji(
@@ -656,10 +653,23 @@ pub trait RoleStore: Send + Sync {
         name: &str,
         color: &str,
         caps: &[String],
+        hoist: bool,
+        position: i32,
     ) -> Result<(), StoreError>;
+
+    /// Set each named role's `position` to its index in `order` (§6.5 reorder).
+    /// Names not present are left untouched.
+    async fn reorder_roles(&self, scope: &str, order: &[String]) -> Result<(), StoreError>;
 
     /// Remove a role definition (and every assignment of it). Idempotent.
     async fn delete_role(&self, scope: &str, name: &str) -> Result<(), StoreError>;
+
+    /// Rename a role in place, carrying its definition **and every assignment**
+    /// to the new name (§6.5). Roles are keyed by name, so a delete+create would
+    /// silently drop membership — this migrates both tables instead. Idempotent:
+    /// an absent `old` is a no-op. Callers must reject an already-taken `new`
+    /// *before* calling (this would otherwise overwrite it).
+    async fn rename_role(&self, scope: &str, old: &str, new: &str) -> Result<(), StoreError>;
 
     /// All role definitions at a scope.
     async fn roles(&self, scope: &str) -> Result<Vec<RoleDef>, StoreError>;

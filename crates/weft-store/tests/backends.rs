@@ -454,7 +454,12 @@ where
         msg(&unread_scope, 100_000, "bob", "hello".into()),
         sys,
         msg(&unread_scope, 200_000, "bob", format!("@{reader} ping")),
-        msg(&unread_scope, 300_000, &reader.to_string(), "my own note".into()),
+        msg(
+            &unread_scope,
+            300_000,
+            &reader.to_string(),
+            "my own note".into(),
+        ),
         msg(&unread_scope, 400_000, "bob", "@everyone standup".into()),
     ] {
         store.append(rec).await.unwrap();
@@ -487,7 +492,12 @@ where
     // -- message search (§6.4) --
     let search_scope: Scope = Scope::Channel(format!("#search-{tag}").parse().unwrap());
     store
-        .append(msg(&search_scope, 10_000, "bob", "the Deploy plan is ready".into()))
+        .append(msg(
+            &search_scope,
+            10_000,
+            "bob",
+            "the Deploy plan is ready".into(),
+        ))
         .await
         .unwrap();
     store
@@ -495,7 +505,12 @@ where
         .await
         .unwrap();
     store
-        .append(msg(&search_scope, 30_000, "bob", "revised deploy timeline".into()))
+        .append(msg(
+            &search_scope,
+            30_000,
+            "bob",
+            "revised deploy timeline".into(),
+        ))
         .await
         .unwrap();
     // A join/part system row must never surface in search.
@@ -532,7 +547,14 @@ where
         ]
     );
     // The limit caps results.
-    assert_eq!(store.search(&search_scope, "deploy", 1).await.unwrap().len(), 1);
+    assert_eq!(
+        store
+            .search(&search_scope, "deploy", 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     // A deleted message drops out of results.
     store
         .append(record(
@@ -547,7 +569,11 @@ where
     let after_delete = store.search(&search_scope, "deploy", 10).await.unwrap();
     assert_eq!(after_delete.len(), 1, "deleted root must not appear");
     // No match → empty.
-    assert!(store.search(&search_scope, "zzz-none", 10).await.unwrap().is_empty());
+    assert!(store
+        .search(&search_scope, "zzz-none", 10)
+        .await
+        .unwrap()
+        .is_empty());
 
     // -- threads (§9.4) --
     let thread_scope: Scope = Scope::Channel(format!("#thread-{tag}").parse().unwrap());
@@ -571,11 +597,23 @@ where
         .append(msg(&thread_scope, 500_000, "bob", "thread root".into()))
         .await
         .unwrap();
-    store.append(msg(&thread_scope, 510_000, "bob", "unrelated".into())).await.unwrap();
-    store.append(threaded(600_000, "first reply")).await.unwrap();
-    store.append(threaded(700_000, "second reply")).await.unwrap();
+    store
+        .append(msg(&thread_scope, 510_000, "bob", "unrelated".into()))
+        .await
+        .unwrap();
+    store
+        .append(threaded(600_000, "first reply"))
+        .await
+        .unwrap();
+    store
+        .append(threaded(700_000, "second reply"))
+        .await
+        .unwrap();
     // Root + its replies, oldest-first; the unrelated message is excluded.
-    let thread = store.thread_roots(&thread_scope, &root_id, 50).await.unwrap();
+    let thread = store
+        .thread_roots(&thread_scope, &root_id, 50)
+        .await
+        .unwrap();
     let thread_bodies: Vec<String> = thread
         .iter()
         .map(|r| match &r.kind {
@@ -599,7 +637,9 @@ where
     assert_eq!(lonely.len(), 1);
 
     // -- custom emoji (§9.4) --
-    let ns: NamespaceName = format!("emo{}", tag.replace(['-', '_'], "")).parse().unwrap();
+    let ns: NamespaceName = format!("emo{}", tag.replace(['-', '_'], ""))
+        .parse()
+        .unwrap();
     assert!(store.list_emoji(&ns).await.unwrap().is_empty());
     store
         .set_emoji(&ns, "partyblob", "weft-media://test.example/aaa")
@@ -613,8 +653,14 @@ where
     assert_eq!(
         store.list_emoji(&ns).await.unwrap(),
         vec![
-            ("catjam".to_string(), "weft-media://test.example/bbb".to_string()),
-            ("partyblob".to_string(), "weft-media://test.example/aaa".to_string()),
+            (
+                "catjam".to_string(),
+                "weft-media://test.example/bbb".to_string()
+            ),
+            (
+                "partyblob".to_string(),
+                "weft-media://test.example/aaa".to_string()
+            ),
         ]
     );
     // Set is idempotent-by-key: replaces the media.
@@ -623,7 +669,10 @@ where
         .await
         .unwrap();
     assert_eq!(store.list_emoji(&ns).await.unwrap().len(), 2);
-    assert_eq!(store.list_emoji(&ns).await.unwrap()[0].1, "weft-media://test.example/ccc");
+    assert_eq!(
+        store.list_emoji(&ns).await.unwrap()[0].1,
+        "weft-media://test.example/ccc"
+    );
     // `emoji_media` reports every referenced blob (for the GC's keep-set).
     let media = store.emoji_media().await.unwrap();
     assert!(media.contains(&"weft-media://test.example/aaa".to_string()));
@@ -633,7 +682,11 @@ where
     assert!(!store.remove_emoji(&ns, "catjam").await.unwrap());
     assert_eq!(store.list_emoji(&ns).await.unwrap().len(), 1);
     // A removed emoji drops out of the GC keep-set.
-    assert!(!store.emoji_media().await.unwrap().contains(&"weft-media://test.example/ccc".to_string()));
+    assert!(!store
+        .emoji_media()
+        .await
+        .unwrap()
+        .contains(&"weft-media://test.example/ccc".to_string()));
 
     // -- verification claims (infrastructure only) --
     store
@@ -865,9 +918,20 @@ where
         })
         .await
         .unwrap();
-    assert_eq!(store.revoke_invites_for_namespace(&bulk_ns).await.unwrap(), 3);
-    assert!(store.invite(&format!("inv-b1-{tag}")).await.unwrap().is_none());
-    assert!(store.invite(&format!("inv-b2-{tag}")).await.unwrap().is_none());
+    assert_eq!(
+        store.revoke_invites_for_namespace(&bulk_ns).await.unwrap(),
+        3
+    );
+    assert!(store
+        .invite(&format!("inv-b1-{tag}"))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .invite(&format!("inv-b2-{tag}"))
+        .await
+        .unwrap()
+        .is_none());
     assert!(store.invite(&other).await.unwrap().is_some()); // other namespace untouched
 
     // -- namespaces (§2.1, §2.2) --
@@ -1501,20 +1565,24 @@ where
             "Moderator",
             "#e8b93d",
             &["mute".into(), "ban".into()],
+            true,
+            0,
         )
         .await
         .unwrap();
     store
-        .set_role(&rscope, "Member", "#3ba55d", &["send".into()])
+        .set_role(&rscope, "Member", "#3ba55d", &["send".into()], false, 1)
         .await
         .unwrap();
-    // Upsert: same name replaces color + caps.
+    // Upsert: same name replaces color + caps + hoist + position.
     store
         .set_role(
             &rscope,
             "Moderator",
             "#ff0000",
             &["mute".into(), "ban".into(), "kick".into()],
+            true,
+            0,
         )
         .await
         .unwrap();
@@ -1523,8 +1591,18 @@ where
         name: "Moderator".into(),
         color: "#ff0000".into(),
         caps: vec!["mute".into(), "ban".into(), "kick".into()],
+        hoist: true,
+        position: 0,
     }));
     assert_eq!(roles.len(), 2);
+    // Reorder: Member first, Moderator second → positions by index.
+    store
+        .reorder_roles(&rscope, &["Member".into(), "Moderator".into()])
+        .await
+        .unwrap();
+    let ordered = store.roles(&rscope).await.unwrap();
+    assert_eq!(ordered[0].name, "Member"); // position 0 sorts first
+    assert_eq!(ordered[1].name, "Moderator");
     store.delete_role(&rscope, "Member").await.unwrap();
     let roles = store.roles(&rscope).await.unwrap();
     assert_eq!(roles.len(), 1);
@@ -1574,6 +1652,64 @@ where
     store.delete_role(&rscope, "Moderator").await.unwrap();
     assert!(store.roles_of(&rscope, &racct).await.unwrap().is_empty());
 
+    // ---- §6.5 ROLE RENAME: definition + membership migrate together ----
+    store
+        .set_role(&rscope, "Helper", "#e8b93d", &["pin".into()], true, 4)
+        .await
+        .unwrap();
+    store.assign_role(&rscope, "Helper", &racct).await.unwrap();
+    store
+        .assign_role(&rscope, "Helper", &foreign)
+        .await
+        .unwrap();
+    store
+        .rename_role(&rscope, "Helper", "Support Lead")
+        .await
+        .unwrap();
+    // The definition moved intact — only the name changed.
+    let renamed = store.roles(&rscope).await.unwrap();
+    assert!(renamed.contains(&RoleDef {
+        name: "Support Lead".into(),
+        color: "#e8b93d".into(),
+        caps: vec!["pin".into()],
+        hoist: true,
+        position: 4,
+    }));
+    assert!(!renamed.iter().any(|r| r.name == "Helper"));
+    // Every holder came with it — a rename must never drop membership.
+    let mut moved = store.role_members(&rscope, "Support Lead").await.unwrap();
+    moved.sort();
+    assert_eq!(moved, vec![foreign.clone(), racct.clone()]);
+    assert!(store
+        .role_members(&rscope, "Helper")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store.roles_of(&rscope, &racct).await.unwrap(),
+        vec!["Support Lead".to_string()]
+    );
+    // Idempotent on an absent source, and a no-op when old == new.
+    store
+        .rename_role(&rscope, "Ghost", "Phantom")
+        .await
+        .unwrap();
+    assert!(!store
+        .roles(&rscope)
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.name == "Phantom"));
+    store
+        .rename_role(&rscope, "Support Lead", "Support Lead")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.roles_of(&rscope, &racct).await.unwrap(),
+        vec!["Support Lead".to_string()]
+    );
+    store.delete_role(&rscope, "Support Lead").await.unwrap();
+
     // -- CHANNEL RENAME: re-key everything scoped to the channel name --
     let old: ChannelName = format!("#rn-{tag}/old").parse().unwrap();
     let new: ChannelName = format!("#rn-{tag}/new").parse().unwrap();
@@ -1597,7 +1733,14 @@ where
         .unwrap();
     store.set_membership(&ada, &old).await.unwrap();
     store
-        .set_role(&old.to_string(), "Voice", "#fff", &["react".into()])
+        .set_role(
+            &old.to_string(),
+            "Voice",
+            "#fff",
+            &["react".into()],
+            false,
+            0,
+        )
         .await
         .unwrap();
 

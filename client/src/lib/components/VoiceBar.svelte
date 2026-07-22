@@ -9,35 +9,34 @@
     toggleMute,
     toggleDeafen,
     stopCamera,
-    stopNativeVoiceCamera,
     startScreenShare,
     stopScreenShare,
-    stopNativeVoiceScreenshare,
     IS_DESKTOP,
   } from "$lib/voice.svelte";
-  import { voiceUI } from "$lib/voiceui.svelte";
+  import { voiceUI, openScreenMenu } from "$lib/voiceui.svelte";
   import { getApp } from "$lib/context";
 
   const app = getApp();
   function openStage() {
     if (voice.channel) app.openVoice(voice.channel);
   }
-  // Camera + screen share: desktop publishes natively (Rust SDK), web uses the
-  // webview (device picker / getDisplayMedia). Both open a picker when turning on.
+  // Desktop always opens the picker — it lets you start, switch source/device,
+  // change quality, or stop. Web toggles directly (or opens the camera picker).
   const camClick = () => {
-    if (voice.cameraOn) {
-      IS_DESKTOP ? stopNativeVoiceCamera() : stopCamera();
-    } else {
+    if (IS_DESKTOP) {
       voiceUI.cameraPicker = true;
+    } else {
+      voice.cameraOn ? stopCamera() : (voiceUI.cameraPicker = true);
     }
   };
-  const screenClick = () => {
-    if (voice.sharingScreen) {
-      IS_DESKTOP ? stopNativeVoiceScreenshare() : stopScreenShare();
-    } else if (IS_DESKTOP) {
-      voiceUI.screenPicker = true;
+  // While sharing, the button opens the share menu (stop / switch / quality),
+  // anchored to itself — Discord's behavior. Otherwise it opens the picker.
+  const screenClick = (e: MouseEvent) => {
+    if (IS_DESKTOP) {
+      if (voice.sharingScreen) openScreenMenu(e.currentTarget as HTMLElement);
+      else voiceUI.screenPicker = true;
     } else {
-      startScreenShare();
+      voice.sharingScreen ? stopScreenShare() : startScreenShare();
     }
   };
 </script>
@@ -90,7 +89,7 @@
       <button
         class="vp-btn"
         class:on={voice.sharingScreen}
-        title={voice.sharingScreen ? "Stop sharing screen" : "Share your screen"}
+        title={voice.sharingScreen ? "Screen share options" : "Share your screen"}
         aria-label="Toggle screen share"
         onclick={screenClick}
       >

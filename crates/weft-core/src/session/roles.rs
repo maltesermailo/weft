@@ -3,12 +3,15 @@
 use super::*;
 
 impl<S: ControlStream> Session<S> {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn on_role_create(
         &mut self,
         label: Option<String>,
         scope: String,
         color: String,
         caps: String,
+        hoist: bool,
+        position: i32,
         name: String,
         account: Account,
     ) -> io::Result<Flow> {
@@ -40,7 +43,7 @@ impl<S: ControlStream> Session<S> {
         if let Err(e) = self
             .ctx
             .roles
-            .set_role(&scope, &name, &color, &cap_strings)
+            .set_role(&scope, &name, &color, &cap_strings, hoist, position)
             .await
         {
             return self.internal(label, &e).await;
@@ -110,6 +113,60 @@ impl<S: ControlStream> Session<S> {
             Err(e) => return self.internal(label, &e).await,
         }
         if let Err(e) = self.ctx.roles.delete_role(&scope, &name).await {
+            return self.internal(label, &e).await;
+        }
+        self.on_roles_list(label, scope).await
+    }
+
+    /// §6.5 ROLE RENAME (scope admin only) → updated `ROLES` batch.
+    ///
+    /// Roles are keyed by name, so this is a store migration that carries the
+    /// definition *and* every assignment. Issued grants need no migration: a
+    /// role's authority is its capability bundle, and that is unchanged.
+    pub(super) async fn on_role_rename(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        old: String,
+        new: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        // Invariant 4: the cap check precedes any mutation — and precedes the
+        // existence probes below, so they can't be used to enumerate roles.
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::NsAdmin, &token_scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "ns-admin").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        if old == new {
+            return self.on_roles_list(label, scope).await;
+        }
+        let roles = match self.ctx.roles.roles(&scope).await {
+            Ok(roles) => roles,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        if !roles.iter().any(|r| r.name == old) {
+            return self.no_such_target(label).await;
+        }
+        // Renaming onto a live role would merge two bundles — refuse.
+        if roles.iter().any(|r| r.name == new) {
+            self.send_err(
+                label,
+                ErrCode::Policy,
+                None,
+                "a role with that name already exists",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        if let Err(e) = self.ctx.roles.rename_role(&scope, &old, &new).await {
             return self.internal(label, &e).await;
         }
         self.on_roles_list(label, scope).await
@@ -299,6 +356,8 @@ impl<S: ControlStream> Session<S> {
                     scope: scope.clone(),
                     color: role.color,
                     caps: role.caps.join(","),
+                    hoist: role.hoist,
+                    position: role.position,
                     name: role.name,
                 },
             )
@@ -314,5 +373,31 @@ impl<S: ControlStream> Session<S> {
         )
         .await?;
         Ok(Flow::Continue)
+    }
+
+    /// §6.5 ROLE REORDER (scope admin only) → sets positions, re-emits `ROLES`.
+    pub(super) async fn on_roles_reorder(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        order: Vec<String>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::NsAdmin, &token_scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "ns-admin").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        if let Err(e) = self.ctx.roles.reorder_roles(&scope, &order).await {
+            return self.internal(label, &e).await;
+        }
+        self.on_roles_list(label, scope).await
     }
 }

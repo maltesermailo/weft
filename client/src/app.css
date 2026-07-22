@@ -2195,6 +2195,14 @@ button:disabled {
   border-radius: 8px;
   background: var(--bg-panel-raised);
 }
+.hoist-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
 .role-swatch {
   width: 14px;
   height: 14px;

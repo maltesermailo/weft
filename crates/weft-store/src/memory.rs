@@ -52,6 +52,9 @@ fn email_domain(email: &str) -> String {
         .to_lowercase()
 }
 
+/// A stored role's value: (color, caps, hoist, position).
+type RoleEntry = (String, Vec<String>, bool, i32);
+
 #[derive(Default)]
 struct Inner {
     /// (scope key, event ulid) → record; BTreeMap gives ordered range
@@ -100,7 +103,8 @@ struct Inner {
     /// account → channels it's a member of (§6.3 persistent membership).
     memberships: HashMap<Account, std::collections::HashSet<ChannelName>>,
     /// scope → role name → (color, caps) (§6.5 role definitions).
-    roles: HashMap<String, std::collections::BTreeMap<String, (String, Vec<String>)>>,
+    // scope → name → (color, caps, hoist, position)
+    roles: HashMap<String, std::collections::BTreeMap<String, RoleEntry>>,
     /// Explicit role membership: (scope, role name, account).
     /// (scope, role name, subject) — subject is a local name or `account@network`.
     role_assignments: HashSet<(String, String, String)>,
@@ -1570,13 +1574,26 @@ impl RoleStore for MemoryStore {
         name: &str,
         color: &str,
         caps: &[String],
+        hoist: bool,
+        position: i32,
     ) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
-        inner
-            .roles
-            .entry(scope.to_string())
-            .or_default()
-            .insert(name.to_string(), (color.to_string(), caps.to_vec()));
+        inner.roles.entry(scope.to_string()).or_default().insert(
+            name.to_string(),
+            (color.to_string(), caps.to_vec(), hoist, position),
+        );
+        Ok(())
+    }
+
+    async fn reorder_roles(&self, scope: &str, order: &[String]) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(defs) = inner.roles.get_mut(scope) {
+            for (i, name) in order.iter().enumerate() {
+                if let Some(role) = defs.get_mut(name) {
+                    role.3 = i as i32;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1591,19 +1608,59 @@ impl RoleStore for MemoryStore {
         Ok(())
     }
 
+    async fn rename_role(&self, scope: &str, old: &str, new: &str) -> Result<(), StoreError> {
+        if old == new {
+            return Ok(());
+        }
+        let mut inner = self.inner.lock().expect("store lock");
+
+        // Move the definition (absent ⇒ nothing to rename, and no assignments
+        // should be touched either).
+        let Some(def) = inner.roles.get_mut(scope).and_then(|d| d.remove(old)) else {
+            return Ok(());
+        };
+        inner
+            .roles
+            .entry(scope.to_string())
+            .or_default()
+            .insert(new.to_string(), def);
+
+        // Carry membership across, so nobody loses a role to a rename.
+        let moved: Vec<String> = inner
+            .role_assignments
+            .iter()
+            .filter(|(s, n, _)| s == scope && n == old)
+            .map(|(_, _, a)| a.clone())
+            .collect();
+        inner
+            .role_assignments
+            .retain(|(s, n, _)| !(s == scope && n == old));
+        for subject in moved {
+            inner
+                .role_assignments
+                .insert((scope.to_string(), new.to_string(), subject));
+        }
+        Ok(())
+    }
+
     async fn roles(&self, scope: &str) -> Result<Vec<RoleDef>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner
             .roles
             .get(scope)
             .map(|defs| {
-                defs.iter()
-                    .map(|(name, (color, caps))| RoleDef {
+                let mut out: Vec<RoleDef> = defs
+                    .iter()
+                    .map(|(name, (color, caps, hoist, position))| RoleDef {
                         name: name.clone(),
                         color: color.clone(),
                         caps: caps.clone(),
+                        hoist: *hoist,
+                        position: *position,
                     })
-                    .collect()
+                    .collect();
+                out.sort_by(|a, b| a.position.cmp(&b.position).then(a.name.cmp(&b.name)));
+                out
             })
             .unwrap_or_default())
     }

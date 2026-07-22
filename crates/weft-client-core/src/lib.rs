@@ -141,6 +141,8 @@ pub enum ClientEvent {
         scope: String,
         color: String,
         caps: String,
+        hoist: bool,
+        position: i32,
         name: String,
     },
     /// `ROLE-MEMBER <scope> <account> :<roles>` — an account's assigned roles.
@@ -559,11 +561,15 @@ pub fn on_line<E: EventSink>(
             scope,
             color,
             caps,
+            hoist,
+            position,
             name,
         } => sink.emit(ClientEvent::Role {
             scope,
             color,
             caps,
+            hoist,
+            position,
             name,
         }),
         Event::RoleMember {
@@ -1152,13 +1158,26 @@ pub fn build_role_create(
     scope: &str,
     color: &str,
     caps: &str,
+    hoist: bool,
+    position: i32,
     name: &str,
 ) -> Result<String, String> {
     Request::new(Command::RoleCreate {
         scope: scope.to_string(),
         color: color.to_string(),
         caps: caps.to_string(),
+        hoist,
+        position,
         name: name.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+pub fn build_roles_reorder(scope: &str, order: &[String]) -> Result<String, String> {
+    Request::new(Command::RolesReorder {
+        scope: scope.to_string(),
+        order: order.to_vec(),
     })
     .serialize()
     .map_err(|e| e.to_string())
@@ -1168,6 +1187,20 @@ pub fn build_role_delete(scope: &str, name: &str) -> Result<String, String> {
     Request::new(Command::RoleDelete {
         scope: scope.to_string(),
         name: name.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+pub fn build_role_rename(scope: &str, old: &str, new: &str) -> Result<String, String> {
+    // Both names ride one trailing as a comma pair, so neither may contain one.
+    if old.contains(',') || new.contains(',') {
+        return Err("a role name cannot contain a comma".to_string());
+    }
+    Request::new(Command::RoleRename {
+        scope: scope.to_string(),
+        old: old.to_string(),
+        new: new.to_string(),
     })
     .serialize()
     .map_err(|e| e.to_string())

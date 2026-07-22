@@ -19,6 +19,7 @@
   import VoiceStage from "$lib/components/chat/VoiceStage.svelte";
   import CameraPicker from "$lib/components/modals/CameraPicker.svelte";
   import ScreenPicker from "$lib/components/modals/ScreenPicker.svelte";
+  import ScreenShareMenu from "$lib/components/modals/ScreenShareMenu.svelte";
   import { voiceUI } from "$lib/voiceui.svelte";
   import ChannelList from "$lib/components/sidebar/ChannelList.svelte";
   import SidebarHeader from "$lib/components/sidebar/SidebarHeader.svelte";
@@ -433,9 +434,16 @@
     roleFetchQueue.push(scope);
     weft.roles(scope).catch(() => roleFetchQueue.pop());
   }
-  function createRoleAt(scope: string, name: string, color: string, caps: string) {
+  function createRoleAt(
+    scope: string,
+    name: string,
+    color: string,
+    caps: string,
+    hoist = false,
+    position = 0,
+  ) {
     roleFetchQueue.push(scope);
-    return weft.roleCreate(scope, color, caps, name);
+    return weft.roleCreate(scope, color, caps, hoist, position, name);
   }
   function deleteRoleAt(scope: string, name: string) {
     roleFetchQueue.push(scope);
@@ -451,6 +459,16 @@
   const fedRolesFetched = new Set<string>();
   function fetchMemberRoles(account: string, scope: string) {
     weft.rolesOfAccount(scope, account).catch(() => {});
+  }
+  // Eagerly fetch a member's namespace roles once, so the member list can group
+  // by hoisted role without opening each profile. Deduped per (account, scope).
+  const memberRolesFetched = new Set<string>();
+  function ensureMemberRoles(account: string) {
+    const scope = nsRoleScope();
+    const key = `${account}|${scope}`;
+    if (memberRolesFetched.has(key)) return;
+    memberRolesFetched.add(key);
+    fetchMemberRoles(account, scope);
   }
   /// The role definitions an account is assigned at a scope.
   function rolesOf(account: string, scope: string): RoleDefC[] {
@@ -520,17 +538,63 @@
   let newRoleName = $state("");
   let newRoleColor = $state("#5865f2");
   let newRoleCaps = $state<string[]>([]);
+  let newRoleHoist = $state(false);
   const toggleNewRoleCap = (c: string) =>
     (newRoleCaps = newRoleCaps.includes(c) ? newRoleCaps.filter((x) => x !== c) : [...newRoleCaps, c]);
   const nsRoleScope = () => (activeServer ? `ns:${activeServer}` : "*");
   function createRole() {
     if (!newRoleName.trim() || !newRoleCaps.length) return;
-    createRoleAt(nsRoleScope(), newRoleName.trim(), newRoleColor, newRoleCaps.join(","))
+    // Append at the bottom of the ordered list.
+    const position = rolesByScope[nsRoleScope()]?.length ?? 0;
+    createRoleAt(nsRoleScope(), newRoleName.trim(), newRoleColor, newRoleCaps.join(","), newRoleHoist, position)
       .then(() => {
         newRoleName = "";
         newRoleCaps = [];
+        newRoleHoist = false;
       })
       .catch((e) => toast(String(e), "error"));
+  }
+  // Move a role up/down in the ordered list, then persist the new order (§6.5).
+  function moveRole(name: string, dir: -1 | 1) {
+    const scope = nsRoleScope();
+    const list = [...(rolesByScope[scope] ?? [])];
+    const i = list.findIndex((r) => r.name === name);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    roleFetchQueue.push(scope);
+    weft.rolesReorder(scope, list.map((r) => r.name)).catch((e) => toast(String(e), "error"));
+  }
+  // Persist an arbitrary order (drag-and-drop) — positions follow the list.
+  function reorderRoles(names: string[]) {
+    const scope = nsRoleScope();
+    roleFetchQueue.push(scope);
+    weft.rolesReorder(scope, names).catch((e) => toast(String(e), "error"));
+  }
+  // Apply a role edit. A changed name goes through ROLE RENAME so the role keeps
+  // its members and issued caps; the rest rides the ordinary upsert (§6.5).
+  function saveRole(
+    role: RoleDefC,
+    patch: { name: string; color: string; caps: string[]; hoist: boolean },
+  ) {
+    const scope = nsRoleScope();
+    const name = patch.name.trim() || role.name;
+    if (!patch.caps.length) {
+      toast("A role needs at least one permission", "error");
+      return;
+    }
+    const upsert = () =>
+      createRoleAt(scope, name, patch.color, patch.caps.join(","), patch.hoist, role.position);
+
+    if (name !== role.name) {
+      roleFetchQueue.push(scope);
+      weft
+        .roleRename(scope, role.name, name)
+        .then(upsert)
+        .catch((e) => toast(String(e), "error"));
+    } else {
+      upsert().catch((e) => toast(String(e), "error"));
+    }
   }
   function deleteRole(name: string) {
     deleteRoleAt(nsRoleScope(), name).catch((e) => toast(String(e), "error"));
@@ -1095,7 +1159,13 @@
         break;
       }
       case "role":
-        roleBuf.push({ name: e.name, color: e.color, caps: e.caps ? e.caps.split(",") : [] });
+        roleBuf.push({
+          name: e.name,
+          color: e.color,
+          caps: e.caps ? e.caps.split(",") : [],
+          hoist: e.hoist,
+          position: e.position,
+        });
         break;
       case "role-member":
         memberRoles[`${e.account}|${e.scope}`] = e.roles ? e.roles.split(",") : [];
@@ -1210,6 +1280,8 @@
         }
         if (currentBatchId.startsWith("r")) {
           const scope = roleFetchQueue.shift();
+          // Keep roles in position order (server sorts, but be safe).
+          roleBuf.sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
           if (scope) rolesByScope[scope] = roleBuf;
           roleBuf = [];
           currentBatchId = "";
@@ -2542,6 +2614,7 @@
     // roles (ProfileCard)
     get rolesByScope() { return rolesByScope; },
     rolesOf,
+    ensureMemberRoles,
     roleScopeOf,
     isOwnerAt,
     assignRoleTo,
@@ -2591,6 +2664,8 @@
     get newRoleColor() { return newRoleColor; },
     set newRoleColor(v: string) { newRoleColor = v; },
     get newRoleCaps() { return newRoleCaps; },
+    get newRoleHoist() { return newRoleHoist; },
+    set newRoleHoist(v: boolean) { newRoleHoist = v; },
     toggleNewRoleCap,
     get nsDelegSubject() { return nsDelegSubject; },
     set nsDelegSubject(v: string) { nsDelegSubject = v; },
@@ -2608,6 +2683,9 @@
     nsSetFederation,
     federate,
     createRole,
+    moveRole,
+    reorderRoles,
+    saveRole,
     deleteRole,
     assignRole,
     showRecoveryKey,
@@ -2645,6 +2723,7 @@
   <LinkWarningModal />
   {#if voiceUI.cameraPicker}<CameraPicker />{/if}
   {#if voiceUI.screenPicker}<ScreenPicker />{/if}
+  {#if voiceUI.screenMenu}<ScreenShareMenu />{/if}
   <ThreadPanel />
   {#if federating}
     <div class="federating-banner">

@@ -5,7 +5,7 @@
   import { fade } from "svelte/transition";
   import { invoke } from "@tauri-apps/api/core";
   import { voiceUI } from "$lib/voiceui.svelte";
-  import { startNativeVoiceScreenshare } from "$lib/voice.svelte";
+  import { voice, startNativeVoiceScreenshare, stopNativeVoiceScreenshare } from "$lib/voice.svelte";
 
   type Source = {
     id: string;
@@ -87,6 +87,10 @@
   function cancel() {
     voiceUI.screenPicker = false;
   }
+  function stopSharing() {
+    void stopNativeVoiceScreenshare();
+    voiceUI.screenPicker = false;
+  }
 
   $effect(() => {
     void load();
@@ -152,7 +156,12 @@
           <option value={60}>60 fps</option>
         </select>
       </label>
-      <span class="sp-q-hint">Higher settings need more CPU — lower the resolution if it stutters.</span>
+      <span class="sp-q-hint">
+        {#if voice.sharingScreen}Pick a source to switch, or stop sharing.{:else}Higher settings need more CPU — lower the resolution if it stutters.{/if}
+      </span>
+      {#if voice.sharingScreen}
+        <button class="sp-stop" onclick={stopSharing}>Stop sharing</button>
+      {/if}
     </div>
   </div>
 </div>
@@ -312,5 +321,18 @@
     margin-left: auto;
     font-size: 0.72rem;
     color: var(--text-faint);
+  }
+  .sp-stop {
+    padding: 7px 14px;
+    border: none;
+    border-radius: 8px;
+    background: #b3413b;
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .sp-stop:hover {
+    background: #c94a43;
   }
 </style>

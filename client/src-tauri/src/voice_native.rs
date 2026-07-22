@@ -18,14 +18,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures_util::StreamExt;
 use livekit::options::TrackPublishOptions;
 use livekit::prelude::*;
+use livekit::webrtc::audio_frame::AudioFrame;
+use livekit::webrtc::audio_source::{native::NativeAudioSource, AudioSourceOptions};
 use livekit::webrtc::native::yuv_helper;
 use livekit::webrtc::prelude::RtcVideoTrack;
 use livekit::webrtc::video_frame::{I420Buffer, VideoBuffer, VideoFrame, VideoRotation};
 use livekit::webrtc::video_source::{native::NativeVideoSource, RtcVideoSource, VideoResolution};
 use livekit::webrtc::video_stream::native::NativeVideoStream;
+use nnnoiseless::DenoiseState;
 use nokhwa::pixel_format::RgbAFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::{query, Camera};
@@ -45,13 +49,166 @@ struct VideoPub {
 /// One live native voice session (at most one at a time).
 struct Session {
     room: Arc<Room>,
-    // The ADM handle must outlive the room — dropping it stops capture/playout.
+    // The ADM handle must outlive the room — it drives remote-audio playout.
     _audio: PlatformAudio,
     mic: LocalAudioTrack,
     muted: Arc<AtomicBool>,
+    // Mic capture (cpal + RNNoise): the flag stops the capture thread; the pump
+    // feeds denoised frames into the LiveKit source.
+    mic_flag: Arc<AtomicBool>,
+    mic_pump: tauri::async_runtime::JoinHandle<()>,
     task: tauri::async_runtime::JoinHandle<()>,
     screen: Option<VideoPub>,
     camera: Option<VideoPub>,
+}
+
+/// Down-mix + resample + RNNoise-denoise mic audio into 48 kHz mono 10 ms frames.
+struct MicProc {
+    denoise: Box<DenoiseState<'static>>,
+    device_rate: f64,
+    channels: usize,
+    resample_pos: f64,
+    in_buf: Vec<f32>, // mono, at the device rate
+    out48: Vec<f32>,  // mono, 48 kHz, scaled to i16 magnitude (RNNoise convention)
+    tx: tokio::sync::mpsc::Sender<Vec<i16>>,
+}
+
+impl MicProc {
+    fn new(device_rate: f64, channels: usize, tx: tokio::sync::mpsc::Sender<Vec<i16>>) -> Self {
+        Self {
+            denoise: DenoiseState::new(),
+            device_rate,
+            channels,
+            resample_pos: 0.0,
+            in_buf: Vec::new(),
+            out48: Vec::new(),
+            tx,
+        }
+    }
+
+    fn process_f32(&mut self, data: &[f32]) {
+        self.feed(data);
+    }
+    fn process_i16(&mut self, data: &[i16]) {
+        let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
+        self.feed(&f);
+    }
+
+    /// `data` is interleaved f32 in [-1, 1] at the device rate.
+    fn feed(&mut self, data: &[f32]) {
+        // Down-mix to mono.
+        for frame in data.chunks(self.channels.max(1)) {
+            let m = frame.iter().copied().sum::<f32>() / self.channels.max(1) as f32;
+            self.in_buf.push(m);
+        }
+        // Linear-resample to 48 kHz, scaling to i16 magnitude for RNNoise.
+        let ratio = self.device_rate / 48_000.0;
+        while (self.resample_pos as usize) + 1 < self.in_buf.len() {
+            let i = self.resample_pos as usize;
+            let frac = self.resample_pos - i as f64;
+            let s = self.in_buf[i] as f64 * (1.0 - frac) + self.in_buf[i + 1] as f64 * frac;
+            self.out48.push((s * 32768.0) as f32);
+            self.resample_pos += ratio;
+        }
+        let consumed = (self.resample_pos as usize).min(self.in_buf.len());
+        if consumed > 0 {
+            self.in_buf.drain(0..consumed);
+            self.resample_pos -= consumed as f64;
+        }
+        // Denoise 10 ms frames and hand them to the pump.
+        while self.out48.len() >= DenoiseState::FRAME_SIZE {
+            let inp: Vec<f32> = self.out48.drain(0..DenoiseState::FRAME_SIZE).collect();
+            let mut out = vec![0f32; DenoiseState::FRAME_SIZE];
+            self.denoise.process_frame(&mut out, &inp);
+            let pcm: Vec<i16> = out
+                .iter()
+                .map(|&x| x.clamp(-32768.0, 32767.0) as i16)
+                .collect();
+            let _ = self.tx.try_send(pcm);
+        }
+    }
+}
+
+/// Build the cpal input stream (its callback pushes denoised i16 frames to `tx`).
+/// The returned Stream is `!Send`, so the caller keeps it alive on a dedicated
+/// thread.
+fn build_mic_stream(tx: tokio::sync::mpsc::Sender<Vec<i16>>) -> Result<cpal::Stream, String> {
+    let host = cpal::default_host();
+    let device = host.default_input_device().ok_or("no microphone found")?;
+    let supported = device.default_input_config().map_err(|e| e.to_string())?;
+    let device_rate = supported.sample_rate() as f64;
+    let channels = supported.channels() as usize;
+    let format = supported.sample_format();
+    let config: cpal::StreamConfig = supported.into();
+
+    let mut proc = MicProc::new(device_rate, channels, tx);
+    let err_fn = |_e| {};
+
+    let stream = match format {
+        cpal::SampleFormat::F32 => device.build_input_stream(
+            config,
+            move |data: &[f32], _: &_| proc.process_f32(data),
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::I16 => device.build_input_stream(
+            config,
+            move |data: &[i16], _: &_| proc.process_i16(data),
+            err_fn,
+            None,
+        ),
+        other => return Err(format!("unsupported mic sample format: {other:?}")),
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(stream)
+}
+
+/// Start mic capture: a cpal thread (owns the Stream) + an async pump feeding the
+/// LiveKit source. Blocks briefly to surface an init failure (no mic / denied).
+fn start_mic_capture(
+    source: NativeAudioSource,
+) -> Result<(Arc<AtomicBool>, tauri::async_runtime::JoinHandle<()>), String> {
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(128);
+    let flag = Arc::new(AtomicBool::new(true));
+
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    {
+        let flag = flag.clone();
+        std::thread::spawn(move || match build_mic_stream(frame_tx) {
+            Ok(stream) => {
+                if stream.play().is_err() {
+                    let _ = ready_tx.send(Err("couldn't start the microphone".into()));
+                    return;
+                }
+                let _ = ready_tx.send(Ok(()));
+                while flag.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                drop(stream);
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+            }
+        });
+    }
+    match ready_rx.recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err("mic capture thread died".into()),
+    }
+
+    let pump = tauri::async_runtime::spawn(async move {
+        while let Some(pcm) = frame_rx.recv().await {
+            let frame = AudioFrame {
+                data: pcm.into(),
+                sample_rate: 48_000,
+                num_channels: 1,
+                samples_per_channel: DenoiseState::FRAME_SIZE as u32,
+            };
+            let _ = source.capture_frame(&frame).await;
+        }
+    });
+    Ok((flag, pump))
 }
 
 #[derive(Default)]
@@ -83,7 +240,9 @@ fn roster(room: &Room, local_muted: bool) -> Vec<RosterEntry> {
         camera_on: lpubs
             .values()
             .any(|t| t.source() == TrackSource::Camera && !t.is_muted()),
-        sharing_screen: lpubs.values().any(|t| t.source() == TrackSource::Screenshare),
+        sharing_screen: lpubs
+            .values()
+            .any(|t| t.source() == TrackSource::Screenshare),
         self_: true,
     }];
     for (_id, p) in room.remote_participants() {
@@ -91,7 +250,7 @@ fn roster(room: &Room, local_muted: bool) -> Vec<RosterEntry> {
         let muted = pubs
             .values()
             .find(|t| t.source() == TrackSource::Microphone)
-            .map_or(true, |t| t.is_muted());
+            .is_none_or(|t| t.is_muted());
         out.push(RosterEntry {
             user: p.identity().as_str().to_string(),
             speaking: p.is_speaking(),
@@ -99,7 +258,9 @@ fn roster(room: &Room, local_muted: bool) -> Vec<RosterEntry> {
             camera_on: pubs
                 .values()
                 .any(|t| t.source() == TrackSource::Camera && !t.is_muted()),
-            sharing_screen: pubs.values().any(|t| t.source() == TrackSource::Screenshare),
+            sharing_screen: pubs
+                .values()
+                .any(|t| t.source() == TrackSource::Screenshare),
             self_: false,
         });
     }
@@ -182,7 +343,9 @@ pub async fn voice_native_connect(
     url: String,
     token: String,
 ) -> Result<(), String> {
-    voice_native_disconnect(app.clone(), state.clone()).await.ok();
+    voice_native_disconnect(app.clone(), state.clone())
+        .await
+        .ok();
 
     let audio = PlatformAudio::new().map_err(|e| format!("audio device: {e}"))?;
     let (room, mut events) = Room::connect(&url, &token, RoomOptions::default())
@@ -191,9 +354,24 @@ pub async fn voice_native_connect(
     // Room isn't Clone; share it with the event task via Arc.
     let room = Arc::new(room);
 
-    // A `Device`-sourced track = capture from libwebrtc's audio device module
-    // (HAL, no ducking) with its software NS/AEC. Recording auto-starts on publish.
-    let mic = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
+    // Mic: capture ourselves via cpal (macOS HAL — no ducking) and denoise with
+    // RNNoise before publishing. libwebrtc's built-in NS (the `Device` source)
+    // doesn't remove keyboard/mouse transients — RNNoise does — so we push our own
+    // frames to a NativeAudioSource. The ADM (`audio`) is kept only for playout.
+    let mic_source = NativeAudioSource::new(
+        AudioSourceOptions {
+            echo_cancellation: true, // WebRTC AEC (best-effort); RNNoise does the NS
+            noise_suppression: false,
+            auto_gain_control: true,
+        },
+        48_000,
+        1,
+        100,
+    );
+    let mic = LocalAudioTrack::create_audio_track(
+        "microphone",
+        RtcAudioSource::Native(mic_source.clone()),
+    );
     room.local_participant()
         .publish_track(
             LocalTrack::Audio(mic.clone()),
@@ -204,6 +382,7 @@ pub async fn voice_native_connect(
         )
         .await
         .map_err(|e| format!("publish mic: {e}"))?;
+    let (mic_flag, mic_pump) = start_mic_capture(mic_source)?;
 
     let muted = Arc::new(AtomicBool::new(false));
 
@@ -215,10 +394,12 @@ pub async fn voice_native_connect(
             // Remote video tasks, keyed by publication sid (aborted on unsubscribe).
             let mut video_tasks: HashMap<TrackSid, tauri::async_runtime::JoinHandle<()>> =
                 HashMap::new();
-            let emit_roster =
-                |app: &AppHandle, room: &Room| {
-                    let _ = app.emit("voice-native-roster", roster(room, muted.load(Ordering::SeqCst)));
-                };
+            let emit_roster = |app: &AppHandle, room: &Room| {
+                let _ = app.emit(
+                    "voice-native-roster",
+                    roster(room, muted.load(Ordering::SeqCst)),
+                );
+            };
 
             let _ = app.emit("voice-native-state", "connected");
             emit_roster(&app, &room);
@@ -289,6 +470,8 @@ pub async fn voice_native_connect(
         _audio: audio,
         mic,
         muted,
+        mic_flag,
+        mic_pump,
         task,
         screen: None,
         camera: None,
@@ -329,7 +512,18 @@ fn rgba_to_i420(img: &RgbaImage) -> I420Buffer {
     let (sy, su, sv) = buf.strides();
     let (dy, du, dv) = buf.data_mut();
     // xcap RGBA (R,G,B,A) == libyuv "ABGR".
-    yuv_helper::abgr_to_i420(img.as_raw(), w * 4, dy, sy, du, su, dv, sv, w as i32, h as i32);
+    yuv_helper::abgr_to_i420(
+        img.as_raw(),
+        w * 4,
+        dy,
+        sy,
+        du,
+        su,
+        dv,
+        sv,
+        w as i32,
+        h as i32,
+    );
     buf
 }
 
@@ -348,13 +542,22 @@ pub async fn voice_native_start_screenshare(
 
     if let Some(prev) = session.screen.take() {
         prev.flag.store(false, Ordering::SeqCst);
-        let _ = session.room.local_participant().unpublish_track(&prev.sid).await;
+        let _ = session
+            .room
+            .local_participant()
+            .unpublish_track(&prev.sid)
+            .await;
         let _ = prev.thread;
     }
 
     let fps = fps.unwrap_or(15).clamp(1, 60);
     let width = max_width.unwrap_or(1280).clamp(240, 3840);
-    let local_id = session.room.local_participant().identity().as_str().to_string();
+    let local_id = session
+        .room
+        .local_participant()
+        .identity()
+        .as_str()
+        .to_string();
 
     let source = NativeVideoSource::new(
         VideoResolution {
@@ -363,7 +566,8 @@ pub async fn voice_native_start_screenshare(
         },
         true,
     );
-    let track = LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(source.clone()));
+    let track =
+        LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(source.clone()));
     session
         .room
         .local_participant()
@@ -415,10 +619,19 @@ pub async fn voice_native_stop_screenshare(
 ) -> Result<(), String> {
     let mut guard = state.0.lock().await;
     if let Some(session) = guard.as_mut() {
-        let local_id = session.room.local_participant().identity().as_str().to_string();
+        let local_id = session
+            .room
+            .local_participant()
+            .identity()
+            .as_str()
+            .to_string();
         if let Some(prev) = session.screen.take() {
             prev.flag.store(false, Ordering::SeqCst);
-            let _ = session.room.local_participant().unpublish_track(&prev.sid).await;
+            let _ = session
+                .room
+                .local_participant()
+                .unpublish_track(&prev.sid)
+                .await;
             let _ = prev.thread;
         }
         let _ = app.emit(
@@ -472,11 +685,20 @@ pub async fn voice_native_start_camera(
 
     if let Some(prev) = session.camera.take() {
         prev.flag.store(false, Ordering::SeqCst);
-        let _ = session.room.local_participant().unpublish_track(&prev.sid).await;
+        let _ = session
+            .room
+            .local_participant()
+            .unpublish_track(&prev.sid)
+            .await;
         let _ = prev.thread;
     }
 
-    let local_id = session.room.local_participant().identity().as_str().to_string();
+    let local_id = session
+        .room
+        .local_participant()
+        .identity()
+        .as_str()
+        .to_string();
     let index = match device_id.as_deref() {
         Some(s) => s
             .parse::<u32>()
@@ -485,8 +707,15 @@ pub async fn voice_native_start_camera(
         None => CameraIndex::Index(0),
     };
 
-    let source = NativeVideoSource::new(VideoResolution { width: 1280, height: 720 }, false);
-    let track = LocalVideoTrack::create_video_track("camera", RtcVideoSource::Native(source.clone()));
+    let source = NativeVideoSource::new(
+        VideoResolution {
+            width: 1280,
+            height: 720,
+        },
+        false,
+    );
+    let track =
+        LocalVideoTrack::create_video_track("camera", RtcVideoSource::Native(source.clone()));
     session
         .room
         .local_participant()
@@ -559,10 +788,19 @@ pub async fn voice_native_stop_camera(
 ) -> Result<(), String> {
     let mut guard = state.0.lock().await;
     if let Some(session) = guard.as_mut() {
-        let local_id = session.room.local_participant().identity().as_str().to_string();
+        let local_id = session
+            .room
+            .local_participant()
+            .identity()
+            .as_str()
+            .to_string();
         if let Some(prev) = session.camera.take() {
             prev.flag.store(false, Ordering::SeqCst);
-            let _ = session.room.local_participant().unpublish_track(&prev.sid).await;
+            let _ = session
+                .room
+                .local_participant()
+                .unpublish_track(&prev.sid)
+                .await;
             let _ = prev.thread;
         }
         let _ = app.emit(
@@ -607,6 +845,8 @@ pub async fn voice_native_disconnect(
         if let Some(camera) = s.camera.take() {
             camera.flag.store(false, Ordering::SeqCst);
         }
+        s.mic_flag.store(false, Ordering::SeqCst); // stops the cpal thread
+        s.mic_pump.abort();
         s.task.abort();
         let _ = s.room.close().await;
     }

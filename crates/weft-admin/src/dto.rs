@@ -17,6 +17,11 @@ pub struct Me {
     pub account: String,
     pub network: String,
     pub scopes: Vec<String>,
+    /// True **operator** authority (config seed or DB flag) — not merely holding
+    /// every scope, which a delegated `admin.*` grant also confers. Only an
+    /// operator may change other accounts' permissions, so the SPA keys the
+    /// permission controls off this rather than off the scope set.
+    pub operator: bool,
 }
 
 /// `GET /stats` — dashboard counters. `live_connections` is `None` standalone
@@ -470,4 +475,18 @@ impl From<AuditRecord> for Audit {
             hash: r.hash,
         }
     }
+}
+
+/// One row of `GET /admins` — an account holding panel access, and how.
+/// `operator` accounts implicitly hold every scope; `config_operator` marks the
+/// ones seeded from `weftd.toml`, whose flag the panel cannot revoke.
+#[derive(Serialize)]
+pub struct AdminEntry {
+    pub account: String,
+    pub operator: bool,
+    pub config_operator: bool,
+    /// The effective scopes — every scope for an operator, else the granted set.
+    pub scopes: Vec<String>,
+    /// Unix seconds; `None` = no expiry. Only meaningful for granted admins.
+    pub expiry: Option<u64>,
 }

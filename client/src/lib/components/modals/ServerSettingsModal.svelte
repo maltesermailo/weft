@@ -2,8 +2,7 @@
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   import * as weft from "$lib/weft";
-  import { CAPS, ROLE_COLORS } from "$lib/constants";
-  import CapChecklist from "$lib/components/CapChecklist.svelte";
+  import RolesTab from "$lib/components/modals/RolesTab.svelte";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 
@@ -97,33 +96,7 @@
         <p class="so-sub">Immediately close every outstanding invite link for this namespace. People already in stay; new joins need a fresh invite.</p>
         <div class="modal-actions"><button class="danger-btn" onclick={app.revokeAllInvites}>Revoke all invites</button></div>
       {:else if app.nsTab === "roles"}
-        <h1>Roles</h1>
-        <p class="so-sub">Named capability bundles. Assigning a role grants its tokens — enforcement stays token-based.</p>
-        <div class="role-list">
-          {#each app.rolesByScope[app.nsRoleScope()] ?? [] as r (r.name)}
-            <div class="role-row">
-              <span class="role-swatch" style="background:{r.color}"></span>
-              <div class="role-meta">
-                <div class="role-title">{r.name}</div>
-                <div class="role-caps">{r.caps.join(" · ")}</div>
-              </div>
-              <button class="mini-danger" onclick={() => app.deleteRole(r.name)}>Delete</button>
-            </div>
-          {:else}
-            <div class="empty-hint">No roles yet — create one below.</div>
-          {/each}
-        </div>
-        <div class="section-sep"></div>
-        <div class="field-label">Create a role</div>
-        <input class="text-input" bind:value={app.newRoleName} placeholder="Role name (e.g. Moderator)" />
-        <div class="color-row">
-          {#each ROLE_COLORS as c (c)}
-            <button class="color-dot" class:on={app.newRoleColor === c} style="background:{c}" aria-label="color {c}" onclick={() => (app.newRoleColor = c)}></button>
-          {/each}
-        </div>
-        <div class="field-label">Permissions</div>
-        <CapChecklist caps={CAPS} selected={app.newRoleCaps} onToggle={app.toggleNewRoleCap} />
-        <div class="modal-actions"><button class="ok-btn" disabled={!app.newRoleName.trim() || !app.newRoleCaps.length} onclick={app.createRole}>Create role</button></div>
+        <RolesTab />
       {:else if app.nsTab === "members"}
         <h1>Members &amp; roles</h1>
         <p class="so-sub">Roles are the only way to grant capabilities. Assign one and its token bundle applies to the member.</p>

@@ -58,5 +58,11 @@ export type Channel = {
 /// A right-click context-menu entry.
 export type CtxItem = { label: string; danger?: boolean; run: () => void };
 
-/// A namespace-scoped role definition (name + color + caps).
-export type RoleDefC = { name: string; color: string; caps: string[] };
+/// A namespace-scoped role definition (name + color + caps + hoist + position).
+export type RoleDefC = {
+  name: string;
+  color: string;
+  caps: string[];
+  hoist: boolean;
+  position: number;
+};

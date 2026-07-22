@@ -40,6 +40,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 livekit = { version = "0.7.53", features = ["native-tls"] }
 futures-util = "0.3"
 nokhwa = { version = "0.10.11", features = ["input-native"] }
+cpal = "0.18.1"
+nnnoiseless = "0.5.2"
 
 # §16 voice: grant the WebKitGTK webview's getUserMedia permission (Linux only).
 # The version tracks wry's `webkit2gtk` so `PlatformWebview::inner()` returns a

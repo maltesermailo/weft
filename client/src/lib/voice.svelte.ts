@@ -42,6 +42,11 @@ type VoiceModel = {
   cameraOn: boolean;
   /** Local screen share published (LiveKit path). */
   sharingScreen: boolean;
+  /** Which source the desktop screen share is capturing (`screen:`/`window:` id),
+   *  and at what quality — so the share menu can show and re-apply them. */
+  screenSource: string | null;
+  screenFps: number;
+  screenMaxWidth: number;
   /** Room roster keyed by account. */
   participants: Record<string, VoiceParticipant>;
   /** Bumped on every video-track change so the stage re-attaches its <video>s.
@@ -58,6 +63,9 @@ export const voice = $state<VoiceModel>({
   deafened: false,
   cameraOn: false,
   sharingScreen: false,
+  screenSource: null,
+  screenFps: 15,
+  screenMaxWidth: 1280,
   participants: {},
   mediaTick: 0,
   error: null,
@@ -321,18 +329,25 @@ export async function startNativeVoiceScreenshare(
   sourceId: string,
   opts?: { fps?: number; maxWidth?: number },
 ): Promise<void> {
+  const fps = opts?.fps ?? voice.screenFps;
+  const maxWidth = opts?.maxWidth ?? voice.screenMaxWidth;
   try {
-    await tauriInvoke("voice_native_start_screenshare", {
-      id: sourceId,
-      fps: opts?.fps ?? 15,
-      maxWidth: opts?.maxWidth ?? 1280,
-    });
+    await tauriInvoke("voice_native_start_screenshare", { id: sourceId, fps, maxWidth });
+    // The native path publishes from Rust, so no LiveKit `LocalTrackPublished`
+    // fires in the webview — the UI state has to be set here or the share
+    // controls (and the stop button) never light up.
+    voice.sharingScreen = true;
+    voice.screenSource = sourceId;
+    voice.screenFps = fps;
+    voice.screenMaxWidth = maxWidth;
   } catch {
     voice.error = "couldn't start screen share";
   }
 }
 export async function stopNativeVoiceScreenshare(): Promise<void> {
   await tauriInvoke("voice_native_stop_screenshare").catch(() => {});
+  voice.sharingScreen = false;
+  voice.screenSource = null;
 }
 
 // ── Native voice camera (desktop, Rust SDK via nokhwa) ─────────────────────
@@ -346,6 +361,7 @@ export async function listNativeCameras(): Promise<{ id: string; name: string }[
 export async function startNativeVoiceCamera(deviceId?: string): Promise<void> {
   try {
     await tauriInvoke("voice_native_start_camera", { deviceId: deviceId ?? null });
+    voice.cameraOn = true; // published from Rust — see the screenshare note above
   } catch (e) {
     voice.error = String(e).toLowerCase().includes("permission")
       ? "camera permission denied"
@@ -354,6 +370,7 @@ export async function startNativeVoiceCamera(deviceId?: string): Promise<void> {
 }
 export async function stopNativeVoiceCamera(): Promise<void> {
   await tauriInvoke("voice_native_stop_camera").catch(() => {});
+  voice.cameraOn = false;
 }
 
 // ── Native screen capture (desktop custom picker) ──────────────────────────
@@ -510,6 +527,7 @@ function teardown(): void {
   voice.deafened = false;
   voice.cameraOn = false;
   voice.sharingScreen = false;
+  voice.screenSource = null;
   voice.mediaTick++;
   micBeforeDeafen = false;
 }

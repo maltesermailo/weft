@@ -482,6 +482,31 @@ WC6). **[refinement]** epoch-revocation of admin grants relies on `REVOKE`
 removing the row; bulk `bump_epoch` invalidation isn't wired for the `admin`
 scope yet.
 
+**Shipped — permission management in the panel.** WC2 could only be *enforced*
+from the panel; changing who held which scope still meant a wire `GRANT`. Now:
+`GET /admins` (everyone with access, operator vs delegated, their scopes and
+expiry), `POST /accounts/:name/admin-scopes` (set the complete scope set —
+replaces the `admin` grant wholesale; `[]` revokes access), and
+`POST /accounts/:name/operator` / `/unoperator` (the DB operator flag). New
+**Access → Permissions** screen plus a per-user "Panel permissions" card with a
+checkbox per scope.
+
+**The gate is operator-only, deliberately not `admin.destroy`** — a delegated
+`admin.*` grant confers every scope, so a scope-based gate would let a delegated
+admin promote itself. `GET /me` therefore gained a real `operator` flag (the
+SPA previously *inferred* operator-ness from holding all five scopes, which a
+delegated grant also satisfies) and the permission controls key off it. Further
+guards: `admin.read` is forced on whenever any other scope is held (a set
+without the baseline can't sign in); editing an operator's scopes is a `409`
+(its authority is the flag, so the edit would silently do nothing); and
+demotion refuses self-demotion, config-seeded operators (their authority lives
+in `weftd.toml`), and the last remaining operator (panel lockout). All audited
+(`admin.scopes` / `admin.promote` / `admin.demote`). Tests:
+`an_operator_sets_and_clears_delegated_admin_scopes`,
+`a_delegated_admin_cannot_escalate_its_own_privileges`,
+`operator_promotion_guards_against_lockout`,
+`an_unknown_scope_is_rejected_rather_than_silently_dropped`.
+
 ### WC3 ◑ — destructive-action safety
 
 The account hard-delete — the one truly irreversible panel action — is now
