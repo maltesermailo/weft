@@ -29,6 +29,9 @@ weft-proto = { path = "../../crates/weft-proto" }
 weft-crypto = { path = "../../crates/weft-crypto" }
 weft-transport = { path = "../../crates/weft-transport", features = ["insecure-client"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util"] }
+xcap = "0.9.7"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 # §16 voice: grant the WebKitGTK webview's getUserMedia permission (Linux only).
 # The version tracks wry's `webkit2gtk` so `PlatformWebview::inner()` returns a

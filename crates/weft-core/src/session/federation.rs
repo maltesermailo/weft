@@ -1332,6 +1332,9 @@ impl<S: ControlStream> Session<S> {
             Command::InviteRevoke { invite_id } => {
                 self.on_invite_revoke(label, invite_id, actor).await
             }
+            Command::InviteRevokeAll { scope } => {
+                self.on_invite_revoke_all(label, scope, actor).await
+            }
             // §6.5 role membership.
             Command::RoleAssign {
                 scope,

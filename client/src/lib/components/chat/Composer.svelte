@@ -89,7 +89,8 @@
     <div class="mention-pop">
       {#each app.emojiSuggestions as em, i (em.name)}
         <button class="mention-opt" class:first={i === 0} onclick={() => app.pickEmojiSuggestion(em.name)}>
-          <img class="custom-emoji" src={em.url ?? ''} alt="" /> :{em.name}:
+          {#if em.url}<img class="custom-emoji" src={em.url} alt="" />{:else}<span class="emoji-glyph">{em.char}</span>{/if}
+          :{em.name}:
         </button>
       {/each}
     </div>

@@ -92,6 +92,10 @@
           <option value="private">private</option>
         </select>
         <div class="modal-actions"><button class="ok-btn" onclick={app.saveNsMeta}>Save changes</button></div>
+        <div class="section-sep"></div>
+        <div class="field-label">Invites</div>
+        <p class="so-sub">Immediately close every outstanding invite link for this namespace. People already in stay; new joins need a fresh invite.</p>
+        <div class="modal-actions"><button class="danger-btn" onclick={app.revokeAllInvites}>Revoke all invites</button></div>
       {:else if app.nsTab === "roles"}
         <h1>Roles</h1>
         <p class="so-sub">Named capability bundles. Assigning a role grants its tokens — enforcement stays token-based.</p>

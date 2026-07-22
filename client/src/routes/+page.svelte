@@ -4,6 +4,7 @@
   import type { Msg, Channel, CtxItem, RoleDefC } from "$lib/types";
   import { provideApp } from "$lib/context";
   import { highlightCode } from "$lib/highlight";
+  import { shortcodeToChar, searchUnicode } from "$lib/shortcodes";
   import { installLinkGuard } from "$lib/linkguard.svelte";
   import LinkWarningModal from "$lib/components/modals/LinkWarningModal.svelte";
   import ConnectScreen from "$lib/components/ConnectScreen.svelte";
@@ -17,6 +18,7 @@
   import VoiceBar from "$lib/components/VoiceBar.svelte";
   import VoiceStage from "$lib/components/chat/VoiceStage.svelte";
   import CameraPicker from "$lib/components/modals/CameraPicker.svelte";
+  import ScreenPicker from "$lib/components/modals/ScreenPicker.svelte";
   import { voiceUI } from "$lib/voiceui.svelte";
   import ChannelList from "$lib/components/sidebar/ChannelList.svelte";
   import SidebarHeader from "$lib/components/sidebar/SidebarHeader.svelte";
@@ -1668,13 +1670,15 @@
       const me = name === account || name === "everyone" || name === "here";
       return `<span class="mention${me ? " me" : ""}">@${name}</span>`;
     });
-    // §9.4 :name: custom emoji (active namespace) → an inline image; unknown
-    // shortcodes are left as literal text.
-    s = s.replace(/:([a-zA-Z0-9_]+):/g, (full, name: string) => {
+    // :name: → this server's custom emoji (an inline image) if it exists, else a
+    // standard unicode emoji (`:smile:` → 😄); an unknown shortcode stays literal.
+    s = s.replace(/:([a-zA-Z0-9_+-]+):/g, (full, name: string) => {
       const media = customEmoji[activeServer]?.[name];
-      if (!media) return full;
-      const url = weft.mediaUrl(media).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
-      return `<img class="custom-emoji" src="${url}" alt=":${name}:" title=":${name}:" />`;
+      if (media) {
+        const url = weft.mediaUrl(media).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+        return `<img class="custom-emoji" src="${url}" alt=":${name}:" title=":${name}:" />`;
+      }
+      return shortcodeToChar(name) ?? full;
     });
 
     // Restore stashed code spans / links.
@@ -1868,23 +1872,35 @@
 
   // ---- :emoji: autocomplete (custom emoji only — unicode has no names) ----
   let emojiQuery = $state<string | null>(null);
-  const emojiSuggestions = $derived.by(() => {
+  type EmojiSuggestion = { name: string; url: string | null; char?: string };
+  const emojiSuggestions = $derived.by<EmojiSuggestion[]>(() => {
     if (emojiQuery === null) return [];
     const q = emojiQuery.toLowerCase();
     const rank = (n: string) => (n.toLowerCase().startsWith(q) ? 0 : 1);
-    return activeEmoji
+    // This server's custom emoji first (they win a name clash), then standard
+    // unicode shortcodes (`:smile:` → 😄).
+    const custom: EmojiSuggestion[] = activeEmoji
       .filter((e) => e.name.toLowerCase().includes(q))
       .sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name))
-      .slice(0, 8)
       .map((e) => ({ name: e.name, url: emojiUrlFor(e.name) }));
+    const taken = new Set(custom.map((c) => c.name));
+    const unicode: EmojiSuggestion[] = searchUnicode(q)
+      .filter((u) => !taken.has(u.name))
+      .map((u) => ({ name: u.name, url: null, char: u.char }));
+    return [...custom, ...unicode].slice(0, 10);
   });
   function updateEmojiSuggest() {
-    // A `:word` at a token boundary — not `http://`, not `12:30`.
-    const m = composer.match(/(?:^|\s):([a-zA-Z0-9_]+)$/);
+    // A `:word` at a token boundary — not `http://`, not `12:30`. `+`/`-` allow
+    // shortcodes like `:+1:` / `:e-mail:`.
+    const m = composer.match(/(?:^|\s):([a-zA-Z0-9_+-]+)$/);
     emojiQuery = m ? m[1] : null;
   }
   function pickEmojiSuggestion(name: string) {
-    composer = composer.replace(/:[a-zA-Z0-9_]+$/, `:${name}: `);
+    // Unicode shortcodes insert the character (universal); custom emoji keep the
+    // `:name:` form (their image is server-specific).
+    const s = emojiSuggestions.find((x) => x.name === name);
+    const insert = s?.char ?? `:${name}:`;
+    composer = composer.replace(/:[a-zA-Z0-9_+-]*$/, `${insert} `);
     emojiQuery = null;
   }
   function stopTyping() {
@@ -2308,6 +2324,14 @@
     }
   }
 
+  // Revoke every outstanding invite for the active namespace (ns-admin, §6.5).
+  function revokeAllInvites() {
+    if (!activeServer) return;
+    if (!confirm(`Revoke ALL invites for ${activeServer}? Every existing invite link stops working.`)) return;
+    weft.inviteRevokeAll(`ns:${activeServer}`).catch(() => {});
+    toast(`Revoked all invites for ${activeServer}`, "info");
+  }
+
   onMount(() => {
     // Restore the cached layout for instant render before the server refresh.
     try {
@@ -2592,6 +2616,7 @@
     submitRecovery,
     doTransfer,
     deleteNamespace,
+    revokeAllInvites,
   });
 </script>
 
@@ -2619,6 +2644,7 @@
   <Lightbox />
   <LinkWarningModal />
   {#if voiceUI.cameraPicker}<CameraPicker />{/if}
+  {#if voiceUI.screenPicker}<ScreenPicker />{/if}
   <ThreadPanel />
   {#if federating}
     <div class="federating-banner">

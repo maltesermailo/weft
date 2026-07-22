@@ -1041,6 +1041,11 @@ button:disabled {
 }
 
 /* markdown inline */
+/* Unicode glyph shown beside a shortcode in the composer autocomplete. */
+.emoji-glyph {
+  font-size: 1.2em;
+  line-height: 1;
+}
 /* §9.4 custom emoji — inline in messages, in reactions, and in the picker. */
 .custom-emoji {
   height: 1.4em;
@@ -1109,7 +1114,9 @@ button:disabled {
   position: absolute;
   bottom: calc(100% + 8px);
   right: 0;
-  z-index: 30;
+  /* Above the `.ctx-backdrop` (z-index 399) that catches outside clicks, else
+     every click on the picker hits the backdrop and closes it. */
+  z-index: 400;
 }
 /* Reaction picker popover (anchored to a message's react action). */
 .reaction-picker-pop {

@@ -219,7 +219,7 @@ export interface AppCtx {
   readonly mentionMatches: string[];
   /** `:emoji:` autocomplete: the current `:query`, or null. */
   readonly emojiQuery: string | null;
-  readonly emojiSuggestions: { name: string; url: string | null }[];
+  readonly emojiSuggestions: { name: string; url: string | null; char?: string }[];
   pickEmojiSuggestion(name: string): void;
   readonly typingLabel: string;
 
@@ -305,6 +305,7 @@ export interface AppCtx {
   submitRecovery(): void;
   doTransfer(): void;
   deleteNamespace(): void;
+  revokeAllInvites(): void;
 }
 
 const APP = Symbol("weft-app");

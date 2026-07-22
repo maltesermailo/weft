@@ -11,6 +11,7 @@
     stopCamera,
     startScreenShare,
     stopScreenShare,
+    IS_DESKTOP,
   } from "$lib/voice.svelte";
   import { voiceUI } from "$lib/voiceui.svelte";
   import { getApp } from "$lib/context";
@@ -19,9 +20,15 @@
   function openStage() {
     if (voice.channel) app.openVoice(voice.channel);
   }
-  // Camera opens the in-app device picker; screen share uses the OS picker.
+  // Camera opens the in-app device picker. Screen share opens the Discord-style
+  // native picker on desktop, or the OS getDisplayMedia picker on the web.
   const camClick = () => (voice.cameraOn ? stopCamera() : (voiceUI.cameraPicker = true));
-  const screenClick = () => (voice.sharingScreen ? stopScreenShare() : startScreenShare());
+  const screenClick = () =>
+    voice.sharingScreen
+      ? stopScreenShare()
+      : IS_DESKTOP
+        ? (voiceUI.screenPicker = true)
+        : startScreenShare();
 </script>
 
 {#if voice.channel}

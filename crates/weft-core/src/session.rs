@@ -1014,6 +1014,10 @@ impl<S: ControlStream> Session<S> {
                 self.on_invite_revoke(label, invite_id, Actor::Local(account))
                     .await
             }
+            Command::InviteRevokeAll { scope } => {
+                self.on_invite_revoke_all(label, scope, Actor::Local(account))
+                    .await
+            }
             Command::InviteRedeem { token } => self.on_invite_redeem(label, token, account).await,
             // §6.2 namespace verbs.
             Command::NsCreate {

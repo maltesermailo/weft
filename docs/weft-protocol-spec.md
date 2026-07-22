@@ -226,6 +226,7 @@ Signed NS verbs (`TRANSFER`, `RECOVERY CANCEL`) carry the root signature in a `@
 | `REVOKE` | `REVOKE <account\|pubkey> <scope> [caps=<list>] [epoch]` | grant chain | Stops refresh; a bare `epoch` number bumps the scope revocation epoch. → `TOKEN` (remaining caps). |
 | `INVITE MINT` | `INVITE MINT <scope> [max-uses=] [expiry=]` | `invite` | → `INVITED` (`@token=`, link `weft://<net>/<ns>/i/<b64>` — the namespace is embedded so a *foreign* redeemer can auto-federate to it, §11.10; top-level channels have no `<ns>` and use `weft://<net>/i/<b64>`). |
 | `INVITE REVOKE` | `INVITE REVOKE <invite-id>` | `invite` | Closes the counter; already-redeemed members unaffected. |
+| `INVITE REVOKE-ALL` | `INVITE REVOKE-ALL <scope>` | `invite` | Bulk-closes every invite for the scope's namespace (`ns:<name>` + its `#<ns>/<chan>` scopes) in one shot. → `INVITED … invite-id=* max-uses=0` ack. Already-redeemed members unaffected. |
 | `INVITE REDEEM` | `INVITE REDEEM <b64>` | — | Verifies chain + counter, mints a member token **bound to the redeemer's key**, auto-joins the default channel. Dead invites → `NO-SUCH-TARGET` (indistinct). |
 
 Invite tokens are capability tokens with an **unbound subject**: one object serves single-use / expiring / vanity links — offline-verifiable authorization, never itself a membership credential.

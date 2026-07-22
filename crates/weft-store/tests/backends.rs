@@ -835,6 +835,41 @@ where
         RedeemOutcome::Gone
     );
 
+    // Bulk revoke: closes the namespace's own scope + its channel scopes, and
+    // leaves a different namespace's invites untouched.
+    let bulk_ns = format!("bulkns-{tag}");
+    for (id, scope) in [
+        (format!("inv-b1-{tag}"), format!("ns:{bulk_ns}")),
+        (format!("inv-b2-{tag}"), format!("#{bulk_ns}/general")),
+        (format!("inv-b3-{tag}"), format!("#{bulk_ns}/voice")),
+    ] {
+        store
+            .create_invite(InviteRecord {
+                id,
+                scope,
+                caps: vec!["view".into()],
+                uses_left: None,
+                expiry: None,
+            })
+            .await
+            .unwrap();
+    }
+    let other = format!("inv-other-{tag}");
+    store
+        .create_invite(InviteRecord {
+            id: other.clone(),
+            scope: format!("ns:keepme-{tag}"),
+            caps: vec!["view".into()],
+            uses_left: None,
+            expiry: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.revoke_invites_for_namespace(&bulk_ns).await.unwrap(), 3);
+    assert!(store.invite(&format!("inv-b1-{tag}")).await.unwrap().is_none());
+    assert!(store.invite(&format!("inv-b2-{tag}")).await.unwrap().is_none());
+    assert!(store.invite(&other).await.unwrap().is_some()); // other namespace untouched
+
     // -- namespaces (§2.1, §2.2) --
     let ns: weft_proto::NamespaceName = format!("gaming{tag}").parse().unwrap();
     assert!(store

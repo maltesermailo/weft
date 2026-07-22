@@ -15,15 +15,22 @@
     stopScreenShare,
     attachVideo,
     detachVideo,
+    IS_DESKTOP,
     type VoiceParticipant,
   } from "$lib/voice.svelte";
   import { voiceUI } from "$lib/voiceui.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
 
   const app = getApp();
-  // Camera opens the in-app device picker; screen share uses the OS picker.
+  // Camera opens the in-app device picker. Screen share opens the Discord-style
+  // native picker on desktop, or the OS getDisplayMedia picker on the web.
   const camClick = () => (voice.cameraOn ? stopCamera() : (voiceUI.cameraPicker = true));
-  const screenClick = () => (voice.sharingScreen ? stopScreenShare() : startScreenShare());
+  const screenClick = () =>
+    voice.sharingScreen
+      ? stopScreenShare()
+      : IS_DESKTOP
+        ? (voiceUI.screenPicker = true)
+        : startScreenShare();
 
   const channel = $derived(app.active);
   const joined = $derived(voice.channel === channel);

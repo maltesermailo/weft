@@ -333,6 +333,10 @@ pub trait InviteStore: Send + Sync {
 
     /// INVITE REVOKE — closes the counter. False = no such invite.
     async fn revoke_invite(&self, id: &str) -> Result<bool, StoreError>;
+
+    /// INVITE REVOKE-ALL — remove every invite belonging to namespace `ns` (its
+    /// `ns:<ns>` scope plus any `#<ns>/<chan>` channel scope). Returns the count.
+    async fn revoke_invites_for_namespace(&self, ns: &str) -> Result<u64, StoreError>;
 }
 
 /// User-owned namespaces (§2.1, §2.2).

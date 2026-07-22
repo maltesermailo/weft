@@ -925,6 +925,15 @@ pub fn build_invite_revoke(invite_id: &str) -> Result<String, String> {
     .map_err(|e| e.to_string())
 }
 
+/// `INVITE REVOKE-ALL <scope>` — close every invite for the scope's namespace.
+pub fn build_invite_revoke_all(scope: &str) -> Result<String, String> {
+    Request::new(Command::InviteRevokeAll {
+        scope: scope.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
 // ---- federation (§11): netblocks + bridges (operator surface) ----
 
 /// `NETBLOCK ADD <network> [:reason]` (§11.6). Cap `netblock` at `*`.

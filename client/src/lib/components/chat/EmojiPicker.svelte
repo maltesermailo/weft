@@ -5,6 +5,7 @@
   // `onpick` receives a unicode char or a `:name:` shortcode.
   import { getApp } from "$lib/context";
   import { EMOJI } from "$lib/emoji";
+  import { charName } from "$lib/shortcodes";
   const app = getApp();
   let { onpick }: { onpick: (value: string) => void } = $props();
 
@@ -40,20 +41,19 @@
         id: cat,
         label: cat,
         icon: list[0] ?? "🙂",
-        items: list.map((e) => ({ value: e, char: e })),
+        items: list.map((e) => ({ value: e, char: e, name: charName(e) })),
       });
     }
     return out;
   });
 
   let query = $state("");
-  // Only custom emoji carry searchable names; a query narrows to those.
+  // Search by shortcode name across every section (custom + unicode).
   const visible = $derived.by<Section[]>(() => {
     const q = query.toLowerCase().replace(/:/g, "").trim();
     if (!q) return sections;
     return sections
-      .filter((s) => s.id === "server")
-      .map((s) => ({ ...s, items: s.items.filter((it) => (it.name ?? "").includes(q)) }))
+      .map((s) => ({ ...s, items: s.items.filter((it) => (it.name ?? "").toLowerCase().includes(q)) }))
       .filter((s) => s.items.length);
   });
 
@@ -106,7 +106,7 @@
           </div>
         </div>
       {:else}
-        <div class="ep-empty">No custom emoji match “{query}”.</div>
+        <div class="ep-empty">No emoji match “{query}”.</div>
       {/each}
     </div>
   </div>

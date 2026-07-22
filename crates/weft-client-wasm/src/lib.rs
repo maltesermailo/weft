@@ -328,6 +328,7 @@ impl WeftClient {
             "invite_mint" => build_invite_mint(&arg("scope"))?,
             "invite_redeem" => build_invite_redeem(&arg("token"))?,
             "invite_revoke" => build_invite_revoke(&arg("inviteId"))?,
+            "invite_revoke_all" => build_invite_revoke_all(&arg("scope"))?,
             // ---- moderation / reports ----
             "moderate" => build_moderation(
                 &arg("verb"),

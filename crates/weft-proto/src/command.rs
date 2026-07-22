@@ -257,6 +257,9 @@ pub enum Command {
     },
     /// `INVITE REVOKE <invite-id>` — closes the counter (§6.5).
     InviteRevoke { invite_id: String },
+    /// `INVITE REVOKE-ALL <scope>` — closes every invite belonging to the
+    /// scope's namespace in one shot (bulk revoke, §6.5).
+    InviteRevokeAll { scope: String },
     /// `INVITE REDEEM <b64>` — verifies chain + counter, mints a member
     /// token bound to the redeemer (§6.5).
     InviteRedeem { token: String },
@@ -959,6 +962,9 @@ impl Command {
                     }
                     "REVOKE" => Ok(Command::InviteRevoke {
                         invite_id: args.req("invite-id")?.to_string(),
+                    }),
+                    "REVOKE-ALL" => Ok(Command::InviteRevokeAll {
+                        scope: args.req("scope")?.to_string(),
                     }),
                     "REDEEM" => Ok(Command::InviteRedeem {
                         token: args.req("token")?.to_string(),
@@ -1749,6 +1755,11 @@ impl Command {
             Command::InviteRevoke { invite_id } => (
                 "INVITE",
                 vec!["REVOKE".to_string(), invite_id.clone()],
+                None,
+            ),
+            Command::InviteRevokeAll { scope } => (
+                "INVITE",
+                vec!["REVOKE-ALL".to_string(), scope.clone()],
                 None,
             ),
             Command::InviteRedeem { token } => {
@@ -2618,6 +2629,12 @@ mod tests {
         round_trip(&Request::new(Command::InviteRevoke {
             invite_id: "inv-abc".into(),
         }));
+        round_trip(&Request::with_label(
+            Command::InviteRevokeAll {
+                scope: "ns:gaming".into(),
+            },
+            "ra1",
+        ));
         round_trip(&Request::new(Command::InviteRedeem {
             token: "B64TOKEN==".into(),
         }));

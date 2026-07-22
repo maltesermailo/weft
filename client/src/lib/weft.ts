@@ -545,6 +545,11 @@ export function inviteRevoke(inviteId: string) {
   return invoke("invite_revoke", { inviteId });
 }
 
+/// Revoke every invite for a namespace at once (§6.5).
+export function inviteRevokeAll(scope: string) {
+  return invoke("invite_revoke_all", { scope });
+}
+
 /// Moderation (§6.7). `verb` = mute|unmute|ban|unban|kick. `scope` is a channel
 /// (`#chan`), namespace (`ns:<name>`) or `*`; for `kick` it must be a channel.
 export function moderate(verb: string, scope: string, account: string, reason?: string) {

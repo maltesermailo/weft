@@ -13,7 +13,8 @@
 // One voice room at a time.
 
 import { voiceJoin, voiceLeave, voiceDesc, voiceCand, onWeft, type WeftEvent } from "./weft";
-import type { Room, Participant, Track } from "livekit-client";
+import { invoke as tauriInvoke, Channel } from "@tauri-apps/api/core";
+import type { Room, Participant, Track, AudioCaptureOptions } from "livekit-client";
 
 export type VoiceParticipant = {
   user: string;
@@ -205,8 +206,10 @@ export async function stopCamera(): Promise<void> {
   }
 }
 
-// Tauri v2 injects `__TAURI_INTERNALS__`; its absence ⇒ a plain browser.
-const IS_DESKTOP = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+// Tauri v2 injects `__TAURI_INTERNALS__`; its absence ⇒ a plain browser. The
+// desktop app uses the custom native screen picker; the web build uses the OS
+// getDisplayMedia picker.
+export const IS_DESKTOP = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 /** Start screen sharing (LiveKit path only). Uses `getDisplayMedia`, which brings
  *  up the OS-native picker (screens · windows · tabs, with thumbnails) and manages
@@ -240,12 +243,101 @@ export async function startScreenShare(): Promise<void> {
   }
 }
 export async function stopScreenShare(): Promise<void> {
+  // A native (custom-picker) capture takes priority over the getDisplayMedia one.
+  if (nativeScreenTrack) {
+    await stopNativeScreenShare();
+    return;
+  }
   if (!room) return;
   try {
     await room.localParticipant.setScreenShareEnabled(false);
   } catch {
     /* already off */
   }
+}
+
+// ── Native screen capture (desktop custom picker) ──────────────────────────
+// Frames arrive from Rust as base64 JPEG data URLs; we paint them to a canvas
+// and publish its captureStream to LiveKit. This is the path behind the
+// Discord-style in-app picker, where the user chose a specific screen/window.
+let nativeScreenTrack: MediaStreamTrack | null = null;
+
+/** Begin sharing a natively-captured source (`screen:<id>` / `window:<id>`). */
+export async function startNativeScreenShare(sourceId: string, fps = 15): Promise<void> {
+  if (!room) {
+    voice.error = "screen sharing needs the LiveKit voice backend";
+    return;
+  }
+  try {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const img = new Image();
+    let latest: string | null = null; // latest-wins: drop stale frames if behind
+    let busy = false;
+    let published = false;
+
+    const paint = () => {
+      if (busy || latest === null) return;
+      busy = true;
+      const url = latest;
+      latest = null;
+      img.onload = () => {
+        if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+        }
+        ctx.drawImage(img, 0, 0);
+        busy = false;
+        if (!published) {
+          published = true;
+          void publishCanvasStream(canvas, fps);
+        }
+        paint();
+      };
+      img.onerror = () => {
+        busy = false;
+        paint();
+      };
+      img.src = url;
+    };
+
+    const chan = new Channel<string>();
+    chan.onmessage = (dataUrl) => {
+      latest = dataUrl;
+      paint();
+    };
+
+    await tauriInvoke("start_capture", { id: sourceId, fps, onFrame: chan });
+  } catch {
+    voice.error = "couldn't start screen sharing";
+  }
+}
+
+async function publishCanvasStream(canvas: HTMLCanvasElement, fps: number): Promise<void> {
+  if (!room) return;
+  const stream = canvas.captureStream(fps);
+  const track = stream.getVideoTracks()[0];
+  if (!track) return;
+  const lk = await import("livekit-client");
+  await room.localParticipant.publishTrack(track, {
+    source: lk.Track.Source.ScreenShare,
+    name: "screen",
+  });
+  nativeScreenTrack = track;
+}
+
+export async function stopNativeScreenShare(): Promise<void> {
+  await tauriInvoke("stop_capture").catch(() => {});
+  if (nativeScreenTrack && room) {
+    try {
+      await room.localParticipant.unpublishTrack(nativeScreenTrack, true);
+    } catch {
+      /* already gone */
+    }
+  }
+  nativeScreenTrack = null;
 }
 
 /** Attach a participant's video track (camera or screenshare) to a <video>
@@ -366,6 +458,9 @@ async function onLiveKitOffer(
   try {
     const lk = await import("livekit-client");
     // libwebrtc does AEC/NS/AGC; ask explicitly so desktop webviews enable them.
+    // `voiceIsolation` requests the browser's ML noise-cancelling path where
+    // supported (Chrome/WebKit) — a stronger "remove background noise" than the
+    // basic noiseSuppression filter.
     const r = new lk.Room({
       adaptiveStream: true,
       dynacast: true,
@@ -373,7 +468,8 @@ async function onLiveKitOffer(
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
-      },
+        voiceIsolation: true,
+      } as AudioCaptureOptions,
     });
     room = r;
 
@@ -499,7 +595,8 @@ async function onWebrtcOffer(channel: string, endpoint: string | null): Promise<
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
-      },
+        voiceIsolation: true,
+      } as MediaTrackConstraints,
       video: false,
     });
   } catch {

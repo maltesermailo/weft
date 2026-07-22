@@ -1044,6 +1044,17 @@ impl InviteStore for MemoryStore {
         let mut inner = self.inner.lock().expect("store lock");
         Ok(inner.invites.remove(id).is_some())
     }
+
+    async fn revoke_invites_for_namespace(&self, ns: &str) -> Result<u64, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let ns_scope = format!("ns:{ns}");
+        let chan_prefix = format!("#{ns}/");
+        let before = inner.invites.len();
+        inner
+            .invites
+            .retain(|_, inv| inv.scope != ns_scope && !inv.scope.starts_with(&chan_prefix));
+        Ok((before - inner.invites.len()) as u64)
+    }
 }
 
 #[async_trait]

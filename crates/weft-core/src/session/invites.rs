@@ -106,6 +106,50 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    pub(super) async fn on_invite_revoke_all(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        actor: Actor,
+    ) -> io::Result<Flow> {
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        // The bulk revoke is a namespace-admin action: the scope must resolve to
+        // a namespace (`ns:<name>` or `#<ns>/<chan>`).
+        let Some(ns) = invite_scope_namespace(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        let ns = ns.to_string();
+        match self
+            .ctx
+            .actor_has_cap(&actor, &Capability::Invite, &token_scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "invite").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        if let Err(e) = self.ctx.invites.revoke_invites_for_namespace(&ns).await {
+            return self.internal(label, &e).await;
+        }
+        // Bulk-close ack: an INVITED marker with a `*` id and max-uses=0 (the
+        // client treats max-uses=0 as "closed" and ignores the `*` id, §6.5).
+        self.send_event(
+            label,
+            Event::Invited {
+                scope,
+                invite_id: "*".to_string(),
+                token: "*".to_string(),
+                link: None,
+                max_uses: Some(0),
+                expiry: None,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
     pub(super) async fn on_invite_redeem(
         &mut self,
         label: Option<String>,

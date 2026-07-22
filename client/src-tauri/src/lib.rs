@@ -3,6 +3,7 @@
 
 mod config;
 mod keys;
+mod screencap;
 mod weft;
 
 use std::sync::Mutex;
@@ -416,6 +417,11 @@ fn invite_revoke(conn: State<'_, Conn>, invite_id: String) -> Result<(), String>
 }
 
 #[tauri::command]
+fn invite_revoke_all(conn: State<'_, Conn>, scope: String) -> Result<(), String> {
+    conn.send(weft::build_invite_revoke_all(&scope)?)
+}
+
+#[tauri::command]
 fn moderate(
     conn: State<'_, Conn>,
     verb: String,
@@ -767,6 +773,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(Conn::default())
+        .manage(screencap::CaptureState::default())
         .setup(|app| {
             use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {
@@ -775,6 +782,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            screencap::list_capture_sources,
+            screencap::capture_source_thumb,
+            screencap::start_capture,
+            screencap::stop_capture,
             connect,
             client_config,
             disconnect,
@@ -821,6 +832,7 @@ pub fn run() {
             grant,
             revoke,
             invite_mint,
+            invite_revoke_all,
             invite_redeem,
             invite_revoke,
             moderate,

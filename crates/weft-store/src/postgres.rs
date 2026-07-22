@@ -1308,6 +1308,18 @@ impl InviteStore for PgStore {
             .map_err(backend_err)?;
         Ok(result.rows_affected() == 1)
     }
+
+    async fn revoke_invites_for_namespace(&self, ns: &str) -> Result<u64, StoreError> {
+        // `ns:<ns>` (the namespace scope) plus any `#<ns>/<chan>` channel scope.
+        // Namespace names carry no LIKE metacharacters, so the pattern is safe.
+        let result = sqlx::query("DELETE FROM weft_invites WHERE scope = $1 OR scope LIKE $2")
+            .bind(format!("ns:{ns}"))
+            .bind(format!("#{ns}/%"))
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected())
+    }
 }
 
 #[async_trait]
