@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WEFT · Loom Console</title>
+  <style>
+    :root{
+      --warp-0:#131519; --warp-1:#1A1D23; --warp-2:#22262F;
+      --line:#2C313C; --line-soft:#242832;
+      --linen:#E7E2D6; --flax:#8E95A3; --flax-dim:#5C6270;
+      --thread:#D9A05B; --thread-dim:#8a6a42;
+      --teal:#63A89F; --madder:#C75B52; --amber:#C9A24B;
+      --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+      --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+    }
+    *{margin:0;padding:0;box-sizing:border-box}
+    html,body{height:100%}
+    body{background:var(--warp-0);color:var(--linen);font-family:var(--sans);font-size:14px;line-height:1.5;display:flex}
+    ::selection{background:var(--thread-dim);color:var(--linen)}
+
+    .selvage{width:6px;flex:none;opacity:.55;
+      background:repeating-linear-gradient(180deg,
+      var(--thread) 0 8px,var(--warp-2) 8px 16px,var(--teal) 16px 24px,var(--warp-2) 24px 32px)}
+
+    /* ---------- sidebar ---------- */
+    aside{width:232px;flex:none;background:var(--warp-1);border-right:1px solid var(--line-soft);
+      display:flex;flex-direction:column;overflow-y:auto}
+    .wordmark{padding:20px 18px 16px;border-bottom:1px solid var(--line-soft)}
+    .wordmark .weave{font-family:var(--mono);font-size:19px;font-weight:700;letter-spacing:.28em;color:var(--linen)}
+    .wordmark .weave b{color:var(--thread)}
+    .wordmark .sub{font-family:var(--mono);font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--flax-dim);margin-top:3px}
+    nav{padding:10px 0 24px}
+    .nav-group{margin-top:14px}
+    .nav-label{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--flax-dim);padding:0 18px 6px}
+    .nav-item{display:flex;align-items:center;gap:9px;padding:7px 18px;color:var(--flax);cursor:pointer;
+      border:0;background:none;width:100%;text-align:left;font-family:var(--sans);font-size:13.5px;border-left:2px solid transparent}
+    .nav-item:hover{background:var(--warp-2);color:var(--linen)}
+    .nav-item.active{background:var(--warp-2);color:var(--linen);border-left-color:var(--thread)}
+    .nav-item .tick{font-family:var(--mono);font-size:11px;color:var(--flax-dim);width:10px}
+    .nav-item.active .tick{color:var(--thread)}
+    .nav-item:focus-visible{outline:2px solid var(--thread);outline-offset:-2px}
+
+    /* ---------- main ---------- */
+    main{flex:1;display:flex;flex-direction:column;min-width:0}
+    header{height:58px;flex:none;background:var(--warp-1);display:flex;align-items:center;gap:14px;padding:0 22px;position:relative}
+    header::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;opacity:.5;
+      background:repeating-linear-gradient(90deg,var(--thread) 0 14px,transparent 14px 20px,var(--teal) 20px 34px,transparent 34px 40px)}
+    .op-ident{display:flex;align-items:center;gap:11px}
+    .op-avatar{width:32px;height:32px;border-radius:50%;border:1px solid var(--line);
+      background:repeating-linear-gradient(45deg,var(--thread-dim) 0 3px,var(--warp-2) 3px 6px)}
+    .op-name{font-weight:600;font-size:13.5px}
+    .op-addr{font-family:var(--mono);font-size:11px;color:var(--flax)}
+    header .spacer{flex:1}
+
+    .btn{font-family:var(--sans);font-size:13px;font-weight:600;background:var(--warp-2);color:var(--linen);
+      border:1px solid var(--line);border-radius:6px;padding:7px 14px;cursor:pointer}
+    .btn:hover{border-color:var(--flax-dim)}
+    .btn:focus-visible{outline:2px solid var(--thread);outline-offset:1px}
+    .btn.primary{background:var(--thread);border-color:var(--thread);color:#1a1408}
+    .btn.primary:hover{filter:brightness(1.08)}
+    .btn.danger{background:transparent;border-color:var(--madder);color:var(--madder)}
+    .btn.danger:hover{background:var(--madder);color:#1a0c0a}
+    .btn.danger.solid{background:var(--madder);color:#1a0c0a}
+    .btn.small{padding:4px 10px;font-size:12px}
+    .btn:disabled{opacity:.35;cursor:default}
+    .btn:disabled:hover{border-color:var(--line)}
+
+    .content{flex:1;overflow-y:auto;padding:30px 34px 60px}
+    .content-inner{max-width:1000px;margin:0 auto}
+
+    h1{font-size:22px;font-weight:700;letter-spacing:-.01em}
+    .h-row{display:flex;align-items:baseline;gap:14px;margin-bottom:20px}
+    .h-row .meta{font-family:var(--mono);font-size:11.5px;color:var(--flax-dim);margin-left:auto}
+    .crumb{font-family:var(--mono);font-size:11.5px;color:var(--flax);background:none;border:0;cursor:pointer;
+      padding:0;margin-bottom:16px;display:inline-block}
+    .crumb:hover{color:var(--thread)}
+
+    .card{background:var(--warp-1);border:1px solid var(--line-soft);border-radius:8px;margin-bottom:18px;overflow:hidden}
+    .card-h{padding:14px 18px;border-bottom:1px solid var(--line-soft);display:flex;align-items:center;gap:10px}
+    .card-h h2{font-size:14.5px;font-weight:700}
+    .card-h .shuttle{width:14px;height:3px;background:var(--thread);border-radius:2px;flex:none}
+    .card-b{padding:16px 18px}
+
+    .kv{display:grid;grid-template-columns:190px 1fr}
+    .kv > div{padding:9px 0;border-bottom:1px solid var(--line-soft);font-size:13.5px}
+    .kv > div:nth-last-child(-n+2){border-bottom:0}
+    .kv .k{color:var(--flax)}
+    .kv .v{color:var(--linen)}
+    .mono{font-family:var(--mono);font-size:12.5px}
+    .dim{color:var(--flax-dim)}
+    .ok{color:var(--teal)}
+    .link{color:var(--teal);cursor:pointer;text-decoration:none}
+    .link:hover{color:var(--thread)}
+
+    /* search */
+    .search-row{display:flex;gap:10px;margin-bottom:18px}
+    .search-wrap{flex:1;position:relative}
+    input[type=text]{width:100%;background:var(--warp-1);border:1px solid var(--line);border-radius:6px;
+      color:var(--linen);font-family:var(--mono);font-size:13px;padding:10px 36px 10px 13px}
+    input[type=text]::placeholder{color:var(--flax-dim)}
+    input[type=text]:focus{outline:none;border-color:var(--thread)}
+    .clear-x{position:absolute;right:10px;top:50%;transform:translateY(-50%);
+      width:18px;height:18px;border-radius:50%;border:0;cursor:pointer;
+      background:var(--warp-2);color:var(--flax);font-size:11px;line-height:1}
+    .clear-x:hover{color:var(--linen)}
+
+    .result{display:flex;align-items:center;gap:16px;padding:16px 18px}
+    .r-avatar{width:52px;height:52px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;
+      font-family:var(--mono);font-weight:700;font-size:14px;color:var(--linen);
+      background:var(--warp-2);border:1px solid var(--line)}
+    .r-main{flex:1;min-width:0}
+    .r-name{font-weight:700;font-size:15px}
+    .r-lines{font-family:var(--mono);font-size:11.5px;color:var(--flax);margin-top:3px;line-height:1.7}
+
+    .pager{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:20px;
+      font-family:var(--mono);font-size:11.5px;color:var(--flax-dim)}
+
+    /* profile header (user / guild detail) */
+    .profile{display:flex;align-items:flex-start;gap:18px;margin-bottom:24px}
+    .p-avatar{width:74px;height:74px;border-radius:50%;flex:none;border:1px solid var(--line);
+      display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-weight:700;font-size:18px;
+      background:repeating-linear-gradient(45deg,var(--thread-dim) 0 4px,var(--warp-2) 4px 8px)}
+    .p-avatar.g{background:var(--warp-2);border-radius:12px}
+    .p-name{font-size:21px;font-weight:700;display:flex;align-items:center;gap:8px}
+    .p-name .crown{color:var(--thread);font-size:14px}
+    .p-sub{font-family:var(--mono);font-size:12px;color:var(--flax);margin-top:2px;line-height:1.8}
+    .p-owner{margin-left:auto;text-align:left}
+    .p-owner .k{font-size:12.5px;color:var(--flax)}
+    .p-owner .v{font-size:13.5px}
+
+    /* detail layout: sub-nav + panels */
+    .detail{display:grid;grid-template-columns:180px 1fr;gap:26px;align-items:start}
+    .subnav{border-left:1px solid var(--line-soft);position:sticky;top:0}
+    .subnav button{display:block;width:100%;text-align:left;background:none;border:0;cursor:pointer;
+      font-family:var(--sans);font-size:13.5px;color:var(--flax);padding:8px 14px;
+      border-left:2px solid transparent;margin-left:-1px}
+    .subnav button:hover{color:var(--linen)}
+    .subnav button.active{color:var(--linen);border-left-color:var(--thread);font-weight:600}
+
+    /* flags */
+    .flags{display:grid;grid-template-columns:1fr 1fr;gap:2px 30px}
+    .flag{display:flex;align-items:center;gap:10px;padding:6px 0;font-family:var(--mono);font-size:12px;color:var(--flax)}
+    .flag .box{width:14px;height:14px;border:1px solid var(--line);border-radius:3px;flex:none;
+      display:flex;align-items:center;justify-content:center}
+    .flag.on{color:var(--linen)}
+    .flag.on .box{background:var(--thread);border-color:var(--thread)}
+    .flag.on .box::after{content:"✓";color:#1a1408;font-size:10px;font-weight:700}
+
+    /* moderation actions */
+    .action-card{background:var(--warp-1);border:1px solid var(--line-soft);border-radius:8px;margin-bottom:18px;padding:16px 18px}
+    .action-card h2{font-size:15px;font-weight:700;margin-bottom:12px}
+    .action-card p{font-size:12.5px;color:var(--flax);margin-bottom:12px;max-width:600px}
+    .action-card .row{display:flex;flex-direction:column;gap:10px;align-items:flex-start}
+    .action-card .row input[type=text]{padding-right:13px}
+    .action-card .row .btns{display:flex;gap:10px}
+    .action-card.danger h2{color:var(--madder)}
+
+    /* badges & pills */
+    .badge{display:inline-block;font-size:12px;background:var(--warp-2);border:1px solid var(--line);
+      border-radius:20px;padding:3px 12px;margin-right:8px;color:var(--flax)}
+    .pill{display:inline-block;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;color:var(--teal);
+      border:1px solid #2f4b47;background:#1a2422;border-radius:4px;padding:2px 8px;margin:0 6px 6px 0}
+
+    /* assets grid */
+    .assets{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    .asset{border:1px solid var(--line-soft);border-radius:8px;padding:12px 14px}
+    .asset h3{font-size:13px;font-weight:700;margin-bottom:9px}
+    .asset .frame{background:var(--warp-2);border-radius:6px;display:flex;align-items:center;justify-content:center;
+      color:var(--flax-dim);font-family:var(--mono);font-size:11.5px}
+    .asset .frame.icon{width:88px;height:88px}
+    .asset .frame.wide{height:110px}
+    .asset .hash{font-family:var(--mono);font-size:11px;color:var(--flax-dim);margin-top:8px}
+
+    /* channel & role rows */
+    .rowlist > div{display:flex;align-items:center;background:var(--warp-2);border:1px solid var(--line-soft);
+      border-radius:6px;padding:10px 14px;margin-bottom:10px}
+    .rowlist > div:last-child{margin-bottom:0}
+    .rl-main .n{font-weight:700;font-size:13.5px}
+    .rl-main .i{font-family:var(--mono);font-size:11.5px;color:var(--flax-dim)}
+    .rl-type{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--flax)}
+    .swatch{width:13px;height:13px;border-radius:3px;background:#111;border:1px solid var(--line);margin-right:11px;flex:none}
+
+    .view{display:none}
+    .view.active{display:block}
+    .placeholder{border:1px dashed var(--line);border-radius:8px;padding:40px;text-align:center;
+      color:var(--flax-dim);font-family:var(--mono);font-size:12.5px}
+
+    @media (prefers-reduced-motion:no-preference){
+      .view.active{animation:rise .18s ease-out}
+      @keyframes rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+    }
+    @media (max-width:900px){
+      aside{width:190px}
+      .detail{grid-template-columns:1fr}
+      .subnav{display:flex;flex-wrap:wrap;border-left:0}
+      .assets{grid-template-columns:1fr}
+      .flags{grid-template-columns:1fr}
+      .kv{grid-template-columns:140px 1fr}
+    }
+  </style>
+</head>
+<body>
+
+<div class="selvage" aria-hidden="true"></div>
+
+<aside>
+  <div class="wordmark">
+    <div class="weave">W<b>E</b>FT</div>
+    <div class="sub">loom console</div>
+  </div>
+  <nav aria-label="Admin sections">
+    <div class="nav-group">
+      <div class="nav-label">Lookup</div>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Users</button>
+      <button class="nav-item" data-view="guilds"><span class="tick">─</span>Guilds</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Applications</button>
+    </div>
+    <div class="nav-group">
+      <div class="nav-label">Moderation</div>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Reports</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Discovery Review</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Bulk Actions</button>
+    </div>
+    <div class="nav-group">
+      <div class="nav-label">Content Tools</div>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Message Tools</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>System DMs</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Archives</button>
+    </div>
+    <div class="nav-group">
+      <div class="nav-label">User Bans</div>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>IP Bans</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Email Bans</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Suspicious Email Domains</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Phrase Bans</button>
+    </div>
+    <div class="nav-group">
+      <div class="nav-label">Content Blocklists</div>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>URL Blocklist</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>URL Domain Blocklist</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>File SHA Blocklist</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Avatar Hash Blocklist</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Profile Substring Blocklist</button>
+    </div>
+    <div class="nav-group">
+      <div class="nav-label">Observability</div>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Gateway</button>
+      <button class="nav-item" data-view="ph"><span class="tick">─</span>Audit Logs</button>
+    </div>
+  </nav>
+</aside>
+
+<main>
+  <header>
+    <div class="op-ident">
+      <div class="op-avatar" aria-hidden="true"></div>
+      <div>
+        <div class="op-name">nightishaman</div>
+        <div class="op-addr">nightishaman#0961</div>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn">Logout</button>
+  </header>
+
+  <div class="content">
+    <div class="content-inner">
+
+      <!-- ============ GUILDS SEARCH (screenshot 1) ============ -->
+      <section class="view" id="view-guilds">
+        <div class="h-row">
+          <h1>Guilds</h1>
+          <span class="meta">Found 1 results (showing 1)</span>
+        </div>
+        <div class="search-row">
+          <div class="search-wrap">
+            <input type="text" value="test" aria-label="Search guilds">
+            <button class="clear-x" aria-label="Clear search">✕</button>
+          </div>
+          <button class="btn primary">Search</button>
+        </div>
+        <div class="card">
+          <div class="result">
+            <div class="r-avatar">TS</div>
+            <div class="r-main">
+              <div class="r-name">test server</div>
+              <div class="r-lines">
+                ID: 1520200727627038720<br>
+                Members: 6<br>
+                Owner: 1519785535260852224
+              </div>
+            </div>
+            <button class="btn" onclick="show('guilddetail');guildTab('overview')">View Details</button>
+          </div>
+        </div>
+        <div class="pager">
+          <button class="btn small" disabled>← Previous</button>
+          Page 1 of 1
+          <button class="btn small" disabled>Next →</button>
+        </div>
+      </section>
+
+      <!-- ============ USER DETAIL (screenshot 2) ============ -->
+      <section class="view" id="view-userdetail">
+        <button class="crumb" onclick="show('ph')">← Back to Users</button>
+
+        <div class="profile">
+          <div class="p-avatar" aria-hidden="true">NS</div>
+          <div>
+            <div class="p-name">nightishaman <span class="crown" title="Guild owner">♛</span></div>
+            <div class="p-sub">
+              nightishaman#0961<br>
+              1519785535260852224
+            </div>
+          </div>
+        </div>
+
+        <div class="detail">
+          <div class="subnav" id="user-subnav">
+            <button class="active">Overview</button>
+            <button>Account</button>
+            <button>Guilds</button>
+            <button>DM History</button>
+            <button>Group DMs</button>
+            <button>Relationships</button>
+            <button>Reports</button>
+            <button>Moderation</button>
+            <button>Applications</button>
+            <button>Archives</button>
+            <button>Audit Logs</button>
+          </div>
+
+          <div>
+            <div class="card">
+              <div class="card-h"><span class="shuttle"></span><h2>Account Information</h2></div>
+              <div class="card-b kv">
+                <div class="k">User ID</div><div class="v mono">1519785535260852224</div>
+                <div class="k">Created</div><div class="v mono">2026-06-25T19:25:07Z</div>
+                <div class="k">Username</div><div class="v mono">nightishaman#0961</div>
+                <div class="k">Display Name</div><div class="v">nightishaman</div>
+                <div class="k">Email</div><div class="v mono">jannik@andreasmueller.de <span class="ok">verified</span></div>
+                <div class="k">Phone</div><div class="v dim">Not verified</div>
+                <div class="k">Date of Birth</div><div class="v">Not set</div>
+                <div class="k">Locale</div><div class="v mono">de</div>
+                <div class="k">Authenticators</div><div class="v dim">None</div>
+                <div class="k">Premium</div><div class="v dim">None</div>
+                <div class="k">Last Active</div><div class="v mono">2026-07-20T18:20:03.031Z</div>
+                <div class="k">Last IP</div><div class="v mono">89.244.86.172 <a class="link">Find related</a> <span class="dim">(i59F456AC.versanet.de)</span></div>
+                <div class="k">Location</div><div class="v">Unknown</div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-h"><span class="shuttle"></span><h2>User Flags</h2></div>
+              <div class="card-b flags">
+                <div class="flag on"><span class="box"></span>STAFF</div>
+                <div class="flag"><span class="box"></span>CTP_MEMBER</div>
+                <div class="flag"><span class="box"></span>PARTNER</div>
+                <div class="flag"><span class="box"></span>BUG_HUNTER</div>
+                <div class="flag"><span class="box"></span>FRIENDLY_BOT</div>
+                <div class="flag"><span class="box"></span>FRIENDLY_BOT_MANUAL_APPROVAL</div>
+                <div class="flag"><span class="box"></span>SPAMMER</div>
+                <div class="flag"><span class="box"></span>HIGH_GLOBAL_RATE_LIMIT</div>
+                <div class="flag"><span class="box"></span>DELETED</div>
+                <div class="flag"><span class="box"></span>DISABLED_SUSPICIOUS_ACTIVITY</div>
+                <div class="flag"><span class="box"></span>SELF_DELETED</div>
+                <div class="flag"><span class="box"></span>DISABLED</div>
+                <div class="flag on"><span class="box"></span>HAS_SESSION_STARTED</div>
+                <div class="flag"><span class="box"></span>RATE_LIMIT_BYPASS</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ GUILD DETAIL (screenshots 3, 4, 5) ============ -->
+      <section class="view" id="view-guilddetail">
+        <button class="crumb" onclick="show('guilds')">← Back to Guilds</button>
+
+        <div class="card">
+          <div class="card-b profile" style="margin-bottom:0">
+            <div class="p-avatar g" aria-hidden="true">TS</div>
+            <div>
+              <div class="p-name">test server</div>
+              <div class="p-sub">
+                Guild ID:<br>
+                1520200727627038720
+              </div>
+            </div>
+            <div class="p-owner">
+              <div class="k">Owner:</div>
+              <div class="v">nightishaman (nightishaman#0961)</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="detail">
+          <div class="subnav" id="guild-subnav">
+            <button data-gtab="overview" class="active">Overview</button>
+            <button data-gtab="ph">Members</button>
+            <button data-gtab="ph">Settings</button>
+            <button data-gtab="ph">Features</button>
+            <button data-gtab="moderation">Moderation</button>
+            <button data-gtab="ph">Archives</button>
+            <button data-gtab="ph">Emojis</button>
+            <button data-gtab="ph">Stickers</button>
+            <button data-gtab="ph">Admin Audit Logs</button>
+            <button data-gtab="ph">Guild Audit Log</button>
+            <button data-gtab="ph">Reports</button>
+          </div>
+
+          <div>
+            <!-- ------ Overview tab (screenshots 4 + 5) ------ -->
+            <div class="gtab" id="gtab-overview">
+              <div class="card">
+                <div class="card-h"><span class="shuttle"></span><h2>Content Rating</h2></div>
+                <div class="card-b">
+                  <span class="badge">Not flagged adult</span>
+                  <span class="badge">No content warning</span>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-h"><span class="shuttle"></span><h2>Assets</h2></div>
+                <div class="card-b assets">
+                  <div class="asset">
+                    <h3>Icon</h3>
+                    <div class="frame icon">Not set</div>
+                    <div class="hash">Hash: null</div>
+                  </div>
+                  <div class="asset">
+                    <h3>Banner</h3>
+                    <div class="frame wide">Not set</div>
+                    <div class="hash">Hash: null</div>
+                  </div>
+                  <div class="asset">
+                    <h3>Splash</h3>
+                    <div class="frame wide">Not set</div>
+                    <div class="hash">Hash: null</div>
+                  </div>
+                  <div class="asset">
+                    <h3>Embed Splash</h3>
+                    <div class="frame wide">Not set</div>
+                    <div class="hash">Hash: null</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-h"><span class="shuttle"></span><h2>Guild Information</h2></div>
+                <div class="card-b kv">
+                  <div class="k">Guild ID</div><div class="v mono">1520200727627038720</div>
+                  <div class="k">Name</div><div class="v">test server</div>
+                  <div class="k">Member Count</div><div class="v mono">6</div>
+                  <div class="k">Vanity URL</div><div class="v dim">None</div>
+                  <div class="k">Owner</div><div class="v">nightishaman (nightishaman#0961)<br><span class="mono dim">1519785535260852224</span></div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-h"><span class="shuttle"></span><h2>Features</h2></div>
+                <div class="card-b">
+                  <span class="pill">ANIMATED_ICON</span>
+                  <span class="pill">ANIMATED_BANNER</span>
+                  <span class="pill">BANNER</span>
+                  <span class="pill">INVITE_SPLASH</span>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-h"><span class="shuttle"></span><h2>Channels (4)</h2></div>
+                <div class="card-b rowlist">
+                  <div>
+                    <div class="rl-main"><div class="n">Text Channels</div><div class="i">1520200727627038721</div></div>
+                    <span class="rl-type">Category</span>
+                  </div>
+                  <div>
+                    <div class="rl-main"><div class="n">general</div><div class="i">1520200727627038723</div></div>
+                    <span class="rl-type">Text</span>
+                  </div>
+                  <div>
+                    <div class="rl-main"><div class="n">General</div><div class="i">1520200727627038724</div></div>
+                    <span class="rl-type">Voice</span>
+                  </div>
+                  <div>
+                    <div class="rl-main"><div class="n">Voice Channels</div><div class="i">1520200727627038722</div></div>
+                    <span class="rl-type">Category</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-h"><span class="shuttle"></span><h2>Roles (1)</h2></div>
+                <div class="card-b rowlist">
+                  <div>
+                    <span class="swatch" aria-hidden="true"></span>
+                    <div class="rl-main"><div class="n">@everyone</div><div class="i">1520200727627038720</div></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ------ Moderation tab (screenshot 3) ------ -->
+            <div class="gtab" id="gtab-moderation" style="display:none">
+              <div class="action-card">
+                <h2>Update Guild Name</h2>
+                <div class="row">
+                  <input type="text" placeholder="New guild name">
+                  <div class="btns"><button class="btn primary">Update Name</button></div>
+                </div>
+              </div>
+
+              <div class="action-card">
+                <h2>Update Vanity URL</h2>
+                <div class="row">
+                  <input type="text" placeholder="vanity-code (leave empty to remove)">
+                  <div class="btns"><button class="btn primary">Update Vanity URL</button></div>
+                </div>
+              </div>
+
+              <div class="action-card">
+                <h2>Transfer Ownership</h2>
+                <div class="row">
+                  <input type="text" placeholder="New owner user ID">
+                  <div class="btns"><button class="btn danger solid">Transfer Ownership</button></div>
+                </div>
+              </div>
+
+              <div class="action-card">
+                <h2>Force Add User to Guild</h2>
+                <div class="row">
+                  <input type="text" placeholder="User ID to add">
+                  <div class="btns"><button class="btn primary">Add User</button></div>
+                </div>
+              </div>
+
+              <div class="action-card">
+                <h2>Guild Process Controls</h2>
+                <div class="row">
+                  <div class="btns">
+                    <button class="btn">Reload Guild</button>
+                    <button class="btn danger solid">Shutdown Guild</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="action-card danger">
+                <h2>Delete Guild</h2>
+                <p>Deleting a guild permanently removes it and all associated data. This action cannot be undone.</p>
+                <div class="row">
+                  <div class="btns"><button class="btn danger solid">Delete Guild</button></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ PLACEHOLDER ============ -->
+      <section class="view" id="view-ph">
+        <div class="h-row"><h1 id="ph-title">Users</h1></div>
+        <div class="placeholder">not in the mockup yet — demo covers Guilds, Guild detail, and User detail
+          <br><br><button class="btn small" onclick="show('userdetail')">open user detail demo</button>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</main>
+
+<script>
+  const items = document.querySelectorAll('.nav-item');
+
+  function show(name, navEl){
+    document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+    (document.getElementById('view-'+name)||document.getElementById('view-ph')).classList.add('active');
+    items.forEach(i=>i.classList.remove('active'));
+    if(navEl){ navEl.classList.add('active'); }
+    else{
+      const parent = {guilddetail:'guilds', userdetail:null}[name];
+      if(parent!==null){
+        items.forEach(i=>{ if(i.dataset.view===(parent||name)) i.classList.add('active'); });
+      }else{
+        // user detail maps to the Users nav item
+        items.forEach(i=>{ if(i.textContent.trim()==='Users') i.classList.add('active'); });
+      }
+    }
+    document.querySelector('.content').scrollTop = 0;
+  }
+
+  items.forEach(i=>i.addEventListener('click',()=>{
+    if(i.dataset.view==='ph'){ document.getElementById('ph-title').textContent = i.textContent.trim(); }
+    show(i.dataset.view, i);
+  }));
+
+  // guild sub-nav tabs
+  function guildTab(name){
+    document.querySelectorAll('.gtab').forEach(t=>t.style.display='none');
+    const target = document.getElementById('gtab-'+name);
+    if(target){ target.style.display='block'; }
+    document.querySelectorAll('#guild-subnav button').forEach(b=>{
+      b.classList.toggle('active', b.dataset.gtab===name);
+    });
+  }
+  document.querySelectorAll('#guild-subnav button').forEach(b=>{
+    b.addEventListener('click',()=>{
+      const t = b.dataset.gtab;
+      if(t==='ph'){
+        document.querySelectorAll('.gtab').forEach(x=>x.style.display='none');
+        document.querySelectorAll('#guild-subnav button').forEach(x=>x.classList.remove('active'));
+        b.classList.add('active');
+        return;
+      }
+      guildTab(t);
+    });
+  });
+
+  // user sub-nav: visual only
+  document.querySelectorAll('#user-subnav button').forEach(b=>{
+    b.addEventListener('click',()=>{
+      document.querySelectorAll('#user-subnav button').forEach(x=>x.classList.remove('active'));
+      b.classList.add('active');
+    });
+  });
+
+  show('guilds', document.querySelector('[data-view="guilds"]'));
+</script>
+</body>
+</html>
