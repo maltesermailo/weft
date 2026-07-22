@@ -724,7 +724,9 @@ impl ServerCtx {
         now: u64,
     ) -> Result<bool, StoreError> {
         if let Actor::Local(account) = actor {
-            if self.operators.contains(account) {
+            // Operator authority: the config `[operators]` seed set OR the
+            // DB-backed flag (managed via `weftd admin`, §10.4).
+            if self.operators.contains(account) || self.accounts.is_operator(account).await? {
                 return Ok(true);
             }
             if let Some(ns_name) = scope_namespace(scope) {
@@ -785,7 +787,7 @@ impl ServerCtx {
         now: u64,
     ) -> Result<bool, StoreError> {
         if let Actor::Local(account) = actor {
-            if self.operators.contains(account) {
+            if self.operators.contains(account) || self.accounts.is_operator(account).await? {
                 return Ok(true);
             }
         }
@@ -991,9 +993,14 @@ impl ServerCtx {
         self.identity.public()
     }
 
-    /// Operator accounts — the net-scope (`*`) report handlers (§6.7).
-    pub(crate) fn operator_accounts(&self) -> Vec<Account> {
-        self.operators.iter().cloned().collect()
+    /// Operator accounts — the net-scope (`*`) report handlers (§6.7). The
+    /// union of the config `[operators]` seed and the DB-backed flags (§10.4).
+    pub(crate) async fn operator_accounts(&self) -> Vec<Account> {
+        let mut ops: std::collections::HashSet<Account> = self.operators.iter().cloned().collect();
+        if let Ok(db) = self.accounts.list_operators().await {
+            ops.extend(db);
+        }
+        ops.into_iter().collect()
     }
 
     pub(crate) fn next_session_id(&self) -> u64 {

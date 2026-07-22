@@ -378,6 +378,16 @@ where
     assert!(!store.is_suspended(&dan).await.unwrap());
     assert!(!store.set_suspended(&cara, true).await.unwrap()); // unknown
 
+    // §10.4 operator flag: toggleable, listable; unknown account → false.
+    assert!(!store.is_operator(&dan).await.unwrap());
+    assert!(!store.list_operators().await.unwrap().contains(&dan));
+    assert!(store.set_operator(&dan, true).await.unwrap());
+    assert!(store.is_operator(&dan).await.unwrap());
+    assert!(store.list_operators().await.unwrap().contains(&dan));
+    assert!(store.set_operator(&dan, false).await.unwrap());
+    assert!(!store.is_operator(&dan).await.unwrap());
+    assert!(!store.set_operator(&cara, true).await.unwrap()); // unknown account
+
     assert!(store.delete_account(&dan).await.unwrap());
     assert!(!store.list_accounts().await.unwrap().contains(&dan));
 

@@ -21,8 +21,10 @@ pub struct Config {
     pub channels: Vec<ChannelConfig>,
     /// §6.1: REGISTER works only when `open`.
     pub registration: Registration,
-    /// §11.3: operator accounts hold every capability at `*` (the network
-    /// key's authority) — they bootstrap the grant chain.
+    /// §11.3 **deprecated** — operator status now lives in Postgres, managed
+    /// with `weftd admin` (create/grant/revoke/list). Any accounts still listed
+    /// here are treated as operators (a compat seed), but prefer the CLI and
+    /// remove this list. Operators hold every capability at `*`.
     pub operators: Vec<String>,
     /// §9.5: one retention policy for all DMs (default `permanent`).
     pub dm_policy: String,

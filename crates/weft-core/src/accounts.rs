@@ -64,6 +64,25 @@ impl Accounts {
         self.store.set_suspended(account, suspended).await
     }
 
+    /// §10.4: whether the account holds operator authority (DB-backed).
+    pub async fn is_operator(&self, account: &Account) -> Result<bool, StoreError> {
+        self.store.is_operator(account).await
+    }
+
+    /// §10.4: grant/revoke operator authority. False iff the account is unknown.
+    pub async fn set_operator(
+        &self,
+        account: &Account,
+        operator: bool,
+    ) -> Result<bool, StoreError> {
+        self.store.set_operator(account, operator).await
+    }
+
+    /// §10.4: every operator account.
+    pub async fn list_operators(&self) -> Result<Vec<Account>, StoreError> {
+        self.store.list_operators().await
+    }
+
     /// Constant-time, uniform: a missing (or corrupt) stored hash verifies
     /// — and fails — against the dummy instead of returning early.
     pub async fn verify_password(

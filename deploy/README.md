@@ -61,7 +61,7 @@ matching values are duplicated; keep them in sync).
 
 ```toml
 network   = "weft.example.com"        # ← your domain
-operators = ["admin"]                 # ← your first admin handle
+operators = []                        # ← operators live in Postgres now; use the CLI
 
 [tls]                                 # ← replace weft.example.com in BOTH paths
 cert = "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/weft.example.com/weft.example.com.crt"
@@ -132,8 +132,19 @@ needed.
 ### 7. Log in
 
 Open **`https://weft.example.com`**. The web client loads (served by weftd) and
-connects over `wss://weft.example.com/ws`. **Register the `admin` handle** you set
-in `operators` — that account holds every capability at `*` (§11.3).
+connects over `wss://weft.example.com/ws`.
+
+**Create your first operator** (§11.3 — holds every capability at `*`, and
+unlocks `/admin`). Operator status lives in Postgres now, so use the CLI:
+
+```bash
+docker compose exec weftd weftd admin create admin --password '<a-strong-password>'
+# later: grant <account> / revoke <account> / list
+```
+
+This registers the `admin` account **and** flags it operator; log in with it in
+the web client (or at `/admin` with `[admin] enabled = true`). To promote an
+account someone already registered, use `weftd admin grant <account>` instead.
 
 ### 8. Try voice
 

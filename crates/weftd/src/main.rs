@@ -5,9 +5,16 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // `weftd admin …` — operator-management CLI (§10.4); no server, quiet output.
+    if args.get(1).map(String::as_str) == Some("admin") {
+        return weftd::admin_cli::run(&args[2..]).await;
+    }
+
     weftd::telemetry::init();
 
-    let config = match std::env::args().nth(1) {
+    let config = match args.get(1) {
         Some(path) => weftd::config::load(path)?,
         None => weftd::Config::default(),
     };

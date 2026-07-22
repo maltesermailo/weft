@@ -151,6 +151,16 @@ pub trait AccountStore: Send + Sync {
     /// Whether the account is currently suspended (`false` also covers unknown).
     async fn is_suspended(&self, account: &Account) -> Result<bool, StoreError>;
 
+    /// Set/clear an account's operator flag (§10.4). An operator holds every
+    /// capability at every scope. Idempotent; false iff the account is unknown.
+    async fn set_operator(&self, account: &Account, operator: bool) -> Result<bool, StoreError>;
+
+    /// Whether the account holds operator authority (`false` also covers unknown).
+    async fn is_operator(&self, account: &Account) -> Result<bool, StoreError>;
+
+    /// Every operator account, name-sorted.
+    async fn list_operators(&self) -> Result<Vec<Account>, StoreError>;
+
     /// Idempotent; false iff the account is unknown.
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError>;
 

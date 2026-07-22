@@ -37,6 +37,8 @@ struct AccountRecord {
     purge_at: Option<u64>,
     /// WC7 moderation: suspended accounts can't authenticate.
     suspended: bool,
+    /// §10.4 operator authority (managed via `weftd admin`).
+    operator: bool,
 }
 
 /// The domain of an email address — the lowercased part after the last `@`
@@ -409,6 +411,7 @@ impl AccountStore for MemoryStore {
                 verifications: HashMap::new(),
                 purge_at: None,
                 suspended: false,
+                operator: false,
             },
         );
         Ok(true)
@@ -515,6 +518,39 @@ impl AccountStore for MemoryStore {
             .accounts
             .get(account)
             .is_some_and(|r| r.suspended))
+    }
+
+    async fn set_operator(&self, account: &Account, operator: bool) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        match inner.accounts.get_mut(account) {
+            Some(record) => {
+                record.operator = operator;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn is_operator(&self, account: &Account) -> Result<bool, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("store lock")
+            .accounts
+            .get(account)
+            .is_some_and(|r| r.operator))
+    }
+
+    async fn list_operators(&self) -> Result<Vec<Account>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut ops: Vec<Account> = inner
+            .accounts
+            .iter()
+            .filter(|(_, r)| r.operator)
+            .map(|(name, _)| name.clone())
+            .collect();
+        ops.sort();
+        Ok(ops)
     }
 
     async fn enroll_device(&self, account: &Account, device: [u8; 32]) -> Result<bool, StoreError> {

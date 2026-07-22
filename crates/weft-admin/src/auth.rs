@@ -105,7 +105,11 @@ impl AdminScopes {
 /// `None` = holds no admin access at all. Revocation is by `REVOKE` (the grant
 /// row disappears) or expiry — both reflected here on the next request.
 pub(crate) async fn admin_scopes(st: &AdminState, account: &Account) -> Option<AdminScopes> {
-    if st.auth.operators.contains(account) {
+    // Operators hold all admin scopes — from the config seed set OR the
+    // DB-backed flag (managed via `weftd admin`, §10.4).
+    if st.auth.operators.contains(account)
+        || st.accounts.is_operator(account).await.unwrap_or(false)
+    {
         return Some(AdminScopes::all());
     }
 

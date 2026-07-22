@@ -23,9 +23,16 @@ registration = "open"
 
 # Operator accounts hold EVERY capability at `*` — the network-key authority
 # that bootstraps the whole grant chain (§11.3), and what unlocks the client's
-# Federation panel. These accounts must REGISTER (or already exist); listing a
-# name here grants it operator authority, it does not create the account.
-operators = ["admin"]
+# Federation panel.
+#
+# DEPRECATED: operator status now lives in Postgres, managed with the CLI —
+#   weftd admin create <account>   # register + make operator (bootstrap admin #1)
+#   weftd admin grant  <account>   # promote an existing account
+#   weftd admin revoke <account>
+#   weftd admin list
+# Leave this list empty and use the CLI. Any names still here are treated as
+# operators (a compat seed) but you should migrate off it.
+operators = []
 
 # ── channels ─────────────────────────────────────────────────────────────────
 # The seed channel set. Channels also get created at runtime (CHANNEL CREATE),

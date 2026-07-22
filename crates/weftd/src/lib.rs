@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod acceptor;
+pub mod admin_cli;
 pub mod config;
 pub mod dialer;
 pub mod livekit;

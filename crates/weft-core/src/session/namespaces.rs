@@ -629,7 +629,7 @@ impl<S: ControlStream> Session<S> {
     /// pull-not-push limit as the §2.4 recovery announcement).
     pub(super) async fn notify_queue_handlers(&self, queue: &str, event: Event) {
         if queue == "*" {
-            for op in self.ctx.operator_accounts() {
+            for op in self.ctx.operator_accounts().await {
                 self.ctx.directory.notify(op, event.clone()).await;
             }
         } else if let Some(name) = queue.strip_prefix("ns:") {

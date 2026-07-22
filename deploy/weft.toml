@@ -4,9 +4,11 @@
 
 # Your network's DNS name. MUST MATCH the site address in Caddyfile.
 network = "weft.example.com"
-# The bootstrap admin (§11.3) — register this handle first; it holds every
-# capability at `*`.
-operators = ["admin"]
+# Operators (§11.3) now live in Postgres — bootstrap the first admin with the
+# CLI instead of listing it here:
+#   docker compose exec weftd weftd admin create admin --password '<pw>'
+# (also: grant/revoke/list). Leave this empty.
+operators = []
 # §6.1 open registration so accounts can be created; "closed" to lock it.
 registration = "open"
 
