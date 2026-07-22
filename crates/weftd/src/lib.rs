@@ -665,6 +665,7 @@ where
         + weft_store::NetblockStore
         + weft_store::ModerationStore
         + weft_store::PinStore
+        + weft_store::EmojiStore
         + weft_store::MembershipStore
         + weft_store::MediaStore
         + weft_store::MediaBlocklistStore

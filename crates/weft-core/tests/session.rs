@@ -1199,6 +1199,50 @@ async fn history_thread_filter_returns_only_the_thread() {
 }
 
 #[tokio::test]
+async fn custom_emoji_add_list_remove_and_gating() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    // ada creates a namespace → she owns it (holds ns-admin there).
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+
+    // Owner adds two emoji.
+    ada.send("EMOJI ADD gaming partyblob weft-media://test.example/aaa");
+    assert!(
+        matches!(&ada.recv().await.event, Event::Emoji { name, .. } if name == "partyblob")
+    );
+    ada.send("EMOJI ADD gaming catjam weft-media://test.example/bbb");
+    assert!(matches!(ada.recv().await.event, Event::Emoji { .. }));
+
+    // List → a BATCH of both.
+    ada.send("@label=el EMOJI LIST gaming");
+    assert!(matches!(ada.recv().await.event, Event::BatchStart { .. }));
+    let mut names = Vec::new();
+    loop {
+        match ada.recv().await.event {
+            Event::Emoji { name, .. } => names.push(name),
+            Event::BatchEnd { .. } => break,
+            _ => {}
+        }
+    }
+    names.sort();
+    assert_eq!(names, vec!["catjam".to_string(), "partyblob".to_string()]);
+
+    // Remove one.
+    ada.send("EMOJI REMOVE gaming catjam");
+    assert!(matches!(ada.recv().await.event, Event::EmojiRemoved { .. }));
+
+    // An invalid shortcode is rejected regardless of authority.
+    ada.send("EMOJI ADD gaming bad-name! weft-media://x/y");
+    ada.expect_err(ErrCode::Policy).await;
+
+    // A non-admin can't add (ns-admin gate).
+    let mut bob = joined(&ctx, "bob", "#general").await;
+    bob.send("EMOJI ADD gaming sneaky weft-media://x/y");
+    bob.expect_err(ErrCode::CapRequired).await;
+}
+
+#[tokio::test]
 async fn presence_relays_to_co_members_but_never_invisible() {
     let ctx = ctx(&["#general"]);
     let mut ada = joined(&ctx, "ada", "#general").await;

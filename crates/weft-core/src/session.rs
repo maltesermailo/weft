@@ -900,6 +900,19 @@ impl<S: ControlStream> Session<S> {
             Command::Unpin { msgid } => self.on_pin(label, msgid, account, false).await,
             Command::Pins { channel } => self.on_pins(label, channel).await,
             Command::Search { channel, query } => self.on_search(label, channel, query).await,
+            Command::EmojiAdd {
+                namespace,
+                name,
+                media,
+            } => {
+                self.on_emoji_add(label, namespace, name, media, Actor::Local(account))
+                    .await
+            }
+            Command::EmojiRemove { namespace, name } => {
+                self.on_emoji_remove(label, namespace, name, Actor::Local(account))
+                    .await
+            }
+            Command::EmojiList { namespace } => self.on_emoji_list(label, namespace).await,
             Command::Caps {
                 account: subject,
                 scope,

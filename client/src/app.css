@@ -1041,6 +1041,83 @@ button:disabled {
 }
 
 /* markdown inline */
+/* §9.4 custom emoji — inline in messages, in reactions, and in the picker. */
+.custom-emoji {
+  height: 1.4em;
+  width: auto;
+  max-width: 2.4em;
+  vertical-align: middle;
+  object-fit: contain;
+}
+.emoji-opt .custom-emoji {
+  height: 22px;
+  width: 22px;
+  max-width: 22px;
+}
+.reaction .custom-emoji {
+  height: 16px;
+  width: 16px;
+  max-width: 16px;
+}
+/* §9.4 emoji admin tab (server settings). */
+.emoji-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.emoji-add-row .text-input {
+  flex: 1;
+  max-width: 200px;
+}
+.emoji-colon {
+  color: var(--text-faint);
+  font-weight: 700;
+}
+.emoji-pick-btn {
+  display: flex;
+  padding: 4px;
+  border: 1px solid var(--border-hair-strong);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  cursor: pointer;
+}
+.emoji-pick-btn .custom-emoji,
+.emoji-list-item .custom-emoji {
+  height: 28px;
+  width: 28px;
+  max-width: 28px;
+}
+.emoji-list-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+.emoji-list-item:hover {
+  background: var(--bg-hover);
+}
+.emoji-list-item code {
+  flex: 1;
+}
+/* Composer emoji button + pop-up picker (opens above the button). */
+.composer-emoji {
+  position: relative;
+  display: flex;
+}
+.composer-emoji-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+}
+.composer-emoji-pop .emoji-picker {
+  position: static;
+  top: auto;
+  right: auto;
+  max-height: 340px;
+  overflow-y: auto;
+}
 /* Thread reply indicator under a root message (Discord-style). */
 .thread-indicator {
   display: inline-flex;

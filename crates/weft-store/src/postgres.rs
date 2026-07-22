@@ -17,7 +17,7 @@ use weft_proto::{
 
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, AuditStore, CapabilityStore, ChannelStore, EventStore, InviteStore,
+    AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, InviteStore,
     MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
     NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
 };
@@ -2330,6 +2330,59 @@ impl PinStore for PgStore {
                     .map_err(|_| StoreError::Backend("corrupt pin msgid".to_string()))
             })
             .collect()
+    }
+}
+
+#[async_trait]
+impl EmojiStore for PgStore {
+    async fn set_emoji(
+        &self,
+        namespace: &NamespaceName,
+        name: &str,
+        media: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO weft_emoji (namespace, name, media) VALUES ($1, $2, $3) \
+             ON CONFLICT (namespace, name) DO UPDATE SET media = EXCLUDED.media",
+        )
+        .bind(namespace.as_str())
+        .bind(name)
+        .bind(media)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn remove_emoji(
+        &self,
+        namespace: &NamespaceName,
+        name: &str,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM weft_emoji WHERE namespace = $1 AND name = $2")
+            .bind(namespace.as_str())
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn list_emoji(
+        &self,
+        namespace: &NamespaceName,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT name, media FROM weft_emoji WHERE namespace = $1 ORDER BY name",
+        )
+        .bind(namespace.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<String, _>("name"), r.get::<String, _>("media")))
+            .collect())
     }
 }
 

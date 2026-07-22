@@ -11,7 +11,8 @@ use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, Retent
 use weft_store::{
     AccountStore, BlobStore, CapabilityStore, ChannelStore, EventStore, InviteStore,
     MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
-    NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, StoreError,
+    EmojiStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore,
+    StoreError,
 };
 
 use crate::accounts::Accounts;
@@ -130,6 +131,8 @@ pub struct ServerCtx {
     pub(crate) moderation: Arc<dyn ModerationStore>,
     /// Pinned messages, per channel (§6.4).
     pub(crate) pins: Arc<dyn PinStore>,
+    /// Custom emoji, per namespace (§9.4).
+    pub(crate) emoji: Arc<dyn EmojiStore>,
     /// Persistent channel membership for auto-rejoin (§6.3).
     pub(crate) memberships: Arc<dyn MembershipStore>,
     /// Role definitions — named capability-token bundles per scope (§6.5).
@@ -284,6 +287,7 @@ impl ServerCtx {
             + NetblockStore
             + ModerationStore
             + PinStore
+            + EmojiStore
             + MembershipStore
             + MediaStore
             + MediaBlocklistStore
@@ -303,6 +307,7 @@ impl ServerCtx {
         let netblocks: Arc<dyn NetblockStore> = store.clone();
         let moderation: Arc<dyn ModerationStore> = store.clone();
         let pins: Arc<dyn PinStore> = store.clone();
+        let emoji: Arc<dyn EmojiStore> = store.clone();
         let memberships: Arc<dyn MembershipStore> = store.clone();
         let roles: Arc<dyn RoleStore> = store.clone();
         let profiles: Arc<dyn ProfileStore> = store.clone();
@@ -338,6 +343,7 @@ impl ServerCtx {
             netblocks,
             moderation,
             pins,
+            emoji,
             memberships,
             roles,
             profiles,

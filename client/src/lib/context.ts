@@ -165,6 +165,14 @@ export interface AppCtx {
   closeThread(): void;
   sendThread(): void;
 
+  // ---- custom emoji (§9.4) ----
+  /** The active namespace's custom emoji as {name, media ref}. */
+  readonly activeEmoji: { name: string; media: string }[];
+  addEmoji(name: string, media: string): void;
+  removeEmoji(name: string): void;
+  /** A `:name:` shortcode → image URL in the active namespace, or null. */
+  emojiUrlFor(name: string): string | null;
+
   // ---- message list / items ----
   readonly loadingHistory: string | null;
   editingKey: number | null;
@@ -262,7 +270,7 @@ export interface AppCtx {
   readonly verifications: Record<string, { subject: string; state: string }>;
 
   // ---- server settings (ns overlay) ----
-  nsTab: "overview" | "roles" | "members" | "bans" | "federation" | "recovery" | "danger";
+  nsTab: "overview" | "roles" | "members" | "emoji" | "bans" | "federation" | "recovery" | "danger";
   // §6.7 moderation deny-list (mutes + bans) for the active server.
   denyList(): { account: string; kind: string; by?: string | null; reason?: string | null }[];
   refreshBans(): void;

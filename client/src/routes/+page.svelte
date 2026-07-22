@@ -490,7 +490,7 @@
   // ---- namespace admin panel (§6.2 / §2.4 / §6.6) ----
   let nsSettingsOpen = $state(false);
   let nsTab = $state<
-    "overview" | "roles" | "members" | "bans" | "federation" | "recovery" | "danger"
+    "overview" | "roles" | "members" | "emoji" | "bans" | "federation" | "recovery" | "danger"
   >("overview");
   // §6.7 moderation deny-list (mutes + bans) per scope, for the Bans tab.
   let modDeny = $state<
@@ -734,6 +734,35 @@
       weft.channels(s).catch(() => layoutFetched.delete(s));
     }
   });
+
+  // ---- §9.4 custom emoji, keyed namespace → (name → media ref) ----
+  let customEmoji = $state<Record<string, Record<string, string>>>({});
+  const emojiFetched = new Set<string>();
+  $effect(() => {
+    const s = activeServer;
+    if (s && !emojiFetched.has(s)) {
+      emojiFetched.add(s);
+      weft.emojiList(s).catch(() => emojiFetched.delete(s));
+    }
+  });
+  // The active namespace's custom emoji as an array (for pickers).
+  const activeEmoji = $derived(
+    Object.entries(customEmoji[activeServer] ?? {}).map(([name, media]) => ({ name, media })),
+  );
+  function addEmoji(name: string, media: string) {
+    if (!activeServer) return;
+    weft.emojiAdd(activeServer, name, media).catch((e) => toast(String(e), "error"));
+  }
+  function removeEmoji(name: string) {
+    if (!activeServer) return;
+    weft.emojiRemove(activeServer, name).catch((e) => toast(String(e), "error"));
+  }
+  // Resolve a `:name:` shortcode to a fetchable image URL in the active
+  // namespace, or null if it isn't a custom emoji here.
+  const emojiUrlFor = (name: string): string | null => {
+    const media = customEmoji[activeServer]?.[name];
+    return media ? weft.mediaUrl(media) : null;
+  };
 
   // DM conversations (keyed `@peer`), plus any peer we've opened a blank DM with.
   let dmList = $derived(Object.values(channels).filter((c) => c.name.startsWith("@")));
@@ -1006,6 +1035,19 @@
           unreadMap[e.channel] = e.unread > 0;
           mentionCount[e.channel] = e.mentions;
           mentionMap[e.channel] = e.mentions > 0;
+        }
+        break;
+      }
+      case "emoji": {
+        // §9.4 a namespace custom emoji (from EMOJI LIST or a live add).
+        (customEmoji[e.namespace] ??= {})[e.name] = e.media;
+        customEmoji = { ...customEmoji };
+        break;
+      }
+      case "emoji-removed": {
+        if (customEmoji[e.namespace]) {
+          delete customEmoji[e.namespace][e.name];
+          customEmoji = { ...customEmoji };
         }
         break;
       }
@@ -1579,6 +1621,14 @@
     s = s.replace(/@(everyone|here|[a-z0-9][a-z0-9._-]*)/gi, (_full, name: string) => {
       const me = name === account || name === "everyone" || name === "here";
       return `<span class="mention${me ? " me" : ""}">@${name}</span>`;
+    });
+    // §9.4 :name: custom emoji (active namespace) → an inline image; unknown
+    // shortcodes are left as literal text.
+    s = s.replace(/:([a-zA-Z0-9_]+):/g, (full, name: string) => {
+      const media = customEmoji[activeServer]?.[name];
+      if (!media) return full;
+      const url = weft.mediaUrl(media).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+      return `<img class="custom-emoji" src="${url}" alt=":${name}:" title=":${name}:" />`;
     });
     return s;
   }
@@ -2241,6 +2291,11 @@
     openThread,
     closeThread,
     sendThread,
+    // custom emoji (§9.4)
+    get activeEmoji() { return activeEmoji; },
+    addEmoji,
+    removeEmoji,
+    emojiUrlFor,
     // message list / items
     get loadingHistory() { return loadingHistory; },
     get editingKey() { return editingKey; },
@@ -2319,7 +2374,7 @@
     get verifications() { return verifications; },
     // server settings (ns overlay)
     get nsTab() { return nsTab; },
-    set nsTab(v: "overview" | "roles" | "members" | "bans" | "federation" | "recovery" | "danger") { nsTab = v; },
+    set nsTab(v: "overview" | "roles" | "members" | "emoji" | "bans" | "federation" | "recovery" | "danger") { nsTab = v; },
     denyList,
     refreshBans,
     liftMod,

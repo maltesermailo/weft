@@ -580,6 +580,32 @@ pub trait PinStore: Send + Sync {
     async fn pins(&self, channel: &ChannelName) -> Result<Vec<MsgId>, StoreError>;
 }
 
+/// §9.4 custom (per-namespace) emoji: a shortcode `name` → a `weft-media://…`
+/// reference. The image bytes live in the blob store; this only maps names.
+#[async_trait]
+pub trait EmojiStore: Send + Sync {
+    /// Add or replace a namespace emoji (idempotent by `(namespace, name)`).
+    async fn set_emoji(
+        &self,
+        namespace: &NamespaceName,
+        name: &str,
+        media: &str,
+    ) -> Result<(), StoreError>;
+
+    /// Remove a namespace emoji. Returns false iff it didn't exist.
+    async fn remove_emoji(
+        &self,
+        namespace: &NamespaceName,
+        name: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// All emoji for a namespace as `(name, media)`, name-sorted.
+    async fn list_emoji(
+        &self,
+        namespace: &NamespaceName,
+    ) -> Result<Vec<(String, String)>, StoreError>;
+}
+
 /// §6.3 persistent channel membership. Unlike the live channel-actor roster
 /// (session-scoped), this survives reconnects: a client is auto-rejoined to
 /// these channels on auth, so its tiles reappear (the Discord model).

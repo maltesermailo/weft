@@ -1,7 +1,7 @@
 <script lang="ts">
   import { getApp } from "$lib/context";
   import { autofocus } from "$lib/actions";
-  import { EMOJI, QUICK_EMOJI } from "$lib/emoji";
+  import EmojiPicker from "./EmojiPicker.svelte";
   import Attachment from "./Attachment.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
   import type { Msg } from "$lib/types";
@@ -56,8 +56,10 @@
       {#if m.reactions && Object.keys(m.reactions).length}
         <div class="reactions">
           {#each Object.entries(m.reactions) as [emoji, r] (emoji)}
+            {@const custom = emoji.match(/^:([a-zA-Z0-9_]+):$/)}
+            {@const emUrl = custom && app.emojiUrlFor(custom[1])}
             <button class="reaction" class:mine={r.mine} onclick={() => app.toggleReaction(m, emoji)}>
-              <span>{emoji}</span><span class="count">{r.count}</span>
+              {#if emUrl}<img class="custom-emoji" src={emUrl} alt={emoji} />{:else}<span>{emoji}</span>{/if}<span class="count">{r.count}</span>
             </button>
           {/each}
         </div>
@@ -102,23 +104,7 @@
         {/if}
       </div>
       {#if app.pickerKey === m.key}
-        <div class="emoji-picker">
-          <div class="emoji-quick">
-            {#each QUICK_EMOJI as emoji (emoji)}
-              <button class="emoji-opt" onclick={() => app.toggleReaction(m, emoji)}>{emoji}</button>
-            {/each}
-          </div>
-          <div class="emoji-grid">
-            {#each Object.entries(EMOJI) as [cat, list] (cat)}
-              <div class="emoji-cat">{cat}</div>
-              <div class="emoji-row">
-                {#each list as emoji (emoji)}
-                  <button class="emoji-opt" onclick={() => app.toggleReaction(m, emoji)}>{emoji}</button>
-                {/each}
-              </div>
-            {/each}
-          </div>
-        </div>
+        <EmojiPicker onpick={(v) => app.toggleReaction(m, v)} />
       {/if}
     {/if}
   </div>

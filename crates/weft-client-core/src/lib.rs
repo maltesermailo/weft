@@ -108,6 +108,17 @@ pub enum ClientEvent {
         unread: u64,
         mentions: u64,
     },
+    /// `EMOJI <ns> <name> <media>` — a namespace custom emoji (§9.4).
+    Emoji {
+        namespace: String,
+        name: String,
+        media: String,
+    },
+    /// `EMOJI-REMOVED <ns> <name>` — a namespace emoji was removed (§9.4).
+    EmojiRemoved {
+        namespace: String,
+        name: String,
+    },
     /// `PINNED <#chan> <msgid>` — a message was pinned (§7).
     Pinned {
         channel: String,
@@ -512,6 +523,19 @@ pub fn on_line<E: EventSink>(
             channel: channel.to_string(),
             unread,
             mentions,
+        }),
+        Event::Emoji {
+            namespace,
+            name,
+            media,
+        } => sink.emit(ClientEvent::Emoji {
+            namespace: namespace.to_string(),
+            name,
+            media,
+        }),
+        Event::EmojiRemoved { namespace, name } => sink.emit(ClientEvent::EmojiRemoved {
+            namespace: namespace.to_string(),
+            name,
         }),
         Event::Pinned { channel, msgid, by } => sink.emit(ClientEvent::Pinned {
             channel: channel.to_string(),
@@ -1174,6 +1198,40 @@ pub fn build_pins(channel: &str) -> Result<String, String> {
     let channel: weft_proto::ChannelName =
         channel.parse().map_err(|_| "bad channel".to_string())?;
     Request::new(Command::Pins { channel })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `EMOJI ADD <ns> <name> <media>` — add/replace a namespace custom emoji.
+pub fn build_emoji_add(namespace: &str, name: &str, media: &str) -> Result<String, String> {
+    let namespace: weft_proto::NamespaceName =
+        namespace.parse().map_err(|_| "bad namespace".to_string())?;
+    Request::new(Command::EmojiAdd {
+        namespace,
+        name: name.to_string(),
+        media: media.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `EMOJI REMOVE <ns> <name>` — remove a namespace custom emoji.
+pub fn build_emoji_remove(namespace: &str, name: &str) -> Result<String, String> {
+    let namespace: weft_proto::NamespaceName =
+        namespace.parse().map_err(|_| "bad namespace".to_string())?;
+    Request::new(Command::EmojiRemove {
+        namespace,
+        name: name.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `EMOJI LIST <ns>` — a namespace's custom emoji as a `BATCH`.
+pub fn build_emoji_list(namespace: &str) -> Result<String, String> {
+    let namespace: weft_proto::NamespaceName =
+        namespace.parse().map_err(|_| "bad namespace".to_string())?;
+    Request::new(Command::EmojiList { namespace })
         .serialize()
         .map_err(|e| e.to_string())
 }

@@ -526,6 +526,21 @@ fn search(conn: State<'_, Conn>, channel: String, query: String) -> Result<(), S
 }
 
 #[tauri::command]
+fn emoji_add(conn: State<'_, Conn>, namespace: String, name: String, media: String) -> Result<(), String> {
+    conn.send(weft::build_emoji_add(&namespace, &name, &media)?)
+}
+
+#[tauri::command]
+fn emoji_remove(conn: State<'_, Conn>, namespace: String, name: String) -> Result<(), String> {
+    conn.send(weft::build_emoji_remove(&namespace, &name)?)
+}
+
+#[tauri::command]
+fn emoji_list(conn: State<'_, Conn>, namespace: String) -> Result<(), String> {
+    conn.send(weft::build_emoji_list(&namespace)?)
+}
+
+#[tauri::command]
 fn caps(conn: State<'_, Conn>, account: String, scope: String) -> Result<(), String> {
     conn.send(weft::build_caps(&account, &scope)?)
 }
@@ -746,6 +761,9 @@ pub fn run() {
             pin,
             pins,
             search,
+            emoji_add,
+            emoji_remove,
+            emoji_list,
             caps,
             part,
             channel_create,

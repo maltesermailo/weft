@@ -173,6 +173,109 @@ impl<S: ControlStream> Session<S> {
         }
     }
 
+    /// `EMOJI ADD <ns> <name> <media>` (§9.4): add/replace a namespace emoji.
+    /// Cap-gated (`ns-admin`). Echoes the `EMOJI` event to the caller.
+    pub(super) async fn on_emoji_add(
+        &mut self,
+        label: Option<String>,
+        namespace: weft_proto::NamespaceName,
+        name: String,
+        media: String,
+        actor: Actor,
+    ) -> io::Result<Flow> {
+        if !valid_emoji_name(&name) {
+            self.send_err(
+                label,
+                ErrCode::Policy,
+                None,
+                "emoji name must be 1–32 chars of a-z A-Z 0-9 _",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        if self
+            .ns_admin_gate(label.clone(), &namespace, &actor)
+            .await?
+            .is_none()
+        {
+            return Ok(Flow::Continue);
+        }
+        if let Err(e) = self.ctx.emoji.set_emoji(&namespace, &name, &media).await {
+            return self.internal(label, &e).await;
+        }
+        self.send_event(
+            label,
+            Event::Emoji {
+                namespace,
+                name,
+                media,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// `EMOJI REMOVE <ns> <name>` (§9.4). Cap-gated (`ns-admin`).
+    pub(super) async fn on_emoji_remove(
+        &mut self,
+        label: Option<String>,
+        namespace: weft_proto::NamespaceName,
+        name: String,
+        actor: Actor,
+    ) -> io::Result<Flow> {
+        if self
+            .ns_admin_gate(label.clone(), &namespace, &actor)
+            .await?
+            .is_none()
+        {
+            return Ok(Flow::Continue);
+        }
+        if let Err(e) = self.ctx.emoji.remove_emoji(&namespace, &name).await {
+            return self.internal(label, &e).await;
+        }
+        self.send_event(label, Event::EmojiRemoved { namespace, name })
+            .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// `EMOJI LIST <ns>` (§9.4): a `BATCH` of `EMOJI` events. Any authed session
+    /// may list — emoji aren't secret and clients need them to render.
+    pub(super) async fn on_emoji_list(
+        &mut self,
+        label: Option<String>,
+        namespace: weft_proto::NamespaceName,
+    ) -> io::Result<Flow> {
+        let emoji = match self.ctx.emoji.list_emoji(&namespace).await {
+            Ok(emoji) => emoji,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        self.batches += 1;
+        let id = format!("e{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for (name, media) in emoji {
+            self.send_event(
+                None,
+                Event::Emoji {
+                    namespace: namespace.clone(),
+                    name,
+                    media,
+                },
+            )
+            .await?;
+        }
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+                compacted: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
     pub(super) async fn on_ns_meta(
         &mut self,
         label: Option<String>,
@@ -701,4 +804,11 @@ impl<S: ControlStream> Session<S> {
         }
         Ok(Flow::Continue)
     }
+}
+
+/// A valid `:shortcode:` emoji name: 1–32 chars of `[A-Za-z0-9_]`.
+fn valid_emoji_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }

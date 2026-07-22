@@ -1,6 +1,13 @@
 <script lang="ts">
   import { getApp } from "$lib/context";
+  import EmojiPicker from "./EmojiPicker.svelte";
   const app = getApp();
+
+  let emojiOpen = $state(false);
+  function insertEmoji(value: string) {
+    app.composer = app.composer + value;
+    emojiOpen = false;
+  }
 
   // Drag-and-drop file upload: highlight the composer while a file hovers.
   let dragActive = $state(false);
@@ -69,6 +76,15 @@
       oninput={app.onComposerInput}
       onpaste={app.pasteFiles}
     ></textarea>
+    <div class="composer-emoji">
+      {#if emojiOpen}
+        <button class="ctx-backdrop" aria-label="Close" onclick={() => (emojiOpen = false)}></button>
+        <div class="composer-emoji-pop"><EmojiPicker onpick={insertEmoji} /></div>
+      {/if}
+      <button class="icon-btn" title="Emoji" aria-label="Emoji" disabled={!app.active} onclick={() => (emojiOpen = !emojiOpen)}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><path d="M9 9h.01M15 9h.01" /></svg>
+      </button>
+    </div>
     <button class="icon-btn" title="Send" aria-label="Send message" onclick={app.doSend}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 2 11 13" /><path d="M22 2 15 22l-4-9-9-4 20-7z" /></svg>
     </button>

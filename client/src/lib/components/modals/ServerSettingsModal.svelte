@@ -19,6 +19,33 @@
     app.bridgePropose(`ns:${app.activeServer}`, p, brHistory, brMedia, brTyping);
     brPeer = "";
   }
+
+  // §9.4 custom emoji upload.
+  let emojiName = $state("");
+  let pendingEmoji = $state(""); // media ref of an uploaded (not-yet-named) image
+  function pickEmojiImage() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const up = await weft.upload(file);
+        pendingEmoji = up.media;
+      } catch (e) {
+        app.toast(String(e), "error");
+      }
+    };
+    input.click();
+  }
+  function submitEmoji() {
+    const name = emojiName.trim().replace(/[^a-zA-Z0-9_]/g, "");
+    if (!name || !pendingEmoji) return;
+    app.addEmoji(name, pendingEmoji);
+    emojiName = "";
+    pendingEmoji = "";
+  }
 </script>
 
 <div class="settings-overlay" role="dialog" aria-modal="true" transition:fade|global={{ duration: 150 }}>
@@ -28,6 +55,7 @@
       <button class="so-navitem" class:active={app.nsTab === "overview"} onclick={() => (app.nsTab = "overview")}>Overview</button>
       <button class="so-navitem" class:active={app.nsTab === "roles"} onclick={() => (app.nsTab = "roles")}>Roles</button>
       <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => (app.nsTab = "members")}>Members &amp; roles</button>
+      <button class="so-navitem" class:active={app.nsTab === "emoji"} onclick={() => (app.nsTab = "emoji")}>Emoji</button>
       <button class="so-navitem" class:active={app.nsTab === "bans"} onclick={() => { app.nsTab = "bans"; app.refreshBans(); }}>Bans &amp; mutes</button>
       <button class="so-navitem" class:active={app.nsTab === "federation"} onclick={() => (app.nsTab = "federation")}>Federation</button>
       <div class="so-heading">Security</div>
@@ -104,6 +132,34 @@
             <button class="role-pill clickable" style="--role:{r.color}" onclick={() => app.assignRole(r.name)}><span class="role-dot"></span>{r.name}</button>
           {:else}
             <div class="empty-hint">No roles defined — create some in the Roles tab.</div>
+          {/each}
+        </div>
+      {:else if app.nsTab === "emoji"}
+        <h1>Custom emoji</h1>
+        <p class="so-sub">Upload images members type as <code>:name:</code>. Emoji are per-namespace; adding needs <code>ns-admin</code>.</p>
+        <div class="field-label">Add an emoji</div>
+        <div class="emoji-add-row">
+          {#if pendingEmoji}
+            <button class="emoji-pick-btn" title="Change image" onclick={pickEmojiImage}><img class="custom-emoji" src={app.mediaUrl(pendingEmoji)} alt="preview" /></button>
+          {:else}
+            <button class="set-btn" onclick={pickEmojiImage}>Choose image…</button>
+          {/if}
+          <span class="emoji-colon">:</span>
+          <input class="text-input" bind:value={emojiName} placeholder="name" onkeydown={(e) => e.key === "Enter" && submitEmoji()} />
+          <span class="emoji-colon">:</span>
+          <button class="ok-btn" disabled={!pendingEmoji || !emojiName.trim()} onclick={submitEmoji}>Add</button>
+        </div>
+        <div class="section-sep"></div>
+        <div class="field-label">Current emoji ({app.activeEmoji.length})</div>
+        <div class="modal-list">
+          {#each app.activeEmoji as em (em.name)}
+            <div class="emoji-list-item">
+              <img class="custom-emoji" src={app.emojiUrlFor(em.name) ?? ''} alt=":{em.name}:" />
+              <code>:{em.name}:</code>
+              <button class="mini-danger" onclick={() => app.removeEmoji(em.name)}>Remove</button>
+            </div>
+          {:else}
+            <div class="empty-hint">No custom emoji yet.</div>
           {/each}
         </div>
       {:else if app.nsTab === "bans"}

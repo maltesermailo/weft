@@ -260,6 +260,20 @@ pub enum Command {
     /// `INVITE REDEEM <b64>` — verifies chain + counter, mints a member
     /// token bound to the redeemer (§6.5).
     InviteRedeem { token: String },
+    /// `EMOJI ADD <ns> <name> <media>` — add/replace a namespace custom emoji
+    /// (§9.4); cap `ns-admin`. `media` is a `weft-media://…` reference.
+    EmojiAdd {
+        namespace: NamespaceName,
+        name: String,
+        media: String,
+    },
+    /// `EMOJI REMOVE <ns> <name>` — remove a namespace emoji (§9.4).
+    EmojiRemove {
+        namespace: NamespaceName,
+        name: String,
+    },
+    /// `EMOJI LIST <ns>` — a namespace's emoji → an `EMOJI` batch (§9.4).
+    EmojiList { namespace: NamespaceName },
     /// `NS CREATE <name> [tier]` with `@root=<b64-pubkey>` (§6.2). The
     /// client generates the namespace root key and submits its pubkey.
     NsCreate {
@@ -951,6 +965,29 @@ impl Command {
                     }),
                     _ => Err(ParseError::BadParam {
                         verb: "INVITE",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
+            "EMOJI" => {
+                let mut args = Args::new(line, "EMOJI");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "ADD" => Ok(Command::EmojiAdd {
+                        namespace: args.req("namespace")?.parse()?,
+                        name: args.req("name")?.to_string(),
+                        media: args.req("media")?.to_string(),
+                    }),
+                    "REMOVE" => Ok(Command::EmojiRemove {
+                        namespace: args.req("namespace")?.parse()?,
+                        name: args.req("name")?.to_string(),
+                    }),
+                    "LIST" => Ok(Command::EmojiList {
+                        namespace: args.req("namespace")?.parse()?,
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "EMOJI",
                         what: "subcommand",
                         value: sub,
                     }),
@@ -1717,6 +1754,30 @@ impl Command {
             Command::InviteRedeem { token } => {
                 ("INVITE", vec!["REDEEM".to_string(), token.clone()], None)
             }
+            Command::EmojiAdd {
+                namespace,
+                name,
+                media,
+            } => (
+                "EMOJI",
+                vec![
+                    "ADD".to_string(),
+                    namespace.to_string(),
+                    name.clone(),
+                    media.clone(),
+                ],
+                None,
+            ),
+            Command::EmojiRemove { namespace, name } => (
+                "EMOJI",
+                vec!["REMOVE".to_string(), namespace.to_string(), name.clone()],
+                None,
+            ),
+            Command::EmojiList { namespace } => (
+                "EMOJI",
+                vec!["LIST".to_string(), namespace.to_string()],
+                None,
+            ),
             Command::NsCreate {
                 name,
                 visibility,
@@ -2560,6 +2621,38 @@ mod tests {
         round_trip(&Request::new(Command::InviteRedeem {
             token: "B64TOKEN==".into(),
         }));
+    }
+
+    #[test]
+    fn emoji_verbs_round_trip() {
+        let add = Request::with_label(
+            Command::EmojiAdd {
+                namespace: "gaming".parse().unwrap(),
+                name: "partyblob".into(),
+                media: "weft-media://hda.example/abc123".into(),
+            },
+            "e1",
+        );
+        assert_eq!(
+            add.serialize().unwrap(),
+            "@label=e1 EMOJI ADD gaming partyblob weft-media://hda.example/abc123"
+        );
+        round_trip(&add);
+        round_trip(&Request::new(Command::EmojiRemove {
+            namespace: "gaming".parse().unwrap(),
+            name: "partyblob".into(),
+        }));
+        round_trip(&Request::new(Command::EmojiList {
+            namespace: "gaming".parse().unwrap(),
+        }));
+        assert_eq!(
+            Request::parse("EMOJI FROB gaming"),
+            Err(ParseError::BadParam {
+                verb: "EMOJI",
+                what: "subcommand",
+                value: "FROB".into()
+            })
+        );
     }
 
     #[test]

@@ -108,6 +108,8 @@ export type WeftEvent =
   | { kind: "presence"; user: string; status: string }
   | { kind: "marked"; channel: string; msgid: string }
   | { kind: "unread-counts"; channel: string; unread: number; mentions: number }
+  | { kind: "emoji"; namespace: string; name: string; media: string }
+  | { kind: "emoji-removed"; namespace: string; name: string }
   | { kind: "pinned"; channel: string; msgid: string; by: string | null }
   | { kind: "unpinned"; channel: string; msgid: string }
   | { kind: "caps"; account: string; scope: string; caps: string }
@@ -484,6 +486,17 @@ export function pins(channel: string) {
 /// §6.4 message search in a channel; results arrive as a BATCH of messages.
 export function search(channel: string, query: string) {
   return invoke("search", { channel, query });
+}
+
+// ---- §9.4 custom emoji ----
+export function emojiAdd(namespace: string, name: string, media: string) {
+  return invoke("emoji_add", { namespace, name, media });
+}
+export function emojiRemove(namespace: string, name: string) {
+  return invoke("emoji_remove", { namespace, name });
+}
+export function emojiList(namespace: string) {
+  return invoke("emoji_list", { namespace });
 }
 
 export function caps(account: string, scope: string) {

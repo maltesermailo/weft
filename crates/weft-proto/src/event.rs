@@ -143,6 +143,18 @@ pub enum Event {
         unread: u64,
         mentions: u64,
     },
+    /// `EMOJI <ns> <name> <media>` — a namespace custom emoji (§9.4); one per
+    /// emoji in the `EMOJI LIST` batch, and broadcast on add.
+    Emoji {
+        namespace: NamespaceName,
+        name: String,
+        media: String,
+    },
+    /// `EMOJI-REMOVED <ns> <name>` — a namespace emoji was removed (§9.4).
+    EmojiRemoved {
+        namespace: NamespaceName,
+        name: String,
+    },
     /// `PINNED <#chan> <msgid>` with optional `by=` — a message was pinned (§7).
     Pinned {
         channel: ChannelName,
@@ -628,6 +640,21 @@ impl Event {
                     channel,
                     unread,
                     mentions,
+                })
+            }
+            "EMOJI" => {
+                let mut args = Args::new(line, "EMOJI");
+                Ok(Event::Emoji {
+                    namespace: args.req("namespace")?.parse()?,
+                    name: args.req("name")?.to_string(),
+                    media: args.req("media")?.to_string(),
+                })
+            }
+            "EMOJI-REMOVED" => {
+                let mut args = Args::new(line, "EMOJI-REMOVED");
+                Ok(Event::EmojiRemoved {
+                    namespace: args.req("namespace")?.parse()?,
+                    name: args.req("name")?.to_string(),
                 })
             }
             "MEDIA" => {
@@ -1198,6 +1225,20 @@ impl Event {
                     unread.to_string(),
                     mentions.to_string(),
                 ],
+                None,
+            ),
+            Event::Emoji {
+                namespace,
+                name,
+                media,
+            } => (
+                "EMOJI",
+                vec![namespace.to_string(), name.clone(), media.clone()],
+                None,
+            ),
+            Event::EmojiRemoved { namespace, name } => (
+                "EMOJI-REMOVED",
+                vec![namespace.to_string(), name.clone()],
                 None,
             ),
             Event::MediaToken { token } => {
@@ -1825,6 +1866,18 @@ mod tests {
         round_trip(&Reply::new(Event::Marked {
             channel: "#general".parse().unwrap(),
             msgid: MSGID.parse().unwrap(),
+        }));
+        round_trip(&Reply::with_label(
+            Event::Emoji {
+                namespace: "gaming".parse().unwrap(),
+                name: "partyblob".into(),
+                media: "weft-media://hda.example/abc".into(),
+            },
+            "e1",
+        ));
+        round_trip(&Reply::new(Event::EmojiRemoved {
+            namespace: "gaming".parse().unwrap(),
+            name: "partyblob".into(),
         }));
         // Zero and non-zero counts both round-trip (numeric middle params).
         round_trip(&Reply::new(Event::UnreadCounts {

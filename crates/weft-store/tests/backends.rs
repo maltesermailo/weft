@@ -5,16 +5,16 @@
 //! when absent so `cargo test` needs no database.
 
 use weft_proto::{
-    Account, ChannelName, ContentState, MsgId, MsgMeta, NetworkName, ReportStatus, ResolveAction,
-    RetentionPolicy, Ulid, UserRef,
+    Account, ChannelName, ContentState, MsgId, MsgMeta, NamespaceName, NetworkName, ReportStatus,
+    ResolveAction, RetentionPolicy, Ulid, UserRef,
 };
 use weft_store::{
-    materialize, AccountStore, AuditStore, CapabilityStore, ChannelStore, EventKind, EventRecord,
-    EventStore, HistoryItem, InviteRecord, InviteStore, MediaBlockRecord, MediaBlocklistStore,
-    MediaStore, MembershipStore, MemoryStore, ModKind, ModRecord, ModerationStore, NamespaceRecord,
-    NamespaceStore, NetblockRecord, NetblockStore, Page, PeerRecord, PeerStore, PendingRecovery,
-    PinStore, ProfileStore, RedeemOutcome, ReportRecord, ReportResolution, ReportStore, RoleDef,
-    RoleStore, Scope,
+    materialize, AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventKind,
+    EventRecord, EventStore, HistoryItem, InviteRecord, InviteStore, MediaBlockRecord,
+    MediaBlocklistStore, MediaStore, MembershipStore, MemoryStore, ModKind, ModRecord,
+    ModerationStore, NamespaceRecord, NamespaceStore, NetblockRecord, NetblockStore, Page,
+    PeerRecord, PeerStore, PendingRecovery, PinStore, ProfileStore, RedeemOutcome, ReportRecord,
+    ReportResolution, ReportStore, RoleDef, RoleStore, Scope,
 };
 
 fn user(name: &str) -> UserRef {
@@ -74,6 +74,7 @@ where
         + MediaBlocklistStore
         + ModerationStore
         + PinStore
+        + EmojiStore
         + MembershipStore
         + MediaStore
         + ProfileStore
@@ -596,6 +597,37 @@ where
         .await
         .unwrap();
     assert_eq!(lonely.len(), 1);
+
+    // -- custom emoji (§9.4) --
+    let ns: NamespaceName = format!("emo{}", tag.replace(['-', '_'], "")).parse().unwrap();
+    assert!(store.list_emoji(&ns).await.unwrap().is_empty());
+    store
+        .set_emoji(&ns, "partyblob", "weft-media://test.example/aaa")
+        .await
+        .unwrap();
+    store
+        .set_emoji(&ns, "catjam", "weft-media://test.example/bbb")
+        .await
+        .unwrap();
+    // Name-sorted (name, media).
+    assert_eq!(
+        store.list_emoji(&ns).await.unwrap(),
+        vec![
+            ("catjam".to_string(), "weft-media://test.example/bbb".to_string()),
+            ("partyblob".to_string(), "weft-media://test.example/aaa".to_string()),
+        ]
+    );
+    // Set is idempotent-by-key: replaces the media.
+    store
+        .set_emoji(&ns, "catjam", "weft-media://test.example/ccc")
+        .await
+        .unwrap();
+    assert_eq!(store.list_emoji(&ns).await.unwrap().len(), 2);
+    assert_eq!(store.list_emoji(&ns).await.unwrap()[0].1, "weft-media://test.example/ccc");
+    // Remove: true then false.
+    assert!(store.remove_emoji(&ns, "catjam").await.unwrap());
+    assert!(!store.remove_emoji(&ns, "catjam").await.unwrap());
+    assert_eq!(store.list_emoji(&ns).await.unwrap().len(), 1);
 
     // -- verification claims (infrastructure only) --
     store

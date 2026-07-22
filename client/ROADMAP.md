@@ -110,9 +110,14 @@ Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
   core black-box tests green; spec §9.4 amended. *Deferred:* server-side
   reply counts (client tallies from loaded messages), thread mute/notif,
   and a dedicated thread list.
-- [ ] **Custom / per-namespace emoji** — picker is a hardcoded unicode set;
-  no upload, `:name:` autocomplete, skin tones, or recently-used. Needs a
-  server emoji registry (media store can host the images) + client work.
+- [x] **Custom / per-namespace emoji** — shipped (2026-07-22). `EMOJI
+  ADD/REMOVE/LIST` verbs + `EmojiStore` (mem+PG, migration 0027); images ride
+  the media store. Client: an upload/manage tab in server settings, a unified
+  picker (custom images + the unicode set) for reactions **and** the composer,
+  and `:name:` rendered as inline images in messages + reaction pills. Store
+  contract + proto round-trip + core black-box tests green; spec §9.4 amended.
+  *Deferred:* `:name:` autocomplete, skin tones, recently-used, and live
+  propagation to other members (clients refetch on namespace select).
 - [~] **Voice depth** — today: join/leave/mute/**deafen**/speaking rings.
   Missing: **screen share, video, per-user volume, device selection,
   push-to-talk**. LiveKit (M-lk-1/2/3) gives screenshare/video nearly free —

@@ -11,7 +11,7 @@ use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, Retent
 use crate::blob::BlobRecord;
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, AuditStore, CapabilityStore, ChannelStore, EventStore, InviteStore,
+    AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, InviteStore,
     MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
     NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
 };
@@ -95,6 +95,8 @@ struct Inner {
     moderation: HashMap<(String, Account, ModKind), ModRecord>,
     /// channel → pinned msgids, ordered by ULID (§6.4).
     pins: HashMap<ChannelName, std::collections::BTreeMap<Ulid, MsgId>>,
+    /// §9.4 custom emoji: namespace → (name → media ref), name-sorted.
+    emoji: HashMap<NamespaceName, std::collections::BTreeMap<String, String>>,
     /// account → channels it's a member of (§6.3 persistent membership).
     memberships: HashMap<Account, std::collections::HashSet<ChannelName>>,
     /// scope → role name → (color, caps) (§6.5 role definitions).
@@ -1445,6 +1447,49 @@ impl PinStore for MemoryStore {
             .pins
             .get(channel)
             .map(|set| set.values().cloned().collect())
+            .unwrap_or_default())
+    }
+}
+
+#[async_trait]
+impl EmojiStore for MemoryStore {
+    async fn set_emoji(
+        &self,
+        namespace: &NamespaceName,
+        name: &str,
+        media: &str,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        inner
+            .emoji
+            .entry(namespace.clone())
+            .or_default()
+            .insert(name.to_string(), media.to_string());
+        Ok(())
+    }
+
+    async fn remove_emoji(
+        &self,
+        namespace: &NamespaceName,
+        name: &str,
+    ) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .emoji
+            .get_mut(namespace)
+            .map(|set| set.remove(name).is_some())
+            .unwrap_or(false))
+    }
+
+    async fn list_emoji(
+        &self,
+        namespace: &NamespaceName,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .emoji
+            .get(namespace)
+            .map(|set| set.iter().map(|(n, m)| (n.clone(), m.clone())).collect())
             .unwrap_or_default())
     }
 }
