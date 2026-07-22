@@ -171,8 +171,9 @@ docker compose up -d --build      # rebuild after pulling new code
 docker compose down               # stop (data persists in named volumes)
 ```
 
-**Back up** the `pgdata` volume (your database). If you set `[identity] key_file`
-in `weft.toml`, back that up too — it's your network's signing key.
+**Back up** the `pgdata` volume (your database) and the `weftd_media` volume
+(uploaded images/files — content-addressed blobs). If you set `[identity]
+key_file` in `weft.toml`, back that up too — it's your network's signing key.
 
 ---
 

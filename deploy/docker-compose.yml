@@ -51,6 +51,9 @@ services:
         condition: service_started
     volumes:
       - ./weft.toml:/etc/weft/weft.toml:ro
+      # §13 uploaded media blobs — persists across restarts (matches
+      # weft.toml [media] dir). Without this, images vanish on restart.
+      - weftd_media:/var/lib/weft/media
       # Caddy's data (incl. its LE certs) mounted read-only at the same path Caddy
       # uses (/data), so weftd can read the cert for QUIC (see weft.toml [tls]).
       - caddy_data:/data:ro
@@ -75,5 +78,6 @@ services:
 
 volumes:
   pgdata:
+  weftd_media:
   caddy_data:
   caddy_config:

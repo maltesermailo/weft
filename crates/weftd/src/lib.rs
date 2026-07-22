@@ -297,7 +297,14 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 .await
                 .with_context(|| format!("opening media dir {}", dir.display()))?,
         ),
-        None => Arc::new(weft_core::MemBlobStore::default()),
+        None => {
+            warn!(
+                "[media] dir is unset — using an IN-MEMORY blob store; uploaded \
+                 images/files are lost on restart. Set `[media] dir = \"…\"` \
+                 (and a persistent `[storage] backend`) to keep media."
+            );
+            Arc::new(weft_core::MemBlobStore::default())
+        }
     };
     let (ctx, channels, mut tasks, admin_router) = match config.storage.backend {
         config::StorageBackend::Memory => {

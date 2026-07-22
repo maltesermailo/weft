@@ -42,6 +42,12 @@ backend = "postgres"
 # MUST MATCH the POSTGRES_* values in docker-compose.yml.
 url = "postgres://weft:change-me-postgres-password@postgres:5432/weft"
 
+# §13 media blobs. Persist uploaded images/files to disk — WITHOUT this, weftd
+# uses an in-memory blob store and every upload is lost on restart. The path is
+# backed by the `weftd_media` volume in docker-compose.yml.
+[media]
+dir = "/var/lib/weft/media"
+
 # §16 voice via LiveKit. `url` is the PUBLIC address browsers connect to (wss,
 # via Caddy → livekit subdomain); `api_url` is the INTERNAL address weftd calls
 # for the Room API (mute/kick).
