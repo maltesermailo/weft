@@ -132,7 +132,7 @@ pub struct ServerCtx {
     /// Pinned messages, per channel (§6.4).
     pub(crate) pins: Arc<dyn PinStore>,
     /// Custom emoji, per namespace (§9.4).
-    pub(crate) emoji: Arc<dyn EmojiStore>,
+    pub emoji: Arc<dyn EmojiStore>,
     /// Persistent channel membership for auto-rejoin (§6.3).
     pub(crate) memberships: Arc<dyn MembershipStore>,
     /// Role definitions — named capability-token bundles per scope (§6.5).

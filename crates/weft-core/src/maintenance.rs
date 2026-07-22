@@ -9,8 +9,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 use weft_proto::{ChannelName, RetentionPolicy};
 use weft_store::{
-    AccountStore, BlobHash, BlobStore, EventStore, MediaStore, NamespaceStore, ProfileStore,
-    ReportStore, Scope,
+    AccountStore, BlobHash, BlobStore, EmojiStore, EventStore, MediaStore, NamespaceStore,
+    ProfileStore, ReportStore, Scope,
 };
 
 /// §13 grace before an orphaned blob is GC'd — an uploaded-but-not-yet-posted
@@ -45,6 +45,7 @@ pub fn spawn_maintenance(
     media_refs: Arc<dyn MediaStore>,
     blobs: Arc<dyn BlobStore>,
     profiles: Arc<dyn ProfileStore>,
+    emoji: Arc<dyn EmojiStore>,
     accounts: Arc<dyn AccountStore>,
     channels: Vec<(ChannelName, RetentionPolicy)>,
     dm_policy: RetentionPolicy,
@@ -70,7 +71,7 @@ pub fn spawn_maintenance(
             .await;
             // §13 collect blobs orphaned past the grace window.
             let cutoff = unix_now_ms().saturating_sub(MEDIA_GC_GRACE_MS);
-            let gc = gc_orphan_blobs(&media_refs, &blobs, &profiles, cutoff).await;
+            let gc = gc_orphan_blobs(&media_refs, &blobs, &profiles, &emoji, cutoff).await;
             if gc > 0 {
                 info!(collected = gc, "orphaned media blobs GC'd (§13)");
             }
@@ -107,6 +108,7 @@ pub async fn gc_orphan_blobs(
     media_refs: &Arc<dyn MediaStore>,
     blobs: &Arc<dyn BlobStore>,
     profiles: &Arc<dyn ProfileStore>,
+    emoji: &Arc<dyn EmojiStore>,
     cutoff_ms: u64,
 ) -> usize {
     let orphans = match media_refs.orphans(cutoff_ms).await {
@@ -116,10 +118,22 @@ pub async fn gc_orphan_blobs(
             return 0;
         }
     };
+    // §9.4 custom-emoji images are referenced by `weft_emoji`, not a message —
+    // keep any blob a live emoji points at (the ref is `weft-media://<o>/<hash>`).
+    let emoji_hashes: std::collections::HashSet<String> = emoji
+        .emoji_media()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|uri| crate::media::parse_media_uri(uri).map(|(_, hash)| hash.to_string()))
+        .collect();
     let mut removed = 0;
     for hash in orphans {
         // §10.3 an avatar is referenced by a profile, not a message — keep it.
         if profiles.avatar_exists(&hash).await.unwrap_or(false) {
+            continue;
+        }
+        if emoji_hashes.contains(&hash) {
             continue;
         }
         if let Some(parsed) = BlobHash::parse(&hash) {

@@ -2384,6 +2384,13 @@ impl EmojiStore for PgStore {
             .map(|r| (r.get::<String, _>("name"), r.get::<String, _>("media")))
             .collect())
     }
+
+    async fn emoji_media(&self) -> Result<Vec<String>, StoreError> {
+        sqlx::query_scalar("SELECT DISTINCT media FROM weft_emoji")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)
+    }
 }
 
 #[async_trait]

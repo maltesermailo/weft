@@ -1504,6 +1504,18 @@
         return;
       }
     }
+    // :emoji: autocomplete captures the same keys while open.
+    if (emojiQuery !== null && emojiSuggestions.length) {
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        pickEmojiSuggestion(emojiSuggestions[0].name);
+        return;
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        emojiQuery = null;
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       doSend();
@@ -1695,6 +1707,7 @@
   let typingStop: ReturnType<typeof setTimeout> | undefined;
   function onComposerInput() {
     updateMention();
+    updateEmojiSuggest();
     if (!active.startsWith("#")) return;
     if (typingChannel && typingChannel !== active) stopTyping();
     if (!typingChannel) {
@@ -1724,6 +1737,28 @@
   function pickMention(name: string) {
     composer = composer.replace(/@[a-z0-9._-]*$/i, `@${name} `);
     mentionQuery = null;
+  }
+
+  // ---- :emoji: autocomplete (custom emoji only — unicode has no names) ----
+  let emojiQuery = $state<string | null>(null);
+  const emojiSuggestions = $derived.by(() => {
+    if (emojiQuery === null) return [];
+    const q = emojiQuery.toLowerCase();
+    const rank = (n: string) => (n.toLowerCase().startsWith(q) ? 0 : 1);
+    return activeEmoji
+      .filter((e) => e.name.toLowerCase().includes(q))
+      .sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name))
+      .slice(0, 8)
+      .map((e) => ({ name: e.name, url: emojiUrlFor(e.name) }));
+  });
+  function updateEmojiSuggest() {
+    // A `:word` at a token boundary — not `http://`, not `12:30`.
+    const m = composer.match(/(?:^|\s):([a-zA-Z0-9_]+)$/);
+    emojiQuery = m ? m[1] : null;
+  }
+  function pickEmojiSuggestion(name: string) {
+    composer = composer.replace(/:[a-zA-Z0-9_]+$/, `:${name}: `);
+    emojiQuery = null;
   }
   function stopTyping() {
     clearTimeout(typingStop);
@@ -2328,6 +2363,9 @@
     onComposerInput,
     doSend,
     pickMention,
+    get emojiQuery() { return emojiQuery; },
+    get emojiSuggestions() { return emojiSuggestions; },
+    pickEmojiSuggestion,
     get pendingAttachments() { return pendingAttachments; },
     attachFile,
     pasteFiles,

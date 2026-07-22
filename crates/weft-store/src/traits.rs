@@ -604,6 +604,11 @@ pub trait EmojiStore: Send + Sync {
         &self,
         namespace: &NamespaceName,
     ) -> Result<Vec<(String, String)>, StoreError>;
+
+    /// Every media reference used by a custom emoji across all namespaces — so
+    /// the orphan-blob GC keeps their images (an emoji references its blob here,
+    /// not via message media-refs, §13).
+    async fn emoji_media(&self) -> Result<Vec<String>, StoreError>;
 }
 
 /// §6.3 persistent channel membership. Unlike the live channel-actor roster

@@ -216,6 +216,10 @@ export interface AppCtx {
   mediaUrl(ref: string): string;
   readonly mentionQuery: string | null;
   readonly mentionMatches: string[];
+  /** `:emoji:` autocomplete: the current `:query`, or null. */
+  readonly emojiQuery: string | null;
+  readonly emojiSuggestions: { name: string; url: string | null }[];
+  pickEmojiSuggestion(name: string): void;
   readonly typingLabel: string;
 
   // ---- roles (ProfileCard) ----

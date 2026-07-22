@@ -624,10 +624,16 @@ where
         .unwrap();
     assert_eq!(store.list_emoji(&ns).await.unwrap().len(), 2);
     assert_eq!(store.list_emoji(&ns).await.unwrap()[0].1, "weft-media://test.example/ccc");
+    // `emoji_media` reports every referenced blob (for the GC's keep-set).
+    let media = store.emoji_media().await.unwrap();
+    assert!(media.contains(&"weft-media://test.example/aaa".to_string()));
+    assert!(media.contains(&"weft-media://test.example/ccc".to_string()));
     // Remove: true then false.
     assert!(store.remove_emoji(&ns, "catjam").await.unwrap());
     assert!(!store.remove_emoji(&ns, "catjam").await.unwrap());
     assert_eq!(store.list_emoji(&ns).await.unwrap().len(), 1);
+    // A removed emoji drops out of the GC keep-set.
+    assert!(!store.emoji_media().await.unwrap().contains(&"weft-media://test.example/ccc".to_string()));
 
     // -- verification claims (infrastructure only) --
     store

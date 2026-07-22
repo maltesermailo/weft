@@ -386,6 +386,7 @@ async fn media_attachment_message_gates_fetch_and_gcs_on_delete() {
         &server.ctx().media_refs,
         &server.ctx().blobs,
         &server.ctx().profiles,
+        &server.ctx().emoji,
         u64::MAX,
     )
     .await;
@@ -609,6 +610,7 @@ async fn media_image_probes_dimensions_and_generates_thumbnail() {
         &server.ctx().media_refs,
         &server.ctx().blobs,
         &server.ctx().profiles,
+        &server.ctx().emoji,
         u64::MAX,
     )
     .await;

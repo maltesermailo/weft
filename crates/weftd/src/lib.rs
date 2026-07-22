@@ -729,6 +729,7 @@ where
     let reports: Arc<dyn weft_store::ReportStore> = store.clone();
     let media_refs: Arc<dyn weft_store::MediaStore> = store.clone();
     let profiles: Arc<dyn weft_store::ProfileStore> = store.clone();
+    let emoji: Arc<dyn weft_store::EmojiStore> = store.clone();
     let accounts: Arc<dyn weft_store::AccountStore> = store.clone();
     let namespaces: Arc<dyn weft_store::NamespaceStore> = store;
     let tasks = vec![weft_core::spawn_maintenance(
@@ -738,6 +739,7 @@ where
         media_refs,
         Arc::clone(&blobs),
         profiles,
+        emoji,
         accounts,
         channels.clone(),
         dm_policy,

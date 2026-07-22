@@ -1492,6 +1492,15 @@ impl EmojiStore for MemoryStore {
             .map(|set| set.iter().map(|(n, m)| (n.clone(), m.clone())).collect())
             .unwrap_or_default())
     }
+
+    async fn emoji_media(&self) -> Result<Vec<String>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .emoji
+            .values()
+            .flat_map(|set| set.values().cloned())
+            .collect())
+    }
 }
 
 #[async_trait]

@@ -41,6 +41,14 @@
         </button>
       {/each}
     </div>
+  {:else if app.emojiQuery !== null && app.emojiSuggestions.length}
+    <div class="mention-pop">
+      {#each app.emojiSuggestions as em, i (em.name)}
+        <button class="mention-opt" class:first={i === 0} onclick={() => app.pickEmojiSuggestion(em.name)}>
+          <img class="custom-emoji" src={em.url ?? ''} alt="" /> :{em.name}:
+        </button>
+      {/each}
+    </div>
   {/if}
   {#if app.replyTo}
     <div class="reply-bar">
