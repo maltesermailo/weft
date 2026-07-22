@@ -667,9 +667,13 @@ fn send_raw(conn: State<'_, Conn>, line: String) -> Result<(), String> {
 /// prompt (NSMicrophoneUsageDescription in Info.plist + the mic entitlement);
 /// Linux (WebKitGTK) needs the `permission-request` signal handled here.
 ///
-/// NOTE: the non-macOS arms are cfg-gated and were **not** compile/run-verified
-/// from the macOS dev build — they need on-device checking (the WebKitGTK crate
-/// version must match wry's; a mismatch is the likely first thing to fix).
+/// macOS additionally enables WKWebView's `getDisplayMedia` feature so screen
+/// sharing (§16 video) can bring up the native OS picker — an embedded WKWebView
+/// ships it disabled (unlike Safari), so without this the picker never appears.
+///
+/// NOTE: the non-macOS-mic arms are cfg-gated and were **not** compile/run-
+/// verified from every platform — they need on-device checking (the WebKitGTK
+/// crate version must match wry's; a mismatch is the likely first thing to fix).
 #[allow(unused_variables)]
 fn grant_media_permission(webview: tauri::webview::PlatformWebview) {
     #[cfg(target_os = "linux")]
@@ -681,6 +685,79 @@ fn grant_media_permission(webview: tauri::webview::PlatformWebview) {
             req.allow();
             true
         });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        enable_wkwebview_screen_capture(webview.inner() as *mut objc2::runtime::AnyObject);
+    }
+}
+
+/// Turn on the WebKit feature(s) backing `getDisplayMedia` on an embedded
+/// WKWebView (they default off outside Safari). Uses WebKit's *private* feature
+/// API — every call is guarded by `respondsToSelector:`, so a WebKit version
+/// without these selectors is a silent no-op, never a crash. Best-effort: if it
+/// doesn't take, screen sharing still guides the user to the Screen-Recording
+/// permission from the client side.
+#[cfg(target_os = "macos")]
+fn enable_wkwebview_screen_capture(wk: *mut objc2::runtime::AnyObject) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send, sel};
+    use objc2_foundation::NSString;
+
+    if wk.is_null() {
+        return;
+    }
+
+    // Enable any feature in `list` whose key names screen/display capture.
+    unsafe fn enable_matching(prefs: *mut AnyObject, list: *mut AnyObject) {
+        if list.is_null() {
+            return;
+        }
+        let count: usize = msg_send![list, count];
+        for i in 0..count {
+            let feat: *mut AnyObject = msg_send![list, objectAtIndex: i];
+            if feat.is_null() || !{ let r: bool = msg_send![feat, respondsToSelector: sel!(key)]; r } {
+                continue;
+            }
+            let key: *mut NSString = msg_send![feat, key];
+            if key.is_null() {
+                continue;
+            }
+            let name = (*key).to_string().to_ascii_lowercase();
+            if name.contains("screencapture")
+                || name.contains("displaycapture")
+                || name.contains("getdisplaymedia")
+            {
+                let _: () = msg_send![prefs, _setEnabled: true, forFeature: feat];
+            }
+        }
+    }
+
+    unsafe {
+        let config: *mut AnyObject = msg_send![wk, configuration];
+        if config.is_null() {
+            return;
+        }
+        let prefs: *mut AnyObject = msg_send![config, preferences];
+        if prefs.is_null() {
+            return;
+        }
+        // Bail unless the private enable selector exists on this WebKit.
+        let can_set: bool = msg_send![prefs, respondsToSelector: sel!(_setEnabled:forFeature:)];
+        if !can_set {
+            return;
+        }
+
+        let cls = class!(WKPreferences);
+        if { let r: bool = msg_send![cls, respondsToSelector: sel!(_experimentalFeatures)]; r } {
+            let list: *mut AnyObject = msg_send![cls, _experimentalFeatures];
+            enable_matching(prefs, list);
+        }
+        if { let r: bool = msg_send![cls, respondsToSelector: sel!(_internalDebugFeatures)]; r } {
+            let list: *mut AnyObject = msg_send![cls, _internalDebugFeatures];
+            enable_matching(prefs, list);
+        }
     }
 }
 

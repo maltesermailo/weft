@@ -44,6 +44,7 @@ export interface AppCtx {
   /** Select a server tile and open its header menu (rail right-click). */
   openServerMenu(ns: string): void;
   open(name: string): void; // set active + mark read
+  openVoice(name: string): void; // open a voice channel's stage + join the call
   openDiscover(): void;
   federate(target: string): void; // §11.10 join a foreign namespace on demand
 

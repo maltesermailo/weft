@@ -1179,6 +1179,103 @@ button:disabled {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+
+/* highlight.js token palette — a compact, theme-adaptive theme keyed to the
+   `.hljs`-classed <pre> that renderMd emits. Colours come from CSS variables so
+   the same rules serve dark (default) and light ([data-theme="light"]). */
+:root {
+  --hl-comment: #6b7180;
+  --hl-keyword: #c586c0;
+  --hl-type: #4ec9b0;
+  --hl-func: #dcdcaa;
+  --hl-string: #ce9178;
+  --hl-number: #b5cea8;
+  --hl-literal: #569cd6;
+  --hl-attr: #9cdcfe;
+  --hl-meta: #808896;
+  --hl-tag: #569cd6;
+  --hl-del: #e06c75;
+  --hl-add: #98c379;
+}
+:root[data-theme="light"] {
+  --hl-comment: #6a737d;
+  --hl-keyword: #a626a4;
+  --hl-type: #1a7f6f;
+  --hl-func: #8a6d00;
+  --hl-string: #b1500f;
+  --hl-number: #2a7a2a;
+  --hl-literal: #0b66c3;
+  --hl-attr: #056cd6;
+  --hl-meta: #6a737d;
+  --hl-tag: #0b66c3;
+  --hl-del: #c72e2e;
+  --hl-add: #2a7a2a;
+}
+.hljs-comment,
+.hljs-quote {
+  color: var(--hl-comment);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-operator,
+.hljs-doctag {
+  color: var(--hl-keyword);
+}
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-title.class_,
+.hljs-built_in,
+.hljs-symbol {
+  color: var(--hl-type);
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-function .hljs-title,
+.hljs-section {
+  color: var(--hl-func);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-char.escape_,
+.hljs-bullet {
+  color: var(--hl-string);
+}
+.hljs-number {
+  color: var(--hl-number);
+}
+.hljs-literal,
+.hljs-variable.language_,
+.hljs-params {
+  color: var(--hl-literal);
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-property,
+.hljs-variable,
+.hljs-template-variable {
+  color: var(--hl-attr);
+}
+.hljs-name,
+.hljs-tag {
+  color: var(--hl-tag);
+}
+.hljs-meta {
+  color: var(--hl-meta);
+}
+.hljs-deletion {
+  color: var(--hl-del);
+}
+.hljs-addition {
+  color: var(--hl-add);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 700;
+}
+
 /* Tier 1: ||spoilers|| — hidden until clicked. */
 .spoiler {
   border-radius: 4px;
@@ -1198,6 +1295,41 @@ button:disabled {
 }
 .spoiler.revealed {
   background: color-mix(in srgb, var(--text-faint) 22%, transparent);
+}
+
+/* Block-level markdown: headings, quotes, lists, rules. Emitted by renderMd and
+   also used by the composer preview (both render inside `.msg-line`). */
+.msg-line .md-h {
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 8px 0 2px;
+}
+.msg-line .md-h1 {
+  font-size: 1.5em;
+}
+.msg-line .md-h2 {
+  font-size: 1.28em;
+}
+.msg-line .md-h3 {
+  font-size: 1.12em;
+}
+.msg-line .md-quote {
+  margin: 3px 0;
+  padding: 1px 0 1px 12px;
+  border-left: 4px solid var(--border-hair-strong);
+  color: var(--text-secondary);
+}
+.msg-line .md-list {
+  margin: 3px 0;
+  padding-left: 24px;
+}
+.msg-line .md-list li {
+  margin: 1px 0;
+}
+.msg-line .md-hr {
+  border: none;
+  border-top: 1px solid var(--border-hair-strong);
+  margin: 8px 0;
 }
 
 /* reply quote above a message */
@@ -1515,6 +1647,49 @@ button:disabled {
   align-items: center;
   gap: 10px;
   margin-top: 4px;
+}
+
+/* Link-confirmation dialog (anti-phishing for in-body markdown links). */
+.link-warn {
+  max-width: 480px;
+}
+.link-warn-url {
+  margin: 8px 0;
+  padding: 9px 11px;
+  background: var(--bg-void);
+  border: 1px solid var(--border-hair-strong);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.link-warn-host {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 0 0 4px;
+}
+.link-warn-danger {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, #e0564a 16%, transparent);
+  border: 1px solid color-mix(in srgb, #e0564a 45%, transparent);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.link-warn-open {
+  background: var(--accent, #5865f2);
+  border: none;
+  border-radius: var(--radius-md);
+  color: #fff;
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.link-warn-open.danger {
+  background: #d64534;
 }
 .cap-chips {
   display: flex;
@@ -2604,23 +2779,113 @@ button:disabled {
 .composer:focus-within {
   border-color: var(--thread-amber-dim);
 }
-.composer textarea {
+/* The input area layers a transparent textarea over a coloured highlight
+   overlay. Both MUST share identical typography, box metrics and wrapping so the
+   textarea's caret stays aligned with the overlay text behind it. */
+.composer-input {
+  position: relative;
   flex: 1;
-  background: none;
-  border: none;
-  resize: none;
-  color: var(--text-primary);
+  min-width: 0;
+}
+.composer-ta,
+.composer-highlight {
   font-family: var(--font-sans);
   font-size: 14px;
-  max-height: 140px;
   line-height: 1.4;
+  letter-spacing: normal;
   padding: 3px 4px;
+  border: 0;
+  margin: 0;
+  box-sizing: border-box;
+  width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  tab-size: 2;
 }
-.composer textarea:focus {
+.composer-ta {
+  position: relative;
+  z-index: 1;
+  display: block;
+  resize: none;
+  background: transparent;
+  /* Text is transparent; the overlay renders it. Caret + selection stay visible. */
+  color: transparent;
+  caret-color: var(--text-primary);
+  /* Height driven by the auto-grow effect; bounded (vh) so a long draft scrolls
+     internally instead of pushing the chat away. */
+  max-height: 40vh;
+}
+.composer-ta:focus {
   outline: none;
 }
-.composer textarea:disabled {
+.composer-ta:disabled {
+  color: transparent;
+}
+.composer-ta::placeholder {
   color: var(--text-faint);
+}
+.composer-ta::selection {
+  background: color-mix(in srgb, var(--accent, #5865f2) 35%, transparent);
+}
+.composer-highlight {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--text-primary);
+}
+/* During IME composition, reveal the textarea's own text and hide the overlay
+   so preedit candidates are visible. */
+.composer-input.composing .composer-ta {
+  color: var(--text-primary);
+}
+.composer-input.composing .composer-highlight {
+  visibility: hidden;
+}
+/* Composer markdown token colours — colour/decoration only (never weight/style/
+   size), so overlay glyph widths match the textarea and the caret stays aligned.
+   Reuses the theme-adaptive --hl-* palette. */
+.composer-highlight .hl-strong {
+  color: var(--hl-keyword);
+}
+.composer-highlight .hl-em {
+  color: var(--hl-literal);
+}
+.composer-highlight .hl-code {
+  color: var(--hl-string);
+  background: color-mix(in srgb, var(--text-faint) 16%, transparent);
+  border-radius: 3px;
+}
+.composer-highlight .hl-strike {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+.composer-highlight .hl-link,
+.composer-highlight .hl-url {
+  color: var(--accent, #5865f2);
+  text-decoration: underline;
+}
+.composer-highlight .hl-spoiler {
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-faint) 20%, transparent);
+  border-radius: 3px;
+}
+.composer-highlight .hl-mention {
+  color: var(--accent, #5865f2);
+}
+.composer-highlight .hl-emoji {
+  color: var(--hl-func);
+}
+.composer-highlight .hl-heading {
+  color: var(--hl-type);
+}
+.composer-highlight .hl-quote {
+  color: var(--text-secondary);
+}
+.composer-highlight .hl-marker {
+  color: var(--accent, #5865f2);
 }
 .composer-hint {
   font-family: var(--font-mono);
@@ -2632,6 +2897,29 @@ button:disabled {
 }
 .composer-hint .k {
   color: var(--text-muted);
+}
+
+/* Markdown preview panel (Write/Preview toggle) above the input row. */
+.composer-preview {
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border-hair-strong);
+  border-radius: var(--radius-md);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.composer-preview-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+/* Active state for the preview toggle in the composer. */
+.composer .icon-btn.active {
+  color: var(--accent, #5865f2);
 }
 
 /* ---------- MEMBER RAIL ---------- */

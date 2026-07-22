@@ -1,191 +1,186 @@
 <script lang="ts">
-  // §16 voice controls for one channel: join/leave, local mute, and the live
-  // voice-room roster (speaking ring + mute badges). Self-contained — it drives
-  // the WebRTC controller in `voice.svelte.ts` directly, not through AppCtx.
-  import { voice, joinVoice, leaveVoice, toggleMute, toggleDeafen } from "$lib/voice.svelte";
-  import Avatar from "$lib/components/Avatar.svelte";
+  // Persistent voice status panel — sits just above the user footer while
+  // connected (Discord-style), independent of which channel you're viewing. It
+  // drives the controller in `voice.svelte.ts` directly. Clicking the status
+  // opens the voice channel's stage.
+  import {
+    voice,
+    leaveVoice,
+    toggleMute,
+    toggleDeafen,
+    stopCamera,
+    startScreenShare,
+    stopScreenShare,
+  } from "$lib/voice.svelte";
+  import { voiceUI } from "$lib/voiceui.svelte";
+  import { getApp } from "$lib/context";
 
-  let { channel }: { channel: string } = $props();
-
-  // Are we in *this* channel's voice room?
-  const here = $derived(voice.channel === channel);
-  const roster = $derived(Object.values(voice.participants));
+  const app = getApp();
+  function openStage() {
+    if (voice.channel) app.openVoice(voice.channel);
+  }
+  // Camera opens the in-app device picker; screen share uses the OS picker.
+  const camClick = () => (voice.cameraOn ? stopCamera() : (voiceUI.cameraPicker = true));
+  const screenClick = () => (voice.sharingScreen ? stopScreenShare() : startScreenShare());
 </script>
 
-<div class="voice-bar">
-  {#if here}
-    <div class="voice-head">
-      <span class="voice-live" aria-hidden="true"></span>
-      <span class="voice-title">Voice connected</span>
-      <div class="voice-actions">
-        <button
-          class="voice-btn"
-          class:active={voice.muted}
-          title={voice.muted ? "Unmute microphone" : "Mute microphone"}
-          aria-label={voice.muted ? "Unmute microphone" : "Mute microphone"}
-          onclick={toggleMute}
-        >
-          {voice.muted ? "🔇" : "🎙️"}
-        </button>
-        <button
-          class="voice-btn deafen"
-          class:active={voice.deafened}
-          title={voice.deafened ? "Undeafen" : "Deafen (hear nothing)"}
-          aria-label={voice.deafened ? "Undeafen" : "Deafen"}
-          onclick={toggleDeafen}
-        >
-          🎧
-        </button>
-        <button class="voice-btn leave" title="Leave voice" aria-label="Leave voice" onclick={leaveVoice}>
-          Leave
-        </button>
-      </div>
-    </div>
-    <ul class="voice-roster">
-      {#each roster as p (p.user)}
-        <li class="voice-member" class:speaking={p.speaking}>
-          <span class="voice-avatar"><Avatar account={p.user} /></span>
-          <span class="voice-name">{p.user}{p.self ? " (you)" : ""}</span>
-          {#if p.muted}<span class="voice-flag" title="Muted" aria-hidden="true">🔇</span>{/if}
-          {#if p.deaf}<span class="voice-flag deaf" title="Deafened" aria-hidden="true">🎧</span>{/if}
-        </li>
-      {/each}
-    </ul>
-  {:else}
-    <button
-      class="voice-join"
-      disabled={voice.connecting}
-      onclick={() => joinVoice(channel)}
-    >
-      {voice.connecting && voice.channel === channel ? "Connecting…" : "🔊 Join Voice"}
+{#if voice.channel}
+  <div class="voice-panel">
+    <button class="voice-status" onclick={openStage} title="Open voice channel">
+      <span class="voice-live" class:connecting={voice.connecting} aria-hidden="true"></span>
+      <span class="voice-status-text">
+        <span class="voice-state">{voice.connecting ? "Connecting…" : "Voice Connected"}</span>
+        <span class="voice-chan">{voice.channel}</span>
+      </span>
     </button>
-  {/if}
-  {#if voice.error}
-    <div class="voice-error">{voice.error}</div>
-  {/if}
-</div>
+
+    <div class="voice-controls">
+      <button
+        class="vp-btn"
+        class:on={voice.muted}
+        title={voice.muted ? "Unmute microphone" : "Mute microphone"}
+        aria-label="Toggle mute"
+        onclick={toggleMute}
+      >
+        {#if voice.muted}
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="3" y1="3" x2="21" y2="21" /><path d="M9 9v3a3 3 0 0 0 5 2.1M15 12V6a3 3 0 0 0-6 0" /><path d="M17 12a5 5 0 0 1-1 3M5 11a7 7 0 0 0 4 6" /><line x1="12" y1="19" x2="12" y2="22" /></svg>
+        {:else}
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10a7 7 0 0 0 14 0" /><line x1="12" y1="19" x2="12" y2="22" /></svg>
+        {/if}
+      </button>
+
+      <button
+        class="vp-btn"
+        class:on={voice.deafened}
+        title={voice.deafened ? "Undeafen" : "Deafen (hear nothing)"}
+        aria-label="Toggle deafen"
+        onclick={toggleDeafen}
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 14v-3a8 8 0 0 1 16 0v3" /><rect x="2" y="13" width="4" height="7" rx="1.5" /><rect x="18" y="13" width="4" height="7" rx="1.5" />{#if voice.deafened}<line x1="3" y1="3" x2="21" y2="21" />{/if}</svg>
+      </button>
+
+      <button
+        class="vp-btn"
+        class:on={voice.cameraOn}
+        title={voice.cameraOn ? "Stop camera" : "Start camera"}
+        aria-label="Toggle camera"
+        onclick={camClick}
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="6" width="14" height="12" rx="2" /><path d="M22 8l-6 4 6 4V8z" />{#if !voice.cameraOn}<line x1="3" y1="3" x2="21" y2="21" />{/if}</svg>
+      </button>
+
+      <button
+        class="vp-btn"
+        class:on={voice.sharingScreen}
+        title={voice.sharingScreen ? "Stop sharing screen" : "Share your screen"}
+        aria-label="Toggle screen share"
+        onclick={screenClick}
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg>
+      </button>
+
+      <button class="vp-btn leave" title="Disconnect" aria-label="Disconnect" onclick={leaveVoice}>
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 9.5C5 7 9 6 12 6s7 1 10 3.5c.6.5.8 1.3.4 2l-1.3 2c-.4.6-1.2.8-1.9.5l-2.6-1a1.5 1.5 0 0 1-.9-1.4v-1.3C13.9 11 10.1 11 8.3 11.8v1.3c0 .6-.4 1.2-.9 1.4l-2.6 1c-.7.3-1.5.1-1.9-.5l-1.3-2c-.4-.7-.2-1.5.4-2z" /></svg>
+      </button>
+    </div>
+
+    {#if voice.error}<div class="voice-error">{voice.error}</div>{/if}
+  </div>
+{/if}
 
 <style>
-  .voice-bar {
+  .voice-panel {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    padding: 8px;
+    margin: 0 8px 6px;
+    padding: 7px 8px;
     border-radius: 8px;
-    background: var(--bg-2, rgba(255, 255, 255, 0.03));
+    background: var(--bg-panel-raised);
+    border: 1px solid var(--border-hair-strong);
   }
-  .voice-head {
+  .voice-status {
     display: flex;
     align-items: center;
     gap: 8px;
+    background: none;
+    border: none;
+    padding: 2px;
+    cursor: pointer;
+    text-align: left;
+    color: inherit;
+  }
+  .voice-status:hover .voice-chan {
+    text-decoration: underline;
   }
   .voice-live {
-    width: 8px;
-    height: 8px;
+    width: 9px;
+    height: 9px;
+    flex: none;
     border-radius: 50%;
     background: #43b581;
     box-shadow: 0 0 0 0 rgba(67, 181, 129, 0.7);
     animation: voice-pulse 2s infinite;
+  }
+  .voice-live.connecting {
+    background: #e0a53c;
   }
   @keyframes voice-pulse {
     0% { box-shadow: 0 0 0 0 rgba(67, 181, 129, 0.5); }
     70% { box-shadow: 0 0 0 6px rgba(67, 181, 129, 0); }
     100% { box-shadow: 0 0 0 0 rgba(67, 181, 129, 0); }
   }
-  .voice-title {
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: #43b581;
-  }
-  .voice-actions {
-    margin-left: auto;
-    display: flex;
-    gap: 4px;
-  }
-  .voice-btn,
-  .voice-join {
-    cursor: pointer;
-    border: none;
-    border-radius: 6px;
-    padding: 5px 10px;
-    font-size: 0.8rem;
-    color: var(--text, inherit);
-    background: var(--bg-3, rgba(255, 255, 255, 0.06));
-  }
-  .voice-btn:hover,
-  .voice-join:hover {
-    background: var(--bg-4, rgba(255, 255, 255, 0.1));
-  }
-  .voice-btn.active {
-    background: #b3413b;
-    color: #fff;
-  }
-  .voice-btn.leave {
-    background: #b3413b;
-    color: #fff;
-  }
-  .voice-join {
-    width: 100%;
-    font-weight: 600;
-  }
-  .voice-join:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-  .voice-roster {
-    list-style: none;
-    margin: 0;
-    padding: 0;
+  .voice-status-text {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    min-width: 0;
   }
-  .voice-member {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 3px 4px;
-    border-radius: 6px;
-    font-size: 0.82rem;
-  }
-  .voice-avatar {
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    display: grid;
-    place-items: center;
-    font-size: 0.62rem;
+  .voice-state {
+    font-size: 0.74rem;
     font-weight: 700;
-    background: var(--bg-4, rgba(255, 255, 255, 0.1));
-    outline: 2px solid transparent;
-    transition: outline-color 0.1s;
+    color: #43b581;
   }
-  .voice-member.speaking .voice-avatar {
-    outline-color: #43b581;
-  }
-  .voice-name {
-    flex: 1;
+  .voice-chan {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .voice-flag {
-    font-size: 0.7rem;
-    opacity: 0.7;
+  .voice-controls {
+    display: flex;
+    gap: 4px;
   }
-  /* Deafened reads as a headphone with a red slash, distinct from the mute icon. */
-  .voice-flag.deaf {
-    position: relative;
+  .vp-btn {
+    flex: 1;
+    display: grid;
+    place-items: center;
+    padding: 6px 0;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    background: var(--bg-hover);
   }
-  .voice-flag.deaf::after {
-    content: "";
-    position: absolute;
-    left: -1px;
-    right: -1px;
-    top: 50%;
-    height: 2px;
-    background: #e0645c;
-    transform: rotate(-20deg);
+  .vp-btn:hover {
+    color: var(--text-primary);
+    background: var(--border-hair-strong);
+  }
+  /* "on" = an active toggle. Mute/deafen light red; camera/screen light green. */
+  .vp-btn.on {
+    background: #3ba55d;
+    color: #fff;
+  }
+  .vp-btn.on[aria-label="Toggle mute"],
+  .vp-btn.on[aria-label="Toggle deafen"] {
+    background: #b3413b;
+  }
+  .vp-btn.leave {
+    color: #e0645c;
+  }
+  .vp-btn.leave:hover {
+    background: #b3413b;
+    color: #fff;
   }
   .voice-error {
     font-size: 0.72rem;

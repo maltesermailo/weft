@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getApp } from "$lib/context";
+  import { highlightComposer } from "$lib/mdhighlight";
   import EmojiPicker from "./EmojiPicker.svelte";
   const app = getApp();
 
@@ -8,6 +9,49 @@
     app.composer = app.composer + value;
     emojiOpen = false;
   }
+
+  // Live Markdown preview (GitHub-style Write/Preview toggle — full render).
+  let previewOn = $state(false);
+
+  // Live inline syntax highlighting: an overlay behind a transparent textarea
+  // colours valid markdown as you type. `highlightComposer` preserves the text
+  // character-for-character (colour only, never weight/size), so the caret stays
+  // aligned with the overlay.
+  let overlay = $state<HTMLDivElement | null>(null);
+  const highlighted = $derived(highlightComposer(app.composer));
+
+  // While an IME composition is active the textarea's own (transparent) preedit
+  // text would be invisible, so temporarily show the textarea and hide the
+  // overlay until the composition commits.
+  let composing = $state(false);
+
+  // Auto-grow the textarea to fit its content, capped at a share of the viewport
+  // height (vh) so a long draft scrolls internally instead of eating the screen —
+  // and the cap scales uniformly across resolutions rather than a fixed px.
+  const MAX_VH = 40;
+  let ta = $state<HTMLTextAreaElement | null>(null);
+  function autosize() {
+    const el = ta;
+    if (!el) return;
+    const maxH = (window.innerHeight * MAX_VH) / 100;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, maxH) + "px";
+    el.style.overflowY = el.scrollHeight > maxH ? "auto" : "hidden";
+  }
+  // Keep the highlight overlay scrolled in lockstep with the textarea.
+  function syncScroll() {
+    if (overlay && ta) {
+      overlay.scrollTop = ta.scrollTop;
+      overlay.scrollLeft = ta.scrollLeft;
+    }
+  }
+  // React to every composer change — typing, emoji insert, mention pick, and the
+  // reset to "" after send all flow through `app.composer`.
+  $effect(() => {
+    app.composer;
+    autosize();
+    syncScroll();
+  });
 
   // Drag-and-drop file upload: highlight the composer while a file hovers.
   let dragActive = $state(false);
@@ -71,19 +115,44 @@
       {/each}
     </div>
   {/if}
+  {#if previewOn && app.composer.trim()}
+    <div class="composer-preview">
+      <div class="composer-preview-label">Preview</div>
+      <div class="msg-line">{@html app.renderMd(app.composer)}</div>
+    </div>
+  {/if}
   <div class="composer">
     <button class="icon-btn" title="Attach a file" aria-label="Attach a file" disabled={!app.active} onclick={app.attachFile}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
     </button>
-    <textarea
-      rows="1"
-      placeholder={app.active ? `Message ${app.active}…` : "Join a channel first"}
+    <div class="composer-input" class:composing>
+      <div class="composer-highlight" bind:this={overlay} aria-hidden="true">{@html highlighted}<br /></div>
+      <textarea
+        class="composer-ta"
+        bind:this={ta}
+        rows="1"
+        placeholder={app.active ? `Message ${app.active}…` : "Join a channel first"}
+        disabled={!app.active}
+        bind:value={app.composer}
+        onkeydown={app.composerKey}
+        oninput={app.onComposerInput}
+        onscroll={syncScroll}
+        onpaste={app.pasteFiles}
+        oncompositionstart={() => (composing = true)}
+        oncompositionend={() => (composing = false)}
+      ></textarea>
+    </div>
+    <button
+      class="icon-btn"
+      class:active={previewOn}
+      title="Toggle Markdown preview"
+      aria-label="Toggle Markdown preview"
+      aria-pressed={previewOn}
       disabled={!app.active}
-      bind:value={app.composer}
-      onkeydown={app.composerKey}
-      oninput={app.onComposerInput}
-      onpaste={app.pasteFiles}
-    ></textarea>
+      onclick={() => (previewOn = !previewOn)}
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
+    </button>
     <div class="composer-emoji">
       {#if emojiOpen}
         <button class="ctx-backdrop" aria-label="Close" onclick={() => (emojiOpen = false)}></button>

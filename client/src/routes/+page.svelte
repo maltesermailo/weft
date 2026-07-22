@@ -3,6 +3,9 @@
   import * as weft from "$lib/weft";
   import type { Msg, Channel, CtxItem, RoleDefC } from "$lib/types";
   import { provideApp } from "$lib/context";
+  import { highlightCode } from "$lib/highlight";
+  import { installLinkGuard } from "$lib/linkguard.svelte";
+  import LinkWarningModal from "$lib/components/modals/LinkWarningModal.svelte";
   import ConnectScreen from "$lib/components/ConnectScreen.svelte";
   import Toasts from "$lib/components/Toasts.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
@@ -10,7 +13,11 @@
   import CommunityRail from "$lib/components/CommunityRail.svelte";
   import EmptyHome from "$lib/components/EmptyHome.svelte";
   import MemberList from "$lib/components/MemberList.svelte";
-  import { initVoice } from "$lib/voice.svelte";
+  import { initVoice, joinVoice, voice } from "$lib/voice.svelte";
+  import VoiceBar from "$lib/components/VoiceBar.svelte";
+  import VoiceStage from "$lib/components/chat/VoiceStage.svelte";
+  import CameraPicker from "$lib/components/modals/CameraPicker.svelte";
+  import { voiceUI } from "$lib/voiceui.svelte";
   import ChannelList from "$lib/components/sidebar/ChannelList.svelte";
   import SidebarHeader from "$lib/components/sidebar/SidebarHeader.svelte";
   import DmList from "$lib/components/sidebar/DmList.svelte";
@@ -113,11 +120,13 @@
   function msgCtx(e: MouseEvent, m: Msg) {
     if (m.system || !m.msgid) return;
     const items: CtxItem[] = [{ label: "Reply", run: () => (replyTo = m) }];
-    if (active.startsWith("#"))
+    if (active.startsWith("#")) {
+      items.push({ label: "Reply in thread", run: () => openThread(m) });
       items.push({
         label: activeChannel?.pinnedIds?.includes(m.msgid) ? "Unpin" : "Pin",
         run: () => togglePin(m),
       });
+    }
     items.push({ label: "Copy text", run: () => navigator.clipboard?.writeText(m.body) });
     if (m.own) {
       items.push({ label: "Edit", run: () => startEdit(m) });
@@ -1608,22 +1617,47 @@
   // markdown token is turned back into a tag.
   const escapeHtml = (s: string) =>
     s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  // Inline formatting for a run of text with no fenced blocks.
+
+  // Inline formatting for a single run of text (no fenced/block constructs).
+  // Code spans and links are stashed to placeholders BEFORE emphasis runs, so
+  // markdown characters inside a URL or code span (snake_case, a*b, …) can't be
+  // mangled into <em>/<strong>. \x00…\x00 is used as the placeholder delimiter
+  // because a NUL can never occur in a chat line.
   function renderInline(text: string): string {
+    const stash: string[] = [];
+    const keep = (html: string) => {
+      const i = stash.length;
+      stash.push(html);
+      return `\x00T${i}\x00`;
+    };
+
     let s = escapeHtml(text);
-    s = s.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
-    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
-    s = s.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
-    s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+
+    // Inline code — verbatim, highest precedence.
+    s = s.replace(/`([^`]+)`/g, (_m, c: string) => keep(`<code>${c}</code>`));
+
+    // Masked link [text](url) then bare URL — stashed so emphasis can't touch
+    // the URL. `data-mdlink` marks them for the click-through confirm guard.
     s = s.replace(
       /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
+      (_m, txt: string, url: string) =>
+        keep(`<a href="${url}" target="_blank" rel="noopener noreferrer" data-mdlink="1">${txt}</a>`),
     );
     s = s.replace(
       /(^|\s)(https?:\/\/[^\s<]+)/g,
-      '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>',
+      (_m, pre: string, url: string) =>
+        pre + keep(`<a href="${url}" target="_blank" rel="noopener noreferrer" data-mdlink="1">${url}</a>`),
     );
+
+    // Emphasis: ***bold-italic*** → **bold** → __bold__ → *italic* → _italic_ → ~~strike~~.
+    s = s.replace(/\*\*\*([^*]+)\*\*\*/g, "<strong><em>$1</em></strong>");
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+    s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+    // _italic_ only at word boundaries, so snake_case is left alone.
+    s = s.replace(/(^|[^\w])_([^_\n]+)_(?=[^\w]|$)/g, "$1<em>$2</em>");
+    s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+
     // ||spoiler|| → click-to-reveal (revealed by a delegated handler in the list).
     s = s.replace(
       /\|\|([\s\S]+?)\|\|/g,
@@ -1642,10 +1676,15 @@
       const url = weft.mediaUrl(media).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
       return `<img class="custom-emoji" src="${url}" alt=":${name}:" title=":${name}:" />`;
     });
+
+    // Restore stashed code spans / links.
+    s = s.replace(/\x00T(\d+)\x00/g, (_m, i: string) => stash[+i]);
     return s;
   }
-  // Full render: lift out ``` / ~~~ fenced code blocks (their contents are
-  // rendered verbatim), inline-format the rest, then splice the blocks back in.
+
+  // Full render: lift out ``` / ~~~ fenced code blocks (verbatim, highlighted),
+  // parse block-level constructs (headings, block quotes, lists, rules) line by
+  // line, inline-format the rest, then splice the code blocks back in.
   function renderMd(text: string): string {
     const blocks: { lang: string; code: string }[] = [];
     const lifted = text.replace(
@@ -1653,16 +1692,104 @@
       (_m, lang: string, code: string) => {
         const i = blocks.length;
         blocks.push({ lang: lang.trim(), code: code.replace(/\n$/, "") });
-        return ` CB${i} `;
+        return `\x00CB${i}\x00`;
       },
     );
 
-    let s = renderInline(lifted);
+    const lines = lifted.split("\n");
+    const pieces: { block: boolean; html: string }[] = [];
+    const cbOnly = /^\s*\x00CB\d+\x00\s*$/;
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
 
-    s = s.replace(/ CB(\d+) /g, (_m, i: string) => {
+      // A fenced-code placeholder alone on its line is a block.
+      if (cbOnly.test(line)) {
+        pieces.push({ block: true, html: line.trim() });
+        i++;
+        continue;
+      }
+      // ATX headings # / ## / ### (h1–h3, Discord-style).
+      const h = line.match(/^(#{1,3})\s+(.*)$/);
+      if (h) {
+        const lvl = h[1].length;
+        pieces.push({ block: true, html: `<h${lvl} class="md-h md-h${lvl}">${renderInline(h[2])}</h${lvl}>` });
+        i++;
+        continue;
+      }
+      // Thematic break: ---, ***, ___ (three or more).
+      if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+        pieces.push({ block: true, html: `<hr class="md-hr" />` });
+        i++;
+        continue;
+      }
+      // Block quote: `>>> ` quotes the rest of the message; `> ` quotes a run.
+      const tri = line.match(/^>>>\s?(.*)$/);
+      if (tri) {
+        const rest = [tri[1], ...lines.slice(i + 1)];
+        pieces.push({
+          block: true,
+          html: `<blockquote class="md-quote">${rest.map((l) => renderInline(l)).join("<br>")}</blockquote>`,
+        });
+        break;
+      }
+      if (/^>\s?/.test(line)) {
+        const buf: string[] = [];
+        while (i < lines.length && /^>\s?/.test(lines[i])) {
+          buf.push(lines[i].replace(/^>\s?/, ""));
+          i++;
+        }
+        pieces.push({
+          block: true,
+          html: `<blockquote class="md-quote">${buf.map((l) => renderInline(l)).join("<br>")}</blockquote>`,
+        });
+        continue;
+      }
+      // Unordered list: -, *, + .
+      if (/^\s*[-*+]\s+/.test(line)) {
+        const items: string[] = [];
+        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*[-*+]\s+/, ""));
+          i++;
+        }
+        pieces.push({
+          block: true,
+          html: `<ul class="md-list">${items.map((it) => `<li>${renderInline(it)}</li>`).join("")}</ul>`,
+        });
+        continue;
+      }
+      // Ordered list: 1. / 1) .
+      if (/^\s*\d+[.)]\s+/.test(line)) {
+        const items: string[] = [];
+        while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*\d+[.)]\s+/, ""));
+          i++;
+        }
+        pieces.push({
+          block: true,
+          html: `<ol class="md-list">${items.map((it) => `<li>${renderInline(it)}</li>`).join("")}</ol>`,
+        });
+        continue;
+      }
+
+      // Plain line.
+      pieces.push({ block: false, html: renderInline(line) });
+      i++;
+    }
+
+    // Assemble: consecutive plain lines keep their newline (rendered by the
+    // container's pre-wrap); block elements bring their own separation.
+    let s = "";
+    for (let k = 0; k < pieces.length; k++) {
+      if (k > 0 && !pieces[k].block && !pieces[k - 1].block) s += "\n";
+      s += pieces[k].html;
+    }
+
+    // Splice fenced code blocks back in, highlighted.
+    s = s.replace(/\x00CB(\d+)\x00/g, (_m, i: string) => {
       const b = blocks[+i];
       const label = b.lang ? `<span class="code-lang">${escapeHtml(b.lang)}</span>` : "";
-      return `<pre class="code-block">${label}<code>${escapeHtml(b.code)}</code></pre>`;
+      return `<pre class="code-block hljs">${label}<code>${highlightCode(b.code, b.lang)}</code></pre>`;
     });
     return s;
   }
@@ -1682,7 +1809,7 @@
   let typers = $state<Record<string, string[]>>({}); // channel -> accounts typing
   const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   function setTyping(channel: string, user: string, active: boolean) {
-    const key = `${channel} ${user}`;
+    const key = `${channel}\u0000${user}`;
     clearTimeout(typingTimers.get(key));
     typers[channel] ??= [];
     if (active) {
@@ -1783,6 +1910,9 @@
     if (!a) return;
     stickBottom = true;
     const ch = channels[a];
+    // Voice channels have no message timeline or text roster — HISTORY/MEMBERS on
+    // one you only voice-joined (not text-joined) would answer CAP-REQUIRED.
+    if (ch?.voice) return;
     if (ch && !ch.historyLoaded) loadHistory(a, true);
     // Fetch the full roster once (MEMBERS folds in as MEMBER-join rows). The
     // guard stops the self-row in the snapshot from re-triggering us.
@@ -1822,7 +1952,7 @@
   // (MARK, synced across our devices — §9.7).
   $effect(() => {
     const ch = activeChannel;
-    if (!ch) return;
+    if (!ch || ch.voice) return;
     markRead(ch.name);
     if (!ch.name.startsWith("#")) return;
     let newest: string | undefined;
@@ -2195,6 +2325,8 @@
       /* ignore */
     }
     const un = weft.onWeft(handle);
+    // Confirm-before-navigate guard for links in rendered message markdown.
+    const uninstallLinkGuard = installLinkGuard();
     // Load client.toml: TLS verification mode + optional default host.
     weft
       .clientConfig()
@@ -2220,6 +2352,7 @@
     }
     return () => {
       un.then((f) => f());
+      uninstallLinkGuard();
     };
   });
 
@@ -2242,6 +2375,13 @@
     selectServer,
     openServerMenu,
     open: (name: string) => { active = name; markRead(name); },
+    // Open a voice channel's stage (switch the main view) and join the call if
+    // we're not already in it. Voice channels have no message timeline, so we
+    // don't markRead.
+    openVoice: (name: string) => {
+      active = name;
+      if (voice.channel !== name) joinVoice(name);
+    },
     openDiscover,
     get channels() { return channels; },
     get presence() { return presence; },
@@ -2477,6 +2617,8 @@
   {/if}
   <Toasts {toasts} />
   <Lightbox />
+  <LinkWarningModal />
+  {#if voiceUI.cameraPicker}<CameraPicker />{/if}
   <ThreadPanel />
   {#if federating}
     <div class="federating-banner">
@@ -2499,7 +2641,7 @@
       onclose={() => (switcherOpen = false)}
     />
   {/if}
-  <div class="app" class:members-collapsed={!membersVisible}>
+  <div class="app" class:members-collapsed={!membersVisible || activeChannel?.voice}>
     <!-- COMMUNITY RAIL -->
     <CommunityRail />
 
@@ -2515,6 +2657,7 @@
         {/key}
         <SidebarInput bind:value={joinInput} placeholder="join #channel or namespace…" onenter={doJoin} />
       {/if}
+      <VoiceBar />
       <UserFooter />
     </aside>
 
@@ -2522,6 +2665,8 @@
     <main class="main">
       {#if !activeChannel && !homeView}
         <EmptyHome />
+      {:else if activeChannel?.voice}
+        <VoiceStage />
       {:else}
         <ChatTopbar />
 
@@ -2532,7 +2677,7 @@
 
     <!-- MEMBERS -->
     <aside class="members">
-      {#if activeChannel && !activeIsDm}
+      {#if activeChannel && !activeIsDm && !activeChannel.voice}
         <MemberList />
       {/if}
     </aside>

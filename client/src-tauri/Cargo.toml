@@ -36,6 +36,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
 
+# §16 video: enable WKWebView's getDisplayMedia (off by default in an embedded
+# webview) so screen sharing can bring up the macOS native picker. Uses WebKit's
+# private feature API via objc2 — versions track wry's transitive objc2.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+
 # Release optimization lives at the workspace root as a per-package override
 # ([profile.release.package.client]) — Cargo ignores profiles in a non-root
 # member. `lto`/`panic` can't be set per-package, so they're omitted; if the

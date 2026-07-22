@@ -13,7 +13,7 @@
 // One voice room at a time.
 
 import { voiceJoin, voiceLeave, voiceDesc, voiceCand, onWeft, type WeftEvent } from "./weft";
-import type { Room, Participant } from "livekit-client";
+import type { Room, Participant, Track } from "livekit-client";
 
 export type VoiceParticipant = {
   user: string;
@@ -21,6 +21,10 @@ export type VoiceParticipant = {
   muted: boolean;
   deaf: boolean;
   self: boolean;
+  /** Publishing a camera track (LiveKit path). */
+  cameraOn?: boolean;
+  /** Publishing a screenshare track (LiveKit path). */
+  sharingScreen?: boolean;
 };
 
 type VoiceModel = {
@@ -32,8 +36,15 @@ type VoiceModel = {
   muted: boolean;
   /** Deafen: all incoming audio silenced (implies muted while active). */
   deafened: boolean;
+  /** Local camera published (LiveKit path). */
+  cameraOn: boolean;
+  /** Local screen share published (LiveKit path). */
+  sharingScreen: boolean;
   /** Room roster keyed by account. */
   participants: Record<string, VoiceParticipant>;
+  /** Bumped on every video-track change so the stage re-attaches its <video>s.
+   *  (The actual LiveKit tracks live outside `$state` — see `videoTracks`.) */
+  mediaTick: number;
   /** Last error (mic denied, a rejected join, …); shown then cleared by the UI. */
   error: string | null;
 };
@@ -43,7 +54,10 @@ export const voice = $state<VoiceModel>({
   connecting: false,
   muted: false,
   deafened: false,
+  cameraOn: false,
+  sharingScreen: false,
   participants: {},
+  mediaTick: 0,
   error: null,
 });
 
@@ -73,6 +87,24 @@ let audioEl: HTMLAudioElement | null = null;
 // the token set, so the roster matches the WebRTC path's federated keys.
 let room: Room | null = null;
 const attached = new Set<HTMLMediaElement>();
+
+// LiveKit video tracks (camera + screenshare), kept OUT of `$state` so Svelte's
+// reactive proxy never wraps a LiveKit Track (which would break its methods and
+// identity). The UI observes presence via the roster flags + `voice.mediaTick`
+// and attaches the raw track to a <video> via `attachVideo`.
+const videoTracks = new Map<string, { camera?: Track; screen?: Track }>();
+
+function setVideoTrack(user: string, source: "camera" | "screen", track: Track): void {
+  const slot = videoTracks.get(user) ?? {};
+  slot[source] = track;
+  videoTracks.set(user, slot);
+}
+function clearVideoTrack(user: string, source: "camera" | "screen"): void {
+  const slot = videoTracks.get(user);
+  if (!slot) return;
+  delete slot[source];
+  if (!slot.camera && !slot.screen) videoTracks.delete(user);
+}
 
 /** Wire the voice event handler once, and record who "we" are (for the roster).
  *  Call on connect. */
@@ -147,6 +179,87 @@ export function toggleDeafen(): void {
   if (me) me.deaf = voice.deafened;
 }
 
+/** Start the local camera on a chosen device (or the default). Video rides the
+ *  LiveKit SFU only — on the WebRTC path this hints and no-ops. The `cameraOn`
+ *  flag is confirmed by the resulting `LocalTrackPublished` event. */
+export async function startCamera(deviceId?: string): Promise<void> {
+  if (!room) {
+    voice.error = "camera needs the LiveKit voice backend";
+    return;
+  }
+  try {
+    await room.localParticipant.setCameraEnabled(true, deviceId ? { deviceId } : undefined);
+  } catch (err) {
+    voice.error =
+      err instanceof Error && err.name === "NotAllowedError"
+        ? "camera permission denied"
+        : "couldn't start the camera";
+  }
+}
+export async function stopCamera(): Promise<void> {
+  if (!room) return;
+  try {
+    await room.localParticipant.setCameraEnabled(false);
+  } catch {
+    /* already off */
+  }
+}
+
+// Tauri v2 injects `__TAURI_INTERNALS__`; its absence ⇒ a plain browser.
+const IS_DESKTOP = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+/** Start screen sharing (LiveKit path only). Uses `getDisplayMedia`, which brings
+ *  up the OS-native picker (screens · windows · tabs, with thumbnails) and manages
+ *  the publish + the "Stop sharing" lifecycle. Screen audio is included when the
+ *  chosen source offers it.
+ *
+ *  On the desktop app the native picker is provided by the OS/WebKit — there is
+ *  no app-code hook to summon it (macOS exposes no display-capture permission,
+ *  only camera/mic) — and it's gated behind the OS "Screen Recording" permission.
+ *  A denial there surfaces as the same `NotAllowedError` as a user cancel, so on
+ *  desktop we surface an actionable hint instead of silently doing nothing. */
+export async function startScreenShare(): Promise<void> {
+  if (!room) {
+    voice.error = "screen sharing needs the LiveKit voice backend";
+    return;
+  }
+  try {
+    await room.localParticipant.setScreenShareEnabled(true, { audio: true });
+  } catch (err) {
+    const notAllowed = err instanceof Error && err.name === "NotAllowedError";
+    // In the browser a NotAllowedError is almost always a deliberate cancel — stay
+    // quiet. On the desktop app it usually means the OS Screen-Recording grant is
+    // missing (no picker ever appears), so point the user at it.
+    if (IS_DESKTOP) {
+      voice.error =
+        "Screen sharing needs the Screen Recording permission — enable Weft in " +
+        "System Settings → Privacy & Security → Screen Recording, then reopen the app.";
+    } else if (!notAllowed) {
+      voice.error = "couldn't start screen sharing";
+    }
+  }
+}
+export async function stopScreenShare(): Promise<void> {
+  if (!room) return;
+  try {
+    await room.localParticipant.setScreenShareEnabled(false);
+  } catch {
+    /* already off */
+  }
+}
+
+/** Attach a participant's video track (camera or screenshare) to a <video>
+ *  element owned by the stage; a no-op if that track isn't present. */
+export function attachVideo(el: HTMLVideoElement, user: string, source: "camera" | "screen"): void {
+  const t = videoTracks.get(user)?.[source];
+  if (t) t.attach(el);
+}
+export function detachVideo(el: HTMLVideoElement, user: string, source: "camera" | "screen"): void {
+  const t = videoTracks.get(user)?.[source];
+  if (t) t.detach(el);
+  el.srcObject = null;
+}
+
 /** Push the current deafen state onto every remote audio element. Both media
  *  planes play remote audio through elements we own (`attached` for LiveKit,
  *  `audioEl` for WebRTC), so muting those is the whole of "hear nothing." */
@@ -186,10 +299,15 @@ function teardown(): void {
     audioEl = null;
   }
 
+  videoTracks.clear();
+
   voice.channel = null;
   voice.connecting = false;
   voice.participants = {};
   voice.deafened = false;
+  voice.cameraOn = false;
+  voice.sharingScreen = false;
+  voice.mediaTick++;
   micBeforeDeafen = false;
 }
 
@@ -259,15 +377,30 @@ async function onLiveKitOffer(
     });
     room = r;
 
-    r.on(lk.RoomEvent.TrackSubscribed, (track) => {
+    r.on(lk.RoomEvent.TrackSubscribed, (track, pub, participant) => {
       if (track.kind === lk.Track.Kind.Audio) {
         const el = track.attach();
         el.autoplay = true;
         el.muted = voice.deafened;
         attached.add(el);
+        return;
+      }
+      if (track.kind === lk.Track.Kind.Video) {
+        const source = pub.source === lk.Track.Source.ScreenShare ? "screen" : "camera";
+        setVideoTrack(participant.identity, source, track);
+        upsertParticipant(participant);
+        voice.mediaTick++;
       }
     });
-    r.on(lk.RoomEvent.TrackUnsubscribed, (track) => {
+    r.on(lk.RoomEvent.TrackUnsubscribed, (track, pub, participant) => {
+      if (track.kind === lk.Track.Kind.Video) {
+        const source = pub.source === lk.Track.Source.ScreenShare ? "screen" : "camera";
+        clearVideoTrack(participant.identity, source);
+        upsertParticipant(participant);
+        voice.mediaTick++;
+        track.detach();
+        return;
+      }
       for (const el of track.detach()) {
         attached.delete(el);
         el.remove();
@@ -280,7 +413,26 @@ async function onLiveKitOffer(
     r.on(lk.RoomEvent.ActiveSpeakersChanged, (speakers) => onSpeakers(speakers));
     r.on(lk.RoomEvent.TrackMuted, (_pub, p) => upsertParticipant(p));
     r.on(lk.RoomEvent.TrackUnmuted, (_pub, p) => upsertParticipant(p));
-    r.on(lk.RoomEvent.LocalTrackPublished, () => upsertParticipant(r.localParticipant));
+    r.on(lk.RoomEvent.LocalTrackPublished, (pub) => {
+      if (pub.track && pub.kind === lk.Track.Kind.Video) {
+        const source = pub.source === lk.Track.Source.ScreenShare ? "screen" : "camera";
+        setVideoTrack(r.localParticipant.identity, source, pub.track);
+        if (source === "screen") voice.sharingScreen = true;
+        else voice.cameraOn = true;
+        voice.mediaTick++;
+      }
+      upsertParticipant(r.localParticipant);
+    });
+    r.on(lk.RoomEvent.LocalTrackUnpublished, (pub) => {
+      if (pub.kind === lk.Track.Kind.Video) {
+        const source = pub.source === lk.Track.Source.ScreenShare ? "screen" : "camera";
+        clearVideoTrack(r.localParticipant.identity, source);
+        if (source === "screen") voice.sharingScreen = false;
+        else voice.cameraOn = false;
+        voice.mediaTick++;
+      }
+      upsertParticipant(r.localParticipant);
+    });
     r.on(lk.RoomEvent.Disconnected, (reason) => {
       if (room !== r) return;
       // Tell our own leave/teardown apart from a server-side drop (rejected
@@ -321,6 +473,8 @@ function upsertParticipant(p: Participant): void {
     muted: !p.isMicrophoneEnabled,
     deaf: false,
     self: p.isLocal,
+    cameraOn: p.isCameraEnabled,
+    sharingScreen: p.isScreenShareEnabled,
   };
 }
 
