@@ -32,6 +32,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"
 xcap = "0.9.7"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+livekit = "0.7.53"
+futures-util = "0.3"
+nokhwa = { version = "0.10.11", features = ["input-native"] }
 
 # §16 voice: grant the WebKitGTK webview's getUserMedia permission (Linux only).
 # The version tracks wry's `webkit2gtk` so `PlatformWebview::inner()` returns a

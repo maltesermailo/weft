@@ -16,7 +16,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::Serialize;
@@ -119,8 +119,9 @@ pub async fn capture_source_thumb(id: String) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Capture one frame of `screen:<id>` / `window:<id>`.
-fn grab(id: &str) -> Option<RgbaImage> {
+/// Capture one frame of `screen:<id>` / `window:<id>`. Shared with the native
+/// voice module, which publishes these frames to LiveKit.
+pub(crate) fn grab(id: &str) -> Option<RgbaImage> {
     let (kind, raw) = id.split_once(':')?;
     let num: u32 = raw.parse().ok()?;
     match kind {
@@ -147,12 +148,15 @@ fn stop_running(state: &CaptureState) {
 }
 
 /// Start streaming JPEG frames of `id` to `on_frame` (base64 data URLs) until
-/// `stop_capture`. `fps` is best-effort — the real rate is bounded by how fast
-/// the OS hands us frames.
+/// `stop_capture`. `fps` is the target frame rate and `max_width` bounds the
+/// encoded resolution (both best-effort — the real rate is bounded by how fast
+/// the OS grabs + we encode a frame). The loop is paced against the capture time
+/// so a fast source actually reaches the target rate.
 #[tauri::command]
 pub async fn start_capture(
     id: String,
     fps: Option<u32>,
+    max_width: Option<u32>,
     on_frame: Channel<String>,
     state: tauri::State<'_, CaptureState>,
 ) -> Result<(), String> {
@@ -161,18 +165,26 @@ pub async fn start_capture(
     let flag = Arc::new(AtomicBool::new(true));
     *state.running.lock().unwrap() = Some(flag.clone());
 
-    let interval = Duration::from_millis((1000 / fps.unwrap_or(12).clamp(1, 30)) as u64);
+    let fps = fps.unwrap_or(15).clamp(1, 60);
+    let period = Duration::from_micros(1_000_000 / fps as u64);
+    let width = max_width.unwrap_or(1280).clamp(240, 3840);
 
     std::thread::spawn(move || {
         while flag.load(Ordering::SeqCst) {
+            let started = Instant::now();
             if let Some(img) = grab(&id) {
-                if let Some(url) = jpeg_data_url(&img, 1280, 55) {
+                if let Some(url) = jpeg_data_url(&img, width, 55) {
                     if on_frame.send(url).is_err() {
                         break; // the webview went away
                     }
                 }
             }
-            std::thread::sleep(interval);
+            // Sleep only for the remainder of the frame period, so the capture +
+            // encode time counts toward it (rather than being pure overhead).
+            let elapsed = started.elapsed();
+            if elapsed < period {
+                std::thread::sleep(period - elapsed);
+            }
         }
     });
 

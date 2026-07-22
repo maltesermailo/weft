@@ -9,8 +9,10 @@
     toggleMute,
     toggleDeafen,
     stopCamera,
+    stopNativeVoiceCamera,
     startScreenShare,
     stopScreenShare,
+    stopNativeVoiceScreenshare,
     IS_DESKTOP,
   } from "$lib/voice.svelte";
   import { voiceUI } from "$lib/voiceui.svelte";
@@ -20,15 +22,24 @@
   function openStage() {
     if (voice.channel) app.openVoice(voice.channel);
   }
-  // Camera opens the in-app device picker. Screen share opens the Discord-style
-  // native picker on desktop, or the OS getDisplayMedia picker on the web.
-  const camClick = () => (voice.cameraOn ? stopCamera() : (voiceUI.cameraPicker = true));
-  const screenClick = () =>
-    voice.sharingScreen
-      ? stopScreenShare()
-      : IS_DESKTOP
-        ? (voiceUI.screenPicker = true)
-        : startScreenShare();
+  // Camera + screen share: desktop publishes natively (Rust SDK), web uses the
+  // webview (device picker / getDisplayMedia). Both open a picker when turning on.
+  const camClick = () => {
+    if (voice.cameraOn) {
+      IS_DESKTOP ? stopNativeVoiceCamera() : stopCamera();
+    } else {
+      voiceUI.cameraPicker = true;
+    }
+  };
+  const screenClick = () => {
+    if (voice.sharingScreen) {
+      IS_DESKTOP ? stopNativeVoiceScreenshare() : stopScreenShare();
+    } else if (IS_DESKTOP) {
+      voiceUI.screenPicker = true;
+    } else {
+      startScreenShare();
+    }
+  };
 </script>
 
 {#if voice.channel}

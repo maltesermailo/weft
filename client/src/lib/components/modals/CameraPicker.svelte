@@ -4,15 +4,24 @@
   // camera is already on.
   import { fade } from "svelte/transition";
   import { voiceUI } from "$lib/voiceui.svelte";
-  import { startCamera } from "$lib/voice.svelte";
+  import { IS_DESKTOP, startCamera, startNativeVoiceCamera, listNativeCameras } from "$lib/voice.svelte";
 
-  let devices = $state<MediaDeviceInfo[]>([]);
+  type Cam = { deviceId: string; label: string };
+  let devices = $state<Cam[]>([]);
   let selected = $state<string>("");
   let error = $state<string>("");
   let previewEl = $state<HTMLVideoElement | null>(null);
   let previewStream: MediaStream | null = null;
 
   async function loadDevices() {
+    if (IS_DESKTOP) {
+      // Native cameras (nokhwa) — capture happens in Rust, so no webview preview.
+      const cams = await listNativeCameras();
+      devices = cams.map((c) => ({ deviceId: c.id, label: c.name }));
+      if (!devices.length) error = "No cameras found.";
+      else selected = devices[0].deviceId;
+      return;
+    }
     try {
       // A short-lived capture grants permission so device labels are populated.
       const probe = await navigator.mediaDevices.getUserMedia({ video: true });
@@ -22,7 +31,9 @@
       return;
     }
     const list = await navigator.mediaDevices.enumerateDevices();
-    devices = list.filter((d) => d.kind === "videoinput");
+    devices = list
+      .filter((d) => d.kind === "videoinput")
+      .map((d) => ({ deviceId: d.deviceId, label: d.label || "Camera" }));
     if (devices.length) selected = devices[0].deviceId;
   }
 
@@ -50,7 +61,8 @@
 
   function start() {
     stopPreview();
-    void startCamera(selected || undefined);
+    if (IS_DESKTOP) void startNativeVoiceCamera(selected || undefined);
+    else void startCamera(selected || undefined);
     voiceUI.cameraPicker = false;
   }
   function cancel() {
@@ -58,13 +70,14 @@
     voiceUI.cameraPicker = false;
   }
 
-  // Load on mount; the effect re-previews when the selection changes.
+  // Load on mount; the effect re-previews when the selection changes (web only —
+  // desktop capture is native, no in-webview preview).
   $effect(() => {
     void loadDevices();
     return stopPreview;
   });
   $effect(() => {
-    if (selected && previewEl) preview(selected);
+    if (!IS_DESKTOP && selected && previewEl) preview(selected);
   });
 </script>
 
@@ -76,10 +89,12 @@
       <button class="linkish" aria-label="Cancel" onclick={cancel}>✕</button>
     </div>
 
-    <div class="cam-preview">
-      <!-- svelte-ignore a11y_media_has_caption -->
-      <video bind:this={previewEl} autoplay playsinline muted></video>
-    </div>
+    {#if !IS_DESKTOP}
+      <div class="cam-preview">
+        <!-- svelte-ignore a11y_media_has_caption -->
+        <video bind:this={previewEl} autoplay playsinline muted></video>
+      </div>
+    {/if}
 
     {#if error}
       <p class="picker-error">{error}</p>

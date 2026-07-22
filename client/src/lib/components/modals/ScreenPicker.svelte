@@ -5,7 +5,7 @@
   import { fade } from "svelte/transition";
   import { invoke } from "@tauri-apps/api/core";
   import { voiceUI } from "$lib/voiceui.svelte";
-  import { startNativeScreenShare } from "$lib/voice.svelte";
+  import { startNativeVoiceScreenshare } from "$lib/voice.svelte";
 
   type Source = {
     id: string;
@@ -20,6 +20,18 @@
   let loading = $state(true);
   let error = $state("");
   let tab = $state<"window" | "screen">("window");
+
+  // Capture quality — remembered across sessions.
+  const QKEY = "weft:screenshare-quality";
+  let fps = $state(15);
+  let maxWidth = $state(1280); // 720p=1280 · 1080p=1920 · 1440p=2560 · source=3840
+  try {
+    const q = JSON.parse(localStorage.getItem(QKEY) ?? "{}");
+    if (q.fps) fps = q.fps;
+    if (q.maxWidth) maxWidth = q.maxWidth;
+  } catch {
+    /* defaults */
+  }
 
   const shown = $derived(sources.filter((s) => s.kind === tab));
 
@@ -64,7 +76,12 @@
   }
 
   function pick(s: Source) {
-    void startNativeScreenShare(s.id);
+    try {
+      localStorage.setItem(QKEY, JSON.stringify({ fps, maxWidth }));
+    } catch {
+      /* non-fatal */
+    }
+    void startNativeVoiceScreenshare(s.id, { fps, maxWidth });
     voiceUI.screenPicker = false;
   }
   function cancel() {
@@ -115,6 +132,27 @@
           {/each}
         </div>
       {/if}
+    </div>
+
+    <div class="sp-quality">
+      <label class="sp-q">
+        Resolution
+        <select bind:value={maxWidth}>
+          <option value={1280}>720p</option>
+          <option value={1920}>1080p</option>
+          <option value={2560}>1440p</option>
+          <option value={3840}>Source</option>
+        </select>
+      </label>
+      <label class="sp-q">
+        Frame rate
+        <select bind:value={fps}>
+          <option value={15}>15 fps</option>
+          <option value={30}>30 fps</option>
+          <option value={60}>60 fps</option>
+        </select>
+      </label>
+      <span class="sp-q-hint">Higher settings need more CPU — lower the resolution if it stutters.</span>
     </div>
   </div>
 </div>
@@ -246,5 +284,33 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .sp-quality {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--border-hair);
+  }
+  .sp-q {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+  .sp-q select {
+    background: var(--bg-panel-raised);
+    color: var(--text-primary);
+    border: 1px solid var(--border-hair-strong);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .sp-q-hint {
+    margin-left: auto;
+    font-size: 0.72rem;
+    color: var(--text-faint);
   }
 </style>

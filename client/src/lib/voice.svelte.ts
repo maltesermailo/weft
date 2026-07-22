@@ -14,6 +14,7 @@
 
 import { voiceJoin, voiceLeave, voiceDesc, voiceCand, onWeft, type WeftEvent } from "./weft";
 import { invoke as tauriInvoke, Channel } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { Room, Participant, Track, AudioCaptureOptions } from "livekit-client";
 
 export type VoiceParticipant = {
@@ -107,6 +108,19 @@ function clearVideoTrack(user: string, source: "camera" | "screen"): void {
   if (!slot.camera && !slot.screen) videoTracks.delete(user);
 }
 
+// On desktop, the LiveKit connection lives in the Tauri binary (the sole
+// participant — fixes macOS mic ducking). `nativeActive` marks that path so
+// mute/leave route to the native commands instead of the webview SDK.
+let nativeActive = false;
+
+// Desktop remote video: the Rust side streams each remote camera/screen track as
+// JPEG frames (the webview can't render the SDK's decoded frames). Keyed by
+// `${user}|${source}` → data URL, consumed by VoiceStage tiles.
+const nativeVideo = $state<Record<string, string>>({});
+export function nativeVideoUrl(user: string, source: "camera" | "screen"): string | undefined {
+  return nativeVideo[`${user}|${source}`];
+}
+
 /** Wire the voice event handler once, and record who "we" are (for the roster).
  *  Call on connect. */
 export function initVoice(myAccount: string): void {
@@ -114,6 +128,45 @@ export function initVoice(myAccount: string): void {
   if (!subscribed) {
     subscribed = true;
     void onWeft(onVoiceEvent);
+
+    // Desktop: the native voice session pushes roster + connection state + remote
+    // video frames here.
+    if (IS_DESKTOP) {
+      type RosterEntry = {
+        user: string;
+        speaking: boolean;
+        muted: boolean;
+        cameraOn: boolean;
+        sharingScreen: boolean;
+        self: boolean;
+      };
+      void listen<RosterEntry[]>("voice-native-roster", (e) => {
+        const parts: Record<string, VoiceParticipant> = {};
+        for (const r of e.payload) {
+          parts[r.user] = {
+            user: r.user,
+            speaking: r.speaking,
+            muted: r.muted,
+            deaf: false,
+            self: r.self,
+            cameraOn: r.cameraOn,
+            sharingScreen: r.sharingScreen,
+          };
+        }
+        voice.participants = parts;
+        voice.connecting = false;
+      });
+      void listen<string>("voice-native-state", (e) => {
+        if (e.payload === "connected") voice.connecting = false;
+        else if (e.payload === "disconnected" && nativeActive) leaveVoice();
+      });
+      void listen<{ user: string; source: string; data: string }>("voice-native-frame", (e) => {
+        nativeVideo[`${e.payload.user}|${e.payload.source}`] = e.payload.data;
+      });
+      void listen<{ user: string; source: string }>("voice-native-frame-end", (e) => {
+        delete nativeVideo[`${e.payload.user}|${e.payload.source}`];
+      });
+    }
   }
 }
 
@@ -150,6 +203,10 @@ export async function leaveVoice(): Promise<void> {
  *  it disables the local track (server-enforced mute is M-voice-4 / M-lk-2). */
 export function toggleMute(): void {
   voice.muted = !voice.muted;
+  if (nativeActive) {
+    void tauriInvoke("voice_native_set_muted", { muted: voice.muted });
+    return;
+  }
   if (room) {
     void room.localParticipant.setMicrophoneEnabled(!voice.muted);
     return;
@@ -256,18 +313,67 @@ export async function stopScreenShare(): Promise<void> {
   }
 }
 
+// ── Native voice screen share (desktop, Rust SDK) ──────────────────────────
+// The Tauri binary captures the chosen source (xcap) and publishes it to the
+// room via the native LiveKit SDK — no webview, no canvas. `voice.sharingScreen`
+// flips via the roster once the track is published.
+export async function startNativeVoiceScreenshare(
+  sourceId: string,
+  opts?: { fps?: number; maxWidth?: number },
+): Promise<void> {
+  try {
+    await tauriInvoke("voice_native_start_screenshare", {
+      id: sourceId,
+      fps: opts?.fps ?? 15,
+      maxWidth: opts?.maxWidth ?? 1280,
+    });
+  } catch {
+    voice.error = "couldn't start screen share";
+  }
+}
+export async function stopNativeVoiceScreenshare(): Promise<void> {
+  await tauriInvoke("voice_native_stop_screenshare").catch(() => {});
+}
+
+// ── Native voice camera (desktop, Rust SDK via nokhwa) ─────────────────────
+export async function listNativeCameras(): Promise<{ id: string; name: string }[]> {
+  try {
+    return await tauriInvoke("voice_native_list_cameras");
+  } catch {
+    return [];
+  }
+}
+export async function startNativeVoiceCamera(deviceId?: string): Promise<void> {
+  try {
+    await tauriInvoke("voice_native_start_camera", { deviceId: deviceId ?? null });
+  } catch (e) {
+    voice.error = String(e).toLowerCase().includes("permission")
+      ? "camera permission denied"
+      : "couldn't start the camera";
+  }
+}
+export async function stopNativeVoiceCamera(): Promise<void> {
+  await tauriInvoke("voice_native_stop_camera").catch(() => {});
+}
+
 // ── Native screen capture (desktop custom picker) ──────────────────────────
 // Frames arrive from Rust as base64 JPEG data URLs; we paint them to a canvas
 // and publish its captureStream to LiveKit. This is the path behind the
 // Discord-style in-app picker, where the user chose a specific screen/window.
 let nativeScreenTrack: MediaStreamTrack | null = null;
 
-/** Begin sharing a natively-captured source (`screen:<id>` / `window:<id>`). */
-export async function startNativeScreenShare(sourceId: string, fps = 15): Promise<void> {
+/** Begin sharing a natively-captured source (`screen:<id>` / `window:<id>`) at
+ *  the chosen frame rate + max resolution. */
+export async function startNativeScreenShare(
+  sourceId: string,
+  opts?: { fps?: number; maxWidth?: number },
+): Promise<void> {
   if (!room) {
     voice.error = "screen sharing needs the LiveKit voice backend";
     return;
   }
+  const fps = opts?.fps ?? 15;
+  const maxWidth = opts?.maxWidth ?? 1280;
   try {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
@@ -309,7 +415,7 @@ export async function startNativeScreenShare(sourceId: string, fps = 15): Promis
       paint();
     };
 
-    await tauriInvoke("start_capture", { id: sourceId, fps, onFrame: chan });
+    await tauriInvoke("start_capture", { id: sourceId, fps, maxWidth, onFrame: chan });
   } catch {
     voice.error = "couldn't start screen sharing";
   }
@@ -361,7 +467,12 @@ function applyDeafen(): void {
 }
 
 function teardown(): void {
-  // LiveKit path.
+  // Native (desktop) path — the LiveKit connection lives in the Tauri binary.
+  if (nativeActive) {
+    void tauriInvoke("voice_native_disconnect");
+    nativeActive = false;
+  }
+  // LiveKit path (webview / web).
   if (room) {
     void room.disconnect();
     room = null;
@@ -437,9 +548,32 @@ async function onVoiceEvent(e: WeftEvent): Promise<void> {
 async function onOffer(e: Extract<WeftEvent, { kind: "voice-offer" }>): Promise<void> {
   if (e.channel !== voice.channel) return;
   if (e.mode === "livekit") {
-    await onLiveKitOffer(e.channel, e.endpoint, e.token);
+    // Desktop joins the room natively (Rust SDK) so the mic is captured outside
+    // the webview — the only way to stop macOS ducking other apps. Web keeps the
+    // in-page JS SDK.
+    if (IS_DESKTOP) await onNativeLiveKit(e.channel, e.endpoint, e.token);
+    else await onLiveKitOffer(e.channel, e.endpoint, e.token);
   } else {
     await onWebrtcOffer(e.channel, e.endpoint);
+  }
+}
+
+/** Desktop LiveKit path: hand the connect off to the Tauri binary, which becomes
+ *  the sole participant. Roster + state arrive via the `voice-native-*` events
+ *  wired in initVoice. */
+async function onNativeLiveKit(channel: string, url: string | null, token: string): Promise<void> {
+  if (!url) {
+    voice.error = "voice server URL missing";
+    void leaveVoice();
+    return;
+  }
+  if (channel !== voice.channel) return;
+  nativeActive = true;
+  try {
+    await tauriInvoke("voice_native_connect", { url, token });
+  } catch {
+    voice.error = "voice connection failed";
+    void leaveVoice();
   }
 }
 
@@ -457,18 +591,19 @@ async function onLiveKitOffer(
   }
   try {
     const lk = await import("livekit-client");
-    // libwebrtc does AEC/NS/AGC; ask explicitly so desktop webviews enable them.
-    // `voiceIsolation` requests the browser's ML noise-cancelling path where
-    // supported (Chrome/WebKit) — a stronger "remove background noise" than the
-    // basic noiseSuppression filter.
+    // Any OS audio processing (echo cancel / noise suppress / auto-gain) makes
+    // WebKit route the mic through macOS's *voice-processing* audio unit, which
+    // ducks (lowers) every other app's audio while the mic is live. In the
+    // desktop webview we capture RAW (all processing off) so other apps stay at
+    // full volume — the only way to keep WebKit off that unit. Use headphones to
+    // avoid speaker echo. The browser build keeps processing (no ducking there).
     const r = new lk.Room({
       adaptiveStream: true,
       dynacast: true,
       audioCaptureDefaults: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        voiceIsolation: true,
+        echoCancellation: !IS_DESKTOP,
+        noiseSuppression: !IS_DESKTOP,
+        autoGainControl: !IS_DESKTOP,
       } as AudioCaptureOptions,
     });
     room = r;
@@ -592,10 +727,11 @@ async function onWebrtcOffer(channel: string, endpoint: string | null): Promise<
     // browsers, explicit here so desktop webviews enable them too).
     localStream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        voiceIsolation: true,
+        // See onLiveKitOffer: any OS audio processing routes through the voice-
+        // processing unit that ducks other apps, so desktop captures raw.
+        echoCancellation: !IS_DESKTOP,
+        noiseSuppression: !IS_DESKTOP,
+        autoGainControl: !IS_DESKTOP,
       } as MediaTrackConstraints,
       video: false,
     });

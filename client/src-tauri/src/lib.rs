@@ -4,6 +4,7 @@
 mod config;
 mod keys;
 mod screencap;
+mod voice_native;
 mod weft;
 
 use std::sync::Mutex;
@@ -774,6 +775,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Conn::default())
         .manage(screencap::CaptureState::default())
+        .manage(voice_native::NativeVoice::default())
         .setup(|app| {
             use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {
@@ -786,6 +788,14 @@ pub fn run() {
             screencap::capture_source_thumb,
             screencap::start_capture,
             screencap::stop_capture,
+            voice_native::voice_native_connect,
+            voice_native::voice_native_set_muted,
+            voice_native::voice_native_disconnect,
+            voice_native::voice_native_start_screenshare,
+            voice_native::voice_native_stop_screenshare,
+            voice_native::voice_native_list_cameras,
+            voice_native::voice_native_start_camera,
+            voice_native::voice_native_stop_camera,
             connect,
             client_config,
             disconnect,

@@ -11,10 +11,13 @@
     toggleMute,
     toggleDeafen,
     stopCamera,
+    stopNativeVoiceCamera,
     startScreenShare,
     stopScreenShare,
+    stopNativeVoiceScreenshare,
     attachVideo,
     detachVideo,
+    nativeVideoUrl,
     IS_DESKTOP,
     type VoiceParticipant,
   } from "$lib/voice.svelte";
@@ -22,15 +25,24 @@
   import Avatar from "$lib/components/Avatar.svelte";
 
   const app = getApp();
-  // Camera opens the in-app device picker. Screen share opens the Discord-style
-  // native picker on desktop, or the OS getDisplayMedia picker on the web.
-  const camClick = () => (voice.cameraOn ? stopCamera() : (voiceUI.cameraPicker = true));
-  const screenClick = () =>
-    voice.sharingScreen
-      ? stopScreenShare()
-      : IS_DESKTOP
-        ? (voiceUI.screenPicker = true)
-        : startScreenShare();
+  // Camera + screen share: desktop publishes natively (Rust SDK), web uses the
+  // webview (device picker / getDisplayMedia). Both open a picker when turning on.
+  const camClick = () => {
+    if (voice.cameraOn) {
+      IS_DESKTOP ? stopNativeVoiceCamera() : stopCamera();
+    } else {
+      voiceUI.cameraPicker = true;
+    }
+  };
+  const screenClick = () => {
+    if (voice.sharingScreen) {
+      IS_DESKTOP ? stopNativeVoiceScreenshare() : stopScreenShare();
+    } else if (IS_DESKTOP) {
+      voiceUI.screenPicker = true;
+    } else {
+      startScreenShare();
+    }
+  };
 
   const channel = $derived(app.active);
   const joined = $derived(voice.channel === channel);
@@ -77,8 +89,12 @@
       <div class="stage-shares" class:multi={shares.length > 1}>
         {#each shares as p (p.user)}
           <div class="share-tile">
-            <!-- svelte-ignore a11y_media_has_caption -->
-            <video autoplay playsinline use:bindVideo={{ user: p.user, source: "screen", tick: voice.mediaTick }}></video>
+            {#if IS_DESKTOP}
+              <img class="native-video" src={nativeVideoUrl(p.user, "screen") ?? ""} alt="" />
+            {:else}
+              <!-- svelte-ignore a11y_media_has_caption -->
+              <video autoplay playsinline use:bindVideo={{ user: p.user, source: "screen", tick: voice.mediaTick }}></video>
+            {/if}
             <span class="tile-label">{p.user}{p.self ? " (you)" : ""} · screen</span>
           </div>
         {/each}
@@ -88,7 +104,9 @@
     <div class="stage-grid" class:with-shares={shares.length > 0}>
       {#each tiles as p (p.user)}
         <div class="cam-tile" class:speaking={p.speaking}>
-          {#if p.cameraOn}
+          {#if p.cameraOn && IS_DESKTOP}
+            <img class="native-video" class:mirror={p.self} src={nativeVideoUrl(p.user, "camera") ?? ""} alt="" />
+          {:else if p.cameraOn}
             <!-- svelte-ignore a11y_media_has_caption -->
             <video
               class:mirror={p.self}
@@ -189,7 +207,8 @@
     overflow: hidden;
     border: 1px solid var(--border-hair-strong);
   }
-  .share-tile video {
+  .share-tile video,
+  .share-tile .native-video {
     width: 100%;
     height: 100%;
     object-fit: contain;
@@ -217,13 +236,15 @@
   .cam-tile.speaking {
     border-color: #43b581;
   }
-  .cam-tile video {
+  .cam-tile video,
+  .cam-tile .native-video {
     width: 100%;
     height: 100%;
     object-fit: cover;
     background: #000;
   }
-  .cam-tile video.mirror {
+  .cam-tile video.mirror,
+  .cam-tile .native-video.mirror {
     transform: scaleX(-1);
   }
   .tile-avatar {
