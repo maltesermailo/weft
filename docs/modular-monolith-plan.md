@@ -386,11 +386,15 @@ bot swarm) as part of P0 so every later phase has numbers.
    min-account-shard. Pick one, spec-note it, test it.
 6. **Whether P4 happens at all soon** — see §7; P0–P3 stand alone and are the
    recommended near-term slice.
-7. **Network-key rotation signaling** (P1 `weftd key rotate`): today rotation means
-   manual re-pinning by every peer. A signed rotation-announcement event over live
-   bridges (old key signs the new key, mirroring the §2.4 root-rotation shape) would
-   automate it — but it is a protocol addition and belongs in spec §18 before any
-   implementation.
+7. **Network-key rotation signaling** — **decided (2026-07-22): yes**, a signed
+   rotation announcement over live bridges: the old key signs the new key, mirroring
+   the §2.4 root-rotation shape. Needs the spec §18 → normative write-up before
+   implementation. Blast-radius inventory backing the decision: the only *persistent*
+   old-key-signed state is manifests held by peers (re-sent under the new key after
+   the announcement); capability tokens are minted on demand from unsigned store
+   records and attestations are re-issued per verified session, so all intra-network
+   artifacts self-heal within one expiry/refresh cycle. Namespace root keys are
+   user-held and independent — network rotation never touches them.
 
 ## Appendix: phase → test surface summary
 

@@ -1,5 +1,8 @@
 # WEFT client — feature roadmap (Discord-oriented)
 
+> Part of the unified [**`/ROADMAP.md`**](../ROADMAP.md) (the whole-project map).
+> This file is the detailed **client** roadmap it links to.
+
 Gap analysis of the Tauri/SvelteKit client against a Discord-class experience,
 mapped to WEFT protocol verbs. `[ ]` = not started · `[~]` = partial.
 Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
