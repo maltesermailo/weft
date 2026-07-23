@@ -2256,6 +2256,8 @@ async fn cross_network_group_message_home_mints_and_fans_out() {
         sender: "alice@peer.example".parse().unwrap(),
         msgid: None,
         body: "hi from alice".to_string(),
+        meta: weft_proto::MsgMeta::default(),
+        echo: None,
     })
     .serialize()
     .unwrap();
@@ -2276,6 +2278,493 @@ async fn cross_network_group_message_home_mints_and_fans_out() {
     assert!(relay2.line.contains("GROUP RELAY"), "{}", relay2.line);
     assert!(relay2.line.contains("id="), "{}", relay2.line);
     assert!(relay2.line.contains("hi from alice"), "{}", relay2.line);
+}
+
+#[tokio::test]
+async fn cross_network_group_membership_changes_propagate() {
+    // Add / remove / name changes re-sync the group to remote member networks.
+    let ctx = ctx(&["#general"]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let mut carol = ready(&ctx, "carol").await;
+
+    macro_rules! sync_line {
+        () => {{
+            loop {
+                let d = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                    .await
+                    .expect("delivery")
+                    .expect("sink open");
+                if d.line.contains("GROUP SYNC") {
+                    break d;
+                }
+            }
+        }};
+    }
+
+    carol.send("GROUP CREATE alice@peer.example");
+    let gid = match carol.recv().await.event {
+        Event::Group { id, .. } => id.to_string(),
+        e => panic!("expected GROUP, got {e:?}"),
+    };
+    let _created = sync_line!(); // the create sync
+
+    // Add dave@peer → a sync carrying dave (creates the group on peer if new).
+    // (We check the tunnelled sync, not carol's own events.)
+    carol.send(&format!("GROUP ADD {gid} dave@peer.example"));
+    let added = sync_line!();
+    assert_eq!(added.peer.as_str(), "peer.example");
+    assert!(added.line.contains("dave@peer.example"), "{}", added.line);
+    assert!(added.line.contains("alice@peer.example"), "{}", added.line);
+
+    // Rename → a sync carrying the name.
+    carol.send(&format!("GROUP NAME {gid} :weekend"));
+    let named = sync_line!();
+    assert!(named.line.contains("name=weekend"), "{}", named.line);
+
+    // Remove alice → a sync without alice, still delivered to peer (dave remains).
+    carol.send(&format!("GROUP REMOVE {gid} alice@peer.example"));
+    let removed = sync_line!();
+    assert_eq!(removed.peer.as_str(), "peer.example");
+    assert!(
+        removed.line.contains("dave@peer.example"),
+        "{}",
+        removed.line
+    );
+    assert!(
+        !removed.line.contains("alice@peer.example"),
+        "{}",
+        removed.line
+    );
+}
+
+#[tokio::test]
+async fn federated_group_sync_reconciles_and_parts_removed_member() {
+    // An inbound GROUP SYNC reconciles membership; a removed local member is told
+    // it left (its client drops the group).
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let mut carol = ready(&ctx, "carol").await;
+
+    const G: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    macro_rules! sync {
+        ($members:expr) => {{
+            let line = weft_proto::Request::new(weft_proto::Command::GroupSync {
+                group: G.parse().unwrap(),
+                creator: "alice@peer.example".parse().unwrap(),
+                name: None,
+                members: $members,
+            })
+            .serialize()
+            .unwrap();
+            bridge.send(&format!("FSESSION 1 CMD :{line}"));
+        }};
+    }
+    bridge.send("FSESSION 1 OPEN alice");
+
+    // Initial: carol is a member.
+    sync!(vec![
+        "alice@peer.example".parse().unwrap(),
+        "carol@test.example".parse().unwrap(),
+        "dave@peer.example".parse().unwrap(),
+    ]);
+    assert!(matches!(carol.recv().await.event, Event::Group { .. }));
+
+    // Re-sync WITHOUT carol → she's parted.
+    sync!(vec![
+        "alice@peer.example".parse().unwrap(),
+        "dave@peer.example".parse().unwrap(),
+    ]);
+    match carol.recv().await.event {
+        Event::GroupMember { user, action, .. } => {
+            assert_eq!(user.to_string(), "carol@test.example");
+            assert_eq!(action, MemberAction::Part);
+        }
+        e => panic!("expected GROUP-MEMBER part, got {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn spoke_poster_gets_a_labelled_echo() {
+    // A spoke poster's cross-network group message comes back from the home as
+    // their own **labelled** message (the §3.5 ack), via the echo-token round trip.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let mut carol = ready(&ctx, "carol").await;
+
+    // Group home = peer (sync it in).
+    const G: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    let sync = weft_proto::Request::new(weft_proto::Command::GroupSync {
+        group: G.parse().unwrap(),
+        creator: "alice@peer.example".parse().unwrap(),
+        name: None,
+        members: vec![
+            "alice@peer.example".parse().unwrap(),
+            "carol@test.example".parse().unwrap(),
+        ],
+    })
+    .serialize()
+    .unwrap();
+    bridge.send(&format!("FSESSION 1 CMD :{sync}"));
+    assert!(matches!(carol.recv().await.event, Event::Group { .. }));
+
+    // carol posts with a label → relayed to the home, carrying an echo token.
+    carol.send(&format!("@label=post MSG &{G} :hello"));
+    let relayed = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("relay")
+        .expect("sink open");
+    let weft_proto::Command::GroupRelay {
+        echo: Some(token),
+        msgid: None,
+        sender,
+        ..
+    } = weft_proto::Request::parse(&relayed.line).unwrap().command
+    else {
+        panic!(
+            "expected a spoke relay with an echo token, got {:?}",
+            relayed.line
+        );
+    };
+    assert_eq!(sender.to_string(), "carol@test.example");
+
+    // The home mints + echoes it back to us with the SAME token.
+    let echoed = weft_proto::Request::new(weft_proto::Command::GroupRelay {
+        group: G.parse().unwrap(),
+        sender: "carol@test.example".parse().unwrap(),
+        msgid: Some("peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap()),
+        body: "hello".to_string(),
+        meta: weft_proto::MsgMeta::default(),
+        echo: Some(token),
+    })
+    .serialize()
+    .unwrap();
+    bridge.send(&format!("FSESSION 1 CMD :{echoed}"));
+
+    // carol receives her message WITH the label — the ack correlates.
+    let reply = carol.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("post"));
+    match reply.event {
+        Event::Message(m) => assert_eq!(m.body, "hello"),
+        e => panic!("expected labelled message, got {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn spoke_requests_group_backfill_on_history() {
+    // A member (spoke) viewing a cross-network group's history asks the home to
+    // replay anything it missed while unreachable — carrying its cursor (`None`
+    // here, since it has no local messages yet).
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let mut carol = ready(&ctx, "carol").await;
+
+    const G: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    let sync = weft_proto::Request::new(weft_proto::Command::GroupSync {
+        group: G.parse().unwrap(),
+        creator: "alice@peer.example".parse().unwrap(),
+        name: None,
+        members: vec![
+            "alice@peer.example".parse().unwrap(),
+            "carol@test.example".parse().unwrap(),
+        ],
+    })
+    .serialize()
+    .unwrap();
+    bridge.send(&format!("FSESSION 1 CMD :{sync}"));
+    assert!(matches!(carol.recv().await.event, Event::Group { .. }));
+
+    // Viewing history triggers the catch-up request to the home.
+    carol.send(&format!("HISTORY &{G}"));
+    let req = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("backfill request")
+        .expect("sink open");
+    assert_eq!(req.peer.as_str(), "peer.example");
+    let weft_proto::Command::GroupBackfill { group, after } =
+        weft_proto::Request::parse(&req.line).unwrap().command
+    else {
+        panic!("expected GROUP BACKFILL, got {:?}", req.line);
+    };
+    assert_eq!(group.to_string(), format!("&{G}"));
+    assert!(after.is_none(), "no local messages yet ⇒ full replay");
+}
+
+#[tokio::test]
+async fn home_serves_group_backfill_replaying_missed_messages() {
+    // The home replays its group messages after a member's cursor as GROUP RELAY
+    // ingests — the recovery path for a member that was down when they were minted.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let mut carol = ready(&ctx, "carol").await;
+
+    macro_rules! sink_line {
+        ($needle:literal) => {{
+            loop {
+                let d = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                    .await
+                    .expect("delivery")
+                    .expect("sink open");
+                if d.line.contains($needle) {
+                    break d;
+                }
+            }
+        }};
+    }
+
+    // carol (home) creates a group with a remote member and posts two messages.
+    carol.send("GROUP CREATE bob@peer.example");
+    let gid = match carol.recv().await.event {
+        Event::Group { id, .. } => id.to_string(),
+        e => panic!("expected GROUP, got {e:?}"),
+    };
+    let _ = sink_line!("GROUP SYNC"); // membership propagation
+
+    carol.send(&format!("MSG {gid} :first"));
+    let m1 = match carol.recv().await.event {
+        Event::Message(m) => m.msgid.to_string(),
+        e => panic!("expected echo, got {e:?}"),
+    };
+    let _ = sink_line!("first"); // fanned out to peer
+    carol.send(&format!("MSG {gid} :second"));
+    assert!(matches!(carol.recv().await.event, Event::Message(_)));
+    let _ = sink_line!("second");
+
+    // The peer, catching bob up, asks for everything after the first message.
+    let bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN bob");
+    let backfill = weft_proto::Request::new(weft_proto::Command::GroupBackfill {
+        group: gid.parse().unwrap(),
+        after: Some(m1.parse().unwrap()),
+    })
+    .serialize()
+    .unwrap();
+    bridge.send(&format!("FSESSION 1 CMD :{backfill}"));
+
+    // The home replays the second message (only) as a home-minted GROUP RELAY.
+    let replay = sink_line!("GROUP RELAY");
+    assert_eq!(replay.peer.as_str(), "peer.example");
+    let weft_proto::Command::GroupRelay { body, msgid, .. } =
+        weft_proto::Request::parse(&replay.line).unwrap().command
+    else {
+        panic!("expected GROUP RELAY, got {:?}", replay.line);
+    };
+    assert_eq!(body, "second");
+    assert!(msgid.is_some(), "a replay carries the home-minted @id");
+}
+
+#[tokio::test]
+async fn cross_network_group_attachment_is_mirrored() {
+    // §11.8: ingesting a cross-network group message with a foreign attachment
+    // requests a mirror pull from the blob's origin network.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_mirror_sink(tx);
+    let mut carol = ready(&ctx, "carol").await;
+
+    const G: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    let sync = weft_proto::Request::new(weft_proto::Command::GroupSync {
+        group: G.parse().unwrap(),
+        creator: "alice@peer.example".parse().unwrap(),
+        name: None,
+        members: vec![
+            "alice@peer.example".parse().unwrap(),
+            "carol@test.example".parse().unwrap(),
+        ],
+    })
+    .serialize()
+    .unwrap();
+    bridge.send(&format!("FSESSION 1 CMD :{sync}"));
+    assert!(matches!(carol.recv().await.event, Event::Group { .. }));
+
+    // A home-minted message carrying an attachment hosted on a THIRD network.
+    let relay = weft_proto::Request::new(weft_proto::Command::GroupRelay {
+        group: G.parse().unwrap(),
+        sender: "alice@peer.example".parse().unwrap(),
+        msgid: Some("peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap()),
+        body: "look at this".to_string(),
+        meta: weft_proto::MsgMeta {
+            attachments: vec!["weft-media://media.example/deadbeef".to_string()],
+            ..Default::default()
+        },
+        echo: None,
+    })
+    .serialize()
+    .unwrap();
+    bridge.send(&format!("FSESSION 1 CMD :{relay}"));
+
+    // The blob is pulled from its origin network (media.example), not the peer.
+    let req = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("mirror request")
+        .expect("sink open");
+    assert_eq!(req.peer.as_str(), "media.example");
+    assert_eq!(req.hash, "deadbeef");
+
+    // And the message still reaches carol.
+    match carol.recv().await.event {
+        Event::Message(m) => {
+            assert_eq!(m.body, "look at this");
+            assert_eq!(
+                m.meta.attachments,
+                vec!["weft-media://media.example/deadbeef"]
+            );
+        }
+        e => panic!("expected message, got {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn cross_network_group_edit_home_applies_and_fans_out() {
+    // The home applies a group message mutation and fans the minted mutation out
+    // to every member network (§11.4 — mutations at the origin).
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let mut carol = ready(&ctx, "carol").await;
+
+    macro_rules! sink_line {
+        ($needle:literal) => {{
+            loop {
+                let d = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                    .await
+                    .expect("delivery")
+                    .expect("sink open");
+                if d.line.contains($needle) {
+                    break d;
+                }
+            }
+        }};
+    }
+
+    carol.send("GROUP CREATE alice@peer.example");
+    let gid = match carol.recv().await.event {
+        Event::Group { id, .. } => id.to_string(),
+        e => panic!("expected GROUP, got {e:?}"),
+    };
+
+    // Post (home mints), capture the msgid.
+    carol.send(&format!("MSG {gid} :orig"));
+    let mid = match carol.recv().await.event {
+        Event::Message(m) => m.msgid.to_string(),
+        e => panic!("expected echo, got {e:?}"),
+    };
+
+    // Edit → home applies (carol gets EDITED) + fans a GROUP MUT out to peer.
+    carol.send(&format!("EDIT {mid} :fixed"));
+    match carol.recv().await.event {
+        Event::Edited { body, target, .. } => {
+            assert_eq!(body, "fixed");
+            assert_eq!(target.to_string(), gid);
+        }
+        e => panic!("expected EDITED echo, got {e:?}"),
+    }
+    let muts = sink_line!("GROUP MUT");
+    assert_eq!(muts.peer.as_str(), "peer.example");
+    let weft_proto::Command::GroupMut {
+        op,
+        arg,
+        msgid,
+        root,
+        ..
+    } = weft_proto::Request::parse(&muts.line).unwrap().command
+    else {
+        panic!("expected GROUP MUT, got {:?}", muts.line);
+    };
+    assert_eq!(op, "edit");
+    assert_eq!(arg, "fixed");
+    assert!(msgid.is_some(), "home-minted mutation carries @id");
+    assert_eq!(root.to_string(), mid);
+}
+
+#[tokio::test]
+async fn cross_network_group_mutation_spoke_ingests_and_relays() {
+    // Spoke side: a home-minted EDITED is ingested + delivered; a local author's
+    // edit is relayed to the home (no @id).
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let mut carol = ready(&ctx, "carol").await;
+
+    const G: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    macro_rules! cmd {
+        ($c:expr) => {{
+            let line = weft_proto::Request::new($c).serialize().unwrap();
+            bridge.send(&format!("FSESSION 1 CMD :{line}"));
+        }};
+    }
+    bridge.send("FSESSION 1 OPEN alice");
+
+    // Sync the group (home = peer, via alice@peer).
+    cmd!(weft_proto::Command::GroupSync {
+        group: G.parse().unwrap(),
+        creator: "alice@peer.example".parse().unwrap(),
+        name: None,
+        members: vec![
+            "alice@peer.example".parse().unwrap(),
+            "carol@test.example".parse().unwrap(),
+        ],
+    });
+    assert!(matches!(carol.recv().await.event, Event::Group { .. }));
+
+    // Home minted a message authored by carol (relayed earlier) → ingest.
+    const MID: &str = "peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB0";
+    cmd!(weft_proto::Command::GroupRelay {
+        group: G.parse().unwrap(),
+        sender: "carol@test.example".parse().unwrap(),
+        msgid: Some(MID.parse().unwrap()),
+        body: "orig".to_string(),
+        meta: weft_proto::MsgMeta::default(),
+        echo: None,
+    });
+    assert!(matches!(carol.recv().await.event, Event::Message(_)));
+
+    // Home minted an EDIT of it → ingest → carol sees EDITED.
+    cmd!(weft_proto::Command::GroupMut {
+        group: G.parse().unwrap(),
+        sender: "carol@test.example".parse().unwrap(),
+        root: MID.parse().unwrap(),
+        op: "edit".to_string(),
+        arg: "home-fixed".to_string(),
+        msgid: Some("peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB4".parse().unwrap()),
+    });
+    match carol.recv().await.event {
+        Event::Edited { body, .. } => assert_eq!(body, "home-fixed"),
+        e => panic!("expected ingested EDITED, got {e:?}"),
+    }
+
+    // carol (the author) edits it herself → we relay to the home (no @id).
+    carol.send(&format!("EDIT {MID} :carol-fixed"));
+    let relayed = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("relay")
+        .expect("sink open");
+    assert_eq!(relayed.peer.as_str(), "peer.example");
+    let weft_proto::Command::GroupMut { op, arg, msgid, .. } =
+        weft_proto::Request::parse(&relayed.line).unwrap().command
+    else {
+        panic!("expected GROUP MUT relay, got {:?}", relayed.line);
+    };
+    assert_eq!(op, "edit");
+    assert_eq!(arg, "carol-fixed");
+    assert!(msgid.is_none(), "a spoke's relay carries no @id");
 }
 
 #[tokio::test]
@@ -2312,12 +2801,19 @@ async fn cross_network_group_message_spoke_ingests() {
         e => panic!("expected GROUP, got {e:?}"),
     }
 
-    // peer (home) sends a minted message → we ingest + deliver to carol.
+    // peer (home) sends a minted message (a threaded reply) → we ingest + deliver
+    // to carol, meta intact.
     let relay = weft_proto::Request::new(weft_proto::Command::GroupRelay {
         group: G.parse().unwrap(),
         sender: "alice@peer.example".parse().unwrap(),
         msgid: Some("peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap()),
         body: "minted upstream".to_string(),
+        meta: weft_proto::MsgMeta {
+            reply_to: Some("peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB2".parse().unwrap()),
+            thread: Some("peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB2".parse().unwrap()),
+            ..Default::default()
+        },
+        echo: None,
     })
     .serialize()
     .unwrap();
@@ -2331,6 +2827,12 @@ async fn cross_network_group_message_spoke_ingests() {
                 m.msgid.to_string(),
                 "peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB0"
             );
+            // Reply + thread meta crossed the network boundary.
+            assert_eq!(
+                m.meta.reply_to.map(|r| r.to_string()).as_deref(),
+                Some("peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB2")
+            );
+            assert!(m.meta.thread.is_some());
         }
         e => panic!("expected ingested message, got {e:?}"),
     }
@@ -3685,7 +4187,6 @@ async fn bridge_ingest_mirrors_foreign_attachments() {
         .expect("sink open");
     assert_eq!(req.peer.as_str(), "peer.example");
     assert_eq!(req.hash, hash);
-    assert_eq!(req.channel.as_str(), "#general");
 
     // And the reference was recorded so a local member is gated + can fetch it.
     let scopes = ctx.media_refs.blob_scopes(&hash).await.unwrap();

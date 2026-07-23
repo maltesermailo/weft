@@ -32,6 +32,56 @@ pub(crate) struct DirectEvent {
     pub event: Event,
 }
 
+/// A group DM message mutation (edit / delete / react) — the operation, shared by
+/// the same-network and cross-network (federated) paths.
+#[derive(Debug, Clone)]
+pub(crate) enum GroupMutKind {
+    Edit(String),
+    Delete,
+    React { emoji: String, add: bool },
+}
+
+impl GroupMutKind {
+    /// The stored `EventKind` for this mutation.
+    fn event_kind(&self) -> EventKind {
+        match self.clone() {
+            GroupMutKind::Edit(body) => EventKind::Edit { body },
+            GroupMutKind::Delete => EventKind::Delete,
+            GroupMutKind::React { emoji, add } => EventKind::React { emoji, add },
+        }
+    }
+
+    /// The wire event this mutation produces for a group. `mut_msgid` is the
+    /// mutation's own (origin-minted) id; `root` is the message it targets.
+    fn to_event(&self, group: GroupId, sender: UserRef, mut_msgid: MsgId, root: MsgId) -> Event {
+        match self.clone() {
+            GroupMutKind::Edit(body) => Event::Edited {
+                target: Target::Group(group),
+                user: sender,
+                msgid: mut_msgid,
+                edit_of: root,
+                body,
+            },
+            GroupMutKind::Delete => Event::Deleted {
+                target: Target::Group(group),
+                msgid: root,
+                by: Some(sender),
+            },
+            GroupMutKind::React { emoji, add } => Event::Reaction {
+                target: Target::Group(group),
+                msgid: root,
+                emoji,
+                op: if add {
+                    ReactionOp::Add
+                } else {
+                    ReactionOp::Remove
+                },
+                by: sender,
+            },
+        }
+    }
+}
+
 /// Cheap handle; held by `ServerCtx`.
 #[derive(Debug, Clone)]
 pub(crate) struct Directory {
@@ -96,16 +146,41 @@ enum Cmd {
         group: GroupId,
         members: Vec<Account>,
         body: String,
+        meta: MsgMeta,
         reply: oneshot::Sender<MessageEvent>,
     },
     /// A **member** network ingests a home-minted group message (origin msgid
     /// intact, invariant 2): persist under `Scope::Group` + deliver to local
-    /// members. No minting.
+    /// members. No minting. `origin` is the spoke poster's session when this is
+    /// their own echo (so its labelled ack attaches), else `SessionId::MAX`.
     GroupIngest {
+        origin: SessionId,
         sender: UserRef,
         group: GroupId,
         msgid: MsgId,
         body: String,
+        meta: MsgMeta,
+        members: Vec<Account>,
+    },
+    /// The **home** mints a group message mutation (edit/delete/react): persist +
+    /// deliver to local members, and reply with the wire event + the mutation's
+    /// own msgid, for fan-out to other member networks.
+    GroupMutate {
+        origin: SessionId,
+        sender: UserRef,
+        group: GroupId,
+        root: MsgId,
+        kind: GroupMutKind,
+        members: Vec<Account>,
+        reply: oneshot::Sender<(Event, MsgId)>,
+    },
+    /// A **member** network ingests a home-minted mutation (origin `msgid` intact).
+    GroupMutIngest {
+        sender: UserRef,
+        group: GroupId,
+        root: MsgId,
+        msgid: MsgId,
+        kind: GroupMutKind,
         members: Vec<Account>,
     },
     /// DM mutations, fully pre-validated by the session (participant,
@@ -127,33 +202,6 @@ enum Cmd {
         origin: SessionId,
         from: Account,
         peer: Account,
-        root: MsgId,
-        emoji: String,
-        add: bool,
-    },
-    /// Group DM mutations (social layer), fully pre-validated by the session
-    /// (member, author for edit/delete, tombstone). Persisted under
-    /// `Scope::Group` and fanned out to every local member (incl. the sender).
-    GroupEdit {
-        origin: SessionId,
-        from: Account,
-        group: GroupId,
-        members: Vec<Account>,
-        root: MsgId,
-        body: String,
-    },
-    GroupDelete {
-        origin: SessionId,
-        from: Account,
-        group: GroupId,
-        members: Vec<Account>,
-        root: MsgId,
-    },
-    GroupReact {
-        origin: SessionId,
-        from: Account,
-        group: GroupId,
-        members: Vec<Account>,
         root: MsgId,
         emoji: String,
         add: bool,
@@ -267,6 +315,7 @@ impl Directory {
 
     /// Home-mint a cross-network group message; returns the minted `MessageEvent`
     /// for fan-out (`None` if the directory actor is gone).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn group_mint(
         &self,
         origin: SessionId,
@@ -274,6 +323,7 @@ impl Directory {
         group: GroupId,
         members: Vec<Account>,
         body: String,
+        meta: MsgMeta,
     ) -> Option<MessageEvent> {
         let (tx, rx) = oneshot::channel();
         self.inbox
@@ -283,6 +333,7 @@ impl Directory {
                 group,
                 members,
                 body,
+                meta,
                 reply: tx,
             })
             .await
@@ -291,21 +342,76 @@ impl Directory {
     }
 
     /// Ingest a home-minted group message on a member network.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn group_ingest(
         &self,
+        origin: SessionId,
         sender: UserRef,
         group: GroupId,
         msgid: MsgId,
         body: String,
+        meta: MsgMeta,
         members: Vec<Account>,
     ) {
         let _ = self
             .inbox
             .send(Cmd::GroupIngest {
+                origin,
                 sender,
                 group,
                 msgid,
                 body,
+                meta,
+                members,
+            })
+            .await;
+    }
+
+    /// Home-mint a group mutation; returns `(wire event, mutation msgid)` for
+    /// fan-out.
+    pub(crate) async fn group_mutate(
+        &self,
+        origin: SessionId,
+        sender: UserRef,
+        group: GroupId,
+        root: MsgId,
+        kind: GroupMutKind,
+        members: Vec<Account>,
+    ) -> Option<(Event, MsgId)> {
+        let (tx, rx) = oneshot::channel();
+        self.inbox
+            .send(Cmd::GroupMutate {
+                origin,
+                sender,
+                group,
+                root,
+                kind,
+                members,
+                reply: tx,
+            })
+            .await
+            .ok()?;
+        rx.await.ok()
+    }
+
+    /// Ingest a home-minted group mutation on a member network.
+    pub(crate) async fn group_mut_ingest(
+        &self,
+        sender: UserRef,
+        group: GroupId,
+        root: MsgId,
+        msgid: MsgId,
+        kind: GroupMutKind,
+        members: Vec<Account>,
+    ) {
+        let _ = self
+            .inbox
+            .send(Cmd::GroupMutIngest {
+                sender,
+                group,
+                root,
+                msgid,
+                kind,
                 members,
             })
             .await;
@@ -391,73 +497,6 @@ impl Directory {
                 origin,
                 from,
                 peer,
-                root,
-                emoji,
-                add,
-            })
-            .await;
-    }
-
-    pub(crate) async fn group_edit(
-        &self,
-        origin: SessionId,
-        from: Account,
-        group: GroupId,
-        members: Vec<Account>,
-        root: MsgId,
-        body: String,
-    ) {
-        let _ = self
-            .inbox
-            .send(Cmd::GroupEdit {
-                origin,
-                from,
-                group,
-                members,
-                root,
-                body,
-            })
-            .await;
-    }
-
-    pub(crate) async fn group_delete(
-        &self,
-        origin: SessionId,
-        from: Account,
-        group: GroupId,
-        members: Vec<Account>,
-        root: MsgId,
-    ) {
-        let _ = self
-            .inbox
-            .send(Cmd::GroupDelete {
-                origin,
-                from,
-                group,
-                members,
-                root,
-            })
-            .await;
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn group_react(
-        &self,
-        origin: SessionId,
-        from: Account,
-        group: GroupId,
-        members: Vec<Account>,
-        root: MsgId,
-        emoji: String,
-        add: bool,
-    ) {
-        let _ = self
-            .inbox
-            .send(Cmd::GroupReact {
-                origin,
-                from,
-                group,
-                members,
                 root,
                 emoji,
                 add,
@@ -654,6 +693,7 @@ impl Actor {
                 group,
                 members,
                 body,
+                meta,
                 reply,
             } => {
                 let msgid = self.mint();
@@ -662,7 +702,7 @@ impl Actor {
                     sender: sender.clone(),
                     msgid: msgid.clone(),
                     body: body.clone(),
-                    meta: MsgMeta::default(),
+                    meta: meta.clone(),
                     edited: None,
                     edited_at: None,
                 };
@@ -671,20 +711,19 @@ impl Actor {
                     msgid: msgid.clone(),
                     root: msgid,
                     sender,
-                    kind: EventKind::Message {
-                        body,
-                        meta: MsgMeta::default(),
-                    },
+                    kind: EventKind::Message { body, meta },
                 })
                 .await;
                 self.deliver_many(&members, origin, Event::Message(Box::new(msg.clone())));
                 let _ = reply.send(msg);
             }
             Cmd::GroupIngest {
+                origin,
                 sender,
                 group,
                 msgid,
                 body,
+                meta,
                 members,
             } => {
                 self.persist(EventRecord {
@@ -694,7 +733,7 @@ impl Actor {
                     sender: sender.clone(),
                     kind: EventKind::Message {
                         body: body.clone(),
-                        meta: MsgMeta::default(),
+                        meta: meta.clone(),
                     },
                 })
                 .await;
@@ -703,12 +742,54 @@ impl Actor {
                     sender,
                     msgid,
                     body,
-                    meta: MsgMeta::default(),
+                    meta,
                     edited: None,
                     edited_at: None,
                 }));
-                // `SessionId::MAX` origin ⇒ no local session is skipped (this is a
-                // fresh ingest, not an echo).
+                // `origin` = the spoke poster's session for their own echo (its
+                // pending label attaches), else `SessionId::MAX` (a fresh ingest,
+                // no session skipped/labelled).
+                self.deliver_many(&members, origin, event);
+            }
+            Cmd::GroupMutate {
+                origin,
+                sender,
+                group,
+                root,
+                kind,
+                members,
+                reply,
+            } => {
+                let mut_msgid = self.mint();
+                self.persist(EventRecord {
+                    scope: Scope::Group(group),
+                    msgid: mut_msgid.clone(),
+                    root: root.clone(),
+                    sender: sender.clone(),
+                    kind: kind.event_kind(),
+                })
+                .await;
+                let event = kind.to_event(group, sender, mut_msgid.clone(), root);
+                self.deliver_many(&members, origin, event.clone());
+                let _ = reply.send((event, mut_msgid));
+            }
+            Cmd::GroupMutIngest {
+                sender,
+                group,
+                root,
+                msgid,
+                kind,
+                members,
+            } => {
+                self.persist(EventRecord {
+                    scope: Scope::Group(group),
+                    msgid: msgid.clone(),
+                    root: root.clone(),
+                    sender: sender.clone(),
+                    kind: kind.event_kind(),
+                })
+                .await;
+                let event = kind.to_event(group, sender, msgid, root);
                 self.deliver_many(&members, u64::MAX, event);
             }
             Cmd::Edit {
@@ -790,89 +871,6 @@ impl Actor {
                     by: self.user(&from),
                 };
                 self.deliver(&from, &peer, origin, event);
-            }
-            Cmd::GroupEdit {
-                origin,
-                from,
-                group,
-                members,
-                root,
-                body,
-            } => {
-                let msgid = self.mint();
-                self.persist(EventRecord {
-                    scope: Scope::Group(group),
-                    msgid: msgid.clone(),
-                    root: root.clone(),
-                    sender: self.user(&from),
-                    kind: EventKind::Edit { body: body.clone() },
-                })
-                .await;
-                let event = Event::Edited {
-                    target: Target::Group(group),
-                    user: self.user(&from),
-                    msgid,
-                    edit_of: root,
-                    body,
-                };
-                self.deliver_many(&members, origin, event);
-            }
-            Cmd::GroupDelete {
-                origin,
-                from,
-                group,
-                members,
-                root,
-            } => {
-                let msgid = self.mint();
-                self.persist(EventRecord {
-                    scope: Scope::Group(group),
-                    msgid,
-                    root: root.clone(),
-                    sender: self.user(&from),
-                    kind: EventKind::Delete,
-                })
-                .await;
-                let event = Event::Deleted {
-                    target: Target::Group(group),
-                    msgid: root,
-                    by: Some(self.user(&from)),
-                };
-                self.deliver_many(&members, origin, event);
-            }
-            Cmd::GroupReact {
-                origin,
-                from,
-                group,
-                members,
-                root,
-                emoji,
-                add,
-            } => {
-                let msgid = self.mint();
-                self.persist(EventRecord {
-                    scope: Scope::Group(group),
-                    msgid,
-                    root: root.clone(),
-                    sender: self.user(&from),
-                    kind: EventKind::React {
-                        emoji: emoji.clone(),
-                        add,
-                    },
-                })
-                .await;
-                let event = Event::Reaction {
-                    target: Target::Group(group),
-                    msgid: root,
-                    emoji,
-                    op: if add {
-                        ReactionOp::Add
-                    } else {
-                        ReactionOp::Remove
-                    },
-                    by: self.user(&from),
-                };
-                self.deliver_many(&members, origin, event);
             }
             Cmd::MarkSync {
                 origin,

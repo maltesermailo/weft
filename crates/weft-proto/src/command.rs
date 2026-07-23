@@ -628,18 +628,50 @@ pub enum Command {
         name: Option<String>,
         members: Vec<UserRef>,
     },
-    /// `@id=<msgid> GROUP RELAY <&group> <sender@net> :<body>` — a
-    /// **federation-internal** cross-network group message. The group's **home**
-    /// network (`creator`'s network) is the single ULID writer (§9.1). Two forms:
-    /// `@id` **absent** = a spoke relaying a member's post to the home (the home
-    /// mints + fans out); `@id` **present** = a home-minted message for a member
-    /// network to ingest (persist under `Scope::Group` with the origin msgid
-    /// intact, invariant 2) and deliver to its local members. Never from a client.
+    /// `@id=<msgid> @reply-to=… @thread=… @attach.N=… GROUP RELAY <&group>
+    /// <sender@net> :<body>` — a **federation-internal** cross-network group
+    /// message. The group's **home** network (`creator`'s network) is the single
+    /// ULID writer (§9.1). Two forms: `@id` **absent** = a spoke relaying a
+    /// member's post to the home (the home mints + fans out); `@id` **present** =
+    /// a home-minted message for a member network to ingest (persist under
+    /// `Scope::Group` with the origin msgid intact, invariant 2) and deliver to
+    /// its local members. `meta` carries replies/threads/attachments (§9.3). Never
+    /// from a client.
     GroupRelay {
         group: GroupId,
         sender: UserRef,
         msgid: Option<MsgId>,
         body: String,
+        meta: MsgMeta,
+        /// An opaque correlation token so a **spoke poster** gets a labelled echo:
+        /// set on the spoke→home relay, echoed back by the home only in the copy
+        /// destined for the sender's network, which delivers it as the poster's
+        /// own (labelled) message.
+        echo: Option<String>,
+    },
+    /// `@id=<msgid> GROUP MUT <&group> <sender@net> <root> <op> :<arg>` — a
+    /// **federation-internal** cross-network group message **mutation** (§11.4:
+    /// honored at the msgid's origin = the group's home). `op` is `edit` /
+    /// `delete` / `react-add` / `react-remove`; `arg` is the new body (edit) or
+    /// the emoji (react). `@id` **absent** = a spoke relaying a member's mutation
+    /// to the home (the home applies + fans out); `@id` **present** = a
+    /// home-minted mutation for a member network to ingest. Never from a client.
+    GroupMut {
+        group: GroupId,
+        sender: UserRef,
+        root: MsgId,
+        op: String,
+        arg: String,
+        msgid: Option<MsgId>,
+    },
+    /// `@after=<msgid> GROUP BACKFILL <&group>` — a **federation-internal** catch-up
+    /// request sent by a member network to the group's **home**: replay every
+    /// group message after `after` (the requester's latest, or all if absent), so
+    /// messages missed while the member was unreachable aren't lost. The home
+    /// answers with `GROUP RELAY` ingests. Never sent by a client.
+    GroupBackfill {
+        group: GroupId,
+        after: Option<MsgId>,
     },
     /// `CALL <user@net>` (social layer) — place a 1:1 friend call; the callee's
     /// sessions ring (`CALL-RING`). On accept both join an ad-hoc voice room.
@@ -1803,6 +1835,20 @@ impl Command {
                         sender: args.req("sender")?.parse()?,
                         msgid: line.tags.get("id").map(|v| v.parse()).transpose()?,
                         body: line.trailing.clone().unwrap_or_default(),
+                        meta: MsgMeta::from_tags(&line.tags)?,
+                        echo: line.tags.get("echo").filter(|v| !v.is_empty()).cloned(),
+                    }),
+                    "MUT" => Ok(Command::GroupMut {
+                        group: args.req("group")?.parse()?,
+                        sender: args.req("sender")?.parse()?,
+                        root: args.req("root")?.parse()?,
+                        op: args.req("op")?.to_ascii_lowercase(),
+                        arg: line.trailing.clone().unwrap_or_default(),
+                        msgid: line.tags.get("id").map(|v| v.parse()).transpose()?,
+                    }),
+                    "BACKFILL" => Ok(Command::GroupBackfill {
+                        group: args.req("group")?.parse()?,
+                        after: line.tags.get("after").map(|v| v.parse()).transpose()?,
                     }),
                     _ => Err(ParseError::BadParam {
                         verb: "GROUP",
@@ -2598,14 +2644,53 @@ impl Command {
                 sender,
                 msgid,
                 body,
+                meta,
+                echo,
+            } => {
+                if let Some(id) = msgid {
+                    tags.insert("id".to_string(), id.to_string());
+                }
+                if let Some(echo) = echo {
+                    tags.insert("echo".to_string(), echo.clone());
+                }
+                meta.write_tags(&mut tags)?;
+                (
+                    "GROUP",
+                    vec!["RELAY".to_string(), group.to_string(), sender.to_string()],
+                    Some(body.clone()),
+                )
+            }
+            Command::GroupMut {
+                group,
+                sender,
+                root,
+                op,
+                arg,
+                msgid,
             } => {
                 if let Some(id) = msgid {
                     tags.insert("id".to_string(), id.to_string());
                 }
                 (
                     "GROUP",
-                    vec!["RELAY".to_string(), group.to_string(), sender.to_string()],
-                    Some(body.clone()),
+                    vec![
+                        "MUT".to_string(),
+                        group.to_string(),
+                        sender.to_string(),
+                        root.to_string(),
+                        op.clone(),
+                    ],
+                    Some(arg.clone()).filter(|a| !a.is_empty()),
+                )
+            }
+            Command::GroupBackfill { group, after } => {
+                if let Some(after) = after {
+                    tags.insert("after".to_string(), after.to_string());
+                }
+                (
+                    "GROUP",
+                    vec!["BACKFILL".to_string(), group.to_string()],
+                    None,
                 )
             }
             Command::Groups => ("GROUPS", vec![], None),
@@ -3848,19 +3933,57 @@ mod tests {
                 "carol@peer.example".parse().unwrap(),
             ],
         }));
-        // Relay: a spoke's post (no id) and a home-minted ingest (id present).
+        // Relay: a spoke's post (no id) and a home-minted ingest (id + meta).
         round_trip(&Request::new(Command::GroupRelay {
             group: G.parse().unwrap(),
             sender: "carol@peer.example".parse().unwrap(),
             msgid: None,
             body: "hi from a spoke".to_string(),
+            meta: MsgMeta::default(),
+            echo: None,
         }));
         round_trip(&Request::new(Command::GroupRelay {
             group: G.parse().unwrap(),
             sender: "carol@peer.example".parse().unwrap(),
             msgid: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap()),
             body: "minted".to_string(),
+            meta: MsgMeta {
+                reply_to: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap()),
+                thread: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FB1".parse().unwrap()),
+                attachments: vec!["weft-media://home.example/abc".to_string()],
+                ..Default::default()
+            },
+            echo: Some("01ARZ3NDEKTSV4RRFFQ69G5FB9".to_string()),
         }));
+        round_trip(&Request::new(Command::GroupBackfill {
+            group: G.parse().unwrap(),
+            after: None,
+        }));
+        round_trip(&Request::new(Command::GroupBackfill {
+            group: G.parse().unwrap(),
+            after: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap()),
+        }));
+        const R: &str = "home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        for (op, arg) in [
+            ("edit", "fixed"),
+            ("delete", ""),
+            ("react-add", "🦀"),
+            ("react-remove", "🦀"),
+        ] {
+            for msgid in [
+                None,
+                Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FB3".parse().unwrap()),
+            ] {
+                round_trip(&Request::new(Command::GroupMut {
+                    group: G.parse().unwrap(),
+                    sender: "carol@peer.example".parse().unwrap(),
+                    root: R.parse().unwrap(),
+                    op: op.to_string(),
+                    arg: arg.to_string(),
+                    msgid,
+                }));
+            }
+        }
         // A group target is `&<ulid>`; MSG to it round-trips.
         round_trip(&Request::new(Command::Msg {
             target: G.parse().unwrap(),

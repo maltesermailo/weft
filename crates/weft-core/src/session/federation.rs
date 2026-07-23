@@ -1494,7 +1494,29 @@ impl<S: ControlStream> Session<S> {
                 sender,
                 msgid,
                 body,
-            } => self.on_group_relay(label, group, sender, msgid, body).await,
+                meta,
+                echo,
+            } => {
+                self.on_group_relay(label, group, sender, msgid, body, meta, echo)
+                    .await
+            }
+            Command::GroupMut {
+                group,
+                sender,
+                root,
+                op,
+                arg,
+                msgid,
+            } => {
+                self.on_group_mut(label, group, sender, root, op, arg, msgid)
+                    .await
+            }
+            // A member network catching up after downtime: replay the group's
+            // messages after its cursor back to it (we're the home = single writer).
+            Command::GroupBackfill { group, after } => match caller {
+                Some(caller) => self.on_group_backfill(label, caller, group, after).await,
+                None => Ok(Flow::Continue),
+            },
             _ => {
                 self.unsupported(label, "not yet available over a federation session")
                     .await
@@ -1700,12 +1722,48 @@ impl ServerCtx {
         )
         .await;
         // Pull the avatar bytes so we can serve them locally (content-addressed,
-        // BLAKE3-verified). The mirror consumer ignores the channel field.
+        // BLAKE3-verified).
         if let Some(hash) = avatar {
             self.request_mirror(crate::MirrorRequest {
                 peer: peer.clone(),
                 hash: hash.clone(),
-                channel: "#avatars".parse().expect("valid placeholder channel"),
+            });
+        }
+    }
+
+    /// §11.8 for a **cross-network group** message: mirror each foreign
+    /// `weft-media://` attachment from the blob's origin network so this network's
+    /// group members can fetch it (content-addressed, BLAKE3-verified). The ref is
+    /// recorded under `Scope::Group` for access gating.
+    pub(crate) async fn mirror_group_attachments(
+        &self,
+        group: weft_proto::GroupId,
+        meta: &MsgMeta,
+        msgid: &MsgId,
+    ) {
+        let our = self.network_name();
+        for uri in &meta.attachments {
+            let Some((origin, hash)) = crate::media::parse_media_uri(uri) else {
+                continue;
+            };
+            if origin == our {
+                continue; // local blob, already home
+            }
+            let Ok(origin_net) = origin.parse::<NetworkName>() else {
+                continue;
+            };
+            let hash = hash.to_string();
+            let _ = self
+                .media_refs
+                .add_refs(
+                    &weft_store::Scope::Group(group),
+                    msgid,
+                    std::slice::from_ref(&hash),
+                )
+                .await;
+            self.request_mirror(crate::MirrorRequest {
+                peer: origin_net,
+                hash,
             });
         }
     }
@@ -1741,7 +1799,6 @@ impl ServerCtx {
             self.request_mirror(crate::MirrorRequest {
                 peer: peer.clone(),
                 hash,
-                channel: channel.clone(),
             });
         }
     }

@@ -62,6 +62,11 @@ impl std::fmt::Display for Actor {
 /// lifetimes stay short-ish; re-auth refreshes well before expiry).
 const ATTESTATION_TTL_SECS: u64 = 30 * 24 * 3600;
 
+/// How long a cross-network group post's echo token is kept before it's GC'd —
+/// a home that hasn't echoed the message back within this window is treated as
+/// unreachable (the message still arrives via backfill, just without the label).
+const GROUP_ECHO_TTL_MS: u64 = 60_000;
+
 /// Static identity/config of this network, from weftd's config file.
 #[derive(Debug, Clone)]
 pub struct ServerInfo {
@@ -224,6 +229,11 @@ pub struct ServerCtx {
     /// network's room for the call + the local accounts currently in it. Members
     /// join/leave; the entry is dropped when the last local participant leaves.
     group_calls: std::sync::Mutex<HashMap<GroupId, GroupCallInfo>>,
+    /// Cross-network group posts awaiting their home-minted echo: correlation
+    /// token → (the spoke poster's session, when it was registered). Swept on
+    /// insert so a token whose echo never comes back (the home was unreachable)
+    /// can't leak.
+    group_echoes: std::sync::Mutex<HashMap<String, (u64, u64)>>,
     /// §16 M-lk-3b federated voice: the media-relay driver weftd installs (a
     /// libwebrtc `livekit`-SDK relay, or the no-op default). `None` = no relaying.
     voice_relay: std::sync::OnceLock<Arc<dyn crate::voice::VoiceRelay>>,
@@ -246,8 +256,6 @@ pub struct MirrorRequest {
     pub peer: NetworkName,
     /// The BLAKE3 content hash to fetch + verify.
     pub hash: String,
-    /// The channel the reference arrived in (for receiver-side blocklist/policy).
-    pub channel: ChannelName,
 }
 
 /// §11.7 a federated backfill to pull, handed core→weftd: the peer offered a
@@ -482,6 +490,7 @@ impl ServerCtx {
             voice_rooms: std::sync::Mutex::new(HashMap::new()),
             calls: std::sync::Mutex::new(HashMap::new()),
             group_calls: std::sync::Mutex::new(HashMap::new()),
+            group_echoes: std::sync::Mutex::new(HashMap::new()),
             voice_relay: std::sync::OnceLock::new(),
             voice_relays: std::sync::Mutex::new(HashMap::new()),
             mailer: std::sync::OnceLock::new(),
@@ -894,6 +903,25 @@ impl ServerCtx {
             empty,
             host_net,
         })
+    }
+
+    /// A spoke poster relayed a cross-network group post: remember its session
+    /// against a correlation `token`, so the home's echoed copy can be delivered
+    /// as that session's own (labelled) message. Expired tokens (echo never came
+    /// back within [`GROUP_ECHO_TTL_MS`]) are swept here.
+    pub(crate) fn register_group_echo(&self, token: String, session: u64, now_ms: u64) {
+        let mut echoes = self.group_echoes.lock().expect("group echoes lock");
+        echoes.retain(|_, (_, created)| now_ms.saturating_sub(*created) < GROUP_ECHO_TTL_MS);
+        echoes.insert(token, (session, now_ms));
+    }
+
+    /// Consume a group-echo correlation token → the awaiting poster's session.
+    pub(crate) fn take_group_echo(&self, token: &str) -> Option<u64> {
+        self.group_echoes
+            .lock()
+            .expect("group echoes lock")
+            .remove(token)
+            .map(|(session, _)| session)
     }
 
     /// The local accounts currently in `group`'s call (for the roster snapshot).

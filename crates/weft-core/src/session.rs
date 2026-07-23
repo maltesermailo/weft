@@ -402,11 +402,18 @@ enum MessageRoute {
         peer: Account,
         root: MsgId,
     },
-    /// Group DM: the directory is the single writer (like a DM), but the
-    /// mutation fans out to every local member, resolved here.
+    /// Group DM whose **home is this network**: the directory mints the mutation
+    /// and it fans out to local members (+ remote member networks, resolved when
+    /// applied).
     Group {
         group: GroupId,
-        members: Vec<Account>,
+        root: MsgId,
+    },
+    /// Group DM whose home is **another** network: the mutation is relayed there
+    /// (only the origin/home applies it, §11.4), and the result arrives via ingest.
+    GroupRemote {
+        group: GroupId,
+        home: NetworkName,
         root: MsgId,
     },
 }
@@ -1371,7 +1378,9 @@ impl<S: ControlStream> Session<S> {
             // Federation-internal — a client can't send these.
             Command::GroupCallRoster { .. }
             | Command::GroupSync { .. }
-            | Command::GroupRelay { .. } => Ok(Flow::Continue),
+            | Command::GroupRelay { .. }
+            | Command::GroupMut { .. }
+            | Command::GroupBackfill { .. } => Ok(Flow::Continue),
             // Friend calls (social layer, federation-able): signaling + media. The
             // caller's identity is `account@thisnet` here; a tunnelled peer's call
             // commands run in `on_federated` with the caller's *foreign* UserRef.

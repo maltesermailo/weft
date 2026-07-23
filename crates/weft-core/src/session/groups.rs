@@ -5,10 +5,40 @@
 //! rides the bridge (deferred; same-network fan-out works now).
 
 use super::*;
+use crate::directory::GroupMutKind;
 use crate::voice::RelaySpec;
 use weft_proto::{
     CallMediaGrant, CallState, GroupId, MemberAction, MessageEvent, MsgId, Ulid, UserRef,
 };
+
+/// A group mutation's wire `op` token + `arg` (body / emoji).
+fn mut_op_arg(kind: &GroupMutKind) -> (&'static str, String) {
+    match kind {
+        GroupMutKind::Edit(body) => ("edit", body.clone()),
+        GroupMutKind::Delete => ("delete", String::new()),
+        GroupMutKind::React { emoji, add } => (
+            if *add { "react-add" } else { "react-remove" },
+            emoji.clone(),
+        ),
+    }
+}
+
+/// Parse a group-mutation wire `op` token + `arg` back into a kind.
+fn mut_from_op(op: &str, arg: String) -> Option<GroupMutKind> {
+    match op {
+        "edit" => Some(GroupMutKind::Edit(arg)),
+        "delete" => Some(GroupMutKind::Delete),
+        "react-add" => Some(GroupMutKind::React {
+            emoji: arg,
+            add: true,
+        }),
+        "react-remove" => Some(GroupMutKind::React {
+            emoji: arg,
+            add: false,
+        }),
+        _ => None,
+    }
+}
 
 impl<S: ControlStream> Session<S> {
     /// Push an event to every *local* member's live sessions, optionally
@@ -63,7 +93,7 @@ impl<S: ControlStream> Session<S> {
         // Cross-network: sync the group to remote members' networks so it exists
         // consistently everywhere (the enabler for cross-network messaging).
         let creator = UserRef::new(account, self.ctx.info.network.clone());
-        self.sync_group_to_remotes(id, &creator, None, &all);
+        self.sync_group_to_remotes(id, &creator, None, &all, &all);
         Ok(Flow::Continue)
     }
 
@@ -116,11 +146,14 @@ impl<S: ControlStream> Session<S> {
                     Event::Group {
                         id: group,
                         name,
-                        members,
+                        members: members.clone(),
                     },
                 )
                 .await;
         }
+        // Cross-network: re-sync the updated membership to remote networks (incl.
+        // the new member's, which creates the group there).
+        self.propagate_group(group, &members, &members).await;
         Ok(Flow::Continue)
     }
 
@@ -182,6 +215,10 @@ impl<S: ControlStream> Session<S> {
         };
         self.send_event(label, event.clone()).await?;
         self.notify_group(&members, event, Some(&who.account)).await;
+        // Cross-network: sync the post-removal membership to every network that
+        // *had* a member (so the removed member's own network is told too).
+        let remaining: Vec<UserRef> = members.iter().filter(|m| **m != who).cloned().collect();
+        self.propagate_group(group, &remaining, &members).await;
         Ok(Flow::Continue)
     }
 
@@ -210,6 +247,8 @@ impl<S: ControlStream> Session<S> {
         };
         self.send_event(label, event.clone()).await?;
         self.notify_group(&members, event, Some(&me.account)).await;
+        // Cross-network: propagate the new name to remote networks.
+        self.propagate_group(group, &members, &members).await;
         Ok(Flow::Continue)
     }
 
@@ -327,6 +366,7 @@ impl<S: ControlStream> Session<S> {
         members: &[UserRef],
         sender: &UserRef,
         msg: &MessageEvent,
+        echo: Option<String>,
     ) {
         let local = self.ctx.info.network.clone();
         let mut seen: std::collections::HashSet<NetworkName> = std::collections::HashSet::new();
@@ -334,11 +374,16 @@ impl<S: ControlStream> Session<S> {
             if member.network == local || !seen.insert(member.network.clone()) {
                 continue;
             }
+            // The correlation token rides only the copy to the poster's network,
+            // so only that spoke labels the poster's echo.
+            let echo = echo.clone().filter(|_| member.network == sender.network);
             let cmd = Command::GroupRelay {
                 group,
                 sender: sender.clone(),
                 msgid: Some(msg.msgid.clone()),
                 body: msg.body.clone(),
+                meta: msg.meta.clone(),
+                echo,
             };
             if let Ok(line) = Request::new(cmd).serialize() {
                 self.ctx.request_friend_deliver(crate::FriendDeliver {
@@ -354,6 +399,7 @@ impl<S: ControlStream> Session<S> {
     /// us (the home) → mint + fan out; `@id` present = a home-minted message →
     /// ingest + deliver to our local members. (Text only for now — meta,
     /// attachments, edits/reactions across networks are a follow-up.)
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn on_group_relay(
         &mut self,
         _label: Option<String>,
@@ -361,25 +407,248 @@ impl<S: ControlStream> Session<S> {
         sender: UserRef,
         msgid: Option<MsgId>,
         body: String,
+        meta: weft_proto::MsgMeta,
+        echo: Option<String>,
     ) -> io::Result<Flow> {
         let members = self.group_members(group).await?;
         let local = self.local_accounts(&members);
+        let mirror_meta = meta.clone();
         match msgid {
             None => {
+                // Spoke relayed a post to us (the home): mint + fan out, carrying
+                // the echo token back only to the sender's network.
                 if let Some(msg) = self
                     .ctx
                     .directory
-                    .group_mint(u64::MAX, sender.clone(), group, local, body)
+                    .group_mint(u64::MAX, sender.clone(), group, local, body, meta)
                     .await
                 {
-                    self.fanout_group_message(group, &members, &sender, &msg)
+                    // §11.8 mirror foreign attachments so our members can fetch them.
+                    self.ctx
+                        .mirror_group_attachments(group, &mirror_meta, &msg.msgid)
+                        .await;
+                    self.fanout_group_message(group, &members, &sender, &msg, echo)
                         .await;
                 }
             }
             Some(id) => {
                 self.ctx
+                    .mirror_group_attachments(group, &mirror_meta, &id)
+                    .await;
+                // If this copy carries our own echo token, deliver it as the
+                // awaiting poster's session so its pending label attaches.
+                let origin = echo
+                    .and_then(|t| self.ctx.take_group_echo(&t))
+                    .unwrap_or(u64::MAX);
+                self.ctx
                     .directory
-                    .group_ingest(sender, group, id, body, local)
+                    .group_ingest(origin, sender, group, id, body, meta, local)
+                    .await;
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// Spoke-side catch-up: when a member views a cross-network group's history,
+    /// ask the group's **home** to replay everything we minted-elsewhere while we
+    /// were unreachable. We carry our latest local msgid as the cursor (the home
+    /// is the single writer, so our newest = our high-water mark); the home answers
+    /// with `GROUP RELAY` ingests. No-op when we *are* the home. Fire-and-forget.
+    pub(super) async fn request_group_backfill(&mut self, group: GroupId) {
+        let home = self.group_home(group).await;
+        if home == self.ctx.info.network {
+            return;
+        }
+
+        let State::Ready { account } = self.state.clone() else {
+            return;
+        };
+
+        // Our newest local root = the cursor; `None` asks for the whole history.
+        let scope = Scope::Group(group);
+        let page = weft_store::Page {
+            before: None,
+            after: None,
+            limit: 1,
+        };
+        let after = match self.ctx.events.roots(&scope, page).await {
+            Ok(roots) => roots.last().map(|r| r.msgid.clone()),
+            Err(_) => None,
+        };
+
+        let cmd = Command::GroupBackfill { group, after };
+        if let Ok(line) = Request::new(cmd).serialize() {
+            self.ctx.request_friend_deliver(crate::FriendDeliver {
+                peer: home,
+                from: account,
+                line,
+            });
+        }
+    }
+
+    /// Home-side backfill: replay every group message after `after` (or all of
+    /// them) back to the requesting member network as `GROUP RELAY` ingests. This
+    /// is the recovery path for messages a member missed while it was down — the
+    /// ingests are idempotent on msgid, so an already-seen message is a harmless
+    /// no-op on the far side. We only serve members' own network; a request from a
+    /// non-member network gets nothing (anti-enumeration).
+    pub(super) async fn on_group_backfill(
+        &mut self,
+        _label: Option<String>,
+        caller: UserRef,
+        group: GroupId,
+        after: Option<MsgId>,
+    ) -> io::Result<Flow> {
+        let members = self.group_members(group).await?;
+        if !members.iter().any(|m| m == &caller) {
+            return Ok(Flow::Continue);
+        }
+
+        // Ascending roots strictly after the member's cursor (single-writer home).
+        let scope = Scope::Group(group);
+        let page = weft_store::Page {
+            before: None,
+            after: after.as_ref().map(|m| m.ulid()),
+            limit: weft_proto::MAX_HISTORY_LIMIT as usize,
+        };
+        let roots = match self.ctx.events.roots(&scope, page).await {
+            Ok(roots) => roots,
+            Err(e) => return self.internal(_label, &e).await,
+        };
+
+        for root in roots {
+            let EventKind::Message { body, meta } = root.kind else {
+                continue;
+            };
+            let cmd = Command::GroupRelay {
+                group,
+                sender: root.sender,
+                msgid: Some(root.msgid),
+                body,
+                meta,
+                echo: None,
+            };
+            if let Ok(line) = Request::new(cmd).serialize() {
+                self.ctx.request_friend_deliver(crate::FriendDeliver {
+                    peer: caller.network.clone(),
+                    from: caller.account.clone(),
+                    line,
+                });
+            }
+        }
+
+        Ok(Flow::Continue)
+    }
+
+    /// The **home** applies a group message mutation (edit/delete/react): mint it
+    /// via the directory (deliver to local members) and fan the minted mutation
+    /// out to every other member network. `origin` is the local editor's session
+    /// (for its labelled echo), or `u64::MAX` when a spoke relayed it.
+    pub(super) async fn apply_group_mutation(
+        &mut self,
+        origin: SessionId,
+        group: GroupId,
+        sender: UserRef,
+        root: MsgId,
+        kind: GroupMutKind,
+    ) {
+        let members = self.group_members(group).await.unwrap_or_default();
+        let local = self.local_accounts(&members);
+        if let Some((_event, mut_msgid)) = self
+            .ctx
+            .directory
+            .group_mutate(
+                origin,
+                sender.clone(),
+                group,
+                root.clone(),
+                kind.clone(),
+                local,
+            )
+            .await
+        {
+            let (op, arg) = mut_op_arg(&kind);
+            let local_net = self.ctx.info.network.clone();
+            let mut seen: std::collections::HashSet<NetworkName> = std::collections::HashSet::new();
+            for member in &members {
+                if member.network == local_net || !seen.insert(member.network.clone()) {
+                    continue;
+                }
+                let cmd = Command::GroupMut {
+                    group,
+                    sender: sender.clone(),
+                    root: root.clone(),
+                    op: op.to_string(),
+                    arg: arg.clone(),
+                    msgid: Some(mut_msgid.clone()),
+                };
+                if let Ok(line) = Request::new(cmd).serialize() {
+                    self.ctx.request_friend_deliver(crate::FriendDeliver {
+                        peer: member.network.clone(),
+                        from: sender.account.clone(),
+                        line,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Relay a group mutation to the group's **home** network (we're a spoke; only
+    /// the home applies it). The result arrives via a `GROUP MUT` ingest.
+    pub(super) fn relay_group_mut(
+        &self,
+        home: NetworkName,
+        group: GroupId,
+        sender: &UserRef,
+        root: MsgId,
+        kind: GroupMutKind,
+    ) {
+        let (op, arg) = mut_op_arg(&kind);
+        let cmd = Command::GroupMut {
+            group,
+            sender: sender.clone(),
+            root,
+            op: op.to_string(),
+            arg,
+            msgid: None,
+        };
+        if let Ok(line) = Request::new(cmd).serialize() {
+            self.ctx.request_friend_deliver(crate::FriendDeliver {
+                peer: home,
+                from: sender.account.clone(),
+                line,
+            });
+        }
+    }
+
+    /// Federation-internal `GROUP MUT`: `@id` absent = a spoke relayed a mutation
+    /// to us (the home) → apply + fan out; `@id` present = a home-minted mutation
+    /// → ingest + deliver to our local members.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn on_group_mut(
+        &mut self,
+        _label: Option<String>,
+        group: GroupId,
+        sender: UserRef,
+        root: MsgId,
+        op: String,
+        arg: String,
+        msgid: Option<MsgId>,
+    ) -> io::Result<Flow> {
+        let Some(kind) = mut_from_op(&op, arg) else {
+            return Ok(Flow::Continue);
+        };
+        match msgid {
+            None => {
+                self.apply_group_mutation(u64::MAX, group, sender, root, kind)
+                    .await
+            }
+            Some(id) => {
+                let members = self.group_members(group).await?;
+                let local = self.local_accounts(&members);
+                self.ctx
+                    .directory
+                    .group_mut_ingest(sender, group, root, id, kind, local)
                     .await;
             }
         }
@@ -387,16 +656,21 @@ impl<S: ControlStream> Session<S> {
     }
 
     /// Tunnel a `GROUP SYNC` (membership) to each remote member network.
+    /// Tunnel a `GROUP SYNC` carrying the group's `payload` (its new membership +
+    /// name) to every remote network among `recipients`. Pass a wider
+    /// `recipients` than `payload` on a removal so the removed member's network is
+    /// still told (it reconciles by dropping them).
     fn sync_group_to_remotes(
         &self,
         group: GroupId,
         creator: &UserRef,
         name: Option<String>,
-        members: &[UserRef],
+        payload: &[UserRef],
+        recipients: &[UserRef],
     ) {
         let local = self.ctx.info.network.clone();
         let mut seen: std::collections::HashSet<NetworkName> = std::collections::HashSet::new();
-        for member in members {
+        for member in recipients {
             if member.network == local || !seen.insert(member.network.clone()) {
                 continue;
             }
@@ -404,7 +678,7 @@ impl<S: ControlStream> Session<S> {
                 group,
                 creator: creator.clone(),
                 name: name.clone(),
-                members: members.to_vec(),
+                members: payload.to_vec(),
             };
             if let Ok(line) = Request::new(cmd).serialize() {
                 self.ctx.request_friend_deliver(crate::FriendDeliver {
@@ -416,8 +690,18 @@ impl<S: ControlStream> Session<S> {
         }
     }
 
+    /// Re-sync a group's membership + name to remote networks after a change,
+    /// looking up the (fixed) creator + current name from the record.
+    async fn propagate_group(&self, group: GroupId, payload: &[UserRef], recipients: &[UserRef]) {
+        if let Ok(Some(rec)) = self.ctx.groups.group(group).await {
+            self.sync_group_to_remotes(group, &rec.creator, rec.name, payload, recipients);
+        }
+    }
+
     /// Federation-internal `GROUP SYNC`: record/refresh the group locally so it
-    /// exists on this member network, then push a `GROUP` event to local members.
+    /// exists on this member network, **reconcile** its membership to the synced
+    /// list (add/remove), refresh the name, and notify local members — a removed
+    /// local member gets `GROUP-MEMBER part` (its client drops the group).
     pub(super) async fn on_group_sync(
         &mut self,
         _label: Option<String>,
@@ -426,22 +710,59 @@ impl<S: ControlStream> Session<S> {
         name: Option<String>,
         members: Vec<UserRef>,
     ) -> io::Result<Flow> {
-        // Idempotent: a first sync creates it; a re-sync's create is a no-op and we
-        // refresh the name.
-        let _ = self
-            .ctx
-            .groups
-            .create_group(group, &creator, &members, unix_now_ms())
-            .await;
-        if name.is_some() {
-            let _ = self.ctx.groups.set_group_name(group, name.as_deref()).await;
+        let is_new = self.ctx.groups.group(group).await.ok().flatten().is_none();
+        let current = if is_new {
+            Vec::new()
+        } else {
+            self.group_members(group).await?
+        };
+        let removed: Vec<UserRef> = current
+            .iter()
+            .filter(|m| !members.contains(m))
+            .cloned()
+            .collect();
+
+        if is_new {
+            let _ = self
+                .ctx
+                .groups
+                .create_group(group, &creator, &members, unix_now_ms())
+                .await;
+        } else {
+            for m in &members {
+                if !current.contains(m) {
+                    let _ = self.ctx.groups.add_group_member(group, m).await;
+                }
+            }
+            for m in &removed {
+                let _ = self.ctx.groups.remove_group_member(group, m).await;
+            }
         }
+        let _ = self.ctx.groups.set_group_name(group, name.as_deref()).await;
+
+        // Remaining local members see the refreshed group; removed local members
+        // are told they left (their client drops it).
         let event = Event::Group {
             id: group,
             name,
             members: members.clone(),
         };
         self.notify_group(&members, event, None).await;
+        for m in &removed {
+            if m.network == self.ctx.info.network {
+                self.ctx
+                    .directory
+                    .notify(
+                        m.account.clone(),
+                        Event::GroupMember {
+                            group,
+                            user: m.clone(),
+                            action: MemberAction::Part,
+                        },
+                    )
+                    .await;
+            }
+        }
         Ok(Flow::Continue)
     }
 

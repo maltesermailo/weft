@@ -2,6 +2,7 @@
 //! MEMBERS/PIN/PINS/MARK/TYPING.
 
 use super::*;
+use crate::directory::GroupMutKind;
 
 impl<S: ControlStream> Session<S> {
     pub(super) async fn on_join(
@@ -335,18 +336,28 @@ impl<S: ControlStream> Session<S> {
                         if let Some(msg) = self
                             .ctx
                             .directory
-                            .group_mint(self.id, me.clone(), group, local, body)
+                            .group_mint(self.id, me.clone(), group, local, body, meta)
                             .await
                         {
-                            self.fanout_group_message(group, &members, &me, &msg).await;
+                            self.fanout_group_message(group, &members, &me, &msg, None)
+                                .await;
                         }
                         self.pending_direct.push_back(label);
                     } else {
+                        // Spoke: relay to the home, carrying an echo token so we can
+                        // deliver the home's minted copy back as the poster's own
+                        // (labelled) message.
+                        let token = weft_proto::Ulid::new().to_string();
+                        self.ctx
+                            .register_group_echo(token.clone(), self.id, unix_now_ms());
+                        self.pending_direct.push_back(label);
                         let cmd = Command::GroupRelay {
                             group,
                             sender: me.clone(),
                             msgid: None,
                             body,
+                            meta,
+                            echo: Some(token),
                         };
                         if let Ok(line) = Request::new(cmd).serialize() {
                             self.ctx.request_friend_deliver(crate::FriendDeliver {
@@ -381,24 +392,29 @@ impl<S: ControlStream> Session<S> {
         cap: &'static str,
         must_be_author: bool,
     ) -> io::Result<Option<MessageRoute>> {
-        // §11.4: EDIT/DELETE are honored only at the msgid's origin.
-        if msgid.origin() != &self.ctx.info.network {
-            self.send_err(
-                label,
-                ErrCode::Forbidden,
-                Some("origin"),
-                "not this message's origin",
-            )
-            .await?;
-            return Ok(None);
-        }
         let root = match self.ctx.events.find_root(msgid.ulid()).await {
             Err(e) => {
                 self.internal(label, &e).await?;
                 return Ok(None);
             }
             Ok(None) => {
-                self.no_such_target(label).await?;
+                // §11.4 + anti-enumeration: a **foreign-origin** msgid we don't
+                // have answers the uniform FORBIDDEN `origin` — the same as a
+                // foreign message we *do* have (a bridged channel), so probing
+                // can't tell whether we hold it. A missing **local**-origin msgid
+                // is NO-SUCH-TARGET. (A group message we participate in is never
+                // missing here — it was ingested — so it reaches the scope match.)
+                if msgid.origin() != &self.ctx.info.network {
+                    self.send_err(
+                        label,
+                        ErrCode::Forbidden,
+                        Some("origin"),
+                        "not this message's origin",
+                    )
+                    .await?;
+                } else {
+                    self.no_such_target(label).await?;
+                }
                 return Ok(None);
             }
             Ok(Some(root)) => root,
@@ -418,6 +434,18 @@ impl<S: ControlStream> Session<S> {
         }
         match root.scope.clone() {
             Scope::Channel(channel) => {
+                // §11.4: EDIT/DELETE of a channel message are honored only at the
+                // msgid's origin (a bridged message is edited on its home network).
+                if msgid.origin() != &self.ctx.info.network {
+                    self.send_err(
+                        label,
+                        ErrCode::Forbidden,
+                        Some("origin"),
+                        "not this message's origin",
+                    )
+                    .await?;
+                    return Ok(None);
+                }
                 let Some(joined) = self.joined.get(&channel) else {
                     self.not_member_cap(label, &channel, cap).await?;
                     return Ok(None);
@@ -452,8 +480,9 @@ impl<S: ControlStream> Session<S> {
                 }))
             }
             // Group DM mutations: membership-gated (non-member = hidden, §2.2),
-            // author-gated for EDIT/DELETE. The directory is the single writer;
-            // the mutation fans out to the group's local members.
+            // author-gated for EDIT/DELETE. The group's **home** (creator's
+            // network) is the single writer (§11.4): if we're home, mint + fan
+            // out; else relay the mutation there (`GroupRemote`).
             Scope::Group(group) => {
                 let me = UserRef::new(account.clone(), self.ctx.info.network.clone());
                 match self.ctx.groups.is_group_member(group, &me).await {
@@ -467,28 +496,24 @@ impl<S: ControlStream> Session<S> {
                         return Ok(None);
                     }
                 }
-                if must_be_author && root.sender.account != *account {
+                if must_be_author && root.sender != me {
                     self.send_err(label, ErrCode::CapRequired, Some(cap), "not your message")
                         .await?;
                     return Ok(None);
                 }
-                let members = match self.ctx.groups.group_members(group).await {
-                    Ok(m) => m,
-                    Err(e) => {
-                        self.internal(label, &e).await?;
-                        return Ok(None);
-                    }
-                };
-                let local: Vec<Account> = members
-                    .iter()
-                    .filter(|u| u.network == self.ctx.info.network)
-                    .map(|u| u.account.clone())
-                    .collect();
-                Ok(Some(MessageRoute::Group {
-                    group,
-                    members: local,
-                    root: root.msgid,
-                }))
+                let home = self.group_home(group).await;
+                if home != self.ctx.info.network {
+                    Ok(Some(MessageRoute::GroupRemote {
+                        group,
+                        home,
+                        root: root.msgid,
+                    }))
+                } else {
+                    Ok(Some(MessageRoute::Group {
+                        group,
+                        root: root.msgid,
+                    }))
+                }
             }
         }
     }
@@ -530,16 +555,16 @@ impl<S: ControlStream> Session<S> {
                     .edit(self.id, account, peer, root, body)
                     .await;
             }
-            Some(MessageRoute::Group {
-                group,
-                members,
-                root,
-            }) => {
+            Some(MessageRoute::Group { group, root }) => {
                 self.pending_direct.push_back(label);
-                self.ctx
-                    .directory
-                    .group_edit(self.id, account, group, members, root, body)
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.apply_group_mutation(self.id, group, me, root, GroupMutKind::Edit(body))
                     .await;
+            }
+            Some(MessageRoute::GroupRemote { group, home, root }) => {
+                // A spoke: relay to the home; the EDITED arrives via ingest.
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.relay_group_mut(home, group, &me, root, GroupMutKind::Edit(body));
             }
         }
         Ok(Flow::Continue) // ack = the echoed EDITED broadcast
@@ -571,16 +596,15 @@ impl<S: ControlStream> Session<S> {
                     .delete(self.id, account, peer, root)
                     .await;
             }
-            Some(MessageRoute::Group {
-                group,
-                members,
-                root,
-            }) => {
+            Some(MessageRoute::Group { group, root }) => {
                 self.pending_direct.push_back(label);
-                self.ctx
-                    .directory
-                    .group_delete(self.id, account, group, members, root)
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.apply_group_mutation(self.id, group, me, root, GroupMutKind::Delete)
                     .await;
+            }
+            Some(MessageRoute::GroupRemote { group, home, root }) => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.relay_group_mut(home, group, &me, root, GroupMutKind::Delete);
             }
         }
         Ok(Flow::Continue)
@@ -614,16 +638,21 @@ impl<S: ControlStream> Session<S> {
                     .react(self.id, account, peer, root, emoji, add)
                     .await;
             }
-            Some(MessageRoute::Group {
-                group,
-                members,
-                root,
-            }) => {
+            Some(MessageRoute::Group { group, root }) => {
                 self.pending_direct.push_back(label);
-                self.ctx
-                    .directory
-                    .group_react(self.id, account, group, members, root, emoji, add)
-                    .await;
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.apply_group_mutation(
+                    self.id,
+                    group,
+                    me,
+                    root,
+                    GroupMutKind::React { emoji, add },
+                )
+                .await;
+            }
+            Some(MessageRoute::GroupRemote { group, home, root }) => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.relay_group_mut(home, group, &me, root, GroupMutKind::React { emoji, add });
             }
         }
         Ok(Flow::Continue)
@@ -744,11 +773,18 @@ impl<S: ControlStream> Session<S> {
         // We only ever fetch what a client asked to see, never a whole scrollback.
         let ran_out = items.len() < limit;
         self.emit_batch(label, &target, items, truncated).await?;
-        if ran_out {
-            if let Target::Channel(channel) = target {
+        match target {
+            Target::Channel(channel) if ran_out => {
                 self.ctx
                     .request_channel_backfill(crate::BackfillReq { channel, before });
             }
+            // A cross-network group: catch up on anything the home minted while we
+            // were unreachable. Fired regardless of `ran_out` — the messages we
+            // missed are the newest ones, so even a full local page can be stale.
+            Target::Group(group) => {
+                self.request_group_backfill(group).await;
+            }
+            _ => {}
         }
         Ok(Flow::Continue)
     }
