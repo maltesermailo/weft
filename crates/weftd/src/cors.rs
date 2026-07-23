@@ -26,7 +26,10 @@ pub(crate) async fn cors(req: Request, next: Next) -> Response {
     };
 
     let h = resp.headers_mut();
-    h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    h.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
     h.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
         HeaderValue::from_static("GET, POST, OPTIONS"),
@@ -35,6 +38,9 @@ pub(crate) async fn cors(req: Request, next: Next) -> Response {
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         HeaderValue::from_static("Content-Type"),
     );
-    h.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
+    h.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("86400"),
+    );
     resp
 }

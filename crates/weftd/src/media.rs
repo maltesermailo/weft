@@ -370,6 +370,11 @@ pub(crate) fn router(ctx: Arc<ServerCtx>) -> Router {
         .route("/media/:hash", get(download))
         .route("/backfill", get(backfill))
         .layer(DefaultBodyLimit::max(MAX_REQUEST))
+        // CORS: the desktop webview origin differs from the media origin, and an
+        // upload's `Content-Type` header makes it a non-simple cross-origin
+        // request. Without a preflight answer the browser reports a bare
+        // `TypeError: Load failed` and the upload never arrives.
+        .layer(axum::middleware::from_fn(crate::cors::cors))
         .with_state(ctx)
 }
 

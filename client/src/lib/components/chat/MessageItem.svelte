@@ -4,10 +4,19 @@
   import EmojiPicker from "./EmojiPicker.svelte";
   import Attachment from "./Attachment.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
+  import LinkPreview from "./LinkPreview.svelte";
   import type { Msg } from "$lib/types";
 
   const app = getApp();
   let { m }: { m: Msg } = $props();
+
+  // The first http(s) link in the body drives a single unfurl preview card
+  // (Discord-style: one preview per message). System lines are skipped.
+  const firstLink = $derived.by(() => {
+    if (m.system) return null;
+    const match = m.body.match(/https?:\/\/[^\s<>"']+/);
+    return match ? match[0].replace(/[.,;:!?)\]]+$/, "") : null;
+  });
 </script>
 
 {#if m.system}
@@ -52,6 +61,9 @@
             <Attachment {uri} />
           {/each}
         </div>
+      {/if}
+      {#if firstLink && app.editingKey !== m.key}
+        <LinkPreview url={firstLink} />
       {/if}
       {#if m.reactions && Object.keys(m.reactions).length}
         <div class="reactions">

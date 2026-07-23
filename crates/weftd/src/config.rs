@@ -62,10 +62,28 @@ pub struct Config {
     /// data-plane streams are separate and not counted. Default 1024.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// Server-side link-preview (unfurl) proxy. When enabled, `/unfurl` fetches
+    /// a user-supplied URL server-side (SSRF-guarded) and returns its OpenGraph
+    /// preview, so clients don't leak the viewer's IP to arbitrary hosts.
+    pub unfurl: Unfurl,
 }
 
 fn default_max_connections() -> usize {
     1024
+}
+
+/// `[unfurl]` — the link-preview proxy (§13 data plane, HTTP surface).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Unfurl {
+    /// On by default; set false to refuse all server-side link fetching.
+    pub enabled: bool,
+}
+
+impl Default for Unfurl {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// §10.5 SMTP submission for verification emails. weftd connects out to this
@@ -453,6 +471,7 @@ impl Default for Config {
             voice: Voice::default(),
             smtp: Smtp::default(),
             max_connections: default_max_connections(),
+            unfurl: Unfurl::default(),
         }
     }
 }

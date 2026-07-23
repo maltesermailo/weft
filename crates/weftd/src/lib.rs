@@ -10,12 +10,14 @@
 mod acceptor;
 pub mod admin_cli;
 pub mod config;
+mod cors;
 pub mod dialer;
 pub mod livekit;
 pub mod mailer;
 pub mod media;
 pub mod telemetry;
 mod tls;
+mod unfurl;
 mod web;
 mod wellknown;
 
@@ -502,6 +504,12 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         }
         // §13 media data plane over HTTP: /media upload + /media/<hash> fetch.
         app = app.merge(media::router(Arc::clone(&ctx)));
+        // Server-side link-preview proxy (SSRF-guarded); on by default,
+        // disable with `[unfurl] enabled = false`.
+        if config.unfurl.enabled {
+            app = app.merge(unfurl::router(Arc::clone(&ctx)));
+            info!("unfurl proxy mounted at /unfurl");
+        }
         app
     });
 

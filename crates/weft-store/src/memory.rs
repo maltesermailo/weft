@@ -353,7 +353,7 @@ impl EventStore for MemoryStore {
             .cloned()
             .collect();
         // Newest-first (ULID is time-ordered); the msgid IS the key order.
-        hits.sort_by(|a, b| b.msgid.ulid().cmp(&a.msgid.ulid()));
+        hits.sort_by_key(|r| std::cmp::Reverse(r.msgid.ulid()));
         hits.truncate(limit);
         Ok(hits)
     }

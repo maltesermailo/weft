@@ -478,14 +478,74 @@ export async function upload(file: File | Blob): Promise<UploadResult> {
       "no media server configured — set `media_base` in client.toml if it isn't at https://<host>",
     );
   }
-  const res = await fetch(`${mediaOrigin()}/media?t=${encodeURIComponent(mediaBearer)}`, {
-    method: "POST",
-    headers: { "Content-Type": (file as File).type || "application/octet-stream" },
-    body: file,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${mediaOrigin()}/media?t=${encodeURIComponent(mediaBearer)}`, {
+      method: "POST",
+      headers: { "Content-Type": (file as File).type || "application/octet-stream" },
+      body: file,
+    });
+  } catch (e) {
+    // A bare fetch rejection ("TypeError: Load failed") means the media origin
+    // was unreachable or blocked the cross-origin request — surface something
+    // the user can act on instead of the raw network error.
+    throw new Error(
+      `could not reach the media server at ${mediaOrigin() || "(unset)"} — check it is running and reachable (${e})`,
+    );
+  }
   if (!res.ok) throw new Error(`upload failed (${res.status})`);
   const j = await res.json();
   return { media: j.media, thumb: j.thumb ?? null, width: j.width ?? null, height: j.height ?? null };
+}
+
+/** A server-fetched link preview (§13 unfurl proxy). */
+export type LinkPreview = {
+  url: string;
+  title?: string;
+  description?: string;
+  image?: string;
+  siteName?: string;
+};
+
+// Per-session cache: URL → preview (null = no useful preview / fetch failed).
+const unfurlCache = new Map<string, LinkPreview | null>();
+
+/** Fetch a link preview via the server-side unfurl proxy (SSRF-guarded). */
+export async function unfurl(url: string): Promise<LinkPreview | null> {
+  if (!mediaBearer) return null;
+  if (unfurlCache.has(url)) return unfurlCache.get(url) ?? null;
+  const origin = mediaOrigin();
+  if (IS_TAURI && !origin) return null;
+  try {
+    const res = await fetch(
+      `${origin}/unfurl?url=${encodeURIComponent(url)}&t=${encodeURIComponent(mediaBearer)}`,
+    );
+    if (!res.ok) {
+      unfurlCache.set(url, null);
+      return null;
+    }
+    const j = await res.json();
+    const preview: LinkPreview = {
+      url: j.url ?? url,
+      title: j.title ?? undefined,
+      description: j.description ?? undefined,
+      image: j.image ?? undefined,
+      siteName: j.site_name ?? undefined,
+    };
+    // Only surface a card when there's something to show.
+    const useful = preview.title || preview.description || preview.image ? preview : null;
+    unfurlCache.set(url, useful);
+    return useful;
+  } catch {
+    unfurlCache.set(url, null);
+    return null;
+  }
+}
+
+/** Proxy a preview image through the server so the client never hits the
+ * origin host directly (no IP leak). */
+export function unfurlImageUrl(imageUrl: string): string {
+  return `${mediaOrigin()}/unfurl/image?url=${encodeURIComponent(imageUrl)}&t=${encodeURIComponent(mediaBearer)}`;
 }
 
 /** Resolve a `weft-media://origin/hash` reference to a fetchable URL. */
