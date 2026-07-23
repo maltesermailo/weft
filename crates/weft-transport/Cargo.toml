@@ -2,6 +2,8 @@
 name = "weft-transport"
 version.workspace = true
 edition.workspace = true
+# Not published to crates.io: workspace-internal, path deps only.
+publish = false
 rust-version.workspace = true
 license.workspace = true
 description = "WEFT transports (L2): QUIC (quinn) and WebSocket line framing. Frames bytes into lines; never interprets verbs."

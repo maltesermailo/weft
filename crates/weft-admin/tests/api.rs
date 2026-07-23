@@ -1757,3 +1757,190 @@ async fn a_delegated_admin_cannot_take_over_a_namespace() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }
+
+// ---- granular scopes ----
+
+#[tokio::test]
+async fn a_legacy_moderate_grant_keeps_everything_it_used_to_cover() {
+    // The finer scopes were split out of the original five, so a grant issued
+    // before the split must not silently lose reach. `admin.moderate` used to
+    // cover the reports queue, media blocks, account state and reading content.
+    let app = build_with_delegate(&["admin.moderate"]).await;
+    let cookie = login_as(&app, "delegate").await;
+
+    let me = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/v1/me", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    for implied in [
+        "admin.read",
+        "admin.reports",
+        "admin.accounts",
+        "admin.media",
+        "admin.messages",
+    ] {
+        assert!(
+            me.contains(implied),
+            "legacy moderate must still imply {implied}: {me}"
+        );
+    }
+    // ...but it never covered destruction, and still doesn't.
+    assert!(
+        !me.contains("admin.destroy") && !me.contains("admin.delete"),
+        "{me}"
+    );
+
+    // The reach is real, not just advertised.
+    let res = app
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/target/suspend",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn message_content_needs_its_own_scope() {
+    // The point of the split: triaging a queue and reading everyone's
+    // conversations are different powers. A read-only admin sees lists but not
+    // message bodies.
+    let app = build_with_delegate(&["admin.read"]).await;
+    let cookie = login_as(&app, "delegate").await;
+
+    // Non-content reads are fine.
+    assert_eq!(
+        app.clone()
+            .oneshot(get("/admin/api/v1/accounts", Some(&cookie)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    // Content is not — channel history, DM threads, a user's posts, and the
+    // report context all gate on `admin.messages`.
+    for path in [
+        "/admin/api/v1/channels/%23general/messages",
+        "/admin/api/v1/dms/ada/bob/messages",
+        "/admin/api/v1/accounts/mallory/messages",
+        "/admin/api/v1/messages/lookup/01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    ] {
+        let res = app.clone().oneshot(get(path, Some(&cookie))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    // ...and so does the audit log, which watches the other admins.
+    let res = app
+        .oneshot(get("/admin/api/v1/audit", Some(&cookie)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_reports_admin_resolves_but_cannot_mute() {
+    // A queue-worker scope that can't reach the moderation deny-list.
+    let app = build_with_delegate(&["admin.reports"]).await;
+    let cookie = login_as(&app, "delegate").await;
+    // `admin.read` rides along so the session can actually sign in and look.
+    assert_eq!(
+        app.clone()
+            .oneshot(get("/admin/api/v1/reports", Some(&cookie)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let res = app
+        .oneshot(post_json(
+            "/admin/api/v1/moderation",
+            &cookie,
+            r#"{"verb":"mute","scope":"*","account":"target"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_message_resolves_by_full_id_or_bare_ulid() {
+    use weft_store::{EventKind, EventRecord, EventStore, Scope};
+    let store = Arc::new(MemoryStore::default());
+    store
+        .register(
+            &"admin".parse().unwrap(),
+            PasswordHash::new(PASSWORD).as_phc(),
+        )
+        .await
+        .unwrap();
+    let msgid: weft_proto::MsgId = "test.net/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+    store
+        .append(EventRecord {
+            scope: Scope::Channel("#general".parse().unwrap()),
+            msgid: msgid.clone(),
+            root: msgid.clone(),
+            sender: weft_proto::UserRef::new("ada".parse().unwrap(), "test.net".parse().unwrap()),
+            kind: EventKind::Message {
+                body: "find me".into(),
+                meta: Default::default(),
+            },
+        })
+        .await
+        .unwrap();
+    let auth = auth::config(
+        b"a-test-session-secret".to_vec(),
+        ["admin".parse().unwrap()],
+    );
+    let app = weft_admin::router(AdminState::from_store(store, auth, "test.net".into()));
+    let cookie = session(&app).await;
+
+    // Both forms resolve — the client copies the full id, but a log line or a
+    // report may only carry the ULID.
+    for id in [
+        "test.net/01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    ] {
+        let out = body_string(
+            app.clone()
+                .oneshot(get(
+                    &format!("/admin/api/v1/messages/lookup/{id}"),
+                    Some(&cookie),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(out.contains("find me"), "{id} → {out}");
+        assert!(
+            out.contains("\"scope\":\"#general\"") && out.contains("\"scope_kind\":\"channel\"")
+        );
+    }
+
+    // Garbage is a 400, an unknown-but-valid ULID a 404 — distinguishable, so a
+    // typo doesn't look like a purge.
+    assert_eq!(
+        app.clone()
+            .oneshot(get(
+                "/admin/api/v1/messages/lookup/not-a-ulid",
+                Some(&cookie)
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        app.oneshot(get(
+            "/admin/api/v1/messages/lookup/01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            Some(&cookie)
+        ))
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+}

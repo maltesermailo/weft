@@ -85,6 +85,7 @@ fn client_config(app: AppHandle) -> serde_json::Value {
     serde_json::json!({
         "allow_insecure": cfg.allow_insecure,
         "default_host": cfg.default_host,
+        "media_base": cfg.media_base,
         "config_path": config::path(&app).map(|p| p.display().to_string()),
     })
 }

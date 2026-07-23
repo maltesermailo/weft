@@ -316,6 +316,7 @@ impl ServerCtx {
             info.network.clone(),
             Arc::clone(&events),
             Arc::clone(&media_refs),
+            Arc::clone(&pins),
         );
         let directory = crate::directory::spawn(
             info.network.clone(),

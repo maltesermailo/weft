@@ -552,3 +552,20 @@ pub struct Role {
 pub struct DmPartner {
     pub account: String,
 }
+
+/// `GET /messages/lookup/:msgid` — "someone handed me an ID, what is it?".
+/// Resolves a full `network/ULID` msgid or a bare ULID to the message, where it
+/// lives, and its surrounding conversation.
+#[derive(Serialize)]
+pub struct MessageLookup {
+    pub msgid: String,
+    /// The store scope key — a channel name, or `dm:<a>:<b>`.
+    pub scope: String,
+    /// `channel` | `dm`, so the UI knows which detail page to offer.
+    pub scope_kind: String,
+    pub sender: String,
+    pub at_ms: u64,
+    pub deleted: bool,
+    /// The scope's materialized messages, the looked-up one among them.
+    pub context: Vec<Msg>,
+}

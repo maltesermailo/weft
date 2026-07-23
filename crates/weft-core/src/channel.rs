@@ -299,6 +299,7 @@ pub fn spawn(
     policy: RetentionPolicy,
     store: Arc<dyn EventStore>,
     media: Arc<dyn weft_store::MediaStore>,
+    pins: Arc<dyn weft_store::PinStore>,
 ) -> ChannelHandle {
     let (inbox_tx, inbox) = mpsc::channel(INBOX_CAPACITY);
     let handle = ChannelHandle {
@@ -312,6 +313,7 @@ pub fn spawn(
         policy,
         store,
         media,
+        pins,
         members: std::collections::HashMap::new(),
         events: broadcast::Sender::new(BROADCAST_CAPACITY),
         ulids: ulid::Generator::new(),
@@ -328,6 +330,11 @@ struct Actor {
     store: Arc<dyn EventStore>,
     /// §13 media reference index — refs recorded here, the single-writer point.
     media: Arc<dyn weft_store::MediaStore>,
+    /// §6.4 pins — cleared here when a pinned message is deleted, so a pin can
+    /// never outlive its message. The actor is the single writer for both the
+    /// user delete and the admin delete-any, so this is the one place that
+    /// covers every path.
+    pins: Arc<dyn weft_store::PinStore>,
     members: std::collections::HashMap<SessionId, Account>,
     events: broadcast::Sender<ChannelEvent>,
     ulids: ulid::Generator,
@@ -508,6 +515,7 @@ impl Actor {
                 .await;
                 // §13 the deleted message's blob refs drop → refcount may hit 0.
                 let _ = self.media.drop_refs(&root).await;
+                self.unpin_deleted(&root).await;
                 self.broadcast(
                     session,
                     Event::Deleted {
@@ -530,6 +538,8 @@ impl Actor {
                     kind: EventKind::Delete,
                 })
                 .await;
+                let _ = self.media.drop_refs(&root).await;
+                self.unpin_deleted(&root).await;
                 self.broadcast(
                     SENTINEL_ORIGIN,
                     Event::Deleted {
@@ -665,6 +675,30 @@ impl Actor {
     }
 
     /// Monotonic within the actor = per-channel total order. The generator
+    /// §6.4 a pin must never outlive its message: when a root is deleted, drop
+    /// any pin on it and tell the channel, so every member's pins view loses it
+    /// rather than keeping a pin that resolves to a tombstone. Silent when the
+    /// message wasn't pinned — the common case, and not worth a broadcast.
+    async fn unpin_deleted(&mut self, root: &MsgId) {
+        match self.pins.pins(&self.name).await {
+            Ok(pinned) if pinned.contains(root) => {}
+            _ => return, // not pinned — the common case, no broadcast needed
+        }
+        if let Err(e) = self.pins.set_pin(&self.name, root, false).await {
+            error!(channel = %self.name, "clearing the pin of a deleted message failed: {e}");
+            return;
+        }
+        // SENTINEL_ORIGIN, not the deleting session: this is nobody's own echo,
+        // and the deleter's pins view has to lose the entry too.
+        self.broadcast(
+            SENTINEL_ORIGIN,
+            Event::Unpinned {
+                channel: self.name.clone(),
+                msgid: root.clone(),
+            },
+        );
+    }
+
     /// only fails when >2^80 IDs land in one ms; fall back to a fresh
     /// random ULID rather than dropping traffic.
     fn mint(&mut self) -> MsgId {

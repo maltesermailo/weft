@@ -131,6 +131,15 @@
       });
     }
     items.push({ label: "Copy text", run: () => navigator.clipboard?.writeText(m.body) });
+    // The full msgid (`network/ULID`) — what HISTORY, reports and the admin
+    // message lookup all take. Copying the bare ULID would lose the origin.
+    items.push({
+      label: "Copy message ID",
+      run: () => {
+        navigator.clipboard?.writeText(m.msgid!);
+        toast("Message ID copied", "ok");
+      },
+    });
     if (m.own) {
       items.push({ label: "Edit", run: () => startEdit(m) });
       items.push({ label: "Delete", danger: true, run: () => doDelete(m) });

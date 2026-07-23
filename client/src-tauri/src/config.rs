@@ -10,7 +10,15 @@
 //! # %APPDATA%\<identifier>\client.toml                        (Windows)
 //! allow_insecure = true          # accept self-signed / unverified certs
 //! default_host   = "127.0.0.1:4433"
+//! media_base     = "http://127.0.0.1:8080"   # dev only; see below
 //! ```
+//!
+//! `media_base` is the HTTP origin serving §13 `/media` — weftd's axum listener,
+//! which is a *different* port from the QUIC control plane. In a normal
+//! deployment the network's DNS name serves it over HTTPS, so the client derives
+//! `https://<host>` from the connect host and this stays unset. Set it only when
+//! the media endpoint isn't at `https://<host>` (dev, LAN, a reverse proxy on a
+//! nonstandard port).
 
 use std::path::PathBuf;
 
@@ -25,6 +33,10 @@ pub struct ClientConfig {
     pub allow_insecure: bool,
     /// Optional host to prefill the connect screen.
     pub default_host: Option<String>,
+    /// Override the HTTP origin for §13 media (upload + fetch). Unset ⇒ derive
+    /// `https://<connect-host>`, which is correct whenever the network's DNS
+    /// name fronts weftd's HTTP listener.
+    pub media_base: Option<String>,
 }
 
 /// `<app-config-dir>/client.toml`, if the platform exposes a config dir.

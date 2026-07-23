@@ -36,35 +36,90 @@ pub struct AuthConfig {
 /// capability grants (dogfoods §10.4 — `GRANT admin admin.moderate <account>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AdminScope {
-    /// Observability — every read. The baseline for any panel access.
+    /// Observability — every non-content read. The baseline for any panel
+    /// access: lists and entity details, but *not* message bodies.
     Read,
-    /// Structural moderation: mute/ban/kick, resolve reports, media blocks.
+    /// Read message **content**: channel and DM history, and the context
+    /// attached to a report. Split from `Read` because triaging a queue and
+    /// reading everyone's conversations are very different powers — a junior
+    /// moderator can do the former without the latter.
+    Messages,
+    /// Structural moderation: mute / ban / kick / unmute / unban, and freezing
+    /// a channel.
     Moderate,
-    /// Irreversible: delete account, delete message.
+    /// Work the reports queue: resolve individually or in bulk.
+    Reports,
+    /// Account state: suspend / unsuspend / force logout. Not deletion.
+    Accounts,
+    /// The §13 media hash blocklist.
+    Media,
+    /// Remove **content**: delete a message. Reversible in the sense that a
+    /// tombstone is a record, but the body is gone.
+    Delete,
+    /// Irreversible structural destruction: delete an account or a channel, and
+    /// the namespace-wide full freeze.
     Destroy,
-    /// Federation controls: netblocks (peers/transit later).
+    /// Federation controls: netblocks, peers, sever/re-weave.
     Federation,
-    /// Device/token/revocation management (reserved for WC6).
+    /// Device / token / revocation-epoch management.
     Keys,
+    /// Read the audit log — what every other admin has done. Separate because
+    /// it is the surface that watches the watchers.
+    Audit,
 }
 
 impl AdminScope {
-    pub const ALL: [AdminScope; 5] = [
+    pub const ALL: [AdminScope; 11] = [
         AdminScope::Read,
+        AdminScope::Messages,
         AdminScope::Moderate,
+        AdminScope::Reports,
+        AdminScope::Accounts,
+        AdminScope::Media,
+        AdminScope::Delete,
         AdminScope::Destroy,
         AdminScope::Federation,
         AdminScope::Keys,
+        AdminScope::Audit,
     ];
 
     /// The canonical wire string (also the capability name at scope `admin`).
     pub fn as_str(self) -> &'static str {
         match self {
             AdminScope::Read => "admin.read",
+            AdminScope::Messages => "admin.messages",
             AdminScope::Moderate => "admin.moderate",
+            AdminScope::Reports => "admin.reports",
+            AdminScope::Accounts => "admin.accounts",
+            AdminScope::Media => "admin.media",
+            AdminScope::Delete => "admin.delete",
             AdminScope::Destroy => "admin.destroy",
             AdminScope::Federation => "admin.federation",
             AdminScope::Keys => "admin.keys",
+            AdminScope::Audit => "admin.audit",
+        }
+    }
+
+    /// Scopes a **stored grant** of `self` also confers.
+    ///
+    /// The finer scopes above were split out of the original five, so an
+    /// existing `admin.moderate` or `admin.destroy` grant must keep meaning
+    /// exactly what it did when it was issued — otherwise this refactor would
+    /// silently demote every delegated admin on every live deployment. New
+    /// grants can name the leaf scopes directly.
+    pub fn implied(self) -> &'static [AdminScope] {
+        match self {
+            // `moderate` used to cover the reports queue, media blocks, account
+            // suspension and reading the content you were moderating.
+            AdminScope::Moderate => &[
+                AdminScope::Reports,
+                AdminScope::Accounts,
+                AdminScope::Media,
+                AdminScope::Messages,
+            ],
+            // `destroy` used to cover message deletion too.
+            AdminScope::Destroy => &[AdminScope::Delete],
+            _ => &[],
         }
     }
 
@@ -139,8 +194,16 @@ pub(crate) async fn admin_scopes(st: &AdminState, account: &Account) -> Option<A
                 set.extend(AdminScope::ALL);
             } else if let Some(scope) = AdminScope::from_cap(cap) {
                 set.insert(scope);
+                // Grants issued before the finer scopes existed keep their
+                // original reach (see `implied`).
+                set.extend(scope.implied().iter().copied());
             }
         }
+    }
+    // Anything at all implies the read baseline — a scope set that can't sign in
+    // would be a grant that silently does nothing.
+    if !set.is_empty() {
+        set.insert(AdminScope::Read);
     }
 
     (!set.is_empty()).then_some(AdminScopes(set))

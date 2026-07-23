@@ -3390,6 +3390,54 @@ async fn pin_list_and_unpin() {
 }
 
 #[tokio::test]
+async fn deleting_a_pinned_message_drops_its_pin() {
+    // §6.4 a pin must never outlive its message — otherwise the pins view keeps
+    // an entry that resolves to a tombstone. The channel actor is the single
+    // writer for the delete, so it clears the pin and announces the UNPINNED.
+    let ctx = ctx_ops(&["#general"], &["mod"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    ada.send("MSG #general :pin me");
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("expected own echo")
+    };
+    let msgid = m.msgid.to_string();
+
+    let mut op = joined(&ctx, "mod", "#general").await;
+    ada.recv().await; // MEMBER: op joined
+    op.send(&format!("PIN {msgid}"));
+    assert!(matches!(op.recv().await.event, Event::Pinned { .. }));
+    assert!(matches!(ada.recv().await.event, Event::Pinned { .. }));
+
+    // The author deletes it → everyone sees the pin lifted as well.
+    ada.send(&format!("DELETE {msgid}"));
+    let mut saw_unpinned = false;
+    let mut saw_deleted = false;
+    for _ in 0..2 {
+        match ada.recv().await.event {
+            Event::Unpinned { .. } => saw_unpinned = true,
+            Event::Deleted { .. } => saw_deleted = true,
+            _ => {}
+        }
+        if saw_unpinned && saw_deleted {
+            break;
+        }
+    }
+    assert!(saw_deleted, "the delete still broadcasts");
+    assert!(saw_unpinned, "the pin is lifted with the message");
+
+    // ...and the pins list is genuinely empty, not just visually cleared.
+    op.send("PINS #general");
+    loop {
+        match op.recv().await.event {
+            Event::BatchStart { .. } => continue,
+            Event::BatchEnd { .. } => break,
+            Event::Message(m) => panic!("a deleted message is still pinned: {m:?}"),
+            _ => continue,
+        }
+    }
+}
+
+#[tokio::test]
 async fn pin_requires_the_cap() {
     let ctx = ctx_ops(&["#general"], &["mod"]);
     let mut ada = joined(&ctx, "ada", "#general").await;

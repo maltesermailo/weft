@@ -2,6 +2,8 @@
 name = "weft-client-core"
 version.workspace = true
 edition.workspace = true
+# Not published to crates.io: workspace-internal, path deps only.
+publish = false
 license.workspace = true
 
 # Portable WEFT client codec: reply→event parsing, the auth FSM, and command

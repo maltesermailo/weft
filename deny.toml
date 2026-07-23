@@ -1,0 +1,124 @@
+# cargo-deny: dependency licensing, duplicate/banned crates, and source policy.
+# Run locally with `cargo deny check`; CI runs `check licenses bans sources`.
+# The RustSec advisory scan is a separate job (`cargo-audit`), so `advisories`
+# is not duplicated here.
+
+[graph]
+all-features = true
+
+[advisories]
+# RustSec vulnerability + unmaintained scan. Unlike `cargo audit`, which reads
+# Cargo.lock (and so reports every *optional* dependency whether or not it is
+# ever built), cargo-deny resolves features and targets — so this reflects what
+# actually ships.
+#
+# Every entry below is a triage decision, not a silence: anything NOT listed
+# here fails CI. Re-check these whenever dependencies move.
+yanked = "warn"
+
+# Each ignore is a triage decision with a reason, re-checked when deps move.
+# Anything not listed here fails CI.
+ignore = [
+  # --- Linux desktop windowing stack, reached only through the Tauri client
+  # --- (tauri -> gtk/gdk/atk, and xcap -> xcb for screen capture). None of it
+  # --- is compiled into weftd; the server has no GUI dependency at all.
+  #
+  # quick-xml <0.41 DoS (unbounded namespace alloc / quadratic attribute scan),
+  # via xcb. xcb parses the *local* X11 protocol description, not network input,
+  # so the DoS vector needs an attacker who can already write local files.
+  # Upgrading needs a new xcb release; tracked, not reachable.
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml via xcb: local X11 protocol XML, desktop-only, not remote input" },
+  { id = "RUSTSEC-2026-0195", reason = "quick-xml via xcb: as above" },
+  # gtk-rs GTK3 bindings unmaintained — Tauri v2 pins GTK3 on Linux. Resolves
+  # when Tauri moves to GTK4; nothing we can do from here.
+  { id = "RUSTSEC-2024-0411", reason = "gtk-rs GTK3 unmaintained; Tauri v2 Linux webview, desktop-only" },
+  { id = "RUSTSEC-2024-0412", reason = "gtk-rs GTK3 unmaintained; desktop-only" },
+  { id = "RUSTSEC-2024-0413", reason = "gtk-rs GTK3 unmaintained; desktop-only" },
+  { id = "RUSTSEC-2024-0414", reason = "gtk-rs GTK3 unmaintained; desktop-only" },
+  { id = "RUSTSEC-2024-0415", reason = "gtk-rs GTK3 unmaintained; desktop-only" },
+  { id = "RUSTSEC-2024-0416", reason = "gtk-rs GTK3 unmaintained; desktop-only" },
+  { id = "RUSTSEC-2024-0417", reason = "gtk-rs GTK3 unmaintained; desktop-only" },
+  { id = "RUSTSEC-2024-0418", reason = "gtk-rs GTK3 unmaintained; desktop-only" },
+  { id = "RUSTSEC-2024-0419", reason = "gtk-rs GTK3 unmaintained; desktop-only" },
+  { id = "RUSTSEC-2024-0420", reason = "gtk-rs GTK3 unmaintained; desktop-only" },
+  # --- Unmaintained build/proc-macro transitives with no known vulnerability.
+  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; build-time only, no runtime surface" },
+  { id = "RUSTSEC-2024-0375", reason = "atty unmaintained; build/CLI transitive, not in weftd's runtime path" },
+  { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; proc-macro, build-time only" },
+  { id = "RUSTSEC-2025-0075", reason = "unic-* unmaintained; unicode tables, no runtime vulnerability" },
+  { id = "RUSTSEC-2025-0080", reason = "unic-* unmaintained; as above" },
+  { id = "RUSTSEC-2025-0081", reason = "unic-* unmaintained; as above" },
+  { id = "RUSTSEC-2025-0098", reason = "unic-* unmaintained; as above" },
+  { id = "RUSTSEC-2025-0100", reason = "unic-* unmaintained; as above" },
+  # rustls-pemfile is superseded by rustls-pki-types' own PEM support; a
+  # mechanical swap in weftd's cert loading, worth doing but not urgent.
+  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; swap for rustls-pki-types PEM — tracked" },
+]
+
+[licenses]
+# Every license we accept, listed deliberately rather than by category.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "CC0-1.0",
+    "MIT-0",
+    "BSL-1.0",
+    # Unicode data tables (unicode-ident and friends).
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    # File-level copyleft, reached only through the Tauri/wry desktop stack
+    # (cssparser, selectors, dtoa-short, option-ext). We link these unmodified,
+    # which MPL-2.0 permits without affecting our own licensing; modifying one
+    # of those files would oblige us to publish that file's changes.
+    "MPL-2.0",
+    # OpenSSL is only reachable via the desktop client's native-tls path.
+    "OpenSSL",
+    # Independent JPEG Group — mozjpeg, reached through the desktop client's
+    # screen-capture/image path. Permissive, with an attribution requirement.
+    "IJG",
+    # quoted_printable (via lettre's SMTP encoder). Public-domain-equivalent.
+    "0BSD",
+    # webpki-roots: the Mozilla CA bundle, shipped under a *data* licence.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+# ring vendors BoringSSL-derived code and expresses its terms in a LICENSE file
+# rather than an SPDX expression, so it has to be cleared by hash.
+[[licenses.clarify]]
+crate = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+multiple-versions = "warn"
+# A wildcard version on a crates.io dependency is a supply-chain hazard; a
+# wildcard on a workspace *path* dependency is just how a workspace is written.
+wildcards = "deny"
+allow-wildcard-paths = true
+# Duplicated transitively (several crates pin different majors) but harmless to
+# have more than one of.
+skip-tree = [{ crate = "windows-sys" }]
+
+# A second rustls CryptoProvider in the tree makes the process default
+# ambiguous — the whole reason the workspace pins ring (see CLAUDE.md).
+[[bans.deny]]
+crate = "aws-lc-rs"
+reason = "rustls must have exactly one provider; this workspace uses ring"
+
+[[bans.deny]]
+crate = "aws-lc-sys"
+reason = "pulled in by aws-lc-rs; see above"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# Everything must come from crates.io — no git or path dependencies from
+# outside the workspace.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

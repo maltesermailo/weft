@@ -42,6 +42,12 @@ async-trait = "0.1"
 webrtc = "0.17"
 axum = "0.7"
 rustls-pemfile = "2"
+# `macros` is required by `sqlx::migrate!` (migrations are embedded at compile
+# time so the binary ships without a migrations directory). It pulls the
+# sqlx-macros machinery, but with only `postgres` enabled the MySQL driver — and
+# with it `rsa` (RUSTSEC-2023-0071) — is not in the resolved build graph;
+# `cargo deny check advisories` verifies that, `cargo audit` cannot (it reads
+# the lockfile, which lists optional deps regardless of features).
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros"] }
 
 # argon2 at debug-build speed takes >1 s per hash, which makes auth-heavy

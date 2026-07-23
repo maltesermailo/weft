@@ -19,6 +19,9 @@ pub struct Registry {
     /// §13 media reference index, handed to each channel actor so it records
     /// blob references as it mints msgids (the single-writer point).
     media: Arc<dyn weft_store::MediaStore>,
+    /// §6.4 pins, handed to each actor so a delete can clear the pin of the
+    /// message it tombstones (the same single-writer argument).
+    pins: Arc<dyn weft_store::PinStore>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -38,6 +41,7 @@ impl Registry {
         network: NetworkName,
         store: Arc<dyn EventStore>,
         media: Arc<dyn weft_store::MediaStore>,
+        pins: Arc<dyn weft_store::PinStore>,
     ) -> Self {
         let channels = channels
             .into_iter()
@@ -48,6 +52,7 @@ impl Registry {
                     policy,
                     Arc::clone(&store),
                     Arc::clone(&media),
+                    Arc::clone(&pins),
                 );
                 (name, handle)
             })
@@ -57,6 +62,7 @@ impl Registry {
             network,
             store,
             media,
+            pins,
         }
     }
 
@@ -93,6 +99,7 @@ impl Registry {
             policy,
             Arc::clone(&self.store),
             Arc::clone(&self.media),
+            Arc::clone(&self.pins),
         );
         channels.insert(name, handle.clone());
         Some(handle)
@@ -127,6 +134,7 @@ impl Registry {
             policy,
             Arc::clone(&self.store),
             Arc::clone(&self.media),
+            Arc::clone(&self.pins),
         );
         channels.insert(new, handle);
         true

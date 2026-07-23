@@ -1,0 +1,149 @@
+name: CI
+
+# The gate every push and PR has to clear: formatting, lints, the test suite,
+# the declared MSRV, dependency licensing/bans, and a vulnerability scan.
+# `default-members` is the server workspace — the Tauri client and the wasm
+# binding need extra system toolchains, so they are built by their own jobs
+# rather than silently skipped here.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Deliberately no global `RUSTFLAGS: -D warnings`: it applies to dependencies
+  # too, so an upstream crate's warning would fail our build. The denial is
+  # explicit on our own clippy invocation instead.
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # `client` is the Tauri desktop crate: it needs GTK/WebKit/ALSA/v4l
+      # system libraries, so it is built by the desktop release workflow
+      # rather than here. Everything else is linted.
+      - run: cargo clippy --workspace --exclude client --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    # The Postgres-backed half of the store contract suite gates on
+    # WEFT_TEST_DATABASE_URL; without it those cases skip, so CI provides one and
+    # both backends are actually exercised against the same contract.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: weft
+          POSTGRES_DB: weft_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports: ["5432:5432"]
+    env:
+      WEFT_TEST_DATABASE_URL: postgres://postgres:weft@localhost:5432/weft_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --exclude client --all-targets
+      # Doc examples aren't covered by --all-targets.
+      - run: cargo test --workspace --exclude client --doc
+
+  msrv:
+    name: MSRV (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Must match `rust-version` in the workspace Cargo.toml. A dependency
+        # bump that needs a newer compiler fails here instead of on a user's
+        # machine.
+        rust: ["1.75"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+      # Check, not test: the dev-dependencies are free to need a newer compiler,
+      # the shipped libraries are not.
+      - run: cargo check --workspace --exclude client --all-features
+
+  deny:
+    name: cargo-deny (advisories, licenses, bans, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # This covers the RustSec advisory database too, so there is no separate
+      # cargo-audit job: audit reads Cargo.lock and therefore reports every
+      # *optional* dependency whether or not it is ever compiled, while
+      # cargo-deny resolves features and targets. Same database, fewer false
+      # positives. Every ignored advisory is triaged with a reason in deny.toml.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+
+  fuzz:
+    name: fuzz smoke (L0 parsers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # cargo-fuzz needs nightly for -Z sanitizer support.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz --locked
+      # A short run on every push: this is a regression gate against a panic
+      # reachable from untrusted input, not a fuzzing campaign. Long campaigns
+      # belong in a scheduled job with a persisted corpus.
+      - name: fuzz the wire parsers
+        run: |
+          cd crates/weft-proto
+          for target in $(cargo fuzz list); do
+            echo "::group::$target"
+            cargo fuzz run "$target" -- -max_total_time=60 -max_len=16384
+            echo "::endgroup::"
+          done
+
+  client:
+    name: client (svelte-check + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: client
+      - run: pnpm check
+        working-directory: client
+      - run: pnpm build
+        working-directory: client

@@ -2,6 +2,8 @@
 name = "weft-proto"
 version.workspace = true
 edition.workspace = true
+# Not published to crates.io: workspace-internal, path deps only.
+publish = false
 rust-version.workspace = true
 license.workspace = true
 description = "WEFT wire codec (L0): line grammar, verbs, events, error registry, IDs, retention policies. Pure — no I/O, no tokio."

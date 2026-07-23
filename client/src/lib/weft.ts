@@ -224,11 +224,24 @@ export type WeftEvent =
   | { kind: "closed"; reason: string }
   | { kind: "raw"; line: string };
 
-export function connect(host: string, account: string, password: string, mode: Mode) {
+export async function connect(host: string, account: string, password: string, mode: Mode) {
+  // The desktop page is served from the app bundle, not by the network, so the
+  // §13 media endpoints need an explicit origin before any upload or fetch.
+  // Doing it here means every call site gets it, connect and reconnect alike.
+  if (IS_TAURI) {
+    const cfg = await clientConfig().catch(() => null);
+    setMediaBase(host, cfg?.media_base ?? null);
+  }
   return invoke("connect", { host, account, password, mode });
 }
 
-export type ClientConfig = { allow_insecure: boolean; default_host: string | null; config_path: string | null };
+export type ClientConfig = {
+  allow_insecure: boolean;
+  default_host: string | null;
+  /// Override the HTTP origin serving `/media`; unset ⇒ derive `https://<host>`.
+  media_base: string | null;
+  config_path: string | null;
+};
 
 /// The active client.toml settings (TLS mode + prefill host + file path).
 export function clientConfig(): Promise<ClientConfig> {
@@ -419,20 +432,50 @@ export type UploadResult = {
   height: number | null;
 };
 
-/** Base HTTP origin for the media endpoints — same-origin on web. */
+/**
+ * Base HTTP origin for the §13 media endpoints.
+ *
+ * On the **web** the page is already served by the network, so same-origin is
+ * right. On the **desktop** the page is served from the Tauri bundle, so
+ * same-origin points at the app, not the server — the base has to be set
+ * explicitly (see {@link setMediaBase}) or media silently 404s.
+ */
+let mediaBase = "";
 function mediaOrigin(): string {
+  if (IS_TAURI) return mediaBase;
   if (typeof window !== "undefined" && window.location) return window.location.origin;
   return "";
 }
 
 /**
- * Upload a file to the network and return its content-addressed reference.
- * Web: a single authed POST to `/media` (the session bearer authorizes it).
- * Desktop upload rides a later milestone.
+ * Point the desktop client at the HTTP origin serving `/media`.
+ *
+ * `configured` wins when set (dev / reverse proxy on a nonstandard port);
+ * otherwise it is derived as `https://<host>` with the QUIC port dropped —
+ * weftd's HTTP listener is a different port, and in a real deployment the
+ * network's DNS name fronts it on 443.
+ */
+export function setMediaBase(host: string, configured?: string | null) {
+  if (configured) {
+    mediaBase = configured.replace(/\/+$/, "");
+    return;
+  }
+  const hostname = host.trim().replace(/^\w+:\/\//, "").split("/")[0].replace(/:\d+$/, "");
+  mediaBase = hostname ? `https://${hostname}` : "";
+}
+
+/**
+ * Upload a file to the network and return its content-addressed reference: a
+ * single authed POST to `/media`, the session bearer authorizing it. Identical
+ * on web and desktop — they differ only in where {@link mediaOrigin} points.
  */
 export async function upload(file: File | Blob): Promise<UploadResult> {
-  if (IS_TAURI) throw new Error("desktop media upload is not available yet");
   if (!mediaBearer) throw new Error("no media session");
+  if (IS_TAURI && !mediaOrigin()) {
+    throw new Error(
+      "no media server configured — set `media_base` in client.toml if it isn't at https://<host>",
+    );
+  }
   const res = await fetch(`${mediaOrigin()}/media?t=${encodeURIComponent(mediaBearer)}`, {
     method: "POST",
     headers: { "Content-Type": (file as File).type || "application/octet-stream" },

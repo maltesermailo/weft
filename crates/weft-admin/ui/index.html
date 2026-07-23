@@ -455,10 +455,13 @@ const screens = {
         ] })), true));
   },
   messages() {
-    set(hrow("Messages") + note("Browse materialized history — a channel, or a DM thread between two accounts. Content is readable only where the server holds plaintext; an e2ee target shows \"unavailable by policy\".") +
-      `<div class="form-row"><input type="text" id="chan" class="grow" placeholder="#namespace/channel" /><button class="btn primary" data-action="browse">Browse channel</button></div>
+    if (!can("admin.messages")) { set(hrow("Messages") + noPerm("admin.messages")); return; }
+    set(hrow("Messages") + note("Browse materialized history, or resolve a single message by ID. Content is readable only where the server holds plaintext; an e2ee target shows \"unavailable by policy\".") +
+      `<div class="form-row"><input type="text" id="msgid" class="grow" placeholder="message ID — network/ULID, or a bare ULID" /><button class="btn primary" data-action="lookupMsg">Look up ID</button></div>
+       <div class="form-row"><input type="text" id="chan" class="grow" placeholder="#namespace/channel" /><button class="btn primary" data-action="browse">Browse channel</button></div>
        <div class="form-row"><input type="text" id="dmA" placeholder="account" /><span class="hint" style="align-self:center">↔</span><input type="text" id="dmB" placeholder="account" /><button class="btn primary" data-action="browseDm">Browse DM</button></div>
        <div id="msgs"></div>`);
+    $("#msgid").addEventListener("keydown", (e) => { if (e.key === "Enter") lookupMsg(); });
     $("#chan").addEventListener("keydown", (e) => { if (e.key === "Enter") browse(); });
     $("#dmB").addEventListener("keydown", (e) => { if (e.key === "Enter") browseDm(); });
   },
@@ -789,11 +792,17 @@ async function openUser(name) {
 
 // ---- WC2 permissions -------------------------------------------------------
 const ADMIN_SCOPES = [
-  ["admin.read", "Read", "Every read view. The baseline — required for any panel access."],
-  ["admin.moderate", "Moderate", "Mute/ban/kick, resolve reports, suspend accounts, media blocks."],
-  ["admin.destroy", "Destroy", "Irreversible: delete accounts and messages."],
-  ["admin.federation", "Federation", "Netblocks and peer controls."],
-  ["admin.keys", "Keys", "Device, token and revocation management."],
+  ["admin.read", "Read", "Lists and entity details — but not message bodies. The baseline; any other scope implies it."],
+  ["admin.messages", "Read messages", "Message content: channel and DM history, and a report's attached context."],
+  ["admin.moderate", "Moderate", "Mute, ban, kick and unmute/unban; freeze a channel."],
+  ["admin.reports", "Reports", "Work the reports queue — resolve individually or in bulk."],
+  ["admin.accounts", "Account state", "Suspend, unsuspend and force-logout accounts. Not deletion."],
+  ["admin.media", "Media blocklist", "Block and unblock media by content hash."],
+  ["admin.delete", "Delete messages", "Remove message content (leaves a tombstone)."],
+  ["admin.destroy", "Destroy", "Irreversible: delete accounts and channels; namespace full freeze."],
+  ["admin.federation", "Federation", "Netblocks, peers, sever and re-weave."],
+  ["admin.keys", "Keys", "Device, token and revocation-epoch management."],
+  ["admin.audit", "Audit log", "Read what every other admin has done."],
 ];
 
 /// The account's delegated admin scopes, read off its `admin`-scope grant.
@@ -1128,6 +1137,33 @@ async function browseDm(aArg, bArg) {
   catch (e) { const t = $("#msgs"); if (t) t.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 
+/// Resolve a message ID (full `network/ULID` or a bare ULID) to its message,
+/// scope and surrounding conversation — the "someone sent me this ID" path.
+/// The looked-up message is highlighted among its neighbours.
+async function lookupMsg(idArg) {
+  const raw = (idArg || $("#msgid")?.value || "").trim();
+  if (!raw) return;
+  const t = $("#msgs");
+  try {
+    const r = await api("/messages/lookup/" + raw.split("/").map(encodeURIComponent).join("/"));
+    if (!t) return;
+    const open = r.scope_kind === "channel"
+      ? `<button class="btn small" data-action="channel" data-id="${esc(r.scope)}">open ${esc(r.scope)}</button>`
+      : (() => { const p = r.scope.replace(/^dm:/, "").split(":");
+                 return `<button class="btn small" data-action="dm" data-id="${esc(p[0])}" data-x="${esc(p[1])}">open DM</button>`; })();
+    t.innerHTML = card("Message", `<div class="kv">
+        <div class="k">Message ID</div><div class="v mono">${esc(r.msgid)}</div>
+        <div class="k">Scope</div><div class="v mono">${esc(r.scope)} ${open}</div>
+        <div class="k">Sender</div><div class="v"><button class="btn small" data-action="user" data-id="${esc(r.sender.split("@")[0])}">${esc(r.sender)}</button></div>
+        <div class="k">Sent</div><div class="v mono">${when(r.at_ms)}</div>
+        <div class="k">Deleted</div><div class="v">${r.deleted ? '<span class="warn">yes — tombstoned</span>' : "no"}</div>
+      </div>`) +
+      card("In context", r.context.length
+        ? r.context.map((m) => msgCard(m, m.msgid === r.msgid)).join("")
+        : `<div class="placeholder">No surrounding messages.</div>`, r.context.length);
+  } catch (e) { if (t) t.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+
 async function browse(chanArg) {
   const chan = (chanArg || $("#chan")?.value || "").trim();
   if (!chan) return;
@@ -1157,6 +1193,7 @@ const clicks = {
   resolve: async (el) => { await api(`/reports/${encodeURIComponent(el.dataset.id)}/resolve`, { method: "POST", body: JSON.stringify({ action: el.dataset.x }) }); go("reports"); },
   browse: () => browse(),
   browseDm: () => browseDm(),
+  lookupMsg: () => lookupMsg(),
   browseChan: (el) => { go("messages").then(() => browse(el.dataset.id)); },
   grantScope: () => screens.grants($("#gScope").value.trim() || "*"),
   inspectTokens: () => inspectTokens(),

@@ -2,6 +2,8 @@
 name = "weft-tui"
 version.workspace = true
 edition.workspace = true
+# Not published to crates.io: workspace-internal, path deps only.
+publish = false
 rust-version.workspace = true
 license.workspace = true
 description = "Terminal test client for the WEFT protocol: pretty event view with a raw-wire toggle. Dev tooling — trusts any server cert."

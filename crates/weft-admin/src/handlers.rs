@@ -98,6 +98,7 @@ pub fn routes() -> Router<AdminState> {
             axum::routing::delete(unblock_media),
         )
         .route("/api/v1/channels/:name/messages", get(browse_messages))
+        .route("/api/v1/messages/lookup/*msgid", get(message_lookup))
         .route("/api/v1/dms/:a/:b/messages", get(browse_dm))
         // msgids are `<network>/<ULID>` — they contain a slash, so capture the
         // whole tail with a wildcard.
@@ -186,7 +187,15 @@ async fn list_reports(State(st): State<AdminState>, Query(q): Query<ScopeQuery>)
     }
 }
 
-async fn report_detail(State(st): State<AdminState>, Path(id): Path<String>) -> Response {
+async fn report_detail(
+    State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(id): Path<String>,
+) -> Response {
+    // The detail carries the reported message and its held context — content.
+    if let Some(r) = require(&scopes, AdminScope::Messages) {
+        return r;
+    }
     match report_with_context(&st, &id).await {
         Ok(Some(v)) => Json(v).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no such report").into_response(),
@@ -461,9 +470,13 @@ async fn restore_account(
 /// are separate rows); each is deletable by its msgid.
 async fn account_messages(
     State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
     Path(name): Path<String>,
     Query(q): Query<ScopeQuery>,
 ) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Messages) {
+        return r;
+    }
     let Ok(account) = name.parse::<Account>() else {
         return (StatusCode::BAD_REQUEST, "bad account").into_response();
     };
@@ -553,8 +566,18 @@ async fn list_admins(State(st): State<AdminState>) -> Response {
             });
         }
 
-        // Delegated admins: `admin`-scope grants, keyed by account ULID. Grants
-        // are stored by ULID, so map each back to its handle for display.
+        // Delegated admins: `admin`-scope grants, keyed by account ULID. Build
+        // the ULID→handle index **once** — resolving inside the loop made this
+        // O(grants x accounts) queries, which is fine with three accounts and
+        // ruinous with thirty thousand.
+        let mut by_ulid: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for account in st.accounts.list_accounts().await? {
+            if let Some(ulid) = st.accounts.account_ulid(&account).await? {
+                by_ulid.insert(ulid, account.to_string());
+            }
+        }
+
         for grant in st.caps.grants_at_scope(ADMIN_GRANT_SCOPE).await? {
             let mut scopes: Vec<String> = Vec::new();
             for cap in &grant.caps {
@@ -570,7 +593,7 @@ async fn list_admins(State(st): State<AdminState>) -> Response {
                 continue;
             }
             scopes.sort();
-            let Some(account) = resolve_subject_handle(&st, &grant.subject).await? else {
+            let Some(account) = by_ulid.get(&grant.subject).cloned() else {
                 continue; // a grant whose account is gone — nothing to show
             };
             if out.iter().any(|e| e.account == account) {
@@ -591,19 +614,6 @@ async fn list_admins(State(st): State<AdminState>) -> Response {
         Ok(rows) => Json(rows).into_response(),
         Err(e) => internal(e),
     }
-}
-
-/// Map a grant subject (an account ULID) back to its account handle.
-async fn resolve_subject_handle(
-    st: &AdminState,
-    subject: &str,
-) -> Result<Option<String>, StoreError> {
-    for account in st.accounts.list_accounts().await? {
-        if st.accounts.account_ulid(&account).await?.as_deref() == Some(subject) {
-            return Ok(Some(account.to_string()));
-        }
-    }
-    Ok(None)
 }
 
 #[derive(Deserialize)]
@@ -789,7 +799,7 @@ async fn set_suspended(
     Path(name): Path<String>,
     suspend: bool,
 ) -> Response {
-    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+    if let Some(r) = require(&scopes, AdminScope::Accounts) {
         return r;
     }
     let Ok(account) = name.parse::<Account>() else {
@@ -846,7 +856,7 @@ async fn disconnect_account(
     Extension(scopes): Extension<AdminScopes>,
     Path(name): Path<String>,
 ) -> Response {
-    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+    if let Some(r) = require(&scopes, AdminScope::Accounts) {
         return r;
     }
     let Ok(account) = name.parse::<Account>() else {
@@ -1050,7 +1060,7 @@ async fn resolve_report(
     Path(id): Path<String>,
     Json(req): Json<ResolveReq>,
 ) -> Response {
-    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+    if let Some(r) = require(&scopes, AdminScope::Reports) {
         return r;
     }
     let Ok(action) = req.action.parse::<ResolveAction>() else {
@@ -1100,7 +1110,7 @@ async fn bulk_resolve_reports(
     Extension(scopes): Extension<AdminScopes>,
     Json(req): Json<BulkResolveReq>,
 ) -> Response {
-    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+    if let Some(r) = require(&scopes, AdminScope::Reports) {
         return r;
     }
     let Ok(action) = req.action.parse::<ResolveAction>() else {
@@ -1632,9 +1642,13 @@ async fn list_grants(State(st): State<AdminState>, Query(q): Query<ScopeQuery>) 
 /// reaction summaries, tombstones) — the same view `HISTORY` serves.
 async fn browse_messages(
     State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
     Path(name): Path<String>,
     Query(q): Query<ScopeQuery>,
 ) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Messages) {
+        return r;
+    }
     let Ok(channel) = name.parse::<ChannelName>() else {
         return (StatusCode::BAD_REQUEST, "bad channel name").into_response();
     };
@@ -1647,11 +1661,80 @@ async fn browse_messages(
 /// WC4 DM-thread browse (§0 content boundary): the materialized conversation
 /// between two accounts. An `e2ee` DM policy is "unavailable by policy" — no
 /// plaintext is held or materialized (invariant 8).
+/// `GET /messages/:msgid` — look a message up by id, from anywhere. Accepts
+/// either the full `network/ULID` msgid (what the client's "Copy message ID"
+/// yields) or a bare ULID, since a report or a log line may carry either.
+/// Returns the message materialized *with its surrounding context*, plus which
+/// scope it lives in — the "someone gave me an ID, what is it?" path.
+async fn message_lookup(
+    State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(raw): Path<String>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Messages) {
+        return r;
+    }
+    // A msgid is `<network>/<ULID>`; a bare ULID is the tail on its own.
+    let tail = raw.rsplit('/').next().unwrap_or(&raw);
+    let Ok(ulid) = tail.parse::<Ulid>() else {
+        return (StatusCode::BAD_REQUEST, "not a msgid or ULID").into_response();
+    };
+    let found = async {
+        let Some(root) = st.events.find_root(ulid).await? else {
+            return Ok(None);
+        };
+        let scope = root.scope.clone();
+        // Neighbours either side, so the message can be read in context rather
+        // than as a bare line — the same materialized view HISTORY serves.
+        let around = st
+            .events
+            .roots(
+                &scope,
+                Page {
+                    before: None,
+                    after: None,
+                    limit: 400,
+                },
+            )
+            .await?;
+        let ulids: Vec<Ulid> = around.iter().map(|r| r.msgid.ulid()).collect();
+        let children = st.events.children(&scope, &ulids).await?;
+        let context: Vec<dto::Msg> = materialize(around, children)
+            .into_iter()
+            .map(dto::Msg::from)
+            .collect();
+        Ok::<_, StoreError>(Some(dto::MessageLookup {
+            msgid: root.msgid.to_string(),
+            scope: scope.as_key(),
+            scope_kind: match scope {
+                Scope::Channel(_) => "channel".to_string(),
+                Scope::Dm(..) => "dm".to_string(),
+            },
+            sender: root.sender.to_string(),
+            at_ms: root.at_ms(),
+            deleted: st.events.is_deleted(&root.scope, ulid).await?,
+            context,
+        }))
+    }
+    .await;
+    match found {
+        Ok(Some(v)) => Json(v).into_response(),
+        // Absent and purged look the same here, and that's honest — the store
+        // genuinely can't tell them apart once a message is gone.
+        Ok(None) => (StatusCode::NOT_FOUND, "no such message (or purged)").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
 async fn browse_dm(
     State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
     Path((a, b)): Path<(String, String)>,
     Query(q): Query<ScopeQuery>,
 ) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Messages) {
+        return r;
+    }
     let (Ok(a), Ok(b)) = (a.parse::<Account>(), b.parse::<Account>()) else {
         return (StatusCode::BAD_REQUEST, "bad account").into_response();
     };
@@ -1701,7 +1784,7 @@ async fn delete_message(
     Extension(scopes): Extension<AdminScopes>,
     Path(msgid): Path<String>,
 ) -> Response {
-    if let Some(r) = require(&scopes, AdminScope::Destroy) {
+    if let Some(r) = require(&scopes, AdminScope::Delete) {
         return r;
     }
     let Some(live) = &st.live else {
@@ -1904,7 +1987,7 @@ async fn block_media(
     Extension(scopes): Extension<AdminScopes>,
     Json(req): Json<BlockMediaReq>,
 ) -> Response {
-    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+    if let Some(r) = require(&scopes, AdminScope::Media) {
         return r;
     }
     let hash = req.hash.trim();
@@ -1935,7 +2018,7 @@ async fn unblock_media(
     Extension(scopes): Extension<AdminScopes>,
     Path(hash): Path<String>,
 ) -> Response {
-    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+    if let Some(r) = require(&scopes, AdminScope::Media) {
         return r;
     }
     match st.media_blocks.unblock_hash(&hash).await {
@@ -1960,7 +2043,14 @@ struct AuditQuery {
 /// The hash-chained audit log, newest-first, optionally filtered by operator
 /// and/or action. Each row carries its chain fields so a reader can verify the
 /// log wasn't tampered with (recompute `hash`, follow `prev_hash`).
-async fn list_audit(State(st): State<AdminState>, Query(q): Query<AuditQuery>) -> Response {
+async fn list_audit(
+    State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
+    Query(q): Query<AuditQuery>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Audit) {
+        return r;
+    }
     match st
         .audit
         .list_audit(
