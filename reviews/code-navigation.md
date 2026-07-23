@@ -326,3 +326,20 @@ live registry.
 | A new store role on the panel | add the `Arc<dyn …>` field to `AdminState` + its `from_store` bound (`weft-admin/src/lib.rs`), and to weftd's generic store bound in `run`/`serve` (`weftd/src/lib.rs`) |
 | Cutting a live session (forced logout) | each `Session` owns a `close: CancellationToken` registered with the account directory (`weft-core/src/directory.rs`, `SessionEntry`); `ServerCtx::disconnect_account` cancels every token for an account. Sessions exit via the normal `cleanup`, so a cut looks like an ordinary disconnect (presence offline + voice leave, membership retained) — not a `MEMBER part` |
 | Who may do what in the panel (WC2) | scopes are `auth::AdminScope`; a request's set comes from `auth::admin_scopes` (operator ⇒ all, else the `admin`-scope grant keyed by account ULID). Write handlers gate with `require(&scopes, …)`. **Changing** permissions is gated by `auth::is_operator` instead — a delegated `admin.*` grant holds every scope, so a scope gate would allow self-promotion |
+
+## M-social-fed addendum — cross-network friends, group DMs, calls
+
+The line-133 "cross-network deferred" note is superseded: the social layer now federates end-to-end. Spec: §6.8 (social commands), §11.12 (the group tunnel). Flow docs: `docs/weft-federation-flows.md` (§9 social), `docs/weft-protocol-flows.md` (§13).
+
+| I want to change… | Where |
+|---|---|
+| The federation conduit (FriendDeliver) | `ServerCtx::request_friend_deliver(FriendDeliver{peer, from, line})` (`context.rs`) → weftd dialer opens `FSESSION OPEN <from>` + `CMD :<line>` on the peer bridge; receiver reconstructs `from@<sender-net>` and dispatches via `session/federation.rs :: on_federated`. Fire-and-forget (no reply routing). |
+| Home-authoritative group ordering | `session/groups.rs :: group_home(group)` = creator's network = sole ULID writer (§9.1). Same-net → `directory.group_msg`; cross-net home → `group_mint` + `fanout_group_message`; spoke → `GroupRelay{msgid:None}` relayed to home. |
+| Group message federation | `on_group_relay` (`groups.rs`): `@id` absent = spoke→home mint+fanout; present = home→member `group_ingest(origin,…)`. Membership sync = `GroupSync`/`on_group_sync` (reconciles diff, parts removed locals) via `propagate_group`. |
+| Group edit/delete/react federation | `GroupMut`/`apply_group_mutation`/`relay_group_mut`/`on_group_mut` (`groups.rs`); `GroupMutKind` in `directory.rs`. |
+| Group backfill (node-down recovery) | `GroupBackfill` verb. Spoke: `on_history` `Target::Group` → `request_group_backfill` (cursor = latest local msgid) → tunnel to home. Home: `on_group_backfill` → `roots(after:cursor)` → replay as `GroupRelay{msgid:Some}` ingests (idempotent; non-members get nothing). |
+| Spoke-poster labelled echo | `ctx.group_echoes: Mutex<HashMap<token → (session, created_ms)>>` (`context.rs`); `register_group_echo` (TTL-swept, `GROUP_ECHO_TTL_MS`) / `take_group_echo`. Home echoes `@echo=` only to the sender's network; spoke delivers via `group_ingest(origin=session)` so the pending label attaches. |
+| Cross-network calls (1:1 + group) | `Call`/`GroupCall` signaling in `session.rs`/`federation.rs`; media = LiveKit cascade relay (`voice.rs :: VoiceRelay`, `RelaySpec{peer, key, remote/local url·room·token}`, `relay_acquire/release/drop_peer`). Group call mesh: `GroupCallRoster`/`broadcast_roster`/`on_group_call_roster`. |
+| Group attachment mirroring | `ServerCtx::mirror_group_attachments(group, meta, msgid)` (`federation.rs`) → `MirrorRequest` from the blob's origin network (§11.8). |
+
+Tests: `weft-core/tests/session.rs` — `cross_network_group_message_*`, `cross_network_group_edit_*`, `cross_network_group_mutation_*`, `cross_network_group_membership_changes_propagate`, `federated_group_sync_*`, `spoke_poster_gets_a_labelled_echo`, `spoke_requests_group_backfill_on_history`, `home_serves_group_backfill_replaying_missed_messages`, `group_call_*`, `federated_group_call_*`.

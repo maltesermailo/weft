@@ -302,6 +302,45 @@ Bridge sessions authenticate with `AUTH BRIDGE` (§11.2). Every bridge change em
 
 **Confidentiality.** The reported party is never notified and MUST NOT learn the reporter's identity from any protocol surface. Handlers see the reporter's account (accountability against report-flooding); a network MAY anonymize the reporter toward ns-scope handlers while preserving it for the operator.
 
+### 6.8 Social layer — friends, group DMs, calls (S)
+
+The social layer is keyed on **`user@network`** so every relationship federates. These are *account*-level (not channel/namespace) surfaces: a friendship, a group DM, and a call are properties of the accounts involved, and the same-network path works standalone while the cross-network path rides the group-federation tunnel (§11.11). Conceptual flow diagrams: `weft-protocol-flows.md` §13; federation mechanics: `weft-federation-flows.md`.
+
+**Friends.** A symmetric relationship with a pending → accepted handshake.
+
+| Command | Syntax | Cap | → Result / notes |
+|---|---|---|---|
+| `FRIEND ADD` | `FRIEND ADD <user@net>` | — | Sends (or, if they already requested you, accepts) a friend request. → `FRIEND-STATE <user> pending\|friends`. |
+| `FRIEND ACCEPT` | `FRIEND ACCEPT <user@net>` | — | Accepts a pending inbound request. → `FRIEND-STATE <user> friends`. |
+| `FRIEND REMOVE` | `FRIEND REMOVE <user@net>` | — | Removes a friend or cancels/declines a request. → `FRIEND-STATE <user> none`. |
+| `FRIENDS` | `FRIENDS` | — | Roster snapshot. → a `FRIEND-STATE` per relationship. |
+
+**Group DMs.** An ad-hoc, named, multi-party conversation whose members are `UserRef`s. Messages ride `Scope::Group`, minted single-writer like DMs (§9.1); the group's **home** = its creator's network (§11.11). Ordinary `MSG &<group>`, `EDIT`/`DELETE`/`REACT`, and `HISTORY &<group>` all apply to a group target.
+
+| Command | Syntax | Cap | → Result / notes |
+|---|---|---|---|
+| `GROUP CREATE` | `GROUP CREATE <user@net> [<user@net> …]` | — | Creates a group with the caller + listed members (≥1 member required). → `GROUP <&id> :name` + `GROUP-MEMBER` to each. |
+| `GROUP ADD` | `GROUP ADD <&id> <user@net>` | member | Adds a member. → `GROUP-MEMBER <&id> <user> join`. |
+| `GROUP REMOVE` | `GROUP REMOVE <&id> <user@net>` | member | Removes a member. → `GROUP-MEMBER <&id> <user> part`. |
+| `GROUP LEAVE` | `GROUP LEAVE <&id>` | member | The caller leaves. → `GROUP-MEMBER … part`. |
+| `GROUP NAME` | `GROUP NAME <&id> [:name]` | member | Sets/clears the group name (empty trailing clears). → `GROUP <&id> :name`. |
+| `GROUPS` | `GROUPS` | — | The caller's group list. → a `GROUP` per membership. |
+
+Membership changes on a group with remote members propagate to every member network via `GROUP SYNC` (§11.11).
+
+**Calls (1:1 & group).** Signaling is protocol; media is LiveKit (§16). A call's `CALL-MEDIA` credential is minted **per participant** and delivered only to that participant — never broadcast. Cross-network calls bridge room-to-room through a relay so client IPs never cross (§11.11, §16).
+
+| Command | Syntax | Cap | → Result / notes |
+|---|---|---|---|
+| `CALL` | `CALL <user@net>` | friends | Places a 1:1 call. → `CALL-RING` to callee; `CALL-STATE ringing` to caller. |
+| `CALL ACCEPT` | `CALL ACCEPT <user@net>` | — | Answers a ringing call. → `CALL-STATE active` + `CALL-MEDIA` to each party. |
+| `CALL DECLINE` | `CALL DECLINE <user@net>` | — | Rejects. → `CALL-STATE declined`. |
+| `CALL END` | `CALL END <user@net>` | — | Hangs up. → `CALL-STATE ended`. |
+| `GROUP CALL` | `GROUP CALL <&id>` | member | Starts or joins the group's voice call. → `GROUP-CALL <&id> <self> active` + `CALL-MEDIA` + roster; other members are rung. |
+| `GROUP HANGUP` | `GROUP HANGUP <&id>` | member | Leaves the group call. → `GROUP-CALL <&id> <self> ended`. |
+
+The federated forms of `CALL`/`GROUP CALL` carry the callee/host network's pre-minted LiveKit credential as `room=`/`token=`/`endpoint=` tags (an internal relay detail, §11.11); a client never sets those.
+
 ---
 
 ## 7. Events Reference
@@ -327,6 +366,13 @@ Bridge sessions authenticate with `AUTH BRIDGE` (§11.2). Every bridge change em
 | `REPORTED <report-id>` | `label=` | ack to reporter |
 | `REPORT-FILED <report-id> <msgid> <category>` | `state=verified\|unverified\|reporter-attested`, `reporter=` (per config), `scope=` | to `reports` cap holders |
 | `REPORT-RESOLVED <report-id> <action>` | | handlers get full form; reporter gets minimal form |
+| `FRIEND-STATE <user@net> <none\|pending\|friends>` | | social layer (§6.8); pushed to the account's sessions on any change |
+| `GROUP <&id> :name` | `members=` (comma-sep `user@net`) | a group DM's roster snapshot (§6.8); on create/rename/membership change |
+| `GROUP-MEMBER <&id> <user@net> <join\|part>` | | group DM membership change, to the group's members |
+| `CALL-RING <from@net> <room>` | | incoming 1:1 call; `room` is the ad-hoc voice room to join on accept |
+| `CALL-STATE <user@net> <ringing\|active\|declined\|ended\|busy>` | | a 1:1 call's lifecycle to the other party |
+| `CALL-MEDIA <room> <token> :<endpoint>` | `mode=livekit` | **per-participant** media credential (§16); delivered only to that participant, never broadcast; absent when the server is signaling-only |
+| `GROUP-CALL <&id> <user@net> <active\|ended>` | | a member's presence in a group DM's call, to the group's members |
 | `BATCH START\|END` | `id=`, `truncated`, **`compacted`** | brackets HISTORY; **every** line of a batch (brackets and items) echoes the request label — batches are data pages (§3.5) |
 | `MORE <cursor>` / `PONG` | | |
 | `ERR <CODE> [ctx] :text` | `label=`, `retry-after=`, `max=` | §8 |
@@ -531,6 +577,48 @@ A federated user may hold **caps/roles** on a network she is not a member of
   §10.4). Operator/namespace-owner authority is **local-only** — never satisfied
   by a foreign actor; her power on `H` is exactly what `H` granted `account@network`.
 
+### 11.12 Social layer over federation — the group tunnel
+
+The social layer (§6.8) federates over a generic one-way conduit, **FriendDeliver**:
+"deliver this control line to that peer, attributed to this local account." A network
+opens `FSESSION <fsid> OPEN <from>` + `CMD :<line>` on the `F↔H` bridge (§11.11); the
+receiver reconstructs `from@<sender-network>` (the bridge authenticated the sender's
+network key) and dispatches it. It is fire-and-forget — acks return as ordinary events,
+not tunnelled replies. This is the same homeserver-authority mechanism as §11.11, reused
+for account-level relationships instead of namespace administration. Conceptual diagrams:
+`weft-federation-flows.md` §9.
+
+**Home-authoritative ordering (normative).** A group DM with members on more than one
+network has a single **home** = the group creator's network. The home is the **sole
+ULID writer** for the group's messages (§9.1); every other member network **mirrors**
+that order. This is what makes a total order well-defined when several networks post into
+one group. A message a member's own network minted-elsewhere is identified by its origin
+msgid and is never re-minted (origin authority, §11.4).
+
+The following verbs are **federation-internal** (bridge-session-only; a client can never
+send them — the server emits them). All ride FriendDeliver:
+
+| Verb | Syntax | Direction | Meaning |
+|---|---|---|---|
+| `GROUP SYNC` | `@name= GROUP SYNC <&id> <creator@net> [<member@net> …]` | home → members | The authoritative membership snapshot; receivers reconcile the diff (add/remove) and part removed local members. Sent on create + every membership/name change. |
+| `GROUP RELAY` | `GROUP RELAY <&id> <sender@net> [@id=<msgid>] [@echo=<token>] [msg-meta] :body` | both | `@id` **absent** = a spoke relayed a member's post to the home → the home mints + fans out; `@id` **present** = a home-minted message → the member ingests + delivers locally. |
+| `GROUP MUT` | `GROUP MUT <&id> <sender@net> <root-msgid> <op> [@id=<msgid>] [:arg]` | both | A message mutation (`op` ∈ `edit`\|`delete`\|`react-add`\|`react-remove`; `arg` = body/emoji). `@id` absent = spoke → home (relay to mint); present = home-minted → member ingests. |
+| `GROUP BACKFILL` | `GROUP BACKFILL <&id> [@after=<msgid>]` | member → home | Recovery pull: replay every group message after the member's cursor (or all). The home answers with `GROUP RELAY` (`@id` present) ingests. Idempotent on msgid; a non-member network gets nothing (anti-enumeration). |
+| `GROUP CALL` | `GROUP CALL <&id> [@room= @token= @endpoint=]` | home → members | Rings remote members; the media tags carry the ringing network's relay leg (§16). |
+| `GROUP ROSTER` | `GROUP ROSTER <&id> <user@net> <active\|ended> [@reply=yes]` | mesh | Group-call roster gossip across member networks; `@reply=yes` requests the peer's roster back. |
+
+**The echo token.** When a spoke poster's `MSG &<group>` is relayed to the home, the
+spoke attaches an opaque `@echo=<token>` and remembers it against the poster's session.
+The home echoes the token back **only on the copy to the poster's network**; that spoke
+then delivers the home-minted message as the poster's *own* (labelled) message — so the
+send is acked (§3.5) even though the home minted the id. Tokens are swept on a TTL
+(≈60 s): if the home never answers, the message still arrives later via `GROUP BACKFILL`,
+just without the interactive label.
+
+**Attachments.** A cross-network group message carrying a `weft-media://` attachment
+triggers a mirror pull from the blob's **origin** network (§11.8), so local members can
+fetch it.
+
 ---
 
 ## 12. History, Retention & Compaction (server duties)
@@ -711,3 +799,7 @@ v0.1 core design → v0.2 namespaces + manifest bridging → v0.3 user-owned nam
 What is given up is stated plainly rather than papered over: rung 3 no longer satisfies the "delay + root-cancellable" half of invariant 9, and a compromised network signing key can now seize a namespace instantly instead of announcing a month in advance. That is a real reduction in defence-in-depth against a malicious or breached operator, accepted on the grounds that an operator already hosts the data, already holds every capability at `*`, and can already freeze, delete, or read any non-`e2ee` channel — a 30-day namespace-takeover window was never the thing standing between that operator and the community. **E2EE remains the actual boundary and is untouched:** a seized root joins encrypted channels as a fresh MLS member with no access to prior content (invariant 8), so a takeover confers administration, never history.
 
 What is kept is what does the accountability work without a window: the rotation MUST still verify against the **network signing key** (authorization is unchanged — a stranger's signature is `FORBIDDEN`), it is **announced** via `NS-META`, and it is **permanently marked operator-initiated in `root-history`**, visible to every member and bridge peer forever. Implementation: `RECOVERY_DELAY_RUNG3_SECS = 0`, and `on_ns_recover` applies a zero-delay rung inline via `rotate_root` rather than parking it as pending — parking it with an already-elapsed ETA would have left the namespace in the abuser's hands until the next maintenance tick, which is the opposite of the intent. Tests: `operator_takeover_seizes_the_namespace_immediately` (applies at once, no pending state, nothing left for the scheduler, `operator_initiated` recorded) and `a_takeover_still_needs_the_network_key`.
+
+### Social layer (M-social)
+
+*Amendment (friends, group DMs, calls, §6.8/§11.12)*: the social layer is added as an account-level surface keyed on `user@network`, documenting behavior already implemented + tested ahead of this spec pass (the "amend the spec in the same PR" rule, retroactively closed here). **Friends** (`FRIEND ADD/ACCEPT/REMOVE`, `FRIENDS` → `FRIEND-STATE`) are a symmetric pending→accepted relationship in a `FriendStore`. **Group DMs** (`GROUP CREATE/ADD/REMOVE/LEAVE/NAME`, `GROUPS` → `GROUP`/`GROUP-MEMBER`) are ad-hoc multi-party conversations whose messages ride `Scope::Group`, minted single-writer like DMs; ordinary `MSG`/`EDIT`/`DELETE`/`REACT`/`HISTORY` accept a `&<group>` target. **Calls** (`CALL [ACCEPT/DECLINE/END]`, `GROUP CALL/HANGUP` → `CALL-RING`/`CALL-STATE`/`CALL-MEDIA`/`GROUP-CALL`) are LiveKit-backed (§16) with a **per-participant** media credential that is never broadcast; the server is signaling-only when it has no LiveKit backend. **Cross-network (§11.12):** the social layer federates over the FriendDeliver conduit (an `FSESSION OPEN/CMD` reuse of §11.11 homeserver authority). A multi-network group DM is **home-authoritative** — the creator's network is the sole ULID writer (§9.1); other networks mirror. Federation-internal verbs (bridge-only, server-emitted): `GROUP SYNC` (membership reconciliation), `GROUP RELAY` (messages; `@id` absent = spoke→home mint, present = home→member ingest), `GROUP MUT` (edit/delete/react), `GROUP BACKFILL` (recovery replay of messages a member missed while down — idempotent on msgid, non-members get nothing), `GROUP CALL`/`GROUP ROSTER` (call ring + roster mesh, carrying the ringing network's relay leg). A spoke poster's own message is acked via an opaque `@echo=<token>` round-trip (TTL-swept). Cross-network call media bridges room-to-room through a server-to-server **relay** so client IPs never cross (§16). Conceptual flow docs: `weft-federation-flows.md` (federation tunnels) and `weft-protocol-flows.md` (whole-protocol flow map). *Deferred (§18 territory, owner-driven):* a normative friend-request rate/abuse model, group size bounds, cross-network group *mutation/attachment* parity hardening, and per-device attestation on federated social commands.

@@ -11,8 +11,8 @@ netcat-debuggable) rides QUIC with a WebSocket fallback.
   codebase: **desktop** (Tauri), **web** (browser over WebSocket), and
   **embedded** (served by `weftd` itself).
 
-Normative spec: [`docs/weft-protocol-spec.md`](docs/weft-protocol-spec.md).
-Architecture: [`docs/weftd-server-architecture.md`](docs/weftd-server-architecture.md).
+Normative spec: [`docs/weft-protocol-spec.md`](docs/protocol/weft-protocol-spec.md).
+Architecture: [`docs/weftd-server-architecture.md`](docs/architecture/weftd-server-architecture.md).
 
 ## Prerequisites
 

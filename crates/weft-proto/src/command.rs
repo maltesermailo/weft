@@ -453,7 +453,7 @@ pub enum Command {
         network: NetworkName,
         namespace: NamespaceName,
     },
-    /// `FSESSION <fsid> <OPEN <account>|CMD :<line>|EVENT :<line>|CLOSE>`
+    /// `FSESSION <fsid> <OPEN <account>|CMD :<line>|REPLY :<line>|CLOSE>`
     /// (§11.10) — federation-session multiplexing over a bridge (homeserver
     /// authority): F tunnels one of its users' command sessions to H, so a
     /// federated user wields her caps on H without ever connecting to it (IP

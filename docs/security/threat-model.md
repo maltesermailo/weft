@@ -1,6 +1,6 @@
 # WEFT — Security & Threat Model
 
-Adversary-oriented companion to [`security-posture.md`](./security-posture.md).
+Adversary-oriented companion to [`security-posture.md`](security-posture.md).
 The posture document covers supply chain, CI, and tooling — *how the project
 defends itself as a codebase*. This document covers *what an attacker can try
 against a running deployment*, what stops them, and what does not yet.
@@ -549,7 +549,7 @@ experimental features and uses private API (App Store review would reject it).
 ### Native-client residual (dependency advisories)
 
 The desktop-only RustSec advisories the supply-chain audit triaged
-([`security-posture.md`](./security-posture.md)) — unmaintained gtk-rs GTK3, and
+([`security-posture.md`](security-posture.md)) — unmaintained gtk-rs GTK3, and
 the two `quick-xml` DoS advisories via `xcb` — live **exclusively in this
 client**, not in `weftd`. They are reachable only through local windowing/capture,
 not remote input, but they are the client's, not the server's, to carry.
