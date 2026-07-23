@@ -13,7 +13,7 @@ membership (auto-rejoin); sever-on-idle; **open** trigger policy.
 
 ## A. Addressing — insert into §2.1 (identifiers)
 
-> **Cross-network reference.** `<network>/<namespace>` (e.g. `hda.example/gaming`)
+> **Cross-network reference.** `<network>/<namespace>` (e.g. `test.example/gaming`)
 > — the left segment is a DNS network name, the right a namespace on it. Local
 > references stay bare (`gaming`, `#gaming/general`). Link forms:
 > `weft://<network>/<namespace>` (open a namespace) and

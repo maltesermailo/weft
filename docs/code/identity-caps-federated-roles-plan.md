@@ -93,7 +93,7 @@ Unbound`. This is a change to the **deterministic-CBOR encode-before-sign**, so:
 become valid; the store's role-membership + grants accept a foreign subject.
 A role is three things; for a *foreign* subject they split:
 
-- **Membership + display — real now.** `alice@hda.example` wears the role: shown
+- **Membership + display — real now.** `alice@test.example` wears the role: shown
   with its color + badge wherever her bridged messages appear on H. Recognizing a
   partner network's moderators is the immediate, safe win.
 - **Enforced authority — via a federation session (§7).** Foreign users have no

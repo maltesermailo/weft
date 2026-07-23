@@ -38,7 +38,7 @@ weftd can dial out** — today `BRIDGE ADD/REMOVE` answer `UNSUPPORTED` and
 
 ## 3. Addressing
 
-- **Namespace reference:** `<network>/<namespace>` — e.g. `hda.example/gaming`.
+- **Namespace reference:** `<network>/<namespace>` — e.g. `test.example/gaming`.
   The left of the first `/` is a DNS network name; the right is a namespace on
   that network. (Local namespaces stay bare: `gaming`, channels `#gaming/general`.)
 - **Invite link:** `weft://<network>/i/<token>` — already the format. Redeeming

@@ -239,10 +239,10 @@ item directly.
 ```
 C: @label=h1 HISTORY #general limit=3
 S: @label=h1 BATCH START b7
-S: @label=h1 MESSAGE #general alice@hda.example :final text   msgid=hda.example/01J…A edited=1 edited-at=1737…
-S: @label=h1 REACTIONS #general hda.example/01J…A 👍 3         by=alice@hda.example,bob@hda.example,carol@hda.example
-S: @label=h1 DELETED #general hda.example/01J…B               by=bob@hda.example
-S: @label=h1 MESSAGE #general carol@hda.example :ok           msgid=hda.example/01J…C
+S: @label=h1 MESSAGE #general alice@test.example :final text   msgid=test.example/01J…A edited=1 edited-at=1737…
+S: @label=h1 REACTIONS #general test.example/01J…A 👍 3         by=alice@test.example,bob@test.example,carol@test.example
+S: @label=h1 DELETED #general test.example/01J…B               by=bob@test.example
+S: @label=h1 MESSAGE #general carol@test.example :ok           msgid=test.example/01J…C
 S: @label=h1 BATCH END b7   truncated compacted
 ```
 

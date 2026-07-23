@@ -37,7 +37,7 @@
 ## 2. Model & Naming
 
 ### 2.1 Entities
-- **Network**: a sovereign deployment identified by a DNS name (`hda.example`). Owns accounts, hosts namespaces and channels, publishes its signing key, is the abuse-accountable party. **No global state**: nothing leaves a network except through an explicitly agreed bridge manifest.
+- **Network**: a sovereign deployment identified by a DNS name (`test.example`). Owns accounts, hosts namespaces and channels, publishes its signing key, is the abuse-accountable party. **No global state**: nothing leaves a network except through an explicitly agreed bridge manifest.
 - **Namespace** (optional): a named channel bundle — the Discord-"server" analog — **created and owned by a user**. At `NS CREATE` a dedicated **namespace root key** is generated client-side and held by the owner; all roles, moderator tokens, channel policies, and invites chain from it. The operator hosts but does not administer; the network key outranks a namespace root **only** for abuse handling (freeze/delete) and rung 3 recovery (§2.4) — it can never silently mint membership or read `e2ee` content. A network with only flat channels never declares a namespace and is fully conformant.
 - **Channel**: one home network, optionally inside one namespace. `#general` or `#gaming/general` — one level, no nesting.
 - **Account**: `user@network.tld`, registered and recoverable at the home network.
@@ -106,7 +106,7 @@ Any command MAY carry `label=<opaque ≤64 B>`. Every **direct** response — su
 ### 3.6 HELLO
 ```
 C: HELLO weft/1
-S: @features=media,backfill,voice,irc-gw WELCOME hda.example :Willkommen
+S: @features=media,backfill,voice,irc-gw WELCOME test.example :Willkommen
 ```
 `features=`: `media`, `voice`, `e2ee`, `backfill`, `irc-gw`, `presence`. Unknown flags ignored. Version mismatch: `ERR UNSUPPORTED`, close.
 
@@ -151,248 +151,162 @@ Every command accepts a `label` tag (§3.5); the direct response — including `
 
 ### 6.1 Session & identity (S/N)
 
-| Command | Syntax | Cap | → Result / notes |
-|---|---|---|---|
-| `HELLO` | `HELLO <version>` | — | Negotiates the protocol (§3.6). |
-| `REGISTER` | `REGISTER <account> :<password>` | config | Password ≥ 12 B; needs `registration: open` else `FORBIDDEN`. Registration doubles as auth. → `WELCOME` \| `CONFLICT` \| `POLICY`. |
-| `AUTH PASSWORD` | `AUTH PASSWORD <account> :<password>` | — | → `WELCOME` \| `AUTH-FAILED` (constant-time, uniform). |
-| `AUTH KEY` | `AUTH KEY <account> <b64-ed25519-pubkey>` | — | Begins device-key challenge-response (flow below). → `CHALLENGE`. |
-| `AUTH PROOF` | `AUTH PROOF <b64-sig>` | — | Answers the challenge, signing `nonce ‖ network-name`. → `@attestation=<b64> WELCOME` \| `AUTH-FAILED`. |
-| `AUTH ENROLL` | `AUTH ENROLL <b64-pubkey>` | authed | Adds a device to the current account. → `@attestation=<b64> WELCOME`. |
-| `QUIT` | `QUIT [:reason]` | — | Graceful close. |
-| `PING` / `PONG` | `PING\|PONG [token]` | — | §3.4 keepalive; answering is mandatory. → `PONG`. |
-| `PRESENCE` | `PRESENCE <online\|away\|dnd\|invisible>` | — | Same-network visibility only; never bridged; `invisible` renders offline. |
+| Command | Syntax | Cap | → Result / notes | Example (`→` = direct response) |
+|---|---|---|---|---|
+| `HELLO` | `HELLO <version>` | — | Negotiates the protocol (§3.6). | `HELLO weft/1` → `@features=media,backfill WELCOME test.example :Willkommen` |
+| `REGISTER` | `REGISTER <account> :<password>` | config | Password ≥ 12 B; needs `registration: open` else `FORBIDDEN`. Registration doubles as auth. → `WELCOME` \| `CONFLICT` \| `POLICY`. | `@label=r1 REGISTER ada :correct horse battery staple` → `@label=r1 WELCOME test.example` |
+| `AUTH PASSWORD` | `AUTH PASSWORD <account> :<password>` | — | → `WELCOME` \| `AUTH-FAILED` (constant-time, uniform). | `@label=a1 AUTH PASSWORD ada :correct horse battery staple` → `@label=a1 WELCOME test.example` |
+| `AUTH KEY` | `AUTH KEY <account> <b64-ed25519-pubkey>` | — | Begins device-key challenge-response (flow below). → `CHALLENGE`. | `AUTH KEY ada <b64-pubkey>` → `CHALLENGE <b64-nonce-32B>` |
+| `AUTH PROOF` | `AUTH PROOF <b64-sig>` | — | Answers the challenge, signing `nonce ‖ network-name`. → `@attestation=<b64> WELCOME` \| `AUTH-FAILED`. | `AUTH PROOF <b64-sig>` → `@attestation=<b64> WELCOME test.example` |
+| `AUTH ENROLL` | `AUTH ENROLL <b64-pubkey>` | authed | Adds a device to the current account. → `@attestation=<b64> WELCOME`. | `AUTH ENROLL <b64-pubkey>` → `@attestation=<b64> WELCOME test.example` |
+| `QUIT` | `QUIT [:reason]` | — | Graceful close. | `QUIT :bye` (connection closes) |
+| `PING` / `PONG` | `PING\|PONG [token]` | — | §3.4 keepalive; answering is mandatory. → `PONG`. | `PING 42` → `PONG 42` |
+| `PRESENCE` | `PRESENCE <online\|away\|dnd\|invisible>` | — | Same-network visibility only; never bridged; `invisible` renders offline. | `PRESENCE away` → (broadcast) `PRESENCE ada@test.example away` |
 
 Device-key auth is a two-step challenge-response binding a device pubkey to the account; `nonce ‖ network-name` in the signed payload prevents cross-network replay:
 ```
 C: AUTH KEY <account> <b64-ed25519-pubkey>
 S: CHALLENGE <b64-nonce-32B>
 C: AUTH PROOF <b64-sig(nonce ‖ network-name)>
-S: @attestation=<b64> WELCOME hda.example
-```
-
-**Examples** (device-key flow shown above; `→` marks the direct response):
-```
-C: HELLO weft/1
-S: @features=media,backfill,voice,presence WELCOME hda.example :Willkommen
-C: @label=r1 REGISTER ada :correct horse battery staple   → @label=r1 WELCOME hda.example
-C: @label=a1 AUTH PASSWORD ada :correct horse battery staple   → @label=a1 WELCOME hda.example
-C: PING 42          → PONG 42
-C: PRESENCE away    (no reply; broadcast to same-network watchers as PRESENCE ada@hda.example away)
-C: QUIT :bye        (connection closes)
+S: @attestation=<b64> WELCOME test.example
 ```
 
 ### 6.2 Namespace commands (NS)
 
 Signed NS verbs (`TRANSFER`, `RECOVERY CANCEL`) carry the root signature in a `@sig=<b64>` tag; `NS CREATE` carries the new root pubkey in `@root=<b64>` (§2.4, §10.4).
 
-| Command | Syntax | Cap | → Result / notes |
-|---|---|---|---|
-| `NS CREATE` | `NS CREATE <name> [public\|unlisted\|private]` | none (`open`+quota) / `ns-create` (`gated`) | Default `unlisted`. Client generates the namespace **root key**, submits its pubkey (recorded as delegation root). → `NS-META` \| `QUOTA` \| `CONFLICT` \| `FORBIDDEN`. |
-| `NS META` | `NS META <name> <key> :<value>` | `ns-admin` | Keys: `title` / `description` / `icon` (free text); `categories` (comma-separated list — server-authoritative channel groups, Appendix A layout); `federation` (`open`\|`closed`, §11.10 — `open` requires `public` visibility, else `FORBIDDEN`). → `NS-META`. |
-| `NS VISIBILITY` | `NS VISIBILITY <name> <tier>` | `ns-admin` | → `private` applies anti-enumeration immediately. → `NS-META`. |
-| `NS DELEGATE` | `NS DELEGATE <name> <account\|pubkey> <cap>[,…]` | grant chain | Sugar for `GRANT` at `ns:` scope. → `TOKEN`. |
-| `NS TRANSFER` | `NS TRANSFER <name> <account>` | root key | Rung-1 succession, root-signed. → `NS-META` (new owner). |
-| `NS RECOVERY SET` | `NS RECOVERY SET <name> <m> <key1,key2,…>` | root | Designate the M-of-N quorum (§2.4). → `NS-META` (`recovery-set=yes`). |
-| `NS RECOVER` | `NS RECOVER <name> <b64-rotation-record>` | quorum / operator sig | Rung 2 (quorum) starts the 7-day delay window; rung 3 (network-key signed) **applies immediately** — no window, no pending state, marked operator-initiated in `root-history`. → `NS-META` \| `FORBIDDEN` (bad sig) \| `CONFLICT` (a rung-2 recovery already pending). |
-| `NS RECOVERY CANCEL` | `NS RECOVERY CANCEL <name>` | root key | Current root vetoes a pending recovery. |
-| `NS DELETE` | `NS DELETE <name> <name>` | `ns-admin` / operator | Confirmed by repetition. |
-| `NS JOIN` | `NS JOIN <name>` | membership | Auto-join every channel in the namespace the caller can see — view-gated and banned channels are skipped. → a `MEMBER` + `POLICY` per joined channel; no visible channel → `NO-SUCH-TARGET`. |
-| `DISCOVER` | `DISCOVER [cursor]` | — | Public namespace directory. → `NS-META` per ns + `MORE <cursor>`. |
-| `CHANNELS` | `CHANNELS <name>` | view | Ordered channel layout of a namespace (extension). → `CHANNEL-LAYOUT` per channel. |
-
-**Examples:**
-```
-C: @label=n1 @root=<b64pub> NS CREATE gaming public   → @label=n1 NS-META gaming public owner=ada@hda.example
-C: NS META gaming title :Gaming Hub                   → NS-META gaming public title=Gaming\sHub …
-C: NS VISIBILITY gaming unlisted                      → NS-META gaming unlisted …
-C: NS DELEGATE gaming bob ns-admin                    → @token=<b64> TOKEN bob ns:gaming
-C: @sig=<b64> NS TRANSFER gaming bob                  → NS-META gaming unlisted owner=bob@hda.example
-C: NS RECOVERY SET gaming 2 <key1>,<key2>,<key3>      → NS-META gaming … recovery-set=yes
-C: NS RECOVER gaming <b64-rotation-record>            → NS-META gaming … recovery=pending recovery-eta=<ms>
-C: @sig=<b64> NS RECOVERY CANCEL gaming               → NS-META gaming … (pending recovery cleared)
-C: NS DELETE gaming gaming                            → NS-META gaming … description=deleted
-C: NS JOIN gaming        → MEMBER #gaming/general ada@hda.example join count=1
-                           POLICY #gaming/general retained:90d          (one pair per visible channel)
-C: @label=d1 DISCOVER    → @label=d1 NS-META gaming public …
-                           @label=d1 MORE <cursor>
-C: @label=c1 CHANNELS gaming → @label=c1 CHANNEL-LAYOUT #gaming/general 0 category=Text   (one per channel)
-```
+| Command | Syntax | Cap | → Result / notes | Example (`→` = direct response) |
+|---|---|---|---|---|
+| `NS CREATE` | `NS CREATE <name> [public\|unlisted\|private]` | none (`open`+quota) / `ns-create` (`gated`) | Default `unlisted`. Client generates the namespace **root key**, submits its pubkey (recorded as delegation root). → `NS-META` \| `QUOTA` \| `CONFLICT` \| `FORBIDDEN`. | `@root=<b64> NS CREATE gaming public` → `NS-META gaming public owner=ada@test.example` |
+| `NS META` | `NS META <name> <key> :<value>` | `ns-admin` | Keys: `title` / `description` / `icon` (free text); `categories` (comma-separated list — server-authoritative channel groups, Appendix A layout); `federation` (`open`\|`closed`, §11.10 — `open` requires `public` visibility, else `FORBIDDEN`). → `NS-META`. | `NS META gaming title :Gaming Hub` → `NS-META gaming public title=Gaming\sHub` |
+| `NS VISIBILITY` | `NS VISIBILITY <name> <tier>` | `ns-admin` | → `private` applies anti-enumeration immediately. → `NS-META`. | `NS VISIBILITY gaming unlisted` → `NS-META gaming unlisted` |
+| `NS DELEGATE` | `NS DELEGATE <name> <account\|pubkey> <cap>[,…]` | grant chain | Sugar for `GRANT` at `ns:` scope. → `TOKEN`. | `NS DELEGATE gaming bob ns-admin` → `@token=<b64> TOKEN bob ns:gaming` |
+| `NS TRANSFER` | `NS TRANSFER <name> <account>` | root key | Rung-1 succession, root-signed. → `NS-META` (new owner). | `@sig=<b64> NS TRANSFER gaming bob` → `NS-META gaming unlisted owner=bob@test.example` |
+| `NS RECOVERY SET` | `NS RECOVERY SET <name> <m> <key1,key2,…>` | root | Designate the M-of-N quorum (§2.4). → `NS-META` (`recovery-set=yes`). | `NS RECOVERY SET gaming 2 <key1>,<key2>,<key3>` → `NS-META gaming … recovery-set=yes` |
+| `NS RECOVER` | `NS RECOVER <name> <b64-rotation-record>` | quorum / operator sig | Rung 2 (quorum) starts the 7-day delay window; rung 3 (network-key signed) **applies immediately** — no window, no pending state, marked operator-initiated in `root-history`. → `NS-META` \| `FORBIDDEN` (bad sig) \| `CONFLICT` (a rung-2 recovery already pending). | `NS RECOVER gaming <b64-rotation-record>` → `NS-META gaming … recovery=pending recovery-eta=<ms>` |
+| `NS RECOVERY CANCEL` | `NS RECOVERY CANCEL <name>` | root key | Current root vetoes a pending recovery. | `@sig=<b64> NS RECOVERY CANCEL gaming` → `NS-META gaming …` (pending cleared) |
+| `NS DELETE` | `NS DELETE <name> <name>` | `ns-admin` / operator | Confirmed by repetition. | `NS DELETE gaming gaming` → `NS-META gaming … description=deleted` |
+| `NS JOIN` | `NS JOIN <name>` | membership | Auto-join every channel in the namespace the caller can see — view-gated and banned channels are skipped. → a `MEMBER` + `POLICY` per joined channel; no visible channel → `NO-SUCH-TARGET`. | `NS JOIN gaming` → `MEMBER #gaming/general ada@test.example join count=1` + `POLICY …` (per channel) |
+| `DISCOVER` | `DISCOVER [cursor]` | — | Public namespace directory. → `NS-META` per ns + `MORE <cursor>`. | `@label=d1 DISCOVER` → `@label=d1 NS-META gaming public …` + `MORE <cursor>` |
+| `CHANNELS` | `CHANNELS <name>` | view | Ordered channel layout of a namespace (extension). → `CHANNEL-LAYOUT` per channel. | `CHANNELS gaming` → `CHANNEL-LAYOUT #gaming/general 0 category=Text` (per channel) |
 
 ### 6.3 Channel commands (C)
 
 `CHANNEL CREATE`/`DELETE` are confirmed by repeating the name. **JOIN never auto-creates.**
 
-| Command | Syntax | Cap | → Result / notes |
-|---|---|---|---|
-| `CHANNEL CREATE` | `CHANNEL CREATE <#chan> [policy]` | `chan-create` (`*`) / `ns-admin`\|`chan-create` (`ns:`) | Default policy `retained:90d`. → `POLICY`. |
-| `CHANNEL POLICY` | `CHANNEL POLICY <#chan> <policy> [purge]` | `policy` | Tightening purges now; loosening applies to new events only; `e2ee` needs an empty channel or `purge`. → `POLICY`. |
-| `CHANNEL META` | `CHANNEL META <#chan> <topic\|view-gated\|category\|position> :<value>` | `pin` / `ns-admin` | `category`/`position` = the layout extension. → `CHANMETA`. |
-| `CHANNEL DELETE` | `CHANNEL DELETE <#chan> <#chan>` | `ns-admin` / operator | → `CHANMETA … deleted`. |
-| `CHANNEL RENAME` | `CHANNEL RENAME <#old> <#new>` | `ns-admin` / operator | Change a channel's identity within its namespace; server re-keys every scoped record (grants, membership, roles, holds, pins, history). → `CHANNEL-RENAMED <#old> <#new>` (broadcast to members + labeled to actor). |
-| `JOIN` | `JOIN <#chan> [invite-ref]` | membership / invite | → `MEMBER` + `POLICY` + `count=` \| `NO-SUCH-TARGET` \| `BANNED`. |
-| `PART` | `PART <#chan> [:reason]` | — | → `MEMBER … part`. |
-| `MEMBERS` | `MEMBERS <#chan> [cursor]` | membership | Paginated; bridge peers see remote members only as they've appeared. |
-| `TYPING` | `TYPING <#chan> <start\|stop>` | `send` | Never stored; rate-limited (1/3 s RECOMMENDED); bridged only under manifest `typing: yes`. |
-| `MARK` | `MARK <#chan> <msgid>` | membership | Account-scoped read marker, synced via `MARKED`; survives `ephemeral`. |
-| `UNREAD` | `UNREAD [<#chan>]` | membership | Request server-computed unread counts → one `UNREAD-COUNTS` per channel. No channel = every joined channel. Absent channel must be joined, else `NO-SUCH-TARGET`. |
-
-**Examples:**
-```
-C: CHANNEL CREATE #gaming/lounge retained:30d      → POLICY #gaming/lounge retained:30d
-C: CHANNEL POLICY #gaming/lounge permanent         → POLICY #gaming/lounge permanent
-C: CHANNEL META #gaming/lounge topic :Hang out     → CHANMETA #gaming/lounge topic :Hang out
-C: CHANNEL DELETE #gaming/lounge #gaming/lounge     → CHANMETA #gaming/lounge deleted
-C: CHANNEL RENAME #gaming/lounge #gaming/cafe        → CHANNEL-RENAMED #gaming/lounge #gaming/cafe
-C: @label=j1 JOIN #gaming/general   → @label=j1 MEMBER #gaming/general ada@hda.example join count=42
-                                       @label=j1 POLICY #gaming/general retained:90d
-C: PART #gaming/general :later      → MEMBER #gaming/general ada@hda.example part
-C: @label=m1 MEMBERS #gaming/general → @label=m1 BATCH START m1
-                                        @label=m1 MEMBER #gaming/general ada@hda.example join count=42
-                                        @label=m1 BATCH END m1
-C: TYPING #gaming/general start     (broadcast TYPING #gaming/general ada@hda.example start; never stored)
-C: MARK #gaming/general hda.example/01J…A   → MARKED #gaming/general hda.example/01J…A  (to your own sessions)
-C: @label=u1 UNREAD #gaming/general → @label=u1 UNREAD-COUNTS #gaming/general 3 1
-```
+| Command | Syntax | Cap | → Result / notes | Example (`→` = direct response) |
+|---|---|---|---|---|
+| `CHANNEL CREATE` | `CHANNEL CREATE <#chan> [policy]` | `chan-create` (`*`) / `ns-admin`\|`chan-create` (`ns:`) | Default policy `retained:90d`. → `POLICY`. | `CHANNEL CREATE #gaming/lounge retained:30d` → `POLICY #gaming/lounge retained:30d` |
+| `CHANNEL POLICY` | `CHANNEL POLICY <#chan> <policy> [purge]` | `policy` | Tightening purges now; loosening applies to new events only; `e2ee` needs an empty channel or `purge`. → `POLICY`. | `CHANNEL POLICY #gaming/lounge permanent` → `POLICY #gaming/lounge permanent` |
+| `CHANNEL META` | `CHANNEL META <#chan> <topic\|view-gated\|category\|position> :<value>` | `pin` / `ns-admin` | `category`/`position` = the layout extension. → `CHANMETA`. | `CHANNEL META #gaming/lounge topic :Hang out` → `CHANMETA #gaming/lounge topic :Hang out` |
+| `CHANNEL DELETE` | `CHANNEL DELETE <#chan> <#chan>` | `ns-admin` / operator | → `CHANMETA … deleted`. | `CHANNEL DELETE #gaming/lounge #gaming/lounge` → `CHANMETA #gaming/lounge deleted` |
+| `CHANNEL RENAME` | `CHANNEL RENAME <#old> <#new>` | `ns-admin` / operator | Change a channel's identity within its namespace; server re-keys every scoped record (grants, membership, roles, holds, pins, history). → `CHANNEL-RENAMED <#old> <#new>` (broadcast to members + labeled to actor). | `CHANNEL RENAME #gaming/lounge #gaming/cafe` → `CHANNEL-RENAMED #gaming/lounge #gaming/cafe` |
+| `JOIN` | `JOIN <#chan> [invite-ref]` | membership / invite | → `MEMBER` + `POLICY` + `count=` \| `NO-SUCH-TARGET` \| `BANNED`. | `@label=j1 JOIN #gaming/general` → `MEMBER #gaming/general ada@test.example join count=42` + `POLICY …` |
+| `PART` | `PART <#chan> [:reason]` | — | → `MEMBER … part`. | `PART #gaming/general :later` → `MEMBER #gaming/general ada@test.example part` |
+| `MEMBERS` | `MEMBERS <#chan> [cursor]` | membership | Paginated; bridge peers see remote members only as they've appeared. | `MEMBERS #gaming/general` → `BATCH START` … `MEMBER … join count=42` … `BATCH END` |
+| `TYPING` | `TYPING <#chan> <start\|stop>` | `send` | Never stored; rate-limited (1/3 s RECOMMENDED); bridged only under manifest `typing: yes`. | `TYPING #gaming/general start` → (broadcast) `TYPING #gaming/general ada@test.example start` |
+| `MARK` | `MARK <#chan> <msgid>` | membership | Account-scoped read marker, synced via `MARKED`; survives `ephemeral`. | `MARK #gaming/general test.example/01J…A` → `MARKED #gaming/general test.example/01J…A` |
+| `UNREAD` | `UNREAD [<#chan>]` | membership | Request server-computed unread counts → one `UNREAD-COUNTS` per channel. No channel = every joined channel. Absent channel must be joined, else `NO-SUCH-TARGET`. | `UNREAD #gaming/general` → `UNREAD-COUNTS #gaming/general 3 1` |
 
 ### 6.4 Messaging (C)
 
-| Command | Syntax | Cap | → Result / notes |
-|---|---|---|---|
-| `MSG` | `MSG <#chan\|@user> [:body]` + tags `fmt=md` `reply-to=` `thread=` `attach.N=` (≤10) | `send` (+`attach`) | Empty body legal iff attachments. **The echoed `MESSAGE` (with `msgid` + `label`) is the ack.** → `MESSAGE`; errors `CAP-REQUIRED` `TOO-LARGE` `THROTTLED` (`retry-after=`) `NO-SUCH-TARGET`. |
-| `EDIT` | `EDIT <msgid> :<new>` | `edit-own` | No `edit-any` (deliberate). Honored only at the msgid's origin network; elsewhere `FORBIDDEN origin`. → `EDITED`. |
-| `DELETE` | `DELETE <msgid>` | `delete-own` \| `delete-any` | Tombstone. → `DELETED`. |
-| `REACT` / `UNREACT` | `REACT <msgid> <emoji>` | `react` | Unicode emoji ≤ 32 B; shortcodes travel **bare** (leading `:` collides with the §4 trailing marker — §18 #8). Idempotent. → `REACTION op=add\|remove` (live). |
-| `HISTORY` | `HISTORY <target> [before=] [after=] [limit=≤500] [thread=]` | membership / acked manifest | `key=value` middle params, any order, unknown keys ignored; target = channel or `@user`. → `BATCH START` … **compacted** events (§12.1) … `BATCH END [truncated]`. `truncated` marks gaps — silence about them is forbidden. |
-| `PIN` / `UNPIN` | `PIN <msgid>` | `pin` | Pin/unpin a message in its channel (resolved from the msgid). → `PINNED <#chan> <msgid> by=` / `UNPINNED <#chan> <msgid>` broadcast to members. |
-| `PINS` | `PINS <#chan>` | membership | The pinned messages. → `BATCH START` … `MESSAGE` per pin … `BATCH END`. |
-| `SEARCH` | `SEARCH <#chan> :<query>` | membership | Message search in a channel. → `BATCH START` … `MESSAGE` per match (newest-first, ≤50) … `BATCH END`. |
-| `STREAM` | `STREAM OFFER <media\|backfill> <mime> <bytes>` | — | → `STREAM ACCEPT <token>` → data-plane transfer. HISTORY switches to STREAM above ~200 events (RECOMMENDED). |
+The echoed `MESSAGE` — same `label`, server-assigned `msgid` — is the ack; broadcast copies to other members carry no label (§3.5).
 
-**Examples** (the echoed `MESSAGE` is the ack — same `label`, assigned `msgid`; broadcast copies carry no label):
-```
-C: @label=x MSG #gaming/general :gg everyone
-S: @label=x MESSAGE #gaming/general ada@hda.example :gg everyone msgid=hda.example/01J…A     (→ ada, the ack)
-S:            MESSAGE #gaming/general ada@hda.example :gg everyone msgid=hda.example/01J…A     (→ other members)
-C: MSG #gaming/general :look @attach.1=weft-media://hda.example/<b3-hash>   (empty body legal with attachments)
-C: @label=e1 EDIT hda.example/01J…A :gg all   → @label=e1 EDITED #gaming/general ada@hda.example :gg all msgid=hda.example/01J…A
-C: DELETE hda.example/01J…A          → DELETED #gaming/general hda.example/01J…A by=ada@hda.example
-C: REACT hda.example/01J…A 🎉        → REACTION #gaming/general hda.example/01J…A 🎉 op=add by=ada@hda.example
-C: @label=h1 HISTORY #gaming/general limit=50   → @label=h1 BATCH START b1 … (compacted) … BATCH END b1
-C: PIN hda.example/01J…A             → PINNED #gaming/general hda.example/01J…A by=ada@hda.example
-C: @label=p1 PINS #gaming/general    → @label=p1 BATCH START … MESSAGE per pin … BATCH END
-C: @label=s1 SEARCH #gaming/general :gg   → @label=s1 BATCH START … MESSAGE per match (≤50, newest-first) … BATCH END
-C: STREAM OFFER media image/png 20480     → STREAM ACCEPT s_9f3c… (then upload on the data plane)
-```
+| Command | Syntax | Cap | → Result / notes | Example (`→` = direct response) |
+|---|---|---|---|---|
+| `MSG` | `MSG <#chan\|@user> [:body]` + tags `fmt=md` `reply-to=` `thread=` `attach.N=` (≤10) | `send` (+`attach`) | Empty body legal iff attachments. **The echoed `MESSAGE` (with `msgid` + `label`) is the ack.** → `MESSAGE`; errors `CAP-REQUIRED` `TOO-LARGE` `THROTTLED` (`retry-after=`) `NO-SUCH-TARGET`. | `@label=x MSG #gaming/general :gg` → `@label=x MESSAGE #gaming/general ada@test.example :gg msgid=test.example/01J…A` |
+| `EDIT` | `EDIT <msgid> :<new>` | `edit-own` | No `edit-any` (deliberate). Honored only at the msgid's origin network; elsewhere `FORBIDDEN origin`. → `EDITED`. | `EDIT test.example/01J…A :gg all` → `EDITED #gaming/general ada@test.example :gg all msgid=test.example/01J…A` |
+| `DELETE` | `DELETE <msgid>` | `delete-own` \| `delete-any` | Tombstone. → `DELETED`. | `DELETE test.example/01J…A` → `DELETED #gaming/general test.example/01J…A by=ada@test.example` |
+| `REACT` / `UNREACT` | `REACT <msgid> <emoji>` | `react` | Unicode emoji ≤ 32 B; shortcodes travel **bare** (leading `:` collides with the §4 trailing marker — §18 #8). Idempotent. → `REACTION op=add\|remove` (live). | `REACT test.example/01J…A 🎉` → `REACTION #gaming/general test.example/01J…A 🎉 op=add by=ada@test.example` |
+| `HISTORY` | `HISTORY <target> [before=] [after=] [limit=≤500] [thread=]` | membership / acked manifest | `key=value` middle params, any order, unknown keys ignored; target = channel or `@user`. → `BATCH START` … **compacted** events (§12.1) … `BATCH END [truncated]`. `truncated` marks gaps — silence about them is forbidden. | `@label=h1 HISTORY #gaming/general limit=50` → `@label=h1 BATCH START b1` … (compacted) … `BATCH END b1` |
+| `PIN` / `UNPIN` | `PIN <msgid>` | `pin` | Pin/unpin a message in its channel (resolved from the msgid). → `PINNED <#chan> <msgid> by=` / `UNPINNED <#chan> <msgid>` broadcast to members. | `PIN test.example/01J…A` → `PINNED #gaming/general test.example/01J…A by=ada@test.example` |
+| `PINS` | `PINS <#chan>` | membership | The pinned messages. → `BATCH START` … `MESSAGE` per pin … `BATCH END`. | `PINS #gaming/general` → `BATCH START` … `MESSAGE` per pin … `BATCH END` |
+| `SEARCH` | `SEARCH <#chan> :<query>` | membership | Message search in a channel. → `BATCH START` … `MESSAGE` per match (newest-first, ≤50) … `BATCH END`. | `SEARCH #gaming/general :gg` → `BATCH START` … `MESSAGE` per match … `BATCH END` |
+| `STREAM` | `STREAM OFFER <media\|backfill> <mime> <bytes>` | — | → `STREAM ACCEPT <token>` → data-plane transfer. HISTORY switches to STREAM above ~200 events (RECOMMENDED). | `STREAM OFFER media image/png 20480` → `STREAM ACCEPT s_9f3c…` |
 
 ### 6.5 Capabilities & invites (§10.4)
 
-| Command | Syntax | Cap | → Result / notes |
-|---|---|---|---|
-| `GRANT` | `GRANT <account\|pubkey> <scope> <cap>[,…] [expiry=<s>]` | `grant:<cap>` at ≥ scope | Scope `<#chan>` \| `ns:<name>` \| `*`; the chain rule is cryptographic. → `TOKEN`. |
-| `REVOKE` | `REVOKE <account\|pubkey> <scope> [caps=<list>] [epoch]` | grant chain | Stops refresh; a bare `epoch` number bumps the scope revocation epoch. → `TOKEN` (remaining caps). |
-| `INVITE MINT` | `INVITE MINT <scope> [max-uses=] [expiry=]` | `invite` | → `INVITED` (`@token=`, link `weft://<net>/<ns>/i/<b64>` — the namespace is embedded so a *foreign* redeemer can auto-federate to it, §11.10; top-level channels have no `<ns>` and use `weft://<net>/i/<b64>`). |
-| `INVITE REVOKE` | `INVITE REVOKE <invite-id>` | `invite` | Closes the counter; already-redeemed members unaffected. |
-| `INVITE REVOKE-ALL` | `INVITE REVOKE-ALL <scope>` | `invite` | Bulk-closes every invite for the scope's namespace (`ns:<name>` + its `#<ns>/<chan>` scopes) in one shot. → `INVITED … invite-id=* max-uses=0` ack. Already-redeemed members unaffected. |
-| `INVITE REDEEM` | `INVITE REDEEM <b64>` | — | Verifies chain + counter, mints a member token **bound to the redeemer's key**, auto-joins the default channel. Dead invites → `NO-SUCH-TARGET` (indistinct). |
+| Command | Syntax | Cap | → Result / notes | Example (`→` = direct response) |
+|---|---|---|---|---|
+| `GRANT` | `GRANT <account\|pubkey> <scope> <cap>[,…] [expiry=<s>]` | `grant:<cap>` at ≥ scope | Scope `<#chan>` \| `ns:<name>` \| `*`; the chain rule is cryptographic. → `TOKEN`. | `GRANT bob #gaming/general send,react expiry=86400` → `@token=<b64> TOKEN bob #gaming/general` |
+| `REVOKE` | `REVOKE <account\|pubkey> <scope> [caps=<list>] [epoch]` | grant chain | Stops refresh; a bare `epoch` number bumps the scope revocation epoch. → `TOKEN` (remaining caps). | `REVOKE bob #gaming/general caps=react` → `@token=<b64> TOKEN bob #gaming/general` (remaining caps) |
+| `INVITE MINT` | `INVITE MINT <scope> [max-uses=] [expiry=]` | `invite` | → `INVITED` (`@token=`, link `weft://<net>/<ns>/i/<b64>` — the namespace is embedded so a *foreign* redeemer can auto-federate to it, §11.10; top-level channels have no `<ns>` and use `weft://<net>/i/<b64>`). | `INVITE MINT ns:gaming max-uses=10 expiry=604800` → `@token=<b64> INVITED ns:gaming iv_01J… max-uses=10 :weft://test.example/gaming/i/<b64>` |
+| `INVITE REVOKE` | `INVITE REVOKE <invite-id>` | `invite` | Closes the counter; already-redeemed members unaffected. | `INVITE REVOKE iv_01J…` (counter closed) |
+| `INVITE REVOKE-ALL` | `INVITE REVOKE-ALL <scope>` | `invite` | Bulk-closes every invite for the scope's namespace (`ns:<name>` + its `#<ns>/<chan>` scopes) in one shot. → `INVITED … invite-id=* max-uses=0` ack. Already-redeemed members unaffected. | `INVITE REVOKE-ALL ns:gaming` → `INVITED … invite-id=* max-uses=0` |
+| `INVITE REDEEM` | `INVITE REDEEM <b64>` | — | Verifies chain + counter, mints a member token **bound to the redeemer's key**, auto-joins the default channel. Dead invites → `NO-SUCH-TARGET` (indistinct). | `INVITE REDEEM <b64>` → `MEMBER #gaming/general bob@test.example join count=43` |
 
 Invite tokens are capability tokens with an **unbound subject**: one object serves single-use / expiring / vanity links — offline-verifiable authorization, never itself a membership credential.
-
-**Examples:**
-```
-C: @label=g1 GRANT bob #gaming/general send,react expiry=86400   → @label=g1 @token=<b64> TOKEN bob #gaming/general
-C: REVOKE bob #gaming/general caps=react                         → @token=<b64> TOKEN bob #gaming/general   (remaining caps)
-C: REVOKE bob #gaming/general 7                                  (bare epoch number bumps the scope epoch)
-C: @label=i1 INVITE MINT ns:gaming max-uses=10 expiry=604800
-S: @label=i1 @token=<b64> INVITED ns:gaming iv_01J… max-uses=10 :weft://hda.example/gaming/i/<b64>
-C: INVITE REVOKE iv_01J…               (closes the counter; existing members unaffected)
-C: INVITE REVOKE-ALL ns:gaming         → INVITED invite-id=* max-uses=0
-C: @label=rd INVITE REDEEM <b64>       → @label=rd MEMBER #gaming/general bob@hda.example join count=43
-```
 
 #### 6.5.1 Roles — named capability-token bundles
 
 A **role** is a named, colored bundle of capability tokens at a scope: `(scope, name, color, caps)`. Roles give clients human-readable, colored labels over §10.4 capabilities. **Enforcement stays purely token-based** — assigning a role grants exactly its `caps` as ordinary tokens, and every permission check is a pure capability-token check ("no role tables in the *enforcement* path"). **Membership, however, is explicit, not derived:** an account wears a role because it was *assigned* (recorded server-side, `ROLE ASSIGN` / `ROLE UNASSIGN`), never because its caps happen to be a superset of the bundle. Deriving membership from caps was rejected — it wrongly marks owners/operators (who hold every cap implicitly) as wearing every role, and can't distinguish a coincidental cap match from an intended assignment. The assignment record is metadata for *display and propagation*; it is never consulted for a permission decision.
 
-| Command | Syntax | Cap | → Result / notes |
-|---|---|---|---|
-| `ROLE CREATE` | `ROLE CREATE <scope> <color> <cap>[,…] [hoist=0\|1] [pos=<n>] :<name>` | `ns-admin` at scope | Define/replace a role (upsert on `(scope, name)`). `color` is a display hint (e.g. `#e8b93d`); optional `hoist=` (Discord-style "display members separately in the member list") + `pos=` (sort position, ascending) are key=value middle params defaulting to `0`; `name` (may contain spaces) rides the trailing. → updated `ROLES` batch. |
-| `ROLE REORDER` | `ROLE REORDER <scope> :<name1,name2,…>` | `ns-admin` at scope | Set each named role's `pos` to its index in the list. → updated `ROLES` batch. |
-| `ROLE DELETE` | `ROLE DELETE <scope> :<name>` | `ns-admin` at scope | Remove a definition **and all its assignments**. Already-granted tokens are unaffected (revoke separately). → updated `ROLES` batch. |
-| `ROLE RENAME` | `ROLE RENAME <scope> :<old>,<new>` | `ns-admin` at scope | Change a role's display name **in place**, carrying its definition *and every assignment* to the new name. Roles are keyed by name, so a client-side delete+create would silently drop membership — this is one server-side migration instead. Already-granted tokens need no migration: a role's authority is its `caps`, which are unchanged. Both names ride the trailing as a comma pair (the `ROLE REORDER` convention), so a role name may contain spaces but **not** a comma. Absent `<old>` → `NO-SUCH-TARGET`; an `<new>` that already names a live role → `POLICY` (merging two bundles is not a rename). → updated `ROLES` batch. |
-| `ROLE ASSIGN` | `ROLE ASSIGN <scope> <account> :<name>` | `grant:<cap>` for each cap | Record membership + grant the role's tokens (identical authority + `TOKEN` path as `GRANT`). At a **namespace** scope also propagates channel role-permissions (below). |
-| `ROLE UNASSIGN` | `ROLE UNASSIGN <scope> <account> :<name>` | `ns-admin` at scope | Drop membership + revoke the role's caps (bundle + its channel-role caps). → `ROLE-MEMBER`. |
-| `ROLES` | `ROLES <scope>` | — (public) | → a `BATCH` of `ROLE <scope> <color> <caps> hoist=0\|1 pos=<n> :<name>` (definitions, position-ordered). |
-| `ROLES-OF` | `ROLES-OF <scope> <account>` | — (public) | The roles an account is assigned at a scope → `ROLE-MEMBER <scope> <account> :<comma-names>`. |
+| Command | Syntax | Cap | → Result / notes | Example (`→` = direct response) |
+|---|---|---|---|---|
+| `ROLE CREATE` | `ROLE CREATE <scope> <color> <cap>[,…] [hoist=0\|1] [pos=<n>] :<name>` | `ns-admin` at scope | Define/replace a role (upsert on `(scope, name)`). `color` is a display hint (e.g. `#e8b93d`); optional `hoist=` (Discord-style "display members separately in the member list") + `pos=` (sort position, ascending) are key=value middle params defaulting to `0`; `name` (may contain spaces) rides the trailing. → updated `ROLES` batch. | `ROLE CREATE ns:gaming #e8b93d send,react hoist=1 pos=0 :Speaker` → `ROLE ns:gaming #e8b93d send,react hoist=1 pos=0 :Speaker` |
+| `ROLE REORDER` | `ROLE REORDER <scope> :<name1,name2,…>` | `ns-admin` at scope | Set each named role's `pos` to its index in the list. → updated `ROLES` batch. | `ROLE REORDER ns:gaming :Speaker,Regular` |
+| `ROLE DELETE` | `ROLE DELETE <scope> :<name>` | `ns-admin` at scope | Remove a definition **and all its assignments**. Already-granted tokens are unaffected (revoke separately). → updated `ROLES` batch. | `ROLE DELETE ns:gaming :Speaker` |
+| `ROLE RENAME` | `ROLE RENAME <scope> :<old>,<new>` | `ns-admin` at scope | Change a role's display name **in place**, carrying its definition *and every assignment* to the new name. Roles are keyed by name, so a client-side delete+create would silently drop membership — this is one server-side migration instead. Already-granted tokens need no migration: a role's authority is its `caps`, which are unchanged. Both names ride the trailing as a comma pair (the `ROLE REORDER` convention), so a role name may contain spaces but **not** a comma. Absent `<old>` → `NO-SUCH-TARGET`; an `<new>` that already names a live role → `POLICY` (merging two bundles is not a rename). → updated `ROLES` batch. | `ROLE RENAME ns:gaming :Regular,Member` (assignments carried) |
+| `ROLE ASSIGN` | `ROLE ASSIGN <scope> <account> :<name>` | `grant:<cap>` for each cap | Record membership + grant the role's tokens (identical authority + `TOKEN` path as `GRANT`). At a **namespace** scope also propagates channel role-permissions (below). | `ROLE ASSIGN ns:gaming bob :Speaker` → `@token=<b64> TOKEN bob ns:gaming` |
+| `ROLE UNASSIGN` | `ROLE UNASSIGN <scope> <account> :<name>` | `ns-admin` at scope | Drop membership + revoke the role's caps (bundle + its channel-role caps). → `ROLE-MEMBER`. | `ROLE UNASSIGN ns:gaming bob :Speaker` → `ROLE-MEMBER ns:gaming bob :` |
+| `ROLES` | `ROLES <scope>` | — (public) | → a `BATCH` of `ROLE <scope> <color> <caps> hoist=0\|1 pos=<n> :<name>` (definitions, position-ordered). | `ROLES ns:gaming` → `BATCH START` … `ROLE ns:gaming … :Speaker` … `BATCH END` |
+| `ROLES-OF` | `ROLES-OF <scope> <account>` | — (public) | The roles an account is assigned at a scope → `ROLE-MEMBER <scope> <account> :<comma-names>`. | `ROLES-OF ns:gaming bob` → `ROLE-MEMBER ns:gaming bob :Speaker` |
 
 The `ROLE` event carries a definition; the `ROLE-MEMBER` event carries an account's explicit assignments. Clients render pills from the intersection.
 
-**Role channel-permissions.** A namespace role and a **channel role of the same name** compose to give the Discord "role has permission X in channel Y" override — without a rules engine. A role `Speaker` at `ns:s` carries the namespace-wide caps; a role `Speaker` at `#s/stage` (same name) carries that role's caps *for that channel only*. Both directions propagate through explicit membership: `ROLE ASSIGN ns:s <account> :Speaker` grants the namespace bundle **and** every same-named channel role's caps on `#s/*`; and **editing a channel role re-grants it to every current member of the namespace role immediately** (via the membership records) — so a newly-added channel permission reaches existing holders with no re-assignment. Enforcement stays token-based (§10.4): the namespace covers its channels, a channel covers only itself.
+**Role channel-permissions.** Two roles of the **same name** — one at a namespace, one at a channel — compose to give the Discord "role X has permission Y *in channel Z*" override, without a rules engine:
 
-**Examples:**
-```
-C: ROLE CREATE ns:gaming #e8b93d send,react hoist=1 pos=0 :Regular
-S: (updated ROLES batch) ROLE ns:gaming #e8b93d send,react hoist=1 pos=0 :Regular
-C: ROLE REORDER ns:gaming :Speaker,Regular       (sets each role's pos to its index)
-C: ROLE RENAME ns:gaming :Regular,Member          (in-place; carries assignments)
-C: ROLE ASSIGN ns:gaming bob :Speaker            → @token=<b64> TOKEN bob ns:gaming   (grants the bundle's caps)
-C: ROLE UNASSIGN ns:gaming bob :Speaker          → ROLE-MEMBER ns:gaming bob :   (Speaker dropped)
-C: ROLE DELETE ns:gaming :Member                  (removes the definition + all its assignments)
-C: @label=rl ROLES ns:gaming
-S: @label=rl BATCH START … ROLE ns:gaming #e8b93d send,react hoist=1 pos=0 :Speaker … BATCH END
-C: ROLES-OF ns:gaming bob    → ROLE-MEMBER ns:gaming bob :Speaker
-```
+- A role `Speaker` at `ns:s` carries namespace-wide caps; a role `Speaker` at `#s/stage` (same name) carries caps *for that channel only*.
+- Assigning the namespace role grants both: `ROLE ASSIGN ns:s <account> :Speaker` grants the `ns:s` bundle **and** every same-named channel role's caps on `#s/*`.
+- Editing a channel role re-grants it to every current member of the namespace role **immediately** (through the membership records) — so a newly-added channel permission reaches existing holders with no re-assignment.
+
+Enforcement stays token-based (§10.4): a namespace scope covers its channels; a channel scope covers only itself.
 
 ### 6.6 Federation & operator (F)
 
 Bridge sessions authenticate with `AUTH BRIDGE` (§11.2). Every bridge change emits `MANIFEST` to affected members — mandatory (§11.5). The proposing side carries the signed manifest in a `@manifest=<b64>` tag.
 
-| Command | Syntax | Cap | → Result / notes |
-|---|---|---|---|
-| `AUTH BRIDGE` | `AUTH BRIDGE <peer-network> <b64-pubkey>` | pinned / accept-any | Opens a bridge session — challenge-response as `AUTH KEY`, verified against the peer's network key (§11.2). |
-| `BRIDGE PROPOSE` | `BRIDGE PROPOSE <scope> <peer> [history=from-epoch\|full] [media=mirror\|mirror-max:<B>\|none] [typing=yes\|no]` | ladder §11.3 | Snapshot manifest v1. → `MANIFEST`; errors `BLOCKED` `CAP-REQUIRED`. |
-| `BRIDGE ACCEPT` | `BRIDGE ACCEPT <peer> <version>` | ladder | Live on mutual ack. |
-| `BRIDGE ADD` | `BRIDGE ADD <peer> <#chan>` | ladder | v+1, requires re-ack before forwarding. |
-| `BRIDGE REMOVE` | `BRIDGE REMOVE <peer> <#chan>` | ladder | v+1, unilateral, immediate. |
-| `BRIDGE SEVER` | `BRIDGE SEVER <peer>` | ladder | Unilateral teardown. |
-| `BRIDGE REQUEST` | `BRIDGE REQUEST <ns>` | bridge session | §11.10 — ask the peer to offer a manifest for one of *its* namespaces. → `BRIDGE PROPOSE` (its signed manifest, **`history=full`** so the joiner receives the namespace's existing scrollback, §11.7) iff the namespace is auto-federation-reachable (`public` + `federation` open, §6.2); else `NO-SUCH-TARGET` (uniform with private/absent) / `BLOCKED`. Bridge-session-only. |
-| `FEDERATE` | `FEDERATE <network>/<namespace>` | membership; `auto_bridge` open | §11.10 — a local user asks their **home** network to auto-establish an on-demand bridge to a foreign namespace. Gated on NETBLOCK + a per-account cooldown; the bridge lands asynchronously (→ `MANIFEST` on the affected channels). Errors `UNSUPPORTED` (auto-federation off / self-network) `BLOCKED` `THROTTLED`. |
-| `NETBLOCK` | `NETBLOCK ADD <network> [:reason]` / `REMOVE <network>` / `LIST` | `netblock` (`*` only) | Effects §11.6. → `NETBLOCKED`. |
-| `MEDIA` | `MEDIA BLOCK <hash> [:reason]` / `UNBLOCK <hash>` / `BLOCKS` | `media-block` (`*` only) | §13 hash moderation: block deletes the blob + thumbnail and rejects re-upload + mirror (content = identity). → `MEDIA-BLOCKED`. |
-| `REPORT-FORWARD` | `REPORT-FORWARD <report-id> <msgid> <category> [:note]` | bridge session | Forward a report to the origin over the bridge; reporter identity stripped (§11.9). Bridge-session-only. |
-| `FSESSION` | `FSESSION <fsid> OPEN <account>` / `CMD :<line>` / `REPLY :<line>` / `CLOSE` | bridge session | §11.11 — multiplex a federated user's **control** session over the bridge (homeserver authority). `F` opens/relays; `H` attributes each `CMD` to `account@F` and enforces against its own grants. Carries commands + their direct replies only (broadcast events ride the mirror); the user never connects to `H` (IP non-exposure). Bridge-session-only. |
-| `VOICE` | `VOICE JOIN\|LEAVE <#chan>` / `VOICE DESC :<sdp>` | feature-gated | §16. |
+Commands marked *(bridge)* run only inside an authenticated bridge session; the rest are ordinary operator/user commands.
 
-**Examples** (all except `FEDERATE`/`NETBLOCK`/`MEDIA`/`REPORT`/`VOICE` run *inside* a bridge session):
-```
-C: AUTH BRIDGE peer.example <b64-pubkey>   → CHALLENGE <b64-nonce>
-C: AUTH PROOF <b64-sig>                     → WELCOME hda.example   (session is now State::Bridge)
-C: @manifest=<b64> BRIDGE PROPOSE ns:gaming peer.example history=full media=mirror typing=no   → MANIFEST …
-C: BRIDGE ACCEPT peer.example 1             (live on mutual ack)
-C: BRIDGE ADD peer.example #gaming/clips    (v+1, needs re-ack)
-C: BRIDGE REMOVE peer.example #gaming/clips  ·  C: BRIDGE SEVER peer.example
-C: BRIDGE REQUEST gaming     → @manifest=<b64> BRIDGE PROPOSE ns:gaming peer.example history=full … | NO-SUCH-TARGET
-C: @label=f1 FEDERATE peer.example/gaming    → @label=f1 (ack) … then MANIFEST on the channels (async)
-C: NETBLOCK ADD evil.example :abuse          → NETBLOCKED evil.example
-C: MEDIA BLOCK <b3-hash> :csam               → MEDIA-BLOCKED <b3-hash>
-C: REPORT-FORWARD r_01J… peer.example/01J…A harassment :context   (bridge-only; reporter stripped)
-C: FSESSION 1 OPEN alice
-C: FSESSION 1 CMD :GRANT bob ns:gaming send   → FSESSION 1 REPLY :@token=<b64> TOKEN bob ns:gaming
-C: VOICE JOIN #gaming/stage    → VOICE DESC #gaming/stage :<sdp-answer>   (§16)
-```
+| Command | Syntax | Cap | → Result / notes | Example (`→` = direct response) |
+|---|---|---|---|---|
+| `AUTH BRIDGE` | `AUTH BRIDGE <peer-network> <b64-pubkey>` | pinned / accept-any | Opens a bridge session — challenge-response as `AUTH KEY`, verified against the peer's network key (§11.2). | `AUTH BRIDGE peer.example <b64-pubkey>` → `CHALLENGE <b64-nonce>` (then `AUTH PROOF` → `WELCOME`, now `State::Bridge`) |
+| `BRIDGE PROPOSE` *(bridge)* | `BRIDGE PROPOSE <scope> <peer> [history=from-epoch\|full] [media=mirror\|mirror-max:<B>\|none] [typing=yes\|no]` | ladder §11.3 | Snapshot manifest v1. → `MANIFEST`; errors `BLOCKED` `CAP-REQUIRED`. | `@manifest=<b64> BRIDGE PROPOSE ns:gaming peer.example history=full media=mirror` → `MANIFEST …` |
+| `BRIDGE ACCEPT` *(bridge)* | `BRIDGE ACCEPT <peer> <version>` | ladder | Live on mutual ack. | `BRIDGE ACCEPT peer.example 1` |
+| `BRIDGE ADD` *(bridge)* | `BRIDGE ADD <peer> <#chan>` | ladder | v+1, requires re-ack before forwarding. | `BRIDGE ADD peer.example #gaming/clips` |
+| `BRIDGE REMOVE` *(bridge)* | `BRIDGE REMOVE <peer> <#chan>` | ladder | v+1, unilateral, immediate. | `BRIDGE REMOVE peer.example #gaming/clips` |
+| `BRIDGE SEVER` *(bridge)* | `BRIDGE SEVER <peer>` | ladder | Unilateral teardown. | `BRIDGE SEVER peer.example` |
+| `BRIDGE REQUEST` *(bridge)* | `BRIDGE REQUEST <ns>` | bridge session | §11.10 — ask the peer to offer a manifest for one of *its* namespaces. → `BRIDGE PROPOSE` (its signed manifest, **`history=full`** so the joiner receives the namespace's existing scrollback, §11.7) iff the namespace is auto-federation-reachable (`public` + `federation` open, §6.2); else `NO-SUCH-TARGET` (uniform with private/absent) / `BLOCKED`. Bridge-session-only. | `BRIDGE REQUEST gaming` → `@manifest=<b64> BRIDGE PROPOSE ns:gaming peer.example history=full …` \| `NO-SUCH-TARGET` |
+| `FEDERATE` | `FEDERATE <network>/<namespace>` | membership; `auto_bridge` open | §11.10 — a local user asks their **home** network to auto-establish an on-demand bridge to a foreign namespace. Gated on NETBLOCK + a per-account cooldown; the bridge lands asynchronously (→ `MANIFEST` on the affected channels). Errors `UNSUPPORTED` (auto-federation off / self-network) `BLOCKED` `THROTTLED`. | `FEDERATE peer.example/gaming` → (ack) then `MANIFEST` on the channels (async) |
+| `NETBLOCK` | `NETBLOCK ADD <network> [:reason]` / `REMOVE <network>` / `LIST` | `netblock` (`*` only) | Effects §11.6. → `NETBLOCKED`. | `NETBLOCK ADD evil.example :abuse` → `NETBLOCKED evil.example` |
+| `MEDIA` | `MEDIA BLOCK <hash> [:reason]` / `UNBLOCK <hash>` / `BLOCKS` | `media-block` (`*` only) | §13 hash moderation: block deletes the blob + thumbnail and rejects re-upload + mirror (content = identity). → `MEDIA-BLOCKED`. | `MEDIA BLOCK <b3-hash> :csam` → `MEDIA-BLOCKED <b3-hash>` |
+| `REPORT-FORWARD` *(bridge)* | `REPORT-FORWARD <report-id> <msgid> <category> [:note]` | bridge session | Forward a report to the origin over the bridge; reporter identity stripped (§11.9). Bridge-session-only. | `REPORT-FORWARD r_01J… peer.example/01J…A harassment :context` |
+| `FSESSION` *(bridge)* | `FSESSION <fsid> OPEN <account>` / `CMD :<line>` / `REPLY :<line>` / `CLOSE` | bridge session | §11.11 — multiplex a federated user's **control** session over the bridge (homeserver authority). `F` opens/relays; `H` attributes each `CMD` to `account@F` and enforces against its own grants. Carries commands + their direct replies only (broadcast events ride the mirror); the user never connects to `H` (IP non-exposure). Bridge-session-only. | `FSESSION 1 CMD :GRANT bob ns:gaming send` → `FSESSION 1 REPLY :@token=<b64> TOKEN bob ns:gaming` |
+| `VOICE` | `VOICE JOIN\|LEAVE <#chan>` / `VOICE DESC :<sdp>` | feature-gated | §16. | `VOICE JOIN #gaming/stage` → `VOICE DESC #gaming/stage :<sdp-answer>` |
 
 ### 6.7 Moderation & reporting (C/NS/N)
 
-| Command | Syntax | Cap | → Result / notes |
-|---|---|---|---|
-| `REPORT` | `REPORT <msgid> <category> [scope] [:note]` | membership | Routed to the reporter's home network. → `REPORTED <report-id>`; errors `NO-SUCH-TARGET` `THROTTLED` (10/hr RECOMMENDED) `QUOTA`. |
-| `REPORTS LIST` | `REPORTS LIST <scope> [status=open\|resolved] [cursor]` | `reports` at scope | The handler queue. → `REPORT-FILED` page + `MORE`. `scope` is the concrete cap scope (`ns:<name>` or `*`). |
-| `REPORTS RESOLVE` | `REPORTS RESOLVE <report-id> <action> [:note]` | `reports` | Releases the retention hold after a 7-day grace (RECOMMENDED). → `REPORT-RESOLVED`. |
-| `MUTE` / `UNMUTE` | `MUTE <scope> <account> [:reason]` | `mute` at scope | Deny/allow `send`. `scope` = `#chan\|ns:<name>\|*` (a `*` mute is network-wide). → `MODERATED`. |
-| `BAN` / `UNBAN` | `BAN <scope> <account> [:reason]` | `ban` at scope | Deny/allow join + send; a fresh channel-scope ban force-parts the target. → `MODERATED`; blocked joins get `BANNED`. |
-| `KICK` | `KICK <#chan> <account> [:reason]` | `kick` | Force-part (no persistent state — may rejoin). → `MODERATED`. |
+| Command | Syntax | Cap | → Result / notes | Example (`→` = direct response) |
+|---|---|---|---|---|
+| `REPORT` | `REPORT <msgid> <category> [scope] [:note]` | membership | Routed to the reporter's home network. → `REPORTED <report-id>`; errors `NO-SUCH-TARGET` `THROTTLED` (10/hr RECOMMENDED) `QUOTA`. | `REPORT test.example/01J…B harassment ns :being rude` → `REPORTED r_01J…` |
+| `REPORTS LIST` | `REPORTS LIST <scope> [status=open\|resolved] [cursor]` | `reports` at scope | The handler queue. → `REPORT-FILED` page + `MORE`. `scope` is the concrete cap scope (`ns:<name>` or `*`). | `REPORTS LIST ns:gaming status=open` → `REPORT-FILED r_01J… test.example/01J…B harassment state=verified` + `MORE` |
+| `REPORTS RESOLVE` | `REPORTS RESOLVE <report-id> <action> [:note]` | `reports` | Releases the retention hold after a 7-day grace (RECOMMENDED). → `REPORT-RESOLVED`. | `REPORTS RESOLVE r_01J… content-removed :removed` → `REPORT-RESOLVED r_01J… content-removed by=ada@test.example` |
+| `MUTE` / `UNMUTE` | `MUTE <scope> <account> [:reason]` | `mute` at scope | Deny/allow `send`. `scope` = `#chan\|ns:<name>\|*` (a `*` mute is network-wide). → `MODERATED`. | `MUTE #gaming/general bob :spamming` → `MODERATED #gaming/general bob mute by=ada@test.example reason=spamming` |
+| `BAN` / `UNBAN` | `BAN <scope> <account> [:reason]` | `ban` at scope | Deny/allow join + send; a fresh channel-scope ban force-parts the target. → `MODERATED`; blocked joins get `BANNED`. | `BAN ns:gaming bob :repeated` → `MODERATED ns:gaming bob ban by=ada@test.example` (+ `MEMBER … part`) |
+| `KICK` | `KICK <#chan> <account> [:reason]` | `kick` | Force-part (no persistent state — may rejoin). → `MODERATED`. | `KICK #gaming/general bob :cool off` → `MODERATED #gaming/general bob kick by=ada@test.example` |
 
-**Two moderation surfaces, composed** (`can_post = ¬muted ∧ ¬banned ∧ (channel open ∨ holds send)`): the **deny-list** above is targeted per-account state checked against a channel's covering scopes (channel, its namespace, `*` — so `*` = global/network moderators, `ns:` = namespace moderators). Complementarily, a channel may be set **`CHANNEL META <#chan> posting :restricted`**, after which posting requires the `send` capability — so `GRANT send` / `REVOKE send` (+ epoch, §10.4) governs who may speak (e.g. an announcements channel). A mute always denies regardless of posting mode. Kick/ban emit a `MEMBER part` to the channel (the target sees the removal); `MODERATED <scope> <account> <mute\|unmute\|ban\|unban\|kick>` (`by=`/`reason=` tags) is echoed to the acting moderator.
+**How posting permission composes.** A message is allowed only when all three of these hold:
+
+```
+can_post  =  not muted   AND   not banned   AND   (channel is open   OR   sender holds `send`)
+```
+
+Two independent surfaces feed that check:
+
+- **Deny-list (mute / ban)** — per-account blocks keyed by `(scope, account)`. A block applies to a channel if its scope *covers* that channel: the channel itself (`#chan`), its namespace (`ns:<name>`), or the whole network (`*`). That covering rule is also *who moderates what* — a `*` block is set by network moderators, `ns:` by namespace moderators, `#chan` by channel moderators.
+- **Restricted posting** — `CHANNEL META <#chan> posting :restricted` flips a channel from open to send-gated. Posting then requires the `send` capability, so `GRANT send` / `REVOKE send` (+ epoch, §10.4) decides who may speak — e.g. an announcements channel.
+
+A **mute always denies**, whatever the posting mode. Kick and ban broadcast a `MEMBER … part` so the target sees the removal; the acting moderator gets a `MODERATED <scope> <account> <mute\|unmute\|ban\|unban\|kick>` echo (`by=`/`reason=` tags).
 
 **`REPORT` arguments.** `category` — normative set `spam \| harassment \| violence \| sexual \| csam \| illegal \| self-harm \| other` (extensible with an `x-` prefix). `scope` — `ns` (namespace moderators, default) or `net` (network operator); `csam` and `illegal` are ALWAYS *also* routed to `net`, the legally accountable party. `note` — optional free text ≤ 1024 B. Membership-gated: you can only report what you can see — an invisible/absent msgid returns `NO-SUCH-TARGET` (anti-enumeration unchanged). Handlers are holders of the `reports` cap at the relevant scope (`ns:<name>` or `*`).
 
@@ -408,80 +322,44 @@ C: VOICE JOIN #gaming/stage    → VOICE DESC #gaming/stage :<sdp-answer>   (§1
 
 **Confidentiality.** The reported party is never notified and MUST NOT learn the reporter's identity from any protocol surface. Handlers see the reporter's account (accountability against report-flooding); a network MAY anonymize the reporter toward ns-scope handlers while preserving it for the operator.
 
-**Examples:**
-```
-C: @label=rp REPORT hda.example/01J…B harassment ns :being rude   → @label=rp REPORTED r_01J…
-C: @label=rl REPORTS LIST ns:gaming status=open
-S: @label=rl REPORT-FILED r_01J… hda.example/01J…B harassment state=verified reporter=carol@hda.example
-S: @label=rl MORE <cursor>
-C: REPORTS RESOLVE r_01J… content-removed :removed   → REPORT-RESOLVED r_01J… content-removed by=ada@hda.example
-C: MUTE #gaming/general bob :spamming   → MODERATED #gaming/general bob mute by=ada@hda.example reason=spamming
-C: BAN ns:gaming bob :repeated          → MODERATED ns:gaming bob ban by=ada@hda.example   (+ MEMBER … part)
-C: KICK #gaming/general bob :cool off   → MODERATED #gaming/general bob kick by=ada@hda.example
-```
-
 ### 6.8 Social layer — friends, group DMs, calls (S)
 
 The social layer is keyed on **`user@network`** so every relationship federates. These are *account*-level (not channel/namespace) surfaces: a friendship, a group DM, and a call are properties of the accounts involved, and the same-network path works standalone while the cross-network path rides the group-federation tunnel (§11.11). Conceptual flow diagrams: `weft-protocol-flows.md` §13; federation mechanics: `weft-federation-flows.md`.
 
 **Friends.** A symmetric relationship with a pending → accepted handshake.
 
-| Command | Syntax | Cap | → Result / notes |
-|---|---|---|---|
-| `FRIEND ADD` | `FRIEND ADD <user@net>` | — | Sends (or, if they already requested you, accepts) a friend request. → `FRIEND <user> outgoing\|friends`. |
-| `FRIEND ACCEPT` | `FRIEND ACCEPT <user@net>` | — | Accepts an inbound (`incoming`) request. → `FRIEND <user> friends`. |
-| `FRIEND REMOVE` | `FRIEND REMOVE <user@net>` | — | Removes a friend or cancels/declines a request. → `FRIEND-REMOVED <user>`. |
-| `FRIENDS` | `FRIENDS` | — | Roster snapshot. → a `FRIEND <user> <friends\|incoming\|outgoing>` per relationship. |
+| Command | Syntax | Cap | → Result / notes | Example (`→` = direct response) |
+|---|---|---|---|---|
+| `FRIEND ADD` | `FRIEND ADD <user@net>` | — | Sends (or, if they already requested you, accepts) a friend request. → `FRIEND <user> outgoing\|friends`. | `FRIEND ADD bob@peer.example` → `FRIEND bob@peer.example outgoing` |
+| `FRIEND ACCEPT` | `FRIEND ACCEPT <user@net>` | — | Accepts an inbound (`incoming`) request. → `FRIEND <user> friends`. | `FRIEND ACCEPT carol@test.example` → `FRIEND carol@test.example friends` |
+| `FRIEND REMOVE` | `FRIEND REMOVE <user@net>` | — | Removes a friend or cancels/declines a request. → `FRIEND-REMOVED <user>`. | `FRIEND REMOVE bob@peer.example` → `FRIEND-REMOVED bob@peer.example` |
+| `FRIENDS` | `FRIENDS` | — | Roster snapshot. → a `FRIEND <user> <friends\|incoming\|outgoing>` per relationship. | `FRIENDS` → `FRIEND carol@test.example friends` (per relationship) |
 
 **Group DMs.** An ad-hoc, named, multi-party conversation whose members are `UserRef`s. Messages ride `Scope::Group`, minted single-writer like DMs (§9.1); the group's **home** = its creator's network (§11.11). Ordinary `MSG &<group>`, `EDIT`/`DELETE`/`REACT`, and `HISTORY &<group>` all apply to a group target.
 
-| Command | Syntax | Cap | → Result / notes |
-|---|---|---|---|
-| `GROUP CREATE` | `GROUP CREATE <user@net> [<user@net> …]` | — | Creates a group with the caller + listed members (≥1 member required). → `GROUP <&id> :name` + `GROUP-MEMBER` to each. |
-| `GROUP ADD` | `GROUP ADD <&id> <user@net>` | member | Adds a member. → `GROUP-MEMBER <&id> <user> join`. |
-| `GROUP REMOVE` | `GROUP REMOVE <&id> <user@net>` | member | Removes a member. → `GROUP-MEMBER <&id> <user> part`. |
-| `GROUP LEAVE` | `GROUP LEAVE <&id>` | member | The caller leaves. → `GROUP-MEMBER … part`. |
-| `GROUP NAME` | `GROUP NAME <&id> [:name]` | member | Sets/clears the group name (empty trailing clears). → `GROUP <&id> :name`. |
-| `GROUPS` | `GROUPS` | — | The caller's group list. → a `GROUP` per membership. |
+| Command | Syntax | Cap | → Result / notes | Example (`→` = direct response) |
+|---|---|---|---|---|
+| `GROUP CREATE` | `GROUP CREATE <user@net> [<user@net> …]` | — | Creates a group with the caller + listed members (≥1 member required). → `GROUP <&id> :name` + `GROUP-MEMBER` to each. | `GROUP CREATE bob@peer.example carol@test.example` → `GROUP &01J…G :ada@test.example bob@peer.example carol@test.example` |
+| `GROUP ADD` | `GROUP ADD <&id> <user@net>` | member | Adds a member. → `GROUP-MEMBER <&id> <user> join`. | `GROUP ADD &01J…G dave@test.example` → `GROUP-MEMBER &01J…G dave@test.example join` |
+| `GROUP REMOVE` | `GROUP REMOVE <&id> <user@net>` | member | Removes a member. → `GROUP-MEMBER <&id> <user> part`. | `GROUP REMOVE &01J…G dave@test.example` → `GROUP-MEMBER &01J…G dave@test.example part` |
+| `GROUP LEAVE` | `GROUP LEAVE <&id>` | member | The caller leaves. → `GROUP-MEMBER … part`. | `GROUP LEAVE &01J…G` → `GROUP-MEMBER &01J…G ada@test.example part` |
+| `GROUP NAME` | `GROUP NAME <&id> [:name]` | member | Sets/clears the group name (empty trailing clears). → `GROUP <&id> :name`. | `GROUP NAME &01J…G :Weekend Crew` → `@name=Weekend\sCrew GROUP &01J…G :ada@test.example bob@peer.example` |
+| `GROUPS` | `GROUPS` | — | The caller's group list. → a `GROUP` per membership. | `GROUPS` → `@name=Weekend\sCrew GROUP &01J…G :ada@test.example bob@peer.example` (per group) |
 
 Membership changes on a group with remote members propagate to every member network via `GROUP SYNC` (§11.11).
 
 **Calls (1:1 & group).** Signaling is protocol; media is LiveKit (§16). A call's `CALL-MEDIA` credential is minted **per participant** and delivered only to that participant — never broadcast. Cross-network calls bridge room-to-room through a relay so client IPs never cross (§11.11, §16).
 
-| Command | Syntax | Cap | → Result / notes |
-|---|---|---|---|
-| `CALL` | `CALL <user@net>` | friends | Places a 1:1 call. → `CALL-RING` to callee; `CALL-STATE ringing` to caller. |
-| `CALL ACCEPT` | `CALL ACCEPT <user@net>` | — | Answers a ringing call. → `CALL-STATE active` + `CALL-MEDIA` to each party. |
-| `CALL DECLINE` | `CALL DECLINE <user@net>` | — | Rejects. → `CALL-STATE declined`. |
-| `CALL END` | `CALL END <user@net>` | — | Hangs up. → `CALL-STATE ended`. |
-| `GROUP CALL` | `GROUP CALL <&id>` | member | Starts or joins the group's voice call. → `GROUP-CALL <&id> <self> active` + `CALL-MEDIA` + roster; other members are rung. |
-| `GROUP HANGUP` | `GROUP HANGUP <&id>` | member | Leaves the group call. → `GROUP-CALL <&id> <self> ended`. |
+| Command | Syntax | Cap | → Result / notes | Example (`→` = direct response) |
+|---|---|---|---|---|
+| `CALL` | `CALL <user@net>` | friends | Places a 1:1 call. → `CALL-RING` to callee; `CALL-STATE ringing` to caller. | `CALL bob@peer.example` → `CALL-STATE bob@peer.example ringing` (callee gets `CALL-RING`) |
+| `CALL ACCEPT` | `CALL ACCEPT <user@net>` | — | Answers a ringing call. → `CALL-STATE active` + `CALL-MEDIA` to each party. | `CALL ACCEPT ada@test.example` → `CALL-STATE ada@test.example active` + `@mode=livekit CALL-MEDIA …` |
+| `CALL DECLINE` | `CALL DECLINE <user@net>` | — | Rejects. → `CALL-STATE declined`. | `CALL DECLINE ada@test.example` → `CALL-STATE ada@test.example declined` |
+| `CALL END` | `CALL END <user@net>` | — | Hangs up. → `CALL-STATE ended`. | `CALL END bob@peer.example` → `CALL-STATE bob@peer.example ended` |
+| `GROUP CALL` | `GROUP CALL <&id>` | member | Starts or joins the group's voice call. → `GROUP-CALL <&id> <self> active` + `CALL-MEDIA` + roster; other members are rung. | `GROUP CALL &01J…G` → `GROUP-CALL &01J…G ada@test.example active` + `@mode=livekit CALL-MEDIA …` |
+| `GROUP HANGUP` | `GROUP HANGUP <&id>` | member | Leaves the group call. → `GROUP-CALL <&id> <self> ended`. | `GROUP HANGUP &01J…G` → `GROUP-CALL &01J…G ada@test.example ended` |
 
 The federated forms of `CALL`/`GROUP CALL` carry the callee/host network's pre-minted LiveKit credential as `room=`/`token=`/`endpoint=` tags (an internal relay detail, §11.11); a client never sets those.
-
-**Examples:**
-```
-C: FRIEND ADD bob@peer.example      → FRIEND bob@peer.example outgoing
-C: FRIEND ACCEPT carol@hda.example  → FRIEND carol@hda.example friends
-C: FRIEND REMOVE bob@peer.example   → FRIEND-REMOVED bob@peer.example
-C: @label=fl FRIENDS                → @label=fl FRIEND carol@hda.example friends   (one per relationship)
-C: @label=gc GROUP CREATE bob@peer.example carol@hda.example
-S: @label=gc GROUP &01J…G :ada@hda.example bob@peer.example carol@hda.example   (name= tag when set)
-C: GROUP ADD &01J…G dave@hda.example    → GROUP-MEMBER &01J…G dave@hda.example join
-C: GROUP REMOVE &01J…G dave@hda.example → GROUP-MEMBER &01J…G dave@hda.example part
-C: GROUP NAME &01J…G :Weekend Crew      → @name=Weekend\sCrew GROUP &01J…G :ada@hda.example bob@peer.example
-C: GROUP LEAVE &01J…G                   → GROUP-MEMBER &01J…G ada@hda.example part
-C: @label=gs GROUPS                     → @label=gs @name=Weekend\sCrew GROUP &01J…G :ada@hda.example bob@peer.example
-C: @label=cl CALL bob@peer.example      → @label=cl CALL-STATE bob@peer.example ringing
-                                          (callee receives) CALL-RING ada@hda.example call:01J…R
-C: CALL ACCEPT ada@hda.example          → CALL-STATE ada@hda.example active
-                                          @mode=livekit CALL-MEDIA call:01J…R <token> :wss://sfu.peer.example
-C: CALL DECLINE ada@hda.example  → CALL-STATE ada@hda.example declined
-C: CALL END bob@peer.example     → CALL-STATE bob@peer.example ended
-C: @label=gk GROUP CALL &01J…G   → @label=gk GROUP-CALL &01J…G ada@hda.example active
-                                    @mode=livekit CALL-MEDIA gcall:01J…C <token> :wss://sfu.hda.example
-C: GROUP HANGUP &01J…G           → GROUP-CALL &01J…G ada@hda.example ended
-```
 
 ---
 
@@ -493,29 +371,29 @@ Events are the server→client half of the protocol; a client **MUST ignore any 
 
 | Event | Payload / tags | Example |
 |---|---|---|
-| `WELCOME <network>` | `features=`, `attestation=` — enters READY | `@features=media,backfill,voice WELCOME hda.example :Willkommen` |
+| `WELCOME <network>` | `features=`, `attestation=` — enters READY | `@features=media,backfill,voice WELCOME test.example :Willkommen` |
 | `CHALLENGE <nonce>` | keypair auth nonce (§6.1) | `CHALLENGE <b64-nonce-32B>` |
 | `PONG [token]` | keepalive answer (§3.4) | `PONG 42` |
-| `PRESENCE <user@net> <status>` | `online\|away\|dnd\|invisible`; never bridged | `PRESENCE ada@hda.example away` |
+| `PRESENCE <user@net> <status>` | `online\|away\|dnd\|invisible`; never bridged | `PRESENCE ada@test.example away` |
 | `MEDIA TOKEN <bearer>` | per-session media fetch bearer, pushed after auth (§13) | `MEDIA TOKEN <bearer>` |
 
 ### 7.2 Messaging & mutations
 
 | Event | Payload / tags | Example |
 |---|---|---|
-| `MESSAGE <#chan\|@user> <user@net> :body` | `msgid=`, `reply-to=`, `thread=`, `attach.N=`, `fmt=`, `label=` (echo only); **in batches** `edited=<n>`, `edited-at=<ms>` | `MESSAGE #gaming/general ada@hda.example :gg msgid=hda.example/01J…A` |
-| `EDITED <#chan\|@user> <user@net> :new` | `msgid=`, `edit-of=` — **live only** (compacted out of batches) | `EDITED #gaming/general ada@hda.example :gg all msgid=hda.example/01J…A` |
-| `DELETED <#chan\|@user> <msgid>` | `by=` — tombstone; the sole survivor in batches | `DELETED #gaming/general hda.example/01J…A by=ada@hda.example` |
-| `REACTION <#chan\|@user> <msgid> <emoji>` | `op=add\|remove`, `by=` — **live only** | `REACTION #gaming/general hda.example/01J…A 🎉 op=add by=ada@hda.example` |
-| `REACTIONS <#chan\|@user> <msgid> <emoji> <count>` | `by=` (first ≤20 actors) — **batch summary form** (§12.1) | `REACTIONS #gaming/general hda.example/01J…A 🎉 3 by=ada@hda.example,bob@hda.example` |
+| `MESSAGE <#chan\|@user> <user@net> :body` | `msgid=`, `reply-to=`, `thread=`, `attach.N=`, `fmt=`, `label=` (echo only); **in batches** `edited=<n>`, `edited-at=<ms>` | `MESSAGE #gaming/general ada@test.example :gg msgid=test.example/01J…A` |
+| `EDITED <#chan\|@user> <user@net> :new` | `msgid=`, `edit-of=` — **live only** (compacted out of batches) | `EDITED #gaming/general ada@test.example :gg all msgid=test.example/01J…A` |
+| `DELETED <#chan\|@user> <msgid>` | `by=` — tombstone; the sole survivor in batches | `DELETED #gaming/general test.example/01J…A by=ada@test.example` |
+| `REACTION <#chan\|@user> <msgid> <emoji>` | `op=add\|remove`, `by=` — **live only** | `REACTION #gaming/general test.example/01J…A 🎉 op=add by=ada@test.example` |
+| `REACTIONS <#chan\|@user> <msgid> <emoji> <count>` | `by=` (first ≤20 actors) — **batch summary form** (§12.1) | `REACTIONS #gaming/general test.example/01J…A 🎉 3 by=ada@test.example,bob@test.example` |
 
 ### 7.3 Membership, presence & reads
 
 | Event | Payload / tags | Example |
 |---|---|---|
-| `MEMBER <#chan> <user@net> <join\|part>` | `display=`, `count=` (members after the change) | `MEMBER #gaming/general ada@hda.example join count=42` |
-| `TYPING <#chan> <user@net> <start\|stop>` | never stored; bridged only under manifest `typing:yes` | `TYPING #gaming/general ada@hda.example start` |
-| `MARKED <#chan> <msgid>` | read-marker sync to the account's own sessions | `MARKED #gaming/general hda.example/01J…A` |
+| `MEMBER <#chan> <user@net> <join\|part>` | `display=`, `count=` (members after the change) | `MEMBER #gaming/general ada@test.example join count=42` |
+| `TYPING <#chan> <user@net> <start\|stop>` | never stored; bridged only under manifest `typing:yes` | `TYPING #gaming/general ada@test.example start` |
+| `MARKED <#chan> <msgid>` | read-marker sync to the account's own sessions | `MARKED #gaming/general test.example/01J…A` |
 | `UNREAD-COUNTS <#chan> <unread> <mentions>` | server-computed tally since the marker; pushed on login + `MARK` | `UNREAD-COUNTS #gaming/general 3 1` |
 | `POLICY <#chan> <policy>` | sent on join and on policy change (§5.2) | `POLICY #gaming/general retained:90d` |
 
@@ -523,21 +401,21 @@ Events are the server→client half of the protocol; a client **MUST ignore any 
 
 | Event | Payload / tags | Example |
 |---|---|---|
-| `NS-META <ns> <visibility>` | `owner=`, `title=`, `description=`, `icon=`, `cats=`, `federation=`, `recovery-set=`, `recovery=pending`, `recovery-eta=`, `recovery-rung=`, `root-history` | `NS-META gaming public owner=ada@hda.example title=Gaming\sHub` |
+| `NS-META <ns> <visibility>` | `owner=`, `title=`, `description=`, `icon=`, `cats=`, `federation=`, `recovery-set=`, `recovery=pending`, `recovery-eta=`, `recovery-rung=`, `root-history` | `NS-META gaming public owner=ada@test.example title=Gaming\sHub` |
 | `CHANMETA <#chan> <key> :<value>` | key ∈ `topic`/`view-gated`/`category`/`position`/`deleted` | `CHANMETA #gaming/general topic :Welcome` |
 | `CHANNEL-LAYOUT <#chan> <position>` | `category=` — ordered layout (§6.2) | `CHANNEL-LAYOUT #gaming/general 0 category=Text` |
 | `CHANNEL-RENAMED <#old> <#new>` | broadcast to members + labeled to the actor | `CHANNEL-RENAMED #gaming/lounge #gaming/cafe` |
-| `PINNED` / `UNPINNED <#chan> <msgid>` | `by=` on `PINNED` | `PINNED #gaming/general hda.example/01J…A by=ada@hda.example` |
-| `THREAD <#chan> <root> replies=<n>` | `last=`, `:name` — from `THREADS` (§9.4) | `THREAD #gaming/general hda.example/01J…A replies=4 last=hda.example/01J…Z :Bug triage` |
-| `THREAD-NAMED <#chan> <root> [:name]` | live thread (re)label | `THREAD-NAMED #gaming/general hda.example/01J…A :Bug triage` |
-| `EMOJI` / `EMOJI-REMOVED <ns> <name> [<media>]` | per-namespace custom emoji map | `EMOJI gaming partyblob weft-media://hda.example/<b3-hash>` |
+| `PINNED` / `UNPINNED <#chan> <msgid>` | `by=` on `PINNED` | `PINNED #gaming/general test.example/01J…A by=ada@test.example` |
+| `THREAD <#chan> <root> replies=<n>` | `last=`, `:name` — from `THREADS` (§9.4) | `THREAD #gaming/general test.example/01J…A replies=4 last=test.example/01J…Z :Bug triage` |
+| `THREAD-NAMED <#chan> <root> [:name]` | live thread (re)label | `THREAD-NAMED #gaming/general test.example/01J…A :Bug triage` |
+| `EMOJI` / `EMOJI-REMOVED <ns> <name> [<media>]` | per-namespace custom emoji map | `EMOJI gaming partyblob weft-media://test.example/<b3-hash>` |
 
 ### 7.5 Capabilities, invites & roles
 
 | Event | Payload / tags | Example |
 |---|---|---|
 | `TOKEN <subject> <scope>` | `@token=<b64>`, `expiry=` — the signed cap token from `GRANT`/`REVOKE`/`ROLE ASSIGN` (§10.4) | `@token=<b64-cap-token> TOKEN bob #gaming/general` |
-| `INVITED <scope> <invite-id>` | `@token=<b64>` (required), `max-uses=`, `expiry=`; redeem link in the trailing | `@token=<b64> INVITED ns:gaming iv_01J… max-uses=10 :weft://hda.example/gaming/i/<b64>` |
+| `INVITED <scope> <invite-id>` | `@token=<b64>` (required), `max-uses=`, `expiry=`; redeem link in the trailing | `@token=<b64> INVITED ns:gaming iv_01J… max-uses=10 :weft://test.example/gaming/i/<b64>` |
 | `ROLE <scope> <color> <caps> :<name>` | `hoist=`, `pos=` — a role definition | `ROLE ns:gaming #e8b93d send,react hoist=1 pos=0 :Speaker` |
 | `ROLE-MEMBER <scope> <account> :<names>` | an account's explicit role assignments | `ROLE-MEMBER ns:gaming bob :Speaker` |
 | `CAPS <account> <scope> :<caps>` | effective caps at a scope (public; badges) | `CAPS bob ns:gaming :send,react,invite` |
@@ -554,10 +432,10 @@ Events are the server→client half of the protocol; a client **MUST ignore any 
 
 | Event | Payload / tags | Example |
 |---|---|---|
-| `MODERATED <scope> <account> <action>` | `mute\|unmute\|ban\|unban\|kick`; `by=`, `reason=` — to the acting moderator (a join blocked by a ban returns the `ERR BANNED` code, §8) | `MODERATED #gaming/general bob mute by=ada@hda.example reason=spam` |
+| `MODERATED <scope> <account> <action>` | `mute\|unmute\|ban\|unban\|kick`; `by=`, `reason=` — to the acting moderator (a join blocked by a ban returns the `ERR BANNED` code, §8) | `MODERATED #gaming/general bob mute by=ada@test.example reason=spam` |
 | `REPORTED <report-id>` | `label=` — ack to the reporter | `REPORTED r_01J…` |
-| `REPORT-FILED <report-id> <msgid> <category>` | `state=verified\|unverified\|reporter-attested`, `reporter=` (per config), `scope=` — to `reports` holders | `REPORT-FILED r_01J… hda.example/01J…B harassment state=verified` |
-| `REPORT-RESOLVED <report-id> <action>` | handlers get `by=`/`note=`; the reporter gets the minimal form | `REPORT-RESOLVED r_01J… content-removed by=ada@hda.example` |
+| `REPORT-FILED <report-id> <msgid> <category>` | `state=verified\|unverified\|reporter-attested`, `reporter=` (per config), `scope=` — to `reports` holders | `REPORT-FILED r_01J… test.example/01J…B harassment state=verified` |
+| `REPORT-RESOLVED <report-id> <action>` | handlers get `by=`/`note=`; the reporter gets the minimal form | `REPORT-RESOLVED r_01J… content-removed by=ada@test.example` |
 
 ### 7.8 Social layer (§6.8)
 
@@ -565,12 +443,12 @@ Events are the server→client half of the protocol; a client **MUST ignore any 
 |---|---|---|
 | `FRIEND <user@net> <state>` | `friends\|incoming\|outgoing`; pushed on any change | `FRIEND bob@peer.example friends` |
 | `FRIEND-REMOVED <user@net>` | a friendship or pending request ended | `FRIEND-REMOVED bob@peer.example` |
-| `GROUP <&id> :<members>` | `name=` tag; members space-separated in the trailing — group roster snapshot | `@name=Weekend\sCrew GROUP &01J…G :ada@hda.example bob@peer.example carol@hda.example` |
-| `GROUP-MEMBER <&id> <user@net> <join\|part>` | group membership change, to members | `GROUP-MEMBER &01J…G dave@hda.example join` |
-| `CALL-RING <from@net> <room>` | incoming 1:1 call; `room` = the ad-hoc voice room | `CALL-RING ada@hda.example call:01J…R` |
+| `GROUP <&id> :<members>` | `name=` tag; members space-separated in the trailing — group roster snapshot | `@name=Weekend\sCrew GROUP &01J…G :ada@test.example bob@peer.example carol@test.example` |
+| `GROUP-MEMBER <&id> <user@net> <join\|part>` | group membership change, to members | `GROUP-MEMBER &01J…G dave@test.example join` |
+| `CALL-RING <from@net> <room>` | incoming 1:1 call; `room` = the ad-hoc voice room | `CALL-RING ada@test.example call:01J…R` |
 | `CALL-STATE <user@net> <state>` | `ringing\|active\|declined\|ended\|busy` | `CALL-STATE bob@peer.example active` |
-| `CALL-MEDIA <room> <token> :<endpoint>` | `mode=livekit`; **per-participant**, never broadcast; absent when signaling-only | `@mode=livekit CALL-MEDIA call:01J…R <token> :wss://sfu.hda.example` |
-| `GROUP-CALL <&id> <user@net> <active\|ended>` | a member's presence in the group call | `GROUP-CALL &01J…G ada@hda.example active` |
+| `CALL-MEDIA <room> <token> :<endpoint>` | `mode=livekit`; **per-participant**, never broadcast; absent when signaling-only | `@mode=livekit CALL-MEDIA call:01J…R <token> :wss://sfu.test.example` |
+| `GROUP-CALL <&id> <user@net> <active\|ended>` | a member's presence in the group call | `GROUP-CALL &01J…G ada@test.example active` |
 
 ### 7.9 History & data pages
 
@@ -663,7 +541,7 @@ Ed25519 device keys; home network signs `{pubkey, account, network, expiry, sig}
 
 Well-known document (JSON):
 ```json
-{ "protocol": "weft/1", "network": "hda.example", "signing-key": "<b64-ed25519-pubkey>" }
+{ "protocol": "weft/1", "network": "test.example", "signing-key": "<b64-ed25519-pubkey>" }
 ```
 
 ### 10.3 Display identity
@@ -786,7 +664,7 @@ Referenced blobs **mirrored** (fetched over bridge data plane, BLAKE3-verified �
 ### 11.9 Reports and federation
 
 - A report always lands at the reporter's home network (§6.7). For a bridged message, the home network can act **locally** without anyone's permission: local redaction of its replica (its storage, its rules — analogous to the receiver-side hash blocklist in §11.8) and attestation-level blocking of the sender.
-- The home network MAY additionally **forward** the report to the origin network over the bridge session (`REPORT-FORWARD <report-id> <msgid> <category> [:note]`, bridge-session-only verb). Forwarding strips the reporter's identity by default — the origin receives a network-attributed report ("hda.example forwarded a harassment report against your msgid X"). Origin networks treat forwarded reports as net-scope, `unverified`-at-minimum input; they are free to ignore them, and chronic ignoring is what `NETBLOCK` is for.
+- The home network MAY additionally **forward** the report to the origin network over the bridge session (`REPORT-FORWARD <report-id> <msgid> <category> [:note]`, bridge-session-only verb). Forwarding strips the reporter's identity by default — the origin receives a network-attributed report ("test.example forwarded a harassment report against your msgid X"). Origin networks treat forwarded reports as net-scope, `unverified`-at-minimum input; they are free to ignore them, and chronic ignoring is what `NETBLOCK` is for.
 - Report queues, resolutions, and holds NEVER replicate across bridges; there is no federated moderation state, only forwarded signals.
 
 ### 11.11 Federation sessions & homeserver authority
