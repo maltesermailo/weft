@@ -43,11 +43,6 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-      # Override to build the libwebrtc media relay (cross-network call/voice
-      # audio without exposing client IPs, §16 M-lk-3b):
-      #   WEFTD_FEATURES=web-ui,voice,voice-relay docker compose build weftd
-      args:
-        WEFTD_FEATURES: ${WEFTD_FEATURES:-web-ui,voice}
     restart: unless-stopped
     depends_on:
       postgres:

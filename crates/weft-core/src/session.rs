@@ -19,10 +19,10 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use weft_crypto::{Capability, PublicKey, SignedManifest, TokenScope};
 use weft_proto::{
     Account, BridgeState, ChannelKind, ChannelName, Command, ContentState, ErrCode, ErrEvent,
-    Event, FSessionOp, HistoryMode, Line, MediaMode, MemberAction, MessageEvent, ModAction, MsgId,
-    MsgMeta, NamespaceName, NetworkName, ParseError, Reply, ReportScope, ReportStatus, Request,
-    ResolveAction, RetentionPolicy, StreamMode, Target, Ulid, UserRef, VerifyState, Visibility,
-    MAX_LABEL_BYTES,
+    Event, FSessionOp, GroupId, HistoryMode, Line, MediaMode, MemberAction, MessageEvent,
+    ModAction, MsgId, MsgMeta, NamespaceName, NetworkName, ParseError, Reply, ReportScope,
+    ReportStatus, Request, ResolveAction, RetentionPolicy, StreamMode, Target, Ulid, UserRef,
+    VerifyState, Visibility, MAX_LABEL_BYTES,
 };
 
 use weft_store::{
@@ -400,6 +400,13 @@ enum MessageRoute {
     },
     Dm {
         peer: Account,
+        root: MsgId,
+    },
+    /// Group DM: the directory is the single writer (like a DM), but the
+    /// mutation fans out to every local member, resolved here.
+    Group {
+        group: GroupId,
+        members: Vec<Account>,
         root: MsgId,
     },
 }
@@ -1352,6 +1359,19 @@ impl<S: ControlStream> Session<S> {
                 self.on_group_name(label, group, name, account).await
             }
             Command::Groups => self.on_groups(label, account).await,
+            // A client never supplies the relay `media` — the host *network* mints
+            // it; drop any client-supplied leg (forgeable), like 1:1 CALL.
+            Command::GroupCall { group, .. } => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.on_group_call(label, group, me, None).await
+            }
+            Command::GroupCallLeave { group } => {
+                self.on_group_call_leave(label, group, account).await
+            }
+            // Federation-internal — a client can't send these.
+            Command::GroupCallRoster { .. }
+            | Command::GroupSync { .. }
+            | Command::GroupRelay { .. } => Ok(Flow::Continue),
             // Friend calls (social layer, federation-able): signaling + media. The
             // caller's identity is `account@thisnet` here; a tunnelled peer's call
             // commands run in `on_federated` with the caller's *foreign* UserRef.

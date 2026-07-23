@@ -71,6 +71,11 @@ export interface AppCtx {
   openGroup(id: string): void;
   leaveGroup(id: string): void;
   addToGroup(id: string, handle: string): void;
+  // ---- group calls ----
+  readonly groupCallRoster: Record<string, string[]>;
+  readonly activeGroupCall: string | null;
+  startGroupCall(id: string): void;
+  leaveGroupCall(id: string): void;
   // ---- friend calls (1:1) ----
   readonly incomingCall: { from: string; room: string } | null;
   readonly activeCall: { peer: string; room: string; state: string } | null;

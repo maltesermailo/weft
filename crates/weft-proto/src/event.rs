@@ -529,6 +529,15 @@ pub enum Event {
         token: String,
         endpoint: Option<String>,
     },
+    /// `GROUP-CALL <&group> <user@net> <state>` — a member's presence in a group
+    /// DM's voice call (social layer). `state` is `active` (in the call) or
+    /// `ended` (left). Broadcast to the group's members, so a member sees a call
+    /// start / who's in it and can join with `GROUP CALL`.
+    GroupCallState {
+        group: GroupId,
+        user: UserRef,
+        state: CallState,
+    },
     /// `VOICE DESC <#chan> :<sdp>` (§16) — the SFU's SDP **answer** to the
     /// client's `VOICE DESC` offer. Symmetric with the command (spec §16 uses
     /// `VOICE DESC` both directions); the raw SDP rides the trailing.
@@ -1297,6 +1306,14 @@ impl Event {
                     endpoint: args.trailing_opt(),
                 })
             }
+            "GROUP-CALL" => {
+                let mut args = Args::new(line, "GROUP-CALL");
+                Ok(Event::GroupCallState {
+                    group: args.req("group")?.parse()?,
+                    user: args.req("user")?.parse()?,
+                    state: args.req("state")?.parse()?,
+                })
+            }
             "VOICE" => {
                 let mut args = Args::new(line, "VOICE");
                 let sub = args.req("subcommand")?.to_ascii_uppercase();
@@ -2007,6 +2024,11 @@ impl Event {
                     endpoint.clone(),
                 )
             }
+            Event::GroupCallState { group, user, state } => (
+                "GROUP-CALL",
+                vec![group.to_string(), user.to_string(), state.to_string()],
+                None,
+            ),
             Event::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown event"));
             }
@@ -2916,6 +2938,15 @@ mod tests {
             token: "jwt.abc.def".into(),
             endpoint: None,
         }));
+
+        // Group-call member presence.
+        for state in [CallState::Active, CallState::Ended] {
+            round_trip(&Reply::new(Event::GroupCallState {
+                group: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+                user: "ada@home.example".parse().unwrap(),
+                state,
+            }));
+        }
     }
 
     #[test]

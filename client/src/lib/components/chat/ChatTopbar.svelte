@@ -37,6 +37,24 @@
       </button>
     {/if}
     {#if app.activeIsGroup}
+      {@const inCall = app.activeGroupCall === app.active}
+      {@const roster = app.groupCallRoster[app.active] ?? []}
+      <button
+        class="icon-btn"
+        class:in-call={inCall}
+        title={inCall ? "Leave call" : "Start / join call"}
+        aria-label={inCall ? "Leave call" : "Start or join call"}
+        onclick={() => (inCall ? app.leaveGroupCall(app.active) : app.startGroupCall(app.active))}
+      >
+        {#if inCall}
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91" /><line x1="23" y1="1" x2="1" y2="23" /></svg>
+        {:else}
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" /></svg>
+        {/if}
+      </button>
+      {#if roster.length}
+        <span class="call-count" title="{roster.length} in call">{roster.length}</span>
+      {/if}
       <button class="icon-btn" title="Leave group" aria-label="Leave group" onclick={() => app.leaveGroup(app.active)}>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5" /><path d="M21 12H9" /></svg>
       </button>
@@ -66,3 +84,25 @@
     </button>
   </div>
 </div>
+
+<style>
+  /* Active (in-call) tint for the group-call button. */
+  .icon-btn.in-call {
+    color: #3ba55d;
+  }
+  /* Small badge showing how many members are in the group call. */
+  .call-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    margin-left: -4px;
+    border-radius: 9px;
+    background: #3ba55d;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+  }
+</style>

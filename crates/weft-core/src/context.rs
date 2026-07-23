@@ -8,8 +8,8 @@ use weft_crypto::{
     Attestation, Capability, Grant, Keypair, Profile, PublicKey, SignedProfile, Subject, TokenScope,
 };
 use weft_proto::{
-    Account, CallMediaGrant, ChannelName, MsgId, NamespaceName, NetworkName, RetentionPolicy,
-    UserRef,
+    Account, CallMediaGrant, ChannelName, GroupId, MsgId, NamespaceName, NetworkName,
+    RetentionPolicy, UserRef,
 };
 use weft_store::{
     AccountStore, BlobStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, FriendStore,
@@ -220,6 +220,10 @@ pub struct ServerCtx {
     /// Social layer: live 1:1 friend calls, keyed by the canonical account pair
     /// (same-network). Value = the ad-hoc room + whether it's been accepted.
     calls: std::sync::Mutex<HashMap<(UserRef, UserRef), CallInfo>>,
+    /// Social layer: live **group DM** calls, keyed by group. Value = this
+    /// network's room for the call + the local accounts currently in it. Members
+    /// join/leave; the entry is dropped when the last local participant leaves.
+    group_calls: std::sync::Mutex<HashMap<GroupId, GroupCallInfo>>,
     /// §16 M-lk-3b federated voice: the media-relay driver weftd installs (a
     /// libwebrtc `livekit`-SDK relay, or the no-op default). `None` = no relaying.
     voice_relay: std::sync::OnceLock<Arc<dyn crate::voice::VoiceRelay>>,
@@ -299,6 +303,44 @@ pub(crate) enum CallPlace {
     Busy,
     /// A call between these two already exists (ringing or active).
     Exists,
+}
+
+/// A live group DM call on **this** network: the room its local members share and
+/// who is currently in it. Cross-network members join their own network's room,
+/// bridged to the **host** network's by a relay (a star, hub = host — §16 M-lk-3b).
+#[derive(Debug, Clone)]
+pub(crate) struct GroupCallInfo {
+    /// The LiveKit room this network hosts for the group call.
+    pub room: String,
+    /// Local accounts currently in the call.
+    pub participants: std::collections::HashSet<Account>,
+    /// Set only when **we are a spoke** (the call started on another network): the
+    /// host network we bridge our room to, and its relay leg (its room + a relay
+    /// token + URL). `None` ⇒ we are the host.
+    pub host_net: Option<NetworkName>,
+    pub host_leg: Option<CallMediaGrant>,
+}
+
+/// The result of a local member joining a group call.
+pub(crate) struct GroupCallJoin {
+    pub room: String,
+    /// True if `account` was newly added (false = a re-join, already present).
+    pub newly: bool,
+    /// True if this was the first local participant (the call just became active
+    /// on this network).
+    pub first: bool,
+    /// `Some((host, leg))` when we are a **spoke** and just became active — spawn
+    /// the media relay bridging our room to the host's.
+    pub spoke: Option<(NetworkName, CallMediaGrant)>,
+}
+
+/// The result of a local member leaving a group call.
+pub(crate) struct GroupCallLeave {
+    pub room: String,
+    /// True if the last local participant left (the call ended on this network).
+    pub empty: bool,
+    /// The host network to release the relay for, when we were a spoke.
+    pub host_net: Option<NetworkName>,
 }
 
 /// A `FEDERATE` request handed from weft-core to weftd's dialer (§11.10).
@@ -439,6 +481,7 @@ impl ServerCtx {
             voice: std::sync::OnceLock::new(),
             voice_rooms: std::sync::Mutex::new(HashMap::new()),
             calls: std::sync::Mutex::new(HashMap::new()),
+            group_calls: std::sync::Mutex::new(HashMap::new()),
             voice_relay: std::sync::OnceLock::new(),
             voice_relays: std::sync::Mutex::new(HashMap::new()),
             mailer: std::sync::OnceLock::new(),
@@ -756,6 +799,111 @@ impl ServerCtx {
             .lock()
             .expect("calls lock")
             .remove(&Self::call_key(a, b))
+    }
+
+    fn new_group_call(&self) -> GroupCallInfo {
+        GroupCallInfo {
+            room: format!("gcall:{}", weft_proto::Ulid::new()),
+            participants: std::collections::HashSet::new(),
+            host_net: None,
+            host_leg: None,
+        }
+    }
+
+    /// A ring arrived from a network claiming to host `group`'s call. Record it as
+    /// our host (making us a spoke) and return `Some(room)` **iff a relay should be
+    /// spawned now** — i.e. we already have local participants to bridge (we were
+    /// an active host and yielded).
+    ///
+    /// Split-brain guard (simultaneous start): if we are *already* an active host
+    /// (`host_net` unset, participants present), we yield **only** to a network
+    /// that sorts before ours — a deterministic tiebreak, so exactly one of the
+    /// two racing networks becomes the single host and the other bridges to it.
+    pub(crate) fn group_call_ring(
+        &self,
+        group: GroupId,
+        host_net: NetworkName,
+        host_leg: CallMediaGrant,
+    ) -> Option<String> {
+        let mut calls = self.group_calls.lock().expect("group calls lock");
+        let info = calls.entry(group).or_insert_with(|| self.new_group_call());
+        if info.host_net.is_some() {
+            return None; // already a spoke — one host is enough
+        }
+        if info.participants.is_empty() {
+            // Fresh entry (rung before any local join): become a spoke. The relay
+            // spawns when a local member joins.
+            info.host_net = Some(host_net);
+            info.host_leg = Some(host_leg);
+            return None;
+        }
+        // We're an active host and another host is ringing us. Tiebreak by network
+        // name: yield to a smaller one (bridging our existing room into theirs);
+        // ignore a larger one (they will yield to us instead).
+        if host_net < self.info.network {
+            let room = info.room.clone();
+            info.host_net = Some(host_net);
+            info.host_leg = Some(host_leg);
+            Some(room)
+        } else {
+            None
+        }
+    }
+
+    /// Join `account` to `group`'s call on this network — starting it (minting the
+    /// room) if this is the first local participant. On a spoke's first joiner,
+    /// `spoke` carries the host + leg so the caller spawns the bridging relay.
+    pub(crate) fn group_call_join(&self, group: GroupId, account: Account) -> GroupCallJoin {
+        let mut calls = self.group_calls.lock().expect("group calls lock");
+        let info = calls.entry(group).or_insert_with(|| self.new_group_call());
+        let was_empty = info.participants.is_empty();
+        let newly = info.participants.insert(account);
+        let first = was_empty && newly;
+        let spoke = if first {
+            info.host_net.clone().zip(info.host_leg.clone())
+        } else {
+            None
+        };
+        GroupCallJoin {
+            room: info.room.clone(),
+            newly,
+            first,
+            spoke,
+        }
+    }
+
+    /// Remove `account` from `group`'s call. `None` if they weren't in it.
+    pub(crate) fn group_call_leave(
+        &self,
+        group: GroupId,
+        account: &Account,
+    ) -> Option<GroupCallLeave> {
+        let mut calls = self.group_calls.lock().expect("group calls lock");
+        let info = calls.get_mut(&group)?;
+        if !info.participants.remove(account) {
+            return None; // wasn't in the call
+        }
+        let room = info.room.clone();
+        let empty = info.participants.is_empty();
+        let host_net = info.host_net.clone();
+        if empty {
+            calls.remove(&group);
+        }
+        Some(GroupCallLeave {
+            room,
+            empty,
+            host_net,
+        })
+    }
+
+    /// The local accounts currently in `group`'s call (for the roster snapshot).
+    pub(crate) fn group_call_participants(&self, group: GroupId) -> Vec<Account> {
+        self.group_calls
+            .lock()
+            .expect("group calls lock")
+            .get(&group)
+            .map(|i| i.participants.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// weftd installs the §11.7 bridge-backfill sink (its data-plane puller).

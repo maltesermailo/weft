@@ -90,12 +90,12 @@ jobs:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
       # Check, not test: the dev-dependencies are free to need a newer compiler,
-      # the shipped libraries are not. weftd's `voice-relay` feature is excluded
-      # from the MSRV contract — it pulls the LiveKit client SDK (libwebrtc),
-      # which needs a newer toolchain + system libs and is a deployment add-on,
-      # not a shipped library (see the `voice-relay` job below).
+      # the shipped libraries are not. weftd's `voice` feature is excluded from the
+      # MSRV contract — it pulls the LiveKit client SDK (libwebrtc, the integral
+      # media relay), which needs a newer toolchain + system libs and is exercised
+      # by the `voice` job below and the Docker build, not by MSRV.
       - run: cargo check --workspace --exclude client --exclude weftd --all-features
-      - run: cargo check -p weftd --features web-ui,voice
+      - run: cargo check -p weftd --features web-ui
 
   deny:
     name: cargo-deny (advisories, licenses, bans, sources)
@@ -152,25 +152,24 @@ jobs:
       - run: pnpm build
         working-directory: client
 
-  voice-relay:
-    name: voice-relay (libwebrtc relay compiles)
+  voice:
+    name: voice (webrtc SFU + libwebrtc relay compile)
     runs-on: ubuntu-latest
-    # §16 M-lk-3b: the real cross-network-call / federated-voice media relay is
-    # gated behind the `voice-relay` feature because it pulls the LiveKit client
-    # SDK (libwebrtc) — heavy, platform-specific, and verified against a live
-    # LiveKit deployment. This job `cargo check`s that path so an API drift in
-    # the relay driver is caught, WITHOUT gating merges: libwebrtc's prebuilt
-    # download can be slow/flaky and the driver is deployment-verified, so the
-    # job is informational (`continue-on-error`). Flip to blocking once the
-    # driver has been confirmed to build + run against a real LiveKit.
+    # §16 the `voice` feature pulls the webrtc SFU AND the integral libwebrtc media
+    # relay (LiveKit client SDK). This job `cargo check`s that build so an API
+    # drift in the relay driver is caught. It's kept non-blocking for now
+    # (`continue-on-error`) because libwebrtc's prebuilt download can be slow/flaky
+    # and the media plane is verified against a real LiveKit deployment; the Docker
+    # workflow builds this same feature set for the published image. Flip to
+    # blocking once the voice build has been confirmed green a few times.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # libwebrtc build deps (must match deploy/Dockerfile's voice-relay branch).
+      # libwebrtc build deps (must match deploy/Dockerfile).
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang libclang-dev libc++-dev libc++abi-dev libssl-dev pkg-config
-      - run: cargo check -p weftd --features voice-relay
+      - run: cargo check -p weftd --features voice

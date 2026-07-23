@@ -366,6 +366,9 @@
   // friend calls (1:1): incoming ring + the active call, if any.
   let incomingCall = $state<{ from: string; room: string } | null>(null);
   let activeCall = $state<{ peer: string; room: string; state: string } | null>(null);
+  // Group DM calls: gid → members currently in the call, and the gid we're in.
+  let groupCallRoster = $state<Record<string, string[]>>({});
+  let activeGroupCall = $state<string | null>(null);
   // ---- discover dialog (Phase 6) ----
   let discoverOpen = $state(false);
   let discovered = $state<Record<string, Extract<weft.WeftEvent, { kind: "ns-meta" }>>>({});
@@ -1014,6 +1017,14 @@
     const user = qualify(handle);
     if (user.includes("@")) weft.groupAdd(id, user).catch((e) => toast(String(e), "error"));
   }
+  function startGroupCall(id: string) {
+    weft.groupCall(id).catch((e) => toast(String(e), "error"));
+  }
+  function leaveGroupCall(id: string) {
+    weft.groupCallLeave(id).catch(() => {});
+    disconnectCallMedia();
+    if (activeGroupCall === id) activeGroupCall = null;
+  }
 
   // ---- friend calls (1:1) ----
   function callUser(user: string) {
@@ -1379,10 +1390,27 @@
         break;
       case "call-media":
         // The server authorized the call and minted our media credential — join
-        // the LiveKit room so audio flows. Signaling state (activeCall) is already
-        // set by the matching CALL-STATE active.
+        // the LiveKit room so audio flows. Works for both a 1:1 call (activeCall)
+        // and a group call (activeGroupCall) — the credential is the same shape.
         void connectCallMedia(e.endpoint, e.token);
         break;
+      case "group-call-state": {
+        const roster = groupCallRoster[e.group] ?? [];
+        const me = `${account}@${network}`;
+        if (e.state === "active") {
+          if (!roster.includes(e.user)) groupCallRoster[e.group] = [...roster, e.user];
+          if (e.user === me) activeGroupCall = e.group;
+        } else {
+          const next = roster.filter((u) => u !== e.user);
+          if (next.length) groupCallRoster[e.group] = next;
+          else delete groupCallRoster[e.group];
+          if (e.user === me && activeGroupCall === e.group) {
+            activeGroupCall = null;
+            disconnectCallMedia();
+          }
+        }
+        break;
+      }
       case "caps": {
         const set = e.caps ? e.caps.split(",") : [];
         capsFor[`${e.account}|${e.scope}`] = {
@@ -2824,6 +2852,11 @@
     openGroup,
     leaveGroup,
     addToGroup,
+    // group calls
+    get groupCallRoster() { return groupCallRoster; },
+    get activeGroupCall() { return activeGroupCall; },
+    startGroupCall,
+    leaveGroupCall,
     // friend calls
     get incomingCall() { return incomingCall; },
     get activeCall() { return activeCall; },

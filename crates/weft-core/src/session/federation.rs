@@ -1461,6 +1461,40 @@ impl<S: ControlStream> Session<S> {
                 Some(me) => self.on_call_end(label, user, me).await,
                 None => Ok(Flow::Continue),
             },
+            // §16 M-lk-3b group-call relay star: a tunnelled ring from the call's
+            // host network. `caller` is the host member (a foreign `UserRef`); the
+            // group + the host's relay leg drive the spoke's setup.
+            Command::GroupCall { group, media } => match caller {
+                Some(me) => self.on_group_call(label, group, me, media).await,
+                None => Ok(Flow::Continue),
+            },
+            // §16 M-lk-3b group-call roster mesh: a member on the sending network
+            // joined/left; re-emit to our local members (+ reply with ours).
+            Command::GroupCallRoster {
+                group,
+                user,
+                active,
+                reply,
+            } => {
+                self.on_group_call_roster(label, group, user, active, reply)
+                    .await
+            }
+            // Cross-network group membership + messaging (home-authoritative).
+            Command::GroupSync {
+                group,
+                creator,
+                name,
+                members,
+            } => {
+                self.on_group_sync(label, group, creator, name, members)
+                    .await
+            }
+            Command::GroupRelay {
+                group,
+                sender,
+                msgid,
+                body,
+            } => self.on_group_relay(label, group, sender, msgid, body).await,
             _ => {
                 self.unsupported(label, "not yet available over a federation session")
                     .await

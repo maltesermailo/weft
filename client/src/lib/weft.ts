@@ -118,6 +118,7 @@ export type WeftEvent =
   | { kind: "friend-removed"; user: string }
   | { kind: "group"; id: string; name: string | null; members: string[] }
   | { kind: "group-member"; group: string; user: string; action: string }
+  | { kind: "group-call-state"; group: string; user: string; state: string }
   | { kind: "call-ring"; from: string; room: string }
   | { kind: "call-state"; user: string; state: string }
   | { kind: "call-media"; room: string; mode: string; token: string; endpoint: string | null }
@@ -643,6 +644,12 @@ export function groupName(group: string, name: string) {
 }
 export function listGroups() {
   return invoke("groups", {});
+}
+export function groupCall(group: string) {
+  return invoke("group_call", { group });
+}
+export function groupCallLeave(group: string) {
+  return invoke("group_call_leave", { group });
 }
 
 // ---- friend calls (social layer; user = account@network) ----

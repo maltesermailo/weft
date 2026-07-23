@@ -20,24 +20,19 @@ RUN apt-get update \
 WORKDIR /src
 COPY . .
 
-# The weftd feature set. Default: `web-ui` (embed the SPA) + `voice` (the native
-# WEFT-RT SFU, so `backend = "native"` also works without a rebuild). The LiveKit
-# backend itself needs no feature. Add `voice-relay` (§16 M-lk-3b — the libwebrtc
-# media relay that bridges two LiveKit rooms so cross-network calls / federated
-# voice never expose a client's IP to the peer network) to build the heavy relay
-# driver:  --build-arg WEFTD_FEATURES=web-ui,voice,voice-relay
+# The weftd feature set: `web-ui` (embed the SPA) + `voice`. **`voice` is integral
+# to the deployed image** — it compiles the WEFT-RT SFU AND the §16 M-lk-3b
+# libwebrtc media relay (so cross-network calls / federated voice never expose a
+# client's IP to the peer network). `voice` therefore always pulls libwebrtc.
 ARG WEFTD_FEATURES=web-ui,voice
 
-# libwebrtc build deps — installed ONLY when `voice-relay` is requested, so the
-# default image stays lean. The `livekit` client SDK's `webrtc-sys` downloads a
-# prebuilt libwebrtc and links it against libc++ (this list may need tuning per
-# libwebrtc release).
-RUN case ",${WEFTD_FEATURES}," in \
-      *,voice-relay,*) apt-get update \
-        && apt-get install -y --no-install-recommends \
-             clang libclang-dev libc++-dev libc++abi-dev libssl-dev pkg-config \
-        && rm -rf /var/lib/apt/lists/* ;; \
-    esac
+# libwebrtc build deps — the `voice` feature's `livekit` client SDK (`webrtc-sys`)
+# downloads a prebuilt libwebrtc and links it against libc++ (list may need tuning
+# per libwebrtc release).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      clang libclang-dev libc++-dev libc++abi-dev libssl-dev pkg-config \
+ && rm -rf /var/lib/apt/lists/*
 
 # 1) Build the browser client → client/build (wasm-pack + vite). 2) Build weftd
 # embedding it, with the selected features.
@@ -46,15 +41,11 @@ RUN cargo build --release -p weftd --features "${WEFTD_FEATURES}"
 
 # ---- runtime ----
 FROM debian:bookworm-slim
-# Re-declare the ARG (each FROM resets build args) so runtime deps match the build.
-ARG WEFTD_FEATURES=web-ui,voice
 # ca-certificates: outbound TLS (SMTP, §11.10 well-known fetch). libc++/libssl:
-# only when the voice-relay (libwebrtc) driver is built in.
+# the libwebrtc media relay linked into the voice build.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
- && case ",${WEFTD_FEATURES}," in \
-      *,voice-relay,*) apt-get install -y --no-install-recommends libc++1 libc++abi1 libssl3 ;; \
-    esac \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates libc++1 libc++abi1 libssl3 \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/target/release/weftd /usr/local/bin/weftd

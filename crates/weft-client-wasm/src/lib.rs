@@ -283,6 +283,8 @@ impl WeftClient {
             "group_leave" => build_group_leave(&arg("group"))?,
             "group_name" => build_group_name(&arg("group"), &arg("name"))?,
             "groups" => build_groups()?,
+            "group_call" => build_group_call(&arg("group"))?,
+            "group_call_leave" => build_group_call_leave(&arg("group"))?,
             "call" => build_call(&arg("user"))?,
             "call_accept" => build_call_accept(&arg("user"))?,
             "call_decline" => build_call_decline(&arg("user"))?,

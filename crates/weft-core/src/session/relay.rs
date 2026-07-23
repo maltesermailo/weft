@@ -311,18 +311,52 @@ impl<S: ControlStream> Session<S> {
                     Ok(m) => m,
                     Err(e) => return self.internal(label, &e).await,
                 };
-                // Fan out to *local* members' sessions; cross-network members are
-                // reached over the bridge (deferred — group messaging is hard).
+                let local_net = &self.ctx.info.network;
                 let local: Vec<Account> = members
                     .iter()
-                    .filter(|u| u.network == self.ctx.info.network)
+                    .filter(|u| &u.network == local_net)
                     .map(|u| u.account.clone())
                     .collect();
-                self.ctx
-                    .directory
-                    .group_msg(self.id, account, group, local, body, meta)
-                    .await;
-                self.pending_direct.push_back(label);
+                let has_remote = members.iter().any(|u| &u.network != local_net);
+
+                if !has_remote {
+                    // Same-network group: the local directory is the single writer.
+                    self.ctx
+                        .directory
+                        .group_msg(self.id, account, group, local, body, meta)
+                        .await;
+                    self.pending_direct.push_back(label);
+                } else {
+                    // Cross-network: the group's **home** (creator's network) is the
+                    // single ULID writer (§9.1). If we're home, mint + fan out; else
+                    // relay the post there (the poster's copy arrives via ingest).
+                    let home = self.group_home(group).await;
+                    if home == *local_net {
+                        if let Some(msg) = self
+                            .ctx
+                            .directory
+                            .group_mint(self.id, me.clone(), group, local, body)
+                            .await
+                        {
+                            self.fanout_group_message(group, &members, &me, &msg).await;
+                        }
+                        self.pending_direct.push_back(label);
+                    } else {
+                        let cmd = Command::GroupRelay {
+                            group,
+                            sender: me.clone(),
+                            msgid: None,
+                            body,
+                        };
+                        if let Ok(line) = Request::new(cmd).serialize() {
+                            self.ctx.request_friend_deliver(crate::FriendDeliver {
+                                peer: home,
+                                from: account,
+                                line,
+                            });
+                        }
+                    }
+                }
             }
         }
         // The ack is the echoed MESSAGE, sent when the broadcast returns.
@@ -417,11 +451,44 @@ impl<S: ControlStream> Session<S> {
                     root: root.msgid,
                 }))
             }
-            // Editing/deleting/reacting to group DM messages arrives with the
-            // group actor (next increment); none exist yet.
-            Scope::Group(_) => {
-                self.no_such_target(label).await?;
-                Ok(None)
+            // Group DM mutations: membership-gated (non-member = hidden, §2.2),
+            // author-gated for EDIT/DELETE. The directory is the single writer;
+            // the mutation fans out to the group's local members.
+            Scope::Group(group) => {
+                let me = UserRef::new(account.clone(), self.ctx.info.network.clone());
+                match self.ctx.groups.is_group_member(group, &me).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.no_such_target(label).await?;
+                        return Ok(None);
+                    }
+                    Err(e) => {
+                        self.internal(label, &e).await?;
+                        return Ok(None);
+                    }
+                }
+                if must_be_author && root.sender.account != *account {
+                    self.send_err(label, ErrCode::CapRequired, Some(cap), "not your message")
+                        .await?;
+                    return Ok(None);
+                }
+                let members = match self.ctx.groups.group_members(group).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        self.internal(label, &e).await?;
+                        return Ok(None);
+                    }
+                };
+                let local: Vec<Account> = members
+                    .iter()
+                    .filter(|u| u.network == self.ctx.info.network)
+                    .map(|u| u.account.clone())
+                    .collect();
+                Ok(Some(MessageRoute::Group {
+                    group,
+                    members: local,
+                    root: root.msgid,
+                }))
             }
         }
     }
@@ -463,6 +530,17 @@ impl<S: ControlStream> Session<S> {
                     .edit(self.id, account, peer, root, body)
                     .await;
             }
+            Some(MessageRoute::Group {
+                group,
+                members,
+                root,
+            }) => {
+                self.pending_direct.push_back(label);
+                self.ctx
+                    .directory
+                    .group_edit(self.id, account, group, members, root, body)
+                    .await;
+            }
         }
         Ok(Flow::Continue) // ack = the echoed EDITED broadcast
     }
@@ -491,6 +569,17 @@ impl<S: ControlStream> Session<S> {
                 self.ctx
                     .directory
                     .delete(self.id, account, peer, root)
+                    .await;
+            }
+            Some(MessageRoute::Group {
+                group,
+                members,
+                root,
+            }) => {
+                self.pending_direct.push_back(label);
+                self.ctx
+                    .directory
+                    .group_delete(self.id, account, group, members, root)
                     .await;
             }
         }
@@ -523,6 +612,17 @@ impl<S: ControlStream> Session<S> {
                 self.ctx
                     .directory
                     .react(self.id, account, peer, root, emoji, add)
+                    .await;
+            }
+            Some(MessageRoute::Group {
+                group,
+                members,
+                root,
+            }) => {
+                self.pending_direct.push_back(label);
+                self.ctx
+                    .directory
+                    .group_react(self.id, account, group, members, root, emoji, add)
                     .await;
             }
         }

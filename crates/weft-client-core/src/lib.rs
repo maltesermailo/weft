@@ -168,6 +168,13 @@ pub enum ClientEvent {
         user: String,
         action: String,
     },
+    /// `GROUP-CALL <&id> <user@net> <state>` — a member's presence in the group's
+    /// voice call (`active` = in it, `ended` = left).
+    GroupCallState {
+        group: String,
+        user: String,
+        state: String,
+    },
     /// `CALL-RING <from@net> <room>` — an incoming 1:1 friend call.
     CallRing {
         from: String,
@@ -654,6 +661,11 @@ pub fn on_line<E: EventSink>(
             group: group.to_string(),
             user: user.to_string(),
             action: action.to_string(),
+        }),
+        Event::GroupCallState { group, user, state } => sink.emit(ClientEvent::GroupCallState {
+            group: group.to_string(),
+            user: user.to_string(),
+            state: state.to_string(),
         }),
         Event::CallRing { from, room } => sink.emit(ClientEvent::CallRing {
             from: from.to_string(),
@@ -1560,6 +1572,23 @@ pub fn build_groups() -> Result<String, String> {
     Request::new(Command::Groups)
         .serialize()
         .map_err(|e| e.to_string())
+}
+
+pub fn build_group_call(group: &str) -> Result<String, String> {
+    Request::new(Command::GroupCall {
+        group: group_id(group)?,
+        media: None, // the host network mints the relay leg
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+pub fn build_group_call_leave(group: &str) -> Result<String, String> {
+    Request::new(Command::GroupCallLeave {
+        group: group_id(group)?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
 }
 
 // ---- friend calls (social layer; 1:1, keyed by peer account@network) ----

@@ -136,28 +136,29 @@ impl VoiceRelay for LogRelay {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// §16 M-lk-3b: the REAL media relay (feature `voice-relay`, libwebrtc).
+// §16 M-lk-3b: the REAL media relay — an INTEGRAL part of the `voice` feature
+// (libwebrtc, LiveKit client SDK). Any voice-enabled build ships and uses it.
 //
 // A relay is a headless LiveKit participant in BOTH rooms of a `RelaySpec`; it
 // subscribes to the audio published in each room and republishes it into the
-// other, so the two 1:1-call participants hear each other while each stays
-// connected only to ITS OWN network's LiveKit — no client ever touches the peer
-// network's LiveKit, protecting client IP addresses. One relay task per
-// `(peer, key)`; `stop` aborts it, which disconnects both rooms.
+// other, so two call participants (1:1, or a group-call spoke ↔ host) hear each
+// other while each stays connected only to ITS OWN network's LiveKit — no client
+// ever touches the peer network's LiveKit, protecting client IP addresses. One
+// relay task per `(peer, key)`; `stop` aborts it, which disconnects both rooms.
 //
-// NOTE: this path requires the `livekit` client SDK (libwebrtc) — heavy and
-// platform-specific — so it is compiled only under `--features voice-relay` and
-// is verified against a real LiveKit deployment, not the default CI build.
-#[cfg(feature = "voice-relay")]
+// NOTE: `voice` pulls the `livekit` client SDK (libwebrtc — heavy, platform-
+// specific), so a voice build needs its system libs (see deploy/Dockerfile). The
+// media plane is verified against a real LiveKit deployment.
+#[cfg(feature = "voice")]
 mod relay {
     use super::*;
+    use futures_util::StreamExt;
     use livekit::options::TrackPublishOptions;
     use livekit::prelude::*;
     use livekit::track::{LocalAudioTrack, LocalTrack, RemoteTrack, TrackSource};
     use livekit::webrtc::audio_source::native::NativeAudioSource;
     use livekit::webrtc::audio_source::AudioSourceOptions;
     use livekit::webrtc::audio_stream::native::NativeAudioStream;
-    use futures_util::StreamExt;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -284,5 +285,5 @@ mod relay {
     }
 }
 
-#[cfg(feature = "voice-relay")]
+#[cfg(feature = "voice")]
 pub use relay::LivekitRelay;

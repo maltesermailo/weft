@@ -590,6 +590,57 @@ pub enum Command {
     },
     /// `GROUPS` — list the caller's group DMs; one `GROUP` event each (a `BATCH`).
     Groups,
+    /// `GROUP CALL <&group>` (social layer) — start or join the group's voice
+    /// call. Members are notified (`GROUP-CALL … active`); the caller gets a
+    /// `CALL-MEDIA` credential for the shared room.
+    ///
+    /// `media` is set **only on the federated (tunnelled) ring**: the call's host
+    /// network carries its **relay leg** here so a foreign member's network can
+    /// bridge its own room into the host's (the §16 M-lk-3b group-call relay
+    /// star). A client's `GROUP CALL` has `None`.
+    GroupCall {
+        group: GroupId,
+        media: Option<CallMediaGrant>,
+    },
+    /// `GROUP HANGUP <&group>` — leave the group's voice call.
+    GroupCallLeave { group: GroupId },
+    /// `@reply=yes GROUP ROSTER <&group> <user@net> <active|ended>` — a
+    /// **federation-internal** cross-network group-call roster update: one member
+    /// on the sending network joined (`active`) or left (`ended`) the call; the
+    /// receiving network re-emits it as a `GROUP-CALL` event to its local members
+    /// so every network's roster is complete. `reply=yes` asks the receiver to
+    /// send back its own current participants (the snapshot for a fresh joiner);
+    /// a reply carries `reply=no` to avoid a loop. Never sent by a client.
+    GroupCallRoster {
+        group: GroupId,
+        user: UserRef,
+        active: bool,
+        reply: bool,
+    },
+    /// `@name=… GROUP SYNC <&group> <creator@net> <member@net>…` — a
+    /// **federation-internal** cross-network group membership sync: record (or
+    /// update) the group with this id, creator, name, and members, so it exists
+    /// consistently on every member's network. Sent to remote member networks on
+    /// create/membership change. Never sent by a client.
+    GroupSync {
+        group: GroupId,
+        creator: UserRef,
+        name: Option<String>,
+        members: Vec<UserRef>,
+    },
+    /// `@id=<msgid> GROUP RELAY <&group> <sender@net> :<body>` — a
+    /// **federation-internal** cross-network group message. The group's **home**
+    /// network (`creator`'s network) is the single ULID writer (§9.1). Two forms:
+    /// `@id` **absent** = a spoke relaying a member's post to the home (the home
+    /// mints + fans out); `@id` **present** = a home-minted message for a member
+    /// network to ingest (persist under `Scope::Group` with the origin msgid
+    /// intact, invariant 2) and deliver to its local members. Never from a client.
+    GroupRelay {
+        group: GroupId,
+        sender: UserRef,
+        msgid: Option<MsgId>,
+        body: String,
+    },
     /// `CALL <user@net>` (social layer) — place a 1:1 friend call; the callee's
     /// sessions ring (`CALL-RING`). On accept both join an ad-hoc voice room.
     ///
@@ -1705,6 +1756,54 @@ impl Command {
                         group: args.req("group")?.parse()?,
                         name: line.trailing.clone().filter(|n| !n.is_empty()),
                     }),
+                    "CALL" => {
+                        let group = args.req("group")?.parse()?;
+                        // A federated ring carries the host network's relay leg.
+                        let media = match (line.tags.get("room"), line.tags.get("token")) {
+                            (Some(room), Some(token)) if !room.is_empty() && !token.is_empty() => {
+                                Some(CallMediaGrant {
+                                    room: room.clone(),
+                                    token: token.clone(),
+                                    endpoint: line
+                                        .tags
+                                        .get("endpoint")
+                                        .filter(|v| !v.is_empty())
+                                        .cloned(),
+                                })
+                            }
+                            _ => None,
+                        };
+                        Ok(Command::GroupCall { group, media })
+                    }
+                    "HANGUP" => Ok(Command::GroupCallLeave {
+                        group: args.req("group")?.parse()?,
+                    }),
+                    "ROSTER" => Ok(Command::GroupCallRoster {
+                        group: args.req("group")?.parse()?,
+                        user: args.req("user")?.parse()?,
+                        active: args.req("state")?.eq_ignore_ascii_case("active"),
+                        reply: line.tags.get("reply").is_some_and(|v| v == "yes"),
+                    }),
+                    "SYNC" => {
+                        let group = args.req("group")?.parse()?;
+                        let creator = args.req("creator")?.parse()?;
+                        let mut members = Vec::new();
+                        while let Some(m) = args.opt() {
+                            members.push(m.parse()?);
+                        }
+                        Ok(Command::GroupSync {
+                            group,
+                            creator,
+                            name: line.tags.get("name").filter(|v| !v.is_empty()).cloned(),
+                            members,
+                        })
+                    }
+                    "RELAY" => Ok(Command::GroupRelay {
+                        group: args.req("group")?.parse()?,
+                        sender: args.req("sender")?.parse()?,
+                        msgid: line.tags.get("id").map(|v| v.parse()).transpose()?,
+                        body: line.trailing.clone().unwrap_or_default(),
+                    }),
                     _ => Err(ParseError::BadParam {
                         verb: "GROUP",
                         what: "subcommand",
@@ -2448,6 +2547,67 @@ impl Command {
                 vec!["NAME".to_string(), group.to_string()],
                 name.clone().filter(|n| !n.is_empty()),
             ),
+            Command::GroupCall { group, media } => {
+                if let Some(m) = media {
+                    tags.insert("room".to_string(), m.room.clone());
+                    tags.insert("token".to_string(), m.token.clone());
+                    if let Some(endpoint) = &m.endpoint {
+                        tags.insert("endpoint".to_string(), endpoint.clone());
+                    }
+                }
+                ("GROUP", vec!["CALL".to_string(), group.to_string()], None)
+            }
+            Command::GroupCallLeave { group } => {
+                ("GROUP", vec!["HANGUP".to_string(), group.to_string()], None)
+            }
+            Command::GroupCallRoster {
+                group,
+                user,
+                active,
+                reply,
+            } => {
+                if *reply {
+                    tags.insert("reply".to_string(), "yes".to_string());
+                }
+                (
+                    "GROUP",
+                    vec![
+                        "ROSTER".to_string(),
+                        group.to_string(),
+                        user.to_string(),
+                        if *active { "active" } else { "ended" }.to_string(),
+                    ],
+                    None,
+                )
+            }
+            Command::GroupSync {
+                group,
+                creator,
+                name,
+                members,
+            } => {
+                if let Some(name) = name {
+                    tags.insert("name".to_string(), name.clone());
+                }
+                let mut args = vec!["SYNC".to_string(), group.to_string(), creator.to_string()];
+                args.extend(members.iter().map(|m| m.to_string()));
+                ("GROUP", args, None)
+            }
+            Command::GroupRelay {
+                group,
+                sender,
+                msgid,
+                body,
+            } => {
+                if let Some(id) = msgid {
+                    tags.insert("id".to_string(), id.to_string());
+                }
+                (
+                    "GROUP",
+                    vec!["RELAY".to_string(), group.to_string(), sender.to_string()],
+                    Some(body.clone()),
+                )
+            }
             Command::Groups => ("GROUPS", vec![], None),
             Command::Call { user, media } => {
                 if let Some(m) = media {
@@ -3655,6 +3815,52 @@ mod tests {
             name: None,
         }));
         round_trip(&Request::new(Command::Groups));
+        round_trip(&Request::new(Command::GroupCall {
+            group: G.parse().unwrap(),
+            media: None,
+        }));
+        // A federated ring carries the host network's relay leg.
+        round_trip(&Request::new(Command::GroupCall {
+            group: G.parse().unwrap(),
+            media: Some(CallMediaGrant {
+                room: "gcall:01ARZ".into(),
+                token: "relay.tok".into(),
+                endpoint: Some("wss://lk.host.example".into()),
+            }),
+        }));
+        round_trip(&Request::new(Command::GroupCallLeave {
+            group: G.parse().unwrap(),
+        }));
+        for (active, reply) in [(true, true), (false, false)] {
+            round_trip(&Request::new(Command::GroupCallRoster {
+                group: G.parse().unwrap(),
+                user: "carol@peer.example".parse().unwrap(),
+                active,
+                reply,
+            }));
+        }
+        round_trip(&Request::new(Command::GroupSync {
+            group: G.parse().unwrap(),
+            creator: "ada@home.example".parse().unwrap(),
+            name: Some("weekend".to_string()),
+            members: vec![
+                "ada@home.example".parse().unwrap(),
+                "carol@peer.example".parse().unwrap(),
+            ],
+        }));
+        // Relay: a spoke's post (no id) and a home-minted ingest (id present).
+        round_trip(&Request::new(Command::GroupRelay {
+            group: G.parse().unwrap(),
+            sender: "carol@peer.example".parse().unwrap(),
+            msgid: None,
+            body: "hi from a spoke".to_string(),
+        }));
+        round_trip(&Request::new(Command::GroupRelay {
+            group: G.parse().unwrap(),
+            sender: "carol@peer.example".parse().unwrap(),
+            msgid: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap()),
+            body: "minted".to_string(),
+        }));
         // A group target is `&<ulid>`; MSG to it round-trips.
         round_trip(&Request::new(Command::Msg {
             target: G.parse().unwrap(),

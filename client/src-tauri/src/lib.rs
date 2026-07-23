@@ -599,6 +599,16 @@ fn group_name(conn: State<'_, Conn>, group: String, name: String) -> Result<(), 
 }
 
 #[tauri::command]
+fn group_call(conn: State<'_, Conn>, group: String) -> Result<(), String> {
+    conn.send(weft::build_group_call(&group)?)
+}
+
+#[tauri::command]
+fn group_call_leave(conn: State<'_, Conn>, group: String) -> Result<(), String> {
+    conn.send(weft::build_group_call_leave(&group)?)
+}
+
+#[tauri::command]
 fn groups(conn: State<'_, Conn>) -> Result<(), String> {
     conn.send(weft::build_groups()?)
 }
@@ -1003,6 +1013,8 @@ pub fn run() {
             group_remove,
             group_leave,
             group_name,
+            group_call,
+            group_call_leave,
             groups,
             call,
             call_accept,

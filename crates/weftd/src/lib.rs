@@ -370,15 +370,16 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
     // advertised in WELCOME features above).
     if let Some(sfu) = voice_sfu {
         ctx.set_voice_backend(sfu);
-        // §16 M-lk-3b: federated voice / cross-network calls cascade on LiveKit.
-        // Install the media relay so the WEFT-side lifecycle runs. The real
-        // libwebrtc driver (`voice-relay` feature) bridges two LiveKit rooms so
-        // client IPs never cross networks; without the feature the no-op
-        // `LogRelay` runs the lifecycle only (relay requested = logged).
+        // §16 M-lk-3b: federated voice / cross-network calls (1:1 and group)
+        // cascade on LiveKit. The media relay is an integral part of `voice`, so a
+        // voice-enabled build installs the real libwebrtc relay — it bridges the
+        // two networks' LiveKit rooms so client IPs never cross. A build without
+        // the `voice` feature (headless) falls back to the no-op `LogRelay`, which
+        // only runs the WEFT-side lifecycle (relay requested = logged).
         if config.voice.backend == config::VoiceBackendKind::Livekit {
-            #[cfg(feature = "voice-relay")]
+            #[cfg(feature = "voice")]
             ctx.set_voice_relay(Arc::new(livekit::LivekitRelay::new()));
-            #[cfg(not(feature = "voice-relay"))]
+            #[cfg(not(feature = "voice"))]
             ctx.set_voice_relay(Arc::new(livekit::LogRelay));
         }
     }

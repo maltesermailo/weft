@@ -1709,6 +1709,634 @@ async fn group_dm_create_message_and_membership() {
 }
 
 #[tokio::test]
+async fn group_dm_edit_delete_react() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+
+    ada.send("GROUP CREATE bob@test.example");
+    let gid = match ada.recv().await.event {
+        Event::Group { id, .. } => id.to_string(),
+        e => panic!("expected GROUP, got {e:?}"),
+    };
+    assert!(matches!(bob.recv().await.event, Event::Group { .. })); // bob's push
+
+    // ada posts; capture the msgid from her echo, drain bob's copy.
+    ada.send(&format!("MSG {gid} :original"));
+    let msgid = match ada.recv().await.event {
+        Event::Message(m) => m.msgid.to_string(),
+        e => panic!("expected own echo, got {e:?}"),
+    };
+    assert!(matches!(bob.recv().await.event, Event::Message(_)));
+
+    // ada edits her own message → both members see EDITED for the group.
+    ada.send(&format!("@label=e EDIT {msgid} :fixed"));
+    match ada.recv().await.event {
+        Event::Edited {
+            target,
+            body,
+            edit_of,
+            ..
+        } => {
+            assert_eq!(target.to_string(), gid);
+            assert_eq!(body, "fixed");
+            assert_eq!(edit_of.to_string(), msgid);
+        }
+        e => panic!("expected EDITED echo, got {e:?}"),
+    }
+    assert!(matches!(
+        bob.recv().await.event,
+        Event::Edited { body, .. } if body == "fixed"
+    ));
+
+    // bob (a member, not the author) may REACT to ada's message.
+    bob.send(&format!("REACT {msgid} 🦀"));
+    match bob.recv().await.event {
+        Event::Reaction { target, emoji, .. } => {
+            assert_eq!(target.to_string(), gid);
+            assert_eq!(emoji, "🦀");
+        }
+        e => panic!("expected REACTION echo, got {e:?}"),
+    }
+    assert!(matches!(ada.recv().await.event, Event::Reaction { .. }));
+
+    // bob cannot EDIT ada's message — not his to edit.
+    bob.send(&format!("@label=x EDIT {msgid} :hijack"));
+    bob.expect_err(ErrCode::CapRequired).await;
+
+    // A non-member reacting is uniform NO-SUCH-TARGET (no leak of existence).
+    let mut eve = ready(&ctx, "eve").await;
+    eve.send(&format!("REACT {msgid} 👍"));
+    eve.expect_err(ErrCode::NoSuchTarget).await;
+
+    // ada deletes her message → both see DELETED (a tombstone) for the group.
+    ada.send(&format!("@label=d DELETE {msgid}"));
+    match ada.recv().await.event {
+        Event::Deleted {
+            target, msgid: m, ..
+        } => {
+            assert_eq!(target.to_string(), gid);
+            assert_eq!(m.to_string(), msgid);
+        }
+        e => panic!("expected DELETED echo, got {e:?}"),
+    }
+    assert!(matches!(bob.recv().await.event, Event::Deleted { .. }));
+
+    // A deleted group message is gone — editing it is NO-SUCH-TARGET.
+    ada.send(&format!("EDIT {msgid} :necromancy"));
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn group_dm_call_join_roster_and_leave() {
+    let ctx = ctx(&["#general"]);
+    ctx.set_voice_backend(Arc::new(LiveKitBackend::new(
+        Arc::new(StubLk),
+        "wss://lk.test.example".to_string(),
+        "test.example".parse().unwrap(),
+        600,
+    )));
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+
+    ada.send("GROUP CREATE bob@test.example");
+    let gid = match ada.recv().await.event {
+        Event::Group { id, .. } => id.to_string(),
+        e => panic!("expected GROUP, got {e:?}"),
+    };
+    assert!(matches!(bob.recv().await.event, Event::Group { .. }));
+
+    // ada starts the call: labelled `active` ack, then her CALL-MEDIA for the room.
+    ada.send(&format!("@label=c GROUP CALL {gid}"));
+    let room = {
+        match ada.recv().await.event {
+            Event::GroupCallState { group, user, state } => {
+                assert_eq!(group.to_string(), gid);
+                assert_eq!(user.to_string(), "ada@test.example");
+                assert_eq!(state, CallState::Active);
+            }
+            e => panic!("expected GROUP-CALL active ack, got {e:?}"),
+        }
+        match ada.recv().await.event {
+            Event::CallMedia {
+                room,
+                token,
+                endpoint,
+                ..
+            } => {
+                assert!(room.starts_with("gcall:"), "{room}");
+                assert_eq!(endpoint.as_deref(), Some("wss://lk.test.example"));
+                assert_eq!(token, format!("jwt:{room}:ada@test.example"));
+                room
+            }
+            e => panic!("expected CALL-MEDIA, got {e:?}"),
+        }
+    };
+
+    // bob is notified a call is active (ada joined).
+    match bob.recv().await.event {
+        Event::GroupCallState { user, state, .. } => {
+            assert_eq!(user.to_string(), "ada@test.example");
+            assert_eq!(state, CallState::Active);
+        }
+        e => panic!("expected GROUP-CALL active for bob, got {e:?}"),
+    }
+
+    // bob joins: his active ack, his media (SAME group room), then the roster
+    // snapshot (ada already in). ada is told bob joined.
+    bob.send(&format!("GROUP CALL {gid}"));
+    assert!(matches!(
+        bob.recv().await.event,
+        Event::GroupCallState {
+            state: CallState::Active,
+            ..
+        }
+    ));
+    match bob.recv().await.event {
+        Event::CallMedia { room: r, token, .. } => {
+            assert_eq!(r, room, "bob joins the same group room");
+            assert_eq!(token, format!("jwt:{room}:bob@test.example"));
+        }
+        e => panic!("expected bob's CALL-MEDIA, got {e:?}"),
+    }
+    // Roster snapshot: ada is already active.
+    match bob.recv().await.event {
+        Event::GroupCallState { user, state, .. } => {
+            assert_eq!(user.to_string(), "ada@test.example");
+            assert_eq!(state, CallState::Active);
+        }
+        e => panic!("expected roster (ada active), got {e:?}"),
+    }
+    // ada sees bob join.
+    match ada.recv().await.event {
+        Event::GroupCallState { user, state, .. } => {
+            assert_eq!(user.to_string(), "bob@test.example");
+            assert_eq!(state, CallState::Active);
+        }
+        e => panic!("expected bob active for ada, got {e:?}"),
+    }
+
+    // A non-member can't join — uniform NO-SUCH-TARGET.
+    let mut eve = ready(&ctx, "eve").await;
+    eve.send(&format!("GROUP CALL {gid}"));
+    eve.expect_err(ErrCode::NoSuchTarget).await;
+
+    // bob hangs up: his `ended` ack; ada is told he left.
+    bob.send(&format!("GROUP HANGUP {gid}"));
+    assert!(matches!(
+        bob.recv().await.event,
+        Event::GroupCallState {
+            state: CallState::Ended,
+            ..
+        }
+    ));
+    match ada.recv().await.event {
+        Event::GroupCallState { user, state, .. } => {
+            assert_eq!(user.to_string(), "bob@test.example");
+            assert_eq!(state, CallState::Ended);
+        }
+        e => panic!("expected bob ended for ada, got {e:?}"),
+    }
+
+    // Leaving when not in the call is NO-SUCH-TARGET.
+    bob.send(&format!("GROUP HANGUP {gid}"));
+    bob.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn group_call_host_rings_remote_networks_with_a_relay_leg() {
+    // §16 M-lk-3b group-call relay star, host side: starting a group call with a
+    // remote member tunnels a `GROUP CALL` ring carrying the host's relay leg
+    // (a relay token for the host's own room) to that member's network.
+    let ctx = ctx(&["#general"]);
+    ctx.set_voice_backend(Arc::new(LiveKitBackend::new(
+        Arc::new(StubLk),
+        "wss://lk.test.example".to_string(),
+        "test.example".parse().unwrap(),
+        600,
+    )));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let mut ada = ready(&ctx, "ada").await;
+
+    // A group spanning networks (ada@test + carol@peer).
+    ada.send("GROUP CREATE carol@peer.example");
+    let gid = match ada.recv().await.event {
+        Event::Group { id, .. } => id.to_string(),
+        e => panic!("expected GROUP, got {e:?}"),
+    };
+
+    // ada starts the call: her own active ack + CALL-MEDIA, and a ring to peer.
+    ada.send(&format!("GROUP CALL {gid}"));
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::GroupCallState {
+            state: CallState::Active,
+            ..
+        }
+    ));
+    assert!(matches!(ada.recv().await.event, Event::CallMedia { .. }));
+
+    // Skip the GROUP SYNC that group creation tunnels; find the GROUP CALL ring.
+    let req = loop {
+        let d = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("group-call ring")
+            .expect("sink open");
+        if d.line.contains("GROUP CALL") {
+            break d;
+        }
+    };
+    assert_eq!(req.peer.as_str(), "peer.example");
+    let parsed = weft_proto::Request::parse(&req.line).expect("valid GROUP CALL");
+    let weft_proto::Command::GroupCall { group, media } = parsed.command else {
+        panic!("expected GROUP CALL, got {:?}", req.line);
+    };
+    assert_eq!(group.to_string(), gid);
+    let leg = media.expect("host relay leg");
+    assert!(leg.room.starts_with("gcall:"), "{}", leg.room);
+    assert_eq!(leg.endpoint.as_deref(), Some("wss://lk.test.example"));
+    // The leg's identity is `relay@<remote network>` for our host room.
+    assert_eq!(leg.token, format!("jwt:{}:relay@peer.example", leg.room));
+}
+
+#[tokio::test]
+async fn federated_group_call_bridges_via_a_relay_on_join() {
+    // §16 M-lk-3b group-call relay star, spoke side: a federated ring carries the
+    // host network's relay leg; when a local member joins, our network mints its
+    // own room and spawns a relay bridging it to the host's — so the local member
+    // never connects to the host's LiveKit.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    ctx.set_voice_backend(Arc::new(LiveKitBackend::new(
+        Arc::new(StubLk),
+        "wss://lk.test.example".to_string(),
+        "test.example".parse().unwrap(),
+        600,
+    )));
+    let relay = Arc::new(MockRelay::default());
+    ctx.set_voice_relay(relay.clone());
+
+    // A group with our local carol + the remote host member alice@peer.
+    let mut carol = ready(&ctx, "carol").await;
+    carol.send("GROUP CREATE alice@peer.example");
+    let gid = match carol.recv().await.event {
+        Event::Group { id, .. } => id.to_string(),
+        e => panic!("expected GROUP, got {e:?}"),
+    };
+
+    // alice@peer (the host) rings us, carrying peer's relay leg for its room.
+    let inner = weft_proto::Request::new(weft_proto::Command::GroupCall {
+        group: gid.parse().unwrap(),
+        media: Some(weft_proto::CallMediaGrant {
+            room: "gcall:HOST".to_string(),
+            token: "relay.host".to_string(),
+            endpoint: Some("wss://lk.peer.example".to_string()),
+        }),
+    })
+    .serialize()
+    .unwrap();
+    let bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send(&format!("FSESSION 1 CMD :{inner}"));
+
+    // carol is rung — the host member shows active.
+    match carol.recv().await.event {
+        Event::GroupCallState { user, state, .. } => {
+            assert_eq!(user.to_string(), "alice@peer.example");
+            assert_eq!(state, CallState::Active);
+        }
+        e => panic!("expected GROUP-CALL ring, got {e:?}"),
+    }
+
+    // carol joins → active ack, then a relay is spawned, then her media (OUR room).
+    carol.send(&format!("GROUP CALL {gid}"));
+    assert!(matches!(
+        carol.recv().await.event,
+        Event::GroupCallState {
+            state: CallState::Active,
+            ..
+        }
+    ));
+    let room = match carol.recv().await.event {
+        Event::CallMedia { room, endpoint, .. } => {
+            assert_eq!(endpoint.as_deref(), Some("wss://lk.test.example"));
+            assert!(room.starts_with("gcall:"), "{room}");
+            room
+        }
+        e => panic!("expected carol's CALL-MEDIA, got {e:?}"),
+    };
+
+    // The relay bridges our room ↔ the host network's leg.
+    let specs = relay.specs.lock().unwrap();
+    assert_eq!(specs.len(), 1, "one relay spawned");
+    let s = &specs[0];
+    assert_eq!(s.peer.as_str(), "peer.example");
+    assert_eq!(s.key, room);
+    assert_eq!(s.remote_room, "gcall:HOST");
+    assert_eq!(s.remote_token, "relay.host");
+    assert_eq!(s.remote_url, "wss://lk.peer.example");
+    assert_eq!(s.local_room, room);
+    assert_eq!(s.local_token, format!("jwt:{room}:relay@peer.example"));
+}
+
+#[tokio::test]
+async fn federated_group_roster_syncs_across_networks() {
+    // Roster mesh: a local join tunnels a GROUP ROSTER to remote member networks;
+    // an inbound GROUP ROSTER reaches our local members, and a `reply` one is
+    // answered with our own participants (the snapshot for a fresh joiner).
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let mut carol = ready(&ctx, "carol").await;
+    carol.send("GROUP CREATE alice@peer.example");
+    let gid = match carol.recv().await.event {
+        Event::Group { id, .. } => id.to_string(),
+        e => panic!("expected GROUP, got {e:?}"),
+    };
+
+    // carol joins (no LiveKit backend → signaling only). As the host she rings
+    // peer (GROUP CALL) and broadcasts her roster (GROUP ROSTER).
+    carol.send(&format!("GROUP CALL {gid}"));
+    assert!(matches!(
+        carol.recv().await.event,
+        Event::GroupCallState {
+            state: CallState::Active,
+            ..
+        }
+    ));
+    macro_rules! recv_line {
+        () => {
+            tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("delivery")
+                .expect("sink open")
+        };
+    }
+    // Find the GROUP ROSTER among the (GROUP SYNC, GROUP CALL ring, GROUP ROSTER)
+    // deliveries.
+    let mut sent = recv_line!();
+    while !sent.line.contains("GROUP ROSTER") {
+        sent = recv_line!();
+    }
+    assert_eq!(sent.peer.as_str(), "peer.example");
+    assert!(sent.line.contains("GROUP ROSTER"), "{}", sent.line);
+    assert!(
+        sent.line.contains("carol@test.example active"),
+        "{}",
+        sent.line
+    );
+    assert!(sent.line.contains("reply=yes"), "{}", sent.line);
+
+    // peer tells us alice@peer joined (reply=yes → we answer with our roster).
+    let inner = weft_proto::Request::new(weft_proto::Command::GroupCallRoster {
+        group: gid.parse().unwrap(),
+        user: "alice@peer.example".parse().unwrap(),
+        active: true,
+        reply: true,
+    })
+    .serialize()
+    .unwrap();
+    let bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send(&format!("FSESSION 1 CMD :{inner}"));
+
+    // carol's client sees the cross-network member.
+    match carol.recv().await.event {
+        Event::GroupCallState { user, state, .. } => {
+            assert_eq!(user.to_string(), "alice@peer.example");
+            assert_eq!(state, CallState::Active);
+        }
+        e => panic!("expected alice@peer in the roster, got {e:?}"),
+    }
+
+    // We replied to peer with our participant (carol), reply=no (no loop).
+    let reply = recv_line!();
+    assert!(
+        reply.line.contains("carol@test.example active"),
+        "{}",
+        reply.line
+    );
+    assert!(!reply.line.contains("reply=yes"), "{}", reply.line);
+}
+
+#[tokio::test]
+async fn group_call_simultaneous_start_yields_to_smaller_network() {
+    // Split-brain tiebreak: we (test.example) start a call and are momentarily the
+    // host; a competing ring from peer.example — which sorts BEFORE us — makes us
+    // yield and bridge our room into peer's (peer becomes the single host).
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    ctx.set_voice_backend(Arc::new(LiveKitBackend::new(
+        Arc::new(StubLk),
+        "wss://lk.test.example".to_string(),
+        "test.example".parse().unwrap(),
+        600,
+    )));
+    let relay = Arc::new(MockRelay::default());
+    ctx.set_voice_relay(relay.clone());
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send("GROUP CREATE carol@peer.example");
+    let gid = match ada.recv().await.event {
+        Event::Group { id, .. } => id.to_string(),
+        e => panic!("expected GROUP, got {e:?}"),
+    };
+
+    // ada starts → test.example hosts, ada is a participant. Capture her room.
+    ada.send(&format!("GROUP CALL {gid}"));
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::GroupCallState {
+            state: CallState::Active,
+            ..
+        }
+    ));
+    let ada_room = match ada.recv().await.event {
+        Event::CallMedia { room, .. } => room,
+        e => panic!("expected ada's CALL-MEDIA, got {e:?}"),
+    };
+
+    // peer.example simultaneously rings us with its own relay leg.
+    let inner = weft_proto::Request::new(weft_proto::Command::GroupCall {
+        group: gid.parse().unwrap(),
+        media: Some(weft_proto::CallMediaGrant {
+            room: "gcall:PEER".to_string(),
+            token: "relay.peer".to_string(),
+            endpoint: Some("wss://lk.peer.example".to_string()),
+        }),
+    })
+    .serialize()
+    .unwrap();
+    let bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN carol");
+    bridge.send(&format!("FSESSION 1 CMD :{inner}"));
+
+    // The ring notifies ada locally (sync point — the relay spawns before this).
+    match ada.recv().await.event {
+        Event::GroupCallState { user, state, .. } => {
+            assert_eq!(user.to_string(), "carol@peer.example");
+            assert_eq!(state, CallState::Active);
+        }
+        e => panic!("expected carol@peer active, got {e:?}"),
+    }
+
+    // We yielded: a relay now bridges OUR room ↔ peer's (the smaller network wins).
+    let specs = relay.specs.lock().unwrap();
+    assert_eq!(specs.len(), 1, "one relay spawned on yield");
+    let s = &specs[0];
+    assert_eq!(s.peer.as_str(), "peer.example");
+    assert_eq!(s.key, ada_room);
+    assert_eq!(s.remote_room, "gcall:PEER");
+    assert_eq!(s.remote_token, "relay.peer");
+    assert_eq!(s.local_room, ada_room);
+}
+
+#[tokio::test]
+async fn cross_network_group_message_home_mints_and_fans_out() {
+    // The group's home (creator's network) is the single ULID writer: it mints
+    // and fans messages out to every member network; a spoke's relayed post is
+    // minted here too. Also covers membership propagation on create.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let mut carol = ready(&ctx, "carol").await;
+
+    macro_rules! sink {
+        () => {
+            tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("delivery")
+                .expect("sink open")
+        };
+    }
+
+    // carol@test creates a group with alice@peer → test.example is the home. The
+    // membership is synced to peer.
+    carol.send("GROUP CREATE alice@peer.example");
+    let gid = match carol.recv().await.event {
+        Event::Group { id, .. } => id.to_string(),
+        e => panic!("expected GROUP, got {e:?}"),
+    };
+    let synced = sink!();
+    assert_eq!(synced.peer.as_str(), "peer.example");
+    assert!(synced.line.contains("GROUP SYNC"), "{}", synced.line);
+    assert!(
+        synced.line.contains("carol@test.example"),
+        "{}",
+        synced.line
+    );
+    assert!(
+        synced.line.contains("alice@peer.example"),
+        "{}",
+        synced.line
+    );
+
+    // carol posts → home mints, echoes to carol, fans out to peer.
+    carol.send(&format!("@l=m MSG {gid} :hello"));
+    match carol.recv().await.event {
+        Event::Message(m) => {
+            assert_eq!(m.body, "hello");
+            assert_eq!(m.target.to_string(), gid);
+        }
+        e => panic!("expected own echo, got {e:?}"),
+    }
+    let relay = sink!();
+    assert_eq!(relay.peer.as_str(), "peer.example");
+    assert!(relay.line.contains("GROUP RELAY"), "{}", relay.line);
+    assert!(relay.line.contains("id="), "{}", relay.line); // home-minted
+    assert!(relay.line.contains("carol@test.example"), "{}", relay.line);
+    assert!(relay.line.contains("hello"), "{}", relay.line);
+
+    // A spoke relays alice's post to us (home): @id absent → we mint + deliver.
+    let inner = weft_proto::Request::new(weft_proto::Command::GroupRelay {
+        group: gid.parse().unwrap(),
+        sender: "alice@peer.example".parse().unwrap(),
+        msgid: None,
+        body: "hi from alice".to_string(),
+    })
+    .serialize()
+    .unwrap();
+    let bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send(&format!("FSESSION 1 CMD :{inner}"));
+
+    match carol.recv().await.event {
+        Event::Message(m) => {
+            assert_eq!(m.sender.to_string(), "alice@peer.example");
+            assert_eq!(m.body, "hi from alice");
+            assert_eq!(m.msgid.origin().as_str(), "test.example"); // minted by the home
+        }
+        e => panic!("expected alice's message, got {e:?}"),
+    }
+    // And it was fanned back out to peer (home-minted → @id).
+    let relay2 = sink!();
+    assert!(relay2.line.contains("GROUP RELAY"), "{}", relay2.line);
+    assert!(relay2.line.contains("id="), "{}", relay2.line);
+    assert!(relay2.line.contains("hi from alice"), "{}", relay2.line);
+}
+
+#[tokio::test]
+async fn cross_network_group_message_spoke_ingests() {
+    // The receiving side of a foreign-home group: a home-minted message (@id) is
+    // ingested and delivered to our local member.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let mut carol = ready(&ctx, "carol").await;
+
+    // peer is the home: sync a group whose creator is alice@peer, with carol@test.
+    const G: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let sync = weft_proto::Request::new(weft_proto::Command::GroupSync {
+        group: G.parse().unwrap(),
+        creator: "alice@peer.example".parse().unwrap(),
+        name: None,
+        members: vec![
+            "alice@peer.example".parse().unwrap(),
+            "carol@test.example".parse().unwrap(),
+        ],
+    })
+    .serialize()
+    .unwrap();
+    let bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send(&format!("FSESSION 1 CMD :{sync}"));
+
+    // carol is told the group exists.
+    match carol.recv().await.event {
+        Event::Group { id, members, .. } => {
+            assert_eq!(id.to_string(), format!("&{G}"));
+            assert_eq!(members.len(), 2);
+        }
+        e => panic!("expected GROUP, got {e:?}"),
+    }
+
+    // peer (home) sends a minted message → we ingest + deliver to carol.
+    let relay = weft_proto::Request::new(weft_proto::Command::GroupRelay {
+        group: G.parse().unwrap(),
+        sender: "alice@peer.example".parse().unwrap(),
+        msgid: Some("peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap()),
+        body: "minted upstream".to_string(),
+    })
+    .serialize()
+    .unwrap();
+    bridge.send(&format!("FSESSION 1 CMD :{relay}"));
+
+    match carol.recv().await.event {
+        Event::Message(m) => {
+            assert_eq!(m.sender.to_string(), "alice@peer.example");
+            assert_eq!(m.body, "minted upstream");
+            assert_eq!(
+                m.msgid.to_string(),
+                "peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB0"
+            );
+        }
+        e => panic!("expected ingested message, got {e:?}"),
+    }
+}
+
+#[tokio::test]
 async fn friend_request_to_remote_user_is_tunnelled() {
     // Send side of cross-network friends: a local user friending a user on
     // another network records the edge locally AND hands weftd a delivery to
