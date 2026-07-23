@@ -29,6 +29,15 @@ Non-negotiable:
 ## Commands
 
 ```bash
+# CI runs all of these (.github/workflows/ci.yml) — run them before pushing.
+cargo fmt --all --check
+cargo clippy --workspace --exclude client --all-targets -- -D warnings
+cargo test --workspace --exclude client
+cargo deny check               # advisories + licences + bans + sources
+# `client` = the Tauri desktop crate; it needs GTK/WebKit/ALSA/v4l system libs.
+# Fuzzing (nightly): cd crates/weft-proto && cargo fuzz run parse_request
+# Posture, measurements and known gaps: docs/security-posture.md
+
 cargo build                    # workspace
 cargo test -p weft-proto       # codec suite (fast — run constantly; currently 49 green)
 cargo test --workspace
