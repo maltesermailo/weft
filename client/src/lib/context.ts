@@ -10,7 +10,7 @@
 // provides everything components consume).
 
 import { getContext, setContext } from "svelte";
-import type { Channel, Msg, Member, CtxItem, RoleDefC } from "./types";
+import type { Channel, Msg, Member, CtxItem, RoleDefC, ThreadInfo } from "./types";
 
 export type RetentionMeta = { cls: string; label: string; icon: string };
 export type Badge = { owner: boolean; mod: boolean; list: string[] };
@@ -165,6 +165,16 @@ export interface AppCtx {
   openThread(root: Msg): void;
   closeThread(): void;
   sendThread(): void;
+  // ---- threads list (§9.4): all threads in the active channel ----
+  readonly threadsOpen: boolean;
+  readonly threadsList: ThreadInfo[];
+  openThreads(): void;
+  closeThreads(): void;
+  openThreadByRoot(info: ThreadInfo): void;
+  /** A thread's display name (root msgid → name), if named. */
+  threadNameFor(msgid?: string): string | undefined;
+  /** Rename (empty string clears) the currently open thread. */
+  renameThread(name: string): void;
 
   // ---- custom emoji (§9.4) ----
   /** The active namespace's custom emoji as {name, media ref}. */
@@ -327,4 +337,4 @@ export function getApp(): AppCtx {
 }
 
 // Re-export commonly used types for component convenience.
-export type { Channel, Msg, Member, CtxItem, RoleDefC };
+export type { Channel, Msg, Member, CtxItem, RoleDefC, ThreadInfo };

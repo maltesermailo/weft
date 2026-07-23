@@ -94,6 +94,12 @@ fn corpus() -> Vec<String> {
         "ROLE RENAME ns:a :a,b,c",
         "GRANT x ns:a ,,,",
         "GRANT x ns:a *",
+        // Retention policy: multibyte trailing char must not land the unit
+        // split inside a UTF-8 char (fuzz find: parse_reply POLICY).
+        "POLICY #a retained:3û",
+        "POLICY #a retained:û",
+        "POLICY #a retained:12€",
+        "CHANNEL POLICY #a retained:5naïve",
     ]
     .into_iter()
     .map(str::to_string)

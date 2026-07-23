@@ -130,6 +130,22 @@ pub enum ClientEvent {
         channel: String,
         msgid: String,
     },
+    /// `THREAD <#chan> <root> replies=<n> [last=] [:name]` — one thread in a
+    /// `THREADS` list response (§9.4).
+    Thread {
+        channel: String,
+        root: String,
+        replies: u32,
+        last: Option<String>,
+        name: Option<String>,
+    },
+    /// `THREAD-NAMED <#chan> <root> [:name]` — a thread was (re)named or, with
+    /// no name, cleared (§9.4).
+    ThreadNamed {
+        channel: String,
+        root: String,
+        name: Option<String>,
+    },
     /// `CAPS <account> <scope> :<caps>` — effective caps (§10.4).
     Caps {
         account: String,
@@ -547,6 +563,28 @@ pub fn on_line<E: EventSink>(
         Event::Unpinned { channel, msgid } => sink.emit(ClientEvent::Unpinned {
             channel: channel.to_string(),
             msgid: msgid.to_string(),
+        }),
+        Event::Thread {
+            channel,
+            root,
+            replies,
+            last,
+            name,
+        } => sink.emit(ClientEvent::Thread {
+            channel: channel.to_string(),
+            root: root.to_string(),
+            replies,
+            last: last.map(|m| m.to_string()),
+            name,
+        }),
+        Event::ThreadNamed {
+            channel,
+            root,
+            name,
+        } => sink.emit(ClientEvent::ThreadNamed {
+            channel: channel.to_string(),
+            root: root.to_string(),
+            name,
         }),
         Event::Caps {
             account,
@@ -1285,6 +1323,30 @@ pub fn build_search(channel: &str, query: &str) -> Result<String, String> {
     Request::new(Command::Search {
         channel,
         query: query.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `THREADS <#chan>` — list the channel's threads as a `BATCH` (§9.4).
+pub fn build_threads(channel: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    Request::new(Command::Threads { channel })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `THREAD NAME <#chan> <root> [:name]` — set/clear a thread's name (§9.4).
+/// An empty `name` clears it.
+pub fn build_thread_name(channel: &str, root: &str, name: &str) -> Result<String, String> {
+    let channel: weft_proto::ChannelName =
+        channel.parse().map_err(|_| "bad channel".to_string())?;
+    let root: weft_proto::MsgId = root.parse().map_err(|_| "bad msgid".to_string())?;
+    Request::new(Command::ThreadName {
+        channel,
+        root,
+        name: Some(name.to_string()).filter(|n| !n.is_empty()),
     })
     .serialize()
     .map_err(|e| e.to_string())

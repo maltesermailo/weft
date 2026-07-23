@@ -104,11 +104,15 @@ impl FromStr for RetentionPolicy {
             "e2ee" => Ok(RetentionPolicy::E2ee),
             _ => {
                 let spec = folded.strip_prefix("retained:").ok_or_else(bad)?;
-                let (digits, unit) = spec.split_at(spec.len().saturating_sub(1));
-                let unit = match unit {
-                    "d" => RetentionUnit::Days,
-                    "h" => RetentionUnit::Hours,
-                    "s" => RetentionUnit::Seconds,
+                // Split on the last *char* boundary, not the last byte: a
+                // multibyte trailing char (e.g. "3û") would make `split_at`
+                // panic on a non-char-boundary index (fuzz: parse_reply).
+                let unit_char = spec.chars().next_back().ok_or_else(bad)?;
+                let digits = &spec[..spec.len() - unit_char.len_utf8()];
+                let unit = match unit_char {
+                    'd' => RetentionUnit::Days,
+                    'h' => RetentionUnit::Hours,
+                    's' => RetentionUnit::Seconds,
                     _ => return Err(bad()),
                 };
                 let count: u32 = digits.parse().map_err(|_| bad())?;
@@ -163,6 +167,22 @@ mod tests {
             "retained:",
             "forever",
             "",
+        ] {
+            assert!(s.parse::<RetentionPolicy>().is_err(), "accepted {s:?}");
+        }
+    }
+
+    #[test]
+    fn multibyte_trailing_char_does_not_panic() {
+        // Regression (fuzz parse_reply): a multibyte trailing char put the
+        // old byte-index `split_at` inside a UTF-8 char and panicked. These
+        // must all reject cleanly, never panic.
+        for s in [
+            "retained:3û",
+            "retained:û",
+            "retained:12€",
+            "retained:5\u{0}",
+            "retained:naïve",
         ] {
             assert!(s.parse::<RetentionPolicy>().is_err(), "accepted {s:?}");
         }

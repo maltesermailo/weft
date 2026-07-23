@@ -534,6 +534,21 @@ fn search(conn: State<'_, Conn>, channel: String, query: String) -> Result<(), S
 }
 
 #[tauri::command]
+fn threads(conn: State<'_, Conn>, channel: String) -> Result<(), String> {
+    conn.send(weft::build_threads(&channel)?)
+}
+
+#[tauri::command]
+fn thread_name(
+    conn: State<'_, Conn>,
+    channel: String,
+    root: String,
+    name: String,
+) -> Result<(), String> {
+    conn.send(weft::build_thread_name(&channel, &root, &name)?)
+}
+
+#[tauri::command]
 fn emoji_add(
     conn: State<'_, Conn>,
     namespace: String,
@@ -901,6 +916,8 @@ pub fn run() {
             pin,
             pins,
             search,
+            threads,
+            thread_name,
             emoji_add,
             emoji_remove,
             emoji_list,

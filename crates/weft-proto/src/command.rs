@@ -130,6 +130,17 @@ pub enum Command {
     /// `SEARCH <#chan> :<query>` — full-text message search in a channel
     /// (§6.4), membership-gated. Matching messages return as a `BATCH`.
     Search { channel: ChannelName, query: String },
+    /// `THREADS <#chan>` — list the channel's threads (§9.4 amendment),
+    /// membership-gated. → a `BATCH` of `THREAD` events.
+    Threads { channel: ChannelName },
+    /// `THREAD NAME <#chan> <root> [:name]` — set (or clear, if the name is
+    /// omitted) a thread's display name (§9.4 amendment). Requires the same
+    /// authority as posting in the channel. → broadcasts `THREAD-NAMED`.
+    ThreadName {
+        channel: ChannelName,
+        root: MsgId,
+        name: Option<String>,
+    },
     /// `CAPS <account> <scope>` — query an account's effective caps at a scope
     /// (§10.4). Public: any member may ask (caps aren't secret). → `CAPS` event.
     Caps { account: Account, scope: String },
@@ -704,6 +715,26 @@ impl Command {
                     channel: args.req("channel")?.parse()?,
                     query: args.trailing_req("query")?.to_string(),
                 })
+            }
+            "THREADS" => Ok(Command::Threads {
+                channel: Args::new(line, "THREADS").req("channel")?.parse()?,
+            }),
+            "THREAD" => {
+                let mut args = Args::new(line, "THREAD");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "NAME" => Ok(Command::ThreadName {
+                        channel: args.req("channel")?.parse()?,
+                        root: args.req("root")?.parse()?,
+                        // Omitted or empty trailing clears the name.
+                        name: line.trailing.clone().filter(|n| !n.is_empty()),
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "THREAD",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
             }
             "CAPS" => {
                 let mut args = Args::new(line, "CAPS");
@@ -1610,6 +1641,18 @@ impl Command {
             Command::Search { channel, query } => {
                 ("SEARCH", vec![channel.to_string()], Some(query.clone()))
             }
+            Command::Threads { channel } => ("THREADS", vec![channel.to_string()], None),
+            Command::ThreadName {
+                channel,
+                root,
+                name,
+            } => (
+                "THREAD",
+                vec!["NAME".to_string(), channel.to_string(), root.to_string()],
+                // A present-but-empty name is unrepresentable — clearing is
+                // the omitted-trailing form (lenient-in above filters empty).
+                name.clone().filter(|n| !n.is_empty()),
+            ),
             Command::Caps { account, scope } => {
                 ("CAPS", vec![account.to_string(), scope.clone()], None)
             }
@@ -2355,6 +2398,28 @@ mod tests {
             channel: "#general".parse().unwrap(),
             query: "deploy plan v2".to_string(),
         }));
+        round_trip(&Request::new(Command::Threads {
+            channel: "#general".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::ThreadName {
+            channel: "#general".parse().unwrap(),
+            root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            name: Some("Release planning".to_string()),
+        }));
+        // Omitted trailing = clear the name; must round-trip as None.
+        round_trip(&Request::new(Command::ThreadName {
+            channel: "#general".parse().unwrap(),
+            root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            name: None,
+        }));
+        assert_eq!(
+            Request::parse("THREAD NAME #general hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            Request::new(Command::ThreadName {
+                channel: "#general".parse().unwrap(),
+                root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+                name: None,
+            })
+        );
         round_trip(&Request::new(Command::Caps {
             account: "ada".parse().unwrap(),
             scope: "#general".to_string(),

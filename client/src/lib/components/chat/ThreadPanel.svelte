@@ -10,6 +10,28 @@
       app.sendThread();
     }
   }
+
+  // Editable thread name. Seed the field from the live name and commit on
+  // Enter or blur; an empty value clears the name (§9.4).
+  let editingName = $state(false);
+  let nameDraft = $state("");
+  function startRename() {
+    nameDraft = app.threadNameFor(app.threadRoot?.msgid ?? undefined) ?? "";
+    editingName = true;
+  }
+  function commitRename() {
+    if (!editingName) return;
+    editingName = false;
+    app.renameThread(nameDraft);
+  }
+  function nameKey(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitRename();
+    } else if (e.key === "Escape") {
+      editingName = false;
+    }
+  }
 </script>
 
 {#if app.threadRoot}
@@ -17,7 +39,23 @@
     <div class="thread-head">
       <div class="thread-title">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
-        Thread
+        {#if editingName}
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            class="name-input"
+            autofocus
+            bind:value={nameDraft}
+            placeholder="Name this thread…"
+            onkeydown={nameKey}
+            onblur={commitRename}
+          />
+        {:else}
+          {@const named = app.threadNameFor(app.threadRoot.msgid ?? undefined)}
+          <button class="name-btn" title="Rename thread" onclick={startRename}>
+            {named ?? "Thread"}
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" /></svg>
+          </button>
+        {/if}
       </div>
       <button class="linkish" aria-label="Close thread" onclick={app.closeThread}>✕</button>
     </div>
@@ -70,6 +108,42 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    font-weight: 600;
+    min-width: 0;
+  }
+  .name-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 260px;
+    padding: 2px 4px;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .name-btn:hover {
+    background: var(--bg-panel-raised);
+  }
+  .name-btn svg {
+    flex: none;
+    opacity: 0.55;
+  }
+  .name-input {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-hair-strong);
+    background: var(--bg-panel-raised);
+    color: var(--text-primary);
+    font: inherit;
     font-weight: 600;
   }
   .thread-scroll {

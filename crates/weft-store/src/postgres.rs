@@ -25,7 +25,7 @@ use crate::types::{
     audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventKind, EventRecord, GrantRecord,
     InviteRecord, MediaBlockRecord, ModKind, ModRecord, NamespaceRecord, NetblockRecord, Page,
     PeerRecord, PendingRecovery, ProfileRecord, RedeemOutcome, ReportRecord, ReportResolution,
-    RoleDef, RootHistoryEntry, Scope, Verification, AUDIT_GENESIS,
+    RoleDef, RootHistoryEntry, Scope, ThreadSummary, Verification, AUDIT_GENESIS,
 };
 use crate::StoreError;
 
@@ -358,6 +358,106 @@ impl EventStore for PgStore {
         rows.iter()
             .map(Self::record_from_row)
             .collect::<Result<Vec<_>, _>>()
+    }
+
+    async fn channel_threads(
+        &self,
+        scope: &Scope,
+        limit: usize,
+    ) -> Result<Vec<ThreadSummary>, StoreError> {
+        // Per-thread reply count + newest reply (joined back for its origin, so
+        // `last` is a full msgid, not just a ULID). `thread` holds the root's
+        // full `origin/ULID` msgid — the group key. Most-recent first.
+        let rows = sqlx::query(
+            r#"
+            SELECT e.thread AS root, cnt.replies, e.origin AS last_origin, e.ulid AS last_ulid
+            FROM weft_events e
+            JOIN (
+                SELECT thread, COUNT(*) AS replies, MAX(ulid) AS max_ulid
+                FROM weft_events
+                WHERE scope = $1 AND kind = 0 AND thread IS NOT NULL
+                GROUP BY thread
+            ) cnt ON cnt.thread = e.thread AND cnt.max_ulid = e.ulid
+            WHERE e.scope = $1 AND e.kind = 0
+            ORDER BY e.ulid DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(scope.as_key())
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+
+        // Names for this scope, merged in Rust (keyed by the root's full msgid).
+        let name_rows = sqlx::query("SELECT root, name FROM weft_thread_names WHERE scope = $1")
+            .bind(scope.as_key())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        let names: std::collections::HashMap<String, String> = name_rows
+            .iter()
+            .map(|r| (r.get::<String, _>("root"), r.get::<String, _>("name")))
+            .collect();
+
+        let corrupt = |what: &str| StoreError::Backend(format!("corrupt row: {what}"));
+        rows.iter()
+            .map(|row| {
+                let root_str: String = row.get("root");
+                let root: MsgId = root_str.parse().map_err(|_| corrupt("thread root"))?;
+                let last_origin = row
+                    .get::<&str, _>("last_origin")
+                    .parse()
+                    .map_err(|_| corrupt("last origin"))?;
+                let last_ulid =
+                    Ulid::from_string(row.get("last_ulid")).map_err(|_| corrupt("last ulid"))?;
+                Ok(ThreadSummary {
+                    name: names.get(&root_str).cloned(),
+                    root,
+                    replies: row.get::<i64, _>("replies").max(0) as u32,
+                    last: Some(MsgId::new(last_origin, last_ulid)),
+                })
+            })
+            .collect()
+    }
+
+    async fn set_thread_name(
+        &self,
+        scope: &Scope,
+        root: &MsgId,
+        name: Option<&str>,
+        by: &str,
+        at_ms: u64,
+    ) -> Result<(), StoreError> {
+        match name.filter(|n| !n.is_empty()) {
+            Some(n) => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO weft_thread_names (scope, root, name, set_by, set_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (scope, root) DO UPDATE
+                      SET name = EXCLUDED.name, set_by = EXCLUDED.set_by, set_at = EXCLUDED.set_at
+                    "#,
+                )
+                .bind(scope.as_key())
+                .bind(root.to_string())
+                .bind(n)
+                .bind(by)
+                .bind(at_ms as i64)
+                .execute(&self.pool)
+                .await
+                .map_err(backend_err)?;
+            }
+            None => {
+                sqlx::query("DELETE FROM weft_thread_names WHERE scope = $1 AND root = $2")
+                    .bind(scope.as_key())
+                    .bind(root.to_string())
+                    .execute(&self.pool)
+                    .await
+                    .map_err(backend_err)?;
+            }
+        }
+        Ok(())
     }
 
     async fn children(

@@ -1144,6 +1144,13 @@ button:disabled {
 .thread-indicator:hover {
   background: var(--bg-hover);
 }
+.thread-indicator-name {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
 .msg-line code {
   font-family: var(--font-mono);
   font-size: 12px;

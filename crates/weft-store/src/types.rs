@@ -77,6 +77,18 @@ impl EventRecord {
     }
 }
 
+/// A channel's thread summarized for the `THREADS` list (§9.4 amendment): the
+/// root message, its optional display name, the number of replies tagged
+/// `thread=<root>`, and the most-recent reply (last activity). Only threads
+/// with at least one reply are surfaced — a reply-less root is not yet a thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadSummary {
+    pub root: MsgId,
+    pub name: Option<String>,
+    pub replies: u32,
+    pub last: Option<MsgId>,
+}
+
 /// A HISTORY window (§6.4): exclusive cursors, newest-anchored — the last
 /// `limit` roots strictly between `after` and `before`.
 #[derive(Debug, Clone, Copy)]

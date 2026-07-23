@@ -867,6 +867,116 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    /// §9.4 `THREADS <#chan>`: the channel's threads as a `BATCH` of `THREAD`
+    /// events (membership-gated, like PINS/SEARCH). Each carries the root, its
+    /// reply count, last activity, and display name (if named).
+    pub(super) async fn on_threads(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+    ) -> io::Result<Flow> {
+        if !self.joined.contains_key(&channel) {
+            return self.not_member_cap(label, &channel, "view").await;
+        }
+        const THREAD_LIMIT: usize = 200;
+        let threads = match self
+            .ctx
+            .events
+            .channel_threads(&Scope::Channel(channel.clone()), THREAD_LIMIT)
+            .await
+        {
+            Ok(threads) => threads,
+            Err(e) => return self.internal(label, &e).await,
+        };
+
+        self.batches += 1;
+        let id = format!("t{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for summary in threads {
+            self.send_event(
+                None,
+                Event::Thread {
+                    channel: channel.clone(),
+                    root: summary.root,
+                    replies: summary.replies,
+                    last: summary.last,
+                    name: summary.name,
+                },
+            )
+            .await?;
+        }
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+                compacted: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// §9.4 `THREAD NAME <#chan> <root> [:name]`: set (or clear) a thread's
+    /// display name. Requires the same authority as posting; broadcasts
+    /// `THREAD-NAMED` to members so every client relabels the thread live.
+    pub(super) async fn on_thread_name(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        root: MsgId,
+        name: Option<String>,
+        account: Account,
+    ) -> io::Result<Flow> {
+        // The root must be a real message in this channel. An unknown or
+        // foreign root is NO-SUCH-TARGET — no distinct branch (invariant 1).
+        match self.ctx.events.find_root(root.ulid()).await {
+            Ok(Some(record)) if record.scope == Scope::Channel(channel.clone()) => {}
+            Ok(_) => return self.no_such_target(label).await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+
+        match self.can_post(&channel, &account).await {
+            Ok(None) => {}
+            Ok(Some((code, context))) => {
+                self.send_err(label, code, Some(context), "cannot name threads here")
+                    .await?;
+                return Ok(Flow::Continue);
+            }
+            Err(e) => return self.internal(label, &e).await,
+        }
+
+        if let Err(e) = self
+            .ctx
+            .events
+            .set_thread_name(
+                &Scope::Channel(channel.clone()),
+                &root,
+                name.as_deref(),
+                &account.to_string(),
+                unix_now_ms(),
+            )
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+
+        // Broadcast so every member's thread list relabels; the acting session
+        // (if joined) receives it too — that is its confirmation.
+        let event = Event::ThreadNamed {
+            channel: channel.clone(),
+            root,
+            name,
+        };
+        if let Some(handle) = self.ctx.registry.get(&channel) {
+            handle.announce(event).await;
+        } else {
+            self.send_event(label, event).await?;
+        }
+        Ok(Flow::Continue)
+    }
+
     /// §10.4 `CAPS <account> <scope>`: the account's effective caps at the
     /// scope (public — caps aren't secret). Powers client capability badges.
     /// §6.3 MARK: persist the read marker, echo MARKED (the direct

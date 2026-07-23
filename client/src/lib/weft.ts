@@ -112,6 +112,8 @@ export type WeftEvent =
   | { kind: "emoji-removed"; namespace: string; name: string }
   | { kind: "pinned"; channel: string; msgid: string; by: string | null }
   | { kind: "unpinned"; channel: string; msgid: string }
+  | { kind: "thread"; channel: string; root: string; replies: number; last: string | null; name: string | null }
+  | { kind: "thread-named"; channel: string; root: string; name: string | null }
   | { kind: "caps"; account: string; scope: string; caps: string }
   | { kind: "role"; scope: string; color: string; caps: string; hoist: boolean; position: number; name: string }
   | { kind: "role-member"; scope: string; account: string; roles: string }
@@ -529,6 +531,16 @@ export function pins(channel: string) {
 /// §6.4 message search in a channel; results arrive as a BATCH of messages.
 export function search(channel: string, query: string) {
   return invoke("search", { channel, query });
+}
+
+/// §9.4 list the channel's threads; each arrives as a `thread` event in a BATCH.
+export function listThreads(channel: string) {
+  return invoke("threads", { channel });
+}
+
+/// §9.4 set (or, with an empty name, clear) a thread's display name.
+export function nameThread(channel: string, root: string, name: string) {
+  return invoke("thread_name", { channel, root, name });
 }
 
 // ---- §9.4 custom emoji ----

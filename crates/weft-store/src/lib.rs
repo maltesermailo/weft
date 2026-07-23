@@ -38,7 +38,7 @@ pub use types::{
     audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventKind, EventRecord, GrantRecord,
     InviteRecord, MediaBlockRecord, ModKind, ModRecord, NamespaceRecord, NetblockRecord, Page,
     PeerRecord, PendingRecovery, ProfileRecord, RedeemOutcome, ReportRecord, ReportResolution,
-    RoleDef, RootHistoryEntry, Scope, Verification, AUDIT_GENESIS,
+    RoleDef, RootHistoryEntry, Scope, ThreadSummary, Verification, AUDIT_GENESIS,
 };
 
 use thiserror::Error;

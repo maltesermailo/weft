@@ -935,6 +935,15 @@ impl<S: ControlStream> Session<S> {
             Command::Unpin { msgid } => self.on_pin(label, msgid, account, false).await,
             Command::Pins { channel } => self.on_pins(label, channel).await,
             Command::Search { channel, query } => self.on_search(label, channel, query).await,
+            Command::Threads { channel } => self.on_threads(label, channel).await,
+            Command::ThreadName {
+                channel,
+                root,
+                name,
+            } => {
+                self.on_thread_name(label, channel, root, name, account)
+                    .await
+            }
             Command::EmojiAdd {
                 namespace,
                 name,

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import * as weft from "$lib/weft";
-  import type { Msg, Channel, CtxItem, RoleDefC } from "$lib/types";
+  import type { Msg, Channel, CtxItem, RoleDefC, ThreadInfo } from "$lib/types";
   import { provideApp } from "$lib/context";
   import { highlightCode } from "$lib/highlight";
   import { shortcodeToChar, searchUnicode } from "$lib/shortcodes";
@@ -36,6 +36,7 @@
   import ReportsQueueModal from "$lib/components/modals/ReportsQueueModal.svelte";
   import InviteLinkModal from "$lib/components/modals/InviteLinkModal.svelte";
   import PinsModal from "$lib/components/modals/PinsModal.svelte";
+  import ThreadsModal from "$lib/components/modals/ThreadsModal.svelte";
   import SearchModal from "$lib/components/modals/SearchModal.svelte";
   import DiscoverModal from "$lib/components/modals/DiscoverModal.svelte";
   import ReportModal from "$lib/components/modals/ReportModal.svelte";
@@ -410,6 +411,14 @@
   let threadComposer = $state("");
   let loadingThread: string | null = null; // root msgid whose thread batch is inbound
   let threadBuf: Msg[] = [];
+  // ---- threads list (§9.4) — a channel's threads, arriving as a BATCH ----
+  let threadsOpen = $state(false);
+  let threadsList = $state<ThreadInfo[]>([]);
+  let threadsBuf: ThreadInfo[] = [];
+  let loadingThreads = false;
+  // Root msgid → display name, kept live from THREAD / THREAD-NAMED events so
+  // the inline indicator and the thread panel title show the name everywhere.
+  let threadNames = $state<Record<string, string>>({});
   // ---- capability badges (§10.4 CAPS), keyed `account|scope` ----
   let capsFor = $state<Record<string, { owner: boolean; mod: boolean; list: string[] }>>({});
   const capsInflight = new Set<string>();
@@ -1156,6 +1165,21 @@
         if (pinsOpen && active === e.channel) pinsList = pinsList.filter((m) => m.msgid !== e.msgid);
         break;
       }
+      case "thread": {
+        if (e.name) threadNames[e.root] = e.name;
+        else delete threadNames[e.root];
+        if (loadingThreads)
+          threadsBuf.push({ root: e.root, name: e.name ?? undefined, replies: e.replies, last: e.last ?? undefined });
+        break;
+      }
+      case "thread-named": {
+        if (e.name) threadNames[e.root] = e.name;
+        else delete threadNames[e.root];
+        // Reflect a live rename in an open threads list.
+        const i = threadsList.findIndex((t) => t.root === e.root);
+        if (i >= 0) threadsList[i] = { ...threadsList[i], name: e.name ?? undefined };
+        break;
+      }
       case "caps": {
         const set = e.caps ? e.caps.split(",") : [];
         capsFor[`${e.account}|${e.scope}`] = {
@@ -1315,6 +1339,14 @@
           pinsList = pinsBuf;
           pinsBuf = [];
           loadingPins = null;
+          break;
+        }
+        if (loadingThreads) {
+          // Newest activity first (last-activity msgid sorts by its ULID).
+          threadsBuf.sort((a, b) => (b.last ?? "").localeCompare(a.last ?? ""));
+          threadsList = threadsBuf;
+          threadsBuf = [];
+          loadingThreads = false;
           break;
         }
         const target = loadingHistory;
@@ -2343,8 +2375,45 @@
     if (active !== threadChannel) {
       threadChannel = active;
       closeThread();
+      threadsOpen = false;
     }
   });
+
+  // ---- threads list (§9.4): all threads in the active channel ----
+  function openThreads() {
+    if (!active.startsWith("#")) return;
+    threadsOpen = true;
+    threadsList = [];
+    threadsBuf = [];
+    loadingThreads = true;
+    weft.listThreads(active).catch((e) => {
+      loadingThreads = false;
+      toast(String(e), "error");
+    });
+  }
+  function closeThreads() {
+    threadsOpen = false;
+  }
+  // Open a thread from the list. If its root is already in the timeline, reuse
+  // it; otherwise seed a placeholder — the thread HISTORY (which includes the
+  // root) replaces it on arrival.
+  function openThreadByRoot(info: ThreadInfo) {
+    threadsOpen = false;
+    const loaded = activeChannel?.messages.find((m) => m.msgid === info.root);
+    if (loaded) {
+      openThread(loaded);
+      return;
+    }
+    openThread(mkMsg({ author: "", body: "", time: "", ts: 0, own: false, msgid: info.root }));
+  }
+  // A thread's display name (from THREAD / THREAD-NAMED), for the indicator
+  // and the panel title.
+  const threadNameFor = (msgid?: string): string | undefined => (msgid ? threadNames[msgid] : undefined);
+  // Rename (or, with an empty string, clear the name of) the open thread.
+  function renameThread(name: string) {
+    if (!threadRoot?.msgid || !active) return;
+    weft.nameThread(active, threadRoot.msgid, name.trim()).catch((e) => toast(String(e), "error"));
+  }
 
   // Namespace admin
   function openNsSettings() {
@@ -2581,6 +2650,14 @@
     openThread,
     closeThread,
     sendThread,
+    // threads list (§9.4)
+    get threadsOpen() { return threadsOpen; },
+    get threadsList() { return threadsList; },
+    openThreads,
+    closeThreads,
+    openThreadByRoot,
+    threadNameFor,
+    renameThread,
     // custom emoji (§9.4)
     get activeEmoji() { return activeEmoji; },
     addEmoji,
@@ -2825,6 +2902,10 @@
 
     {#if pinsOpen}
       <PinsModal onclose={() => (pinsOpen = false)} />
+    {/if}
+
+    {#if threadsOpen}
+      <ThreadsModal onclose={() => (threadsOpen = false)} />
     {/if}
 
     {#if searchOpen}

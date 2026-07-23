@@ -166,6 +166,24 @@ pub enum Event {
         channel: ChannelName,
         msgid: MsgId,
     },
+    /// `THREAD <#chan> <root> replies=<n> [last=<msgid>] [:name]` — one per
+    /// thread in a `THREADS` list response (§9.4 amendment). `name` empty =
+    /// an active-but-unnamed thread.
+    Thread {
+        channel: ChannelName,
+        root: MsgId,
+        replies: u32,
+        last: Option<MsgId>,
+        name: Option<String>,
+    },
+    /// `THREAD-NAMED <#chan> <root> [:name]` — a thread was (re)named or, with
+    /// an empty trailing, its name was cleared (§9.4 amendment). Broadcast to
+    /// members so clients update the thread's label live.
+    ThreadNamed {
+        channel: ChannelName,
+        root: MsgId,
+        name: Option<String>,
+    },
     /// `CAPS <account> <scope> :<caps>` — an account's effective caps at a
     /// scope, comma-separated (§7). Empty trailing = no caps.
     Caps {
@@ -591,6 +609,31 @@ impl Event {
                 Ok(Event::Unpinned {
                     channel: args.req("channel")?.parse()?,
                     msgid: args.req("msgid")?.parse()?,
+                })
+            }
+            "THREAD" => {
+                let mut args = Args::new(line, "THREAD");
+                let channel = args.req("channel")?.parse()?;
+                let root = args.req("root")?.parse()?;
+                let replies = line
+                    .tags
+                    .get("replies")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                Ok(Event::Thread {
+                    channel,
+                    root,
+                    replies,
+                    last: line.tags.get("last").map(|v| v.parse()).transpose()?,
+                    name: line.trailing.clone().filter(|n| !n.is_empty()),
+                })
+            }
+            "THREAD-NAMED" => {
+                let mut args = Args::new(line, "THREAD-NAMED");
+                Ok(Event::ThreadNamed {
+                    channel: args.req("channel")?.parse()?,
+                    root: args.req("root")?.parse()?,
+                    name: line.trailing.clone().filter(|n| !n.is_empty()),
                 })
             }
             "CAPS" => {
@@ -1283,6 +1326,32 @@ impl Event {
                 vec![channel.to_string(), msgid.to_string()],
                 None,
             ),
+            Event::Thread {
+                channel,
+                root,
+                replies,
+                last,
+                name,
+            } => {
+                tags.insert("replies".to_string(), replies.to_string());
+                if let Some(last) = last {
+                    tags.insert("last".to_string(), last.to_string());
+                }
+                (
+                    "THREAD",
+                    vec![channel.to_string(), root.to_string()],
+                    name.clone().filter(|n| !n.is_empty()),
+                )
+            }
+            Event::ThreadNamed {
+                channel,
+                root,
+                name,
+            } => (
+                "THREAD-NAMED",
+                vec![channel.to_string(), root.to_string()],
+                name.clone().filter(|n| !n.is_empty()),
+            ),
             Event::Caps {
                 account,
                 scope,
@@ -1906,6 +1975,31 @@ mod tests {
         round_trip(&Reply::new(Event::EmojiRemoved {
             namespace: "gaming".parse().unwrap(),
             name: "partyblob".into(),
+        }));
+        round_trip(&Reply::new(Event::Thread {
+            channel: "#general".parse().unwrap(),
+            root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            replies: 7,
+            last: Some("hda.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap()),
+            name: Some("Release planning".to_string()),
+        }));
+        // An unnamed active thread: zero-name, no last-activity tag.
+        round_trip(&Reply::new(Event::Thread {
+            channel: "#general".parse().unwrap(),
+            root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            replies: 0,
+            last: None,
+            name: None,
+        }));
+        round_trip(&Reply::new(Event::ThreadNamed {
+            channel: "#general".parse().unwrap(),
+            root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            name: Some("Release planning".to_string()),
+        }));
+        round_trip(&Reply::new(Event::ThreadNamed {
+            channel: "#general".parse().unwrap(),
+            root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            name: None,
         }));
         // Zero and non-zero counts both round-trip (numeric middle params).
         round_trip(&Reply::new(Event::UnreadCounts {

@@ -35,6 +35,15 @@ export type Msg = {
   attachments?: string[];
 };
 
+/// §9.4 a channel thread as summarized in a `THREADS` list: its root msgid,
+/// optional display name, reply count, and last-activity msgid.
+export type ThreadInfo = {
+  root: string;
+  name?: string;
+  replies: number;
+  last?: string;
+};
+
 export type Channel = {
   name: string;
   retention: string;

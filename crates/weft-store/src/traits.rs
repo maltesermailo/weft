@@ -12,7 +12,7 @@ use crate::types::{
     AuditEntry, AuditRecord, ChannelRecord, EventRecord, GrantRecord, InviteRecord,
     MediaBlockRecord, ModKind, ModRecord, NamespaceRecord, NetblockRecord, Page, PeerRecord,
     PendingRecovery, RedeemOutcome, ReportRecord, ReportResolution, RoleDef, RootHistoryEntry,
-    Scope, Verification,
+    Scope, ThreadSummary, Verification,
 };
 use crate::StoreError;
 
@@ -62,6 +62,28 @@ pub trait EventStore: Send + Sync {
         root: &MsgId,
         limit: usize,
     ) -> Result<Vec<EventRecord>, StoreError>;
+
+    /// Every thread in a channel (§9.4 amendment): each root that has at least
+    /// one `thread=<root>` reply, with its reply count, last activity, and
+    /// display name (if named via [`EventStore::set_thread_name`]).
+    /// Most-recently-active first, capped at `limit`.
+    async fn channel_threads(
+        &self,
+        scope: &Scope,
+        limit: usize,
+    ) -> Result<Vec<ThreadSummary>, StoreError>;
+
+    /// Set (or, with `name = None`, clear) a thread's display name (§9.4
+    /// amendment). Keyed by `(scope, root)`; idempotent. `by`/`at_ms` record
+    /// who last named it, for the audit surface.
+    async fn set_thread_name(
+        &self,
+        scope: &Scope,
+        root: &MsgId,
+        name: Option<&str>,
+        by: &str,
+        at_ms: u64,
+    ) -> Result<(), StoreError>;
 
     /// Root (`Message`) rows authored by `sender` (the `account@network` form),
     /// across every scope, newest-first. The operator admin surface only — the

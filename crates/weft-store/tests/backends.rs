@@ -636,6 +636,51 @@ where
         .unwrap();
     assert_eq!(lonely.len(), 1);
 
+    // channel_threads: one thread (root 500_000) with two replies; last
+    // activity is the newest reply (700_000). The unrelated root is not a
+    // thread (no replies) and must not appear.
+    let threads = store.channel_threads(&thread_scope, 50).await.unwrap();
+    assert_eq!(threads.len(), 1, "exactly one active thread");
+    assert_eq!(threads[0].root, root_id);
+    assert_eq!(threads[0].replies, 2);
+    assert_eq!(threads[0].last, Some(msgid(700_000)));
+    assert_eq!(threads[0].name, None, "unnamed until set");
+
+    // Naming is keyed by (scope, root) and shows up in the list.
+    store
+        .set_thread_name(
+            &thread_scope,
+            &root_id,
+            Some("Release planning"),
+            "bob",
+            720_000,
+        )
+        .await
+        .unwrap();
+    let named = store.channel_threads(&thread_scope, 50).await.unwrap();
+    assert_eq!(named[0].name.as_deref(), Some("Release planning"));
+
+    // Renaming overwrites; clearing (None) removes the name, thread stays.
+    store
+        .set_thread_name(&thread_scope, &root_id, Some("Ship it"), "bob", 730_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.channel_threads(&thread_scope, 50).await.unwrap()[0]
+            .name
+            .as_deref(),
+        Some("Ship it")
+    );
+    store
+        .set_thread_name(&thread_scope, &root_id, None, "bob", 740_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.channel_threads(&thread_scope, 50).await.unwrap()[0].name,
+        None,
+        "cleared name, thread still listed"
+    );
+
     // -- custom emoji (§9.4) --
     let ns: NamespaceName = format!("emo{}", tag.replace(['-', '_'], ""))
         .parse()

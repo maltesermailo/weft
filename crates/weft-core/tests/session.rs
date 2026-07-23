@@ -1250,6 +1250,70 @@ async fn history_thread_filter_returns_only_the_thread() {
 }
 
 #[tokio::test]
+async fn threads_list_naming_and_unknown_root() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+
+    let root = say(&mut ada, "#general", "thread root").await;
+    ada.send(&format!("@thread={root} MSG #general :reply one"));
+    assert!(matches!(ada.recv().await.event, Event::Message(_)));
+    ada.send(&format!("@thread={root} MSG #general :reply two"));
+    assert!(matches!(ada.recv().await.event, Event::Message(_)));
+    // An unrelated (non-thread) message must not become a thread.
+    say(&mut ada, "#general", "unrelated chatter").await;
+
+    // THREADS lists exactly the one thread, two replies, unnamed.
+    ada.send("@label=t1 THREADS #general");
+    let start = ada.recv().await;
+    assert_eq!(start.label.as_deref(), Some("t1"));
+    assert!(matches!(start.event, Event::BatchStart { .. }));
+    let mut threads = Vec::new();
+    loop {
+        match ada.recv().await.event {
+            Event::Thread {
+                root,
+                replies,
+                name,
+                ..
+            } => threads.push((root.to_string(), replies, name)),
+            Event::BatchEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(threads.len(), 1, "one active thread");
+    assert_eq!(threads[0].0, root);
+    assert_eq!(threads[0].1, 2);
+    assert_eq!(threads[0].2, None, "unnamed until set");
+
+    // Naming broadcasts THREAD-NAMED to the channel (ada is a member).
+    ada.send(&format!("THREAD NAME #general {root} :Release planning"));
+    match ada.recv().await.event {
+        Event::ThreadNamed { name, .. } => assert_eq!(name.as_deref(), Some("Release planning")),
+        e => panic!("expected THREAD-NAMED, got {e:?}"),
+    }
+
+    // The name now shows up in the listing.
+    ada.send("THREADS #general");
+    assert!(matches!(ada.recv().await.event, Event::BatchStart { .. }));
+    match ada.recv().await.event {
+        Event::Thread { name, .. } => assert_eq!(name.as_deref(), Some("Release planning")),
+        e => panic!("expected THREAD, got {e:?}"),
+    }
+    assert!(matches!(ada.recv().await.event, Event::BatchEnd { .. }));
+
+    // Clearing the name (no trailing) keeps the thread but drops the label.
+    ada.send(&format!("THREAD NAME #general {root}"));
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::ThreadNamed { name: None, .. }
+    ));
+
+    // Naming an unknown root is NO-SUCH-TARGET (anti-enumeration, invariant 1).
+    ada.send("THREAD NAME #general test.example/01ARZ3NDEKTSV4RRFFQ69G5FAV :nope");
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
 async fn custom_emoji_add_list_remove_and_gating() {
     let ctx = ctx(&["#general"]);
     let mut ada = joined(&ctx, "ada", "#general").await;

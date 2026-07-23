@@ -19,7 +19,7 @@ use crate::types::{
     audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventRecord, GrantRecord, InviteRecord,
     MediaBlockRecord, ModKind, ModRecord, NamespaceRecord, NetblockRecord, Page, PeerRecord,
     PendingRecovery, ProfileRecord, RedeemOutcome, ReportRecord, ReportResolution, RoleDef,
-    RootHistoryEntry, Scope, Verification, AUDIT_GENESIS,
+    RootHistoryEntry, Scope, ThreadSummary, Verification, AUDIT_GENESIS,
 };
 use crate::StoreError;
 use weft_proto::{ContentState, ReportStatus};
@@ -98,6 +98,8 @@ struct Inner {
     moderation: HashMap<(String, Account, ModKind), ModRecord>,
     /// channel → pinned msgids, ordered by ULID (§6.4).
     pins: HashMap<ChannelName, std::collections::BTreeMap<Ulid, MsgId>>,
+    /// §9.4 thread names: (scope key, root msgid) → display name.
+    thread_names: HashMap<(String, MsgId), String>,
     /// §9.4 custom emoji: namespace → (name → media ref), name-sorted.
     emoji: HashMap<NamespaceName, std::collections::BTreeMap<String, String>>,
     /// account → channels it's a member of (§6.3 persistent membership).
@@ -261,6 +263,72 @@ impl EventStore for MemoryStore {
             .cloned()
             .collect();
         Ok(hits)
+    }
+
+    async fn channel_threads(
+        &self,
+        scope: &Scope,
+        limit: usize,
+    ) -> Result<Vec<ThreadSummary>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let key = scope.as_key();
+
+        // Aggregate replies per root: count + newest reply (last activity).
+        let mut agg: HashMap<MsgId, (u32, MsgId)> = HashMap::new();
+        for (_, record) in inner.events.range(Self::scope_range(&key)) {
+            let crate::types::EventKind::Message { meta, .. } = &record.kind else {
+                continue;
+            };
+            if let Some(root) = &meta.thread {
+                let entry = agg.entry(root.clone()).or_insert((0, record.msgid.clone()));
+                entry.0 += 1;
+                if record.msgid.ulid() > entry.1.ulid() {
+                    entry.1 = record.msgid.clone();
+                }
+            }
+        }
+
+        let mut out: Vec<ThreadSummary> = agg
+            .into_iter()
+            .map(|(root, (replies, last))| ThreadSummary {
+                name: inner
+                    .thread_names
+                    .get(&(key.clone(), root.clone()))
+                    .cloned(),
+                root,
+                replies,
+                last: Some(last),
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.last
+                .as_ref()
+                .map(|m| m.ulid())
+                .cmp(&a.last.as_ref().map(|m| m.ulid()))
+        });
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    async fn set_thread_name(
+        &self,
+        scope: &Scope,
+        root: &MsgId,
+        name: Option<&str>,
+        _by: &str,
+        _at_ms: u64,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let k = (scope.as_key(), root.clone());
+        match name.filter(|n| !n.is_empty()) {
+            Some(n) => {
+                inner.thread_names.insert(k, n.to_string());
+            }
+            None => {
+                inner.thread_names.remove(&k);
+            }
+        }
+        Ok(())
     }
 
     async fn find_root(&self, ulid: Ulid) -> Result<Option<EventRecord>, StoreError> {

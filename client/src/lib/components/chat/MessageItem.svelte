@@ -66,8 +66,10 @@
       {/if}
       {#if app.active.startsWith("#") && app.threadCount(m.msgid) > 0}
         {@const n = app.threadCount(m.msgid)}
+        {@const tn = app.threadNameFor(m.msgid)}
         <button class="thread-indicator" onclick={() => app.openThread(m)}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+          {#if tn}<span class="thread-indicator-name">{tn}</span>{/if}
           {n} {n === 1 ? "reply" : "replies"}
         </button>
       {/if}

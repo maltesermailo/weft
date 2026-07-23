@@ -260,6 +260,8 @@ impl WeftClient {
             "pin" => build_pin(&arg("msgid"), flag("pinned"))?,
             "pins" => build_pins(&arg("channel"))?,
             "search" => build_search(&arg("channel"), &arg("query"))?,
+            "threads" => build_threads(&arg("channel"))?,
+            "thread_name" => build_thread_name(&arg("channel"), &arg("root"), &arg("name"))?,
             "emoji_add" => build_emoji_add(&arg("namespace"), &arg("name"), &arg("media"))?,
             "emoji_remove" => build_emoji_remove(&arg("namespace"), &arg("name"))?,
             "emoji_list" => build_emoji_list(&arg("namespace"))?,
