@@ -168,30 +168,34 @@ only at network granularity, not per device.
 
 ### Genuine DoS risks (defense absent or partial)
 
-- **D-1 · Unauthenticated Argon2id on the async runtime.** Every `AUTH` runs
-  Argon2id (~19 MiB, t=2) **inline on a tokio worker thread** — no
-  `spawn_blocking` (`weft-crypto/src/password.rs:23`, called from
-  `accounts.rs:99`). By anti-enumeration design, *every* attempt — even for a
-  nonexistent account — pays the full cost via the dummy-hash path. With **no
-  auth-attempt throttle** and **no connection cap** (D-2), a modest number of
-  connections spamming `AUTH` can saturate CPU and exhaust worker threads. **This
-  is the most material unauthenticated resource-exhaustion vector.** Fix:
-  `spawn_blocking` for Argon2 + a per-IP auth throttle.
-- **D-2 · No global concurrent-connection cap.** The accept loops
-  (`acceptor.rs:88,140,165`) spawn every connection into a `JoinSet` with no
-  `Semaphore`. Per-connection memory is bounded (several 256-deep queues) but the
-  *count* is not — memory and thread pressure scale linearly with connections.
+- **D-1 · Unauthenticated Argon2id on the async runtime — FIXED (partial).**
+  Every `AUTH` ran Argon2id (~19 MiB, t=2) **inline on a tokio worker thread**,
+  and by anti-enumeration design *every* attempt — even for a nonexistent account
+  — pays the full cost. **Fixed** by moving both hash and verify to
+  `tokio::task::spawn_blocking` (`accounts.rs`), so a burst can no longer starve
+  the runtime's worker threads. Combined with the new connection cap (D-2) this
+  bounds the vector. **Still open:** no *per-IP auth-attempt throttle* — a single
+  IP can still burn one blocking thread per connection up to the connection cap.
+- **D-2 · No global concurrent-connection cap — FIXED.** A shared
+  `tokio::sync::Semaphore` (`[max_connections]`, default 1024) now caps live
+  sessions across QUIC + WS + IRC; a connection past the cap is refused
+  immediately, not queued (`acceptor.rs`). Bridge and data-plane streams are not
+  counted. **Still open:** the cap is global, not per-IP — one source can still
+  consume the whole budget (needs the per-IP throttle above).
 - **D-3 · No general per-message rate limiter.** Well-formed command floods
   (`MSG`, `HISTORY`, `JOIN` churn) are unthrottled; only malformed/REPORT/FEDERATE
   are limited. The `THROTTLED` error exists but is wired only to those two verbs.
+  *Open.*
 - **D-4 · `SEARCH` is an unindexed substring scan.** Postgres `body ILIKE
   '%q%'` (`postgres.rs:315`) and memory `contains` (`memory.rs:235`) both
   full-scan a channel's messages. `SEARCH_LIMIT` caps *rows returned*, not *rows
   scanned*. Any member can drive repeated full scans (no rate limit — D-3).
-- **D-5 · No cap on accounts or channels created.**
-- **D-6 · IRC gateway reader is uncapped.** `read_line` into a `String`
-  (`weft-irc/src/lib.rs:115`) has no per-line length limit, unlike the 8 KiB-capped
-  native transports — an IRC peer can buffer an unbounded single line.
+  *Open.*
+- **D-5 · No cap on accounts or channels created.** *Open.*
+- **D-6 · IRC gateway reader is uncapped — FIXED.** `read_line` now runs under a
+  per-line `take(MAX_IRC_LINE)` budget (8 KiB, matching the native transports);
+  a line that hits the cap without terminating closes the connection
+  (`weft-irc/src/lib.rs`).
 
 ### Stubbed
 
@@ -221,13 +225,12 @@ was found.**
 
 **Flags, weakest first:**
 
-- **F-1 · Cookie MAC secret is the raw network signing-key seed.** `weftd`
-  passes `identity.seed_b64()` as the admin cookie HMAC secret
-  (`weftd/src/lib.rs:698`). This is cross-primitive key reuse: the same 32 bytes
-  are the Ed25519 private key (attestations, tokens, manifests, rotations) *and*
-  the HMAC-SHA256 cookie key. No known interaction makes this directly
-  exploitable, but the cookie secret now carries the blast radius of the network
-  identity. **Fix: derive the cookie key via a KDF with a distinct label.**
+- **F-1 · Cookie MAC secret was the raw network signing-key seed — FIXED.**
+  `weftd` passed `identity.seed_b64()` as the admin cookie HMAC secret — the same
+  32 bytes as the Ed25519 private key. **Fixed** in `auth::config`, which now
+  derives the cookie key as `SHA-256("weft-admin-cookie-key-v1" ‖ secret)` — a
+  labeled one-way derivation, so learning the cookie key no longer reveals the
+  network identity. (Existing sessions are invalidated once, harmless.)
 - **F-2 · The admin cookie is an un-revocable stateless bearer for 12 h.** The
   token is `account|exp|HMAC` with no server-side session id
   (`weft-admin/src/auth.rs:304`); logout only clears the client cookie. A leaked
@@ -241,10 +244,10 @@ was found.**
   (M5) and currently dormant.** Consequence for this model: on the same network,
   token forgery is irrelevant (the DB is authoritative), but the token system is
   not yet defending live traffic — do not assume it gates anything today.
-- **F-4 · Unbounded delegation-chain depth.** `verify_chain` iterates a
-  caller-supplied slice with no length cap (`captoken.rs:303`) — one Ed25519
-  verify per link. Dormant today (F-3), but a linear-CPU DoS once federation
-  wires it in. Fix: a depth cap before verification.
+- **F-4 · Unbounded delegation-chain depth — FIXED.** `verify_chain` now rejects
+  a chain deeper than `MAX_CHAIN_LEN` (16) before any per-link Ed25519 work
+  (`captoken.rs`, tested `overlong_chain_is_rejected`) — pre-empting the
+  linear-CPU cost once federation activates it (F-3).
 - **F-5 · Attestations have no per-credential revocation and no nonce**
   (`attestation.rs:7`) — a leaked attestation is bearer-replayable until its
   issuer-chosen `expires_at`, with no lower/upper bound enforced. Revocation is
@@ -394,31 +397,42 @@ hardening work.
 
 ## 11. Prioritized recommendations
 
-**P0 — unauthenticated availability & key hygiene**
+**Fixed (2026-07-23):** Argon2 → `spawn_blocking` (D-1), global connection cap
+(D-2), IRC line cap (D-6), admin cookie key derivation (F-1), `verify_chain`
+depth cap (F-4); client XSS→bridge (C-1) and remote-frame overflow (C-2). Server
+fixes are test-covered; the two client fixes are compile-verified.
 
-- **`spawn_blocking` for Argon2 + a per-IP auth-attempt throttle** (D-1). The
-  clearest unauth DoS.
-- **A global concurrent-connection cap** (`Semaphore` in the accept loops) and a
-  **per-IP connection cap** (D-2).
-- **Derive the admin cookie key via a KDF**, not the raw network seed (F-1).
+**P0 — remaining unauthenticated availability**
+
+- **A per-IP auth-attempt throttle + per-IP connection cap** — the D-1/D-2 fixes
+  bound *total* Argon2 and session count, but a single source can still consume
+  the whole budget. Needs the peer address plumbed to a shared limiter.
 
 **P1 — availability & confidentiality depth**
 
 - **A general per-connection command rate limiter** (token bucket), wiring the
   existing `THROTTLED` error to more than REPORT/FEDERATE (D-3).
-- **Cap the IRC gateway line length** to match the 8 KiB native cap (D-6).
 - **Server-side admin session revocation** (table or epoch), so logout /
   password change invalidate cookies (F-2).
 - **Index the SEARCH path** (Postgres trigram/FTS) or gate it behind the rate
   limiter (D-4).
 - **Implement or test the `ERR SLOW` forced resync** — close the invariant-6
   gap, and add the missing test either way.
+- **Client key storage → OS keychain / encrypt at rest** (C-3) — the top open
+  *client* risk. Needs per-OS runtime verification (implement macOS-first on the
+  dev's platform, file fallback for headless Linux).
 
 **P2 — hardening & hygiene**
 
+- **A CSP for the desktop webview** (C-1 defence-in-depth). Requires SvelteKit
+  inline-script hashing (`kit.csp`) + runtime verification — a strict
+  `script-src 'self'` blanks the app because the built `index.html` inlines a
+  bootstrap script.
+- **Scope the desktop `opener` capability and the Linux permission auto-grant**
+  (C-5), and make `allow_insecure` per-host (C-4). All need runtime/multi-OS
+  verification.
 - **Swap to `parking_lot`** to remove 165 poisoning `expect`s (§8), and add
   `clippy::unwrap_used`/`expect_used` warnings on L0.
-- **A depth cap in `verify_chain`** before federation activates it (F-4).
 - **Account/channel creation caps** (D-5).
 - **A timing-equalization pass** on the NO-SUCH-TARGET branches, or an explicit
   decision that structural uniformity is sufficient (invariant 1).
@@ -432,13 +446,130 @@ must never be enabled in production (`weft-transport/src/insecure.rs`).
 
 ---
 
-## 12. What this model does *not* cover
+## 12. Native desktop client (Tauri)
+
+The desktop client (`client/src-tauri/` + the Svelte frontend `client/src/`) is a
+*distinct and sharper* attack surface than the server: it decodes untrusted
+media from potentially-malicious servers and call peers, holds governance keys on
+disk, and bridges a webview to native Rust. Adversaries: a malicious/compromised
+server, a malicious call peer (LiveKit media), or a malicious message author on an
+honest server.
+
+**Client-specific assets:** device private keys, **namespace root keys**, and
+**recovery keys** (the community-governance anchors), the session, the media
+bearer token, and the user's screen/camera/mic.
+
+### The IPC bridge
+
+~95 `#[tauri::command]`s (`lib.rs:825` handler) are reachable by **any** script in
+the webview via the standard `invoke` bridge. Most are wire relays, but the
+dangerous ones if the webview is ever compromised are `send_raw` (`lib.rs:697`,
+an arbitrary authenticated wire line — "act as the logged-in user"), `connect`
+(`lib.rs:35`, dial an arbitrary host, loading a stored device key), and the
+key-operation commands (`ns_transfer`, `recovery_*`, `enroll_device`). **Credit
+to the design:** no command returns secret key material to JS — seeds stay in the
+Rust process; only public keys and *signatures* cross the bridge. So webview
+compromise cannot directly exfiltrate a private key — but it can make the client
+*sign* an attacker-chosen namespace transfer (hijack) or enroll a device
+(persistence).
+
+### C-1 · Stored-message XSS → native command bridge — **FOUND & FIXED (was critical)**
+
+The Markdown renderer's `escapeHtml` (`+page.svelte`) escaped `& < >` but **not
+`"`**, and the link rewriters interpolate a captured URL straight into
+`href="${url}"` — and the bare-URL char class (`[^\s<]+`) permits `"`. A message
+body like `https://x/"onfocus="fetch(…)"autofocus="` closed the attribute and
+injected an auto-firing event handler. With **`csp: null`** (below) the payload
+reached the full Tauri bridge: `send_raw`, `connect`, `ns_transfer`-signing,
+`enroll_device`, screen/camera capture, the `opener` plugin. One missing quote
+escape turned any hostile message into native-command execution.
+
+**Fixed this session** by escaping `"` and `'` in `escapeHtml` — the root fix,
+since it protects *every* attribute interpolation (the emoji path already escaped
+quotes; the link path had missed it). The escape runs before the URL rewriters,
+so the captured URL can no longer break out. `pnpm check` clean.
+
+**Still open (defence-in-depth): `csp: null`** (`tauri.conf.json:22`). There is no
+Content-Security-Policy, and no HTML sanitizer (no DOMPurify). The webview loads
+only the bundled app (`frontendDist`), so there's no remote-origin risk, but a CSP
+(`script-src 'self'`) would have blocked the injected handler from reaching the
+bridge even with the escape bug present. **Recommend adding one.** Related: the
+`opener:default` capability is broad and, absent CSP, injected script could call
+`plugin:opener` directly — scope it to nothing, or drop it.
+
+### C-2 · Remote video-frame integer overflow — **FOUND & FIXED (was high)**
+
+`remote_video_task` (`voice_native.rs`) took `(w, h)` from a peer-decoded frame
+and did `vec![0u8; (w * h * 4) as usize]` in **u32 math** with no dimension check
+— an adversarial frame could wrap the size to an under-allocated buffer that the
+FFI `i420_to_abgr` conversion then overruns (memory corruption). **Fixed this
+session** with a `MAX_VIDEO_DIM` (8K) cap that rejects the frame before
+allocation, after which the `usize` math cannot overflow. The *underlying*
+decoder — libwebrtc's native H.264/VP8/AV1 — remains an RCE surface fed directly
+by remote peers; WEFT can't fix that but should **track the libwebrtc version for
+CVEs**. (The Rust glue is otherwise defensive — `Option`/`ok()?`, no `unwrap` on
+attacker bytes.)
+
+### C-3 · Key storage at rest — **OPEN (high)**
+
+Device keys, **namespace root keys**, and **recovery keys** are stored as
+**plaintext base64 Ed25519 seeds on disk** (`keys.rs:81`) — no encryption, no OS
+keychain. Protection is best-effort `chmod 0600` **on Unix only**
+(`#[cfg(unix)]`); Windows and macOS get default ACLs. The code itself flags the
+gap ("an OS keychain is the hardening upgrade", `keys.rs:8`). Consequence: any
+local malware running as the user, or a backup/sync of the app-data dir, obtains
+the namespace **owner root key** and can forge transfers/rotations offline —
+namespace takeover with no server involvement. Keys never transit the IPC bridge
+(good), but they sit unprotected on disk. **Recommend: OS keychain (macOS
+Keychain / Windows Credential Manager / libsecret) or encryption at rest, and an
+explicit Windows ACL.**
+
+### C-4 · TLS / transport — **OPEN (medium, gated)**
+
+`allow_insecure` (`config.rs`, off by default, set only via a local config file)
+routes to `insecure::client_endpoint` — a **cert-blind** QUIC endpoint that
+disables verification entirely → full active MITM if enabled. The flag is
+*global*, not per-host, so a user who enables it for one LAN server is exposed on
+every connection. Minor, related: `media_base` may be plain `http://` (dev), and
+the media bearer token rides in the URL query (`weft.ts`) — cleartext token
+exposure over http. **Recommend: make `allow_insecure` per-host; disallow
+cleartext `media_base`.**
+
+### C-5 · Platform / webview permissions — **OPEN (low/info)**
+
+On Linux/WebKitGTK, `grant_media_permission` (`lib.rs:714`) unconditionally
+`allow()`s **every** webview permission request, not just the mic — bounded by the
+bundled-only content, but with the (now-fixed) XSS it would have auto-granted
+camera/geolocation to injected script. `enable_wkwebview_screen_capture`
+(`lib.rs:739`) toggles **private** WebKit feature SPI (defensively guarded by
+`respondsToSelector:` and scoped to screen-capture keys) — narrow, but it enables
+experimental features and uses private API (App Store review would reject it).
+**Recommend: allow-list the Linux permission grant to mic/camera.**
+
+### Native-client residual (dependency advisories)
+
+The desktop-only RustSec advisories the supply-chain audit triaged
+([`security-posture.md`](./security-posture.md)) — unmaintained gtk-rs GTK3, and
+the two `quick-xml` DoS advisories via `xcb` — live **exclusively in this
+client**, not in `weftd`. They are reachable only through local windowing/capture,
+not remote input, but they are the client's, not the server's, to carry.
+
+### Native-client priority
+
+`C-3` (key storage) is the top **open** risk now that C-1/C-2 are fixed, followed
+by adding a **CSP** (C-1 defence-in-depth) and scoping the `opener`/permission
+grants. `allow_insecure` and the private-SPI items are lower and partly gated.
+
+## 13. What this model does *not* cover
 
 - **Load/DoS testing** — this is a static review; none of the DoS vectors above
   has a load test proving the bound (or the gap) empirically.
-- **The desktop client** (Tauri) and its native-capture stack — reviewed only
-  for the media-upload path, not as an attack surface.
+- **The Svelte frontend beyond the render/IPC paths** — component logic, state
+  handling, and the WASM (browser) client build were not audited as attack
+  surface.
 - **Deployment/operational security** — TLS termination, reverse-proxy config,
   secret storage, and OS hardening are the operator's responsibility (the IRC
   and plain-WS listeners *assume* upstream TLS).
 - **A formal timing analysis** of the anti-enumeration paths.
+- **libwebrtc / native decoder internals** — treated as an opaque RCE surface to
+  track by version, not audited.

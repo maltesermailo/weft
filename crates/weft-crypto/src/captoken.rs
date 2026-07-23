@@ -33,6 +33,11 @@ use crate::{b64, CryptoError};
 // `version != VERSION` check below rejects them.
 const VERSION: u8 = 2;
 
+/// Maximum delegation-chain depth accepted by [`verify_chain`]. A legitimate
+/// chain is a few hops (network → namespace → channel → device); anything
+/// deeper is rejected before per-link signature work (threat-model F-4).
+pub const MAX_CHAIN_LEN: usize = 16;
+
 /// Who a token authorizes. Only `Key` subjects can sign child tokens
 /// (delegate further); `Account` subjects are leaves used by that account;
 /// `Unbound` is an invite (§6.5) bound to a redeemer's key on redemption.
@@ -295,6 +300,14 @@ pub fn verify_chain(
     now: u64,
     epoch_of: impl Fn(&TokenScope) -> u64,
 ) -> Result<Verified, CryptoError> {
+    // Bound the chain length before doing per-link Ed25519 work: a delegation
+    // chain deeper than this is not a legitimate grant and would only be a
+    // linear-CPU cost to verify (threat-model F-4). A real chain is a handful of
+    // hops (network → ns → channel → device).
+    if chain.len() > MAX_CHAIN_LEN {
+        return Err(CryptoError::BadToken);
+    }
+
     let root = chain.first().ok_or(CryptoError::BadToken)?;
     if root.grant.parent.is_some() || &root.grant.issuer != authority {
         return Err(CryptoError::Unauthorized);
@@ -430,6 +443,22 @@ mod tests {
         let v = verify_chain(&[token], &net.public(), 0, no_revocations).unwrap();
         assert!(v.authorizes(&cap("netblock"), &TokenScope::parse("#any/chan").unwrap()));
         assert!(v.authorizes(&cap("ns-create"), &TokenScope::parse("ns:foo").unwrap()));
+    }
+
+    #[test]
+    fn overlong_chain_is_rejected() {
+        // F-4: a chain past the depth cap is refused outright, before any
+        // per-link signature work, so it can't be a linear-CPU DoS.
+        let net = Keypair::generate();
+        let key = Keypair::generate();
+        let chain: Vec<_> = (0..=MAX_CHAIN_LEN)
+            .map(|_| root(&net, Subject::Key(key.public()), "*", &["send"], 0))
+            .collect();
+        assert_eq!(chain.len(), MAX_CHAIN_LEN + 1);
+        assert!(matches!(
+            verify_chain(&chain, &net.public(), 0, no_revocations),
+            Err(CryptoError::BadToken)
+        ));
     }
 
     #[test]

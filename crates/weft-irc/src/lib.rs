@@ -19,7 +19,7 @@ mod translate;
 use std::collections::VecDeque;
 use std::io;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -103,6 +103,12 @@ impl ControlStream for IrcStream {
     }
 }
 
+/// Per-line byte cap for the IRC reader — matches the native transports' 8 KiB
+/// line limit (§4) so a peer can't force unbounded buffering by never sending a
+/// newline (threat-model D-6). RFC 2812's own limit is 512 B; this is generous
+/// for IRCv3 tags while still bounded.
+const MAX_IRC_LINE: u64 = 8192;
+
 /// Read newline-framed IRC lines off the socket in a dedicated task so the
 /// stream's `recv_line` await is a cancel-safe `mpsc::recv`.
 fn spawn_reader(read: OwnedReadHalf) -> mpsc::Receiver<String> {
@@ -112,9 +118,16 @@ fn spawn_reader(read: OwnedReadHalf) -> mpsc::Receiver<String> {
         let mut buf = String::new();
         loop {
             buf.clear();
-            match reader.read_line(&mut buf).await {
+            // Bound each line to MAX_IRC_LINE: a fresh `take` budget per line
+            // (+1 so an over-cap line without a newline is detectable). A line
+            // that hits the cap without terminating is a flood → close.
+            let mut limited = (&mut reader).take(MAX_IRC_LINE + 1);
+            match limited.read_line(&mut buf).await {
                 Ok(0) => break, // EOF
                 Ok(_) => {
+                    if buf.len() as u64 > MAX_IRC_LINE {
+                        break; // oversized line (no terminator within the cap)
+                    }
                     if tx.send(std::mem::take(&mut buf)).await.is_err() {
                         break; // session gone
                     }

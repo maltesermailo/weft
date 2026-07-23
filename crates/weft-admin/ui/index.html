@@ -138,6 +138,9 @@ td.actions{text-align:right;white-space:nowrap}
 .pill.neutral{color:var(--flax);border-color:var(--line);background:var(--warp-2)}
 .pill.warn{color:var(--amber);border-color:#4b3d26;background:#241f16}
 .pill.bad{color:var(--madder);border-color:#4b2f2c;background:#241816}
+/* An "off" status chip — muted, so a flag that is set OFF still shows, rather
+   than vanishing (which reads as "unknown"). */
+.pill.off{color:var(--flax-dim);border-color:var(--line-soft);background:transparent}
 
 .pager{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:18px;font-family:var(--mono);font-size:11.5px;color:var(--flax-dim)}
 .placeholder{border:1px dashed var(--line);border-radius:8px;padding:40px;text-align:center;color:var(--flax-dim);font-family:var(--mono);font-size:12.5px}
@@ -274,6 +277,9 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 const when = (ms) => (ms ? new Date(ms).toLocaleString() : "—");
 const short = (s) => { s = String(s ?? ""); return s.length > 14 ? s.slice(0, 10) + "…" : s; };
 const pill = (s, cls = "") => `<span class="pill ${cls}">${esc(s)}</span>`;
+// A boolean-flag status chip that ALWAYS renders — ✓ + colored when on, ✕ +
+// muted when off — so a header shows every flag's state, not just the set ones.
+const flagChip = (label, on, tone = "gold") => `<span class="pill ${on ? tone : "off"}">${on ? "✓" : "✕"} ${esc(label)}</span>`;
 
 // The current detail view re-renders itself after a mutation.
 let refresh = () => {};
@@ -662,9 +668,10 @@ async function openUser(name) {
   USER_CTX = { u, msgs, dms };
   const email = (u.verifications || []).find((v) => v.kind === "email");
   const flag = (n, on) => `<label class="flag ${on ? "on" : ""}"><span class="box"></span>${n}</label>`;
-  const state = `${u.operator ? pill("operator", "gold") : ""}${u.suspended ? pill("suspended", "bad") : ""}${
-    u.banned ? pill("banned", "bad") : ""}${u.muted ? pill("muted", "warn") : ""}${
-    u.deletion_scheduled ? pill("pending delete", "bad") : ""}`;
+  // Every flag shows its state (✓/✕), so "not suspended" is visible, not absent.
+  const state = flagChip("operator", u.operator) + flagChip("suspended", u.suspended, "bad") +
+    flagChip("banned", u.banned, "bad") + flagChip("muted", u.muted, "warn") +
+    (u.deletion_scheduled ? pill("pending delete", "bad") : "");
 
   detailPage({
     key: "user",
@@ -674,7 +681,7 @@ async function openUser(name) {
       name: u.account,
       badges: u.operator ? `<span class="crown" title="Operator">♛</span>` : "",
       sub: `${esc(u.account)}@${esc(WHO.network)}<br>${esc(u.ulid)}`,
-      aside: `<div class="k">State</div><div class="v">${state || '<span class="dim">nominal</span>'}</div>`,
+      aside: `<div class="k">State</div><div class="v">${state}</div>`,
     },
     tabs: [
       ["overview", "Overview"],
@@ -887,7 +894,7 @@ async function openChannel(name) {
   refresh = () => openChannel(name);
   const c = await api("/channels/" + encodeURIComponent(name) + "/detail");
   const ns = name.startsWith("#") && name.includes("/") ? name.slice(1).split("/")[0] : null;
-  const state = `${c.frozen ? pill("frozen", "bad") : ""}${c.restricted ? pill("restricted", "warn") : ""}`;
+  const state = flagChip("frozen", c.frozen, "bad") + flagChip("restricted", c.restricted, "warn");
 
   detailPage({
     key: "channel",
@@ -900,7 +907,8 @@ async function openChannel(name) {
       aside: `<div class="k">Posting</div><div class="v">${
         c.frozen ? '<span class="bad">frozen — ns-admin only</span>'
         : c.restricted ? '<span class="warn">restricted — requires <span class="mono">send</span></span>'
-        : "open"}</div>`,
+        : "open"}</div>
+              <div class="k" style="margin-top:8px">State</div><div class="v">${state}</div>`,
     },
     tabs: [
       ["overview", "Overview"],
@@ -963,7 +971,8 @@ async function openChannel(name) {
 async function openNs(name) {
   refresh = () => openNs(name);
   const n = await api("/namespaces/" + encodeURIComponent(name) + "/detail");
-  const state = `${n.frozen ? pill("frozen", "bad") : ""}${pill(n.visibility, "neutral")}${n.federation ? pill("federating", "neutral") : ""}`;
+  // Visibility is a value (always shown); frozen/federation are flags shown ✓/✕.
+  const state = pill(n.visibility, "neutral") + flagChip("frozen", n.frozen, "bad") + flagChip("federation", n.federation, "");
 
   detailPage({
     key: "ns",

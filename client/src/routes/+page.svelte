@@ -1697,9 +1697,19 @@
 
   // ---- markdown (Phase 4 · Tier 1) ----
   // Escape-first: safe to feed {@html} because HTML is neutralised before any
-  // markdown token is turned back into a tag.
+  // markdown token is turned back into a tag. Quotes are escaped too — the link
+  // rewriters interpolate a captured URL into `href="${url}"`, and a URL char
+  // class permits `"`, so without this a body like `https://x/"onfocus="…` would
+  // break out of the attribute and inject an event handler (attribute-injection
+  // XSS → the Tauri command bridge on desktop). Escaping here fixes it at the
+  // root, for every attribute interpolation, not just links.
   const escapeHtml = (s: string) =>
-    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
 
   // Inline formatting for a single run of text (no fenced/block constructs).
   // Code spans and links are stashed to placeholders BEFORE emphasis runs, so

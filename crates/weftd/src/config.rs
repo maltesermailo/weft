@@ -56,6 +56,16 @@ pub struct Config {
     /// §10.5 outbound SMTP for account (email) verification. Disabled → the
     /// server records claims and logs the code (dev) but sends no mail.
     pub smtp: Smtp,
+    /// Max concurrent client sessions across all client transports (QUIC + WS +
+    /// IRC combined). A new connection past the cap is refused immediately, not
+    /// queued — this bounds total memory/threads (threat-model D-2). Bridge and
+    /// data-plane streams are separate and not counted. Default 1024.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+}
+
+fn default_max_connections() -> usize {
+    1024
 }
 
 /// §10.5 SMTP submission for verification emails. weftd connects out to this
@@ -442,6 +452,7 @@ impl Default for Config {
             media: Media::default(),
             voice: Voice::default(),
             smtp: Smtp::default(),
+            max_connections: default_max_connections(),
         }
     }
 }

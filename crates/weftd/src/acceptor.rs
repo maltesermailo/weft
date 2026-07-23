@@ -84,6 +84,7 @@ pub(crate) async fn accept_quic(
     endpoint: quinn::Endpoint,
     ctx: Arc<ServerCtx>,
     peer_keys: crate::media::PeerKeys,
+    conn_limit: Arc<tokio::sync::Semaphore>,
 ) {
     let mut sessions = JoinSet::new();
     loop {
@@ -92,6 +93,7 @@ pub(crate) async fn accept_quic(
                 let Some(incoming) = incoming else { break }; // endpoint closed
                 let ctx = Arc::clone(&ctx);
                 let peer_keys = Arc::clone(&peer_keys);
+                let conn_limit = Arc::clone(&conn_limit);
                 sessions.spawn(async move {
                     let connection = match incoming.await {
                         Ok(connection) => connection,
@@ -99,6 +101,14 @@ pub(crate) async fn accept_quic(
                             debug!("QUIC handshake failed: {e}");
                             return;
                         }
+                    };
+                    // Bound total concurrent sessions (D-2): refuse past the cap
+                    // rather than queue, so memory can't grow with connection
+                    // count. The permit is held for the session's lifetime.
+                    let Ok(_permit) = conn_limit.try_acquire_owned() else {
+                        debug!(peer = %connection.remote_address(), "connection cap reached; refusing");
+                        connection.close(0u32.into(), b"server at capacity");
+                        return;
                     };
                     info!(peer = %connection.remote_address(), "QUIC connection");
                     // The client opens the control stream FIRST (§3.1 stream 0);
@@ -137,7 +147,12 @@ pub(crate) async fn accept_quic(
 /// §17 WEFT-IRC gateway accept loop. `server_name` (this network's name)
 /// prefixes server-originated IRC lines. TLS termination, if any, is the
 /// operator's (a reverse proxy) — this listener is plaintext.
-pub(crate) async fn accept_irc(listener: TcpListener, ctx: Arc<ServerCtx>, server_name: String) {
+pub(crate) async fn accept_irc(
+    listener: TcpListener,
+    ctx: Arc<ServerCtx>,
+    server_name: String,
+    conn_limit: Arc<tokio::sync::Semaphore>,
+) {
     let mut sessions = JoinSet::new();
     loop {
         let (tcp, peer) = tokio::select! {
@@ -152,7 +167,12 @@ pub(crate) async fn accept_irc(listener: TcpListener, ctx: Arc<ServerCtx>, serve
         };
         let ctx = Arc::clone(&ctx);
         let server_name = server_name.clone();
+        let conn_limit = Arc::clone(&conn_limit);
         sessions.spawn(async move {
+            let Ok(_permit) = conn_limit.try_acquire_owned() else {
+                debug!(%peer, "connection cap reached; refusing IRC");
+                return; // dropping `tcp` closes the socket
+            };
             info!(%peer, "IRC connection");
             let _ = tcp.set_nodelay(true);
             weft_core::run_session(weft_irc::IrcStream::new(tcp, server_name), ctx).await;
@@ -162,7 +182,11 @@ pub(crate) async fn accept_irc(listener: TcpListener, ctx: Arc<ServerCtx>, serve
     drain(sessions, "IRC").await;
 }
 
-pub(crate) async fn accept_ws(listener: TcpListener, ctx: Arc<ServerCtx>) {
+pub(crate) async fn accept_ws(
+    listener: TcpListener,
+    ctx: Arc<ServerCtx>,
+    conn_limit: Arc<tokio::sync::Semaphore>,
+) {
     let mut sessions = JoinSet::new();
     loop {
         let (tcp, peer) = tokio::select! {
@@ -176,7 +200,12 @@ pub(crate) async fn accept_ws(listener: TcpListener, ctx: Arc<ServerCtx>) {
             _ = ctx.shutdown.cancelled() => break,
         };
         let ctx = Arc::clone(&ctx);
+        let conn_limit = Arc::clone(&conn_limit);
         sessions.spawn(async move {
+            let Ok(_permit) = conn_limit.try_acquire_owned() else {
+                debug!(%peer, "connection cap reached; refusing WS");
+                return; // dropping `tcp` closes the socket before the upgrade
+            };
             info!(%peer, "WebSocket connection");
             match WsControlStream::accept(tcp).await {
                 Ok(stream) => weft_core::run_session(WsLines(stream), ctx).await,

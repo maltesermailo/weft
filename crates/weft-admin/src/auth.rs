@@ -14,7 +14,7 @@ use axum::Json;
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use weft_crypto::PasswordHash;
 use weft_proto::Account;
 
@@ -334,10 +334,24 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Domain-separation label so the derived cookie key is independent of the
+/// input secret's other uses. Bump the version suffix to force re-login.
+const COOKIE_KEY_LABEL: &[u8] = b"weft-admin-cookie-key-v1";
+
 /// Convenience for callers that build the config.
+///
+/// `secret` may be a high-value key with other duties — in the embedded server
+/// it is the network Ed25519 signing-key seed. To avoid cross-primitive key
+/// reuse (threat-model F-1), the cookie-signing key is **derived** from it via a
+/// labeled SHA-256 rather than used raw: `SHA-256(label ‖ secret)`. Learning the
+/// derived cookie key therefore no longer reveals the input secret.
 pub fn config(secret: Vec<u8>, operators: impl IntoIterator<Item = Account>) -> AuthConfig {
+    let mut h = Sha256::new();
+    h.update(COOKIE_KEY_LABEL);
+    h.update(&secret);
+    let derived = h.finalize().to_vec();
     AuthConfig {
-        secret,
+        secret: derived,
         operators: operators.into_iter().collect::<HashSet<_>>(),
     }
 }

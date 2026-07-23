@@ -1,8 +1,16 @@
 # Modular monolith & scaling plan for weftd
 
 Status: **proposal — not started.** Decision points for Jannik are marked ⚖ throughout and
-collected in §9. Nothing here changes the wire protocol; everything below is deployment
-topology and internal plumbing.
+collected in §9. Nothing here changes the inter-network wire protocol; §10.5 adds
+intra-network client verbs (Appendix A material). Everything else is deployment topology
+and internal plumbing.
+
+**Revision 2 (2026-07-23).** Merged in: single-namespace scale-out ("spill mode", §10),
+auto-lazy delivery (§10.5), the edge gateway promoted from §8.6 to phase **P6**, the ULID
+clamp fence (P4.6, §10.4), and new/decided items in §9. Decided this revision: worker
+model = **processes across machines over the P1 fabric**; authority hot path = **epoch
+snapshots** (§10.3); delivery contract = **auto-lazy above a size threshold** (§10.5);
+edge gateway = **build** (P6).
 
 ## 0. Goal
 
@@ -48,7 +56,7 @@ Coupling inventory, easiest to hardest to sever:
 | Admin → live actors | `Live` trait (kick/eject/delete), shared `connections` counter | Easy — trait becomes a cluster RPC client. |
 | Mailer | `Mailer` trait | Trivial — stays a library; every role that needs mail links it. Not worth a process. |
 | Media data plane | QUIC bidi streams + HTTP `/media`, gated by `MediaRegistry` in-memory tokens | Medium — bytes are separable, but the token registry is in-process state (fix: signed stateless tokens, §4.2). |
-| Sessions ↔ channel actors | `ChannelHandle` (mpsc) + `broadcast` fan-out + per-session forwarder tasks | **Hard** — the actual monolith. This is P4. |
+| Sessions ↔ channel actors | `ChannelHandle` (mpsc) + `broadcast` fan-out + per-session forwarder tasks | **Hard** — the actual monolith. This is P4 (and §10 for the single-hot-namespace case). |
 | Sessions ↔ directory | one global `Directory` actor (DM order, presence, notify) | Hard — same shape as channels; shard by account. |
 | In-memory maps | `presence`, `voice_rooms`, `federate_cooldown`, `verify_codes`, `MediaRegistry`, dedup `(session,label)` | Mixed — dedup is per-session (stays local); the rest must follow their owning actor or become signed/stored (§6.3). |
 
@@ -67,12 +75,13 @@ cluster_key    = "path/to/node.key"       # per-node Ed25519, signed by the netw
 
 | Role | Owns | Scales with |
 |---|---|---|
-| **chat** | Client transports (QUIC/WS/IRC), session tasks, **channel actors + directory shard for the namespaces/accounts placed on it**, store access | Connections × message rate. The horizontally-sharded tier (§5). |
+| **chat** | Client transports (QUIC/WS/IRC; behind **edge** after P6), session tasks, **channel actors + directory shard for the namespaces/accounts placed on it** (per-channel grain under spill, §10.4), store access | Connections × message rate. The horizontally-sharded tier (§5, §10). |
 | **media** | Blob store (fs/S3 later), QUIC data-plane streams, HTTP `/media`, hash blocklist check | Bandwidth + disk. Stateless once tokens are signed (§4.2); scale-out is trivial. |
 | **federation** | Outbound dialers, `PeerLinks`, mirror/backfill/auto-bridge consumers, **inbound bridge listener** (advertised via `/.well-known/weft`) | Peer count. Usually 1 instance. |
 | **web** | axum: well-known, SPA, HTTPS termination | CDN-able; usually rides chat or media nodes. |
 | **admin** | Admin API + SPA, store-direct, `Live` via cluster RPC | 1 instance. |
 | **maintenance** | Retention purge, compaction, media GC, recovery scheduler, deletion finalizer | **Singleton** — enforced with a Postgres advisory lock (`pg_advisory_lock`), no new deps. |
+| **edge** (P6, decided) | Public TLS/QUIC/WS/IRC termination + ACME; pipes raw `ControlStream` bytes to chat workers over the fabric; new-session placement (RR → least-sessions) | TLS handshake load + connection count. ~Stateless; run ≥2 behind DNS RR. Chat workers drop their public listeners. |
 
 Postgres stays the single source of truth for all roles (its own scaling: §8.3). LiveKit
 stays the voice media plane, unchanged.
@@ -82,6 +91,10 @@ channels, layout, roles, moderation covering-scopes (`#chan` ⊂ `ns:` ⊂ `*`),
 rosters all interrelate; co-locating them keeps every hot-path check node-local and is
 exactly Discord's guild-sharding shape. Non-namespaced (network-level) channels hash as
 the pseudo-namespace `""`. DMs shard separately by account hash on the directory (§5.3).
+**Refinement (§10):** for a namespace that outgrows one node, the authority snapshot
+plane makes hot-path checks node-local *everywhere*, which un-rejects per-channel
+placement — but only as an explicit per-namespace "spill" mode; the default stays whole-
+namespace co-location.
 
 ## 3. The internal fabric: `weft-cluster` (new crate, L2)
 
@@ -92,13 +105,16 @@ verbs beyond envelope framing — the domain payloads are defined in weft-core.
   AUTH BRIDGE: each node holds an Ed25519 node key; a node cert (deterministic-CBOR,
   signed by the network identity key, same pattern as `SignedManifest`) authorizes it to
   join the cluster. Nonce challenge both ways; TLS via the existing rcgen/rustls stack.
-- **Framing**: two stream kinds on one connection.
-  - **CALL streams** (bidi, one per request): deterministic-CBOR envelope
-    `{ id, method, payload }` → `{ id, result | error }`. Same correlation idea as the
-    public protocol's `label`, binary because payloads are full domain records.
-  - **SUB streams** (uni, long-lived): opened by the serving node after a
-    `Subscribe { channel }` call; carries a CBOR stream of `ChannelEvent`s. One SUB per
-    `(subscribing node, channel)` — see the fan-out multiplexer in §5.2.
+- **Framing**: three stream kinds on one connection.
+    - **CALL streams** (bidi, one per request): deterministic-CBOR envelope
+      `{ id, method, payload }` → `{ id, result | error }`. Same correlation idea as the
+      public protocol's `label`, binary because payloads are full domain records.
+    - **SUB streams** (uni, long-lived): opened by the serving node after a
+      `Subscribe { channel }` call; carries a CBOR stream of `ChannelEvent`s. One SUB per
+      `(subscribing node, channel)` — see the fan-out multiplexer in §5.2. SUB streams also
+      carry the **authority feed** (§10.3) and the **watermark plane** (§10.5.4).
+    - **PIPE streams** (bidi, one per client session, P6): edge → chat worker, raw
+      `ControlStream` bytes shoveled both ways; edge never parses beyond framing.
 - ⚖ §9.2 covers text-vs-CBOR: the netcat-debuggable ethos governs the *public* control
   plane; internally, re-encoding `EventRecord`s to text and back is pure loss. Recommend
   CBOR + a `weftd cluster-tap` debug subcommand for observability parity.
@@ -109,20 +125,27 @@ verbs beyond envelope framing — the domain payloads are defined in weft-core.
 Method surface (grows per phase, exhaustive list per phase below):
 
 ```text
-P2  media.check_blocked? (or store-direct)          — media role
-P3  federation.request_auto_bridge / mirror / backfill_pull   (chat → federation)
-    core.ingest_bridged                              (federation → chat, routed by placement)
-P4  channel.call { name, cmd }                       (any Cmd variant, oneshot → response)
-    channel.subscribe { name } → SUB stream
-    directory.call { account, cmd }  + directory.subscribe
-    cluster.placement_epoch / node liveness pings
-P5  admin.live { kick | eject | delete_message }, admin.stats
+P2   media.check_blocked? (or store-direct)          — media role
+P3   federation.request_auto_bridge / mirror / backfill_pull   (chat → federation)
+     core.ingest_bridged                              (federation → chat, routed by placement)
+P4   channel.call { name, cmd }                       (any Cmd variant, oneshot → response)
+     channel.subscribe { name } → SUB stream
+     directory.call { account, cmd }  + directory.subscribe
+     cluster.placement_epoch / node liveness pings
+P5   admin.live { kick | eject | delete_message }, admin.stats
+P6   edge.pipe (PIPE stream open)                     (edge → chat)
+§10  authority.subscribe { ns, have_epoch } → snapshot + delta SUB
+     authority.snapshot { ns }
+     watermark.report { chan, latest_ulid }           (channel actor → home, coalesced)
+     ns-notify SUB (batched watermark frames, home → workers)
 ```
 
 ## 4. Phased plan
 
 Each phase is independently shippable and leaves `cargo test --workspace` green with the
-single-process default untouched.
+single-process default untouched. **Scheduling amendment (rev 2):** §10 Stage A (lazy
+delivery) is protocol-final, cheap, and pays off even single-process — slot it right
+after P0. P6 requires only P1.
 
 ### P0 — Role scaffolding (pure refactor, no new behavior)
 
@@ -173,8 +196,8 @@ pre-generate it, or mint the cluster credentials P1 introduces. Subcommands:
   all be re-minted (`node sign`); `/.well-known/weft` serves the new key immediately so
   unpinned auto-federation self-heals; NETBLOCK entries elsewhere are **unaffected**
   (name-keyed by design, invariant 7 — rotation never evades a block). A wire-level
-  rotation announcement to peers does not exist in the protocol; whether to add one is
-  spec §18 territory (⚖ §9.7).
+  rotation announcement over live bridges is decided (⚖ §9.7) and needs the spec §18
+  normative write-up before implementation.
 
 *Exit criteria*: two test processes complete the handshake, exchange a CALL round-trip
 and a SUB stream; a bad node cert is rejected; codec round-trip tests green; `weftd key`
@@ -196,11 +219,12 @@ Then:
 
 1. Move `FsBlobStore`, `media::router`, and `accept_data_plane`/`handle_data_stream`
    under the `media` role builder. Media nodes need: blob dir, store access for
-   `MediaBlocklistStore` + `MediaStore` metadata (they already write refcounts? — no:
-   **ref recording stays in the channel actor**, the single writer; media nodes only
-   store/serve bytes and write blob metadata rows).
+   `MediaBlocklistStore` + `MediaStore` metadata (**ref recording stays in the channel
+   actor**, the single writer; media nodes only store/serve bytes and write blob
+   metadata rows).
 2. Chat nodes advertise media endpoints to clients (the data-plane address in WELCOME /
-   well-known — small spec-adjacent addition, note in Appendix A).
+   well-known — small spec-adjacent addition, note in Appendix A). After P6, whether
+   this stays a direct public endpoint or proxies through edge is ⚖ §9.14.
 3. `may_fetch` (membership gating) is computed at mint time on the chat node and baked
    into the token — media nodes do **zero** membership queries. Blocklist stays a
    store read at serve time (it must apply to already-minted tokens).
@@ -223,9 +247,10 @@ one code path).
    (Fallback: chat nodes accept `AUTH BRIDGE` and proxy — rejected: pointless hop.)
 4. Ingestion reverses direction: federation node receives bridged events and calls
    `core.ingest_bridged` on the chat node owning the target namespace (placement fn,
-   trivial while chat is 1 node). Origin-authority + manifest gating (invariants 2, 3)
-   run **on the federation node** before the call — it is the component that knows the
-   authenticated peer identity.
+   trivial while chat is 1 node; **per (ns, chan) when the namespace is spilled**,
+   §10.4). Origin-authority + manifest gating (invariants 2, 3) run **on the federation
+   node** before the call — it is the component that knows the authenticated peer
+   identity.
 5. Report-forward outbound dial (currently deferred) naturally lands here too.
 
 *Exit criteria*: the existing two-live-weftd conformance tests re-run with each weftd
@@ -240,7 +265,8 @@ it works with exactly one chat node.
 1. **Placement**: rendezvous (HRW) hashing of namespace name over the configured chat
    node set. Pure function + table in `weft-core`; static membership from `[node]`
    config first (⚖ §9.4 for dynamic membership later). Placement epoch bumps on config
-   change; a mismatch error on calls triggers re-resolution.
+   change; a mismatch error on calls triggers re-resolution. (§10.4 refines the key to
+   `(ns, channel)` for spilled namespaces.)
 2. **`ChannelHandle` goes remote-capable**:
    ```rust
    enum ChannelHandle { Local(mpsc::Sender<Cmd>), Remote(RemoteChannel) }
@@ -255,28 +281,32 @@ it works with exactly one chat node.
    `broadcast::Sender`; further subscribers attach to that; last-drop closes the SUB.
    Cross-node traffic per channel is O(nodes), not O(sessions). Lag on the local
    rebroadcast reuses the existing `RecvError::Lagged` → `SLOW` → HISTORY-resync path
-   (invariant 6) unchanged.
+   (invariant 6) unchanged. (§10.5.2 makes SUB membership focus-aware under lazy mode.)
 4. **Directory sharding**: same pattern keyed by account hash: `Directory` becomes
    local-or-remote; presence moves inside the directory shard that owns the account
    (deleting the separate `presence` Mutex map); `notify` and DM delivery route by
    account. DM ULID ordering: per-account-pair order is preserved because a DM is
    minted by the *recipient-owning* shard — ⚖ §9.5 (alternative: mint by lexicographic
    min of the two accounts; must pick one rule and test it).
-5. **In-memory maps** follow their owner: `voice_rooms` lives with the namespace's chat
-   node; `verify_codes` and `federate_cooldown` move to the directory shard of the
-   account (or drop to store-backed — they're low-rate).
+5. **In-memory maps** follow their owner: `voice_rooms` lives with the channel actor
+   that owns the voice channel; `verify_codes` and `federate_cooldown` move to the
+   directory shard of the account (or drop to store-backed — they're low-rate).
 6. **Failure semantics, explicitly staged**:
-   - *Stage 1 (ship P4 with this)*: static placement; a dead chat node makes its
-     namespaces unavailable until it returns — availability equals today's single
-     process, sharding buys capacity only.
-   - *Stage 2*: lease-based failover — a Postgres lease table (or advisory locks);
-     surviving nodes re-run placement over live nodes, actors respawn cold from the
-     store (actor state is store-backed except the member map, which rebuilds as
-     sessions resubscribe via the resync path). Split-brain is prevented by the lease,
-     preserving the single-writer invariant.
+    - *Stage 1 (ship P4 with this)*: static placement; a dead chat node makes its
+      namespaces unavailable until it returns — availability equals today's single
+      process, sharding buys capacity only.
+    - *Stage 2*: lease-based failover — a Postgres lease table (or advisory locks);
+      surviving nodes re-run placement over live nodes, actors respawn cold from the
+      store (actor state is store-backed except the member map, which rebuilds as
+      sessions resubscribe via the resync path). Split-brain is prevented by the lease,
+      preserving the single-writer invariant. **ULID clamp fence (rev 2, required):** on
+      any cold spawn (failover or migration), the actor initializes its ULID generator
+      to `max(now, last_stored_ulid + 1)` so node clock skew can never mint a ULID ≤ an
+      already-persisted one. Spec-note this; it also underpins §10.4's spill transitions.
 7. Client connection routing: any client may connect to any chat node (sessions are
    node-local; channels resolve remotely). Plain L4 load balancing / DNS RR suffices —
-   no sticky routing needed beyond ordinary connection affinity.
+   no sticky routing needed beyond ordinary connection affinity. **Superseded by P6
+   (decided):** the edge role becomes the public entry; chat workers go internal-only.
 
 *Exit criteria*: two-chat-node conformance — user connected to node A joins, chats,
 edits, reacts, and gets history in a namespace placed on node B; ordering test (two
@@ -287,31 +317,81 @@ across nodes; kill-node-B test documents stage-1 unavailability semantics.
 
 - Maintenance singleton via `pg_advisory_lock` (safe to list the role on several nodes).
 - Admin: `Live` over cluster CALLs fanned to all chat nodes; `/stats` aggregates
-  per-node connection counts.
+  per-node connection counts (also feeds P6 least-sessions placement).
 - `deploy/`: compose profiles for split topologies (chat×2 + media + federation +
   postgres + livekit); document in `docs/vps-testing.md`.
-- `weftd cluster-tap` debug subcommand (§3) + per-link tracing spans.
+- `weftd cluster-tap` debug subcommand (§3) + per-link tracing spans (rev 2: include
+  authority, watermark, and PIPE streams).
 - Update `reviews/code-navigation.md` (per repo convention) as each phase lands.
+
+### P6 — Edge gateway (decided 2026-07-23; promoted from §8.6)
+
+Requires P1 (fabric) only; independent of P2–P5. One public endpoint; certs/ACME in one
+place; QUIC connection migration handled where QUIC terminates; chat workers become
+purely internal machines with no public listener.
+
+1. New role `edge`, same binary (`roles = ["edge"]`), joins the fabric with a node cert
+   like any node. Terminates public TLS/QUIC/WS/IRC and owns the ACME machinery.
+2. **Pipe, not participant.** Per accepted client connection, edge opens one fabric
+   PIPE stream to a chosen chat worker and shovels raw `ControlStream` bytes both ways.
+   Edge never authenticates, never parses beyond framing, holds no snapshots — sessions
+   stay on chat workers. The moment edge makes decisions, a second session layer exists
+   and the authority plane must replicate there too; dumbness is the feature. One fabric
+   connection per edge→worker pair carries all PIPE streams; QUIC gives per-session
+   ordering and per-stream backpressure.
+3. **Placement of new sessions** is edge's only decision: round-robin first,
+   least-sessions later (reusing the P5 `/stats` connection counts).
+4. **Failure model**: edge is ~stateless (per-connection buffers only); a crash is a
+   mass reconnect, absorbed by the SLOW→HISTORY resync path by design. HA: ≥2 edges
+   behind DNS RR, uncoordinated.
+5. **Certs**: ACME (HTTP-01 or DNS-01) on edge only — resolves the multi-node challenge
+   problem from the pre-P6 topology.
+6. **Media path**: ⚖ §9.14 — proxy blobs through edge (single public door; every byte
+   transits twice) vs media nodes advertising their own public endpoint (splits the
+   one-door story). Recommendation: proxy through edge until bandwidth says otherwise;
+   content-addressed blobs keep the CDN option (§8.5) open either way.
+7. **Admin**: ⚖ §9.15 — behind the public edge vs a private port on the admin node.
+   Recommendation: private.
+8. **Security posture**: `is_dialable`/SSRF gating and the anti-enumeration timing
+   envelope now sit at one choke point instead of N workers — added to §5.
+
+*Exit criteria*: full client conformance suite green through one edge in front of two
+chat workers; kill-edge test — clients reconnect via a second edge and resync; cert
+issuance exercised on edge only; RR placement observable in `/stats`; PIPE backpressure
+bounded — a deliberately slow client stalls only its own stream, never the shared
+edge→worker connection.
 
 ## 5. Invariants under the split (checklist to carry into review)
 
 - **§9.1 total order**: exactly one actor per channel cluster-wide (placement + lease);
-  ULID generator never leaves the actor. Test with concurrent cross-node senders.
+  ULID generator never leaves the actor; **clamp fence on every cold spawn** (P4.6).
+  Test with concurrent cross-node senders and skewed clocks.
 - **Invariant 1 (anti-enumeration)**: placement lookups must not leak — a remote
   `NO-SUCH-TARGET` and a local one must be indistinguishable in code path and timing
-  envelope; the placement fn runs regardless of existence.
+  envelope; the placement fn runs regardless of existence, **including nonexistent
+  channels of spilled namespaces** (§10.4). After P6 the timing envelope is measured at
+  the edge choke point.
 - **Invariant 4 (caps precede side effects)**: capability verification stays on the
-  session's node *before* any cluster call is issued.
+  session's node *before* any cluster call is issued; under spill this is the session-
+  side pre-check, with the channel actor's re-check as the only authoritative gate
+  (§10.3.3).
 - **Invariants 2/3 (origin authority, manifest gating)**: enforced on the federation
   node at ingest; the chat node's `ingest` method trusts only authenticated cluster
   peers — the internal fabric's mutual auth is now load-bearing for federation security.
 - **Invariant 6 (backpressure)**: bounded everywhere — CALL streams are naturally
-  request-scoped; SUB streams inherit lag→SLOW; the cluster link itself must never
-  buffer unboundedly (bounded per-link send queues, drop-to-resync on overflow).
+  request-scoped; SUB streams inherit lag→SLOW; the authority feed bounds by epoch-gap
+  → snapshot re-pull (§10.3.2); the watermark plane is coalesced by construction
+  (§10.5.4); PIPE streams bound per-session via QUIC flow control (P6); the cluster
+  link itself must never buffer unboundedly (bounded per-link send queues,
+  drop-to-resync on overflow).
 - **Invariant 13 (SSRF)**: `is_dialable` continues to gate only *federation* dials;
-  cluster peers are explicit config and exempt (they are internal addresses on purpose).
+  cluster peers are explicit config and exempt (they are internal addresses on
+  purpose). After P6, public-side gating concentrates at edge.
 - **§14 (e2ee)**: unchanged — no plaintext path exists to move; SUB streams carry the
-  same opaque payloads the broadcast did.
+  same opaque payloads the broadcast did; lazy mode changes *when* frames are
+  delivered, never content; watermarks carry ULIDs, not payloads.
+- **Snapshot trust (rev 2)**: authority snapshots are trusted state distribution —
+  fabric-only, mutually authed, never derived from client input (§10.3.2).
 
 ## 6. What this plan deliberately does not do
 
@@ -321,6 +401,8 @@ across nodes; kill-node-B test documents stage-1 unavailability semantics.
   path when it saturates).
 - No rewrite of session handlers — the entire point of cutting at `ChannelHandle` /
   `Directory` / sinks is that `session/*.rs` stays untouched.
+- No smart edge — edge (P6) is a byte pipe by definition; session logic never moves
+  there.
 
 ## 7. Cost/benefit honesty
 
@@ -332,10 +414,19 @@ bandwidth). **P4 is a big lift** — do it when a load test says the chat tier i
 bottleneck, not before. Recommend building a load-generation harness (a `weft-tui`-derived
 bot swarm) as part of P0 so every later phase has numbers.
 
+**Rev 2 amendments**: §10 Stage A (lazy delivery + watermarks + windowed member lists)
+is cheap, client-protocol-final, and pays off on a *single box* — at 100k sessions it
+turns a 16 Gbit/s eager-egress fantasy into sub-Gbit/s reality — so it belongs right
+after P0, before any sharding. §10 Stage B (spill) has P4's cost profile: do it when a
+measured namespace outgrows a node. P6 is small (a byte pipe) and simplifies certs,
+routing, and the security choke point; it can land any time after P1.
+
 ## 8. Other ways to scale (context and complements)
 
 1. **Vertical scaling** — the baseline. Rust + tokio + QUIC means the ceiling on one
-   machine is high; measure before sharding. Cheapest ops story by far.
+   machine is high; measure before sharding. Cheapest ops story by far. (With §10 Stage
+   A, the single-box ceiling for one hot namespace rises dramatically — bandwidth, not
+   CPU, was the wall.)
 2. **Federation as sharding** — WEFT's superpower: the protocol is *designed* so that
    load can split across sovereign networks bridged by signed manifests. Many
    mid-sized networks federating beats one giant network, and it needs **zero new
@@ -343,33 +434,35 @@ bot swarm) as part of P0 so every later phase has numbers.
    For communities that outgrow a server, "spin up a second network and bridge" is a
    legitimate, already-working answer.
 3. **Database scaling** (orthogonal to every phase above):
-   - Connection pooling (pgbouncer) and **read replicas** — HISTORY/BATCH, search, and
-     DISCOVER are read-heavy and replica-safe (bounded staleness is fine for
-     scrollback; live path never reads what it just wrote thanks to actor ordering).
-   - **Native partitioning** of the events table by channel hash and/or ULID time —
-     also makes retention purge a partition drop instead of a delete.
-   - **Citus / per-namespace database routing** behind the store traits if a single
-     writer node saturates — the `Arc<dyn Store>` seam admits a router impl that picks
-     a pool by namespace, aligning data placement with P4 actor placement.
+    - Connection pooling (pgbouncer) and **read replicas** — HISTORY/BATCH, search, and
+      DISCOVER are read-heavy and replica-safe (bounded staleness is fine for
+      scrollback; live path never reads what it just wrote thanks to actor ordering).
+      Windowed member lists (§10.5.6) are replica reads too.
+    - **Native partitioning** of the events table by channel hash and/or ULID time —
+      also makes retention purge a partition drop instead of a delete.
+    - **Citus / per-namespace database routing** behind the store traits if a single
+      writer node saturates — the `Arc<dyn Store>` seam admits a router impl that picks
+      a pool by namespace, aligning data placement with P4 actor placement.
 4. **Sharding axis comparison** (why §2 chose namespaces):
-   - *By channel*: finest grain, but splits a namespace's moderation/layout/roles
-     across nodes — every covering-scope check goes remote. Rejected.
-   - *By namespace* (chosen): hot-path locality, Discord-proven shape. Downside: one
-     mega-namespace can't split — mitigate with per-channel sub-placement as a later
-     refinement only if a real namespace outgrows a node.
-   - *By user/account*: right for the directory/DM tier (and used there, P4.4), wrong
-     for channels — every channel would be remote for most of its members.
-   - *By network* = federation (point 2), already built.
+    - *By channel*: finest grain; originally rejected because every covering-scope check
+      goes remote. **Rev 2: un-rejected for hot namespaces only** — the authority
+      snapshot plane (§10.3) makes the checks node-local again; see spill mode (§10.4).
+    - *By namespace* (chosen default): hot-path locality, Discord-proven shape.
+    - *By user/account*: right for the directory/DM tier (and used there, P4.4), wrong
+      for channels — every channel would be remote for most of its members.
+    - *By network* = federation (point 2), already built.
 5. **Edge/CDN for media** — media URLs are content-addressed (BLAKE3), i.e. immutable
    and perfectly cacheable; a dumb HTTP cache or CDN in front of media nodes multiplies
    read bandwidth for free. Signed short-lived GET tokens compose with this via
    signed-URL-style caching keyed on hash (cache the blob, not the authorization).
-6. **Thin edge terminators** (a possible P6): tiny `edge` role that terminates
-   TLS/QUIC/WS and pipes raw `ControlStream` lines to chat nodes over the fabric —
-   sessions stay on chat nodes. Only worth it if TLS termination or connection count
-   (not message rate) becomes the bottleneck; listed for completeness, not planned.
+6. **Thin edge terminators** — **promoted to P6 (decided 2026-07-23)**; see phase P6.
 
 ## 9. Decisions for Jannik (⚖)
+
+**Decided 2026-07-23 (rev 2):** worker model = processes across machines over the P1
+fabric; authority hot path = epoch snapshots (§10.3); delivery contract = auto-lazy
+above a size threshold with the FOCUS verb as part of the mechanism (§10.5); edge
+gateway = build (P6).
 
 1. **Internal fabric: build-on-quinn (recommended) vs adopt a broker/gRPC.** Build keeps
    the dependency policy and dogfoods the stack; a broker buys ready-made fan-out and
@@ -384,8 +477,8 @@ bot swarm) as part of P0 so every later phase has numbers.
    Static is one less failure mode; dynamic arrives with P4 stage-2 failover anyway.
 5. **DM ULID minting rule under directory sharding** (P4.4): recipient-shard vs
    min-account-shard. Pick one, spec-note it, test it.
-6. **Whether P4 happens at all soon** — see §7; P0–P3 stand alone and are the
-   recommended near-term slice.
+6. **Whether P4 happens at all soon** — see §7; P0–P3 (+ §10 Stage A) stand alone and
+   are the recommended near-term slice.
 7. **Network-key rotation signaling** — **decided (2026-07-22): yes**, a signed
    rotation announcement over live bridges: the old key signs the new key, mirroring
    the §2.4 root-rotation shape. Needs the spec §18 → normative write-up before
@@ -395,14 +488,290 @@ bot swarm) as part of P0 so every later phase has numbers.
    records and attestations are re-issued per verified session, so all intra-network
    artifacts self-heal within one expiry/refresh cycle. Namespace root keys are
    user-held and independent — network rotation never touches them.
+8. **Lazy thresholds** (§10.5.1): L_on / L_off member counts with hysteresis
+   (proposed 5,000 / 4,000).
+9. **Legacy clients under lazy** (§10.5.5): enforce lazy regardless of capability
+   (recommended — server self-protection was the point) vs capability-gate with eager
+   fallback (lets old clients externalize cost).
+10. **Focus cap K** (proposed 8) and which event classes focus gates — proposed:
+    everything except the §10.5.3 notify classes, i.e. typing/reactions/edits are
+    focus-gated too.
+11. **Spill trigger** (§10.4): manual admin flag first (recommended) vs automatic from
+    the watermark-plane rate signal; if automatic, thresholds + hysteresis.
+12. **Stale-snapshot policy** (§10.3.4, §10.7): unbounded fail-static + alerting
+    (recommended, availability-first) vs refuse writes when snapshot age > T_max.
+13. **Watermark cadence T** (§10.5.4, proposed 1 s) — badge freshness vs the ~10k
+    frames/s per-worker floor at 100k sessions.
+14. **Media bytes via edge** (P6.6): proxy through edge (recommended initially, one
+    public door) vs direct public media endpoints.
+15. **Admin placement under P6** (P6.7): behind the public edge vs a private port on
+    the admin node (recommended: private).
+
+## 10. Spill mode & auto-lazy: one namespace at 100k concurrent
+
+Extends P4; client-visible additions (FOCUS, mode event, watermarks, windowed member
+lists) are Appendix A material. Federation between networks is untouched — everything
+here is intra-network.
+
+### 10.0 Design point
+
+- 100,000 concurrent sessions attached to **one** namespace, spread over N chat
+  workers (≈ S/N per worker; after P6 the edge does the spreading).
+- Hottest channel: ≥100 concurrent writers. Design rate **R = 50 msg/s**
+  (100 × 1 msg/2 s — already frantic typing); frames ≈ 400 B on the wire.
+- Memory rule: **no non-home worker holds anything O(total members).** Worker memory
+  is O(local sessions) + O(hosted channels) + O(attached namespaces × snapshot). The
+  home's roster-of-record stays store-backed (cached pages, not resident).
+- Ordering invariant §9.1 untouched: exactly one actor per channel cluster-wide,
+  ULIDs minted only there.
+
+### 10.1 Why the namespace atom splits
+
+§8.4 originally rejected channel-grain sharding because covering-scope checks go
+remote. The snapshot plane (§10.3) removes that objection, and the namespace's cost
+decomposes into four axes that scale independently:
+
+| Axis | Serialization requirement | Owner | Scales with |
+|---|---|---|---|
+| Ingest + total order | per **channel** (ULID mint) | channel actor, placed per (ns, chan) | msg rate — nowhere near binding at human rates (§10.6) |
+| Authority (roles, scopes, bans, layout) | per **namespace**, low write rate | home actor + replicated snapshots | mod-action rate (tiny) |
+| Fan-out / delivery | none (read side) | mux per worker, O(workers) per channel | subscriber count × rate → the bandwidth wall, fixed by lazy (§10.5) |
+| Roster & presence UX | none | store/replica + windowed lists (§10.5.6) | member count — must never be O(n²) |
+
+The unsplittable atom is a channel actor plus a small namespace kernel — not the
+namespace.
+
+### 10.2 Home actor
+
+One per namespace, placed by the **existing** HRW(namespace) — a namespace not in
+spill mode has home + all channel actors co-resident and behaves byte-identically to
+P4. Single writer for:
+
+- role definitions, covering scopes, ban/mute set, per-channel overrides, layout;
+- membership writes (join/leave; roster-of-record lives in the store);
+- the **authority epoch** (monotone counter over all of the above);
+- namespace flags: `spill` (§10.4), `lazy` (§10.5), and the channel-placement epoch;
+- watermark aggregation (§10.5.4) — which doubles as the load signal for auto-spill.
+
+Deliberate property: **the message path never depends on home liveness.** Channel
+actors serve from their last snapshot if home is down (fail-static, §10.7).
+
+### 10.3 Authority snapshot plane
+
+#### 10.3.1 Snapshot content and the sparse-assignment trick
+
+Snapshot = `{ epoch, role_defs, covering_scopes, explicit_member_roles, ban_mute_set,
+channel_overrides, flags }`, deterministic-CBOR like everything else.
+
+The O(members) trap is member→role assignments. Collapse it: members absent from
+`explicit_member_roles` hold the default role. Explicit assignments are a small
+minority (mods, boosters, bots), so a 100k-member namespace snapshots at:
+
+| Component | Typical | Pathological |
+|---|---|---|
+| role defs (≤100 × ~200 B) | 20 KB | 20 KB |
+| scopes + overrides | few KB | tens of KB |
+| explicit assignments (2k × ~50 B) | 100 KB | 5 MB (everyone explicitly roled) |
+| bans/mutes (10k × ~40 B) | 400 KB | 2 MB |
+
+Sub-MB typical, single-digit MB worst case, degrading gracefully — per worker, per
+*attached* namespace; negligible next to session buffers.
+
+#### 10.3.2 Feed protocol (rides weft-cluster, no new deps)
+
+- `authority.subscribe { ns, have_epoch }` (CALL) → home replies with a full snapshot
+  iff `have_epoch` is stale, then opens a **SUB stream** of deltas
+  (`RoleDef | Scope | Assign | Ban | Override | Flag`), each carrying the new epoch.
+- Epochs are strictly monotone; a gap on the SUB stream ⇒ `authority.snapshot`
+  re-pull. Same lag→resync shape as the client protocol (invariant 6 doing double
+  duty again).
+- Subscription is **refcounted** per worker: held while the worker hosts ≥1 channel of
+  the namespace **or** terminates ≥1 session attached to it. For a hot namespace that
+  is all workers — feed fan-out is O(N).
+- Snapshots are trusted state and travel only over the mutually-authed fabric; nothing
+  in them is ever derived from client input.
+
+#### 10.3.3 Dual check (invariant 4 preserved)
+
+- **Session worker, pre-check**: session-level caps (auth, attachment, rate limits)
+  plus a covering-scope check against its local snapshot ⇒ garbage dies locally
+  without crossing the fabric. Capability verification still precedes any cluster
+  call, literally as invariant 4 states.
+- **Channel actor, authoritative check**: re-run against *its* snapshot (possibly a
+  newer epoch) before minting. The actor's verdict is the only one that gates side
+  effects — the pre-check is fast-fail + DoS relief, never trusted.
+
+#### 10.3.4 Hard fencing
+
+Deny-side deltas (ban/mute) propagate in ~ms on the SUB streams; for immediate effect
+home additionally issues direct `channel.call { eject }`s to the affected channel
+actors — the same shape admin `Live` already uses. During a partition a worker serves
+with a stale snapshot (fail-static); fail-closed bound is ⚖ §9.12.
+
+### 10.4 Spill placement
+
+- Flag per namespace, **manual first** (`weftd admin ns set-spill`), automatic later
+  (⚖ §9.11) using the watermark plane's rate signal.
+- Placement key under spill: `HRW(ns ‖ 0x00 ‖ channel)` over the chat worker set;
+  non-spill keeps HRW(ns) whole. The anti-enumeration rule carries over verbatim:
+  the placement fn runs for any (ns, chan) whether or not it exists, and a remote
+  `NO-SUCH-TARGET` is indistinguishable from a local one — nonexistence is never
+  short-circuited on the session worker.
+- **Transition** (enter/leave spill; same machinery as P4 stage-2 failover): home
+  bumps the placement epoch; the old actor stops accepting
+  (`placement-epoch-mismatch` → callers re-resolve), drains, releases; the new worker
+  spawns the actor cold from the store, with the **ULID clamp fence** (P4.6). Client
+  retry safety already holds: the (session, label) dedup map is session-local and
+  unaffected by re-resolution.
+- Federation: `core.ingest_bridged` resolves per (ns, chan) when the target namespace
+  is spilled (P3.4).
+
+### 10.5 Auto-lazy delivery
+
+#### 10.5.1 Modes and trigger
+
+Per namespace: **eager** (today: every joined session receives every event) or
+**lazy**. Home flips `lazy` when the **member count** crosses a threshold with
+hysteresis (⚖ §9.8; member count, not concurrent sessions — stable, no flapping). The
+flag rides the authority snapshot, so all workers learn in ms; sessions receive a
+namespace-mode event so clients switch behavior (verb naming yours; Appendix A).
+
+#### 10.5.2 FOCUS
+
+`FOCUS ns chan…` — replace-set semantics, capped at K channels per (session, ns)
+(⚖ §9.10). Focus state lives on the session's worker.
+
+The mux integration is the important part: a worker subscribes to a channel's SUB
+stream **iff eager-mode ∨ ≥1 local session focuses it**. Focus therefore shrinks
+*cross-worker* traffic too, not just last-hop delivery — a hot channel's actor fans
+out to O(workers-with-focused-sessions), and an unfocused channel generates zero
+fabric traffic beyond watermarks.
+
+#### 10.5.3 What still pushes when unfocused
+
+Mentions (via directory notify — already account-sharded), moderation actions against
+the session (kick/eject), voice signaling for joined voice channels, and watermarks.
+
+#### 10.5.4 Watermark plane
+
+- Each channel actor sends home a coalesced `{ chan, latest_ulid }` at most once per
+  T (⚖ §9.13, proposed 1 s) when it minted anything. Home load: ≤ #active-channels
+  msgs/s — trivial.
+- Home batches changed watermarks into **one frame per T per namespace** on a
+  low-rate ns-notify SUB that every session-hosting worker holds; workers fan it to
+  attached sessions. Per-worker cost at S/N = 10k: ~10k small frames/s — minor.
+- Clients derive unread badges from watermarks vs. their read state; a `WATERMARKS`
+  pull exists for resync-on-connect.
+- Free byproduct: home sees per-channel message rates — the measurement input for
+  auto-spill (§10.4) without extra plumbing.
+
+#### 10.5.5 Focus switch = the resync path
+
+Opening a channel is: client extends FOCUS → worker joins the SUB (mux) → client
+fetches the gap from its last-seen ULID via HISTORY. An unfocused channel is exactly a
+**permanently lagged subscriber**; the SLOW→HISTORY machinery built for invariant 6 is
+the entire correctness story. No new consistency mechanism exists to get wrong.
+
+Legacy clients (no FOCUS capability): lazy is **enforced anyway** (recommended,
+⚖ §9.9) — server self-protection was the point. They degrade to no live background
+scrollback; since clients fetch history on channel open regardless, degradation is
+cosmetic (badge accuracy), not correctness.
+
+#### 10.5.6 Windowed member list & presence (companion, required)
+
+At 100k members, presence transitions × full-roster fan-out is O(n²) and dwarfs the
+message plane; it must not exist. Member list becomes a **windowed subscription**:
+client requests a range (the visible scroll window, ~100 entries), served from the
+store/replica via home; presence events push only for subscribed windows, routed from
+the directory shards. Its own small spec addition; ships with Stage A.
+
+### 10.6 Capacity & memory model (N = 10, S = 100k, hottest channel R = 50 msg/s)
+
+| Quantity | Eager | Lazy (5–10 % focus) |
+|---|---|---|
+| Channel-actor ingest | 50 CALL/s — ≪ 1 % core | same |
+| Actor egress (fabric) | ≤ N SUB frames/msg = 500 f/s | O(focused workers) ≤ that |
+| Per-worker client egress (worst case: all sessions in the hot channel) | 50 × 10k × 400 B ≈ **1.6 Gbit/s** | **80–160 Mbit/s** |
+| Per-worker delivery wakeups | 500k/s (≈ 0.5–2 cores incl. writes) | 25–50k/s |
+| Watermark plane per worker | — | ~10k small frames/s |
+| Postgres | few hundred inserts/s namespace-wide — group commit yawns; §8.3 is the real story | same |
+
+Notes:
+
+- Both columns dilute **linearly** in N. Eager is a pure hardware bet (buy NICs);
+  lazy is what makes N small — even N = 2–3 is plausible for 100k, and on a *single*
+  box lazy turns a 16 Gbit/s egress fantasy into sub-Gbit/s reality (why Stage A
+  ships before sharding, §10.9).
+- The 100-writer requirement is met with ~10²–10³× headroom: the channel is the
+  ordering-mandated serialization point, and one actor sustains tens of thousands of
+  msg/s before PG append or fan-out CPU binds — provided the message path is strictly
+  **O(1) in members**: mint, snapshot lookups, batched append, ≤N SUB sends, 1 Hz
+  watermark. Nothing on this path may ever iterate the roster — mentions resolve
+  receiver-side, read-state lives in watermarks + client, refcounts stay where P2 put
+  them.
+- Memory per worker: sessions S/N × ~50–150 KB (quinn conn state + buffers) ≈
+  0.5–1.5 GB — dominant, irreducible, exists today; per hosted channel: node-SUB map
+  O(N) + voice roster + small recent cache (KBs); per attached namespace: snapshot
+  (§10.3.1) + per-session focus sets (bytes). Home adds cached roster pages only.
+  **Nothing anywhere is O(total members) except the store.**
+
+### 10.7 Failure semantics
+
+- **Home down**: authority writes (joins, mod actions) and watermarks stall; message
+  ingest, ordering, delivery, and HISTORY continue on last snapshots (fail-static).
+  Lease-based respawn (P4 stage-2 machinery) recovers it; workers reconcile by epoch.
+- **Channel worker down**: its channels unavailable (stage-1) or lease-failover
+  respawn cold-from-store elsewhere (stage-2) with the clamp fence; subscribers re-SUB
+  through the mux and clients resync via SLOW→HISTORY.
+- **Feed partition**: stale snapshot, fail-static, alert; moderation propagation to
+  the partitioned worker is degraded until heal (⚖ §9.12 for a fail-closed bound).
+
+### 10.8 Layman's model (for the README, roughly)
+
+Every room has exactly one scribe who stamps message order — scribes for different
+rooms may sit on different machines, but no room ever has two. The rulebook (mods,
+bans) is photocopied to every machine and kept fresh by numbered faxes; a missed fax
+means "order a new photocopy," never "phone head office per message." Nobody shouts at
+100,000 people: only those with a room open on screen get messages live; everyone else
+gets a once-per-second sticky note good enough for an unread badge, and opening the
+room fetches the gap through the same catch-up path laggy connections already use. If
+head office burns down, chat keeps flowing off the photocopies — you just can't ban
+anyone until it's rebuilt from the database.
+
+### 10.9 Phasing & test surface
+
+**Stage A — lazy plane (right after P0; single-process valuable on its own).**
+FOCUS verb + mode event + watermark plane + windowed member list. In one process the
+"fabric" legs are function calls; the client-visible protocol is final from day one.
+*Tests*: mode flip mid-session (hysteresis, both directions); focus-switch gap fetch
+== HISTORY resync; marker coalescing bound (≤1 frame/T/ns under burst); legacy-client
+degradation; single-box load: bot swarm (P0 harness) at 100k sessions / 100 writers
+with an egress assertion proving the eager→lazy drop.
+
+**Stage B — home + snapshot plane + spill (requires P1 + P4).**
+Home actor extraction; authority subscribe/delta/re-pull; dual check; spill flag +
+transition + clamp; per-channel federation routing.
+*Tests*: 3-worker conformance — 100 writers split across workers A+B into a channel
+placed on C, strictly monotone ULIDs under concurrency; ban-fencing latency (delta +
+eject) < target; epoch-gap → snapshot re-pull; kill-home → message path stays live,
+joins fail, recovery reconciles; spill transition under load with zero persisted-order
+violations; migration clamp test with skewed clocks.
+
+**Stage C — auto triggers + ops.** Auto-spill from watermark stats; per-namespace
+egress/rate metrics; `cluster-tap` coverage for authority + watermark streams; compose
+profile `edge + chat×3 + postgres` in `deploy/`; update `reviews/code-navigation.md`.
 
 ## Appendix: phase → test surface summary
 
 | Phase | New tests | Existing suite |
 |---|---|---|
 | P0 | role-gated boot matrix | green, byte-identical default |
+| §10 A | mode flip; focus resync; marker coalescing; legacy degradation; 100k bot-swarm egress assertion | eager default unchanged below threshold |
 | P1 | cluster codec round-trips; handshake accept/reject; `weftd key` CLI tests | untouched |
 | P2 | 2-process media conformance; signed-token unit tests | media suite now exercises signed tokens |
 | P3 | 4-process federation conformance; NETBLOCK on split listener | two-live-weftd re-run split |
-| P4 | 2-chat-node conformance; cross-node ordering; cross-node SLOW resync; node-loss semantics | full suite on 1-node placement (degenerate case) |
+| P4 | 2-chat-node conformance; cross-node ordering; cross-node SLOW resync; node-loss semantics; **clamp fence w/ skewed clocks** | full suite on 1-node placement (degenerate case) |
+| §10 B | cross-worker ordering (3 workers); ban-fencing latency; epoch gap re-pull; kill-home fail-static; spill transition | non-spill = degenerate case |
 | P5 | advisory-lock singleton test; admin fan-out | — |
+| P6 | client suite through edge × 2 workers; kill-edge resync; cert-on-edge; RR placement; PIPE backpressure isolation | untouched |
+| §10 C | auto-trigger hysteresis under synthetic load | — |

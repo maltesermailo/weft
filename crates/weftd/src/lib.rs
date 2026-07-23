@@ -407,10 +407,16 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         .context("binding QUIC endpoint")?;
     let quic_addr = endpoint.local_addr()?;
 
+    // One cap shared across every client transport (QUIC + WS + IRC), so the
+    // network-wide live-session count — and thus memory/threads — is bounded
+    // (threat-model D-2). Bridge + data-plane streams are not counted.
+    let conn_limit = Arc::new(tokio::sync::Semaphore::new(config.max_connections));
+
     tasks.push(tokio::spawn(acceptor::accept_quic(
         endpoint.clone(),
         Arc::clone(&ctx),
         Arc::clone(&mirror_peer_keys),
+        Arc::clone(&conn_limit),
     )));
 
     // §11.8 federation media mirroring: outbound bridge connections register
@@ -472,6 +478,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
             tasks.push(tokio::spawn(acceptor::accept_ws(
                 listener,
                 Arc::clone(&ctx),
+                Arc::clone(&conn_limit),
             )));
             Some(ws_addr)
         }
@@ -554,6 +561,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 listener,
                 Arc::clone(&ctx),
                 network.to_string(),
+                Arc::clone(&conn_limit),
             )));
             Some(irc_addr)
         }

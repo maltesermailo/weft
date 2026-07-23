@@ -37,8 +37,15 @@ impl Accounts {
         account: &Account,
         password: &str,
     ) -> Result<RegisterOutcome, StoreError> {
-        let hash = PasswordHash::new(password);
-        Ok(if self.store.register(account, hash.as_phc()).await? {
+        // Argon2id is deliberately CPU/memory-heavy (~19 MiB). Run it on the
+        // blocking pool so a burst of registrations can't starve the async
+        // runtime's worker threads (threat-model D-1).
+        let password = password.to_owned();
+        let phc =
+            tokio::task::spawn_blocking(move || PasswordHash::new(&password).as_phc().to_owned())
+                .await
+                .map_err(|e| StoreError::Backend(format!("argon2 task: {e}")))?;
+        Ok(if self.store.register(account, &phc).await? {
             RegisterOutcome::Created
         } else {
             RegisterOutcome::Exists
@@ -97,7 +104,14 @@ impl Accounts {
             .and_then(|phc| PasswordHash::from_phc(&phc).ok());
         let known = stored.is_some();
         let hash = stored.unwrap_or_else(|| dummy_hash().clone());
-        Ok(hash.verify(password) && known)
+        // Verify on the blocking pool for the same reason as register: every
+        // AUTH — even for an unknown account (the dummy path) — pays the full
+        // Argon2 cost, so this must not run on a runtime worker (D-1).
+        let password = password.to_owned();
+        let ok = tokio::task::spawn_blocking(move || hash.verify(&password))
+            .await
+            .map_err(|e| StoreError::Backend(format!("argon2 task: {e}")))?;
+        Ok(ok && known)
     }
 
     pub async fn enroll_device(

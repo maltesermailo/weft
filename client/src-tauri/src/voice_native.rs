@@ -39,6 +39,12 @@ use xcap::image::{
     codecs::jpeg::JpegEncoder, imageops, DynamicImage, ExtendedColorType, RgbaImage,
 };
 
+/// Upper bound on a decoded video frame's width/height (8K). A remote call
+/// peer's encoder chooses these, so they are attacker-influenced; capping them
+/// before we size a buffer keeps `w * h * 4` from overflowing into an
+/// under-sized allocation that the FFI colour-conversion would then overrun.
+const MAX_VIDEO_DIM: u32 = 7680;
+
 /// A running native video publication (screen share or camera).
 struct VideoPub {
     sid: TrackSid,
@@ -316,9 +322,15 @@ async fn remote_video_task(rtc: RtcVideoTrack, user: String, source: String, app
 
         let i420 = frame.buffer.to_i420();
         let (w, h) = (i420.width(), i420.height());
+        // Dimensions come from the remote peer's decoded frame — reject absurd
+        // ones before allocating (see MAX_VIDEO_DIM). Past the cap, the usize
+        // math below cannot overflow.
+        if w == 0 || h == 0 || w > MAX_VIDEO_DIM || h > MAX_VIDEO_DIM {
+            continue;
+        }
         let (y, u, v) = i420.data();
         let (sy, su, sv) = i420.strides();
-        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        let mut rgba = vec![0u8; w as usize * h as usize * 4];
         yuv_helper::i420_to_abgr(y, sy, u, su, v, sv, &mut rgba, w * 4, w as i32, h as i32);
 
         if let Some(data) = jpeg_data_url_rgba(rgba, w, h, 60) {
