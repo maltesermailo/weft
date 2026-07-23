@@ -1262,6 +1262,9 @@ impl<S: ControlStream> Session<S> {
         cmd: Command,
         user: String,
     ) -> io::Result<Flow> {
+        // The friend verbs key on the caller's full `account@peer` identity —
+        // parse it before `user` is moved into the moderation `Actor`.
+        let caller: Option<UserRef> = user.parse().ok();
         let actor = Actor::Foreign(user);
         match cmd {
             Command::Mute {
@@ -1418,6 +1421,26 @@ impl<S: ControlStream> Session<S> {
                 self.send_event(None, Event::Pong { token }).await?;
                 Ok(Flow::Continue)
             }
+            // Social layer: a peer's user, tunnelled here, manages their side of
+            // a cross-network friendship. `caller` is the foreign `account@peer`
+            // the peer vouched for; the handlers record the edge in *this*
+            // network's store and notify the local target.
+            Command::FriendAdd { user } => match caller {
+                Some(me) => self.on_friend_add(label, user, me).await,
+                None => Ok(Flow::Continue),
+            },
+            Command::FriendAccept { user } => match caller {
+                Some(me) => self.on_friend_accept(label, user, me).await,
+                None => Ok(Flow::Continue),
+            },
+            Command::FriendRemove { user } => match caller {
+                Some(me) => self.on_friend_remove(label, user, me).await,
+                None => Ok(Flow::Continue),
+            },
+            Command::Friends => match caller {
+                Some(me) => self.on_friends(label, me).await,
+                None => Ok(Flow::Continue),
+            },
             _ => {
                 self.unsupported(label, "not yet available over a federation session")
                     .await

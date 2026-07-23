@@ -1322,6 +1322,45 @@ async fn friend_request_accept_list_and_remove() {
 }
 
 #[tokio::test]
+async fn friend_request_to_remote_user_is_tunnelled() {
+    // Send side of cross-network friends: a local user friending a user on
+    // another network records the edge locally AND hands weftd a delivery to
+    // tunnel the command to the peer (§11.10 home-side driver).
+    let ctx = ctx(&["#general"]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let mut ada = ready(&ctx, "ada").await;
+
+    ada.send("FRIEND ADD bob@peer.example");
+    // ada's own state records `outgoing` locally.
+    match ada.recv().await.event {
+        Event::Friend { user, state } => {
+            assert_eq!(user.to_string(), "bob@peer.example");
+            assert_eq!(state, FriendState::Outgoing);
+        }
+        e => panic!("expected FRIEND outgoing, got {e:?}"),
+    }
+    // And the command is handed to weftd's tunnel driver for the peer network.
+    let req = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("friend delivery")
+        .expect("sink open");
+    assert_eq!(req.peer.as_str(), "peer.example");
+    assert_eq!(req.from.to_string(), "ada");
+    assert_eq!(req.line, "FRIEND ADD bob@peer.example");
+
+    // A purely *local* friend request is NOT tunnelled anywhere.
+    ada.send("FRIEND ADD carol@test.example");
+    assert!(matches!(ada.recv().await.event, Event::Friend { .. }));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .is_err(),
+        "a local friend request must not hit the tunnel sink"
+    );
+}
+
+#[tokio::test]
 async fn threads_list_naming_and_unknown_root() {
     let ctx = ctx(&["#general"]);
     let mut ada = joined(&ctx, "ada", "#general").await;
@@ -2672,6 +2711,39 @@ async fn federated_moderator_wields_caps_over_the_bridge() {
     let raw = bridge.recv_raw().await;
     assert!(raw.starts_with("FSESSION 2 REPLY :"), "{raw}");
     assert!(raw.contains("CAP-REQUIRED"), "{raw}");
+}
+
+#[tokio::test]
+async fn federated_friend_request_over_the_tunnel() {
+    // Cross-network friends: a user on network F friend-requests a user on
+    // network H through the §11.10 tunnel. H records the cross-network edge in
+    // its own store and pushes the incoming request to its local user; alice's
+    // own resulting state tunnels back to F.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+
+    // bob is a local (H = test.example) user, online to receive the push.
+    let mut bob = ready(&ctx, "bob").await;
+
+    // F authenticates the bridge and tunnels alice's FRIEND ADD bob@test.example.
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send("FSESSION 1 CMD :@label=f FRIEND ADD bob@test.example");
+
+    // alice's own state (outgoing) tunnels back to F as an FSESSION REPLY.
+    let raw = bridge.recv_raw().await;
+    assert!(raw.starts_with("FSESSION 1 REPLY :"), "{raw}");
+    assert!(raw.contains("FRIEND bob@test.example outgoing"), "{raw}");
+
+    // bob (local) is pushed the incoming request from the federated user — the
+    // edge crossed the network boundary.
+    match bob.recv().await.event {
+        Event::Friend { user, state } => {
+            assert_eq!(user.to_string(), "alice@peer.example");
+            assert_eq!(state, FriendState::Incoming);
+        }
+        e => panic!("expected FRIEND incoming from federated user, got {e:?}"),
+    }
 }
 
 #[tokio::test]

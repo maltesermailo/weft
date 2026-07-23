@@ -464,12 +464,23 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         tasks.push(dialer::spawn_auto_bridge_consumer(
             rx,
             &config.peers,
-            identity_seed,
+            identity_seed.clone(),
             network.clone(),
             Arc::clone(&ctx),
             peer_links.clone(),
         ));
-        info!("auto-federation enabled (auto_bridge = open)");
+        // Social-layer delivery rides the same outbound-federation capability:
+        // a cross-network friend command tunnels to the friend's network.
+        let (friend_tx, friend_rx) = tokio::sync::mpsc::unbounded_channel();
+        ctx.set_friend_deliver_sink(friend_tx);
+        tasks.push(dialer::spawn_friend_deliver_consumer(
+            friend_rx,
+            &config.peers,
+            identity_seed,
+            network.clone(),
+            Arc::clone(&ctx),
+        ));
+        info!("auto-federation enabled (auto_bridge = open); cross-network friends active");
     }
 
     let ws_addr = match config.listen.ws {

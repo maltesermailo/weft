@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Context};
 use tracing::info;
 use weft_core::{BlobHash, Keypair, MirrorRequest, PublicKey, ServerCtx};
-use weft_proto::{Command, Event, NamespaceName, NetworkName, Reply, Request};
+use weft_proto::{Command, Event, FSessionOp, NamespaceName, NetworkName, Reply, Request};
 use weft_transport::QuicControlStream;
 
 /// An authenticated outbound bridge: the control stream plus the connection it
@@ -320,6 +320,126 @@ pub fn spawn_auto_bridge_consumer(
             }
         }
     })
+}
+
+/// §11.10 home-side tunnel driver — drain the social-layer friend-delivery port:
+/// for each cross-network friend command, resolve + SSRF-guard the peer, dial a
+/// fresh **authenticated** bridge, and forward the command inside an FSession
+/// tunnel opened as the local user. Fire-and-forget: the peer applies it and
+/// notifies its own user; we only await the tunnelled ack so the peer processes
+/// the command before we drop the connection. Peer keys/endpoints come from
+/// `[[peers]]` pins, else the §10.2 well-known key fetch (arbitrary domains).
+pub fn spawn_friend_deliver_consumer(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<weft_core::FriendDeliver>,
+    peers: &[crate::config::Peer],
+    identity_seed: String,
+    our_network: NetworkName,
+    ctx: Arc<ServerCtx>,
+) -> tokio::task::JoinHandle<()> {
+    let pinned: std::collections::HashMap<NetworkName, (String, PublicKey)> = peers
+        .iter()
+        .filter_map(|p| {
+            Some((
+                p.network.parse().ok()?,
+                (p.endpoint.clone(), PublicKey::from_b64(&p.key).ok()?),
+            ))
+        })
+        .collect();
+    tokio::spawn(async move {
+        let Ok(identity) = Keypair::from_seed_b64(&identity_seed) else {
+            return;
+        };
+        let client = match weft_transport::client_endpoint(weft_transport::ALPN) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("friend-deliver: cannot build client endpoint: {e}");
+                return;
+            }
+        };
+        loop {
+            let req = tokio::select! {
+                r = rx.recv() => match r { Some(r) => r, None => break },
+                _ = ctx.shutdown.cancelled() => break,
+            };
+            let weft_core::FriendDeliver { peer, from, line } = req;
+            let resolved = match pinned.get(&peer) {
+                Some((endpoint, key)) => tokio::net::lookup_host(endpoint)
+                    .await
+                    .ok()
+                    .and_then(|mut a| a.next())
+                    .map(|addr| (*key, addr))
+                    .ok_or_else(|| anyhow::anyhow!("cannot resolve pinned endpoint {endpoint}")),
+                None => fetch_signing_key(peer.as_str()).await,
+            };
+            let (_key, addr) = match resolved {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(%peer, "friend-deliver: cannot resolve peer: {e}");
+                    continue;
+                }
+            };
+            // Invariant 13: a friend target's network name must never make us
+            // reach internal infrastructure.
+            if !is_dialable(&addr) {
+                tracing::warn!(%peer, %addr, "friend-deliver: refusing non-public peer (SSRF guard)");
+                continue;
+            }
+            if let Err(e) = deliver_friend(
+                &client,
+                addr,
+                &peer,
+                &from.to_string(),
+                &line,
+                &identity,
+                &our_network,
+            )
+            .await
+            {
+                tracing::warn!(%peer, "friend delivery failed: {e}");
+            }
+        }
+    })
+}
+
+/// Dial + authenticate a bridge to `peer`, then tunnel one friend command as the
+/// local user `from` (`FSESSION OPEN` + `CMD`), awaiting the ack so the peer
+/// runs it before we close.
+async fn deliver_friend(
+    endpoint: &quinn::Endpoint,
+    addr: SocketAddr,
+    peer: &NetworkName,
+    from: &str,
+    line: &str,
+    identity: &Keypair,
+    our_network: &NetworkName,
+) -> anyhow::Result<()> {
+    let mut link = dial_bridge(endpoint, addr, peer, identity, our_network).await?;
+    let fsid = "1".to_string();
+    send(
+        &mut link.stream,
+        Command::FSession {
+            fsid: fsid.clone(),
+            op: FSessionOp::Open {
+                account: from.to_string(),
+            },
+        },
+    )
+    .await?;
+    send(
+        &mut link.stream,
+        Command::FSession {
+            fsid: fsid.clone(),
+            op: FSessionOp::Cmd {
+                line: line.to_string(),
+            },
+        },
+    )
+    .await?;
+    // Await the tunnelled reply (bounded) so the peer processes the command
+    // before we drop the link; the reply itself is not needed (each network
+    // records its own edge).
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), link.stream.recv_line()).await;
+    Ok(())
 }
 
 /// Spawn one maintained outbound bridge per configured peer. Each task dials,

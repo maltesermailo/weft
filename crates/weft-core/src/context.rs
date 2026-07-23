@@ -183,6 +183,10 @@ pub struct ServerCtx {
     /// core (socket-free) hands weftd the pull requests; weftd fetches the blobs
     /// over the bridge data plane. `None` = no sink installed.
     mirror_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<MirrorRequest>>,
+    /// Social-layer federation port: core hands weftd a [`FriendDeliver`] when a
+    /// local friend action targets a user on another network; weftd tunnels the
+    /// command to that peer (§11.10 home-side). `None` = no sink installed.
+    friend_deliver_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<FriendDeliver>>,
     /// §11.7 bridge-backfill port: when a peer answers our federated HISTORY with
     /// `STREAM ACCEPT <token>` (large page), core (socket-free) hands weftd the
     /// pull; weftd opens a data stream on the bridge, drains it, and ingests each
@@ -258,6 +262,21 @@ pub struct BackfillReq {
 pub struct AutoBridgeRequest {
     pub network: NetworkName,
     pub namespace: NamespaceName,
+}
+
+/// Deliver a local user's social-layer command to a **peer network** over an
+/// FSession tunnel (§11.10 home-side driver). weftd reuses/establishes the
+/// bridge to `peer`, opens a tunnel as `from`, and forwards `line`. Fire-and-
+/// forget: the peer applies it and notifies its local user; each network keeps
+/// its own copy of the edge, so no reply routing is needed.
+#[derive(Debug, Clone)]
+pub struct FriendDeliver {
+    /// The peer network that owns the *other* user (the target's network).
+    pub peer: NetworkName,
+    /// The local account acting — the tunnel is opened as `from@thisnetwork`.
+    pub from: Account,
+    /// The serialized friend command to run on the peer (`FRIEND ADD …` etc.).
+    pub line: String,
 }
 
 impl ServerCtx {
@@ -366,6 +385,7 @@ impl ServerCtx {
             shutdown: tokio_util::sync::CancellationToken::new(),
             auto_bridge_tx: std::sync::OnceLock::new(),
             mirror_tx: std::sync::OnceLock::new(),
+            friend_deliver_tx: std::sync::OnceLock::new(),
             backfill_tx: std::sync::OnceLock::new(),
             backfill_demand: std::sync::Mutex::new(Vec::new()),
             federate_cooldown: std::sync::Mutex::new(HashMap::new()),
@@ -614,6 +634,18 @@ impl ServerCtx {
     /// §11.8 hand a blob-mirror request to weftd. `false` if no sink is installed.
     pub(crate) fn request_mirror(&self, req: MirrorRequest) -> bool {
         matches!(self.mirror_tx.get(), Some(tx) if tx.send(req).is_ok())
+    }
+
+    /// weftd installs the social-layer friend-delivery sink (its tunnel driver).
+    pub fn set_friend_deliver_sink(&self, tx: tokio::sync::mpsc::UnboundedSender<FriendDeliver>) {
+        let _ = self.friend_deliver_tx.set(tx);
+    }
+
+    /// Hand a cross-network friend command to weftd's tunnel driver. `false` if
+    /// no sink is installed (federation off) — the local edge is still recorded,
+    /// so the peer simply isn't told until federation is available.
+    pub(crate) fn request_friend_deliver(&self, req: FriendDeliver) -> bool {
+        matches!(self.friend_deliver_tx.get(), Some(tx) if tx.send(req).is_ok())
     }
 
     /// weftd installs the §11.7 bridge-backfill sink (its data-plane puller).

@@ -1312,11 +1312,25 @@ impl<S: ControlStream> Session<S> {
                 self.on_verify_confirm(label, kind, code, account).await
             }
             Command::VerifyList => self.on_verify_list(label, account).await,
-            // Social layer: friends (federation-able).
-            Command::FriendAdd { user } => self.on_friend_add(label, user, account).await,
-            Command::FriendAccept { user } => self.on_friend_accept(label, user, account).await,
-            Command::FriendRemove { user } => self.on_friend_remove(label, user, account).await,
-            Command::Friends => self.on_friends(label, account).await,
+            // Social layer: friends (federation-able). The caller's identity is
+            // `account@thisnet` here; a tunnelled peer's friend commands run in
+            // `on_federated` with the caller's *foreign* UserRef.
+            Command::FriendAdd { user } => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.on_friend_add(label, user, me).await
+            }
+            Command::FriendAccept { user } => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.on_friend_accept(label, user, me).await
+            }
+            Command::FriendRemove { user } => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.on_friend_remove(label, user, me).await
+            }
+            Command::Friends => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.on_friends(label, me).await
+            }
             // §16 WEFT-RT voice signaling. The SFU backend is installed by weftd;
             // a zero-voice server answers `UNSUPPORTED` inside these handlers.
             Command::VoiceJoin { channel } => self.on_voice_join(label, channel, account).await,

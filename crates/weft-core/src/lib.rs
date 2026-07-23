@@ -26,8 +26,8 @@ mod voice;
 pub use accounts::Accounts;
 pub use channel::{ChannelEvent, ChannelHandle, JoinAck};
 pub use context::{
-    Actor, AutoBridgeRequest, BackfillPull, BackfillReq, FederationConfig, MirrorRequest,
-    ServerCtx, ServerInfo, PROTOCOL_VERSION,
+    Actor, AutoBridgeRequest, BackfillPull, BackfillReq, FederationConfig, FriendDeliver,
+    MirrorRequest, ServerCtx, ServerInfo, PROTOCOL_VERSION,
 };
 pub use mailer::Mailer;
 pub use maintenance::{

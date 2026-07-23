@@ -6,17 +6,30 @@
 //! store already records cross-network relationships regardless.
 
 use super::*;
+use crate::FriendDeliver;
 use weft_proto::{FriendState, UserRef};
 use weft_store::FriendOutcome;
 
 impl<S: ControlStream> Session<S> {
-    /// The caller's own fully-qualified identity on this network.
-    fn me(&self, account: Account) -> UserRef {
-        UserRef::new(account, self.ctx.info.network.clone())
+    /// Forward a friend command to the target's network over a §11.10 tunnel,
+    /// but only when a **local** caller targets a **remote** user — a federated
+    /// (already-received) action must never re-forward, or it would loop. weftd's
+    /// tunnel driver reuses/establishes the bridge and opens a tunnel as `me`.
+    fn deliver_if_remote(&self, me: &UserRef, target: &UserRef, line: String) {
+        let local = &self.ctx.info.network;
+        if &me.network == local && &target.network != local && !line.is_empty() {
+            self.ctx.request_friend_deliver(FriendDeliver {
+                peer: target.network.clone(),
+                from: me.account.clone(),
+                line,
+            });
+        }
     }
 
     /// Push a `FRIEND` update to a peer's live sessions when the peer is local.
-    /// Cross-network peers are reached over the bridge (deferred routing).
+    /// A **cross-network** peer is reached over the bridge — home forwards the
+    /// change into a §11.10 tunnel to the peer's network, whose own session runs
+    /// the matching handler there (send-side routing tracked separately).
     async fn notify_friend(&self, peer: &UserRef, about: UserRef, state: FriendState) {
         if peer.network == self.ctx.info.network {
             self.ctx
@@ -27,15 +40,18 @@ impl<S: ControlStream> Session<S> {
     }
 
     /// `FRIEND ADD <user@net>` — send a request, or accept the peer's pending
-    /// one. No existence check: an unknown handle is recorded and delivered if
-    /// they ever appear, so the wire never leaks who exists (invariant 1).
+    /// one. `me` is the caller's fully-qualified identity: for a local session
+    /// it is `account@thisnet`; for a **federated (tunnelled) session** it is
+    /// the foreign `account@peer` the peer vouched for — so the same handler
+    /// serves both directions of a cross-network friendship. No existence
+    /// check: an unknown handle is recorded and delivered if they ever appear,
+    /// so the wire never leaks who exists (invariant 1).
     pub(super) async fn on_friend_add(
         &mut self,
         label: Option<String>,
         user: UserRef,
-        account: Account,
+        me: UserRef,
     ) -> io::Result<Flow> {
-        let me = self.me(account);
         if user == me {
             return self.no_such_target(label).await; // can't befriend yourself
         }
@@ -61,28 +77,33 @@ impl<S: ControlStream> Session<S> {
             },
         )
         .await?;
-        // Push the corresponding change to the peer (nothing to push on a
-        // duplicate request / already-friends).
+        // Push the corresponding change to the other side — a local peer via the
+        // directory, a remote one via the tunnel (nothing on a duplicate).
+        let line = format!("FRIEND ADD {user}");
         match outcome {
             FriendOutcome::Requested => {
-                self.notify_friend(&user, me, FriendState::Incoming).await;
+                self.notify_friend(&user, me.clone(), FriendState::Incoming)
+                    .await;
+                self.deliver_if_remote(&me, &user, line);
             }
             FriendOutcome::Accepted => {
-                self.notify_friend(&user, me, FriendState::Friends).await;
+                self.notify_friend(&user, me.clone(), FriendState::Friends)
+                    .await;
+                self.deliver_if_remote(&me, &user, line);
             }
             _ => {}
         }
         Ok(Flow::Continue)
     }
 
-    /// `FRIEND ACCEPT <user@net>` — accept a pending incoming request.
+    /// `FRIEND ACCEPT <user@net>` — accept a pending incoming request. `me` is
+    /// the caller's full identity (local or federated — see [`on_friend_add`]).
     pub(super) async fn on_friend_accept(
         &mut self,
         label: Option<String>,
         user: UserRef,
-        account: Account,
+        me: UserRef,
     ) -> io::Result<Flow> {
-        let me = self.me(account);
         let accepted = match self
             .ctx
             .friends
@@ -104,7 +125,9 @@ impl<S: ControlStream> Session<S> {
             },
         )
         .await?;
-        self.notify_friend(&user, me, FriendState::Friends).await;
+        self.notify_friend(&user, me.clone(), FriendState::Friends)
+            .await;
+        self.deliver_if_remote(&me, &user, format!("FRIEND ACCEPT {user}"));
         Ok(Flow::Continue)
     }
 
@@ -114,9 +137,8 @@ impl<S: ControlStream> Session<S> {
         &mut self,
         label: Option<String>,
         user: UserRef,
-        account: Account,
+        me: UserRef,
     ) -> io::Result<Flow> {
-        let me = self.me(account);
         let removed = match self.ctx.friends.friend_remove(&me, &user).await {
             Ok(r) => r,
             Err(e) => return self.internal(label, &e).await,
@@ -126,12 +148,15 @@ impl<S: ControlStream> Session<S> {
         }
         self.send_event(label, Event::FriendRemoved { user: user.clone() })
             .await?;
-        // Tell the peer the edge is gone.
+        // Tell the other side the edge is gone — local peer via the directory,
+        // remote peer via the tunnel.
         if user.network == self.ctx.info.network {
             self.ctx
                 .directory
                 .notify(user.account.clone(), Event::FriendRemoved { user: me })
                 .await;
+        } else {
+            self.deliver_if_remote(&me, &user, format!("FRIEND REMOVE {user}"));
         }
         Ok(Flow::Continue)
     }
@@ -141,9 +166,8 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_friends(
         &mut self,
         label: Option<String>,
-        account: Account,
+        me: UserRef,
     ) -> io::Result<Flow> {
-        let me = self.me(account);
         let list = match self.ctx.friends.friends(&me).await {
             Ok(l) => l,
             Err(e) => return self.internal(label, &e).await,
