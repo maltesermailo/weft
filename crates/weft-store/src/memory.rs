@@ -290,6 +290,23 @@ impl EventStore for MemoryStore {
         Ok(hits)
     }
 
+    async fn dm_partners(&self, account: &Account) -> Result<Vec<Account>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut out: Vec<Account> = inner
+            .events
+            .keys()
+            .filter_map(|(key, _)| match Scope::from_key(key) {
+                // The scope names both participants; the partner is the other.
+                Some(Scope::Dm(a, b)) if &a == account => Some(b),
+                Some(Scope::Dm(a, b)) if &b == account => Some(a),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     async fn is_deleted(&self, scope: &Scope, root: Ulid) -> Result<bool, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner.deleted.contains(&(scope.as_key(), root)))

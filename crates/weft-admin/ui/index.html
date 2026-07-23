@@ -142,6 +142,54 @@ td.actions{text-align:right;white-space:nowrap}
 .pager{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:18px;font-family:var(--mono);font-size:11.5px;color:var(--flax-dim)}
 .placeholder{border:1px dashed var(--line);border-radius:8px;padding:40px;text-align:center;color:var(--flax-dim);font-family:var(--mono);font-size:12.5px}
 
+/* ---- entity detail pages (design/admin/weft-admin.html) ---- */
+/* profile header */
+.profile{display:flex;align-items:flex-start;gap:18px;margin-bottom:24px}
+.p-avatar{width:74px;height:74px;border-radius:50%;flex:none;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-weight:700;font-size:18px;background:repeating-linear-gradient(45deg,var(--thread-dim) 0 4px,var(--warp-2) 4px 8px)}
+.p-avatar.g{background:var(--warp-2);border-radius:12px}
+.p-name{font-size:21px;font-weight:700;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.p-name .crown{color:var(--thread);font-size:14px}
+.p-sub{font-family:var(--mono);font-size:12px;color:var(--flax);margin-top:2px;line-height:1.8}
+.p-owner{margin-left:auto;text-align:left}
+.p-owner .k{font-size:12.5px;color:var(--flax)}
+.p-owner .v{font-size:13.5px}
+
+/* sub-nav + panel */
+.detail{display:grid;grid-template-columns:180px 1fr;gap:26px;align-items:start}
+.subnav{border-left:1px solid var(--line-soft);position:sticky;top:0}
+.subnav button{display:block;width:100%;text-align:left;background:none;border:0;cursor:pointer;font-family:var(--sans);font-size:13.5px;color:var(--flax);padding:8px 14px;border-left:2px solid transparent;margin-left:-1px}
+.subnav button:hover{color:var(--linen)}
+.subnav button.active{color:var(--linen);border-left-color:var(--thread);font-weight:600}
+.subnav button .n{font-family:var(--mono);font-size:10.5px;color:var(--flax-dim);margin-left:6px}
+
+/* action cards (the controls) */
+.action-card{background:var(--warp-1);border:1px solid var(--line-soft);border-radius:8px;margin-bottom:18px;padding:16px 18px}
+.action-card h2{font-size:15px;font-weight:700;margin-bottom:12px}
+.action-card p{font-size:12.5px;color:var(--flax);margin-bottom:12px;max-width:600px}
+.action-card .row{display:flex;flex-direction:column;gap:10px;align-items:stretch}
+.action-card .row .btns{display:flex;gap:10px;flex-wrap:wrap}
+.action-card.danger{border-color:#4a2b28}
+.action-card.danger h2{color:var(--madder)}
+
+/* entity row lists */
+.rowlist > div{display:flex;align-items:center;gap:11px;background:var(--warp-2);border:1px solid var(--line-soft);border-radius:6px;padding:10px 14px;margin-bottom:10px}
+.rowlist > div:last-child{margin-bottom:0}
+.rowlist .rl-main{min-width:0}
+.rl-main .n{font-weight:700;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rl-main .i{font-family:var(--mono);font-size:11.5px;color:var(--flax-dim)}
+.rl-type{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--flax);flex:none}
+.rl-act{margin-left:auto;display:flex;gap:8px;flex:none}
+.rl-act + .rl-type{margin-left:0}
+.swatch{width:13px;height:13px;border-radius:3px;background:#111;border:1px solid var(--line);flex:none}
+.badge{display:inline-block;font-size:12px;background:var(--warp-2);border:1px solid var(--line);border-radius:20px;padding:3px 12px;margin-right:8px;color:var(--flax)}
+
+@media (max-width:900px){
+  .detail{grid-template-columns:1fr}
+  .subnav{display:flex;flex-wrap:wrap;border-left:0}
+  .subnav button{width:auto;border-left:0;border-bottom:2px solid transparent}
+  .subnav button.active{border-left-color:transparent;border-bottom-color:var(--thread)}
+}
+
 @media (prefers-reduced-motion:no-preference){
   .view-enter{animation:rise .18s ease-out}
   @keyframes rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
@@ -266,6 +314,68 @@ const card = (title, bodyHtml, count) =>
 
 const capChips = (caps) => `<div class="chips">${(caps || []).map((c) => pill(c)).join("")}</div>`;
 
+// ---- entity detail framework (design/admin/weft-admin.html) ----------------
+// Every entity — user, namespace, channel, DM — renders the same shape: a
+// profile header, a sticky sub-nav of sub-pages, and the active panel. The tab
+// lives in module state keyed by entity so re-renders (after an action) keep
+// their place instead of bouncing back to Overview.
+const TAB = {};
+const initials = (s) => (s || "?").replace(/[^a-zA-Z0-9]/g, "").slice(0, 2).toUpperCase() || "?";
+
+/** profile: {avatar, avatarClass, name, badges, sub, aside} */
+function profileHead(p) {
+  return `<div class="profile">
+    <div class="p-avatar ${p.avatarClass || ""}" aria-hidden="true">${esc(p.avatar)}</div>
+    <div>
+      <div class="p-name">${esc(p.name)}${p.badges || ""}</div>
+      <div class="p-sub">${p.sub || ""}</div>
+    </div>
+    ${p.aside ? `<div class="p-owner">${p.aside}</div>` : ""}
+  </div>`;
+}
+
+/**
+ * Render an entity detail page.
+ *  key    — entity kind, the TAB state key (e.g. "user")
+ *  crumb  — {label, view}
+ *  tabs   — [[id, label, count?]]
+ *  panel  — (tabId) => html
+ */
+function detailPage({ key, crumb, profile, tabs, panel }) {
+  const ids = tabs.map(([id]) => id);
+  if (!ids.includes(TAB[key])) TAB[key] = ids[0];
+  const active = TAB[key];
+  const nav = tabs.map(([id, label, count]) =>
+    `<button class="${id === active ? "active" : ""}" data-action="tab" data-x="${key}" data-id="${id}">${esc(label)}${
+      count != null ? `<span class="n">${count}</span>` : ""}</button>`).join("");
+  set(
+    `<a class="crumb" data-action="back" data-x="${crumb.view}">← ${esc(crumb.label)}</a>` +
+    profileHead(profile) +
+    `<div class="detail"><div class="subnav">${nav}</div><div>${panel(active)}</div></div>`
+  );
+}
+
+/** An action card: title, explanation, and its controls. */
+const actionCard = (title, desc, controls, danger = false) =>
+  `<div class="action-card ${danger ? "danger" : ""}"><h2>${title}</h2>${
+    desc ? `<p>${desc}</p>` : ""}<div class="row">${controls}</div></div>`;
+
+/** A row list (channels, roles, members, conversations). */
+const rowList = (rows) => rows.length
+  ? `<div class="card-b rowlist">${rows.map((r) =>
+      `<div>${r.lead || ""}<div class="rl-main"><div class="n">${r.name}</div>${
+        r.sub ? `<div class="i">${r.sub}</div>` : ""}</div>${
+        r.actions ? `<span class="rl-act">${r.actions}</span>` : ""}${
+        r.type ? `<span class="rl-type">${esc(r.type)}</span>` : ""}</div>`).join("")}</div>`
+  : `<div class="card-b"><div class="placeholder">Nothing here yet.</div></div>`;
+
+const rowListCard = (title, rows, count) =>
+  `<div class="card"><div class="card-h"><span class="shuttle"></span><h2>${title}</h2>${
+    count != null ? `<span class="count">${count}</span>` : ""}</div>${rowList(rows)}</div>`;
+
+/** Read-only note shown in place of controls the session can't use. */
+const noPerm = (scope) => `<div class="placeholder">Read-only — you don't hold <span class="mono">${scope}</span>.</div>`;
+
 const delBtn = (msgid) => can("admin.destroy") ? `<button class="btn small danger" data-action="delMsg" data-id="${esc(msgid)}" style="float:right">delete</button>` : "";
 function msgCard(m, reported = false) {
   if (m.deleted) return `<div class="msg"><span class="del">deleted by ${esc(m.by)}</span></div>`;
@@ -331,17 +441,18 @@ const screens = {
         ? `<button class="btn small" data-action="unfreezeNs" data-id="${esc(n.name)}">unfreeze</button>`
         : `<button class="btn small danger" data-action="freezeNs" data-id="${esc(n.name)}">full freeze</button>`)
       : "";
+    ALL_NS = list;
     set(hrow("Namespaces", `${list.length} public`) +
-      note("Public and listed namespaces and their owners. A <b>full freeze</b> locks every channel in a namespace — only the owner and network operators can post, not delegated ns-admins.") +
+      note("Open one for its channels, roles, members and controls. A <b>full freeze</b> locks every channel — only the owner and network operators can post, not delegated ns-admins.") +
       cardTable("Namespaces", list.length, ["Namespace", "Owner", "Visibility", "State", "Title"],
-        list.map((n) => ({ cells: [
+        list.map((n) => ({ action: "ns", id: n.name, cells: [
           `<span class="mono">${esc(n.name)}</span>`,
           esc(n.owner),
           pill(n.visibility, "neutral"),
           n.frozen ? pill("frozen", "bad") : "",
           esc(n.title || ""),
           act2(n),
-        ] }))));
+        ] })), true));
   },
   messages() {
     set(hrow("Messages") + note("Browse materialized history — a channel, or a DM thread between two accounts. Content is readable only where the server holds plaintext; an e2ee target shows \"unavailable by policy\".") +
@@ -480,6 +591,22 @@ const screens = {
 
 // Users list (client-filtered result rows) ----------------------------------
 let ALL_USERS = [];
+/// Namespaces, cached so a user's detail can show what they own without a
+/// per-user query; refreshed whenever the Namespaces screen loads.
+let ALL_NS = [];
+/// The user-detail payload currently on screen (its tabs read from one fetch).
+let USER_CTX = null;
+
+/// Apply a moderation verb at an explicit scope, from an entity's page.
+async function applyMod(verb, scope, account, reasonEl) {
+  if (!account) { alert("Enter an account first."); return; }
+  const reason = (reasonEl?.value || "").trim() || null;
+  if (!confirm(`${verb} ${account} at ${scope}?`)) return;
+  try {
+    await api("/moderation", { method: "POST", body: JSON.stringify({ verb, scope, account, reason }) });
+    refresh();
+  } catch (e) { alert(e.message); }
+}
 function renderUsers(q) {
   const list = ALL_USERS.filter((u) => !q || u.account.toLowerCase().includes(q));
   if (!list.length) { $("#userList").innerHTML = `<div class="card-b"><div class="placeholder">No accounts match "${esc(q)}".</div></div>`; return; }
@@ -524,87 +651,140 @@ function userMsgCard(m) {
 
 async function openUser(name) {
   refresh = () => openUser(name);
-  const [u, msgs] = await Promise.all([
+  const [u, msgs, dms] = await Promise.all([
     api("/accounts/" + encodeURIComponent(name)),
     api("/accounts/" + encodeURIComponent(name) + "/messages?limit=200").catch(() => []),
+    api("/accounts/" + encodeURIComponent(name) + "/dms").catch(() => []),
   ]);
+  USER_CTX = { u, msgs, dms };
   const email = (u.verifications || []).find((v) => v.kind === "email");
-  const claims = (u.verifications || []).length
-    ? (u.verifications || []).map((v) => `<div>${pill(v.kind, v.verified ? "" : "warn")} <span class="mono">${esc(v.subject)}</span> ${v.verified ? '<span class="ok">verified</span>' : '<span class="warn">unconfirmed</span>'}</div>`).join("")
-    : `<span class="dim">none</span>`;
-  const mem = (u.memberships || []).length ? `<div class="chips">${(u.memberships || []).map((c) => pill(c, "neutral")).join("")}</div>` : `<span class="dim">none</span>`;
-  const stateTags = `${u.operator ? pill("operator", "gold") : ""}${u.banned ? pill("banned", "bad") : ""}${u.muted ? pill("muted", "warn") : ""}`;
+  const flag = (n, on) => `<label class="flag ${on ? "on" : ""}"><span class="box"></span>${n}</label>`;
+  const state = `${u.operator ? pill("operator", "gold") : ""}${u.suspended ? pill("suspended", "bad") : ""}${
+    u.banned ? pill("banned", "bad") : ""}${u.muted ? pill("muted", "warn") : ""}${
+    u.deletion_scheduled ? pill("pending delete", "bad") : ""}`;
 
-  const kv = card("Account", `<div class="kv">
-    <div class="k">ULID</div><div class="v mono">${esc(u.ulid)}</div>
-    <div class="k">Email</div><div class="v">${email ? `<span class="mono">${esc(email.subject)}</span> ${email.verified ? '<span class="ok">verified</span>' : '<span class="warn">unconfirmed</span>'}` : '<span class="dim">none on file</span>'}</div>
-    <div class="k">Verified claims</div><div class="v">${claims}</div>
-    <div class="k">Memberships</div><div class="v">${mem}</div>
-  </div>`);
-
-  // WC4 flags card: account state as SCREAMING_SNAKE toggles (design .flags).
-  const flag = (name, on) => `<label class="flag ${on ? "on" : ""}"><span class="box"></span>${name}</label>`;
-  const flags = card("Account flags", `<div class="flags">
-    ${flag("OPERATOR", u.operator)}${flag("SUSPENDED", u.suspended)}${flag("MUTED", u.muted)}${flag("BANNED", u.banned)}${flag("PENDING_DELETE", !!u.deletion_scheduled)}
-  </div>`);
-
-  // WC4 devices card: enrolled Ed25519 fingerprints.
-  const devices = (u.devices || []).length
-    ? cardTable("Devices", u.devices.length, ["Fingerprint"],
-        u.devices.map((f) => ({ cells: [`<span class="fp">${esc(f)}</span>`] })))
-    : card("Devices", `<div class="placeholder">No enrolled devices.</div>`);
-
-  const grants = (u.grants || []).length
-    ? cardTable("Capability grants", u.grants.length, ["Scope", "Caps", "Epoch", "Expiry"],
-        u.grants.map((g) => ({ cells: [`<span class="mono">${esc(g.scope)}</span>`, capChips(g.caps), g.epoch, g.expiry ? when(g.expiry * 1000) : "—"] })))
-    : card("Capability grants", `<div class="placeholder">No grants.</div>`);
-
-  // WC4 "find related": accounts sharing this account's email domain.
-  const related = (u.related || []).length
-    ? card("Related accounts", `<p class="hint" style="margin-bottom:10px">Share this account's email domain — useful during spam waves.</p><div class="chips">${u.related.map((a) => `<button class="btn small" data-action="user" data-id="${esc(a)}">${esc(a)}</button>`).join(" ")}</div>`, u.related.length)
-    : "";
-
-  const messages = card(`Messages`, msgs.length ? msgs.map(userMsgCard).join("") : `<div class="placeholder">No messages authored (or all purged).</div>`, msgs.length);
-
-  // WC7 account moderation: suspend / unsuspend (login-block).
-  let moderation = "";
-  if (can("admin.moderate")) {
-    moderation = card("Account moderation",
-      (u.suspended
-        ? `<div class="action"><h3>Suspended</h3><p>This account is blocked from authenticating — its capability tokens are frozen (it can't open a session). Unsuspend to restore access.</p><div class="row"><button class="btn" data-action="unsuspendUser" data-id="${esc(u.account)}">Unsuspend</button></div></div>`
-        : `<div class="action"><h3>Suspend</h3><p>Blocks the account from authenticating (uniform AUTH-FAILED), freezing its tokens, and closes any sessions it currently has. Reversible.</p><div class="row"><button class="btn danger" data-action="suspendUser" data-id="${esc(u.account)}">Suspend</button></div></div>`) +
-      // WC7 forced logout, on its own: end the sessions without changing state.
-      `<div class="action"><h3>Force logout</h3><p>Closes every device this account has connected right now. It can sign straight back in — pair with Suspend to keep it out. Co-members see an ordinary disconnect.</p><div class="row"><button class="btn" data-action="disconnectUser" data-id="${esc(u.account)}">Disconnect all devices</button></div></div>`);
-  }
-
-  // WC3 danger zone: pending-deletion banner + restore, else a typed-name
-  // confirmation to schedule a (recoverable) soft delete.
-  let danger = "";
-  if (u.deletion_scheduled) {
-    danger = card("Deletion scheduled", `<div class="action danger">
-      <h3>Pending hard delete</h3>
-      <p>Permanent deletion at <b>${when(u.deletion_scheduled)}</b>. Memberships, grants, and moderation records are removed then; posted messages are kept. Restore to cancel.</p>
-      <div class="row"><button class="btn" data-action="restoreUser" data-id="${esc(u.account)}">Restore account</button></div>
-    </div>`);
-  } else if (can("admin.destroy")) {
-    danger = card("Danger zone", `<div class="action danger">
-      <h3>Delete account</h3>
-      <p>Schedules a hard delete after a grace window, recoverable until then. Type the exact account name to confirm.</p>
-      <div class="row">
-        <input type="text" id="delConfirm" placeholder="Type ${esc(u.account)} to confirm" aria-label="Type the exact name to confirm deletion" />
-        <button class="btn danger solid" data-action="delUser" data-id="${esc(u.account)}">Delete account</button>
-      </div>
-    </div>`);
-  }
-
-  // WC2 permissions: only a real operator may change who is an admin, so the
-  // card is hidden otherwise (the server enforces regardless).
-  let perms = "";
-  if (IS_OPERATOR) perms = permissionCard(u.account, u.operator, adminScopesOf(u));
-
-  set(`<a class="crumb" data-action="back" data-x="users">← back to Users</a>` +
-    `<div class="h-row"><h1>${esc(u.account)}</h1><span class="id">${stateTags}${u.suspended ? " " + pill("suspended", "bad") : ""}${u.deletion_scheduled ? " " + pill("pending delete", "bad") : ""}</span></div>` +
-    kv + flags + devices + grants + perms + related + messages + moderation + danger);
+  detailPage({
+    key: "user",
+    crumb: { label: "Back to Users", view: "users" },
+    profile: {
+      avatar: initials(u.account),
+      name: u.account,
+      badges: u.operator ? `<span class="crown" title="Operator">♛</span>` : "",
+      sub: `${esc(u.account)}@${esc(WHO.network)}<br>${esc(u.ulid)}`,
+      aside: `<div class="k">State</div><div class="v">${state || '<span class="dim">nominal</span>'}</div>`,
+    },
+    tabs: [
+      ["overview", "Overview"],
+      ["account", "Account"],
+      ["namespaces", "Namespaces"],
+      ["channels", "Channels", (u.memberships || []).length],
+      ["dms", "DM History", dms.length],
+      ["perms", "Roles & Grants", (u.grants || []).length],
+      ["devices", "Devices", (u.devices || []).length],
+      ["messages", "Messages", msgs.length],
+      ["moderation", "Moderation"],
+      ["danger", "Danger Zone"],
+    ],
+    panel: (tab) => {
+      if (tab === "overview") {
+        return card("Account Information", `<div class="kv">
+            <div class="k">Account</div><div class="v mono">${esc(u.account)}@${esc(WHO.network)}</div>
+            <div class="k">Account ULID</div><div class="v mono">${esc(u.ulid)}</div>
+            <div class="k">Email</div><div class="v">${email ? `<span class="mono">${esc(email.subject)}</span> ${email.verified ? '<span class="ok">verified</span>' : '<span class="warn">unconfirmed</span>'}` : '<span class="dim">none on file</span>'}</div>
+            <div class="k">Operator</div><div class="v">${u.operator ? '<span class="ok">yes</span>' : "no"}</div>
+            <div class="k">Suspended</div><div class="v">${u.suspended ? '<span class="bad">yes</span>' : "no"}</div>
+            <div class="k">Channels</div><div class="v mono">${(u.memberships || []).length}</div>
+            <div class="k">DM conversations</div><div class="v mono">${dms.length}</div>
+            <div class="k">Messages authored</div><div class="v mono">${msgs.length}</div>
+          </div>`) +
+          card("Account Flags", `<div class="flags">
+            ${flag("OPERATOR", u.operator)}${flag("SUSPENDED", u.suspended)}${flag("MUTED", u.muted)}${flag("BANNED", u.banned)}${flag("PENDING_DELETE", !!u.deletion_scheduled)}${flag("EMAIL_VERIFIED", !!(email && email.verified))}
+          </div>`) +
+          ((u.related || []).length
+            ? card("Related accounts", `<p class="hint" style="margin-bottom:10px">Share this account's email domain — the spam-wave pivot.</p><div class="chips">${u.related.map((a) => `<button class="btn small" data-action="user" data-id="${esc(a)}">${esc(a)}</button>`).join(" ")}</div>`, u.related.length)
+            : "");
+      }
+      if (tab === "account") {
+        const claims = (u.verifications || []).length
+          ? (u.verifications || []).map((v) => `<div>${pill(v.kind, v.verified ? "" : "warn")} <span class="mono">${esc(v.subject)}</span> ${v.verified ? '<span class="ok">verified</span>' : '<span class="warn">unconfirmed</span>'}</div>`).join("")
+          : `<span class="dim">none</span>`;
+        return card("Identity", `<div class="kv">
+            <div class="k">Handle</div><div class="v mono">${esc(u.account)}</div>
+            <div class="k">Network</div><div class="v mono">${esc(WHO.network)}</div>
+            <div class="k">ULID</div><div class="v mono">${esc(u.ulid)}</div>
+          </div>`) +
+          card("Verified claims", claims, (u.verifications || []).length);
+      }
+      if (tab === "namespaces") {
+        const owned = ALL_NS.filter((n) => n.owner === u.account);
+        return rowListCard("Namespaces owned", owned.map((n) => ({
+          name: esc(n.name),
+          sub: `${esc(n.visibility)}${n.frozen ? " · frozen" : ""}`,
+          actions: `<button class="btn small" data-action="ns" data-id="${esc(n.name)}">open</button>`,
+        })), owned.length) +
+        note("Namespaces this account owns. Membership in others shows under Channels.");
+      }
+      if (tab === "channels") {
+        return rowListCard("Channel memberships", (u.memberships || []).map((c) => ({
+          name: esc(c),
+          actions: `<button class="btn small" data-action="channel" data-id="${esc(c)}">open</button>` +
+            (can("admin.moderate") ? `<button class="btn small danger" data-action="kickFrom" data-id="${esc(c)}" data-x="${esc(u.account)}">kick</button>` : ""),
+        })), (u.memberships || []).length);
+      }
+      if (tab === "dms") {
+        return rowListCard("Conversations", dms.map((d) => ({
+          name: esc(d.account),
+          sub: "direct message",
+          actions: `<button class="btn small" data-action="dm" data-id="${esc(u.account)}" data-x="${esc(d.account)}">open thread</button>`,
+        })), dms.length) +
+        note("Readable only where the server holds plaintext — an <span class=\"mono\">e2ee</span> DM policy shows as unavailable.");
+      }
+      if (tab === "perms") {
+        const grants = (u.grants || []).length
+          ? cardTable("Capability grants", u.grants.length, ["Scope", "Caps", "Epoch", "Expiry"],
+              u.grants.map((g) => ({ cells: [`<span class="mono">${esc(g.scope)}</span>`, capChips(g.caps), g.epoch, g.expiry ? when(g.expiry * 1000) : "—"] })))
+          : card("Capability grants", `<div class="placeholder">No grants.</div>`);
+        return grants + (IS_OPERATOR ? permissionCard(u.account, u.operator, adminScopesOf(u)) : "");
+      }
+      if (tab === "devices") {
+        return (u.devices || []).length
+          ? cardTable("Enrolled devices", u.devices.length, ["Fingerprint"], u.devices.map((f) => ({ cells: [`<span class="fp">${esc(f)}</span>`] })))
+          : card("Devices", `<div class="placeholder">No enrolled devices.</div>`);
+      }
+      if (tab === "messages") {
+        return card("Messages", msgs.length ? msgs.map(userMsgCard).join("") : `<div class="placeholder">No messages authored (or all purged).</div>`, msgs.length);
+      }
+      if (tab === "moderation") {
+        if (!can("admin.moderate")) return noPerm("admin.moderate");
+        return (u.suspended
+            ? actionCard("Suspended", "This account is blocked from authenticating — its capability tokens are frozen because it can't open a session.",
+                `<div class="btns"><button class="btn" data-action="unsuspendUser" data-id="${esc(u.account)}">Unsuspend</button></div>`)
+            : actionCard("Suspend account", "Blocks authentication (uniform AUTH-FAILED), freezing its tokens, and closes any sessions it currently has. Reversible.",
+                `<div class="btns"><button class="btn danger" data-action="suspendUser" data-id="${esc(u.account)}">Suspend</button></div>`)) +
+          actionCard("Force logout", "Closes every device connected right now. The account can sign straight back in — pair with Suspend to keep it out.",
+            `<div class="btns"><button class="btn" data-action="disconnectUser" data-id="${esc(u.account)}">Disconnect all devices</button></div>`) +
+          actionCard("Network moderation", "Mute or ban at network scope (<span class=\"mono\">*</span>). Use a channel or namespace scope from that entity's page for narrower action.",
+            `<input type="text" id="uModReason" placeholder="reason (optional)" />
+             <div class="btns">
+               <button class="btn" data-action="modUser" data-id="${esc(u.account)}" data-x="mute">Mute</button>
+               <button class="btn" data-action="modUser" data-id="${esc(u.account)}" data-x="unmute">Unmute</button>
+               <button class="btn danger" data-action="modUser" data-id="${esc(u.account)}" data-x="ban">Ban</button>
+               <button class="btn" data-action="modUser" data-id="${esc(u.account)}" data-x="unban">Unban</button>
+             </div>`);
+      }
+      // danger
+      if (u.deletion_scheduled) {
+        return actionCard("Pending hard delete",
+          `Permanent deletion at <b>${when(u.deletion_scheduled)}</b>. Memberships, grants and moderation records are removed then; posted messages are kept.`,
+          `<div class="btns"><button class="btn" data-action="restoreUser" data-id="${esc(u.account)}">Restore account</button></div>`, true);
+      }
+      if (!can("admin.destroy")) return noPerm("admin.destroy");
+      return actionCard("Delete account",
+        "Schedules a hard delete after a grace window, recoverable until then. Type the exact account name to confirm.",
+        `<input type="text" id="delConfirm" placeholder="Type ${esc(u.account)} to confirm" aria-label="Type the exact name to confirm deletion" />
+         <div class="btns"><button class="btn danger solid" data-action="delUser" data-id="${esc(u.account)}">Delete account</button></div>`, true);
+    },
+  });
 }
 
 // ---- WC2 permissions -------------------------------------------------------
@@ -697,36 +877,218 @@ async function openPeer(name) {
 async function openChannel(name) {
   refresh = () => openChannel(name);
   const c = await api("/channels/" + encodeURIComponent(name) + "/detail");
-  const members = (c.members || []).length
-    ? card("Members", `<p class="hint" style="margin-bottom:10px">Persistent roster (§6.3) — offline members included.</p><div class="chips">${c.members.map((m) => `<button class="btn small" data-action="user" data-id="${esc(m)}">${esc(m)}</button>`).join(" ")}</div>`, c.members.length)
-    : card("Members", `<div class="placeholder">No persistent members.</div>`);
-  // WC7 room actions: freeze (reversible lock) and the typed-name delete.
-  let actions = "";
-  if (can("admin.moderate")) {
-    actions += card("Room actions", c.frozen
-      ? `<div class="action"><h3>Frozen</h3><p>Nobody can post here except <b>ns-admin</b> holders — so a moderator can still explain why. Unfreeze to reopen.</p><div class="row"><button class="btn" data-action="unfreezeChan" data-id="${esc(c.name)}">Unfreeze channel</button></div></div>`
-      : `<div class="action"><h3>Freeze</h3><p>Locks the channel: everyone but <b>ns-admin</b> holders is refused, whatever capabilities they hold. Reversible, and it leaves grants untouched.</p><div class="row"><button class="btn danger" data-action="freezeChan" data-id="${esc(c.name)}">Freeze channel</button></div></div>`);
-  }
-  if (can("admin.destroy")) {
-    actions += card("Danger zone", `<div class="action danger">
-      <h3>Delete channel</h3>
-      <p>Removes the channel and its stored messages. This is <b>not</b> recoverable. Type the exact channel name to confirm.</p>
-      <div class="row">
-        <input type="text" id="chanDelConfirm" placeholder="Type ${esc(c.name)} to confirm" aria-label="Type the exact channel name to confirm deletion" />
-        <button class="btn danger solid" data-action="delChan" data-id="${esc(c.name)}">Delete channel</button>
-      </div>
-    </div>`);
-  }
+  const ns = name.startsWith("#") && name.includes("/") ? name.slice(1).split("/")[0] : null;
   const state = `${c.frozen ? pill("frozen", "bad") : ""}${c.restricted ? pill("restricted", "warn") : ""}`;
-  set(`<a class="crumb" data-action="back" data-x="channels">← back to Channels</a>` +
-    `<div class="h-row"><h1>${esc(c.name)}</h1><span class="id">${state}<span class="meta">${esc(c.policy)}</span></span></div>` +
-    card("Channel", `<div class="kv">
-      <div class="k">Retention</div><div class="v mono">${esc(c.policy)}</div>
-      <div class="k">Posting</div><div class="v">${c.frozen ? '<span class="bad">frozen — ns-admin only</span>' : c.restricted ? '<span class="warn">restricted — requires <span class="mono">send</span></span>' : "open"}</div>
-    </div>`) +
-    members +
-    card("History", `<button class="btn primary" data-action="browseChan" data-id="${esc(c.name)}">Browse messages</button>`) +
-    actions);
+
+  detailPage({
+    key: "channel",
+    crumb: { label: "Back to Channels", view: "channels" },
+    profile: {
+      avatar: initials(name.replace(/^#/, "").split("/").pop()),
+      avatarClass: "g",
+      name: c.name,
+      sub: `${esc(c.policy)}<br>${ns ? `namespace: ${esc(ns)}` : "network channel"}`,
+      aside: `<div class="k">Posting</div><div class="v">${
+        c.frozen ? '<span class="bad">frozen — ns-admin only</span>'
+        : c.restricted ? '<span class="warn">restricted — requires <span class="mono">send</span></span>'
+        : "open"}</div>`,
+    },
+    tabs: [
+      ["overview", "Overview"],
+      ["members", "Members", (c.members || []).length],
+      ["messages", "Messages"],
+      ["moderation", "Moderation"],
+      ["danger", "Danger Zone"],
+    ],
+    panel: (tab) => {
+      if (tab === "overview") {
+        return card("Channel Information", `<div class="kv">
+          <div class="k">Channel</div><div class="v mono">${esc(c.name)}</div>
+          <div class="k">Namespace</div><div class="v">${ns ? `<button class="btn small" data-action="ns" data-id="${esc(ns)}">${esc(ns)}</button>` : '<span class="dim">none (network channel)</span>'}</div>
+          <div class="k">Retention</div><div class="v mono">${esc(c.policy)}</div>
+          <div class="k">Posting</div><div class="v">${c.frozen ? '<span class="bad">frozen</span>' : c.restricted ? '<span class="warn">restricted</span>' : "open"}</div>
+          <div class="k">Members</div><div class="v mono">${(c.members || []).length}</div>
+        </div>`) + card("State", `<div class="flags">${
+          `<label class="flag ${c.frozen ? "on" : ""}"><span class="box"></span>FROZEN</label>` +
+          `<label class="flag ${c.restricted ? "on" : ""}"><span class="box"></span>RESTRICTED</label>`}</div>`);
+      }
+      if (tab === "members") {
+        return rowListCard("Persistent roster", (c.members || []).map((m) => ({
+          name: esc(m),
+          sub: "member",
+          actions: `<button class="btn small" data-action="user" data-id="${esc(m)}">open</button>` +
+            (can("admin.moderate") ? `<button class="btn small danger" data-action="kickFrom" data-id="${esc(c.name)}" data-x="${esc(m)}">kick</button>` : ""),
+        })), (c.members || []).length) +
+        note("Persistent membership (§6.3) — offline members included.");
+      }
+      if (tab === "messages") {
+        return card("History", `<p class="hint" style="margin-bottom:10px">Materialized view — the same one HISTORY serves.</p><button class="btn primary" data-action="browseChan" data-id="${esc(c.name)}">Browse messages</button>`);
+      }
+      if (tab === "moderation") {
+        if (!can("admin.moderate")) return noPerm("admin.moderate");
+        return (c.frozen
+            ? actionCard("Frozen", "Nobody can post here except <b>ns-admin</b> holders, so a moderator can still explain why.",
+                `<div class="btns"><button class="btn" data-action="unfreezeChan" data-id="${esc(c.name)}">Unfreeze channel</button></div>`)
+            : actionCard("Freeze channel", "Locks the channel: everyone but <b>ns-admin</b> holders is refused, whatever capabilities they hold. Reversible, and it leaves grants untouched.",
+                `<div class="btns"><button class="btn danger" data-action="freezeChan" data-id="${esc(c.name)}">Freeze channel</button></div>`)) +
+          actionCard("Channel moderation", "Mute or ban at this channel's scope. A channel-scope ban also force-parts the account.",
+            `<input type="text" id="cModAcct" placeholder="account" />
+             <input type="text" id="cModReason" placeholder="reason (optional)" />
+             <div class="btns">
+               <button class="btn" data-action="modChan" data-id="${esc(c.name)}" data-x="mute">Mute</button>
+               <button class="btn" data-action="modChan" data-id="${esc(c.name)}" data-x="unmute">Unmute</button>
+               <button class="btn danger" data-action="modChan" data-id="${esc(c.name)}" data-x="ban">Ban</button>
+               <button class="btn" data-action="modChan" data-id="${esc(c.name)}" data-x="unban">Unban</button>
+               <button class="btn danger" data-action="modChan" data-id="${esc(c.name)}" data-x="kick">Kick</button>
+             </div>`);
+      }
+      if (!can("admin.destroy")) return noPerm("admin.destroy");
+      return actionCard("Delete channel",
+        "Removes the channel and its stored messages. This is <b>not</b> recoverable. Type the exact channel name to confirm.",
+        `<input type="text" id="chanDelConfirm" placeholder="Type ${esc(c.name)} to confirm" aria-label="Type the exact channel name to confirm deletion" />
+         <div class="btns"><button class="btn danger solid" data-action="delChan" data-id="${esc(c.name)}">Delete channel</button></div>`, true);
+    },
+  });
+}
+
+async function openNs(name) {
+  refresh = () => openNs(name);
+  const n = await api("/namespaces/" + encodeURIComponent(name) + "/detail");
+  const state = `${n.frozen ? pill("frozen", "bad") : ""}${pill(n.visibility, "neutral")}${n.federation ? pill("federating", "neutral") : ""}`;
+
+  detailPage({
+    key: "ns",
+    crumb: { label: "Back to Namespaces", view: "namespaces" },
+    profile: {
+      avatar: initials(n.name),
+      avatarClass: "g",
+      name: n.title || n.name,
+      sub: `${esc(n.name)}<br>${esc(n.root_key).slice(0, 24)}…`,
+      aside: `<div class="k">Owner</div><div class="v"><button class="btn small" data-action="user" data-id="${esc(n.owner)}">${esc(n.owner)}</button></div>
+              <div class="k" style="margin-top:8px">State</div><div class="v">${state}</div>`,
+    },
+    tabs: [
+      ["overview", "Overview"],
+      ["channels", "Channels", n.channels.length],
+      ["roles", "Roles", n.roles.length],
+      ["members", "Members", n.members.length],
+      ["settings", "Settings"],
+      ["moderation", "Moderation"],
+      ["danger", "Danger Zone"],
+    ],
+    panel: (tab) => {
+      if (tab === "overview") {
+        return card("Namespace Information", `<div class="kv">
+            <div class="k">Name</div><div class="v mono">${esc(n.name)}</div>
+            <div class="k">Title</div><div class="v">${esc(n.title || "") || '<span class="dim">not set</span>'}</div>
+            <div class="k">Description</div><div class="v">${esc(n.description || "") || '<span class="dim">not set</span>'}</div>
+            <div class="k">Owner</div><div class="v mono">${esc(n.owner)}</div>
+            <div class="k">Visibility</div><div class="v mono">${esc(n.visibility)}</div>
+            <div class="k">Root key</div><div class="v"><span class="fp">${esc(n.root_key)}</span></div>
+            <div class="k">Recovery quorum</div><div class="v">${n.recovery_set ? '<span class="ok">designated</span> <span class="dim">(membership not disclosed)</span>' : '<span class="dim">none</span>'}</div>
+            <div class="k">Channels</div><div class="v mono">${n.channels.length}</div>
+            <div class="k">Members</div><div class="v mono">${n.members.length}</div>
+          </div>`) +
+          card("Categories", n.categories.length
+            ? `<div class="chips">${n.categories.map((c) => pill(c, "neutral")).join("")}</div>`
+            : `<div class="placeholder">No categories defined.</div>`, n.categories.length) +
+          card("State", `<div class="flags">
+            <label class="flag ${n.frozen ? "on" : ""}"><span class="box"></span>FULL_FREEZE</label>
+            <label class="flag ${n.federation ? "on" : ""}"><span class="box"></span>FEDERATION_OPEN</label>
+            <label class="flag ${n.visibility === "public" ? "on" : ""}"><span class="box"></span>PUBLIC</label>
+            <label class="flag ${n.recovery_set ? "on" : ""}"><span class="box"></span>RECOVERY_SET</label>
+          </div>`);
+      }
+      if (tab === "channels") {
+        return rowListCard("Channels", n.channels.map((c) => ({
+          name: esc(c.name),
+          sub: `${esc(c.policy)}${c.category ? ` · ${esc(c.category)}` : ""}${c.frozen ? " · frozen" : ""}${c.restricted ? " · restricted" : ""}`,
+          type: c.kind,
+          actions: `<button class="btn small" data-action="channel" data-id="${esc(c.name)}">open</button>`,
+        })), n.channels.length);
+      }
+      if (tab === "roles") {
+        return rowListCard("Roles", n.roles.map((r) => ({
+          lead: `<span class="swatch" style="background:${esc(r.color)}"></span>`,
+          name: esc(r.name),
+          sub: (r.caps || []).join(" · ") || "no permissions",
+          type: r.hoist ? "hoisted" : "",
+        })), n.roles.length) +
+        note("Roles are capability bundles (§6.5). Edit them in the client — the panel shows the effective set.");
+      }
+      if (tab === "members") {
+        return rowListCard("Members", n.members.map((m) => ({
+          name: esc(m),
+          actions: `<button class="btn small" data-action="user" data-id="${esc(m)}">open</button>`,
+        })), n.members.length) +
+        note("Distinct accounts holding membership in any channel of this namespace.");
+      }
+      if (tab === "settings") {
+        if (!can("admin.moderate")) return noPerm("admin.moderate");
+        const visOpts = ["public", "unlisted", "private"].map((v) => `<option ${v === n.visibility ? "selected" : ""}>${v}</option>`).join("");
+        return actionCard("Visibility", "Public namespaces are listed in discovery; unlisted are joinable by exact name; private are indistinguishable from nonexistent.",
+            `<select id="nsVis">${visOpts}</select>
+             <div class="btns"><button class="btn primary" data-action="nsVis" data-id="${esc(n.name)}">Update visibility</button></div>`) +
+          actionCard("Auto-federation", `§11.10 reachability. When open <b>and</b> public, a bridge request for this namespace is answered with a signed manifest. Currently <b>${n.federation ? "open" : "closed"}</b>.`,
+            `<div class="btns"><button class="btn" data-action="nsFed" data-id="${esc(n.name)}" data-x="${n.federation ? "closed" : "open"}">${n.federation ? "Close federation" : "Open federation"}</button></div>`);
+      }
+      if (tab === "moderation") {
+        if (!can("admin.destroy")) return noPerm("admin.destroy");
+        return (n.frozen
+            ? actionCard("Full freeze active", "Every channel in this namespace is locked. Only the owner and network operators can post — a delegated ns-admin cannot.",
+                `<div class="btns"><button class="btn" data-action="unfreezeNs" data-id="${esc(n.name)}">Lift full freeze</button></div>`)
+            : actionCard("Full freeze", "Locks <b>every</b> channel in the namespace. Only the owner and network operators may post — delegated ns-admins cannot talk through it or lift it.",
+                `<div class="btns"><button class="btn danger" data-action="freezeNs" data-id="${esc(n.name)}">Full-freeze namespace</button></div>`, true)) +
+          actionCard("Namespace moderation", "Mute or ban at <span class=\"mono\">ns:" + esc(n.name) + "</span> — covers every channel in the namespace.",
+            `<input type="text" id="nsModAcct" placeholder="account" />
+             <input type="text" id="nsModReason" placeholder="reason (optional)" />
+             <div class="btns">
+               <button class="btn" data-action="modNs" data-id="${esc(n.name)}" data-x="mute">Mute</button>
+               <button class="btn" data-action="modNs" data-id="${esc(n.name)}" data-x="unmute">Unmute</button>
+               <button class="btn danger" data-action="modNs" data-id="${esc(n.name)}" data-x="ban">Ban</button>
+               <button class="btn" data-action="modNs" data-id="${esc(n.name)}" data-x="unban">Unban</button>
+             </div>`);
+      }
+      if (!IS_OPERATOR) return noPerm("operator");
+      return actionCard("Operator takeover",
+        "§2.4 rung 3. Seizes the namespace immediately — no delay and nothing to cancel — rotating the root key and handing ownership to the account you name. It is announced to members and permanently marked operator-initiated in <span class=\"mono\">root-history</span>. Requires the network signing key, so it runs server-side.",
+        `<input type="text" id="nsTakeover" placeholder="new owner account" />
+         <div class="btns"><button class="btn danger solid" data-action="nsTakeover" data-id="${esc(n.name)}">Take over namespace</button></div>`, true);
+    },
+  });
+}
+
+async function openDm(a, b) {
+  refresh = () => openDm(a, b);
+  const t = await api(`/dms/${encodeURIComponent(a)}/${encodeURIComponent(b)}/messages?limit=200`);
+  detailPage({
+    key: "dm",
+    crumb: { label: "Back to Messages", view: "messages" },
+    profile: {
+      avatar: "DM",
+      avatarClass: "g",
+      name: `${t.participants[0]} ↔ ${t.participants[1]}`,
+      sub: `policy: ${esc(t.policy)}<br>${t.unavailable ? "unavailable by policy" : `${t.messages.length} messages`}`,
+      aside: `<div class="k">Participants</div><div class="v">
+        <button class="btn small" data-action="user" data-id="${esc(t.participants[0])}">${esc(t.participants[0])}</button>
+        <button class="btn small" data-action="user" data-id="${esc(t.participants[1])}">${esc(t.participants[1])}</button></div>`,
+    },
+    tabs: [["overview", "Overview"], ["messages", "Messages", t.unavailable ? null : t.messages.length]],
+    panel: (tab) => {
+      if (tab === "overview") {
+        return card("Conversation", `<div class="kv">
+          <div class="k">Participants</div><div class="v mono">${esc(t.participants[0])}, ${esc(t.participants[1])}</div>
+          <div class="k">Retention policy</div><div class="v mono">${esc(t.policy)}</div>
+          <div class="k">Readable</div><div class="v">${t.unavailable ? '<span class="warn">no — e2ee, the server holds no plaintext</span>' : '<span class="ok">yes</span>'}</div>
+          <div class="k">Messages</div><div class="v mono">${t.unavailable ? "—" : t.messages.length}</div>
+        </div>`);
+      }
+      if (t.unavailable) {
+        return card("Messages", `<div class="placeholder">Unavailable by policy — this conversation is <span class="mono">e2ee</span>, so no plaintext is held or materialized (invariant 8).</div>`);
+      }
+      return card("Messages", t.messages.length ? t.messages.map((m) => msgCard(m)).join("") : `<div class="placeholder">No messages.</div>`, t.messages.length);
+    },
+  });
 }
 
 async function inspectTokens() {
@@ -755,22 +1117,15 @@ async function inspectTokens() {
   } catch (e) { out.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 
+/// The DM lookup opens the conversation's own detail page (Overview +
+/// Messages), so a DM is a first-class entity like a user or channel rather
+/// than a result pane.
 async function browseDm(aArg, bArg) {
   const a = (aArg || $("#dmA")?.value || "").trim();
   const b = (bArg || $("#dmB")?.value || "").trim();
   if (!a || !b) return;
-  if ($("#dmA")) { $("#dmA").value = a; $("#dmB").value = b; }
-  refresh = () => browseDm(a, b);
-  try {
-    const r = await api(`/dms/${encodeURIComponent(a)}/${encodeURIComponent(b)}/messages?limit=100`);
-    const t = $("#msgs");
-    if (!t) return;
-    if (r.unavailable) {
-      t.innerHTML = `<div class="placeholder">Unavailable by policy — this network's DMs are <span class="mono">${esc(r.policy)}</span> (end-to-end encrypted). Plaintext is never held server-side.</div>`;
-      return;
-    }
-    t.innerHTML = r.messages.length ? r.messages.map((m) => msgCard(m)).join("") : `<div class="placeholder">No messages.</div>`;
-  } catch (e) { const t = $("#msgs"); if (t) t.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  try { await openDm(a, b); }
+  catch (e) { const t = $("#msgs"); if (t) t.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 
 async function browse(chanArg) {
@@ -881,6 +1236,38 @@ const clicks = {
     catch (e) { alert(e.message); }
   },
   unfreezeNs: async (el) => { try { await api(`/namespaces/${encodeURIComponent(el.dataset.id)}/unfreeze`, { method: "POST" }); go("namespaces"); } catch (e) { alert(e.message); } },
+  // Sub-page switch on an entity detail page.
+  tab: (el) => { TAB[el.dataset.x] = el.dataset.id; refresh(); },
+  ns: (el) => openNs(el.dataset.id),
+  dm: (el) => openDm(el.dataset.id, el.dataset.x),
+  kickFrom: async (el) => {
+    if (!confirm(`Kick ${el.dataset.x} from ${el.dataset.id}?`)) return;
+    try {
+      await api("/moderation", { method: "POST", body: JSON.stringify({ verb: "kick", scope: el.dataset.id, account: el.dataset.x }) });
+      refresh();
+    } catch (e) { alert(e.message); }
+  },
+  // Scoped moderation from an entity page: the scope comes from the entity.
+  modUser: (el) => applyMod(el.dataset.x, "*", el.dataset.id, $("#uModReason")),
+  modChan: (el) => applyMod(el.dataset.x, el.dataset.id, ($("#cModAcct")?.value || "").trim(), $("#cModReason")),
+  modNs: (el) => applyMod(el.dataset.x, "ns:" + el.dataset.id, ($("#nsModAcct")?.value || "").trim(), $("#nsModReason")),
+  nsVis: async (el) => {
+    try { await api(`/namespaces/${encodeURIComponent(el.dataset.id)}/visibility`, { method: "POST", body: JSON.stringify({ visibility: $("#nsVis").value }) }); refresh(); }
+    catch (e) { alert(e.message); }
+  },
+  nsFed: async (el) => {
+    try { await api(`/namespaces/${encodeURIComponent(el.dataset.id)}/federation`, { method: "POST", body: JSON.stringify({ mode: el.dataset.x }) }); refresh(); }
+    catch (e) { alert(e.message); }
+  },
+  nsTakeover: async (el) => {
+    const owner = ($("#nsTakeover")?.value || "").trim();
+    if (!owner) { alert("Name the account to hand the namespace to."); return; }
+    if (!confirm(`Seize "${el.dataset.id}" and hand it to ${owner}?\n\nThis applies immediately, rotates the root key, and is permanently recorded as operator-initiated. It cannot be undone by the current owner.`)) return;
+    try {
+      await api(`/namespaces/${encodeURIComponent(el.dataset.id)}/takeover`, { method: "POST", body: JSON.stringify({ new_owner: owner }) });
+      refresh();
+    } catch (e) { alert(e.message); }
+  },
   selectAllReports: () => {
     const boxes = [...document.querySelectorAll(".repBox")];
     const allOn = boxes.every((b) => b.checked);

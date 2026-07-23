@@ -402,6 +402,27 @@ impl EventStore for PgStore {
         rows.iter().map(Self::record_from_row).collect()
     }
 
+    async fn dm_partners(&self, account: &Account) -> Result<Vec<Account>, StoreError> {
+        // DM scope keys are `dm:<a>:<b>` with the pair already sorted, so a
+        // prefix match plus the two positional forms finds every conversation.
+        let keys: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT scope FROM weft_events WHERE scope LIKE 'dm:%'")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        let mut out: Vec<Account> = keys
+            .iter()
+            .filter_map(|key| match Scope::from_key(key) {
+                Some(Scope::Dm(a, b)) if &a == account => Some(b),
+                Some(Scope::Dm(a, b)) if &b == account => Some(a),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     async fn is_deleted(&self, scope: &Scope, root: Ulid) -> Result<bool, StoreError> {
         sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM weft_events WHERE scope = $1 AND root_ulid = $2 AND kind = 2)",

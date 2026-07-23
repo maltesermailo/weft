@@ -1596,3 +1596,164 @@ async fn reports_resolve_in_bulk_and_report_partial_outcomes() {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{body}");
     }
 }
+
+#[tokio::test]
+async fn namespace_detail_and_operator_takeover() {
+    use weft_store::{ChannelStore, NamespaceRecord, NamespaceStore};
+    let store = Arc::new(MemoryStore::default());
+    for name in ["admin", "owner", "rescuer"] {
+        store
+            .register(&name.parse().unwrap(), PasswordHash::new(PASSWORD).as_phc())
+            .await
+            .unwrap();
+    }
+    let ns: weft_proto::NamespaceName = "gaming".parse().unwrap();
+    store
+        .create_namespace(NamespaceRecord {
+            name: ns.clone(),
+            owner: "owner".parse().unwrap(),
+            root_key: "OLDROOTKEY".to_string(),
+            visibility: "unlisted".to_string(),
+            title: Some("Gaming".into()),
+            description: None,
+            icon: None,
+            recovery_set: None,
+            pending_recovery: None,
+            categories: vec!["text".into()],
+            federation: false,
+            frozen: false,
+        })
+        .await
+        .unwrap();
+    store
+        .upsert_channel(
+            &"#gaming/general".parse().unwrap(),
+            weft_proto::RetentionPolicy::Permanent,
+            weft_proto::ChannelKind::Text,
+        )
+        .await
+        .unwrap();
+    let auth = auth::config(
+        b"a-test-session-secret".to_vec(),
+        ["admin".parse().unwrap()],
+    );
+    let app = weft_admin::router(AdminState::from_store(
+        Arc::clone(&store),
+        auth,
+        "test.net".into(),
+    ));
+    let cookie = session(&app).await;
+
+    // The detail carries what the sub-tabs render, and discloses only that a
+    // recovery quorum exists — never who is in it (§2.4).
+    let detail = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/v1/namespaces/gaming/detail", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(detail.contains("#gaming/general"), "{detail}");
+    assert!(detail.contains("\"owner\":\"owner\"") && detail.contains("\"recovery_set\":false"));
+
+    // Auto-federation refuses to open on a non-public namespace rather than
+    // storing a flag that silently does nothing.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/gaming/federation",
+            &cookie,
+            r#"{"mode":"open"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+
+    // Make it public, then federation opens.
+    for (path, body) in [
+        (
+            "/admin/api/v1/namespaces/gaming/visibility",
+            r#"{"visibility":"public"}"#,
+        ),
+        (
+            "/admin/api/v1/namespaces/gaming/federation",
+            r#"{"mode":"open"}"#,
+        ),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(post_json(path, &cookie, body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT, "{path}");
+    }
+
+    // Takeover: handing it to an account that doesn't exist would leave it
+    // ownerless, so that's refused before anything rotates.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/gaming/takeover",
+            &cookie,
+            r#"{"new_owner":"ghost"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        store.namespace(&ns).await.unwrap().unwrap().owner.as_str(),
+        "owner"
+    );
+
+    // The real seizure: applies at once, rotates the root key, returns the new
+    // secret exactly once, and is marked operator-initiated forever.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/gaming/takeover",
+            &cookie,
+            r#"{"new_owner":"rescuer"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let out = body_string(res).await;
+    assert!(
+        out.contains("new_root_seed"),
+        "the new owner's key is handed back once: {out}"
+    );
+
+    let after = store.namespace(&ns).await.unwrap().unwrap();
+    assert_eq!(after.owner.as_str(), "rescuer");
+    assert_ne!(
+        after.root_key, "OLDROOTKEY",
+        "the old root must be superseded"
+    );
+    let history = store.root_history(&ns).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert!(history[0].operator_initiated);
+}
+
+#[tokio::test]
+async fn a_delegated_admin_cannot_take_over_a_namespace() {
+    // Seizure is operator-only — a delegated admin holding every scope must not
+    // be able to take a community over.
+    let app = build_with_delegate(&[
+        "admin.read",
+        "admin.moderate",
+        "admin.destroy",
+        "admin.federation",
+        "admin.keys",
+    ])
+    .await;
+    let cookie = login_as(&app, "delegate").await;
+    let res = app
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/gaming/takeover",
+            &cookie,
+            r#"{"new_owner":"delegate"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}

@@ -21,6 +21,7 @@ use axum::Router;
 use weft_store::{
     AccountStore, AuditStore, CapabilityStore, ChannelStore, EventStore, MediaBlocklistStore,
     MembershipStore, ModerationStore, NamespaceStore, NetblockStore, PeerStore, ReportStore,
+    RoleStore,
 };
 
 pub use auth::AuthConfig;
@@ -65,6 +66,7 @@ pub struct AdminState {
     pub(crate) netblocks: Arc<dyn NetblockStore>,
     pub(crate) peers: Arc<dyn PeerStore>,
     pub(crate) media_blocks: Arc<dyn MediaBlocklistStore>,
+    pub(crate) roles: Arc<dyn RoleStore>,
     pub(crate) audit: Arc<dyn AuditStore>,
     pub(crate) auth: Arc<AuthConfig>,
     pub(crate) network: String,
@@ -102,6 +104,7 @@ impl AdminState {
             + NetblockStore
             + PeerStore
             + MediaBlocklistStore
+            + RoleStore
             + AuditStore
             + 'static,
     {
@@ -117,6 +120,7 @@ impl AdminState {
             netblocks: store.clone(),
             peers: store.clone(),
             media_blocks: store.clone(),
+            roles: store.clone(),
             audit: store,
             auth: Arc::new(auth),
             network,

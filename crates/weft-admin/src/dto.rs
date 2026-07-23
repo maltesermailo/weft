@@ -497,3 +497,58 @@ pub struct AdminEntry {
     /// Unix seconds; `None` = no expiry. Only meaningful for granted admins.
     pub expiry: Option<u64>,
 }
+
+/// `GET /namespaces/:name/detail` — one namespace's full operator view, the
+/// backing data for its detail page's sub-tabs.
+#[derive(Serialize)]
+pub struct NamespaceDetail {
+    pub name: String,
+    pub owner: String,
+    pub visibility: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub icon: Option<String>,
+    /// WC7 full freeze — every channel locked to the owner + network operators.
+    pub frozen: bool,
+    /// §11.10 auto-federation reachability.
+    pub federation: bool,
+    /// Server-authoritative channel categories (empty ones included).
+    pub categories: Vec<String>,
+    /// Whether an M-of-N recovery quorum is designated (§2.4). Membership of the
+    /// quorum is deliberately not exposed — existence only.
+    pub recovery_set: bool,
+    pub root_key: String,
+    pub channels: Vec<NamespaceChannel>,
+    pub roles: Vec<Role>,
+    /// Distinct accounts holding membership in any of the namespace's channels.
+    pub members: Vec<String>,
+}
+
+/// A channel row inside a namespace detail.
+#[derive(Serialize)]
+pub struct NamespaceChannel {
+    pub name: String,
+    pub kind: String,
+    pub policy: String,
+    pub category: Option<String>,
+    pub position: i64,
+    pub frozen: bool,
+    pub restricted: bool,
+}
+
+/// A role definition (§6.5) as the panel shows it.
+#[derive(Serialize)]
+pub struct Role {
+    pub name: String,
+    pub color: String,
+    pub caps: Vec<String>,
+    pub hoist: bool,
+    pub position: i32,
+}
+
+/// One row of `GET /accounts/:name/dms` — a correspondent plus the conversation
+/// key the message browser uses.
+#[derive(Serialize)]
+pub struct DmPartner {
+    pub account: String,
+}

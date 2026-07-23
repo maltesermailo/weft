@@ -1577,6 +1577,16 @@ where
     store.clear_membership(&acct, &mc1).await.unwrap();
     assert_eq!(store.memberships(&acct).await.unwrap(), vec![mc2]);
 
+    // ---- §9.5 DM correspondents (admin surface only) ----
+    let dm_a: Account = format!("dma-{tag}").parse().unwrap();
+    let dm_b: Account = format!("dmb-{tag}").parse().unwrap();
+    assert!(store.dm_partners(&dm_a).await.unwrap().is_empty());
+    let dm_scope = Scope::dm(dm_a.clone(), dm_b.clone());
+    store.append(message(&dm_scope, 1, "hi")).await.unwrap();
+    // Both sides see each other, whichever way the pair sorted.
+    assert_eq!(store.dm_partners(&dm_a).await.unwrap(), vec![dm_b.clone()]);
+    assert_eq!(store.dm_partners(&dm_b).await.unwrap(), vec![dm_a.clone()]);
+
     // ---- §6.5 role definitions ----
     let rscope = format!("ns:roles-{tag}");
     assert!(store.roles(&rscope).await.unwrap().is_empty());

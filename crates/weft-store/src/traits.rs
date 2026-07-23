@@ -72,6 +72,11 @@ pub trait EventStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<EventRecord>, StoreError>;
 
+    /// The accounts `account` has an existing DM conversation with (§9.5),
+    /// name-sorted. The operator admin surface only — the wire protocol never
+    /// enumerates a user's correspondents, so this must stay off it.
+    async fn dm_partners(&self, account: &Account) -> Result<Vec<Account>, StoreError>;
+
     /// Whether a root already carries a tombstone.
     async fn is_deleted(&self, scope: &Scope, root: Ulid) -> Result<bool, StoreError>;
 

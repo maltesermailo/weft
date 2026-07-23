@@ -45,6 +45,7 @@ pub fn routes() -> Router<AdminState> {
             get(account_detail).delete(delete_account),
         )
         .route("/api/v1/accounts/:name/messages", get(account_messages))
+        .route("/api/v1/accounts/:name/dms", get(account_dms))
         .route("/api/v1/accounts/:name/restore", post(restore_account))
         .route("/api/v1/accounts/:name/suspend", post(suspend_account))
         .route("/api/v1/accounts/:name/unsuspend", post(unsuspend_account))
@@ -61,6 +62,19 @@ pub fn routes() -> Router<AdminState> {
             axum::routing::delete(delete_channel),
         )
         .route("/api/v1/namespaces", get(list_namespaces))
+        .route("/api/v1/namespaces/:name/detail", get(namespace_detail))
+        .route(
+            "/api/v1/namespaces/:name/visibility",
+            post(set_ns_visibility),
+        )
+        .route(
+            "/api/v1/namespaces/:name/federation",
+            post(set_ns_federation),
+        )
+        .route(
+            "/api/v1/namespaces/:name/takeover",
+            post(takeover_namespace),
+        )
         .route("/api/v1/namespaces/:name/freeze", post(freeze_namespace))
         .route(
             "/api/v1/namespaces/:name/unfreeze",
@@ -1190,6 +1204,296 @@ async fn set_frozen(
     )
     .await;
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// `GET /namespaces/:name/detail` — everything the namespace detail page's
+/// sub-tabs render: metadata, its channels, its roles, and its member set.
+async fn namespace_detail(State(st): State<AdminState>, Path(name): Path<String>) -> Response {
+    let Ok(ns) = name.parse::<weft_proto::NamespaceName>() else {
+        return (StatusCode::BAD_REQUEST, "bad namespace name").into_response();
+    };
+    let detail = async {
+        let Some(record) = st.namespaces.namespace(&ns).await? else {
+            return Ok(None);
+        };
+        // A namespace's channels are the ones prefixed `#<ns>/`.
+        let prefix = format!("#{ns}/");
+        let mut channels = Vec::new();
+        let mut members: Vec<String> = Vec::new();
+        for (chan, _) in st.channels.list_channels().await? {
+            if !chan.as_str().starts_with(&prefix) {
+                continue;
+            }
+            if let Some(c) = st.channels.channel(&chan).await? {
+                channels.push(dto::NamespaceChannel {
+                    name: chan.to_string(),
+                    kind: c.kind.to_string(),
+                    policy: c.policy.to_string(),
+                    category: c.category,
+                    position: c.position,
+                    frozen: c.frozen,
+                    restricted: c.restricted,
+                });
+            }
+            for m in st.memberships.members(&chan).await? {
+                members.push(m.to_string());
+            }
+        }
+        channels.sort_by(|a, b| {
+            a.category
+                .cmp(&b.category)
+                .then(a.position.cmp(&b.position))
+                .then(a.name.cmp(&b.name))
+        });
+        members.sort();
+        members.dedup();
+
+        let roles = st
+            .roles
+            .roles(&format!("ns:{ns}"))
+            .await?
+            .into_iter()
+            .map(|r| dto::Role {
+                name: r.name,
+                color: r.color,
+                caps: r.caps,
+                hoist: r.hoist,
+                position: r.position,
+            })
+            .collect();
+
+        Ok::<_, StoreError>(Some(dto::NamespaceDetail {
+            name: record.name.to_string(),
+            owner: record.owner.to_string(),
+            visibility: record.visibility,
+            title: record.title,
+            description: record.description,
+            icon: record.icon,
+            frozen: record.frozen,
+            federation: record.federation,
+            categories: record.categories,
+            // Existence only — never who is in the quorum (§2.4).
+            recovery_set: record.recovery_set.is_some(),
+            root_key: record.root_key,
+            channels,
+            roles,
+            members,
+        }))
+    }
+    .await;
+    match detail {
+        Ok(Some(v)) => Json(v).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such namespace").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// `GET /accounts/:name/dms` — the account's DM correspondents, so the user
+/// detail can list conversations and open each one's thread.
+async fn account_dms(State(st): State<AdminState>, Path(name): Path<String>) -> Response {
+    let Ok(account) = name.parse::<Account>() else {
+        return (StatusCode::BAD_REQUEST, "bad account").into_response();
+    };
+    match st.events.dm_partners(&account).await {
+        Ok(list) => Json(
+            list.into_iter()
+                .map(|a| dto::DmPartner {
+                    account: a.to_string(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct VisibilityReq {
+    visibility: String,
+}
+
+/// `POST /namespaces/:name/visibility` — set the discovery tier (§2.2).
+async fn set_ns_visibility(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(name): Path<String>,
+    Json(req): Json<VisibilityReq>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Ok(ns) = name.parse::<weft_proto::NamespaceName>() else {
+        return (StatusCode::BAD_REQUEST, "bad namespace name").into_response();
+    };
+    if !matches!(req.visibility.as_str(), "public" | "unlisted" | "private") {
+        return (
+            StatusCode::BAD_REQUEST,
+            "visibility must be public|unlisted|private",
+        )
+            .into_response();
+    }
+    match st.namespaces.namespace(&ns).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such namespace").into_response(),
+        Err(e) => return internal(e),
+    }
+    if let Err(e) = st
+        .namespaces
+        .set_namespace_visibility(&ns, &req.visibility)
+        .await
+    {
+        return internal(e);
+    }
+    audit(
+        &st,
+        &who,
+        "namespace.visibility",
+        ns.as_str(),
+        &json!({ "namespace": ns.to_string(), "visibility": req.visibility }),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct FederationReq {
+    /// `open` | `closed` (§11.10).
+    mode: String,
+}
+
+/// `POST /namespaces/:name/federation` — toggle §11.10 auto-federation
+/// reachability. `open` only has effect while the namespace is also `public`.
+async fn set_ns_federation(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(name): Path<String>,
+    Json(req): Json<FederationReq>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Ok(ns) = name.parse::<weft_proto::NamespaceName>() else {
+        return (StatusCode::BAD_REQUEST, "bad namespace name").into_response();
+    };
+    let open = match req.mode.as_str() {
+        "open" => true,
+        "closed" => false,
+        _ => return (StatusCode::BAD_REQUEST, "mode must be open|closed").into_response(),
+    };
+    let record = match st.namespaces.namespace(&ns).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such namespace").into_response(),
+        Err(e) => return internal(e),
+    };
+    // Say why rather than storing a flag that silently does nothing (§11.10).
+    if open && record.visibility != "public" {
+        return (
+            StatusCode::CONFLICT,
+            "auto-federation needs public visibility — change that first",
+        )
+            .into_response();
+    }
+    if let Err(e) = st.namespaces.set_namespace_federation(&ns, open).await {
+        return internal(e);
+    }
+    audit(
+        &st,
+        &who,
+        "namespace.federation",
+        ns.as_str(),
+        &json!({ "namespace": ns.to_string(), "mode": req.mode }),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct TakeoverReq {
+    new_owner: String,
+}
+
+/// `POST /namespaces/:name/takeover` — §2.4 **rung 3 operator takeover**.
+/// Applies immediately: rotates the root key, hands ownership to `new_owner`,
+/// and records the rotation as operator-initiated in `root-history` forever.
+///
+/// Operator-only, deliberately not `admin.destroy`: seizing a namespace is the
+/// single most powerful action the panel exposes, and a delegated admin holding
+/// every scope must not be able to take communities over.
+///
+/// The wire path (`NS RECOVER`) needs a rotation signed by the **network key**,
+/// which the human operator doesn't hold — the server does. So the panel runs
+/// the rotation server-side through the store, which is the same operation the
+/// scheduler applies, with the same audit mark.
+async fn takeover_namespace(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Path(name): Path<String>,
+    Json(req): Json<TakeoverReq>,
+) -> Response {
+    if let Some(r) = require_operator(&st, &who).await {
+        return r;
+    }
+    let Ok(ns) = name.parse::<weft_proto::NamespaceName>() else {
+        return (StatusCode::BAD_REQUEST, "bad namespace name").into_response();
+    };
+    let Ok(new_owner) = req.new_owner.parse::<Account>() else {
+        return (StatusCode::BAD_REQUEST, "bad account").into_response();
+    };
+    match st.namespaces.namespace(&ns).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such namespace").into_response(),
+        Err(e) => return internal(e),
+    }
+    // Handing a namespace to an account that doesn't exist would leave it
+    // ownerless — worse than the state we're fixing.
+    match st.accounts.account_ulid(&new_owner).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, "no such account to hand it to").into_response()
+        }
+        Err(e) => return internal(e),
+    }
+
+    // A fresh root key the new owner will hold. The old one is superseded, so a
+    // seizure the previous owner could undo with their key is not a seizure.
+    let new_root = weft_crypto::Keypair::generate();
+    if let Err(e) = st
+        .namespaces
+        .rotate_root(
+            &ns,
+            new_owner.as_str(),
+            &new_root.public().to_b64(),
+            true, // operator_initiated — permanent
+            now_ms(),
+        )
+        .await
+    {
+        return internal(e);
+    }
+    audit(
+        &st,
+        &who,
+        "namespace.takeover",
+        ns.as_str(),
+        &json!({
+            "namespace": ns.to_string(),
+            "new_owner": new_owner.to_string(),
+            "new_root_key": new_root.public().to_b64(),
+        }),
+    )
+    .await;
+    // The new root **secret** is returned exactly once — it is not stored, so if
+    // it isn't handed to the new owner now it is gone and the namespace will
+    // need another takeover.
+    Json(json!({
+        "namespace": ns.to_string(),
+        "new_owner": new_owner.to_string(),
+        "new_root_key": new_root.public().to_b64(),
+        "new_root_seed": new_root.seed_b64(),
+    }))
+    .into_response()
 }
 
 /// `POST /namespaces/:name/freeze` — WC7 **full freeze**: lock every channel in
