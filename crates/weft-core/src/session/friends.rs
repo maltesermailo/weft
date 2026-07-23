@@ -11,11 +11,13 @@ use weft_proto::{FriendState, UserRef};
 use weft_store::FriendOutcome;
 
 impl<S: ControlStream> Session<S> {
-    /// Forward a friend command to the target's network over a §11.10 tunnel,
-    /// but only when a **local** caller targets a **remote** user — a federated
-    /// (already-received) action must never re-forward, or it would loop. weftd's
-    /// tunnel driver reuses/establishes the bridge and opens a tunnel as `me`.
-    fn deliver_if_remote(&self, me: &UserRef, target: &UserRef, line: String) {
+    /// Forward a social-layer command (friend *or* call) to the target's network
+    /// over a §11.10 tunnel, but only when a **local** caller targets a **remote**
+    /// user — a federated (already-received) action must never re-forward, or it
+    /// would loop. weftd's tunnel driver reuses/establishes the bridge and opens a
+    /// tunnel as `me`; the peer reconstructs `me`'s full `account@ournet` identity
+    /// (the bridge is authenticated as our network) and re-runs the handler there.
+    pub(super) fn deliver_if_remote(&self, me: &UserRef, target: &UserRef, line: String) {
         let local = &self.ctx.info.network;
         if &me.network == local && &target.network != local && !line.is_empty() {
             self.ctx.request_friend_deliver(FriendDeliver {

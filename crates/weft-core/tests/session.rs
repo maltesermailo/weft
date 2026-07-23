@@ -13,7 +13,7 @@ use weft_core::{
     VoiceError, VoiceGrant, VoiceJoinReq, VoiceRelay,
 };
 use weft_proto::RetentionPolicy;
-use weft_proto::{ErrCode, Event, FriendState, MemberAction, Reply, VoiceAction};
+use weft_proto::{CallState, ErrCode, Event, FriendState, MemberAction, Reply, VoiceAction};
 use weft_store::{ChannelStore, NamespaceStore};
 
 struct MockStream {
@@ -1319,6 +1319,393 @@ async fn friend_request_accept_list_and_remove() {
     // You cannot befriend yourself.
     ada.send("FRIEND ADD ada@test.example");
     ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn friend_call_ring_accept_and_end() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+
+    // ada calls bob → ada sees `ringing`, bob is rung with the room.
+    ada.send("@l=1 CALL bob@test.example");
+    match ada.recv().await.event {
+        Event::CallState { user, state } => {
+            assert_eq!(user.to_string(), "bob@test.example");
+            assert_eq!(state, CallState::Ringing);
+        }
+        e => panic!("expected CALL-STATE ringing, got {e:?}"),
+    }
+    let room = match bob.recv().await.event {
+        Event::CallRing { from, room } => {
+            assert_eq!(from.to_string(), "ada@test.example");
+            room
+        }
+        e => panic!("expected CALL-RING, got {e:?}"),
+    };
+    assert!(room.starts_with("call:"));
+
+    // A third user calling bob while he's ringing gets `busy`.
+    let mut eve = ready(&ctx, "eve").await;
+    eve.send("CALL bob@test.example");
+    assert!(matches!(
+        eve.recv().await.event,
+        Event::CallState {
+            state: CallState::Busy,
+            ..
+        }
+    ));
+
+    // bob accepts → both sides go `active`.
+    bob.send("CALL ACCEPT ada@test.example");
+    assert!(matches!(
+        bob.recv().await.event,
+        Event::CallState {
+            state: CallState::Active,
+            ..
+        }
+    ));
+    match ada.recv().await.event {
+        Event::CallState { user, state } => {
+            assert_eq!(user.to_string(), "bob@test.example");
+            assert_eq!(state, CallState::Active);
+        }
+        e => panic!("expected CALL-STATE active to caller, got {e:?}"),
+    }
+
+    // ada hangs up → bob is told the call ended.
+    ada.send("CALL END bob@test.example");
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::CallState {
+            state: CallState::Ended,
+            ..
+        }
+    ));
+    match bob.recv().await.event {
+        Event::CallState { user, state } => {
+            assert_eq!(user.to_string(), "ada@test.example");
+            assert_eq!(state, CallState::Ended);
+        }
+        e => panic!("expected CALL-STATE ended to bob, got {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn friend_call_accept_delivers_livekit_media_to_both_parties() {
+    // With a LiveKit backend installed, accepting a call mints each party its
+    // own CALL-MEDIA credential for the shared room (never the peer's token).
+    let ctx = ctx(&["#general"]);
+    ctx.set_voice_backend(Arc::new(LiveKitBackend::new(
+        Arc::new(StubLk),
+        "wss://livekit.test.example".to_string(),
+        "test.example".parse().unwrap(),
+        600,
+    )));
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+
+    ada.send("CALL bob@test.example");
+    assert!(matches!(ada.recv().await.event, Event::CallState { .. })); // ringing
+    let room = match bob.recv().await.event {
+        Event::CallRing { room, .. } => room,
+        e => panic!("expected CALL-RING, got {e:?}"),
+    };
+
+    // bob accepts. He gets his active state, then his own CALL-MEDIA.
+    bob.send("CALL ACCEPT ada@test.example");
+    assert!(matches!(
+        bob.recv().await.event,
+        Event::CallState {
+            state: CallState::Active,
+            ..
+        }
+    ));
+    match bob.recv().await.event {
+        Event::CallMedia {
+            room: r,
+            token,
+            endpoint,
+            ..
+        } => {
+            assert_eq!(r, room);
+            assert_eq!(endpoint.as_deref(), Some("wss://livekit.test.example"));
+            // bob's token bears bob's identity — the room is the ad-hoc call room.
+            assert_eq!(token, format!("jwt:{room}:bob@test.example"));
+        }
+        e => panic!("expected bob's CALL-MEDIA, got {e:?}"),
+    }
+
+    // ada (the caller, on her own session) is pushed active then her CALL-MEDIA.
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::CallState {
+            state: CallState::Active,
+            ..
+        }
+    ));
+    match ada.recv().await.event {
+        Event::CallMedia { room: r, token, .. } => {
+            assert_eq!(r, room);
+            assert_eq!(token, format!("jwt:{room}:ada@test.example"));
+        }
+        e => panic!("expected ada's CALL-MEDIA, got {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn call_to_remote_user_is_tunnelled() {
+    // Send side of cross-network calls: a local user calling a user on another
+    // network records the call locally (ringing) AND hands weftd a tunnel
+    // delivery — the same §11.10 seam as cross-network friends.
+    let ctx = ctx(&["#general"]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let mut ada = ready(&ctx, "ada").await;
+
+    ada.send("CALL bob@peer.example");
+    // ada sees `ringing` locally.
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::CallState {
+            state: CallState::Ringing,
+            ..
+        }
+    ));
+    // And the CALL is handed to the tunnel driver for the peer network.
+    let req = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("call delivery")
+        .expect("sink open");
+    assert_eq!(req.peer.as_str(), "peer.example");
+    assert_eq!(req.from.to_string(), "ada");
+    assert_eq!(req.line, "CALL bob@peer.example");
+
+    // Hanging up also tunnels (CALL END), so the remote side clears.
+    ada.send("CALL END bob@peer.example");
+    assert!(matches!(ada.recv().await.event, Event::CallState { .. }));
+    let end = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("end delivery")
+        .expect("sink open");
+    assert_eq!(end.line, "CALL END bob@peer.example");
+}
+
+#[tokio::test]
+async fn federated_call_rings_a_local_user_over_the_tunnel() {
+    // Receive side of cross-network calls: a user on network F calls a user on
+    // network H through the §11.10 tunnel. H records the call and rings its
+    // local user; the caller's `ringing` state tunnels back to F.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+
+    // bob is a local (H = test.example) user, online to be rung.
+    let mut bob = ready(&ctx, "bob").await;
+
+    // F authenticates the bridge and tunnels alice's CALL bob@test.example.
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send("FSESSION 1 CMD :@label=c CALL bob@test.example");
+
+    // alice's own ringing state tunnels back to F as an FSESSION REPLY.
+    let raw = bridge.recv_raw().await;
+    assert!(raw.starts_with("FSESSION 1 REPLY :"), "{raw}");
+    assert!(raw.contains("CALL-STATE bob@test.example ringing"), "{raw}");
+
+    // bob (local) is rung by the federated caller — the call crossed networks.
+    match bob.recv().await.event {
+        Event::CallRing { from, room } => {
+            assert_eq!(from.to_string(), "alice@peer.example");
+            assert!(room.starts_with("call:"));
+        }
+        e => panic!("expected CALL-RING from federated caller, got {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn call_to_remote_user_mints_and_tunnels_a_relay_leg() {
+    // Cross-network cascade, send side: the caller's network hosts its OWN room
+    // and tunnels a *relay leg* (a relay token for that room), so the callee's
+    // network can bridge into it — the callee never touches our LiveKit.
+    let ctx = ctx(&["#general"]);
+    ctx.set_voice_backend(Arc::new(LiveKitBackend::new(
+        Arc::new(StubLk),
+        "wss://livekit.test.example".to_string(),
+        "test.example".parse().unwrap(),
+        600,
+    )));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let mut ada = ready(&ctx, "ada").await;
+
+    ada.send("CALL bob@peer.example");
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::CallState {
+            state: CallState::Ringing,
+            ..
+        }
+    ));
+
+    let req = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("call delivery")
+        .expect("sink open");
+    assert_eq!(req.peer.as_str(), "peer.example");
+
+    // The tunnelled CALL carries our relay leg. Parse it back.
+    let parsed = weft_proto::Request::parse(&req.line).expect("valid CALL line");
+    let weft_proto::Command::Call { user, media } = parsed.command else {
+        panic!("expected CALL, got {:?}", req.line);
+    };
+    assert_eq!(user.to_string(), "bob@peer.example");
+    let leg = media.expect("caller network minted a relay leg");
+    assert!(leg.room.starts_with("call:"), "{}", leg.room);
+    assert_eq!(leg.endpoint.as_deref(), Some("wss://livekit.test.example"));
+    // The relay token's identity is `relay@<callee network>` (StubLk = `jwt:<room>:<id>`).
+    assert_eq!(leg.token, format!("jwt:{}:relay@peer.example", leg.room));
+}
+
+#[tokio::test]
+async fn federated_call_bridges_via_a_relay_on_accept() {
+    // Cross-network cascade, receive side: a federated CALL carries the caller
+    // network's relay leg; the callee's network mints its OWN room for its user
+    // and, on accept, spawns a relay bridging the two rooms — so neither client
+    // connects to the other network's LiveKit (IP protection).
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    ctx.set_voice_backend(Arc::new(LiveKitBackend::new(
+        Arc::new(StubLk),
+        "wss://lk.test.example".to_string(),
+        "test.example".parse().unwrap(),
+        600,
+    )));
+    let relay = Arc::new(MockRelay::default());
+    ctx.set_voice_relay(relay.clone());
+
+    let mut bob = ready(&ctx, "bob").await;
+    let bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+
+    // alice@peer calls bob@test, carrying peer's relay leg for peer's room.
+    let inner = weft_proto::Request::new(weft_proto::Command::Call {
+        user: "bob@test.example".parse().unwrap(),
+        media: Some(weft_proto::CallMediaGrant {
+            room: "call:HOME".to_string(),
+            token: "relay.tok.home".to_string(),
+            endpoint: Some("wss://lk.peer.example".to_string()),
+        }),
+    })
+    .serialize()
+    .unwrap();
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send(&format!("FSESSION 1 CMD :{inner}"));
+
+    // bob rings with OUR OWN room (not the caller's `call:HOME`).
+    let bob_room = match bob.recv().await.event {
+        Event::CallRing { from, room } => {
+            assert_eq!(from.to_string(), "alice@peer.example");
+            assert!(room.starts_with("call:") && room != "call:HOME", "{room}");
+            room
+        }
+        e => panic!("expected CALL-RING, got {e:?}"),
+    };
+
+    // bob accepts → active, then CALL-MEDIA for OUR LiveKit + OUR room + his token.
+    bob.send("CALL ACCEPT alice@peer.example");
+    assert!(matches!(
+        bob.recv().await.event,
+        Event::CallState {
+            state: CallState::Active,
+            ..
+        }
+    ));
+    match bob.recv().await.event {
+        Event::CallMedia {
+            room,
+            token,
+            endpoint,
+            ..
+        } => {
+            assert_eq!(room, bob_room);
+            assert_eq!(endpoint.as_deref(), Some("wss://lk.test.example"));
+            assert_eq!(token, format!("jwt:{bob_room}:bob@test.example"));
+        }
+        e => panic!("expected bob's own CALL-MEDIA, got {e:?}"),
+    }
+
+    // A relay was spawned bridging bob's room ↔ the caller network's leg.
+    let specs = relay.specs.lock().unwrap();
+    assert_eq!(specs.len(), 1, "one relay spawned");
+    let s = &specs[0];
+    assert_eq!(s.peer.as_str(), "peer.example");
+    assert_eq!(s.key, bob_room);
+    assert_eq!(s.remote_room, "call:HOME");
+    assert_eq!(s.remote_token, "relay.tok.home");
+    assert_eq!(s.remote_url, "wss://lk.peer.example");
+    assert_eq!(s.local_room, bob_room);
+    assert_eq!(s.local_token, format!("jwt:{bob_room}:relay@peer.example"));
+}
+
+#[tokio::test]
+async fn group_dm_create_message_and_membership() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+
+    // ada creates a group DM with bob.
+    ada.send("@l=1 GROUP CREATE bob@test.example");
+    let gid = match ada.recv().await.event {
+        Event::Group { id, members, name } => {
+            assert_eq!(members.len(), 2, "ada + bob");
+            assert_eq!(name, None);
+            id.to_string()
+        }
+        e => panic!("expected GROUP, got {e:?}"),
+    };
+    // bob is pushed the group too.
+    assert!(matches!(bob.recv().await.event, Event::Group { .. }));
+
+    // ada messages the group; ada gets her labelled echo, bob gets the copy.
+    ada.send(&format!("@l=2 MSG {gid} :hey group"));
+    match ada.recv().await.event {
+        Event::Message(m) => {
+            assert_eq!(m.body, "hey group");
+            assert_eq!(m.target.to_string(), gid);
+        }
+        e => panic!("expected own group echo, got {e:?}"),
+    }
+    match bob.recv().await.event {
+        Event::Message(m) => assert_eq!(m.body, "hey group"),
+        e => panic!("expected group message to bob, got {e:?}"),
+    }
+
+    // ada lists her groups.
+    ada.send("GROUPS");
+    assert!(matches!(ada.recv().await.event, Event::BatchStart { .. }));
+    assert!(matches!(ada.recv().await.event, Event::Group { .. }));
+    assert!(matches!(ada.recv().await.event, Event::BatchEnd { .. }));
+
+    // A non-member can't message the group — uniform NO-SUCH-TARGET.
+    let mut eve = ready(&ctx, "eve").await;
+    eve.send(&format!("MSG {gid} :sneaking in"));
+    eve.expect_err(ErrCode::NoSuchTarget).await;
+
+    // bob leaves; both bob (ack) and ada (push) see GROUP-MEMBER part.
+    bob.send(&format!("GROUP LEAVE {gid}"));
+    assert!(matches!(
+        bob.recv().await.event,
+        Event::GroupMember {
+            action: MemberAction::Part,
+            ..
+        }
+    ));
+    match ada.recv().await.event {
+        Event::GroupMember { user, action, .. } => {
+            assert_eq!(user.to_string(), "bob@test.example");
+            assert_eq!(action, MemberAction::Part);
+        }
+        e => panic!("expected GROUP-MEMBER part, got {e:?}"),
+    }
 }
 
 #[tokio::test]
@@ -4749,11 +5136,13 @@ async fn verify_email_code_flow_birthday_and_list() {
 
 // ---- §16 M-lk-3b: the federated-voice relay lifecycle manager ----
 
-/// A stand-in relay driver: records start/stop instead of running libwebrtc.
+/// A stand-in relay driver: records start/stop (and the full spec) instead of
+/// running libwebrtc.
 #[derive(Default)]
 struct MockRelay {
-    started: std::sync::Mutex<Vec<(String, String)>>, // (peer, channel)
+    started: std::sync::Mutex<Vec<(String, String)>>, // (peer, key)
     stopped: std::sync::Mutex<Vec<(String, String)>>,
+    specs: std::sync::Mutex<Vec<RelaySpec>>,
 }
 
 #[async_trait::async_trait]
@@ -4762,20 +5151,21 @@ impl VoiceRelay for MockRelay {
         self.started
             .lock()
             .unwrap()
-            .push((spec.peer.to_string(), spec.channel.to_string()));
+            .push((spec.peer.to_string(), spec.key.clone()));
+        self.specs.lock().unwrap().push(spec);
     }
-    async fn stop(&self, peer: &weft_proto::NetworkName, channel: &weft_proto::ChannelName) {
+    async fn stop(&self, peer: &weft_proto::NetworkName, key: &str) {
         self.stopped
             .lock()
             .unwrap()
-            .push((peer.to_string(), channel.to_string()));
+            .push((peer.to_string(), key.to_string()));
     }
 }
 
-fn relay_spec(peer: &str, channel: &str) -> RelaySpec {
+fn relay_spec(peer: &str, key: &str) -> RelaySpec {
     RelaySpec {
         peer: peer.parse().unwrap(),
-        channel: channel.parse().unwrap(),
+        key: key.to_string(),
         remote_url: "wss://f".into(),
         remote_room: "wv:fda.example:c".into(),
         remote_token: "rt".into(),
@@ -4792,7 +5182,6 @@ async fn relay_lifecycle_refcounts_then_drops_by_peer() {
     ctx.set_voice_relay(relay.clone());
 
     let f: weft_proto::NetworkName = "fda.example".parse().unwrap();
-    let lounge: weft_proto::ChannelName = "#lounge".parse().unwrap();
 
     // Two local members of the same foreign channel → the relay starts once.
     ctx.relay_acquire(relay_spec("fda.example", "#lounge"))
@@ -4802,11 +5191,11 @@ async fn relay_lifecycle_refcounts_then_drops_by_peer() {
     assert_eq!(relay.started.lock().unwrap().len(), 1);
 
     // One leaves → still live (no stop).
-    ctx.relay_release(&f, &lounge).await;
+    ctx.relay_release(&f, "#lounge").await;
     assert!(relay.stopped.lock().unwrap().is_empty());
 
     // The last leaves → stop.
-    ctx.relay_release(&f, &lounge).await;
+    ctx.relay_release(&f, "#lounge").await;
     assert_eq!(
         *relay.stopped.lock().unwrap(),
         vec![("fda.example".to_string(), "#lounge".to_string())]

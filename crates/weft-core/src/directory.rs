@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use ulid::Ulid;
 use weft_proto::{
-    Account, ChannelName, Event, MessageEvent, MsgId, MsgMeta, NetworkName, ReactionOp,
+    Account, ChannelName, Event, GroupId, MessageEvent, MsgId, MsgMeta, NetworkName, ReactionOp,
     RetentionPolicy, Target, UserRef,
 };
 use weft_store::{AccountStore, EventKind, EventRecord, EventStore, Scope};
@@ -73,6 +73,18 @@ enum Cmd {
         body: String,
         meta: MsgMeta,
         delivered: oneshot::Sender<bool>,
+    },
+    /// A group DM message (social layer). The session pre-validates membership
+    /// and resolves the local members to fan out to; the directory mints the
+    /// ULID (single writer → group total order), persists under `Scope::Group`,
+    /// and delivers to every local member's sessions (incl. the sender's echo).
+    GroupMsg {
+        origin: SessionId,
+        from: Account,
+        group: GroupId,
+        members: Vec<Account>,
+        body: String,
+        meta: MsgMeta,
     },
     /// DM mutations, fully pre-validated by the session (participant,
     /// author, tombstone).
@@ -180,6 +192,30 @@ impl Directory {
     }
 
     /// False = recipient does not exist (→ NO-SUCH-TARGET).
+    /// Publish a group DM message. `members` are the local accounts to fan out
+    /// to (the session resolved them from the `GroupStore`, including itself).
+    pub(crate) async fn group_msg(
+        &self,
+        origin: SessionId,
+        from: Account,
+        group: GroupId,
+        members: Vec<Account>,
+        body: String,
+        meta: MsgMeta,
+    ) {
+        let _ = self
+            .inbox
+            .send(Cmd::GroupMsg {
+                origin,
+                from,
+                group,
+                members,
+                body,
+                meta,
+            })
+            .await;
+    }
+
     pub(crate) async fn dm(
         &self,
         origin: SessionId,
@@ -419,6 +455,37 @@ impl Actor {
                 self.deliver(&from, &to, origin, event);
                 let _ = delivered.send(true);
             }
+            Cmd::GroupMsg {
+                origin,
+                from,
+                group,
+                members,
+                body,
+                meta,
+            } => {
+                let msgid = self.mint();
+                let record = EventRecord {
+                    scope: Scope::Group(group),
+                    msgid: msgid.clone(),
+                    root: msgid.clone(),
+                    sender: self.user(&from),
+                    kind: EventKind::Message {
+                        body: body.clone(),
+                        meta: meta.clone(),
+                    },
+                };
+                self.persist(record).await;
+                let event = Event::Message(Box::new(MessageEvent {
+                    target: Target::Group(group),
+                    sender: self.user(&from),
+                    msgid,
+                    body,
+                    meta,
+                    edited: None,
+                    edited_at: None,
+                }));
+                self.deliver_many(&members, origin, event);
+            }
             Cmd::Edit {
                 origin,
                 from,
@@ -570,6 +637,22 @@ impl Actor {
                     event: event.clone(),
                 },
             );
+        }
+    }
+
+    /// Fan an event out to every live session of each account in `members`
+    /// (group DM delivery). `origin` drives the echo-label rule as usual.
+    fn deliver_many(&self, members: &[Account], origin: SessionId, event: Event) {
+        for account in members {
+            for entry in self.sessions.get(account).into_iter().flatten() {
+                push(
+                    &entry.queue,
+                    DirectEvent {
+                        origin,
+                        event: event.clone(),
+                    },
+                );
+            }
         }
     }
 

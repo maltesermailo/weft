@@ -1709,6 +1709,7 @@ async fn message_lookup(
             scope_kind: match scope {
                 Scope::Channel(_) => "channel".to_string(),
                 Scope::Dm(..) => "dm".to_string(),
+                Scope::Group(..) => "group".to_string(),
             },
             sender: root.sender.to_string(),
             at_ms: root.at_ms(),

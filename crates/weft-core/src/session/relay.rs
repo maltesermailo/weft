@@ -294,6 +294,36 @@ impl<S: ControlStream> Session<S> {
                 }
                 self.pending_direct.push_back(label);
             }
+            // Group DM: membership-gated; the directory mints the ULID (single
+            // writer → group total order) and fans out to local members.
+            Target::Group(group) => {
+                let State::Ready { account } = self.state.clone() else {
+                    unreachable!("on_msg only dispatched in READY");
+                };
+                let me = UserRef::new(account.clone(), self.ctx.info.network.clone());
+                match self.ctx.groups.is_group_member(group, &me).await {
+                    Ok(true) => {}
+                    // Not a member = indistinguishable from nonexistent (§2.2).
+                    Ok(false) => return self.no_such_target(label).await,
+                    Err(e) => return self.internal(label, &e).await,
+                }
+                let members = match self.ctx.groups.group_members(group).await {
+                    Ok(m) => m,
+                    Err(e) => return self.internal(label, &e).await,
+                };
+                // Fan out to *local* members' sessions; cross-network members are
+                // reached over the bridge (deferred — group messaging is hard).
+                let local: Vec<Account> = members
+                    .iter()
+                    .filter(|u| u.network == self.ctx.info.network)
+                    .map(|u| u.account.clone())
+                    .collect();
+                self.ctx
+                    .directory
+                    .group_msg(self.id, account, group, local, body, meta)
+                    .await;
+                self.pending_direct.push_back(label);
+            }
         }
         // The ack is the echoed MESSAGE, sent when the broadcast returns.
         Ok(Flow::Continue)
@@ -386,6 +416,12 @@ impl<S: ControlStream> Session<S> {
                     peer,
                     root: root.msgid,
                 }))
+            }
+            // Editing/deleting/reacting to group DM messages arrives with the
+            // group actor (next increment); none exist yet.
+            Scope::Group(_) => {
+                self.no_such_target(label).await?;
+                Ok(None)
             }
         }
     }
@@ -531,6 +567,23 @@ impl<S: ControlStream> Session<S> {
                     Scope::dm(account, peer.clone()),
                     self.ctx.dm_policy,
                     Target::User(peer),
+                )
+            }
+            // Group DM history: membership-gated, served from `Scope::Group`.
+            Target::Group(group) => {
+                let State::Ready { account } = self.state.clone() else {
+                    unreachable!("on_history only dispatched in READY");
+                };
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                match self.ctx.groups.is_group_member(group, &me).await {
+                    Ok(true) => {}
+                    Ok(false) => return self.no_such_target(label).await,
+                    Err(e) => return self.internal(label, &e).await,
+                }
+                (
+                    Scope::Group(group),
+                    self.ctx.dm_policy,
+                    Target::Group(group),
                 )
             }
         };

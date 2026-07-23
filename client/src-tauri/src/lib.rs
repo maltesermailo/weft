@@ -424,6 +424,11 @@ fn invite_revoke_all(conn: State<'_, Conn>, scope: String) -> Result<(), String>
 }
 
 #[tauri::command]
+fn invite_list(conn: State<'_, Conn>, scope: String) -> Result<(), String> {
+    conn.send(weft::build_invite_list(&scope)?)
+}
+
+#[tauri::command]
 fn moderate(
     conn: State<'_, Conn>,
     verb: String,
@@ -566,6 +571,56 @@ fn friend_remove(conn: State<'_, Conn>, user: String) -> Result<(), String> {
 #[tauri::command]
 fn friends(conn: State<'_, Conn>) -> Result<(), String> {
     conn.send(weft::build_friends()?)
+}
+
+#[tauri::command]
+fn group_create(conn: State<'_, Conn>, members: Vec<String>) -> Result<(), String> {
+    conn.send(weft::build_group_create(&members)?)
+}
+
+#[tauri::command]
+fn group_add(conn: State<'_, Conn>, group: String, user: String) -> Result<(), String> {
+    conn.send(weft::build_group_add(&group, &user)?)
+}
+
+#[tauri::command]
+fn group_remove(conn: State<'_, Conn>, group: String, user: String) -> Result<(), String> {
+    conn.send(weft::build_group_remove(&group, &user)?)
+}
+
+#[tauri::command]
+fn group_leave(conn: State<'_, Conn>, group: String) -> Result<(), String> {
+    conn.send(weft::build_group_leave(&group)?)
+}
+
+#[tauri::command]
+fn group_name(conn: State<'_, Conn>, group: String, name: String) -> Result<(), String> {
+    conn.send(weft::build_group_name(&group, &name)?)
+}
+
+#[tauri::command]
+fn groups(conn: State<'_, Conn>) -> Result<(), String> {
+    conn.send(weft::build_groups()?)
+}
+
+#[tauri::command]
+fn call(conn: State<'_, Conn>, user: String) -> Result<(), String> {
+    conn.send(weft::build_call(&user)?)
+}
+
+#[tauri::command]
+fn call_accept(conn: State<'_, Conn>, user: String) -> Result<(), String> {
+    conn.send(weft::build_call_accept(&user)?)
+}
+
+#[tauri::command]
+fn call_decline(conn: State<'_, Conn>, user: String) -> Result<(), String> {
+    conn.send(weft::build_call_decline(&user)?)
+}
+
+#[tauri::command]
+fn call_end(conn: State<'_, Conn>, user: String) -> Result<(), String> {
+    conn.send(weft::build_call_end(&user)?)
 }
 
 #[tauri::command]
@@ -921,6 +976,7 @@ pub fn run() {
             invite_revoke_all,
             invite_redeem,
             invite_revoke,
+            invite_list,
             moderate,
             netblock_add,
             netblock_remove,
@@ -942,6 +998,16 @@ pub fn run() {
             friend_accept,
             friend_remove,
             friends,
+            group_create,
+            group_add,
+            group_remove,
+            group_leave,
+            group_name,
+            groups,
+            call,
+            call_accept,
+            call_decline,
+            call_end,
             emoji_add,
             emoji_remove,
             emoji_list,

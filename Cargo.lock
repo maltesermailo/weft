@@ -9602,6 +9602,7 @@ dependencies = [
  "image",
  "instant-acme",
  "lettre",
+ "livekit",
  "livekit-api",
  "livekit-protocol",
  "quinn",

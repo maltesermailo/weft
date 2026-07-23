@@ -31,15 +31,15 @@ pub use memory::MemoryStore;
 pub use postgres::PgStore;
 pub use traits::{
     AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, FriendOutcome,
-    FriendStore, InviteStore, MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore,
-    NamespaceStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore,
-    HOLD_RADIUS,
+    FriendStore, GroupStore, InviteStore, MediaBlocklistStore, MediaStore, MembershipStore,
+    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore,
+    RoleStore, HOLD_RADIUS,
 };
 pub use types::{
     audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventKind, EventRecord, GrantRecord,
-    InviteRecord, MediaBlockRecord, ModKind, ModRecord, NamespaceRecord, NetblockRecord, Page,
-    PeerRecord, PendingRecovery, ProfileRecord, RedeemOutcome, ReportRecord, ReportResolution,
-    RoleDef, RootHistoryEntry, Scope, ThreadSummary, Verification, AUDIT_GENESIS,
+    GroupRecord, InviteRecord, MediaBlockRecord, ModKind, ModRecord, NamespaceRecord,
+    NetblockRecord, Page, PeerRecord, PendingRecovery, ProfileRecord, RedeemOutcome, ReportRecord,
+    ReportResolution, RoleDef, RootHistoryEntry, Scope, ThreadSummary, Verification, AUDIT_GENESIS,
 };
 
 use thiserror::Error;

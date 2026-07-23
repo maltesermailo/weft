@@ -55,6 +55,8 @@ impl<S: ControlStream> Session<S> {
                     return self.no_such_target(label).await;
                 }
             }
+            // Group DM messages aren't reportable until the group actor lands.
+            Scope::Group(_) => return self.no_such_target(label).await,
         }
 
         // Routing (§6.7): ns → the channel's namespace owner (or the operator
@@ -62,7 +64,7 @@ impl<S: ControlStream> Session<S> {
         // always ALSO reach the operator, who is the legally accountable party.
         let ns = match &root.scope {
             Scope::Channel(c) => channel_namespace(c),
-            Scope::Dm(..) => None,
+            Scope::Dm(..) | Scope::Group(..) => None,
         };
         let mut queue_scopes: Vec<String> = Vec::new();
         match scope {

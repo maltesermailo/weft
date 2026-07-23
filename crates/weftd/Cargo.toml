@@ -17,6 +17,11 @@ web-ui = ["dep:rust-embed"]
 # a headless build pulls neither webrtc nor its dep tree; a zero-voice server
 # stays conformant (advertises no `features=voice`).
 voice = ["dep:weft-rt"]
+# §16 M-lk-3b: the real federated-voice / cross-network-call media relay — a
+# headless libwebrtc participant (LiveKit client SDK) bridging two LiveKit rooms
+# so client IPs never cross networks. Heavy + platform-specific (pulls libwebrtc),
+# so off by default; without it the no-op `LogRelay` runs (relay lifecycle only).
+voice-relay = ["dep:livekit"]
 
 [dependencies]
 weft-proto = { path = "../weft-proto" }
@@ -62,6 +67,10 @@ livekit-api = { version = "0.5.6", default-features = false, features = [
 ] }
 # §16 M-lk-2: construct the ParticipantPermission for the Room server API mute.
 livekit-protocol = "0.7.10"
+# §16 M-lk-3b: the LiveKit client SDK (libwebrtc) for the real media relay —
+# optional, enabled only by the `voice-relay` feature. Same version the desktop
+# client uses, so the workspace already locks it.
+livekit = { version = "0.7.53", features = ["native-tls"], optional = true }
 lettre = { version = "0.11.19", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls", "builder", "hostname"] }
 
 [dev-dependencies]

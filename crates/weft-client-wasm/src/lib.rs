@@ -266,6 +266,27 @@ impl WeftClient {
             "friend_accept" => build_friend_accept(&arg("user"))?,
             "friend_remove" => build_friend_remove(&arg("user"))?,
             "friends" => build_friends()?,
+            "group_create" => {
+                let members: Vec<String> = args
+                    .get("members")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                build_group_create(&members)?
+            }
+            "group_add" => build_group_add(&arg("group"), &arg("user"))?,
+            "group_remove" => build_group_remove(&arg("group"), &arg("user"))?,
+            "group_leave" => build_group_leave(&arg("group"))?,
+            "group_name" => build_group_name(&arg("group"), &arg("name"))?,
+            "groups" => build_groups()?,
+            "call" => build_call(&arg("user"))?,
+            "call_accept" => build_call_accept(&arg("user"))?,
+            "call_decline" => build_call_decline(&arg("user"))?,
+            "call_end" => build_call_end(&arg("user"))?,
             "emoji_add" => build_emoji_add(&arg("namespace"), &arg("name"), &arg("media"))?,
             "emoji_remove" => build_emoji_remove(&arg("namespace"), &arg("name"))?,
             "emoji_list" => build_emoji_list(&arg("namespace"))?,
@@ -354,6 +375,7 @@ impl WeftClient {
             "invite_mint" => build_invite_mint(&arg("scope"))?,
             "invite_redeem" => build_invite_redeem(&arg("token"))?,
             "invite_revoke" => build_invite_revoke(&arg("inviteId"))?,
+            "invite_list" => build_invite_list(&arg("scope"))?,
             "invite_revoke_all" => build_invite_revoke_all(&arg("scope"))?,
             // ---- moderation / reports ----
             "moderate" => build_moderation(

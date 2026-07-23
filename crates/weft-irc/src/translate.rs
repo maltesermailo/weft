@@ -94,6 +94,9 @@ impl St {
             Target::Channel(c) => c.to_string(),
             // A DM addressed to us renders as a PRIVMSG to our own nick.
             Target::User(_) => self.nick_or_star().to_string(),
+            // Group DMs have no IRC representation (§17 flattens the model);
+            // render as our own nick so a stray line never targets a channel.
+            Target::Group(_) => self.nick_or_star().to_string(),
         }
     }
 }

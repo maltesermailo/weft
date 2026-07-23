@@ -116,6 +116,11 @@ export type WeftEvent =
   | { kind: "thread-named"; channel: string; root: string; name: string | null }
   | { kind: "friend"; user: string; state: string }
   | { kind: "friend-removed"; user: string }
+  | { kind: "group"; id: string; name: string | null; members: string[] }
+  | { kind: "group-member"; group: string; user: string; action: string }
+  | { kind: "call-ring"; from: string; room: string }
+  | { kind: "call-state"; user: string; state: string }
+  | { kind: "call-media"; room: string; mode: string; token: string; endpoint: string | null }
   | { kind: "caps"; account: string; scope: string; caps: string }
   | { kind: "role"; scope: string; color: string; caps: string; hoist: boolean; position: number; name: string }
   | { kind: "role-member"; scope: string; account: string; roles: string }
@@ -156,6 +161,7 @@ export type WeftEvent =
   | { kind: "more"; cursor: string }
   | { kind: "token"; subject: string; scope: string }
   | { kind: "invited"; scope: string; invite_id: string; link: string | null; max_uses: number | null }
+  | { kind: "invite-info"; scope: string; invite_id: string; creator: string; uses_left: number | null; expiry: number | null }
   | { kind: "reported"; report_id: string }
   | {
       kind: "report-filed";
@@ -619,6 +625,40 @@ export function listFriends() {
   return invoke("friends", {});
 }
 
+// ---- group DMs (social layer; ids are `&<ulid>`, members account@network) ----
+export function groupCreate(members: string[]) {
+  return invoke("group_create", { members });
+}
+export function groupAdd(group: string, user: string) {
+  return invoke("group_add", { group, user });
+}
+export function groupRemove(group: string, user: string) {
+  return invoke("group_remove", { group, user });
+}
+export function groupLeave(group: string) {
+  return invoke("group_leave", { group });
+}
+export function groupName(group: string, name: string) {
+  return invoke("group_name", { group, name });
+}
+export function listGroups() {
+  return invoke("groups", {});
+}
+
+// ---- friend calls (social layer; user = account@network) ----
+export function call(user: string) {
+  return invoke("call", { user });
+}
+export function callAccept(user: string) {
+  return invoke("call_accept", { user });
+}
+export function callDecline(user: string) {
+  return invoke("call_decline", { user });
+}
+export function callEnd(user: string) {
+  return invoke("call_end", { user });
+}
+
 // ---- §9.4 custom emoji ----
 export function emojiAdd(namespace: string, name: string, media: string) {
   return invoke("emoji_add", { namespace, name, media });
@@ -694,6 +734,11 @@ export function inviteRevoke(inviteId: string) {
 /// Revoke every invite for a namespace at once (§6.5).
 export function inviteRevokeAll(scope: string) {
   return invoke("invite_revoke_all", { scope });
+}
+
+/// List the live invites at a scope (§6.5); each arrives as an `invite-info`.
+export function inviteList(scope: string) {
+  return invoke("invite_list", { scope });
 }
 
 /// Moderation (§6.7). `verb` = mute|unmute|ban|unban|kick. `scope` is a channel

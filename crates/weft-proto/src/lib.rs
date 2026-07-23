@@ -28,7 +28,7 @@ mod name;
 mod policy;
 mod types;
 
-pub use command::{Command, FSessionOp, Request};
+pub use command::{CallMediaGrant, Command, FSessionOp, Request};
 pub use errcode::ErrCode;
 pub use error::{ParseError, SerializeError};
 pub use event::{ErrEvent, Event, MessageEvent, Reply};
@@ -38,13 +38,13 @@ pub use line::{
     MAX_EMOJI_BYTES, MAX_HISTORY_LIMIT, MAX_LABEL_BYTES, MAX_LINE_BYTES, MAX_PARAMS, MAX_TAGS,
     MAX_TAG_KEY_BYTES, MAX_TAG_VALUE_BYTES,
 };
-pub use name::{Account, ChannelName, NamespaceName, NetworkName, Target, UserRef};
+pub use name::{Account, ChannelName, GroupId, NamespaceName, NetworkName, Target, UserRef};
 pub use policy::{RetainedFor, RetentionPolicy, RetentionUnit};
 pub use types::{
-    report_category_ok, BridgeState, ChannelKind, ContentState, FriendState, HistoryMode,
-    MediaMode, MemberAction, ModAction, MsgMeta, PresenceStatus, ReactionOp, ReportScope,
-    ReportStatus, ResolveAction, StreamMode, TypingState, VerifyState, Visibility, VoiceAction,
-    VoiceTransport,
+    report_category_ok, BridgeState, CallState, ChannelKind, ContentState, FriendState,
+    HistoryMode, MediaMode, MemberAction, ModAction, MsgMeta, PresenceStatus, ReactionOp,
+    ReportScope, ReportStatus, ResolveAction, StreamMode, TypingState, VerifyState, Visibility,
+    VoiceAction, VoiceTransport,
 };
 
 // Re-exported so consumers (weft-core mints ULIDs in channel actors) share

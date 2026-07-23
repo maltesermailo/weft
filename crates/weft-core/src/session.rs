@@ -40,10 +40,12 @@ use crate::stream::ControlStream;
 // the dispatch here can route to them; they see this module's private fields
 // and helpers as descendants).
 mod auth;
+mod calls;
 mod caps;
 mod channels;
 mod federation;
 mod friends;
+mod groups;
 mod invites;
 mod moderation;
 mod namespaces;
@@ -1072,6 +1074,10 @@ impl<S: ControlStream> Session<S> {
                     .await
             }
             Command::InviteRedeem { token } => self.on_invite_redeem(label, token, account).await,
+            Command::InviteList { scope } => {
+                self.on_invite_list(label, scope, Actor::Local(account))
+                    .await
+            }
             // §6.2 namespace verbs.
             Command::NsCreate {
                 name,
@@ -1330,6 +1336,43 @@ impl<S: ControlStream> Session<S> {
             Command::Friends => {
                 let me = UserRef::new(account, self.ctx.info.network.clone());
                 self.on_friends(label, me).await
+            }
+            // Group DMs: proto + store shipped; the group actor + handlers are
+            // the next increment, so the verbs are recognized but not yet live.
+            // Group DMs (social layer).
+            Command::GroupCreate { members } => self.on_group_create(label, members, account).await,
+            Command::GroupAdd { group, user } => {
+                self.on_group_add(label, group, user, account).await
+            }
+            Command::GroupRemove { group, user } => {
+                self.on_group_remove(label, group, user, account).await
+            }
+            Command::GroupLeave { group } => self.on_group_leave(label, group, account).await,
+            Command::GroupName { group, name } => {
+                self.on_group_name(label, group, name, account).await
+            }
+            Command::Groups => self.on_groups(label, account).await,
+            // Friend calls (social layer, federation-able): signaling + media. The
+            // caller's identity is `account@thisnet` here; a tunnelled peer's call
+            // commands run in `on_federated` with the caller's *foreign* UserRef.
+            // A client never supplies `media` — the caller's *network* pre-mints
+            // the callee's credential (a client-injected token would be forged), so
+            // it's dropped here and re-derived server-side.
+            Command::Call { user, .. } => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.on_call(label, user, me, None).await
+            }
+            Command::CallAccept { user } => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.on_call_accept(label, user, me).await
+            }
+            Command::CallDecline { user } => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.on_call_decline(label, user, me).await
+            }
+            Command::CallEnd { user } => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.on_call_end(label, user, me).await
             }
             // §16 WEFT-RT voice signaling. The SFU backend is installed by weftd;
             // a zero-voice server answers `UNSUPPORTED` inside these handlers.

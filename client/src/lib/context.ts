@@ -13,6 +13,14 @@ import { getContext, setContext } from "svelte";
 import type { Channel, Msg, Member, CtxItem, RoleDefC, ThreadInfo } from "./types";
 
 export type RetentionMeta = { cls: string; label: string; icon: string };
+/** One live invite in the Discord-style invites menu (§6.5). */
+export type InviteInfo = {
+  scope: string;
+  invite_id: string;
+  creator: string;
+  uses_left: number | null;
+  expiry: number | null;
+};
 export type Badge = { owner: boolean; mod: boolean; list: string[] };
 
 export interface AppCtx {
@@ -27,6 +35,7 @@ export interface AppCtx {
   readonly active: string;
   readonly activeChannel: Channel | undefined;
   readonly activeIsDm: boolean;
+  readonly activeIsGroup: boolean;
   readonly serverNamespaces: string[];
   readonly channelGroups: { category: string; list: Channel[] }[];
   readonly dmList: Channel[];
@@ -53,6 +62,25 @@ export interface AppCtx {
   removeFriend(user: string): void;
   messageFriend(user: string): void;
   openFriends(): void;
+  // ---- group DMs (ids are `&<ulid>`) ----
+  readonly groupList: string[];
+  newGroupInput: string;
+  /** A group's display label (its name, else member handles). */
+  groupLabel(id: string): string;
+  createGroup(): void;
+  openGroup(id: string): void;
+  leaveGroup(id: string): void;
+  addToGroup(id: string, handle: string): void;
+  // ---- friend calls (1:1) ----
+  readonly incomingCall: { from: string; room: string } | null;
+  readonly activeCall: { peer: string; room: string; state: string } | null;
+  readonly callMuted: boolean;
+  readonly callConnecting: boolean;
+  callUser(user: string): void;
+  acceptCall(): void;
+  declineCall(): void;
+  endCall(): void;
+  toggleCallMute(): void;
   goHome(): void;
   selectServer(ns: string): void;
   /** Select a server tile and open its header menu (rail right-click). */
@@ -130,6 +158,13 @@ export interface AppCtx {
   openCreateChannelInCat(cat: string): void;
   openNsSettings(): void;
   mintInvite(): void;
+  // ---- invites menu (Discord-style: list, creator, revoke) ----
+  readonly invitesList: InviteInfo[];
+  readonly invitesScope: string;
+  openInvites(): void;
+  revokeInvite(id: string): void;
+  createInvite(): void;
+  inviteLinkFor(inv: InviteInfo): string;
   newCat(): void; // open the create-category modal
 
   // ---- members ----

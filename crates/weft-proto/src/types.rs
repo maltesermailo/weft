@@ -281,6 +281,19 @@ wire_enum!(
 );
 
 wire_enum!(
+    /// `CALL-STATE <user@net> <state>` — a 1:1 friend call's lifecycle (social
+    /// layer). `ringing` (outbound placed / inbound arriving), `active` (both
+    /// joined the room), `declined`, `ended`, or `busy` (peer already in a call).
+    CallState, "call state", {
+        Ringing => "ringing",
+        Active => "active",
+        Declined => "declined",
+        Ended => "ended",
+        Busy => "busy",
+    }
+);
+
+wire_enum!(
     /// `FRIEND <user@net> <state>` — a friendship's state from the listing
     /// account's point of view (social layer). Federation-able: the peer is a
     /// full `UserRef`, so a friend may live on another network.

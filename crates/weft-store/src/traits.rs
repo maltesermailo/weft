@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use weft_proto::{
-    Account, ChannelName, FriendState, MsgId, ReportStatus, RetentionPolicy, Ulid, UserRef,
+    Account, ChannelName, FriendState, GroupId, MsgId, ReportStatus, RetentionPolicy, Ulid, UserRef,
 };
 
 use weft_proto::NamespaceName;
@@ -11,7 +11,7 @@ use weft_proto::NamespaceName;
 use weft_proto::NetworkName;
 
 use crate::types::{
-    AuditEntry, AuditRecord, ChannelRecord, EventRecord, GrantRecord, InviteRecord,
+    AuditEntry, AuditRecord, ChannelRecord, EventRecord, GrantRecord, GroupRecord, InviteRecord,
     MediaBlockRecord, ModKind, ModRecord, NamespaceRecord, NetblockRecord, Page, PeerRecord,
     PendingRecovery, RedeemOutcome, ReportRecord, ReportResolution, RoleDef, RootHistoryEntry,
     Scope, ThreadSummary, Verification,
@@ -366,6 +366,9 @@ pub trait InviteStore: Send + Sync {
 
     /// INVITE REVOKE — closes the counter. False = no such invite.
     async fn revoke_invite(&self, id: &str) -> Result<bool, StoreError>;
+
+    /// INVITE LIST — the live (non-revoked) invites at `scope`, newest-id first.
+    async fn invites_for_scope(&self, scope: &str) -> Result<Vec<InviteRecord>, StoreError>;
 
     /// INVITE REVOKE-ALL — remove every invite belonging to namespace `ns` (its
     /// `ns:<ns>` scope plus any `#<ns>/<chan>` channel scope). Returns the count.
@@ -850,4 +853,42 @@ pub trait FriendStore: Send + Sync {
         account: &UserRef,
         other: &UserRef,
     ) -> Result<Option<FriendState>, StoreError>;
+}
+
+/// Group DMs (social layer): multi-party conversations with an explicit member
+/// list and no namespace. **Federation-able** — members are full `UserRef`s.
+/// Messages live under `Scope::Group(id)` in the [`EventStore`]; this store
+/// holds only the group's identity + membership.
+#[async_trait]
+pub trait GroupStore: Send + Sync {
+    /// Create a group with the given `members` (the creator must be included by
+    /// the caller). Idempotent by `id`.
+    async fn create_group(
+        &self,
+        id: GroupId,
+        creator: &UserRef,
+        members: &[UserRef],
+        at_ms: u64,
+    ) -> Result<(), StoreError>;
+
+    /// The group's record, or `None` if it doesn't exist.
+    async fn group(&self, id: GroupId) -> Result<Option<GroupRecord>, StoreError>;
+
+    /// A group's members, sorted. Empty if the group doesn't exist.
+    async fn group_members(&self, id: GroupId) -> Result<Vec<UserRef>, StoreError>;
+
+    /// Whether `user` is currently a member of the group.
+    async fn is_group_member(&self, id: GroupId, user: &UserRef) -> Result<bool, StoreError>;
+
+    /// Add a member. Idempotent. `false` iff the group doesn't exist.
+    async fn add_group_member(&self, id: GroupId, user: &UserRef) -> Result<bool, StoreError>;
+
+    /// Remove a member. `false` iff they weren't a member.
+    async fn remove_group_member(&self, id: GroupId, user: &UserRef) -> Result<bool, StoreError>;
+
+    /// Set (or, with `None`, clear) a group's display name. `false` iff unknown.
+    async fn set_group_name(&self, id: GroupId, name: Option<&str>) -> Result<bool, StoreError>;
+
+    /// Every group `user` is a member of, most-recently-created first.
+    async fn groups_for(&self, user: &UserRef) -> Result<Vec<GroupRecord>, StoreError>;
 }

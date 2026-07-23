@@ -5,12 +5,12 @@ use crate::errcode::ErrCode;
 use crate::error::{ParseError, SerializeError};
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
-use crate::name::{Account, ChannelName, NamespaceName, NetworkName, Target, UserRef};
+use crate::name::{Account, ChannelName, GroupId, NamespaceName, NetworkName, Target, UserRef};
 use crate::policy::RetentionPolicy;
 use crate::types::{
-    BridgeState, ChannelKind, ContentState, FriendState, HistoryMode, MediaMode, MemberAction,
-    ModAction, MsgMeta, PresenceStatus, ReactionOp, ReportScope, ResolveAction, TypingState,
-    VerifyState, Visibility, VoiceAction, VoiceTransport,
+    BridgeState, CallState, ChannelKind, ContentState, FriendState, HistoryMode, MediaMode,
+    MemberAction, ModAction, MsgMeta, PresenceStatus, ReactionOp, ReportScope, ResolveAction,
+    TypingState, VerifyState, Visibility, VoiceAction, VoiceTransport,
 };
 
 /// An event plus its optional `label` echo (§3.5). Only direct responses
@@ -306,6 +306,15 @@ pub enum Event {
         max_uses: Option<u32>,
         expiry: Option<u64>,
     },
+    /// `@uses=;expiry= INVITE-INFO <scope> <invite-id> <creator@net>` — one live
+    /// invite in an `INVITE LIST` response (§6.5). `uses` absent = unlimited.
+    InviteInfo {
+        scope: String,
+        invite_id: String,
+        creator: UserRef,
+        uses_left: Option<u32>,
+        expiry: Option<u64>,
+    },
     /// `CHANMETA <#chan> <key> :<value>` (§7) — channel metadata change.
     Chanmeta {
         channel: ChannelName,
@@ -479,6 +488,46 @@ pub enum Event {
     /// unfriended, declined, or cancelled. Pushed to both parties' sessions.
     FriendRemoved {
         user: UserRef,
+    },
+    /// `@name= GROUP <&id> :<member> <member>…` — a group DM's identity, name,
+    /// and current members (social layer). Sent on create + one per group for
+    /// `GROUPS`. Members are full `UserRef`s (federation-able).
+    Group {
+        id: GroupId,
+        name: Option<String>,
+        members: Vec<UserRef>,
+    },
+    /// `GROUP-MEMBER <&id> <user@net> <join|part>` — a group DM membership
+    /// change, broadcast to the group's members.
+    GroupMember {
+        group: GroupId,
+        user: UserRef,
+        action: MemberAction,
+    },
+    /// `CALL-RING <from@net> <room>` — an incoming 1:1 friend call. `room` is
+    /// the ad-hoc voice room to `VOICE JOIN` on accept (social layer).
+    CallRing {
+        from: UserRef,
+        room: String,
+    },
+    /// `CALL-STATE <user@net> <state>` — a call's lifecycle update to the other
+    /// party (ringing/active/declined/ended/busy).
+    CallState {
+        user: UserRef,
+        state: CallState,
+    },
+    /// `@mode=livekit CALL-MEDIA <room> <token> :<endpoint>` — the media
+    /// credential for a friend call, minted per-participant when the call goes
+    /// `active` and delivered **only to that participant** (the `token` is their
+    /// personal publish/subscribe JWT — never broadcast). Mirrors the media half
+    /// of `VOICE OFFER`, but keyed by the ad-hoc call `room`, not a channel; the
+    /// client connects to `endpoint` with the LiveKit SDK exactly as for a voice
+    /// channel. Absent when the server has no LiveKit backend (signaling-only).
+    CallMedia {
+        room: String,
+        mode: VoiceTransport,
+        token: String,
+        endpoint: Option<String>,
     },
     /// `VOICE DESC <#chan> :<sdp>` (§16) — the SFU's SDP **answer** to the
     /// client's `VOICE DESC` offer. Symmetric with the command (spec §16 uses
@@ -944,6 +993,26 @@ impl Event {
                     expiry: u64_tag(line, "expiry", "INVITED")?,
                 })
             }
+            "INVITE-INFO" => {
+                let mut args = Args::new(line, "INVITE-INFO");
+                Ok(Event::InviteInfo {
+                    scope: args.req("scope")?.to_string(),
+                    invite_id: args.req("invite-id")?.to_string(),
+                    creator: args.req("creator")?.parse()?,
+                    uses_left: line
+                        .tags
+                        .get("uses")
+                        .map(|v| {
+                            v.parse().map_err(|_| ParseError::BadParam {
+                                verb: "INVITE-INFO",
+                                what: "uses",
+                                value: v.clone(),
+                            })
+                        })
+                        .transpose()?,
+                    expiry: u64_tag(line, "expiry", "INVITE-INFO")?,
+                })
+            }
             "CHANMETA" => {
                 let mut args = Args::new(line, "CHANMETA");
                 Ok(Event::Chanmeta {
@@ -1174,6 +1243,58 @@ impl Event {
                 let mut args = Args::new(line, "FRIEND-REMOVED");
                 Ok(Event::FriendRemoved {
                     user: args.req("user")?.parse()?,
+                })
+            }
+            "GROUP" => {
+                let mut args = Args::new(line, "GROUP");
+                let id = args.req("id")?.parse()?;
+                let members = line
+                    .trailing
+                    .as_deref()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .map(str::parse)
+                    .collect::<Result<Vec<UserRef>, _>>()?;
+                Ok(Event::Group {
+                    id,
+                    name: line.tags.get("name").filter(|v| !v.is_empty()).cloned(),
+                    members,
+                })
+            }
+            "GROUP-MEMBER" => {
+                let mut args = Args::new(line, "GROUP-MEMBER");
+                Ok(Event::GroupMember {
+                    group: args.req("group")?.parse()?,
+                    user: args.req("user")?.parse()?,
+                    action: args.req("action")?.parse()?,
+                })
+            }
+            "CALL-RING" => {
+                let mut args = Args::new(line, "CALL-RING");
+                Ok(Event::CallRing {
+                    from: args.req("from")?.parse()?,
+                    room: args.req("room")?.to_string(),
+                })
+            }
+            "CALL-STATE" => {
+                let mut args = Args::new(line, "CALL-STATE");
+                Ok(Event::CallState {
+                    user: args.req("user")?.parse()?,
+                    state: args.req("state")?.parse()?,
+                })
+            }
+            "CALL-MEDIA" => {
+                let mut args = Args::new(line, "CALL-MEDIA");
+                Ok(Event::CallMedia {
+                    room: args.req("room")?.to_string(),
+                    mode: line
+                        .tags
+                        .get("mode")
+                        .map(|v| v.parse())
+                        .transpose()?
+                        .unwrap_or_default(),
+                    token: args.req("token")?.to_string(),
+                    endpoint: args.trailing_opt(),
                 })
             }
             "VOICE" => {
@@ -1532,6 +1653,25 @@ impl Event {
                     link.clone(),
                 )
             }
+            Event::InviteInfo {
+                scope,
+                invite_id,
+                creator,
+                uses_left,
+                expiry,
+            } => {
+                if let Some(uses) = uses_left {
+                    tags.insert("uses".to_string(), uses.to_string());
+                }
+                if let Some(expiry) = expiry {
+                    tags.insert("expiry".to_string(), expiry.to_string());
+                }
+                (
+                    "INVITE-INFO",
+                    vec![scope.clone(), invite_id.clone(), creator.to_string()],
+                    None,
+                )
+            }
             Event::Chanmeta {
                 channel,
                 key,
@@ -1815,6 +1955,58 @@ impl Event {
                 ("FRIEND", vec![user.to_string(), state.to_string()], None)
             }
             Event::FriendRemoved { user } => ("FRIEND-REMOVED", vec![user.to_string()], None),
+            Event::Group { id, name, members } => {
+                if let Some(name) = name.as_ref().filter(|n| !n.is_empty()) {
+                    tags.insert("name".to_string(), name.clone());
+                }
+                let trailing = if members.is_empty() {
+                    None
+                } else {
+                    Some(
+                        members
+                            .iter()
+                            .map(|m| m.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    )
+                };
+                ("GROUP", vec![id.to_string()], trailing)
+            }
+            Event::GroupMember {
+                group,
+                user,
+                action,
+            } => (
+                "GROUP-MEMBER",
+                vec![group.to_string(), user.to_string(), action.to_string()],
+                None,
+            ),
+            Event::CallRing { from, room } => {
+                ("CALL-RING", vec![from.to_string(), room.clone()], None)
+            }
+            Event::CallState { user, state } => (
+                "CALL-STATE",
+                vec![user.to_string(), state.to_string()],
+                None,
+            ),
+            Event::CallMedia {
+                room,
+                mode,
+                token,
+                endpoint,
+            } => {
+                // `webrtc` is the default — omit the tag; calls only ever use
+                // `livekit` (the SFU has no room-grant), but stay symmetric with
+                // `VOICE OFFER`.
+                if *mode != VoiceTransport::Webrtc {
+                    tags.insert("mode".to_string(), mode.to_string());
+                }
+                (
+                    "CALL-MEDIA",
+                    vec![room.clone(), token.clone()],
+                    endpoint.clone(),
+                )
+            }
             Event::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown event"));
             }
@@ -2300,6 +2492,33 @@ mod tests {
     }
 
     #[test]
+    fn invite_info_event_round_trips() {
+        let info = Reply::with_label(
+            Event::InviteInfo {
+                scope: "ns:gaming".into(),
+                invite_id: "i01ARZ".into(),
+                creator: "ada@hda.example".parse().unwrap(),
+                uses_left: Some(5),
+                expiry: Some(1_700_000_000),
+            },
+            "il1",
+        );
+        assert!(info
+            .serialize()
+            .unwrap()
+            .contains("INVITE-INFO ns:gaming i01ARZ ada@hda.example"));
+        round_trip(&info);
+        // Unlimited uses, no expiry.
+        round_trip(&Reply::new(Event::InviteInfo {
+            scope: "#general".into(),
+            invite_id: "i2".into(),
+            creator: "bob@peer.example".parse().unwrap(),
+            uses_left: None,
+            expiry: None,
+        }));
+    }
+
+    #[test]
     fn chanmeta_event_round_trips() {
         round_trip(&Reply::new(Event::Chanmeta {
             channel: "#general".parse().unwrap(),
@@ -2611,6 +2830,91 @@ mod tests {
         }
         round_trip(&Reply::new(Event::FriendRemoved {
             user: "carol@other.example".parse().unwrap(),
+        }));
+    }
+
+    #[test]
+    fn group_dm_events_round_trip() {
+        const G: &str = "&01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let group = Reply::with_label(
+            Event::Group {
+                id: G.parse().unwrap(),
+                name: Some("trip".to_string()),
+                members: vec![
+                    "ada@home.example".parse().unwrap(),
+                    "bob@peer.example".parse().unwrap(),
+                ],
+            },
+            "g1",
+        );
+        assert_eq!(
+            group.serialize().unwrap(),
+            "@label=g1;name=trip GROUP &01ARZ3NDEKTSV4RRFFQ69G5FAV :ada@home.example bob@peer.example"
+        );
+        round_trip(&group);
+        // Nameless, single-member (e.g. everyone else left).
+        round_trip(&Reply::new(Event::Group {
+            id: G.parse().unwrap(),
+            name: None,
+            members: vec!["ada@home.example".parse().unwrap()],
+        }));
+        round_trip(&Reply::new(Event::GroupMember {
+            group: G.parse().unwrap(),
+            user: "carol@peer.example".parse().unwrap(),
+            action: MemberAction::Join,
+        }));
+        round_trip(&Reply::new(Event::GroupMember {
+            group: G.parse().unwrap(),
+            user: "carol@peer.example".parse().unwrap(),
+            action: MemberAction::Part,
+        }));
+    }
+
+    #[test]
+    fn call_events_round_trip() {
+        let ring = Reply::with_label(
+            Event::CallRing {
+                from: "ada@home.example".parse().unwrap(),
+                room: "call:01ARZ".into(),
+            },
+            "cr1",
+        );
+        assert_eq!(
+            ring.serialize().unwrap(),
+            "@label=cr1 CALL-RING ada@home.example call:01ARZ"
+        );
+        round_trip(&ring);
+        for state in [
+            CallState::Ringing,
+            CallState::Active,
+            CallState::Declined,
+            CallState::Ended,
+            CallState::Busy,
+        ] {
+            round_trip(&Reply::new(Event::CallState {
+                user: "bob@peer.example".parse().unwrap(),
+                state,
+            }));
+        }
+
+        // The per-participant media credential (LiveKit), delivered on `active`.
+        let media = Reply::new(Event::CallMedia {
+            room: "call:01ARZ".into(),
+            mode: VoiceTransport::Livekit,
+            token: "jwt.abc.def".into(),
+            endpoint: Some("wss://lk.example".into()),
+        });
+        assert_eq!(
+            media.serialize().unwrap(),
+            "@mode=livekit CALL-MEDIA call:01ARZ jwt.abc.def :wss://lk.example"
+        );
+        round_trip(&media);
+        // Endpoint omitted (a deployment that hands the URL out-of-band).
+        round_trip(&Reply::new(Event::CallMedia {
+            room: "call:01ARZ".into(),
+            mode: VoiceTransport::Livekit,
+            token: "jwt.abc.def".into(),
+            endpoint: None,
         }));
     }
 

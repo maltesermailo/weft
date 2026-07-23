@@ -7,11 +7,15 @@ use std::sync::Arc;
 use weft_crypto::{
     Attestation, Capability, Grant, Keypair, Profile, PublicKey, SignedProfile, Subject, TokenScope,
 };
-use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, RetentionPolicy};
+use weft_proto::{
+    Account, CallMediaGrant, ChannelName, MsgId, NamespaceName, NetworkName, RetentionPolicy,
+    UserRef,
+};
 use weft_store::{
     AccountStore, BlobStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, FriendStore,
-    InviteStore, MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
-    NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, StoreError,
+    GroupStore, InviteStore, MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore,
+    NamespaceStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore,
+    StoreError,
 };
 
 use crate::accounts::Accounts;
@@ -141,6 +145,9 @@ pub struct ServerCtx {
     /// Social graph (friends + pending requests). Federation-able — peers are
     /// full `UserRef`s.
     pub(crate) friends: Arc<dyn FriendStore>,
+    /// Group DMs: identity + membership (messages live in `events` under
+    /// `Scope::Group`). Federation-able members.
+    pub(crate) groups: Arc<dyn GroupStore>,
     /// §6.1 live presence, in-memory only (never stored, never bridged).
     /// account → last non-invisible status; served with MEMBERS for correct
     /// roster dots.
@@ -210,13 +217,17 @@ pub struct ServerCtx {
     /// source of the `VOICE STATE` snapshot a joiner gets, and how a moderator's
     /// `MUTE` finds a target's live voice sessions.
     voice_rooms: std::sync::Mutex<HashMap<ChannelName, HashMap<u64, crate::voice::VoiceMember>>>,
+    /// Social layer: live 1:1 friend calls, keyed by the canonical account pair
+    /// (same-network). Value = the ad-hoc room + whether it's been accepted.
+    calls: std::sync::Mutex<HashMap<(UserRef, UserRef), CallInfo>>,
     /// §16 M-lk-3b federated voice: the media-relay driver weftd installs (a
     /// libwebrtc `livekit`-SDK relay, or the no-op default). `None` = no relaying.
     voice_relay: std::sync::OnceLock<Arc<dyn crate::voice::VoiceRelay>>,
-    /// §16 M-lk-3b relay refcounts: `(peer, foreign-channel) → live local
-    /// members`. A relay starts on the first local joiner and stops on the last
-    /// (or on `SEVER`/`NETBLOCK`, invariant 7).
-    voice_relays: std::sync::Mutex<HashMap<(NetworkName, ChannelName), usize>>,
+    /// §16 M-lk-3b relay refcounts: `(peer, key) → live local participants`,
+    /// where `key` is a foreign channel name or a cross-network call room. A relay
+    /// starts on the first local joiner and stops on the last (or on
+    /// `SEVER`/`NETBLOCK`, invariant 7).
+    voice_relays: std::sync::Mutex<HashMap<(NetworkName, String), usize>>,
     /// §10.5 the email sender weftd installs (SMTP, or a dev log-mailer).
     mailer: std::sync::OnceLock<Arc<dyn crate::mailer::Mailer>>,
     /// §10.5 pending email verification codes: `(account, kind) → (code,
@@ -255,6 +266,39 @@ pub struct BackfillPull {
 pub struct BackfillReq {
     pub channel: ChannelName,
     pub before: Option<MsgId>,
+}
+
+/// A live 1:1 friend call (social layer). For a cross-network call **each network
+/// hosts its own LiveKit room** for its local participant; a relay bridges the two
+/// rooms so neither client ever connects to the other network's LiveKit
+/// (protecting client IPs). A same-network call is one room, minted at accept.
+#[derive(Debug, Clone)]
+pub(crate) struct CallInfo {
+    /// Who placed the call (the other side is the callee).
+    pub caller: UserRef,
+    /// The LiveKit room **this** network hosts (same-network: the single shared
+    /// room). Keys the relay on the callee's side.
+    pub room: String,
+    /// False while ringing, true once accepted.
+    pub active: bool,
+    /// The credential for **this** network's local participant, delivered as
+    /// `CALL-MEDIA` when they accept. `Some` on a cross-network call (pre-minted
+    /// for our own LiveKit room); `None` same-network (minted at accept).
+    pub local_media: Option<CallMediaGrant>,
+    /// Set only on the **callee's** network of a cross-network call: the caller
+    /// network's relay leg (its room + a relay token + URL) to bridge our room to.
+    /// Present ⇒ spawn a media relay on accept, tear it down on end.
+    pub relay_leg: Option<CallMediaGrant>,
+}
+
+/// The outcome of placing a call.
+pub(crate) enum CallPlace {
+    /// Ringing — carries the room to advertise to the callee.
+    Ringing(String),
+    /// The callee is already in a call.
+    Busy,
+    /// A call between these two already exists (ringing or active).
+    Exists,
 }
 
 /// A `FEDERATE` request handed from weft-core to weftd's dialer (§11.10).
@@ -315,6 +359,7 @@ impl ServerCtx {
             + RoleStore
             + ProfileStore
             + FriendStore
+            + GroupStore
             + 'static,
     {
         let events: Arc<dyn EventStore> = store.clone();
@@ -334,6 +379,7 @@ impl ServerCtx {
         let roles: Arc<dyn RoleStore> = store.clone();
         let profiles: Arc<dyn ProfileStore> = store.clone();
         let friends: Arc<dyn FriendStore> = store.clone();
+        let groups: Arc<dyn GroupStore> = store.clone();
         let namespaces: Arc<dyn NamespaceStore> = store;
         let registry = Registry::spawn(
             channels,
@@ -372,6 +418,7 @@ impl ServerCtx {
             roles,
             profiles,
             friends,
+            groups,
             presence: std::sync::Mutex::new(std::collections::HashMap::new()),
             blobs,
             media_refs,
@@ -391,6 +438,7 @@ impl ServerCtx {
             federate_cooldown: std::sync::Mutex::new(HashMap::new()),
             voice: std::sync::OnceLock::new(),
             voice_rooms: std::sync::Mutex::new(HashMap::new()),
+            calls: std::sync::Mutex::new(HashMap::new()),
             voice_relay: std::sync::OnceLock::new(),
             voice_relays: std::sync::Mutex::new(HashMap::new()),
             mailer: std::sync::OnceLock::new(),
@@ -466,12 +514,13 @@ impl ServerCtx {
         }
     }
 
-    /// §16 M-lk-3b: a local member joined the foreign voice channel `spec.channel`
-    /// (homed on `spec.peer`). Refcount it; on the **first** joiner start the media
-    /// relay bridging the peer's LiveKit room into ours. Idempotent per member —
+    /// §16 M-lk-3b: a local participant joined a bridged conversation (a foreign
+    /// voice channel, or a cross-network call) identified by `spec.key`, homed on
+    /// `spec.peer`. Refcount it; on the **first** joiner start the media relay
+    /// bridging the peer's LiveKit room into ours. Idempotent per participant —
     /// the caller pairs it with [`relay_release`](Self::relay_release).
     pub async fn relay_acquire(&self, spec: crate::voice::RelaySpec) {
-        let key = (spec.peer.clone(), spec.channel.clone());
+        let key = (spec.peer.clone(), spec.key.clone());
         let first = {
             let mut relays = self.voice_relays.lock().expect("relay lock");
             let count = relays.entry(key).or_insert(0);
@@ -485,17 +534,17 @@ impl ServerCtx {
         }
     }
 
-    /// §16 M-lk-3b: a local member left the foreign voice channel. On the **last**
-    /// leaver, stop the relay.
-    pub async fn relay_release(&self, peer: &NetworkName, channel: &ChannelName) {
-        let key = (peer.clone(), channel.clone());
+    /// §16 M-lk-3b: a local participant left. On the **last** leaver, stop the
+    /// relay for `(peer, key)`.
+    pub async fn relay_release(&self, peer: &NetworkName, key: &str) {
+        let map_key = (peer.clone(), key.to_string());
         let last = {
             let mut relays = self.voice_relays.lock().expect("relay lock");
-            match relays.get_mut(&key) {
+            match relays.get_mut(&map_key) {
                 Some(count) => {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
-                        relays.remove(&key);
+                        relays.remove(&map_key);
                         true
                     } else {
                         false
@@ -506,7 +555,7 @@ impl ServerCtx {
         };
         if last {
             if let Some(driver) = self.voice_relay.get() {
-                driver.stop(peer, channel).await;
+                driver.stop(peer, key).await;
             }
         }
     }
@@ -515,17 +564,17 @@ impl ServerCtx {
     /// `BRIDGE SEVER` or `NETBLOCK` stops the peer's media immediately, regardless
     /// of local refcounts).
     pub async fn relay_drop_peer(&self, peer: &NetworkName) {
-        let dropped: Vec<ChannelName> = {
+        let dropped: Vec<String> = {
             let mut relays = self.voice_relays.lock().expect("relay lock");
             let keys: Vec<_> = relays.keys().filter(|(p, _)| p == peer).cloned().collect();
             for key in &keys {
                 relays.remove(key);
             }
-            keys.into_iter().map(|(_, c)| c).collect()
+            keys.into_iter().map(|(_, k)| k).collect()
         };
         if let Some(driver) = self.voice_relay.get() {
-            for channel in dropped {
-                driver.stop(peer, &channel).await;
+            for key in dropped {
+                driver.stop(peer, &key).await;
             }
         }
     }
@@ -646,6 +695,67 @@ impl ServerCtx {
     /// so the peer simply isn't told until federation is available.
     pub(crate) fn request_friend_deliver(&self, req: FriendDeliver) -> bool {
         matches!(self.friend_deliver_tx.get(), Some(tx) if tx.send(req).is_ok())
+    }
+
+    // ---- social layer: 1:1 friend calls ----
+
+    fn call_key(a: &UserRef, b: &UserRef) -> (UserRef, UserRef) {
+        if a <= b {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
+        }
+    }
+
+    /// Record a placed call, returning [`CallPlace`]. `Busy` if either party is
+    /// already in a call, `Exists` if this pair already has one. `local_media` is
+    /// this network's participant's pre-minted credential (cross-network) or
+    /// `None` (same-network, minted at accept); `relay_leg` is the caller
+    /// network's relay leg on the callee's side (⇒ relay on accept).
+    pub(crate) fn call_place(
+        &self,
+        caller: &UserRef,
+        callee: &UserRef,
+        room: String,
+        local_media: Option<CallMediaGrant>,
+        relay_leg: Option<CallMediaGrant>,
+    ) -> CallPlace {
+        let mut calls = self.calls.lock().expect("calls lock");
+        let key = Self::call_key(caller, callee);
+        if calls.contains_key(&key) {
+            return CallPlace::Exists;
+        }
+        let in_call = |u: &UserRef| calls.keys().any(|(a, b)| a == u || b == u);
+        if in_call(caller) || in_call(callee) {
+            return CallPlace::Busy;
+        }
+        calls.insert(
+            key,
+            CallInfo {
+                caller: caller.clone(),
+                room: room.clone(),
+                active: false,
+                local_media,
+                relay_leg,
+            },
+        );
+        CallPlace::Ringing(room)
+    }
+
+    /// Mark the call between `a` and `b` accepted; returns its info (room, caller).
+    pub(crate) fn call_accept(&self, a: &UserRef, b: &UserRef) -> Option<CallInfo> {
+        let mut calls = self.calls.lock().expect("calls lock");
+        let c = calls.get_mut(&Self::call_key(a, b))?;
+        c.active = true;
+        Some(c.clone())
+    }
+
+    /// End (remove) the call between `a` and `b`; returns its info if one existed.
+    pub(crate) fn call_end(&self, a: &UserRef, b: &UserRef) -> Option<CallInfo> {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .remove(&Self::call_key(a, b))
     }
 
     /// weftd installs the §11.7 bridge-backfill sink (its data-plane puller).
@@ -1017,6 +1127,9 @@ impl ServerCtx {
         scopes.iter().any(|scope| match scope {
             weft_store::Scope::Channel(channel) => mine.contains(channel),
             weft_store::Scope::Dm(a, b) => a == account || b == account,
+            // Group membership is answered by the GroupStore, not this
+            // channel-membership index (group messaging = next increment).
+            weft_store::Scope::Group(_) => false,
         })
     }
 

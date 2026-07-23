@@ -13,6 +13,12 @@
       app.addFriend();
     }
   }
+  function onGroupKey(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      app.createGroup();
+    }
+  }
 </script>
 
 <div class="friends-view">
@@ -31,6 +37,17 @@
     />
     <button class="btn-primary" disabled={!app.addFriendInput.trim()} onclick={app.addFriend}>
       Send Request
+    </button>
+  </div>
+
+  <div class="fv-add">
+    <input
+      placeholder="New group DM — handles, comma-separated"
+      bind:value={app.newGroupInput}
+      onkeydown={onGroupKey}
+    />
+    <button class="btn-primary" disabled={!app.newGroupInput.trim()} onclick={app.createGroup}>
+      Create Group
     </button>
   </div>
 
@@ -82,6 +99,9 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
             </button>
           {/if}
+          <button class="icon-pill call" title="Call" aria-label="Call" disabled={!!app.activeCall} onclick={() => app.callUser(user)}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" /></svg>
+          </button>
           <button class="icon-pill decline" title="Remove friend" aria-label="Remove friend" onclick={() => app.removeFriend(user)}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M17 8l5 5m0-5-5 5" /></svg>
           </button>
@@ -189,6 +209,13 @@
   }
   .icon-pill.decline:hover {
     color: #f04747;
+  }
+  .icon-pill.call:hover {
+    color: #43b581;
+  }
+  .icon-pill:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
   .fv-empty {
     padding: 30px 12px;

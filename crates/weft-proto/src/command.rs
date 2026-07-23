@@ -4,7 +4,7 @@
 use crate::error::{ParseError, SerializeError};
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
-use crate::name::{Account, ChannelName, NamespaceName, NetworkName, Target, UserRef};
+use crate::name::{Account, ChannelName, GroupId, NamespaceName, NetworkName, Target, UserRef};
 use crate::types::{
     report_category_ok, HistoryMode, MediaMode, MsgMeta, PresenceStatus, ReportScope, ReportStatus,
     ResolveAction, StreamMode, TypingState, Visibility,
@@ -70,6 +70,22 @@ pub enum FSessionOp {
     Reply { line: String },
     /// Close the sub-session.
     Close,
+}
+
+/// The caller network's **relay leg** carried on a **federated** `CALL`
+/// (cross-network calls, §16 M-lk-3b cascade): its LiveKit `room`, a relay
+/// `token` authorizing the callee network's relay to join that room, and the
+/// `endpoint` URL. The callee's network bridges its own room to this leg so
+/// neither client touches the other network's LiveKit. Never present on a
+/// client-originated `CALL`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallMediaGrant {
+    /// The caller network's LiveKit room id (`call:<ulid>`) the relay joins.
+    pub room: String,
+    /// A relay token for that room (identity `relay@<callee-network>`).
+    pub token: String,
+    /// The caller network's LiveKit server URL the relay connects to.
+    pub endpoint: Option<String>,
 }
 
 /// M0 verb set. Extra params or an unexpected trailing are ignored
@@ -291,6 +307,9 @@ pub enum Command {
     /// `INVITE REDEEM <b64>` — verifies chain + counter, mints a member
     /// token bound to the redeemer (§6.5).
     InviteRedeem { token: String },
+    /// `INVITE LIST <scope>` — the live invites at `scope` (cap `invite`);
+    /// answered as a `BATCH` of `INVITE-INFO` events.
+    InviteList { scope: String },
     /// `EMOJI ADD <ns> <name> <media>` — add/replace a namespace custom emoji
     /// (§9.4); cap `ns-admin`. `media` is a `weft-media://…` reference.
     EmojiAdd {
@@ -554,6 +573,41 @@ pub enum Command {
     /// `FRIENDS` — list the caller's friends + pending requests; the server
     /// answers a `FRIEND` event per relationship (a `BATCH`).
     Friends,
+    /// `GROUP CREATE <user@net> [user@net...]` (social layer) — open a group DM
+    /// with the caller + the listed members. The server mints a `GroupId` and
+    /// replies with a `GROUP` event. Members are full `UserRef`s (federation-able).
+    GroupCreate { members: Vec<UserRef> },
+    /// `GROUP ADD <&group> <user@net>` — add a member to a group DM.
+    GroupAdd { group: GroupId, user: UserRef },
+    /// `GROUP REMOVE <&group> <user@net>` — remove a member from a group DM.
+    GroupRemove { group: GroupId, user: UserRef },
+    /// `GROUP LEAVE <&group>` — leave a group DM.
+    GroupLeave { group: GroupId },
+    /// `GROUP NAME <&group> [:name]` — set, or (empty) clear, a group's name.
+    GroupName {
+        group: GroupId,
+        name: Option<String>,
+    },
+    /// `GROUPS` — list the caller's group DMs; one `GROUP` event each (a `BATCH`).
+    Groups,
+    /// `CALL <user@net>` (social layer) — place a 1:1 friend call; the callee's
+    /// sessions ring (`CALL-RING`). On accept both join an ad-hoc voice room.
+    ///
+    /// `media` is set **only on the federated (tunnelled) path**, never by a
+    /// client: for a cross-network call the caller's network pre-mints the callee
+    /// a token for the shared LiveKit room (which one network hosts) and carries
+    /// it here, so the callee's server can proxy the credential to its client
+    /// (`@room=`/`@token=`/`@endpoint=` tags). A bare client `CALL` has `None`.
+    Call {
+        user: UserRef,
+        media: Option<CallMediaGrant>,
+    },
+    /// `CALL ACCEPT <user@net>` — accept an incoming call from `user`.
+    CallAccept { user: UserRef },
+    /// `CALL DECLINE <user@net>` — decline an incoming call.
+    CallDecline { user: UserRef },
+    /// `CALL END <user@net>` — hang up / cancel a call with `user`.
+    CallEnd { user: UserRef },
     /// Any verb outside the known set. Servers ignore it silently (§4).
     Unknown { verb: String },
 }
@@ -1081,6 +1135,9 @@ impl Command {
                     "REDEEM" => Ok(Command::InviteRedeem {
                         token: args.req("token")?.to_string(),
                     }),
+                    "LIST" => Ok(Command::InviteList {
+                        scope: args.req("scope")?.to_string(),
+                    }),
                     _ => Err(ParseError::BadParam {
                         verb: "INVITE",
                         what: "subcommand",
@@ -1578,6 +1635,83 @@ impl Command {
                     }),
                 }
             }
+            "CALL" => {
+                let mut args = Args::new(line, "CALL");
+                let first = args.req("subcommand-or-user")?.to_string();
+                match first.to_ascii_uppercase().as_str() {
+                    "ACCEPT" => Ok(Command::CallAccept {
+                        user: args.req("user")?.parse()?,
+                    }),
+                    "DECLINE" => Ok(Command::CallDecline {
+                        user: args.req("user")?.parse()?,
+                    }),
+                    "END" => Ok(Command::CallEnd {
+                        user: args.req("user")?.parse()?,
+                    }),
+                    // Bare `CALL <user@net>` = place a call. A federated CALL also
+                    // carries the callee's pre-minted LiveKit credential as tags.
+                    _ => {
+                        let media = match (line.tags.get("room"), line.tags.get("token")) {
+                            (Some(room), Some(token)) if !room.is_empty() && !token.is_empty() => {
+                                Some(CallMediaGrant {
+                                    room: room.clone(),
+                                    token: token.clone(),
+                                    endpoint: line
+                                        .tags
+                                        .get("endpoint")
+                                        .filter(|v| !v.is_empty())
+                                        .cloned(),
+                                })
+                            }
+                            _ => None,
+                        };
+                        Ok(Command::Call {
+                            user: first.parse()?,
+                            media,
+                        })
+                    }
+                }
+            }
+            "GROUPS" => Ok(Command::Groups),
+            "GROUP" => {
+                let mut args = Args::new(line, "GROUP");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "CREATE" => {
+                        let mut members = Vec::new();
+                        while let Some(m) = args.opt() {
+                            members.push(m.parse()?);
+                        }
+                        if members.is_empty() {
+                            return Err(ParseError::MissingParam {
+                                verb: "GROUP",
+                                what: "member",
+                            });
+                        }
+                        Ok(Command::GroupCreate { members })
+                    }
+                    "ADD" => Ok(Command::GroupAdd {
+                        group: args.req("group")?.parse()?,
+                        user: args.req("user")?.parse()?,
+                    }),
+                    "REMOVE" => Ok(Command::GroupRemove {
+                        group: args.req("group")?.parse()?,
+                        user: args.req("user")?.parse()?,
+                    }),
+                    "LEAVE" => Ok(Command::GroupLeave {
+                        group: args.req("group")?.parse()?,
+                    }),
+                    "NAME" => Ok(Command::GroupName {
+                        group: args.req("group")?.parse()?,
+                        name: line.trailing.clone().filter(|n| !n.is_empty()),
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "GROUP",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
             "VOICE" => {
                 let mut args = Args::new(line, "VOICE");
                 let sub = args.req("subcommand")?.to_ascii_uppercase();
@@ -1921,6 +2055,9 @@ impl Command {
             ),
             Command::InviteRedeem { token } => {
                 ("INVITE", vec!["REDEEM".to_string(), token.clone()], None)
+            }
+            Command::InviteList { scope } => {
+                ("INVITE", vec!["LIST".to_string(), scope.clone()], None)
             }
             Command::EmojiAdd {
                 namespace,
@@ -2286,6 +2423,49 @@ impl Command {
                 ("FRIEND", vec!["REMOVE".to_string(), user.to_string()], None)
             }
             Command::Friends => ("FRIENDS", vec![], None),
+            Command::GroupCreate { members } => (
+                "GROUP",
+                std::iter::once("CREATE".to_string())
+                    .chain(members.iter().map(|m| m.to_string()))
+                    .collect(),
+                None,
+            ),
+            Command::GroupAdd { group, user } => (
+                "GROUP",
+                vec!["ADD".to_string(), group.to_string(), user.to_string()],
+                None,
+            ),
+            Command::GroupRemove { group, user } => (
+                "GROUP",
+                vec!["REMOVE".to_string(), group.to_string(), user.to_string()],
+                None,
+            ),
+            Command::GroupLeave { group } => {
+                ("GROUP", vec!["LEAVE".to_string(), group.to_string()], None)
+            }
+            Command::GroupName { group, name } => (
+                "GROUP",
+                vec!["NAME".to_string(), group.to_string()],
+                name.clone().filter(|n| !n.is_empty()),
+            ),
+            Command::Groups => ("GROUPS", vec![], None),
+            Command::Call { user, media } => {
+                if let Some(m) = media {
+                    tags.insert("room".to_string(), m.room.clone());
+                    tags.insert("token".to_string(), m.token.clone());
+                    if let Some(endpoint) = &m.endpoint {
+                        tags.insert("endpoint".to_string(), endpoint.clone());
+                    }
+                }
+                ("CALL", vec![user.to_string()], None)
+            }
+            Command::CallAccept { user } => {
+                ("CALL", vec!["ACCEPT".to_string(), user.to_string()], None)
+            }
+            Command::CallDecline { user } => {
+                ("CALL", vec!["DECLINE".to_string(), user.to_string()], None)
+            }
+            Command::CallEnd { user } => ("CALL", vec!["END".to_string(), user.to_string()], None),
             Command::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown command"));
             }
@@ -2848,6 +3028,9 @@ mod tests {
         ));
         round_trip(&Request::new(Command::InviteRevoke {
             invite_id: "inv-abc".into(),
+        }));
+        round_trip(&Request::new(Command::InviteList {
+            scope: "ns:gaming".into(),
         }));
         round_trip(&Request::with_label(
             Command::InviteRevokeAll {
@@ -3433,6 +3616,108 @@ mod tests {
         // A friend target must be fully qualified (federation-able).
         assert!(Request::parse("FRIEND ADD bob").is_err());
         assert!(Request::parse("FRIEND FROB bob@x.example").is_err()); // bad subcommand
+    }
+
+    #[test]
+    fn group_dm_verbs_round_trip() {
+        const G: &str = "&01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let create = Request::with_label(
+            Command::GroupCreate {
+                members: vec![
+                    "bob@home.example".parse().unwrap(),
+                    "carol@peer.example".parse().unwrap(),
+                ],
+            },
+            "g1",
+        );
+        assert_eq!(
+            create.serialize().unwrap(),
+            "@label=g1 GROUP CREATE bob@home.example carol@peer.example"
+        );
+        round_trip(&create);
+        round_trip(&Request::new(Command::GroupAdd {
+            group: G.parse().unwrap(),
+            user: "dave@home.example".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::GroupRemove {
+            group: G.parse().unwrap(),
+            user: "dave@home.example".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::GroupLeave {
+            group: G.parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::GroupName {
+            group: G.parse().unwrap(),
+            name: Some("weekend plans".to_string()),
+        }));
+        round_trip(&Request::new(Command::GroupName {
+            group: G.parse().unwrap(),
+            name: None,
+        }));
+        round_trip(&Request::new(Command::Groups));
+        // A group target is `&<ulid>`; MSG to it round-trips.
+        round_trip(&Request::new(Command::Msg {
+            target: G.parse().unwrap(),
+            body: Some("hi group".to_string()),
+            meta: Default::default(),
+        }));
+
+        assert!(Request::parse("GROUP CREATE").is_err()); // needs ≥1 member
+        assert!(Request::parse("GROUP FROB &x").is_err()); // bad subcommand
+    }
+
+    #[test]
+    fn call_verbs_round_trip() {
+        let place = Request::with_label(
+            Command::Call {
+                user: "bob@peer.example".parse().unwrap(),
+                media: None,
+            },
+            "c1",
+        );
+        assert_eq!(
+            place.serialize().unwrap(),
+            "@label=c1 CALL bob@peer.example"
+        );
+        round_trip(&place);
+        round_trip(&Request::new(Command::CallAccept {
+            user: "ada@home.example".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::CallDecline {
+            user: "ada@home.example".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::CallEnd {
+            user: "bob@peer.example".parse().unwrap(),
+        }));
+        // A call target must be fully qualified.
+        assert!(Request::parse("CALL bob").is_err());
+
+        // A federated CALL carries the callee's pre-minted LiveKit credential.
+        let fed = Request::new(Command::Call {
+            user: "bob@peer.example".parse().unwrap(),
+            media: Some(CallMediaGrant {
+                room: "call:01ARZ".to_string(),
+                token: "jwt.abc.def".to_string(),
+                endpoint: Some("wss://lk.home.example".to_string()),
+            }),
+        });
+        round_trip(&fed);
+        // The tags survive the round trip and reconstruct the grant.
+        let Command::Call { media, .. } =
+            Request::parse(&fed.serialize().unwrap()).unwrap().command
+        else {
+            panic!("expected CALL");
+        };
+        assert_eq!(media.unwrap().room, "call:01ARZ");
+        // Endpoint is optional (a deployment that hands the URL out of band).
+        round_trip(&Request::new(Command::Call {
+            user: "bob@peer.example".parse().unwrap(),
+            media: Some(CallMediaGrant {
+                room: "call:01ARZ".to_string(),
+                token: "jwt.abc.def".to_string(),
+                endpoint: None,
+            }),
+        }));
     }
 
     #[test]

@@ -5,6 +5,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use ulid::Ulid;
+
 use crate::error::ParseError;
 
 fn invalid(what: &'static str, value: &str) -> ParseError {
@@ -199,11 +201,48 @@ impl fmt::Display for ChannelName {
     }
 }
 
-/// A MSG/MESSAGE destination: `#channel` or `@user` (same-network DM, §9.5).
+/// A group-DM identifier: a server-minted ULID. Addressed on the wire as
+/// `&<ulid>` (the `&` sigil is added by [`Target`]; `GroupId` itself is the
+/// bare ULID). Group DMs are multi-party conversations with an explicit member
+/// list and no namespace (social layer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GroupId(Ulid);
+
+impl GroupId {
+    pub fn new(ulid: Ulid) -> Self {
+        Self(ulid)
+    }
+    pub fn ulid(&self) -> Ulid {
+        self.0
+    }
+}
+
+impl FromStr for GroupId {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, ParseError> {
+        // Accept a bare ULID or a `&`-prefixed one (lenient-in).
+        let body = s.strip_prefix('&').unwrap_or(s);
+        Ulid::from_string(body)
+            .map(GroupId)
+            .map_err(|_| invalid("group id", s))
+    }
+}
+
+impl fmt::Display for GroupId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Canonical group reference: `&<ULID>` (uppercase Crockford base32).
+        write!(f, "&{}", self.0)
+    }
+}
+
+/// A MSG/MESSAGE destination: `#channel`, `@user` (same-network DM, §9.5), or
+/// `&<group>` (a group DM, social layer).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Target {
     Channel(ChannelName),
     User(Account),
+    Group(GroupId),
 }
 
 impl FromStr for Target {
@@ -214,6 +253,8 @@ impl FromStr for Target {
             Ok(Target::Channel(s.parse()?))
         } else if let Some(user) = s.strip_prefix('@') {
             Ok(Target::User(user.parse()?))
+        } else if s.starts_with('&') {
+            Ok(Target::Group(s.parse()?))
         } else {
             Err(invalid("target", s))
         }
@@ -225,6 +266,7 @@ impl fmt::Display for Target {
         match self {
             Target::Channel(channel) => channel.fmt(f),
             Target::User(account) => write!(f, "@{account}"),
+            Target::Group(group) => group.fmt(f), // GroupId already renders `&<ulid>`
         }
     }
 }

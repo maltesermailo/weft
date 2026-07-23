@@ -151,9 +151,29 @@ account someone already registered, use `weftd admin grant <account>` instead.
 Create a voice channel and join from two browsers → LiveKit carries the audio (via
 `wss://livekit.example.com`); server-side mute/kick works through weftd.
 
-Federated (cross-network) voice needs the libwebrtc relay driver, which is **not**
-in this image by design (see `docs/voice-livekit-plan.md`) — same-network voice
-works out of the box.
+Same-network voice works out of the box. **Cross-network calls and federated
+voice** additionally need the libwebrtc **media relay** (§16 M-lk-3b) — it bridges
+the two networks' LiveKit rooms so a client never connects to the peer network's
+LiveKit (protecting its IP). The lean default image leaves it out (the driver
+pulls libwebrtc, heavy + platform-specific); CI publishes a second image with it
+built in, tagged `-voice-relay`. To use it, point the `weftd` service at that tag:
+
+```yaml
+# docker-compose.yml
+image: ghcr.io/maltesermailo/weft-weftd:latest-voice-relay
+```
+
+Or build it locally instead of pulling:
+
+```bash
+WEFTD_FEATURES=web-ui,voice,voice-relay docker compose build weftd
+docker compose up -d weftd
+```
+
+The `voice-relay` feature installs its own build/runtime libs in the image
+(conditional in `deploy/Dockerfile`). CI builds + pushes the `-voice-relay` image
+in a non-blocking job and `cargo check`s the driver; it's verified end-to-end
+against a live LiveKit at deploy time.
 
 ### 9. (Optional) email verification
 

@@ -97,3 +97,38 @@ async fn livekit_backend_routes_moderation_to_the_room_api() {
     assert_eq!(admin.removed.lock().unwrap().len(), 1);
     assert_eq!(admin.muted.lock().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn room_grant_mints_a_credential_for_an_ad_hoc_call_room() {
+    let admin = std::sync::Arc::new(MockLiveKitAdmin::default());
+    let backend = LiveKitBackend::new(
+        admin.clone(),
+        "wss://lk.example".to_string(),
+        "hda.example".parse().unwrap(),
+        600,
+    );
+
+    // A friend-call room id is opaque and used verbatim as the LiveKit room —
+    // not run through `livekit_room` (which prefixes `wv:<net>:`).
+    let grant = backend
+        .room_grant("call:01ARZ", &"ada".parse().unwrap(), true)
+        .await
+        .expect("livekit backend serves room grants");
+
+    assert_eq!(grant.mode, VoiceTransport::Livekit);
+    assert_eq!(grant.room.as_deref(), Some("call:01ARZ"));
+    assert_eq!(grant.endpoint.as_deref(), Some("wss://lk.example"));
+    // Identity is the canonical user@network; publish follows can_speak.
+    assert_eq!(grant.token, "tok:call:01ARZ:ada@hda.example:true");
+
+    // A listen-only grant maps to canPublish=false.
+    let muted = backend
+        .room_grant("call:01ARZ", &"bob".parse().unwrap(), false)
+        .await
+        .unwrap();
+    assert_eq!(muted.token, "tok:call:01ARZ:bob@hda.example:false");
+
+    // room_grant never touches the per-session peer map (no moderation calls).
+    assert!(admin.muted.lock().unwrap().is_empty());
+    assert!(admin.removed.lock().unwrap().is_empty());
+}

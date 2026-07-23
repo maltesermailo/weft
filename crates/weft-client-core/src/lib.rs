@@ -156,6 +156,36 @@ pub enum ClientEvent {
     FriendRemoved {
         user: String,
     },
+    /// `GROUP <&id> [name] :<members>` — a group DM's identity, name, members.
+    Group {
+        id: String,
+        name: Option<String>,
+        members: Vec<String>,
+    },
+    /// `GROUP-MEMBER <&id> <user@net> <join|part>` — a membership change.
+    GroupMember {
+        group: String,
+        user: String,
+        action: String,
+    },
+    /// `CALL-RING <from@net> <room>` — an incoming 1:1 friend call.
+    CallRing {
+        from: String,
+        room: String,
+    },
+    /// `CALL-STATE <user@net> <state>` — a call's lifecycle update.
+    CallState {
+        user: String,
+        state: String,
+    },
+    /// `CALL-MEDIA <room> <token> :<endpoint>` — the LiveKit credential for a
+    /// friend call, delivered per-participant when the call goes active.
+    CallMedia {
+        room: String,
+        mode: String,
+        token: String,
+        endpoint: Option<String>,
+    },
     /// `CAPS <account> <scope> :<caps>` — effective caps (§10.4).
     Caps {
         account: String,
@@ -245,6 +275,14 @@ pub enum ClientEvent {
         link: Option<String>,
         /// `0` marks a revoked/closed invite (§6.5).
         max_uses: Option<u32>,
+    },
+    /// `INVITE-INFO …` — one live invite in an `INVITE LIST` response (§6.5).
+    InviteInfo {
+        scope: String,
+        invite_id: String,
+        creator: String,
+        uses_left: Option<u32>,
+        expiry: Option<u64>,
     },
     /// `REPORTED <report-id>` — ack to the reporter (§7).
     Reported {
@@ -603,6 +641,39 @@ pub fn on_line<E: EventSink>(
         Event::FriendRemoved { user } => sink.emit(ClientEvent::FriendRemoved {
             user: user.to_string(),
         }),
+        Event::Group { id, name, members } => sink.emit(ClientEvent::Group {
+            id: id.to_string(),
+            name,
+            members: members.iter().map(|m| m.to_string()).collect(),
+        }),
+        Event::GroupMember {
+            group,
+            user,
+            action,
+        } => sink.emit(ClientEvent::GroupMember {
+            group: group.to_string(),
+            user: user.to_string(),
+            action: action.to_string(),
+        }),
+        Event::CallRing { from, room } => sink.emit(ClientEvent::CallRing {
+            from: from.to_string(),
+            room,
+        }),
+        Event::CallState { user, state } => sink.emit(ClientEvent::CallState {
+            user: user.to_string(),
+            state: state.to_string(),
+        }),
+        Event::CallMedia {
+            room,
+            mode,
+            token,
+            endpoint,
+        } => sink.emit(ClientEvent::CallMedia {
+            room,
+            mode: mode.to_string(),
+            token,
+            endpoint,
+        }),
         Event::Caps {
             account,
             scope,
@@ -696,6 +767,19 @@ pub fn on_line<E: EventSink>(
             invite_id,
             link,
             max_uses,
+        }),
+        Event::InviteInfo {
+            scope,
+            invite_id,
+            creator,
+            uses_left,
+            expiry,
+        } => sink.emit(ClientEvent::InviteInfo {
+            scope,
+            invite_id,
+            creator: creator.to_string(),
+            uses_left,
+            expiry,
         }),
         Event::Reported { report_id } => sink.emit(ClientEvent::Reported { report_id }),
         Event::ReportFiled {
@@ -989,6 +1073,15 @@ pub fn build_invite_revoke(invite_id: &str) -> Result<String, String> {
 /// `INVITE REVOKE-ALL <scope>` — close every invite for the scope's namespace.
 pub fn build_invite_revoke_all(scope: &str) -> Result<String, String> {
     Request::new(Command::InviteRevokeAll {
+        scope: scope.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `INVITE LIST <scope>` — the live invites at the scope (a `BATCH`).
+pub fn build_invite_list(scope: &str) -> Result<String, String> {
+    Request::new(Command::InviteList {
         scope: scope.to_string(),
     })
     .serialize()
@@ -1408,6 +1501,96 @@ pub fn build_friends() -> Result<String, String> {
 fn friend_user(user: &str) -> Result<weft_proto::UserRef, String> {
     user.parse()
         .map_err(|_| "friend must be account@network".to_string())
+}
+
+// ---- group DMs (social layer) ----
+
+/// `GROUP CREATE <user@net>…` — `members` are qualified `account@network`.
+pub fn build_group_create(members: &[String]) -> Result<String, String> {
+    let members = members
+        .iter()
+        .map(|m| m.parse())
+        .collect::<Result<Vec<weft_proto::UserRef>, _>>()
+        .map_err(|_| "members must be account@network".to_string())?;
+    Request::new(Command::GroupCreate { members })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+fn group_id(id: &str) -> Result<weft_proto::GroupId, String> {
+    id.parse().map_err(|_| "bad group id".to_string())
+}
+
+pub fn build_group_add(group: &str, user: &str) -> Result<String, String> {
+    Request::new(Command::GroupAdd {
+        group: group_id(group)?,
+        user: friend_user(user)?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+pub fn build_group_remove(group: &str, user: &str) -> Result<String, String> {
+    Request::new(Command::GroupRemove {
+        group: group_id(group)?,
+        user: friend_user(user)?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+pub fn build_group_leave(group: &str) -> Result<String, String> {
+    Request::new(Command::GroupLeave {
+        group: group_id(group)?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+pub fn build_group_name(group: &str, name: &str) -> Result<String, String> {
+    Request::new(Command::GroupName {
+        group: group_id(group)?,
+        name: Some(name.to_string()).filter(|n| !n.is_empty()),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+pub fn build_groups() -> Result<String, String> {
+    Request::new(Command::Groups)
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+// ---- friend calls (social layer; 1:1, keyed by peer account@network) ----
+pub fn build_call(user: &str) -> Result<String, String> {
+    Request::new(Command::Call {
+        user: friend_user(user)?,
+        media: None, // the caller's network pre-mints cross-network media
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+pub fn build_call_accept(user: &str) -> Result<String, String> {
+    Request::new(Command::CallAccept {
+        user: friend_user(user)?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+pub fn build_call_decline(user: &str) -> Result<String, String> {
+    Request::new(Command::CallDecline {
+        user: friend_user(user)?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+pub fn build_call_end(user: &str) -> Result<String, String> {
+    Request::new(Command::CallEnd {
+        user: friend_user(user)?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
 }
 
 /// `MEMBERS <#chan>` — request the roster snapshot (§6.3).

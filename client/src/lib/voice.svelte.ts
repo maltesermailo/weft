@@ -149,6 +149,10 @@ export function initVoice(myAccount: string): void {
         self: boolean;
       };
       void listen<RosterEntry[]>("voice-native-roster", (e) => {
+        // The native LiveKit connection is a singleton shared with friend calls
+        // (callmedia.svelte.ts). Only fold its roster into the channel model when
+        // *we* own it — otherwise a call's roster would pollute channel voice.
+        if (!nativeActive) return;
         const parts: Record<string, VoiceParticipant> = {};
         for (const r of e.payload) {
           parts[r.user] = {

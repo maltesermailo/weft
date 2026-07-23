@@ -27,6 +27,7 @@ impl<S: ControlStream> Session<S> {
         let caps = vec!["view".to_string(), "send".to_string()];
         let invite_id = format!("i{}", weft_proto::Ulid::new());
         let absolute_expiry = expiry.map(|ttl| unix_now() + ttl);
+        let creator = self.actor_ref(&actor);
         if let Err(e) = self
             .ctx
             .invites
@@ -36,6 +37,7 @@ impl<S: ControlStream> Session<S> {
                 caps,
                 uses_left: max_uses,
                 expiry: absolute_expiry,
+                creator,
             })
             .await
         {
@@ -207,6 +209,74 @@ impl<S: ControlStream> Session<S> {
                 Err(_) => self.no_such_target(label).await,
             },
             _ => self.no_such_target(label).await,
+        }
+    }
+
+    /// `INVITE LIST <scope>` — the live invites at `scope`, as a `BATCH` of
+    /// `INVITE-INFO` (cap `invite`, same as mint/revoke). Powers the Discord-
+    /// style invites menu: id, creator, uses left, expiry — each revocable.
+    pub(super) async fn on_invite_list(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        actor: Actor,
+    ) -> io::Result<Flow> {
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        match self
+            .ctx
+            .actor_has_cap(&actor, &Capability::Invite, &token_scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "invite").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+        let invites = match self.ctx.invites.invites_for_scope(&scope).await {
+            Ok(v) => v,
+            Err(e) => return self.internal(label, &e).await,
+        };
+
+        self.batches += 1;
+        let id = format!("il{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for inv in invites {
+            self.send_event(
+                None,
+                Event::InviteInfo {
+                    scope: inv.scope,
+                    invite_id: inv.id,
+                    creator: inv.creator,
+                    uses_left: inv.uses_left,
+                    expiry: inv.expiry,
+                },
+            )
+            .await?;
+        }
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+                compacted: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// The acting user as a `UserRef` (for stamping the invite creator).
+    fn actor_ref(&self, actor: &Actor) -> weft_proto::UserRef {
+        match actor {
+            Actor::Local(a) => weft_proto::UserRef::new(a.clone(), self.ctx.info.network.clone()),
+            Actor::Foreign(u) => u.parse().unwrap_or_else(|_| {
+                weft_proto::UserRef::new(
+                    "unknown".parse().expect("valid account"),
+                    self.ctx.info.network.clone(),
+                )
+            }),
         }
     }
 }

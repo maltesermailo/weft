@@ -1441,6 +1441,26 @@ impl<S: ControlStream> Session<S> {
                 Some(me) => self.on_friends(label, me).await,
                 None => Ok(Flow::Continue),
             },
+            // Social layer: a peer's user, tunnelled here, calls / answers a
+            // **local** user. `caller` is the foreign `account@peer`; the handler
+            // records the call in *this* network's state and rings the local
+            // callee. Cross-network media (LiveKit) is proxied separately.
+            Command::Call { user, media } => match caller {
+                Some(me) => self.on_call(label, user, me, media).await,
+                None => Ok(Flow::Continue),
+            },
+            Command::CallAccept { user } => match caller {
+                Some(me) => self.on_call_accept(label, user, me).await,
+                None => Ok(Flow::Continue),
+            },
+            Command::CallDecline { user } => match caller {
+                Some(me) => self.on_call_decline(label, user, me).await,
+                None => Ok(Flow::Continue),
+            },
+            Command::CallEnd { user } => match caller {
+                Some(me) => self.on_call_end(label, user, me).await,
+                None => Ok(Flow::Continue),
+            },
             _ => {
                 self.unsupported(label, "not yet available over a federation session")
                     .await

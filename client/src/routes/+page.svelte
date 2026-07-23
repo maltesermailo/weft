@@ -16,6 +16,12 @@
   import FriendsView from "$lib/components/FriendsView.svelte";
   import MemberList from "$lib/components/MemberList.svelte";
   import { initVoice, joinVoice, voice } from "$lib/voice.svelte";
+  import {
+    callMedia,
+    connectCallMedia,
+    disconnectCallMedia,
+    toggleCallMute,
+  } from "$lib/callmedia.svelte";
   import VoiceBar from "$lib/components/VoiceBar.svelte";
   import VoiceStage from "$lib/components/chat/VoiceStage.svelte";
   import CameraPicker from "$lib/components/modals/CameraPicker.svelte";
@@ -36,8 +42,10 @@
   import CreateCategoryModal from "$lib/components/modals/CreateCategoryModal.svelte";
   import ReportsQueueModal from "$lib/components/modals/ReportsQueueModal.svelte";
   import InviteLinkModal from "$lib/components/modals/InviteLinkModal.svelte";
+  import InvitesModal from "$lib/components/modals/InvitesModal.svelte";
   import PinsModal from "$lib/components/modals/PinsModal.svelte";
   import ThreadsModal from "$lib/components/modals/ThreadsModal.svelte";
+  import CallOverlay from "$lib/components/CallOverlay.svelte";
   import SearchModal from "$lib/components/modals/SearchModal.svelte";
   import DiscoverModal from "$lib/components/modals/DiscoverModal.svelte";
   import ReportModal from "$lib/components/modals/ReportModal.svelte";
@@ -353,6 +361,11 @@
   // userref → "friends" | "incoming" | "outgoing"
   let friends = $state<Record<string, string>>({});
   let addFriendInput = $state("");
+  // group DMs: group id (`&<ulid>`) → { name?, members (userrefs) }
+  let groups = $state<Record<string, { name?: string; members: string[] }>>({});
+  // friend calls (1:1): incoming ring + the active call, if any.
+  let incomingCall = $state<{ from: string; room: string } | null>(null);
+  let activeCall = $state<{ peer: string; room: string; state: string } | null>(null);
   // ---- discover dialog (Phase 6) ----
   let discoverOpen = $state(false);
   let discovered = $state<Record<string, Extract<weft.WeftEvent, { kind: "ns-meta" }>>>({});
@@ -365,6 +378,13 @@
   let profileTarget = $state<string | null>(null); // member profile popout
   let inviteLink = $state<string | null>(null);
   let inviteId = $state<string | null>(null); // for INVITE REVOKE
+  // Discord-style invites menu: the live invites at a scope, each revocable.
+  type InviteInfo = Extract<weft.WeftEvent, { kind: "invite-info" }>;
+  let invitesOpen = $state(false);
+  let invitesScope = $state("");
+  let invitesList = $state<InviteInfo[]>([]);
+  let invitesBuf: InviteInfo[] = [];
+  let loadingInvites = false;
   // ---- federation (§11, operator) ----
   let federationOpen = $state(false);
   let netblocks = $state<Record<string, string | null>>({}); // network → reason
@@ -746,8 +766,12 @@
   const oldestMsgid = (ch?: Channel) => ch?.messages.find((m) => m.msgid)?.msgid;
 
   function loadHistory(target: string, initial: boolean) {
-    // Channels (`#`) and DMs (`@`) both backfill; one load at a time.
-    if (loadingHistory || !(target.startsWith("#") || target.startsWith("@"))) return;
+    // Channels (`#`), DMs (`@`), and group DMs (`&`) all backfill; one at a time.
+    if (
+      loadingHistory ||
+      !(target.startsWith("#") || target.startsWith("@") || target.startsWith("&"))
+    )
+      return;
     loadingHistory = target;
     loadingInitial = initial;
     historyBuf = [];
@@ -765,6 +789,7 @@
 
   let activeChannel = $derived(active ? channels[active] : undefined);
   let activeIsDm = $derived(active.startsWith("@"));
+  let activeIsGroup = $derived(active.startsWith("&"));
   // Namespaces we hold channels in — each becomes a rail tile (flavor A).
   let serverNamespaces = $derived(
     [
@@ -863,7 +888,9 @@
   };
 
   // DM conversations (keyed `@peer`), plus any peer we've opened a blank DM with.
-  let dmList = $derived(Object.values(channels).filter((c) => c.name.startsWith("@")));
+  let dmList = $derived(
+    Object.values(channels).filter((c) => c.name.startsWith("@") || c.name.startsWith("&")),
+  );
 
   // ---- DM + presence helpers ----
   const peerOf = (key: string) => key.replace(/^@/, "");
@@ -953,6 +980,64 @@
     homeView = true;
     active = "";
   }
+
+  // ---- group DMs ----
+  let newGroupInput = $state("");
+  // A group's display label: its name, else the member handles (minus self).
+  function groupLabel(id: string): string {
+    const g = groups[id];
+    if (!g) return "Group";
+    if (g.name) return g.name;
+    const me = `${account}@${network}`;
+    const others = g.members.filter((m) => m !== me).map((m) => friendLabel(m));
+    return others.length ? others.join(", ") : "Group";
+  }
+  const groupList = $derived(Object.keys(groups));
+  function createGroup() {
+    const members = newGroupInput
+      .split(/[,\s]+/)
+      .map((h) => qualify(h))
+      .filter((h) => h.includes("@"));
+    if (!members.length) return;
+    newGroupInput = "";
+    weft.groupCreate(members).catch((e) => toast(String(e), "error"));
+  }
+  function openGroup(id: string) {
+    ensureChannel(id);
+    homeView = true;
+    active = id;
+  }
+  function leaveGroup(id: string) {
+    weft.groupLeave(id).catch((e) => toast(String(e), "error"));
+  }
+  function addToGroup(id: string, handle: string) {
+    const user = qualify(handle);
+    if (user.includes("@")) weft.groupAdd(id, user).catch((e) => toast(String(e), "error"));
+  }
+
+  // ---- friend calls (1:1) ----
+  function callUser(user: string) {
+    if (activeCall) return; // already in a call
+    weft.call(user).catch((e) => toast(String(e), "error"));
+  }
+  function acceptCall() {
+    if (!incomingCall) return;
+    const { from, room } = incomingCall;
+    weft.callAccept(from).catch((e) => toast(String(e), "error"));
+    activeCall = { peer: from, room, state: "active" };
+    incomingCall = null;
+  }
+  function declineCall() {
+    if (!incomingCall) return;
+    weft.callDecline(incomingCall.from).catch(() => {});
+    incomingCall = null;
+  }
+  function endCall() {
+    if (!activeCall) return;
+    weft.callEnd(activeCall.peer).catch(() => {});
+    disconnectCallMedia();
+    activeCall = null;
+  }
   function setStatus(s: string) {
     myStatus = s;
     userMenu = false;
@@ -974,7 +1059,9 @@
         queryProfile(account); // §10.3 load our own profile
         weft.verifyList().catch(() => {}); // §10.5 load our verification claims
         friends = {};
+        groups = {};
         weft.listFriends().catch(() => {}); // social layer: load friends + requests
+        weft.listGroups().catch(() => {}); // and group DMs
         // Remember creds so the next launch logs straight back in. NOTE: this
         // includes the password in localStorage — a dev convenience; the
         // hardening is OS-keychain storage in the backend.
@@ -1060,6 +1147,7 @@
         let key: string;
         if (e.target.startsWith("#")) key = e.target;
         else if (e.target.startsWith("@")) key = "@" + (e.own ? e.target.slice(1) : e.sender);
+        else if (e.target.startsWith("&")) key = e.target; // group DM: keyed by id
         else break;
         // Server-generated system messages (join/part, …) — a persistent line
         // that rides the normal message + history path, rendered Discord-style.
@@ -1247,6 +1335,54 @@
       case "friend-removed":
         delete friends[e.user];
         break;
+      case "group": {
+        groups[e.id] = { name: e.name ?? undefined, members: e.members };
+        ensureChannel(e.id); // a conversation entry so it lists + holds messages
+        break;
+      }
+      case "group-member": {
+        const g = groups[e.group];
+        if (!g) break;
+        const me = `${account}@${network}`;
+        if (e.action === "join") {
+          if (!g.members.includes(e.user)) g.members = [...g.members, e.user];
+        } else {
+          g.members = g.members.filter((m) => m !== e.user);
+          // If *we* left, drop the conversation.
+          if (e.user === me) {
+            delete groups[e.group];
+            delete channels[e.group];
+            if (active === e.group) active = "";
+          }
+        }
+        break;
+      }
+      case "call-ring":
+        incomingCall = { from: e.from, room: e.room };
+        break;
+      case "call-state":
+        if (e.state === "ringing") {
+          activeCall = { peer: e.user, room: "", state: "ringing" };
+        } else if (e.state === "active") {
+          incomingCall = null;
+          activeCall = { peer: e.user, room: activeCall?.room ?? "", state: "active" };
+          // Audio (LiveKit) connects on the CALL-MEDIA credential that follows.
+        } else {
+          if (e.state === "busy") toast(`${friendLabel(e.user)} is busy`, "info");
+          else if (e.state === "declined") toast(`${friendLabel(e.user)} declined the call`, "info");
+          if (incomingCall?.from === e.user) incomingCall = null;
+          if (activeCall?.peer === e.user) {
+            activeCall = null;
+            disconnectCallMedia();
+          }
+        }
+        break;
+      case "call-media":
+        // The server authorized the call and minted our media credential — join
+        // the LiveKit room so audio flows. Signaling state (activeCall) is already
+        // set by the matching CALL-STATE active.
+        void connectCallMedia(e.endpoint, e.token);
+        break;
       case "caps": {
         const set = e.caps ? e.caps.split(",") : [];
         capsFor[`${e.account}|${e.scope}`] = {
@@ -1329,15 +1465,21 @@
         break;
       case "invited":
         if (e.max_uses === 0) {
-          // A revoke echo (INVITED … max-uses=0) — close, don't reopen.
+          // A revoke echo (INVITED … max-uses=0) — close it + drop from the menu.
           if (inviteId === e.invite_id) {
             inviteLink = null;
             inviteId = null;
           }
+          invitesList = invitesList.filter((i) => i.invite_id !== e.invite_id);
         } else {
           inviteLink = e.link ?? e.invite_id;
           inviteId = e.invite_id;
+          // A freshly-minted invite: reflect it live in the open menu.
+          if (invitesOpen && e.scope === invitesScope) weft.inviteList(invitesScope).catch(() => {});
         }
+        break;
+      case "invite-info":
+        if (loadingInvites) invitesBuf.push(e);
         break;
       case "reported":
         sys(`✓ report filed (${e.report_id})`);
@@ -1414,6 +1556,12 @@
           threadsList = threadsBuf;
           threadsBuf = [];
           loadingThreads = false;
+          break;
+        }
+        if (loadingInvites) {
+          invitesList = invitesBuf;
+          invitesBuf = [];
+          loadingInvites = false;
           break;
         }
         const target = loadingHistory;
@@ -2213,6 +2361,37 @@
     weft.inviteMint(scopesFor()[0]).catch(() => {});
   }
 
+  // ---- Discord-style invites menu ----
+  function openInvites() {
+    invitesScope = scopesFor()[0];
+    invitesList = [];
+    invitesBuf = [];
+    loadingInvites = true;
+    invitesOpen = true;
+    weft.inviteList(invitesScope).catch((e) => {
+      loadingInvites = false;
+      toast(String(e), "error");
+    });
+  }
+  function revokeInvite(id: string) {
+    weft.inviteRevoke(id).catch((e) => toast(String(e), "error"));
+    invitesList = invitesList.filter((i) => i.invite_id !== id); // optimistic
+  }
+  function createInvite() {
+    weft.inviteMint(invitesScope || scopesFor()[0]).catch((e) => toast(String(e), "error"));
+  }
+  // Reconstruct the shareable link for an invite (the list doesn't carry it).
+  function inviteLinkFor(inv: InviteInfo): string {
+    const ns = inv.scope.startsWith("ns:")
+      ? inv.scope.slice(3)
+      : inv.scope.startsWith("#") && inv.scope.includes("/")
+        ? inv.scope.slice(1).split("/")[0]
+        : null;
+    return ns
+      ? `weft://${network}/${ns}/i/${inv.invite_id}`
+      : `weft://${network}/i/${inv.invite_id}`;
+  }
+
   // ---- server dropdown (Discord-style header menu) ----
   let serverMenu = $state(false);
   let newChanOpen = $state(false);
@@ -2618,6 +2797,7 @@
     get active() { return active; },
     get activeChannel() { return activeChannel; },
     get activeIsDm() { return activeIsDm; },
+    get activeIsGroup() { return activeIsGroup; },
     get serverNamespaces() { return serverNamespaces; },
     get channelGroups() { return channelGroups; },
     get dmList() { return dmList; },
@@ -2635,6 +2815,25 @@
     removeFriend,
     messageFriend,
     openFriends,
+    // group DMs
+    get groupList() { return groupList; },
+    get newGroupInput() { return newGroupInput; },
+    set newGroupInput(v: string) { newGroupInput = v; },
+    groupLabel,
+    createGroup,
+    openGroup,
+    leaveGroup,
+    addToGroup,
+    // friend calls
+    get incomingCall() { return incomingCall; },
+    get activeCall() { return activeCall; },
+    get callMuted() { return callMedia.muted; },
+    get callConnecting() { return callMedia.connecting; },
+    callUser,
+    acceptCall,
+    declineCall,
+    endCall,
+    toggleCallMute,
     goHome: () => (homeView = true),
     selectServer,
     openServerMenu,
@@ -2694,6 +2893,13 @@
     openCreateChannelInCat,
     openNsSettings,
     mintInvite,
+    // invites menu (Discord-style)
+    get invitesList() { return invitesList; },
+    get invitesScope() { return invitesScope; },
+    openInvites,
+    revokeInvite,
+    createInvite,
+    inviteLinkFor,
     newCat: () => { newCatName = ""; newCatOpen = true; serverMenu = false; },
     openProfile,
     openDm,
@@ -2982,6 +3188,10 @@
       <InviteLinkModal link={inviteLink} id={inviteId} onclose={() => (inviteLink = null)} />
     {/if}
 
+    {#if invitesOpen}
+      <InvitesModal onclose={() => (invitesOpen = false)} />
+    {/if}
+
     {#if pinsOpen}
       <PinsModal onclose={() => (pinsOpen = false)} />
     {/if}
@@ -3035,5 +3245,7 @@
     {#if notifSettingsOpen}
       <NotificationSettingsModal onclose={() => (notifSettingsOpen = false)} />
     {/if}
+
+    <CallOverlay />
   </div>
 {/if}

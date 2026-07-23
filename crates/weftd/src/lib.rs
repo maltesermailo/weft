@@ -370,10 +370,15 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
     // advertised in WELCOME features above).
     if let Some(sfu) = voice_sfu {
         ctx.set_voice_backend(sfu);
-        // §16 M-lk-3b: federated voice only cascades on LiveKit. Install the
-        // (no-op) relay driver so the WEFT-side relay lifecycle runs; the real
-        // libwebrtc media driver is a deployment add-on.
+        // §16 M-lk-3b: federated voice / cross-network calls cascade on LiveKit.
+        // Install the media relay so the WEFT-side lifecycle runs. The real
+        // libwebrtc driver (`voice-relay` feature) bridges two LiveKit rooms so
+        // client IPs never cross networks; without the feature the no-op
+        // `LogRelay` runs the lifecycle only (relay requested = logged).
         if config.voice.backend == config::VoiceBackendKind::Livekit {
+            #[cfg(feature = "voice-relay")]
+            ctx.set_voice_relay(Arc::new(livekit::LivekitRelay::new()));
+            #[cfg(not(feature = "voice-relay"))]
             ctx.set_voice_relay(Arc::new(livekit::LogRelay));
         }
     }
@@ -703,6 +708,7 @@ where
         + weft_store::RoleStore
         + weft_store::ProfileStore
         + weft_store::FriendStore
+        + weft_store::GroupStore
         + weft_store::AuditStore
         + 'static,
 {

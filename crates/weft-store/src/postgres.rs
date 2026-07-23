@@ -11,22 +11,22 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use weft_proto::{
-    Account, ChannelName, ContentState, FriendState, MsgId, MsgMeta, NamespaceName, NetworkName,
-    ReportStatus, RetentionPolicy, Ulid, UserRef,
+    Account, ChannelName, ContentState, FriendState, GroupId, MsgId, MsgMeta, NamespaceName,
+    NetworkName, ReportStatus, RetentionPolicy, Ulid, UserRef,
 };
 
 use crate::compact::compaction_plan;
 use crate::traits::{
     AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, FriendOutcome,
-    FriendStore, InviteStore, MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore,
-    NamespaceStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore,
-    HOLD_RADIUS,
+    FriendStore, GroupStore, InviteStore, MediaBlocklistStore, MediaStore, MembershipStore,
+    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore,
+    RoleStore, HOLD_RADIUS,
 };
 use crate::types::{
     audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventKind, EventRecord, GrantRecord,
-    InviteRecord, MediaBlockRecord, ModKind, ModRecord, NamespaceRecord, NetblockRecord, Page,
-    PeerRecord, PendingRecovery, ProfileRecord, RedeemOutcome, ReportRecord, ReportResolution,
-    RoleDef, RootHistoryEntry, Scope, ThreadSummary, Verification, AUDIT_GENESIS,
+    GroupRecord, InviteRecord, MediaBlockRecord, ModKind, ModRecord, NamespaceRecord,
+    NetblockRecord, Page, PeerRecord, PendingRecovery, ProfileRecord, RedeemOutcome, ReportRecord,
+    ReportResolution, RoleDef, RootHistoryEntry, Scope, ThreadSummary, Verification, AUDIT_GENESIS,
 };
 use crate::StoreError;
 
@@ -1374,13 +1374,15 @@ impl CapabilityStore for PgStore {
 impl InviteStore for PgStore {
     async fn create_invite(&self, invite: InviteRecord) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO weft_invites (id, scope, caps, uses_left, expiry) VALUES ($1,$2,$3,$4,$5)",
+            "INSERT INTO weft_invites (id, scope, caps, uses_left, expiry, creator) \
+             VALUES ($1,$2,$3,$4,$5,$6)",
         )
         .bind(&invite.id)
         .bind(&invite.scope)
         .bind(invite.caps.join(","))
         .bind(invite.uses_left.map(|u| u as i32))
         .bind(invite.expiry.map(|e| e as i64))
+        .bind(invite.creator.to_string())
         .execute(&self.pool)
         .await
         .map_err(backend_err)?;
@@ -1389,7 +1391,7 @@ impl InviteStore for PgStore {
 
     async fn invite(&self, id: &str) -> Result<Option<InviteRecord>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, scope, caps, uses_left, expiry FROM weft_invites WHERE id = $1",
+            "SELECT id, scope, caps, uses_left, expiry, creator FROM weft_invites WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -1408,7 +1410,7 @@ impl InviteStore for PgStore {
             WHERE id = $1
               AND (expiry IS NULL OR expiry > $2)
               AND (uses_left IS NULL OR uses_left > 0)
-            RETURNING id, scope, caps, uses_left, expiry
+            RETURNING id, scope, caps, uses_left, expiry, creator
             "#,
         )
         .bind(id)
@@ -1441,6 +1443,18 @@ impl InviteStore for PgStore {
             .await
             .map_err(backend_err)?;
         Ok(result.rows_affected() == 1)
+    }
+
+    async fn invites_for_scope(&self, scope: &str) -> Result<Vec<InviteRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, scope, caps, uses_left, expiry, creator FROM weft_invites \
+             WHERE scope = $1 ORDER BY id DESC",
+        )
+        .bind(scope)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(rows.iter().map(invite_from_row).collect())
     }
 
     async fn revoke_invites_for_namespace(&self, ns: &str) -> Result<u64, StoreError> {
@@ -2061,6 +2075,10 @@ fn invite_from_row(row: &sqlx::postgres::PgRow) -> InviteRecord {
         caps: split_caps(row.get("caps")),
         uses_left: row.get::<Option<i32>, _>("uses_left").map(|u| u as u32),
         expiry: row.get::<Option<i64>, _>("expiry").map(|e| e as u64),
+        creator: row
+            .get::<String, _>("creator")
+            .parse()
+            .unwrap_or_else(|_| "unknown@invalid".parse().expect("valid fallback UserRef")),
     }
 }
 
@@ -2646,6 +2664,154 @@ fn friend_view(me: &str, requested_by: &str, accepted: bool) -> FriendState {
         FriendState::Outgoing
     } else {
         FriendState::Incoming
+    }
+}
+
+#[async_trait]
+impl GroupStore for PgStore {
+    async fn create_group(
+        &self,
+        id: GroupId,
+        creator: &UserRef,
+        members: &[UserRef],
+        at_ms: u64,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(backend_err)?;
+        sqlx::query(
+            "INSERT INTO weft_groups (id, name, creator, created_ms) VALUES ($1, NULL, $2, $3) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(id.to_string())
+        .bind(creator.to_string())
+        .bind(at_ms as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend_err)?;
+        for m in members {
+            sqlx::query(
+                "INSERT INTO weft_group_members (group_id, member) VALUES ($1, $2) \
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(id.to_string())
+            .bind(m.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(backend_err)?;
+        }
+        tx.commit().await.map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn group(&self, id: GroupId) -> Result<Option<GroupRecord>, StoreError> {
+        let row: Option<(Option<String>, String, i64)> =
+            sqlx::query_as("SELECT name, creator, created_ms FROM weft_groups WHERE id = $1")
+                .bind(id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        let corrupt = || StoreError::Backend("corrupt group row".into());
+        row.map(|(name, creator, created_ms)| {
+            Ok(GroupRecord {
+                id,
+                name,
+                creator: creator.parse().map_err(|_| corrupt())?,
+                created_ms: created_ms.max(0) as u64,
+            })
+        })
+        .transpose()
+    }
+
+    async fn group_members(&self, id: GroupId) -> Result<Vec<UserRef>, StoreError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT member FROM weft_group_members WHERE group_id = $1 ORDER BY member",
+        )
+        .bind(id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.into_iter()
+            .map(|(m,)| {
+                m.parse()
+                    .map_err(|_| StoreError::Backend("corrupt group member".into()))
+            })
+            .collect()
+    }
+
+    async fn is_group_member(&self, id: GroupId, user: &UserRef) -> Result<bool, StoreError> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM weft_group_members WHERE group_id = $1 AND member = $2",
+        )
+        .bind(id.to_string())
+        .bind(user.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(n > 0)
+    }
+
+    async fn add_group_member(&self, id: GroupId, user: &UserRef) -> Result<bool, StoreError> {
+        // Only add if the group exists (FK-less: check first).
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM weft_groups WHERE id = $1")
+            .bind(id.to_string())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        if exists == 0 {
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO weft_group_members (group_id, member) VALUES ($1, $2) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(id.to_string())
+        .bind(user.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(true)
+    }
+
+    async fn remove_group_member(&self, id: GroupId, user: &UserRef) -> Result<bool, StoreError> {
+        let r = sqlx::query("DELETE FROM weft_group_members WHERE group_id = $1 AND member = $2")
+            .bind(id.to_string())
+            .bind(user.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    async fn set_group_name(&self, id: GroupId, name: Option<&str>) -> Result<bool, StoreError> {
+        let r = sqlx::query("UPDATE weft_groups SET name = $2 WHERE id = $1")
+            .bind(id.to_string())
+            .bind(name.filter(|n| !n.is_empty()))
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    async fn groups_for(&self, user: &UserRef) -> Result<Vec<GroupRecord>, StoreError> {
+        let rows: Vec<(String, Option<String>, String, i64)> = sqlx::query_as(
+            "SELECT g.id, g.name, g.creator, g.created_ms FROM weft_groups g \
+             JOIN weft_group_members m ON m.group_id = g.id \
+             WHERE m.member = $1 ORDER BY g.created_ms DESC, g.id DESC",
+        )
+        .bind(user.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        let corrupt = || StoreError::Backend("corrupt group row".into());
+        rows.into_iter()
+            .map(|(id, name, creator, created_ms)| {
+                Ok(GroupRecord {
+                    id: id.parse().map_err(|_| corrupt())?,
+                    name,
+                    creator: creator.parse().map_err(|_| corrupt())?,
+                    created_ms: created_ms.max(0) as u64,
+                })
+            })
+            .collect()
     }
 }
 

@@ -2,17 +2,20 @@
 //! are rows referencing the original message's msgid — never mutations.
 
 use weft_proto::{
-    Account, ChannelKind, ChannelName, ContentState, MsgId, MsgMeta, NamespaceName, NetworkName,
-    ReportStatus, ResolveAction, RetentionPolicy, Ulid, UserRef,
+    Account, ChannelKind, ChannelName, ContentState, GroupId, MsgId, MsgMeta, NamespaceName,
+    NetworkName, ReportStatus, ResolveAction, RetentionPolicy, Ulid, UserRef,
 };
 
-/// Where events live: a channel, or a same-network DM pair (§9.5).
+/// Where events live: a channel, a same-network DM pair (§9.5), or a group DM.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Scope {
     Channel(ChannelName),
     /// Participants in sorted order — `Scope::dm` normalizes, so
     /// (ada, bob) and (bob, ada) are the same conversation.
     Dm(Account, Account),
+    /// A group DM, keyed by its server-minted id. Membership lives in a
+    /// `GroupStore` (it changes over time), not in the scope.
+    Group(GroupId),
 }
 
 impl Scope {
@@ -24,12 +27,13 @@ impl Scope {
         }
     }
 
-    /// Stable string key: the channel name, or `dm:<a>:<b>`. Used as the
-    /// database key and safe because channel names always start with `#`.
+    /// Stable string key: the channel name, `dm:<a>:<b>`, or `&<ulid>` for a
+    /// group. Unambiguous — channels start `#`, DMs `dm:`, groups `&`.
     pub fn as_key(&self) -> String {
         match self {
             Scope::Channel(channel) => channel.to_string(),
             Scope::Dm(a, b) => format!("dm:{a}:{b}"),
+            Scope::Group(id) => id.to_string(),
         }
     }
 
@@ -37,6 +41,9 @@ impl Scope {
     pub fn from_key(key: &str) -> Option<Self> {
         if key.starts_with('#') {
             return key.parse().ok().map(Scope::Channel);
+        }
+        if key.starts_with('&') {
+            return key.parse().ok().map(Scope::Group);
         }
         let (a, b) = key.strip_prefix("dm:")?.split_once(':')?;
         Some(Scope::dm(a.parse().ok()?, b.parse().ok()?))
@@ -75,6 +82,16 @@ impl EventRecord {
     pub fn is_root(&self) -> bool {
         matches!(self.kind, EventKind::Message { .. })
     }
+}
+
+/// A group DM's identity (social layer): its id, optional name, creator, and
+/// creation time. Membership is fetched separately (it changes over time).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupRecord {
+    pub id: GroupId,
+    pub name: Option<String>,
+    pub creator: UserRef,
+    pub created_ms: u64,
 }
 
 /// A channel's thread summarized for the `THREADS` list (§9.4 amendment): the
@@ -196,6 +213,8 @@ pub struct InviteRecord {
     pub uses_left: Option<u32>,
     /// Unix seconds; `None` = no expiry.
     pub expiry: Option<u64>,
+    /// Who minted the invite (§6.5) — shown in the invites list.
+    pub creator: UserRef,
 }
 
 /// A user-owned namespace (§2.1, §2.2). `owner` is the account that

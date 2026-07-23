@@ -7,23 +7,23 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use weft_proto::{
-    Account, ChannelName, FriendState, MsgId, NamespaceName, NetworkName, RetentionPolicy, Ulid,
-    UserRef,
+    Account, ChannelName, FriendState, GroupId, MsgId, NamespaceName, NetworkName, RetentionPolicy,
+    Ulid, UserRef,
 };
 
 use crate::blob::BlobRecord;
 use crate::compact::compaction_plan;
 use crate::traits::{
     AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, FriendOutcome,
-    FriendStore, InviteStore, MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore,
-    NamespaceStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore,
-    HOLD_RADIUS,
+    FriendStore, GroupStore, InviteStore, MediaBlocklistStore, MediaStore, MembershipStore,
+    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore,
+    RoleStore, HOLD_RADIUS,
 };
 use crate::types::{
-    audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventRecord, GrantRecord, InviteRecord,
-    MediaBlockRecord, ModKind, ModRecord, NamespaceRecord, NetblockRecord, Page, PeerRecord,
-    PendingRecovery, ProfileRecord, RedeemOutcome, ReportRecord, ReportResolution, RoleDef,
-    RootHistoryEntry, Scope, ThreadSummary, Verification, AUDIT_GENESIS,
+    audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventRecord, GrantRecord, GroupRecord,
+    InviteRecord, MediaBlockRecord, ModKind, ModRecord, NamespaceRecord, NetblockRecord, Page,
+    PeerRecord, PendingRecovery, ProfileRecord, RedeemOutcome, ReportRecord, ReportResolution,
+    RoleDef, RootHistoryEntry, Scope, ThreadSummary, Verification, AUDIT_GENESIS,
 };
 use crate::StoreError;
 use weft_proto::{ContentState, ReportStatus};
@@ -34,6 +34,14 @@ struct FriendRow {
     requested_by: UserRef,
     accepted: bool,
     since_ms: u64,
+}
+
+/// A group DM (memory backend): identity + member set.
+struct GroupRow {
+    name: Option<String>,
+    creator: UserRef,
+    created_ms: u64,
+    members: std::collections::BTreeSet<UserRef>,
 }
 
 /// Order the two sides so a relationship has one canonical key regardless of
@@ -135,6 +143,8 @@ struct Inner {
     thread_names: HashMap<(String, MsgId), String>,
     /// Social graph: canonical (low, high) UserRef pair → relationship.
     friends: HashMap<(UserRef, UserRef), FriendRow>,
+    /// Group DMs: id → identity + member set.
+    groups: HashMap<GroupId, GroupRow>,
     /// §9.4 custom emoji: namespace → (name → media ref), name-sorted.
     emoji: HashMap<NamespaceName, std::collections::BTreeMap<String, String>>,
     /// account → channels it's a member of (§6.3 persistent membership).
@@ -1178,6 +1188,19 @@ impl InviteStore for MemoryStore {
         Ok(inner.invites.remove(id).is_some())
     }
 
+    async fn invites_for_scope(&self, scope: &str) -> Result<Vec<InviteRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut out: Vec<InviteRecord> = inner
+            .invites
+            .values()
+            .filter(|inv| inv.scope == scope)
+            .cloned()
+            .collect();
+        // Newest first (ids are `i<ulid>`, so the ulid sorts by time).
+        out.sort_by(|a, b| b.id.cmp(&a.id));
+        Ok(out)
+    }
+
     async fn revoke_invites_for_namespace(&self, ns: &str) -> Result<u64, StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         let ns_scope = format!("ns:{ns}");
@@ -2149,6 +2172,100 @@ impl FriendStore for MemoryStore {
             .friends
             .get(&canon(account, other))
             .map(|row| view(account, row)))
+    }
+}
+
+#[async_trait]
+impl GroupStore for MemoryStore {
+    async fn create_group(
+        &self,
+        id: GroupId,
+        creator: &UserRef,
+        members: &[UserRef],
+        at_ms: u64,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        inner.groups.entry(id).or_insert_with(|| GroupRow {
+            name: None,
+            creator: creator.clone(),
+            created_ms: at_ms,
+            members: members.iter().cloned().collect(),
+        });
+        Ok(())
+    }
+
+    async fn group(&self, id: GroupId) -> Result<Option<GroupRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner.groups.get(&id).map(|g| GroupRecord {
+            id,
+            name: g.name.clone(),
+            creator: g.creator.clone(),
+            created_ms: g.created_ms,
+        }))
+    }
+
+    async fn group_members(&self, id: GroupId) -> Result<Vec<UserRef>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .groups
+            .get(&id)
+            .map(|g| g.members.iter().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    async fn is_group_member(&self, id: GroupId, user: &UserRef) -> Result<bool, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .groups
+            .get(&id)
+            .is_some_and(|g| g.members.contains(user)))
+    }
+
+    async fn add_group_member(&self, id: GroupId, user: &UserRef) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        match inner.groups.get_mut(&id) {
+            Some(g) => {
+                g.members.insert(user.clone());
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn remove_group_member(&self, id: GroupId, user: &UserRef) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .groups
+            .get_mut(&id)
+            .is_some_and(|g| g.members.remove(user)))
+    }
+
+    async fn set_group_name(&self, id: GroupId, name: Option<&str>) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        match inner.groups.get_mut(&id) {
+            Some(g) => {
+                g.name = name.filter(|n| !n.is_empty()).map(str::to_string);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn groups_for(&self, user: &UserRef) -> Result<Vec<GroupRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut out: Vec<GroupRecord> = inner
+            .groups
+            .iter()
+            .filter(|(_, g)| g.members.contains(user))
+            .map(|(id, g)| GroupRecord {
+                id: *id,
+                name: g.name.clone(),
+                creator: g.creator.clone(),
+                created_ms: g.created_ms,
+            })
+            .collect();
+        out.sort_by(|a, b| b.created_ms.cmp(&a.created_ms).then(b.id.cmp(&a.id)));
+        Ok(out)
     }
 }
 

@@ -5,16 +5,16 @@
 //! when absent so `cargo test` needs no database.
 
 use weft_proto::{
-    Account, ChannelName, ContentState, FriendState, MsgId, MsgMeta, NamespaceName, NetworkName,
-    ReportStatus, ResolveAction, RetentionPolicy, Ulid, UserRef,
+    Account, ChannelName, ContentState, FriendState, GroupId, MsgId, MsgMeta, NamespaceName,
+    NetworkName, ReportStatus, ResolveAction, RetentionPolicy, Ulid, UserRef,
 };
 use weft_store::{
     materialize, AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventKind,
-    EventRecord, EventStore, FriendOutcome, FriendStore, HistoryItem, InviteRecord, InviteStore,
-    MediaBlockRecord, MediaBlocklistStore, MediaStore, MembershipStore, MemoryStore, ModKind,
-    ModRecord, ModerationStore, NamespaceRecord, NamespaceStore, NetblockRecord, NetblockStore,
-    Page, PeerRecord, PeerStore, PendingRecovery, PinStore, ProfileStore, RedeemOutcome,
-    ReportRecord, ReportResolution, ReportStore, RoleDef, RoleStore, Scope,
+    EventRecord, EventStore, FriendOutcome, FriendStore, GroupStore, HistoryItem, InviteRecord,
+    InviteStore, MediaBlockRecord, MediaBlocklistStore, MediaStore, MembershipStore, MemoryStore,
+    ModKind, ModRecord, ModerationStore, NamespaceRecord, NamespaceStore, NetblockRecord,
+    NetblockStore, Page, PeerRecord, PeerStore, PendingRecovery, PinStore, ProfileStore,
+    RedeemOutcome, ReportRecord, ReportResolution, ReportStore, RoleDef, RoleStore, Scope,
 };
 
 fn user(name: &str) -> UserRef {
@@ -80,6 +80,7 @@ where
         + ProfileStore
         + RoleStore
         + FriendStore
+        + GroupStore
         + AuditStore,
 {
     let chan: Scope = Scope::Channel(format!("#suite-{tag}").parse().unwrap());
@@ -742,6 +743,47 @@ where
     assert_eq!(store.friendship(&fa, &fb).await.unwrap(), None);
     assert!(!store.friend_remove(&fb, &fa).await.unwrap()); // already gone
 
+    // -- group DMs (federation-able) --
+    let gid = GroupId::new(Ulid::from_parts(9_000, 9_000));
+    let ga = user(&format!("gada{tag}"));
+    let gb: UserRef = format!("gbob{tag}@peer.example").parse().unwrap(); // cross-network member
+    store
+        .create_group(gid, &ga, &[ga.clone(), gb.clone()], 9_000)
+        .await
+        .unwrap();
+    let rec = store.group(gid).await.unwrap().expect("group exists");
+    assert_eq!(rec.creator, ga);
+    assert_eq!(rec.name, None);
+    assert!(store.is_group_member(gid, &ga).await.unwrap());
+    assert!(store.is_group_member(gid, &gb).await.unwrap());
+    assert_eq!(store.group_members(gid).await.unwrap().len(), 2);
+    // Add a third (local) member.
+    let gc = user(&format!("gcarol{tag}"));
+    assert!(store.add_group_member(gid, &gc).await.unwrap());
+    assert_eq!(store.group_members(gid).await.unwrap().len(), 3);
+    // Name it.
+    assert!(store.set_group_name(gid, Some("trip")).await.unwrap());
+    assert_eq!(
+        store.group(gid).await.unwrap().unwrap().name.as_deref(),
+        Some("trip")
+    );
+    // Each member sees the group in their list; a non-member doesn't.
+    assert_eq!(store.groups_for(&gb).await.unwrap().len(), 1);
+    assert!(store
+        .groups_for(&user(&format!("nope{tag}")))
+        .await
+        .unwrap()
+        .is_empty());
+    // Remove the cross-network member.
+    assert!(store.remove_group_member(gid, &gb).await.unwrap());
+    assert!(!store.is_group_member(gid, &gb).await.unwrap());
+    assert_eq!(store.group_members(gid).await.unwrap().len(), 2);
+    assert!(!store.remove_group_member(gid, &gb).await.unwrap()); // already gone
+                                                                  // Adding to a nonexistent group fails; operations are id-scoped.
+    let ghost = GroupId::new(Ulid::from_parts(1, 1));
+    assert!(!store.add_group_member(ghost, &ga).await.unwrap());
+    assert!(store.group(ghost).await.unwrap().is_none());
+
     // -- custom emoji (§9.4) --
     let ns: NamespaceName = format!("emo{}", tag.replace(['-', '_'], ""))
         .parse()
@@ -958,6 +1000,7 @@ where
             caps: vec!["view".into(), "send".into()],
             uses_left: Some(2),
             expiry: None,
+            creator: user("inviter"),
         })
         .await
         .unwrap();
@@ -982,6 +1025,7 @@ where
             caps: vec!["view".into()],
             uses_left: None,
             expiry: Some(500),
+            creator: user("inviter"),
         })
         .await
         .unwrap();
@@ -1019,6 +1063,7 @@ where
                 caps: vec!["view".into()],
                 uses_left: None,
                 expiry: None,
+                creator: user("inviter"),
             })
             .await
             .unwrap();
@@ -1031,6 +1076,7 @@ where
             caps: vec!["view".into()],
             uses_left: None,
             expiry: None,
+            creator: user("inviter"),
         })
         .await
         .unwrap();
