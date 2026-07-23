@@ -549,6 +549,26 @@ fn thread_name(
 }
 
 #[tauri::command]
+fn friend_add(conn: State<'_, Conn>, user: String) -> Result<(), String> {
+    conn.send(weft::build_friend_add(&user)?)
+}
+
+#[tauri::command]
+fn friend_accept(conn: State<'_, Conn>, user: String) -> Result<(), String> {
+    conn.send(weft::build_friend_accept(&user)?)
+}
+
+#[tauri::command]
+fn friend_remove(conn: State<'_, Conn>, user: String) -> Result<(), String> {
+    conn.send(weft::build_friend_remove(&user)?)
+}
+
+#[tauri::command]
+fn friends(conn: State<'_, Conn>) -> Result<(), String> {
+    conn.send(weft::build_friends()?)
+}
+
+#[tauri::command]
 fn emoji_add(
     conn: State<'_, Conn>,
     namespace: String,
@@ -918,6 +938,10 @@ pub fn run() {
             search,
             threads,
             thread_name,
+            friend_add,
+            friend_accept,
+            friend_remove,
+            friends,
             emoji_add,
             emoji_remove,
             emoji_list,

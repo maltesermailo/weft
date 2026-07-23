@@ -8,9 +8,9 @@ use crate::line::{label_from_tags, write_label, Args, Line, Tags};
 use crate::name::{Account, ChannelName, NamespaceName, NetworkName, Target, UserRef};
 use crate::policy::RetentionPolicy;
 use crate::types::{
-    BridgeState, ChannelKind, ContentState, HistoryMode, MediaMode, MemberAction, ModAction,
-    MsgMeta, PresenceStatus, ReactionOp, ReportScope, ResolveAction, TypingState, VerifyState,
-    Visibility, VoiceAction, VoiceTransport,
+    BridgeState, ChannelKind, ContentState, FriendState, HistoryMode, MediaMode, MemberAction,
+    ModAction, MsgMeta, PresenceStatus, ReactionOp, ReportScope, ResolveAction, TypingState,
+    VerifyState, Visibility, VoiceAction, VoiceTransport,
 };
 
 /// An event plus its optional `label` echo (§3.5). Only direct responses
@@ -466,6 +466,19 @@ pub enum Event {
         kind: String,
         subject: String,
         state: VerifyState,
+    },
+    /// `FRIEND <user@net> <state>` (social layer) — a friendship's state, from
+    /// the recipient's view. Sent per relationship for `FRIENDS`, and pushed
+    /// live on any change (a new `incoming` request, an `outgoing` we sent, or
+    /// `friends` once mutual). Federation-able: `user` is a full `UserRef`.
+    Friend {
+        user: UserRef,
+        state: FriendState,
+    },
+    /// `FRIEND-REMOVED <user@net>` — a friendship (or pending request) ended:
+    /// unfriended, declined, or cancelled. Pushed to both parties' sessions.
+    FriendRemoved {
+        user: UserRef,
     },
     /// `VOICE DESC <#chan> :<sdp>` (§16) — the SFU's SDP **answer** to the
     /// client's `VOICE DESC` offer. Symmetric with the command (spec §16 uses
@@ -1150,6 +1163,19 @@ impl Event {
                         .unwrap_or(VerifyState::Pending),
                 })
             }
+            "FRIEND" => {
+                let mut args = Args::new(line, "FRIEND");
+                Ok(Event::Friend {
+                    user: args.req("user")?.parse()?,
+                    state: args.req("state")?.parse()?,
+                })
+            }
+            "FRIEND-REMOVED" => {
+                let mut args = Args::new(line, "FRIEND-REMOVED");
+                Ok(Event::FriendRemoved {
+                    user: args.req("user")?.parse()?,
+                })
+            }
             "VOICE" => {
                 let mut args = Args::new(line, "VOICE");
                 let sub = args.req("subcommand")?.to_ascii_uppercase();
@@ -1785,6 +1811,10 @@ impl Event {
                 tags.insert("state".to_string(), state.to_string());
                 ("VERIFIED", vec![kind.clone(), subject.clone()], None)
             }
+            Event::Friend { user, state } => {
+                ("FRIEND", vec![user.to_string(), state.to_string()], None)
+            }
+            Event::FriendRemoved { user } => ("FRIEND-REMOVED", vec![user.to_string()], None),
             Event::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown event"));
             }
@@ -2556,6 +2586,31 @@ mod tests {
             kind: "birthday".into(),
             subject: "2000-05-15".into(),
             state: VerifyState::Confirmed,
+        }));
+    }
+
+    #[test]
+    fn friend_events_round_trip() {
+        let incoming = Reply::with_label(
+            Event::Friend {
+                user: "bob@other.example".parse().unwrap(),
+                state: FriendState::Incoming,
+            },
+            "f1",
+        );
+        assert_eq!(
+            incoming.serialize().unwrap(),
+            "@label=f1 FRIEND bob@other.example incoming"
+        );
+        round_trip(&incoming);
+        for state in [FriendState::Friends, FriendState::Outgoing] {
+            round_trip(&Reply::new(Event::Friend {
+                user: "ada@home.example".parse().unwrap(),
+                state,
+            }));
+        }
+        round_trip(&Reply::new(Event::FriendRemoved {
+            user: "carol@other.example".parse().unwrap(),
         }));
     }
 

@@ -5,16 +5,16 @@
 //! when absent so `cargo test` needs no database.
 
 use weft_proto::{
-    Account, ChannelName, ContentState, MsgId, MsgMeta, NamespaceName, NetworkName, ReportStatus,
-    ResolveAction, RetentionPolicy, Ulid, UserRef,
+    Account, ChannelName, ContentState, FriendState, MsgId, MsgMeta, NamespaceName, NetworkName,
+    ReportStatus, ResolveAction, RetentionPolicy, Ulid, UserRef,
 };
 use weft_store::{
     materialize, AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventKind,
-    EventRecord, EventStore, HistoryItem, InviteRecord, InviteStore, MediaBlockRecord,
-    MediaBlocklistStore, MediaStore, MembershipStore, MemoryStore, ModKind, ModRecord,
-    ModerationStore, NamespaceRecord, NamespaceStore, NetblockRecord, NetblockStore, Page,
-    PeerRecord, PeerStore, PendingRecovery, PinStore, ProfileStore, RedeemOutcome, ReportRecord,
-    ReportResolution, ReportStore, RoleDef, RoleStore, Scope,
+    EventRecord, EventStore, FriendOutcome, FriendStore, HistoryItem, InviteRecord, InviteStore,
+    MediaBlockRecord, MediaBlocklistStore, MediaStore, MembershipStore, MemoryStore, ModKind,
+    ModRecord, ModerationStore, NamespaceRecord, NamespaceStore, NetblockRecord, NetblockStore,
+    Page, PeerRecord, PeerStore, PendingRecovery, PinStore, ProfileStore, RedeemOutcome,
+    ReportRecord, ReportResolution, ReportStore, RoleDef, RoleStore, Scope,
 };
 
 fn user(name: &str) -> UserRef {
@@ -79,6 +79,7 @@ where
         + MediaStore
         + ProfileStore
         + RoleStore
+        + FriendStore
         + AuditStore,
 {
     let chan: Scope = Scope::Channel(format!("#suite-{tag}").parse().unwrap());
@@ -680,6 +681,66 @@ where
         None,
         "cleared name, thread still listed"
     );
+
+    // -- social graph / friends (federation-able) --
+    let fa = user(&format!("fada{tag}"));
+    let fb: UserRef = format!("fbob{tag}@peer.example").parse().unwrap(); // a cross-network friend
+                                                                          // fa asks fb → outgoing for fa, incoming for fb.
+    assert_eq!(
+        store.friend_request(&fa, &fb, 1_000).await.unwrap(),
+        FriendOutcome::Requested
+    );
+    assert_eq!(
+        store.friendship(&fa, &fb).await.unwrap(),
+        Some(FriendState::Outgoing)
+    );
+    assert_eq!(
+        store.friendship(&fb, &fa).await.unwrap(),
+        Some(FriendState::Incoming)
+    );
+    // Asking again is idempotent (still just pending).
+    assert_eq!(
+        store.friend_request(&fa, &fb, 1_001).await.unwrap(),
+        FriendOutcome::AlreadyPending
+    );
+    // fb accepts (via ADD, which detects the reciprocal request).
+    assert_eq!(
+        store.friend_request(&fb, &fa, 2_000).await.unwrap(),
+        FriendOutcome::Accepted
+    );
+    assert_eq!(
+        store.friendship(&fa, &fb).await.unwrap(),
+        Some(FriendState::Friends)
+    );
+    assert_eq!(
+        store.friends(&fa).await.unwrap(),
+        vec![(fb.clone(), FriendState::Friends)]
+    );
+    // A second request while already friends is a no-op.
+    assert_eq!(
+        store.friend_request(&fa, &fb, 3_000).await.unwrap(),
+        FriendOutcome::AlreadyFriends
+    );
+    // A third party asks fa; fa accepts via the explicit ACCEPT verb.
+    let fc = user(&format!("fcarol{tag}"));
+    store.friend_request(&fc, &fa, 4_000).await.unwrap();
+    assert_eq!(
+        store.friendship(&fa, &fc).await.unwrap(),
+        Some(FriendState::Incoming)
+    );
+    // Only the addressee may accept: fc (the requester) accepting is a no-op.
+    assert!(!store.friend_accept(&fc, &fa, 4_100).await.unwrap());
+    assert!(store.friend_accept(&fa, &fc, 4_200).await.unwrap());
+    assert_eq!(
+        store.friendship(&fa, &fc).await.unwrap(),
+        Some(FriendState::Friends)
+    );
+    // fa now has two friends.
+    assert_eq!(store.friends(&fa).await.unwrap().len(), 2);
+    // Remove works in any state and is symmetric.
+    assert!(store.friend_remove(&fb, &fa).await.unwrap());
+    assert_eq!(store.friendship(&fa, &fb).await.unwrap(), None);
+    assert!(!store.friend_remove(&fb, &fa).await.unwrap()); // already gone
 
     // -- custom emoji (§9.4) --
     let ns: NamespaceName = format!("emo{}", tag.replace(['-', '_'], ""))

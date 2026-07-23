@@ -2,7 +2,9 @@
 //! behind `Arc<dyn …>` — weft-core stays non-generic over storage.
 
 use async_trait::async_trait;
-use weft_proto::{Account, ChannelName, MsgId, ReportStatus, RetentionPolicy, Ulid};
+use weft_proto::{
+    Account, ChannelName, FriendState, MsgId, ReportStatus, RetentionPolicy, Ulid, UserRef,
+};
 
 use weft_proto::NamespaceName;
 
@@ -794,4 +796,58 @@ pub trait ProfileStore: Send + Sync {
     /// Is `hash` some account's avatar? Avatar blobs are fetchable by any authed
     /// session (§10.3, semi-public) and exempt from orphan GC while referenced.
     async fn avatar_exists(&self, hash: &str) -> Result<bool, StoreError>;
+}
+
+/// The result of a `FRIEND ADD` (social layer). One verb covers "ask" and
+/// "accept the ask they already sent me", so the store reports which happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FriendOutcome {
+    /// A fresh outgoing request was recorded.
+    Requested,
+    /// A reciprocal request existed, so the pair is now mutually friends.
+    Accepted,
+    /// Already friends — nothing changed.
+    AlreadyFriends,
+    /// An outgoing request was already pending — nothing changed.
+    AlreadyPending,
+}
+
+/// Social graph (friends + pending requests). **Federation-able**: every peer
+/// is a full `UserRef`, so a relationship may cross networks. The relationship
+/// is symmetric; a single row per unordered pair carries who asked.
+#[async_trait]
+pub trait FriendStore: Send + Sync {
+    /// Record a friend request `from` → `to`. If `to` already asked `from`, the
+    /// pair becomes accepted instead (see [`FriendOutcome`]). Idempotent.
+    async fn friend_request(
+        &self,
+        from: &UserRef,
+        to: &UserRef,
+        at_ms: u64,
+    ) -> Result<FriendOutcome, StoreError>;
+
+    /// Accept the incoming request from `other` to `account`. Returns false iff
+    /// there was no such pending request to accept.
+    async fn friend_accept(
+        &self,
+        account: &UserRef,
+        other: &UserRef,
+        at_ms: u64,
+    ) -> Result<bool, StoreError>;
+
+    /// Remove the relationship in any state — unfriend, cancel an outgoing
+    /// request, or decline an incoming one. Returns false iff none existed.
+    async fn friend_remove(&self, account: &UserRef, other: &UserRef) -> Result<bool, StoreError>;
+
+    /// `account`'s relationships, each with its state from `account`'s point of
+    /// view (`friends` / `incoming` / `outgoing`).
+    async fn friends(&self, account: &UserRef) -> Result<Vec<(UserRef, FriendState)>, StoreError>;
+
+    /// The state of the `account`↔`other` relationship from `account`'s view, or
+    /// `None` if they have no relationship. Used to gate DMs to `friends`.
+    async fn friendship(
+        &self,
+        account: &UserRef,
+        other: &UserRef,
+    ) -> Result<Option<FriendState>, StoreError>;
 }

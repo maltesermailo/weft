@@ -39,6 +39,20 @@ export interface AppCtx {
         federation?: boolean;
       }
     | undefined;
+  // ---- social layer: friends (federation-able; keys are account@network) ----
+  readonly friendList: string[];
+  readonly incomingRequests: string[];
+  readonly outgoingRequests: string[];
+  addFriendInput: string;
+  /** Short label for a friend: bare handle if local, full ref if federated. */
+  friendLabel(user: string): string;
+  /** The local account handle for a friend, or null if they're federated. */
+  friendLocalAccount(user: string): string | null;
+  addFriend(): void;
+  acceptFriend(user: string): void;
+  removeFriend(user: string): void;
+  messageFriend(user: string): void;
+  openFriends(): void;
   goHome(): void;
   selectServer(ns: string): void;
   /** Select a server tile and open its header menu (rail right-click). */

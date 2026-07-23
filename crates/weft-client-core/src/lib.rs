@@ -146,6 +146,16 @@ pub enum ClientEvent {
         root: String,
         name: Option<String>,
     },
+    /// `FRIEND <user@net> <state>` — a friendship state (social layer): a
+    /// `FRIENDS` list entry or a live change (`friends`/`incoming`/`outgoing`).
+    Friend {
+        user: String,
+        state: String,
+    },
+    /// `FRIEND-REMOVED <user@net>` — a friendship or pending request ended.
+    FriendRemoved {
+        user: String,
+    },
     /// `CAPS <account> <scope> :<caps>` — effective caps (§10.4).
     Caps {
         account: String,
@@ -585,6 +595,13 @@ pub fn on_line<E: EventSink>(
             channel: channel.to_string(),
             root: root.to_string(),
             name,
+        }),
+        Event::Friend { user, state } => sink.emit(ClientEvent::Friend {
+            user: user.to_string(),
+            state: state.to_string(),
+        }),
+        Event::FriendRemoved { user } => sink.emit(ClientEvent::FriendRemoved {
+            user: user.to_string(),
         }),
         Event::Caps {
             account,
@@ -1350,6 +1367,47 @@ pub fn build_thread_name(channel: &str, root: &str, name: &str) -> Result<String
     })
     .serialize()
     .map_err(|e| e.to_string())
+}
+
+/// `FRIEND ADD <user@net>` — send/accept a friend request (social layer).
+/// `user` must be fully qualified (`account@network`); the caller qualifies
+/// bare handles to the local network first.
+pub fn build_friend_add(user: &str) -> Result<String, String> {
+    Request::new(Command::FriendAdd {
+        user: friend_user(user)?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `FRIEND ACCEPT <user@net>` — accept a pending incoming request.
+pub fn build_friend_accept(user: &str) -> Result<String, String> {
+    Request::new(Command::FriendAccept {
+        user: friend_user(user)?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `FRIEND REMOVE <user@net>` — unfriend / cancel / decline.
+pub fn build_friend_remove(user: &str) -> Result<String, String> {
+    Request::new(Command::FriendRemove {
+        user: friend_user(user)?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `FRIENDS` — list friends + pending requests (a `BATCH` of `FRIEND`).
+pub fn build_friends() -> Result<String, String> {
+    Request::new(Command::Friends)
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+fn friend_user(user: &str) -> Result<weft_proto::UserRef, String> {
+    user.parse()
+        .map_err(|_| "friend must be account@network".to_string())
 }
 
 /// `MEMBERS <#chan>` — request the roster snapshot (§6.3).

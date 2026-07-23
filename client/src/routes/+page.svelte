@@ -13,6 +13,7 @@
   import QuickSwitcher from "$lib/components/QuickSwitcher.svelte";
   import CommunityRail from "$lib/components/CommunityRail.svelte";
   import EmptyHome from "$lib/components/EmptyHome.svelte";
+  import FriendsView from "$lib/components/FriendsView.svelte";
   import MemberList from "$lib/components/MemberList.svelte";
   import { initVoice, joinVoice, voice } from "$lib/voice.svelte";
   import VoiceBar from "$lib/components/VoiceBar.svelte";
@@ -348,6 +349,10 @@
   let userMenu = $state(false);
   let userTab = $state<"account" | "appearance" | "connection" | "verification">("account");
   let dmInput = $state("");
+  // ---- social layer: friends (federation-able; keyed by full account@network) ----
+  // userref → "friends" | "incoming" | "outgoing"
+  let friends = $state<Record<string, string>>({});
+  let addFriendInput = $state("");
   // ---- discover dialog (Phase 6) ----
   let discoverOpen = $state(false);
   let discovered = $state<Record<string, Extract<weft.WeftEvent, { kind: "ns-meta" }>>>({});
@@ -896,6 +901,58 @@
     dmInput = "";
     if (p) openDm(p);
   }
+
+  // ---- social layer: friends ----
+  // Fully-qualify a typed handle to `account@network` (local network default).
+  function qualify(handle: string): string {
+    const h = handle.trim().replace(/^@/, "");
+    return h.includes("@") ? h : `${h}@${network}`;
+  }
+  // A friend's short label: bare handle for local, full ref for federated.
+  function friendLabel(user: string): string {
+    const [acct, net] = user.split("@");
+    return net === network ? displayName(acct) : user;
+  }
+  // A friend's local account handle (for DM/profile/presence), if local.
+  function friendLocalAccount(user: string): string | null {
+    const [acct, net] = user.split("@");
+    return net === network ? acct : null;
+  }
+  const friendList = $derived(
+    Object.entries(friends)
+      .filter(([, s]) => s === "friends")
+      .map(([u]) => u)
+      .sort((a, b) => friendLabel(a).localeCompare(friendLabel(b))),
+  );
+  const incomingRequests = $derived(
+    Object.entries(friends).filter(([, s]) => s === "incoming").map(([u]) => u).sort(),
+  );
+  const outgoingRequests = $derived(
+    Object.entries(friends).filter(([, s]) => s === "outgoing").map(([u]) => u).sort(),
+  );
+  function addFriend() {
+    const user = qualify(addFriendInput);
+    if (!user || !user.includes("@")) return;
+    addFriendInput = "";
+    weft.friendAdd(user).catch((e) => toast(String(e), "error"));
+  }
+  function acceptFriend(user: string) {
+    weft.friendAccept(user).catch((e) => toast(String(e), "error"));
+  }
+  // Unfriend / cancel an outgoing request / decline an incoming one.
+  function removeFriend(user: string) {
+    weft.friendRemove(user).catch((e) => toast(String(e), "error"));
+  }
+  // Open a DM with a friend (local friends only for now — DMs are per-network).
+  function messageFriend(user: string) {
+    const acct = friendLocalAccount(user);
+    if (acct) openDm(acct);
+  }
+  // Show the Friends home screen (home view, no DM selected).
+  function openFriends() {
+    homeView = true;
+    active = "";
+  }
   function setStatus(s: string) {
     myStatus = s;
     userMenu = false;
@@ -916,6 +973,8 @@
         initVoice(account); // §16 wire the voice controller to the event stream
         queryProfile(account); // §10.3 load our own profile
         weft.verifyList().catch(() => {}); // §10.5 load our verification claims
+        friends = {};
+        weft.listFriends().catch(() => {}); // social layer: load friends + requests
         // Remember creds so the next launch logs straight back in. NOTE: this
         // includes the password in localStorage — a dev convenience; the
         // hardening is OS-keychain storage in the backend.
@@ -1180,6 +1239,14 @@
         if (i >= 0) threadsList[i] = { ...threadsList[i], name: e.name ?? undefined };
         break;
       }
+      case "friend":
+        friends[e.user] = e.state;
+        // A fresh incoming request is worth a nudge.
+        if (e.state === "incoming") toast(`Friend request from ${e.user}`, "info");
+        break;
+      case "friend-removed":
+        delete friends[e.user];
+        break;
       case "caps": {
         const set = e.caps ? e.caps.split(",") : [];
         capsFor[`${e.account}|${e.scope}`] = {
@@ -2555,6 +2622,19 @@
     get channelGroups() { return channelGroups; },
     get dmList() { return dmList; },
     get activeNsMeta() { return activeNsMeta; },
+    // social layer: friends
+    get friendList() { return friendList; },
+    get incomingRequests() { return incomingRequests; },
+    get outgoingRequests() { return outgoingRequests; },
+    get addFriendInput() { return addFriendInput; },
+    set addFriendInput(v: string) { addFriendInput = v; },
+    friendLabel,
+    friendLocalAccount,
+    addFriend,
+    acceptFriend,
+    removeFriend,
+    messageFriend,
+    openFriends,
     goHome: () => (homeView = true),
     selectServer,
     openServerMenu,
@@ -2864,7 +2944,9 @@
 
     <!-- MAIN -->
     <main class="main">
-      {#if !activeChannel && !homeView}
+      {#if homeView && !activeChannel}
+        <FriendsView />
+      {:else if !activeChannel && !homeView}
         <EmptyHome />
       {:else if activeChannel?.voice}
         <VoiceStage />

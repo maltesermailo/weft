@@ -4,7 +4,7 @@
 use crate::error::{ParseError, SerializeError};
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
-use crate::name::{Account, ChannelName, NamespaceName, NetworkName, Target};
+use crate::name::{Account, ChannelName, NamespaceName, NetworkName, Target, UserRef};
 use crate::types::{
     report_category_ok, HistoryMode, MediaMode, MsgMeta, PresenceStatus, ReportScope, ReportStatus,
     ResolveAction, StreamMode, TypingState, Visibility,
@@ -542,6 +542,18 @@ pub enum Command {
     VerifyConfirm { kind: String, code: String },
     /// `VERIFY LIST` (§10.5) — the caller's own claims, one `VERIFIED` per claim.
     VerifyList,
+    /// `FRIEND ADD <user@net>` (social layer) — send a friend request, or, if
+    /// the peer already has a request out to us, accept it. Federation-able:
+    /// the peer is a full `UserRef` and may be on another network.
+    FriendAdd { user: UserRef },
+    /// `FRIEND ACCEPT <user@net>` — accept a pending incoming request.
+    FriendAccept { user: UserRef },
+    /// `FRIEND REMOVE <user@net>` — unfriend, cancel an outgoing request, or
+    /// decline an incoming one (one verb removes the edge whatever its state).
+    FriendRemove { user: UserRef },
+    /// `FRIENDS` — list the caller's friends + pending requests; the server
+    /// answers a `FRIEND` event per relationship (a `BATCH`).
+    Friends,
     /// Any verb outside the known set. Servers ignore it silently (§4).
     Unknown { verb: String },
 }
@@ -1545,6 +1557,27 @@ impl Command {
                     }),
                 }
             }
+            "FRIENDS" => Ok(Command::Friends),
+            "FRIEND" => {
+                let mut args = Args::new(line, "FRIEND");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "ADD" => Ok(Command::FriendAdd {
+                        user: args.req("user")?.parse()?,
+                    }),
+                    "ACCEPT" => Ok(Command::FriendAccept {
+                        user: args.req("user")?.parse()?,
+                    }),
+                    "REMOVE" => Ok(Command::FriendRemove {
+                        user: args.req("user")?.parse()?,
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "FRIEND",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
             "VOICE" => {
                 let mut args = Args::new(line, "VOICE");
                 let sub = args.req("subcommand")?.to_ascii_uppercase();
@@ -2243,6 +2276,16 @@ impl Command {
                 None,
             ),
             Command::VerifyList => ("VERIFY", vec!["LIST".to_string()], None),
+            Command::FriendAdd { user } => {
+                ("FRIEND", vec!["ADD".to_string(), user.to_string()], None)
+            }
+            Command::FriendAccept { user } => {
+                ("FRIEND", vec!["ACCEPT".to_string(), user.to_string()], None)
+            }
+            Command::FriendRemove { user } => {
+                ("FRIEND", vec!["REMOVE".to_string(), user.to_string()], None)
+            }
+            Command::Friends => ("FRIENDS", vec![], None),
             Command::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown command"));
             }
@@ -3364,6 +3407,32 @@ mod tests {
         assert!(Request::parse("VERIFY EMAIL").is_err()); // address required
         assert!(Request::parse("VERIFY CONFIRM email").is_err()); // code required
         assert!(Request::parse("VERIFY FROB").is_err()); // bad subcommand
+    }
+
+    #[test]
+    fn friend_verbs_round_trip() {
+        let add = Request::with_label(
+            Command::FriendAdd {
+                user: "bob@other.example".parse().unwrap(),
+            },
+            "f1",
+        );
+        assert_eq!(
+            add.serialize().unwrap(),
+            "@label=f1 FRIEND ADD bob@other.example"
+        );
+        round_trip(&add);
+        round_trip(&Request::new(Command::FriendAccept {
+            user: "ada@home.example".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::FriendRemove {
+            user: "carol@home.example".parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::Friends));
+
+        // A friend target must be fully qualified (federation-able).
+        assert!(Request::parse("FRIEND ADD bob").is_err());
+        assert!(Request::parse("FRIEND FROB bob@x.example").is_err()); // bad subcommand
     }
 
     #[test]

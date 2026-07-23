@@ -13,7 +13,7 @@ use weft_core::{
     VoiceError, VoiceGrant, VoiceJoinReq, VoiceRelay,
 };
 use weft_proto::RetentionPolicy;
-use weft_proto::{ErrCode, Event, MemberAction, Reply, VoiceAction};
+use weft_proto::{ErrCode, Event, FriendState, MemberAction, Reply, VoiceAction};
 use weft_store::{ChannelStore, NamespaceStore};
 
 struct MockStream {
@@ -1247,6 +1247,78 @@ async fn history_thread_filter_returns_only_the_thread() {
         bodies,
         vec!["thread root".to_string(), "reply in thread".to_string(),]
     );
+}
+
+#[tokio::test]
+async fn friend_request_accept_list_and_remove() {
+    let ctx = ctx(&["#general"]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+
+    // ada friend-requests bob → ada's own state is outgoing.
+    ada.send("@l=1 FRIEND ADD bob@test.example");
+    match ada.recv().await.event {
+        Event::Friend { user, state } => {
+            assert_eq!(user.to_string(), "bob@test.example");
+            assert_eq!(state, FriendState::Outgoing);
+        }
+        e => panic!("expected FRIEND outgoing, got {e:?}"),
+    }
+    // bob (online) is pushed the incoming request.
+    match bob.recv().await.event {
+        Event::Friend { user, state } => {
+            assert_eq!(user.to_string(), "ada@test.example");
+            assert_eq!(state, FriendState::Incoming);
+        }
+        e => panic!("expected FRIEND incoming push, got {e:?}"),
+    }
+
+    // bob accepts → both see `friends`.
+    bob.send("FRIEND ACCEPT ada@test.example");
+    assert!(matches!(
+        bob.recv().await.event,
+        Event::Friend {
+            state: FriendState::Friends,
+            ..
+        }
+    ));
+    match ada.recv().await.event {
+        Event::Friend { user, state } => {
+            assert_eq!(user.to_string(), "bob@test.example");
+            assert_eq!(state, FriendState::Friends);
+        }
+        e => panic!("expected FRIEND friends push to ada, got {e:?}"),
+    }
+
+    // ada lists — one friend, mutual.
+    ada.send("@l=2 FRIENDS");
+    assert!(matches!(ada.recv().await.event, Event::BatchStart { .. }));
+    match ada.recv().await.event {
+        Event::Friend { user, state } => {
+            assert_eq!(user.to_string(), "bob@test.example");
+            assert_eq!(state, FriendState::Friends);
+        }
+        e => panic!("expected FRIEND in list, got {e:?}"),
+    }
+    assert!(matches!(ada.recv().await.event, Event::BatchEnd { .. }));
+
+    // ada removes bob → both see FRIEND-REMOVED.
+    ada.send("FRIEND REMOVE bob@test.example");
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::FriendRemoved { .. }
+    ));
+    assert!(matches!(
+        bob.recv().await.event,
+        Event::FriendRemoved { .. }
+    ));
+
+    // Accepting a request that isn't there is a uniform NO-SUCH-TARGET.
+    ada.send("FRIEND ACCEPT ghost@test.example");
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+    // You cannot befriend yourself.
+    ada.send("FRIEND ADD ada@test.example");
+    ada.expect_err(ErrCode::NoSuchTarget).await;
 }
 
 #[tokio::test]

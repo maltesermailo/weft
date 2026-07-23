@@ -280,6 +280,17 @@ wire_enum!(
     }
 );
 
+wire_enum!(
+    /// `FRIEND <user@net> <state>` — a friendship's state from the listing
+    /// account's point of view (social layer). Federation-able: the peer is a
+    /// full `UserRef`, so a friend may live on another network.
+    FriendState, "friend state", {
+        Friends => "friends",    // mutually accepted
+        Incoming => "incoming",  // they asked us; awaiting our ACCEPT
+        Outgoing => "outgoing",  // we asked them; awaiting theirs
+    }
+);
+
 /// §6.7 normative report categories; extensible with an `x-` prefix.
 const REPORT_CATEGORIES: &[&str] = &[
     "spam",

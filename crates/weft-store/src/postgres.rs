@@ -11,15 +11,16 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use weft_proto::{
-    Account, ChannelName, ContentState, MsgId, MsgMeta, NamespaceName, NetworkName, ReportStatus,
-    RetentionPolicy, Ulid,
+    Account, ChannelName, ContentState, FriendState, MsgId, MsgMeta, NamespaceName, NetworkName,
+    ReportStatus, RetentionPolicy, Ulid, UserRef,
 };
 
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, InviteStore,
-    MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
-    NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
+    AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, FriendOutcome,
+    FriendStore, InviteStore, MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore,
+    NamespaceStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore,
+    HOLD_RADIUS,
 };
 use crate::types::{
     audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventKind, EventRecord, GrantRecord,
@@ -2491,6 +2492,160 @@ impl PinStore for PgStore {
                     .map_err(|_| StoreError::Backend("corrupt pin msgid".to_string()))
             })
             .collect()
+    }
+}
+
+#[async_trait]
+impl FriendStore for PgStore {
+    async fn friend_request(
+        &self,
+        from: &UserRef,
+        to: &UserRef,
+        at_ms: u64,
+    ) -> Result<FriendOutcome, StoreError> {
+        let (low, high) = canon_pg(from, to);
+        // Read-modify-write in one transaction so a concurrent reciprocal
+        // request can't race the accept.
+        let mut tx = self.pool.begin().await.map_err(backend_err)?;
+        let existing: Option<(String, bool)> = sqlx::query_as(
+            "SELECT requested_by, accepted FROM weft_friends WHERE low = $1 AND high = $2 FOR UPDATE",
+        )
+        .bind(&low)
+        .bind(&high)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend_err)?;
+
+        let outcome = match existing {
+            Some((_, true)) => FriendOutcome::AlreadyFriends,
+            Some((requested_by, false)) if requested_by == from.to_string() => {
+                FriendOutcome::AlreadyPending
+            }
+            Some((_, false)) => {
+                // The other side asked first — accept it.
+                sqlx::query(
+                    "UPDATE weft_friends SET accepted = TRUE, since_ms = $3 WHERE low = $1 AND high = $2",
+                )
+                .bind(&low)
+                .bind(&high)
+                .bind(at_ms as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(backend_err)?;
+                FriendOutcome::Accepted
+            }
+            None => {
+                sqlx::query(
+                    "INSERT INTO weft_friends (low, high, requested_by, accepted, since_ms) \
+                     VALUES ($1, $2, $3, FALSE, $4)",
+                )
+                .bind(&low)
+                .bind(&high)
+                .bind(from.to_string())
+                .bind(at_ms as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(backend_err)?;
+                FriendOutcome::Requested
+            }
+        };
+        tx.commit().await.map_err(backend_err)?;
+        Ok(outcome)
+    }
+
+    async fn friend_accept(
+        &self,
+        account: &UserRef,
+        other: &UserRef,
+        at_ms: u64,
+    ) -> Result<bool, StoreError> {
+        let (low, high) = canon_pg(account, other);
+        // Only the addressee (i.e. not the requester) may accept.
+        let result = sqlx::query(
+            "UPDATE weft_friends SET accepted = TRUE, since_ms = $4 \
+             WHERE low = $1 AND high = $2 AND accepted = FALSE AND requested_by = $3",
+        )
+        .bind(&low)
+        .bind(&high)
+        .bind(other.to_string())
+        .bind(at_ms as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn friend_remove(&self, account: &UserRef, other: &UserRef) -> Result<bool, StoreError> {
+        let (low, high) = canon_pg(account, other);
+        let result = sqlx::query("DELETE FROM weft_friends WHERE low = $1 AND high = $2")
+            .bind(&low)
+            .bind(&high)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn friends(&self, account: &UserRef) -> Result<Vec<(UserRef, FriendState)>, StoreError> {
+        let me = account.to_string();
+        let rows: Vec<(String, String, String, bool)> = sqlx::query_as(
+            "SELECT low, high, requested_by, accepted FROM weft_friends \
+             WHERE low = $1 OR high = $1 ORDER BY low, high",
+        )
+        .bind(&me)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+
+        let corrupt = || StoreError::Backend("corrupt friend row".into());
+        let mut out = Vec::with_capacity(rows.len());
+        for (low, high, requested_by, accepted) in rows {
+            let other_str = if low == me { &high } else { &low };
+            let other: UserRef = other_str.parse().map_err(|_| corrupt())?;
+            let state = friend_view(&me, &requested_by, accepted);
+            out.push((other, state));
+        }
+        Ok(out)
+    }
+
+    async fn friendship(
+        &self,
+        account: &UserRef,
+        other: &UserRef,
+    ) -> Result<Option<FriendState>, StoreError> {
+        let (low, high) = canon_pg(account, other);
+        let row: Option<(String, bool)> = sqlx::query_as(
+            "SELECT requested_by, accepted FROM weft_friends WHERE low = $1 AND high = $2",
+        )
+        .bind(&low)
+        .bind(&high)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(row.map(|(requested_by, accepted)| {
+            friend_view(&account.to_string(), &requested_by, accepted)
+        }))
+    }
+}
+
+/// Canonical `(low, high)` string pair for the friend table key.
+fn canon_pg(a: &UserRef, b: &UserRef) -> (String, String) {
+    let (a, b) = (a.to_string(), b.to_string());
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// Relationship state from the `me` account's view (string form).
+fn friend_view(me: &str, requested_by: &str, accepted: bool) -> FriendState {
+    if accepted {
+        FriendState::Friends
+    } else if requested_by == me {
+        FriendState::Outgoing
+    } else {
+        FriendState::Incoming
     }
 }
 

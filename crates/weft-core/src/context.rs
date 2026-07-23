@@ -9,8 +9,8 @@ use weft_crypto::{
 };
 use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, RetentionPolicy};
 use weft_store::{
-    AccountStore, BlobStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, InviteStore,
-    MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
+    AccountStore, BlobStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, FriendStore,
+    InviteStore, MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
     NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, StoreError,
 };
 
@@ -138,6 +138,9 @@ pub struct ServerCtx {
     pub(crate) roles: Arc<dyn RoleStore>,
     /// §10.3 display profiles (nick + avatar) keyed by account handle.
     pub profiles: Arc<dyn ProfileStore>,
+    /// Social graph (friends + pending requests). Federation-able — peers are
+    /// full `UserRef`s.
+    pub(crate) friends: Arc<dyn FriendStore>,
     /// §6.1 live presence, in-memory only (never stored, never bridged).
     /// account → last non-invisible status; served with MEMBERS for correct
     /// roster dots.
@@ -292,6 +295,7 @@ impl ServerCtx {
             + MediaBlocklistStore
             + RoleStore
             + ProfileStore
+            + FriendStore
             + 'static,
     {
         let events: Arc<dyn EventStore> = store.clone();
@@ -310,6 +314,7 @@ impl ServerCtx {
         let memberships: Arc<dyn MembershipStore> = store.clone();
         let roles: Arc<dyn RoleStore> = store.clone();
         let profiles: Arc<dyn ProfileStore> = store.clone();
+        let friends: Arc<dyn FriendStore> = store.clone();
         let namespaces: Arc<dyn NamespaceStore> = store;
         let registry = Registry::spawn(
             channels,
@@ -347,6 +352,7 @@ impl ServerCtx {
             memberships,
             roles,
             profiles,
+            friends,
             presence: std::sync::Mutex::new(std::collections::HashMap::new()),
             blobs,
             media_refs,

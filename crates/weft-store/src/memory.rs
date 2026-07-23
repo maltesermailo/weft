@@ -6,14 +6,18 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use weft_proto::{Account, ChannelName, MsgId, NamespaceName, NetworkName, RetentionPolicy, Ulid};
+use weft_proto::{
+    Account, ChannelName, FriendState, MsgId, NamespaceName, NetworkName, RetentionPolicy, Ulid,
+    UserRef,
+};
 
 use crate::blob::BlobRecord;
 use crate::compact::compaction_plan;
 use crate::traits::{
-    AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, InviteStore,
-    MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore, NamespaceStore,
-    NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
+    AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, FriendOutcome,
+    FriendStore, InviteStore, MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore,
+    NamespaceStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore,
+    HOLD_RADIUS,
 };
 use crate::types::{
     audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventRecord, GrantRecord, InviteRecord,
@@ -23,6 +27,35 @@ use crate::types::{
 };
 use crate::StoreError;
 use weft_proto::{ContentState, ReportStatus};
+
+/// A row in the social graph (memory backend). Keyed by the canonical
+/// `(low, high)` UserRef pair; `requested_by` is whichever side asked.
+struct FriendRow {
+    requested_by: UserRef,
+    accepted: bool,
+    since_ms: u64,
+}
+
+/// Order the two sides so a relationship has one canonical key regardless of
+/// which side is doing the asking/listing.
+fn canon(a: &UserRef, b: &UserRef) -> (UserRef, UserRef) {
+    if a <= b {
+        (a.clone(), b.clone())
+    } else {
+        (b.clone(), a.clone())
+    }
+}
+
+/// The relationship's state from `account`'s point of view.
+fn view(account: &UserRef, row: &FriendRow) -> FriendState {
+    if row.accepted {
+        FriendState::Friends
+    } else if &row.requested_by == account {
+        FriendState::Outgoing
+    } else {
+        FriendState::Incoming
+    }
+}
 
 struct AccountRecord {
     password_phc: String,
@@ -100,6 +133,8 @@ struct Inner {
     pins: HashMap<ChannelName, std::collections::BTreeMap<Ulid, MsgId>>,
     /// §9.4 thread names: (scope key, root msgid) → display name.
     thread_names: HashMap<(String, MsgId), String>,
+    /// Social graph: canonical (low, high) UserRef pair → relationship.
+    friends: HashMap<(UserRef, UserRef), FriendRow>,
     /// §9.4 custom emoji: namespace → (name → media ref), name-sorted.
     emoji: HashMap<NamespaceName, std::collections::BTreeMap<String, String>>,
     /// account → channels it's a member of (§6.3 persistent membership).
@@ -2025,6 +2060,95 @@ impl MediaStore for MemoryStore {
     async fn forget_blob(&self, hash: &str) -> Result<(), StoreError> {
         self.inner.lock().expect("store lock").blobs.remove(hash);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl FriendStore for MemoryStore {
+    async fn friend_request(
+        &self,
+        from: &UserRef,
+        to: &UserRef,
+        at_ms: u64,
+    ) -> Result<FriendOutcome, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let key = canon(from, to);
+        match inner.friends.get_mut(&key) {
+            Some(row) if row.accepted => Ok(FriendOutcome::AlreadyFriends),
+            Some(row) if &row.requested_by == from => Ok(FriendOutcome::AlreadyPending),
+            Some(row) => {
+                // The other side had already asked us — this accepts it.
+                row.accepted = true;
+                row.since_ms = at_ms;
+                Ok(FriendOutcome::Accepted)
+            }
+            None => {
+                inner.friends.insert(
+                    key,
+                    FriendRow {
+                        requested_by: from.clone(),
+                        accepted: false,
+                        since_ms: at_ms,
+                    },
+                );
+                Ok(FriendOutcome::Requested)
+            }
+        }
+    }
+
+    async fn friend_accept(
+        &self,
+        account: &UserRef,
+        other: &UserRef,
+        at_ms: u64,
+    ) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let key = canon(account, other);
+        match inner.friends.get_mut(&key) {
+            Some(row) if !row.accepted && &row.requested_by == other => {
+                row.accepted = true;
+                row.since_ms = at_ms;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn friend_remove(&self, account: &UserRef, other: &UserRef) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        Ok(inner.friends.remove(&canon(account, other)).is_some())
+    }
+
+    async fn friends(&self, account: &UserRef) -> Result<Vec<(UserRef, FriendState)>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut out: Vec<(UserRef, FriendState)> = inner
+            .friends
+            .iter()
+            .filter_map(|((low, high), row)| {
+                let other = if low == account {
+                    high
+                } else if high == account {
+                    low
+                } else {
+                    return None;
+                };
+                Some((other.clone(), view(account, row)))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    async fn friendship(
+        &self,
+        account: &UserRef,
+        other: &UserRef,
+    ) -> Result<Option<FriendState>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .friends
+            .get(&canon(account, other))
+            .map(|row| view(account, row)))
     }
 }
 

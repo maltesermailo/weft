@@ -114,6 +114,8 @@ export type WeftEvent =
   | { kind: "unpinned"; channel: string; msgid: string }
   | { kind: "thread"; channel: string; root: string; replies: number; last: string | null; name: string | null }
   | { kind: "thread-named"; channel: string; root: string; name: string | null }
+  | { kind: "friend"; user: string; state: string }
+  | { kind: "friend-removed"; user: string }
   | { kind: "caps"; account: string; scope: string; caps: string }
   | { kind: "role"; scope: string; color: string; caps: string; hoist: boolean; position: number; name: string }
   | { kind: "role-member"; scope: string; account: string; roles: string }
@@ -601,6 +603,20 @@ export function listThreads(channel: string) {
 /// §9.4 set (or, with an empty name, clear) a thread's display name.
 export function nameThread(channel: string, root: string, name: string) {
   return invoke("thread_name", { channel, root, name });
+}
+
+// ---- social layer: friends (federation-able; `user` is account@network) ----
+export function friendAdd(user: string) {
+  return invoke("friend_add", { user });
+}
+export function friendAccept(user: string) {
+  return invoke("friend_accept", { user });
+}
+export function friendRemove(user: string) {
+  return invoke("friend_remove", { user });
+}
+export function listFriends() {
+  return invoke("friends", {});
 }
 
 // ---- §9.4 custom emoji ----
