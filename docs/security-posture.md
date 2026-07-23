@@ -3,6 +3,11 @@
 What is enforced automatically, what was measured, and what is genuinely still
 open. Written so a claim here can be checked rather than taken on trust.
 
+For the *adversary-oriented* view — trust boundaries, federation threats, the
+DoS risk register, cryptography flags, and the invariant-enforcement table — see
+[`threat-model.md`](./threat-model.md). This document is the codebase/tooling
+half; that one is the running-deployment half.
+
 Last measured: 2026-07-23.
 
 ## Enforced in CI (`.github/workflows/ci.yml`)
