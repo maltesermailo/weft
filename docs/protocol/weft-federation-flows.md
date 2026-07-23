@@ -69,18 +69,38 @@ stops media — and rotating its key does *not* evade the block.
 
 ## 3. Tunnel taxonomy — the layers of federation
 
-Everything between two networks rides one physical connection (QUIC, ALPN `weft/1`, or
-WS fallback), but **logically there are five tunnels stacked on it**. This is the
-single most important table in the document:
+Everything between two networks rides **one** authenticated connection (QUIC, ALPN
+`weft/1`, or WS fallback). On top of it, control-plane tunnels are multiplexed and media
+rides two *separate* planes. This is the single most important table in the document —
+the normative version is spec §11 ("Tunnels at a glance"):
 
-| Layer | Tunnel | Direction | Carries | Authority model |
-|-------|--------|-----------|---------|-----------------|
-| 0 | **Bridge session** | network ↔ network | The physical authenticated channel. All below ride it. | Peer proved its **network key** (`State::Bridge`). |
-| 1 | **Manifest handshake** | negotiated | *Which* channels/namespaces are shared, at what version, with what history/media policy. | Signed manifest (scope-authority-signed). |
-| 2 | **Event ingestion + forwarding** | one-way, both ways | Live channel events: your local-origin events go out; the peer's come in and are mirrored. | Origin = authenticated peer (invariant 2 + 3). |
-| 3 | **Federated history / backfill** | pull | Bounded scrollback for a shared channel or a group a member missed. | Manifest-gated + retention-bounded. |
-| 4 | **FSESSION (homeserver authority)** | multiplexed | A foreign user's *command* session tunnelled to us; also the social layer (friends, calls, group sync/relay/mut/backfill). | `Actor::Foreign(user)` — enforced against **our** grant store. |
-| — | **Voice relay** | separate media plane | Real-time audio bridged room-to-room so client IPs never cross. | LiveKit cascade, server-to-server. |
+```
+              NETWORK  H                                     NETWORK  P
+  ┌─ one bridge session ── AUTH BRIDGE (network key) ── State::Bridge ─────────┐
+  │     manifest control      ◄──── PROPOSE / ACCEPT / REQUEST / SEVER ────►    │
+  │     event mirror          ──── H-origin ─────►   ◄───── P-origin ─────      │  one hop each way
+  │     history backfill       ──── HISTORY ─►   ◄── BATCH / STREAM ───         │  pull
+  │     report forwarding      ──── REPORT-FORWARD ──────────────────────►      │  reporter stripped
+  │     FSESSION — admin       ──── CMD ─►      ◄──── REPLY ────                 │  request/reply
+  │     FSESSION — social      ──── CMD ─►  (fire-and-forget; reply = a NEW      │  one-way
+  │                                          reverse FriendDeliver)             │
+  └────────────────────────────────────────────────────────────────────────────┘
+  ═════════════════════ separate data / media planes ════════════════════════════
+        media mirror         ──── MIRROR <hash> (self-auth) ──────►               pull
+        voice relay          ◄════════ audio (LiveKit cascade) ════►              IP-safe, server↔server
+```
+
+| Tunnel | Direction | Carries | Authority / gate |
+|--------|-----------|---------|------------------|
+| **Bridge session** | ↔ base link | The authenticated channel; all control tunnels ride it. | Peer proved its **network key** (`State::Bridge`). |
+| **Manifest control** | ↔ either side proposes | *Which* channels/namespaces are shared, at what version + history/media policy. | Signed manifest (scope-authority-signed). |
+| **Event mirror** | → each way (local-origin only) | Live channel events — yours go out, the peer's come in. | Origin = authenticated peer; manifest-gated; **one hop** (invariants 2 + 3). |
+| **History backfill** | pull (req→origin) | Bounded scrollback for a shared channel or a group a member missed. | Acked manifest ∧ `history` flag ∧ origin retention. |
+| **Report forwarding** | → home→origin | A forwarded moderation report. | Reporter identity stripped (invariant 12). |
+| **FSESSION — admin** | → `CMD` / ← `REPLY` | A foreign user's *control/admin* command session (moderation, grants, ns/channel admin, invites, roles, reports). | `Actor::Foreign` vs **our** grant store (homeserver authority). |
+| **FSESSION — social** | → one-way (fire-and-forget) | The social layer: friends, calls, group sync/relay/mut/backfill/roster. | Same homeserver authority; effects return as a **new reverse** delivery. |
+| **Media mirror** | pull (req→origin) | Content-addressed blob bytes for a foreign attachment. | Requester proves its key (self-auth `MIRROR`); BLAKE3-verified. |
+| **Voice relay** | ↔ audio | Real-time audio bridged room-to-room so client IPs never cross. | LiveKit cascade, server-to-server. |
 
 The next sections walk each one.
 

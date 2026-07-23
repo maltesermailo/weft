@@ -192,35 +192,122 @@ one `MESSAGE` per surviving message (`edited=` count), per-emoji `REACTIONS`, an
 
 ## 6. History & backfill
 
-`HISTORY` returns a **newest-anchored, exclusive-cursor** page as a `BATCH`. Large pages
-upgrade to a data-plane `STREAM` pull.
+This is the most-asked-about flow, so it gets a full walk-through. Reading history has
+three separable pieces: **what you ask for** (a page), **what comes back** (a `BATCH` of
+*compacted* events), and **how it's carried** (inline on the control plane, or — for a
+big page — a one-line token plus a bulk pull on the data plane). Backfill is the same
+machinery pointed at a peer or a group's home instead of the local store.
+
+### 6a. What you ask for — a page
+
+```
+HISTORY <target> [before=<msgid>] [after=<msgid>] [limit=<n>] [thread=<root>]
+```
+
+A page is **newest-anchored with exclusive cursors**: the last `limit` roots *strictly
+between* `after` and `before` (either cursor may be omitted). `limit` caps at 500. So
+"the latest 50" is `limit=50`; "50 older than what I have" is `before=<oldest I hold>`;
+"anything after my newest" (the reconnect/catch-up query) is `after=<newest I hold>`.
+`thread=<root>` narrows to a single thread (root + its replies).
+
+### 6b. What comes back — a compacted `BATCH`
+
+The server reads the roots + their child events and **materializes** them into the
+*compacted* wire form (§12.1, invariant 10) — then frames them:
+
+```
+BATCH START <id>
+  … one event per surviving item …
+BATCH END <id>   (truncated? compacted)
+```
+
+Every line — the brackets **and** each item — echoes the request `label`, because a
+batch is a data page, not a broadcast (§3.5). The items are **not** the raw event log.
+Materialization collapses each message's whole history into at most one line:
+
+| Raw log had… | The batch carries… |
+|---|---|
+| a message + 2 edits | **one** `MESSAGE` with the final body + `edited=2` `edited-at=<ms>` |
+| N reacts/unreacts on a message | **one** `REACTIONS <msgid> <emoji> <count>` per emoji (`by=` lists ≤20 actors) |
+| a message that was deleted | **one** `DELETED <msgid>` tombstone — the content is gone |
+
+So a batch never contains `EDITED` chains or reaction ping-pong; a client renders each
+item directly.
+
+**Worked example — inline (small page):**
+
+```
+C: @label=h1 HISTORY #general limit=3
+S: @label=h1 BATCH START b7
+S: @label=h1 MESSAGE #general alice@hda.example :final text   msgid=hda.example/01J…A edited=1 edited-at=1737…
+S: @label=h1 REACTIONS #general hda.example/01J…A 👍 3         by=alice@hda.example,bob@hda.example,carol@hda.example
+S: @label=h1 DELETED #general hda.example/01J…B               by=bob@hda.example
+S: @label=h1 MESSAGE #general carol@hda.example :ok           msgid=hda.example/01J…C
+S: @label=h1 BATCH END b7   truncated compacted
+```
+
+Three surviving items: an edited message (shown once, final body, `edited=1`), a reaction
+summary, and a tombstone — from what may have been a dozen raw log rows.
+
+### 6c. How it's carried — inline vs. the data-plane switch
+
+A batch's *content* is fixed; only its *transport* changes with size (`HISTORY_STREAM_THRESHOLD` = **200** events):
+
+| Page size | Transport | What the control plane carries |
+|---|---|---|
+| ≤ 200 events | **inline** | the `BATCH START … BATCH END` lines themselves, one control line each |
+| > 200 events | **data-plane `STREAM`** | *just* a `STREAM ACCEPT <token>` — one line, no events |
+
+On the switch, the server serializes the **entire batch once** (the identical
+`BATCH START … BATCH END` lines, newline-delimited) and parks it under a **one-time
+token**. The client pulls it over the data plane; what comes back is **byte-identical**
+to the inline form and folds the same way:
+
+```
+C: @label=h2 HISTORY #general limit=500
+S: @label=h2 STREAM ACCEPT s_9f3c…            ← control plane: only the token, no events
+   ── client opens a data-plane stream ──
+C: BACKFILL s_9f3c…                            ← QUIC bidi   (HTTP alternative: GET /backfill?t=s_9f3c…)
+S: (data plane) BATCH START b8 ⏎ MESSAGE … ⏎ … ⏎ BATCH END b8   ← the same batch, pulled in bulk
+```
+
+**The one thing to remember:** switching to the data plane moves the *bytes*, not the
+*meaning*. The control plane stays responsive (it only carried a token); the bulk rides
+a stream that's independently flow-controlled and rate-limitable. The token is one-time —
+a failed pull is recovered by re-issuing the same `HISTORY` (you get a fresh token).
+
+### 6d. The three backfill flavors (all produce the same `BATCH`)
 
 ```mermaid
 sequenceDiagram
   actor U as Client
-  participant S as Server
-  U->>S: HISTORY <target> [before= after= limit= thread=]
-  S->>S: roots(scope, page) → materialize (compacted form)
-  alt small page
-    S-->>U: BATCH START · events · BATCH END (truncated? = retention gap)
-  else large page
-    S-->>U: STREAM ACCEPT <token> — pull over the data plane
+  participant S as Home server
+  participant P as Peer / group home
+  U->>S: HISTORY <target> …
+  S->>S: roots(scope, page) → materialize → BATCH (inline or STREAM token)
+  S-->>U: BATCH  (or STREAM ACCEPT → data-plane pull)
+  opt short page on a shared (federated) channel — §11.7
+    S->>P: HISTORY over the bridge → BACKFILL <token> on the bridge data plane
+    P-->>S: same window; S persists + broadcasts, next page is local
   end
-  opt ran out locally & channel is federated
-    S->>S: request peer backfill (§11.7)
-  end
-  opt target is a cross-network group
-    S->>S: GROUP BACKFILL to home (recover missed msgs)
+  opt cross-network group view — recovery
+    S->>P: GROUP BACKFILL &group @after=<cursor>
+    P-->>S: GROUP RELAY ingests for missed messages (idempotent)
   end
 ```
+
+| Flavor | Trigger | Source | Mechanism |
+|---|---|---|---|
+| **Local scrollback** | any `HISTORY` | your own store | roots → materialize → BATCH (§6b–c) |
+| **Federated channel backfill** (§11.7) | a short page on a *shared* channel | the peer, over the bridge | server lazily re-runs the window as `HISTORY` on the bridge, pulls it with `BACKFILL <token>`, verifies + persists → the next page serves locally |
+| **Group backfill** (recovery) | viewing a *cross-network group* | the group's **home** | `GROUP BACKFILL @after=<my newest>` → home replays missed messages as `GROUP RELAY` ingests (idempotent on msgid) — see federation doc §7b |
 
 | Concept | Meaning |
 |---------|---------|
 | **Newest-anchored** | The last `limit` roots strictly between `after` and `before`. |
-| **`truncated`** | Set honestly when the window's older edge reaches into the purged region (retention gap), **not** merely when full. |
+| **`truncated`** | Set honestly when the window ran out **and** its older edge reaches into the purged region (a real retention gap) — **not** merely when the page was full. A client renders it as a visible "history missing here" marker. |
+| **`compacted`** | Always set on a HISTORY batch: this is the materialized view, not the raw log. |
 | **`thread=<root>`** | Returns just that thread (root + replies), §9.4. |
-| **Federated backfill** | A short page on a shared channel triggers a lazy peer pull (§11.7). |
-| **Group backfill** | A cross-network group view triggers `GROUP BACKFILL` recovery from the home (see federation doc §7b). |
 
 ---
 
@@ -451,10 +538,12 @@ flowchart LR
 Sovereign networks; explicit **signed manifest peering**; every event **≤ 1 hop** from
 origin; the **home** mints order (single writer). Trust is network-level (a peer proves
 its Ed25519 network key), pinned or accept-any, with name-keyed **NETBLOCK** as the
-escape hatch. Five stacked tunnels — bridge session, manifest handshake, event
-ingestion/forwarding, backfill, and the FSESSION homeserver-authority conduit (which
-also carries the social layer via FriendDeliver) — plus a separate voice-relay cascade
-for IP-safe cross-network audio.
+escape hatch. A stack of control-plane tunnels multiplex on one authenticated bridge
+session — manifest control, the event mirror, history backfill, report forwarding, and
+the FSESSION conduit (homeserver-authority admin **and** the fire-and-forget social layer
+via FriendDeliver) — plus two separate media planes (content-addressed blob mirroring and
+the voice-relay cascade for IP-safe cross-network audio). The full side-by-side inventory
+with directions is spec §11 / `weft-federation-flows.md` §3.
 
 ```mermaid
 flowchart LR
