@@ -978,6 +978,10 @@ button:disabled {
 .msg-group:hover {
   background: #191c24;
 }
+/* §11.13 optimistic send: greyed until the authoritative copy reconciles it. */
+.msg-group.pending {
+  opacity: 0.55;
+}
 .msg-group .avatar {
   margin-top: 2px;
 }

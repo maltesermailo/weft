@@ -539,6 +539,8 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 <li><a href="#s11-11">11.11 Federation sessions &amp; homeserver authority</a></li>
 <li><a href="#s11-12">11.12 Social layer over federation — the group tunnel</a></li>
 <li><a href="#s11-13">11.13 Channels over federation — the channel tunnel</a></li>
+<li><a href="#s11-14">11.14 Federation command reference</a></li>
+<li><a href="#s11-15">11.15 Federation event reference</a></li>
 </ul>
 </li>
 <li><a href="#s12">12. History, Retention &amp; Compaction (server duties)</a>
@@ -3649,6 +3651,78 @@ a post from one spoke reach <em>another</em> spoke at all (one hop from the home
 forward would be the forbidden transitivity of <a href="#s11-4">§11.4</a>).</p>
 </div>
 <div class="paragraph">
+<p><strong>Message flow between two servers.</strong> A member on a spoke posts; the post rides the <strong>relay
+leg</strong> to the home to be minted, and the home-minted message returns over the <strong>event mirror</strong>.
+Both legs multiplex on the one authenticated bridge session (<a href="#s11-2">§11.2</a>) — the user
+never connects to the home.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre>   NETWORK  S  (spoke — alice is a member)          NETWORK  H  (home — owns #ns/chan)
+ ┌────────────────────────────────────────┐       ┌────────────────────────────────────────┐
+ │ alice: MSG #ns/chan :hi  (nonce=N)      │       │                                        │
+ │   │                                     │       │                                        │
+ │   ▼  (1) optimistic echo — show "hi"    │       │                                        │
+ │       now, pending, keyed by nonce N    │       │                                        │
+ │   │                                     │       │                                        │
+ │   ▼        relay leg  (spoke → home)     │ ────▶ │ (2) mint msgid = H/&lt;ULID&gt;              │
+ │  CHANNEL RELAY #ns/chan alice@S :hi     │       │     single ULID writer = the order     │
+ │  nonce=N   (no @id  =  "mint this")     │       │   │                                    │
+ │                                         │       │   ├─▶ (3) deliver to H's local members  │
+ │                                         │       │   │                                    │
+ │  (5) reconcile: match nonce=N →         │ ◀──── │ (4) mirror one hop (home-origin)       │
+ │      replace pending with H/&lt;ULID&gt;      │       │  MESSAGE @msgid=H/&lt;ULID&gt; nonce=N :hi    │
+ │      (now confirmed, in canonical order)│       │     event mirror (home → every spoke)  │
+ └────────────────────────────────────────┘       └────────────────────────────────────────┘
+        └───────── one authenticated bridge session (AUTH BRIDGE, network key) ─────────┘
+
+ Home-network member:  MSG #ns/chan :hi → H mints locally + delivers.  No relay, no wait.
+ Reads (HISTORY):      served from S's local replica.  No round-trip to H.
+ Recovery:             on reconnect S sends CHANNEL BACKFILL; H replays missed messages as
+                       CHANNEL RELAY with @id present — the only time the relay leg carries
+                       a minted id.  Live delivery always rides the event mirror above.</pre>
+</div>
+</div>
+<div class="paragraph">
+<p>The two legs, and how they map to the tunnels-at-a-glance table (<a href="#s11-2">§11.2</a>): the
+<strong>relay leg</strong> is the <code>CHANNEL RELAY</code> row (spoke → home, <code>@id</code> absent = mint request); the
+return is the ordinary <strong>event mirror</strong> row (home → every spoke, one hop, origin preserved).</p>
+</div>
+<div class="paragraph">
+<p><strong>Example — the lines on the wire.</strong> <code>alice@s.example</code> posts to <code>#gaming/general</code>, whose home
+is <code>h.example</code>. The relay leg carries <code>CHANNEL RELAY</code> inside the <code>FSESSION</code> conduit over the
+one bridge; the return is a bare <code>MESSAGE</code> on the same bridge:</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre> client → S   @nonce=n-8F3A;fmt=md MSG #gaming/general :hi everyone
+              (S renders it at once — pending, keyed by nonce n-8F3A)
+
+ S → H        relay leg — CHANNEL RELAY tunnelled in FSESSION (fire-and-forget):
+              FSESSION 1 OPEN alice
+              FSESSION 1 CMD :@nonce=n-8F3A;fmt=md CHANNEL RELAY #gaming/general alice@s.example :hi everyone
+              (no @id  =  "mint this")
+
+ H            mints  msgid = h.example/01ARZ3NDEKTSV4RRFFQ69G5FAV, delivers to H's locals
+
+ H → S        event mirror — a bare line on the bridge, home-origin, nonce carried:
+              @msgid=h.example/01ARZ3NDEKTSV4RRFFQ69G5FAV;nonce=n-8F3A;fmt=md MESSAGE #gaming/general alice@s.example :hi everyone
+
+ S → client   the same MESSAGE; client matches nonce=n-8F3A → replaces the pending copy
+              with the confirmed h.example/01ARZ3NDEKTSV4RRFFQ69G5FAV (now in canonical order)</pre>
+</div>
+</div>
+<div class="paragraph">
+<p>Recovery, after <code>S</code> was unreachable — <code>S</code> pulls, <code>H</code> replays with <code>@id</code> <strong>present</strong> (the one
+time the relay leg carries a minted id; live delivery always rides the mirror above):</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre> S → H        FSESSION 1 CMD :@after=h.example/01ARZ3NDEKTSV4RRFFQ69G5FAV CHANNEL BACKFILL #gaming/general
+ H → S        FSESSION 1 CMD :@id=h.example/01ARZ3NDEKTSV4RRFFQ69G5FAV CHANNEL RELAY #gaming/general alice@s.example :hi everyone</pre>
+</div>
+</div>
+<div class="paragraph">
 <p>The following verbs are <strong>federation-internal</strong> (bridge-session-only; a client can never send
 them — the server emits them). Channel membership is carried by the manifest (<a href="#s11-1">§11.1</a>)
 + the <code>MEMBER</code> mirror, so there is no <code>SYNC</code> analog.</p>
@@ -3690,12 +3764,16 @@ them — the server emits them). Channel membership is carried by the manifest (
 </tbody>
 </table>
 <div class="paragraph">
-<p><strong>The echo token</strong> works exactly as for groups (<a href="#s11-12">§11.12</a>): a spoke poster&#8217;s <code>MSG</code> is
-relayed with an opaque <code>@echo=&lt;token&gt;</code>; the home echoes it back <strong>only on the copy to the
-poster&#8217;s network</strong>, which then delivers the home-minted message as the poster&#8217;s own labelled
-message (the send is acked, <a href="#s3-5">§3.5</a>). Tokens are TTL-swept (≈60 s); if the home never
-answers, the message still arrives via <code>CHANNEL BACKFILL</code>, just without the interactive
-label.</p>
+<p><strong>The nonce — optimistic reconcile.</strong> A client stamps each <code>MSG</code> with an opaque <code>nonce</code> (a
+<code>MsgMeta</code> tag, <a href="#s9-2">§9.2</a>) and renders the message immediately as <em>pending</em>. The home
+carries that nonce through the mint onto the authoritative <code>MESSAGE</code>, which reaches the
+poster&#8217;s network over the <strong>event mirror</strong> — so <strong>every one of the sender&#8217;s devices</strong> (not
+just the posting session) reconciles its pending copy by matching the nonce and swaps in the
+home-minted id. This is what makes reconcile airtight across devices — a per-session ack
+token could not. If the home is slow or was unreachable, the message simply reconciles
+whenever it lands (live, or later via <code>CHANNEL BACKFILL</code>). Live home→spoke delivery is always
+the ordinary event mirror (<a href="#s11-4">§11.4</a>); <code>CHANNEL RELAY</code> with <code>@id</code> present is used only
+for backfill replay.</p>
 </div>
 <div class="admonitionblock note">
 <table>
@@ -3708,7 +3786,7 @@ label.</p>
 <div class="paragraph">
 <p>Home-authority adds a round-trip only to a cross-network post&#8217;s <em>finalization</em>, not to its
 appearance or to reads: (a) the spoke renders the poster&#8217;s own message <strong>optimistically</strong> at
-once and reconciles it to the home-minted copy when <code>@echo</code> returns; (b) <code>HISTORY</code> and
+once and reconciles it to the home-minted copy by matching the <code>nonce</code>; (b) <code>HISTORY</code> and
 scrollback are served from the <strong>local replica</strong> with no round-trip; (c) the relay leg is
 fire-and-forget and pipelined, so posts do not head-of-line-block on confirmation; (d) a
 member whose network <em>is</em> the home mints locally with no relay at all — the common case.
@@ -3729,6 +3807,437 @@ last-mirrored state.</p>
 <p><strong>Attachments</strong> behave as for groups: a <code>weft-media://</code> attachment triggers a mirror pull from
 the blob&#8217;s origin network (<a href="#s11-8">§11.8</a>).</p>
 </div>
+</div>
+<div class="sect2">
+<h3 id="s11-14"><a class="anchor" href="#s11-14"></a>11.14 Federation command reference</h3>
+<div class="paragraph">
+<p>Every command here is exchanged <strong>server-to-server</strong> over a bridge session (<a href="#s11-2">§11.2</a>) and
+is <strong>invisible on a single-network server</strong> — a client can neither send nor receive it (the
+client-facing command surface is <a href="#s6">§6</a>). The one exception is <code>FEDERATE</code>, a user&#8217;s request
+to their <em>own</em> server, listed last. This is a <strong>non-normative index</strong>: the normative syntax,
+gating, and state transitions live in the cited subsection.</p>
+</div>
+<div class="paragraph">
+<p><em>Direction:</em> <code>S→H</code> = spoke → home · <code>H→S</code> = home → spokes · <code>↔</code> = either peer · <code>P↔P</code> = peer ↔
+peer · <code>→members</code> = fan-out to local members · <code>client→home</code> = a user to their own server.</p>
+</div>
+<table class="tableblock frame-all grid-all stretch">
+<caption class="title">Table 1. Bridge session &amp; homeserver authority (<a href="#s11-2">§11.2</a>, <a href="#s11-11">§11.11</a>)</caption>
+<colgroup>
+<col style="width: 16%;">
+<col style="width: 44%;">
+<col style="width: 12%;">
+<col style="width: 28%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Command</th>
+<th class="tableblock halign-left valign-top">Syntax</th>
+<th class="tableblock halign-left valign-top">Direction</th>
+<th class="tableblock halign-left valign-top">Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>AUTH BRIDGE</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>AUTH BRIDGE &lt;peer-network&gt; &lt;b64-key&gt;</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">↔</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Open a bridge; the peer proves control of its network key (answered by <code>CHALLENGE</code> → <code>AUTH PROOF</code>, <a href="#s6-1">§6.1</a>). Pinned or accept-any.</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>FSESSION</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>FSESSION &lt;fsid&gt; OPEN &lt;account&gt; | CMD :&lt;line&gt; | REPLY :&lt;line&gt; | CLOSE</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">↔</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Multiplex a federated user&#8217;s control/admin session; <code>H</code> attributes each <code>CMD</code> to <code>account@peer</code> and enforces against its own grants. Also the fire-and-forget conduit the channel + group tunnels ride.</p></td>
+</tr>
+</tbody>
+</table>
+<table class="tableblock frame-all grid-all stretch">
+<caption class="title">Table 2. Manifest lifecycle (<a href="#s11-1">§11.1</a>, <a href="#s11-3">§11.3</a>)</caption>
+<colgroup>
+<col style="width: 16%;">
+<col style="width: 44%;">
+<col style="width: 12%;">
+<col style="width: 28%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Command</th>
+<th class="tableblock halign-left valign-top">Syntax</th>
+<th class="tableblock halign-left valign-top">Direction</th>
+<th class="tableblock halign-left valign-top">Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE PROPOSE</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE PROPOSE &lt;scope&gt; &lt;peer&gt; [history=] [media=] [typing=] [voice=]</code> (+ signed manifest)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">↔</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Offer a scope-authority-signed manifest for a namespace.</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE ACCEPT</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE ACCEPT &lt;peer&gt; &lt;version&gt;</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">↔</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Mutual ack → the bridge goes live at <code>version</code>.</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE ADD</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE ADD &lt;peer&gt; &lt;#chan&gt;</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">↔</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Amend the shared set (v+1, requires re-ack).</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE REMOVE</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE REMOVE &lt;peer&gt; &lt;#chan&gt;</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">↔</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Drop a channel (v+1, unilateral, immediate).</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE SEVER</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE SEVER &lt;peer&gt;</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">↔</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Tear the bridge down (unilateral).</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE REQUEST</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE REQUEST &lt;ns&gt;</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">S→H</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Ask a peer to offer a manifest for one of its namespaces (auto-federation, <a href="#s11-10">§11.10</a>); answered with <code>BRIDGE PROPOSE</code> iff reachable, else <code>NO-SUCH-TARGET</code>.</p></td>
+</tr>
+</tbody>
+</table>
+<table class="tableblock frame-all grid-all stretch">
+<caption class="title">Table 3. Channel tunnel — home-authoritative content (<a href="#s11-13">§11.13</a>)</caption>
+<colgroup>
+<col style="width: 16%;">
+<col style="width: 44%;">
+<col style="width: 12%;">
+<col style="width: 28%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Command</th>
+<th class="tableblock halign-left valign-top">Syntax</th>
+<th class="tableblock halign-left valign-top">Direction</th>
+<th class="tableblock halign-left valign-top">Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL RELAY</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL RELAY &lt;#ns/chan&gt; &lt;sender@net&gt; [@id=] [@echo=] [msg-meta] :body</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">S→H mint / H→S ingest</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>@id</code> absent = relay a member&#8217;s post to the home to be minted; <code>@id</code> present = a home-minted message to ingest (backfill replay).</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL MUT</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL MUT &lt;#ns/chan&gt; &lt;sender@net&gt; &lt;root&gt; &lt;op&gt; [@id=] [:arg]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">S→H apply / H→S ingest</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">A mutation (<code>edit</code>/<code>delete</code>/<code>react-add</code>/<code>react-remove</code>); the home applies iff <code>sender</code> authored the target (<a href="#s11-4">§11.4</a>).</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL BACKFILL</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL BACKFILL &lt;#ns/chan&gt; [@after=]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">S→H</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Recovery pull; the home replays message roots after the cursor as <code>CHANNEL RELAY</code> (<code>@id</code> present).</p></td>
+</tr>
+</tbody>
+</table>
+<table class="tableblock frame-all grid-all stretch">
+<caption class="title">Table 4. Group tunnel — home-authoritative content (<a href="#s11-12">§11.12</a>)</caption>
+<colgroup>
+<col style="width: 16%;">
+<col style="width: 44%;">
+<col style="width: 12%;">
+<col style="width: 28%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Command</th>
+<th class="tableblock halign-left valign-top">Syntax</th>
+<th class="tableblock halign-left valign-top">Direction</th>
+<th class="tableblock halign-left valign-top">Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP SYNC</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP SYNC &lt;&amp;id&gt; &lt;creator@net&gt; [&lt;member@net&gt;…]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">H→members</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Authoritative membership snapshot; receivers reconcile.</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP RELAY</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP RELAY &lt;&amp;id&gt; &lt;sender@net&gt; [@id=] [@echo=] [msg-meta] :body</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">S→H / H→S</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Group message; <code>@id</code> absent = spoke→home mint, present = home→member ingest.</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP MUT</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP MUT &lt;&amp;id&gt; &lt;sender@net&gt; &lt;root&gt; &lt;op&gt; [@id=] [:arg]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">S→H / H→S</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Group message mutation (same forms as <code>CHANNEL MUT</code>).</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP BACKFILL</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP BACKFILL &lt;&amp;id&gt; [@after=]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">member→home</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Recovery replay of missed group messages.</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP CALL</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP CALL &lt;&amp;id&gt; [@room= @token= @endpoint=]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">H→members</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Ring remote members; media tags carry the ringing network&#8217;s relay leg (<a href="#s16">§16</a>).</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP ROSTER</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP ROSTER &lt;&amp;id&gt; &lt;user@net&gt; &lt;active|ended&gt; [@reply=yes]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">mesh</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Group-call roster gossip across member networks.</p></td>
+</tr>
+</tbody>
+</table>
+<table class="tableblock frame-all grid-all stretch">
+<caption class="title">Table 5. History &amp; media backfill (<a href="#s11-7">§11.7</a>, <a href="#s11-8">§11.8</a>)</caption>
+<colgroup>
+<col style="width: 16%;">
+<col style="width: 44%;">
+<col style="width: 12%;">
+<col style="width: 28%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Command</th>
+<th class="tableblock halign-left valign-top">Syntax</th>
+<th class="tableblock halign-left valign-top">Direction</th>
+<th class="tableblock halign-left valign-top">Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>HISTORY</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>HISTORY &lt;#chan&gt; [before=] [after=] [limit=]</code> (the <a href="#s6-4">§6.4</a> verb, over the bridge)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">S→H</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Federated scrollback pull; answered by <code>BATCH</code> or a <code>STREAM ACCEPT</code> offer, bounded by the manifest <code>history</code> flag + origin retention.</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>MIRROR</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>MIRROR &lt;requester-net&gt; &lt;hash&gt; &lt;sig&gt;</code> (media data plane)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">↔ pull</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Fetch content-addressed blob bytes from the origin network; self-authenticating, BLAKE3-verified.</p></td>
+</tr>
+</tbody>
+</table>
+<table class="tableblock frame-all grid-all stretch">
+<caption class="title">Table 6. Moderation &amp; safety (<a href="#s11-6">§11.6</a>, <a href="#s11-9">§11.9</a>)</caption>
+<colgroup>
+<col style="width: 16%;">
+<col style="width: 44%;">
+<col style="width: 12%;">
+<col style="width: 28%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Command</th>
+<th class="tableblock halign-left valign-top">Syntax</th>
+<th class="tableblock halign-left valign-top">Direction</th>
+<th class="tableblock halign-left valign-top">Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>NETBLOCK ADD</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>NETBLOCK ADD &lt;network&gt; [:reason]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">local (op)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Block a remote network; fires all four <a href="#s11-6">§11.6</a> effects. Cap <code>netblock</code> at <code>*</code>.</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>NETBLOCK REMOVE</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>NETBLOCK REMOVE &lt;network&gt;</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">local (op)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Lift the block.</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>NETBLOCK LIST</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>NETBLOCK LIST</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">local (op)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">The operator&#8217;s blocklist.</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>REPORT-FORWARD</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>REPORT-FORWARD &lt;report-id&gt; &lt;msgid&gt; &lt;category&gt; [:note]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">P↔P</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Forward a report to the content&#8217;s origin network; reporter identity stripped (invariant 12).</p></td>
+</tr>
+</tbody>
+</table>
+<table class="tableblock frame-all grid-all stretch">
+<caption class="title">Table 7. Voice, and the one client-initiated command</caption>
+<colgroup>
+<col style="width: 16%;">
+<col style="width: 44%;">
+<col style="width: 12%;">
+<col style="width: 28%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Command</th>
+<th class="tableblock halign-left valign-top">Syntax</th>
+<th class="tableblock halign-left valign-top">Direction</th>
+<th class="tableblock halign-left valign-top">Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>VOICE REQUEST</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>VOICE REQUEST &lt;scope&gt; &lt;#chan&gt;</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">S→H</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Bridge-only request for a federated voice room&#8217;s relay credential (<a href="#s16">§16</a>).</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>FEDERATE</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>FEDERATE &lt;network&gt;/&lt;namespace&gt;</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">client→home</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">A user asks their own server to auto-establish a bridge to a foreign namespace; the server runs the <code>BRIDGE REQUEST</code> flow (<a href="#s11-10">§11.10</a>). The only federation command a client sends.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="sect2">
+<h3 id="s11-15"><a class="anchor" href="#s11-15"></a>11.15 Federation event reference</h3>
+<div class="paragraph">
+<p>Events a server emits as part of federation. The bridge-handshake and manifest/block events
+travel <strong>server-to-server</strong> or <strong>to local members</strong>; the <strong>mirrored content</strong> events are the
+ordinary <a href="#s7">§7</a> events carried over the bridge with their origin msgids intact
+(<a href="#s11-4">§11.4</a>). None originate from a client. Non-normative index; event shapes are
+normative in the cited section.</p>
+</div>
+<table class="tableblock frame-all grid-all stretch">
+<caption class="title">Table 8. Bridge handshake (<a href="#s11-2">§11.2</a>)</caption>
+<colgroup>
+<col style="width: 16%;">
+<col style="width: 46%;">
+<col style="width: 14%;">
+<col style="width: 24%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Event</th>
+<th class="tableblock halign-left valign-top">Syntax</th>
+<th class="tableblock halign-left valign-top">Direction</th>
+<th class="tableblock halign-left valign-top">Emitted when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHALLENGE</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHALLENGE &lt;b64-nonce&gt;</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">H→peer</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">On <code>AUTH BRIDGE</code>, to be signed with the peer&#8217;s network key.</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>WELCOME</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>WELCOME &lt;network&gt; [:motd]</code> (<code>features=</code>, <code>attestation=</code>)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">H→peer</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">On a verified bridge <code>AUTH PROOF</code> — the session enters the bridge state.</p></td>
+</tr>
+</tbody>
+</table>
+<table class="tableblock frame-all grid-all stretch">
+<caption class="title">Table 9. Manifest &amp; block state (<a href="#s11-5">§11.5</a>, <a href="#s11-6">§11.6</a>)</caption>
+<colgroup>
+<col style="width: 16%;">
+<col style="width: 46%;">
+<col style="width: 14%;">
+<col style="width: 24%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Event</th>
+<th class="tableblock halign-left valign-top">Syntax</th>
+<th class="tableblock halign-left valign-top">Direction</th>
+<th class="tableblock halign-left valign-top">Emitted when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>MANIFEST</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>MANIFEST &lt;peer&gt; &lt;version&gt; &lt;state&gt;</code> (<code>channels=</code> <code>history=</code> <code>media=</code> <code>typing=</code> <code>voice=</code>; <code>state</code> ∈ <code>live|added|removed|severed</code>)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">→members</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">A bridge&#8217;s audience changes (accept / add / remove / sever), so members learn what is now shared (<a href="#s6-6">§6.6</a>).</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>NETBLOCKED</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>NETBLOCKED &lt;network&gt; [:reason]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">→owners</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">A manifest is severed by a netblock (<a href="#s11-6">§11.6</a>).</p></td>
+</tr>
+</tbody>
+</table>
+<table class="tableblock frame-all grid-all stretch">
+<caption class="title">Table 10. Mirrored content — the §7 events, origin-preserved (<a href="#s11-4">§11.4</a>)</caption>
+<colgroup>
+<col style="width: 16%;">
+<col style="width: 46%;">
+<col style="width: 14%;">
+<col style="width: 24%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Event</th>
+<th class="tableblock halign-left valign-top">Syntax</th>
+<th class="tableblock halign-left valign-top">Direction</th>
+<th class="tableblock halign-left valign-top">Emitted when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>MESSAGE</code> / <code>EDITED</code> / <code>DELETED</code> / <code>REACTION</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">shapes in <a href="#s7">§7</a></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">H→S (mirror, one hop)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Live channel events fanned out by the home; <code>msgid</code> origin = the home, <code>nonce</code> echoed for reconcile (<a href="#s11-13">§11.13</a>).</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>PROFILE</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">signed profile update (<a href="#s10-3">§10.3</a>)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">↔ mirror</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">A federated user&#8217;s profile crosses the bridge with its account-scoped signature.</p></td>
+</tr>
+</tbody>
+</table>
+<table class="tableblock frame-all grid-all stretch">
+<caption class="title">Table 11. Backfill data (<a href="#s11-7">§11.7</a>)</caption>
+<colgroup>
+<col style="width: 16%;">
+<col style="width: 46%;">
+<col style="width: 14%;">
+<col style="width: 24%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Event</th>
+<th class="tableblock halign-left valign-top">Syntax</th>
+<th class="tableblock halign-left valign-top">Direction</th>
+<th class="tableblock halign-left valign-top">Emitted when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BATCH</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BATCH START</code> / <code>BATCH END</code> with <code>id=</code> (+ <code>truncated</code> / <code>compacted</code>)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">H→S</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">A federated <code>HISTORY</code> page (the compacted view).</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>STREAM ACCEPT</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>STREAM ACCEPT &lt;token&gt;</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">H→S</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">A large backfill page is offered as a data-plane stream; the puller drains it and re-ingests each line.</p></td>
+</tr>
+</tbody>
+</table>
 <hr>
 </div>
 </div>
@@ -4316,7 +4825,7 @@ the blob&#8217;s origin network (<a href="#s11-8">§11.8</a>).</p>
 <div id="footer">
 <div id="footer-text">
 Version 0.11<br>
-Last updated 2026-07-24 03:45:13 +0200
+Last updated 2026-07-24 21:54:45 +0200
 </div>
 </div>
 </body>

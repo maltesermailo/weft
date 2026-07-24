@@ -22,7 +22,7 @@
 {#if m.system}
   <div class="msg-group"><div style="width:34px;flex-shrink:0"></div><div class="msg-body"><div class="msg-line system">{m.body}</div></div></div>
 {:else}
-  <div class="msg-group" class:mention-hit={!m.own && app.mentionsMe(m.body)} id="msg-{m.key}" role="article" oncontextmenu={(e) => app.msgCtx(e, m)}>
+  <div class="msg-group" class:mention-hit={!m.own && app.mentionsMe(m.body)} class:pending={m.pending} id="msg-{m.key}" role="article" oncontextmenu={(e) => app.msgCtx(e, m)}>
     <!-- §10.3 avatar: local by bare handle, federated by `author@network`. -->
     <div class="avatar"><Avatar account={m.net ? `${m.author}@${m.net}` : m.author} /></div>
     <div class="msg-body">

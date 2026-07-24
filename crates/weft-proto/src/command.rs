@@ -293,6 +293,50 @@ pub enum Command {
         channel: ChannelName,
         new_name: ChannelName,
     },
+    /// `@id=<msgid> @reply-to=… @thread=… @attach.N=… CHANNEL RELAY <#ns/chan>
+    /// <sender@net> :<body>` — a **federation-internal** cross-network channel
+    /// message. The channel's **home** network (its namespace owner's network) is
+    /// the single ULID writer (§9.1, §11.13). Two forms: `@id` **absent** = a spoke
+    /// relaying a member's post to the home (the home mints + fans out); `@id`
+    /// **present** = a home-minted message for a spoke to ingest (persist with the
+    /// origin msgid intact, invariant 2) and deliver to its local members. `meta`
+    /// carries replies/threads/attachments (§9.3). Never from a client.
+    ChannelRelay {
+        channel: ChannelName,
+        sender: UserRef,
+        msgid: Option<MsgId>,
+        body: String,
+        meta: MsgMeta,
+        /// An opaque correlation token so a **spoke poster** gets a labelled echo:
+        /// set on the spoke→home relay, echoed back by the home only in the copy
+        /// destined for the sender's network, which delivers it as the poster's
+        /// own (labelled) message.
+        echo: Option<String>,
+    },
+    /// `@id=<msgid> CHANNEL MUT <#ns/chan> <sender@net> <root> <op> :<arg>` — a
+    /// **federation-internal** cross-network channel message **mutation** (§11.4,
+    /// §11.13: applied at the home on an authored-by basis). `op` is `edit` /
+    /// `delete` / `react-add` / `react-remove`; `arg` is the new body (edit) or the
+    /// emoji (react). `@id` **absent** = a spoke relaying a member's mutation to the
+    /// home (the home applies + fans out); `@id` **present** = a home-minted mutation
+    /// for a spoke to ingest. Never from a client.
+    ChannelMut {
+        channel: ChannelName,
+        sender: UserRef,
+        root: MsgId,
+        op: String,
+        arg: String,
+        msgid: Option<MsgId>,
+    },
+    /// `@after=<msgid> CHANNEL BACKFILL <#ns/chan>` — a **federation-internal**
+    /// catch-up request sent by a spoke to the channel's **home**: replay every
+    /// channel message after `after` (the requester's latest, or all if absent), so
+    /// messages missed while the home was unreachable aren't lost. The home answers
+    /// with `CHANNEL RELAY` ingests. Never sent by a client.
+    ChannelBackfill {
+        channel: ChannelName,
+        after: Option<MsgId>,
+    },
     /// `INVITE MINT <scope> [max-uses=] [expiry=]` (§6.5) → `INVITED`.
     InviteMint {
         scope: String,
@@ -1172,6 +1216,26 @@ impl Command {
                     "RENAME" => Ok(Command::ChannelRename {
                         channel: args.req("channel")?.parse()?,
                         new_name: args.req("new-name")?.parse()?,
+                    }),
+                    "RELAY" => Ok(Command::ChannelRelay {
+                        channel: args.req("channel")?.parse()?,
+                        sender: args.req("sender")?.parse()?,
+                        msgid: line.tags.get("id").map(|v| v.parse()).transpose()?,
+                        body: line.trailing.clone().unwrap_or_default(),
+                        meta: MsgMeta::from_tags(&line.tags)?,
+                        echo: line.tags.get("echo").filter(|v| !v.is_empty()).cloned(),
+                    }),
+                    "MUT" => Ok(Command::ChannelMut {
+                        channel: args.req("channel")?.parse()?,
+                        sender: args.req("sender")?.parse()?,
+                        root: args.req("root")?.parse()?,
+                        op: args.req("op")?.to_ascii_lowercase(),
+                        arg: line.trailing.clone().unwrap_or_default(),
+                        msgid: line.tags.get("id").map(|v| v.parse()).transpose()?,
+                    }),
+                    "BACKFILL" => Ok(Command::ChannelBackfill {
+                        channel: args.req("channel")?.parse()?,
+                        after: line.tags.get("after").map(|v| v.parse()).transpose()?,
                     }),
                     _ => Err(ParseError::BadParam {
                         verb: "CHANNEL",
@@ -2174,6 +2238,60 @@ impl Command {
                 ],
                 None,
             ),
+            Command::ChannelRelay {
+                channel,
+                sender,
+                msgid,
+                body,
+                meta,
+                echo,
+            } => {
+                if let Some(id) = msgid {
+                    tags.insert("id".to_string(), id.to_string());
+                }
+                if let Some(echo) = echo {
+                    tags.insert("echo".to_string(), echo.clone());
+                }
+                meta.write_tags(&mut tags)?;
+                (
+                    "CHANNEL",
+                    vec!["RELAY".to_string(), channel.to_string(), sender.to_string()],
+                    Some(body.clone()),
+                )
+            }
+            Command::ChannelMut {
+                channel,
+                sender,
+                root,
+                op,
+                arg,
+                msgid,
+            } => {
+                if let Some(id) = msgid {
+                    tags.insert("id".to_string(), id.to_string());
+                }
+                (
+                    "CHANNEL",
+                    vec![
+                        "MUT".to_string(),
+                        channel.to_string(),
+                        sender.to_string(),
+                        root.to_string(),
+                        op.clone(),
+                    ],
+                    Some(arg.clone()).filter(|a| !a.is_empty()),
+                )
+            }
+            Command::ChannelBackfill { channel, after } => {
+                if let Some(after) = after {
+                    tags.insert("after".to_string(), after.to_string());
+                }
+                (
+                    "CHANNEL",
+                    vec!["BACKFILL".to_string(), channel.to_string()],
+                    None,
+                )
+            }
             Command::InviteMint {
                 scope,
                 max_uses,
@@ -2971,6 +3089,7 @@ mod tests {
                     thread: Some(MSGID.parse().unwrap()),
                     attachments: vec![],
                     system: None,
+                    nonce: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".into()),
                 },
             },
             "req-1",
@@ -3993,6 +4112,78 @@ mod tests {
 
         assert!(Request::parse("GROUP CREATE").is_err()); // needs ≥1 member
         assert!(Request::parse("GROUP FROB &x").is_err()); // bad subcommand
+    }
+
+    #[test]
+    fn channel_federation_verbs_round_trip() {
+        const C: &str = "#gaming/general";
+        // Relay: a spoke's post (no id) and a home-minted ingest (id + meta + echo).
+        round_trip(&Request::new(Command::ChannelRelay {
+            channel: C.parse().unwrap(),
+            sender: "carol@peer.example".parse().unwrap(),
+            msgid: None,
+            body: "hi from a spoke".to_string(),
+            meta: MsgMeta::default(),
+            echo: None,
+        }));
+        round_trip(&Request::new(Command::ChannelRelay {
+            channel: C.parse().unwrap(),
+            sender: "carol@peer.example".parse().unwrap(),
+            msgid: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap()),
+            body: "minted".to_string(),
+            meta: MsgMeta {
+                reply_to: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap()),
+                thread: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FB1".parse().unwrap()),
+                attachments: vec!["weft-media://home.example/abc".to_string()],
+                ..Default::default()
+            },
+            echo: Some("01ARZ3NDEKTSV4RRFFQ69G5FB9".to_string()),
+        }));
+        // A spoke→home relay serializes with tags before the verb (§4 grammar).
+        assert_eq!(
+            Request::new(Command::ChannelRelay {
+                channel: C.parse().unwrap(),
+                sender: "carol@peer.example".parse().unwrap(),
+                msgid: None,
+                body: "gg".to_string(),
+                meta: MsgMeta::default(),
+                echo: Some("tok1".to_string()),
+            })
+            .serialize()
+            .unwrap(),
+            "@echo=tok1 CHANNEL RELAY #gaming/general carol@peer.example :gg"
+        );
+        round_trip(&Request::new(Command::ChannelBackfill {
+            channel: C.parse().unwrap(),
+            after: None,
+        }));
+        round_trip(&Request::new(Command::ChannelBackfill {
+            channel: C.parse().unwrap(),
+            after: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap()),
+        }));
+        const R: &str = "home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        for (op, arg) in [
+            ("edit", "fixed"),
+            ("delete", ""),
+            ("react-add", "🦀"),
+            ("react-remove", "🦀"),
+        ] {
+            for msgid in [
+                None,
+                Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FB3".parse().unwrap()),
+            ] {
+                round_trip(&Request::new(Command::ChannelMut {
+                    channel: C.parse().unwrap(),
+                    sender: "carol@peer.example".parse().unwrap(),
+                    root: R.parse().unwrap(),
+                    op: op.to_string(),
+                    arg: arg.to_string(),
+                    msgid,
+                }));
+            }
+        }
+
+        assert!(Request::parse("CHANNEL FROB #x").is_err()); // bad subcommand
     }
 
     #[test]

@@ -374,4 +374,236 @@ impl<S: ControlStream> Session<S> {
         .await?;
         Ok(Flow::Continue)
     }
+
+    /// §11.13 a federated channel message arriving over the bridge. `msgid`
+    /// **absent** = a spoke relayed a member's post to us (the home): mint it into
+    /// the one total order — the ordinary event mirror then fans the home-origin
+    /// message out one hop to every spoke. `msgid` **present** = a home-minted
+    /// message for us (a spoke) to ingest, persisted with the origin msgid intact
+    /// (invariant 2) — e.g. a `CHANNEL BACKFILL` replay.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn on_channel_relay(
+        &mut self,
+        _label: Option<String>,
+        channel: ChannelName,
+        sender: UserRef,
+        msgid: Option<MsgId>,
+        body: String,
+        meta: MsgMeta,
+        _echo: Option<String>,
+    ) -> io::Result<Flow> {
+        match msgid {
+            None => {
+                // Only the home may mint; a misrouted relay is silently dropped
+                // (anti-enumeration — a non-home network reveals nothing).
+                if self.ctx.registry.is_home(&channel) {
+                    if let Some(handle) = self.ctx.registry.get(&channel) {
+                        handle.relay_publish(sender, body, meta).await;
+                    }
+                }
+            }
+            Some(id) => {
+                if let Some(handle) = self.ctx.registry.get(&channel) {
+                    let event = Event::Message(Box::new(MessageEvent {
+                        target: Target::Channel(channel.clone()),
+                        sender: sender.clone(),
+                        msgid: id.clone(),
+                        body: body.clone(),
+                        meta: meta.clone(),
+                        edited: None,
+                        edited_at: None,
+                    }));
+                    let record = EventRecord {
+                        scope: Scope::Channel(channel),
+                        msgid: id.clone(),
+                        root: id,
+                        sender,
+                        kind: EventKind::Message { body, meta },
+                    };
+                    // No local session owns this — fan out to every member.
+                    handle.ingest(u64::MAX, record, event).await;
+                }
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// §11.13 relay a channel mutation to the channel's **home** (we're a spoke;
+    /// only the home applies it). The resulting EDITED/DELETED/REACTION returns
+    /// over the ordinary event mirror.
+    pub(super) fn relay_channel_mut(
+        &self,
+        home: NetworkName,
+        channel: ChannelName,
+        sender: &UserRef,
+        root: MsgId,
+        op: &str,
+        arg: String,
+    ) {
+        let cmd = Command::ChannelMut {
+            channel,
+            sender: sender.clone(),
+            root,
+            op: op.to_string(),
+            arg,
+            msgid: None,
+        };
+        if let Ok(line) = Request::new(cmd).serialize() {
+            self.ctx.request_friend_deliver(crate::FriendDeliver {
+                peer: home,
+                from: sender.account.clone(),
+                line,
+            });
+        }
+    }
+
+    /// §11.13 federation-internal `CHANNEL MUT`. `@id` **absent** = a spoke relayed
+    /// a member's mutation to us (the home): verify authorship (§11.4) and apply —
+    /// the event mirror fans the EDITED/DELETED/REACTION out to the spokes. `@id`
+    /// **present** = a home-applied mutation for us (a spoke) to ingest — a
+    /// `CHANNEL BACKFILL` replay (live home→spoke rides the mirror, so this is the
+    /// recovery path only).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn on_channel_mut(
+        &mut self,
+        label: Option<String>,
+        channel: ChannelName,
+        sender: UserRef,
+        root: MsgId,
+        op: String,
+        arg: String,
+        msgid: Option<MsgId>,
+    ) -> io::Result<Flow> {
+        match msgid {
+            None => {
+                // Only the home applies; a misrouted relay reveals nothing (§2.2).
+                if !self.ctx.registry.is_home(&channel) {
+                    return Ok(Flow::Continue);
+                }
+                // §11.4 authored-by: EDIT/DELETE require the sender to own the
+                // target message (REACT is open to any member). The home is the
+                // authority, so it re-checks regardless of the spoke's own gate.
+                if op == "edit" || op == "delete" {
+                    match self.ctx.events.find_root(root.ulid()).await {
+                        Ok(Some(target)) if target.sender == sender => {}
+                        // Not the author, or the message is gone → silently drop.
+                        Ok(_) => return Ok(Flow::Continue),
+                        Err(e) => return self.internal(label, &e).await,
+                    }
+                }
+                if let Some(handle) = self.ctx.registry.get(&channel) {
+                    handle.relay_mutate(sender, root, op, arg).await;
+                }
+            }
+            Some(_id) => {
+                // Backfill replay of a mutation (deferred; live home→spoke
+                // mutations arrive over the event mirror, and CHANNEL BACKFILL
+                // replays message roots only — as the group backfill does).
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// §11.13 spoke → home recovery: ask the channel's home to replay anything it
+    /// minted while we were unreachable, carrying our newest local root as the
+    /// cursor (`None` = replay all). No-op when we are the home.
+    pub(super) async fn request_channel_home_backfill(&mut self, channel: ChannelName) {
+        let home = self.ctx.registry.home(&channel);
+        if home == self.ctx.info.network {
+            return;
+        }
+        let State::Ready { account } = self.state.clone() else {
+            return;
+        };
+
+        // Our newest local root is the cursor (same shape as the group backfill).
+        let scope = Scope::Channel(channel.clone());
+        let page = weft_store::Page {
+            before: None,
+            after: None,
+            limit: 1,
+        };
+        let after = match self.ctx.events.roots(&scope, page).await {
+            Ok(roots) => roots.last().map(|r| r.msgid.clone()),
+            Err(_) => None,
+        };
+
+        let cmd = Command::ChannelBackfill { channel, after };
+        if let Ok(line) = Request::new(cmd).serialize() {
+            self.ctx.request_friend_deliver(crate::FriendDeliver {
+                peer: home,
+                from: account,
+                line,
+            });
+        }
+    }
+
+    /// §11.13 home → spoke recovery: replay this channel's message roots after the
+    /// caller's cursor as `CHANNEL RELAY` (`@id` present) ingests. We must be the
+    /// home; the caller's network must mirror the channel in the acked manifest
+    /// (else it gets nothing — anti-enumeration, §11.1). Message roots only —
+    /// mutations ride the live mirror (matching the group backfill).
+    pub(super) async fn on_channel_backfill(
+        &mut self,
+        label: Option<String>,
+        caller: UserRef,
+        channel: ChannelName,
+        after: Option<MsgId>,
+    ) -> io::Result<Flow> {
+        if !self.ctx.registry.is_home(&channel) {
+            return Ok(Flow::Continue);
+        }
+        // Gate on the acked manifest: only a peer that mirrors this channel may
+        // pull it (same forwardability check as live ingestion).
+        let bridged = self
+            .ctx
+            .peers
+            .peer(&caller.network)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| crate::bridge::is_forwardable(&p, channel.as_str()))
+            .unwrap_or(false);
+        if !bridged {
+            return Ok(Flow::Continue);
+        }
+
+        let scope = Scope::Channel(channel.clone());
+        let page = weft_store::Page {
+            before: None,
+            after: after.as_ref().map(|m| m.ulid()),
+            limit: weft_proto::MAX_HISTORY_LIMIT as usize,
+        };
+        let roots = match self.ctx.events.roots(&scope, page).await {
+            Ok(roots) => roots,
+            Err(e) => return self.internal(label, &e).await,
+        };
+
+        for root in roots {
+            let EventKind::Message { body, meta } = root.kind else {
+                continue;
+            };
+            // Skip server-generated system lines (join/part) — they are re-derived
+            // locally, never replayed across the bridge.
+            if meta.system.is_some() {
+                continue;
+            }
+            let cmd = Command::ChannelRelay {
+                channel: channel.clone(),
+                sender: root.sender,
+                msgid: Some(root.msgid),
+                body,
+                meta,
+                echo: None,
+            };
+            if let Ok(line) = Request::new(cmd).serialize() {
+                self.ctx.request_friend_deliver(crate::FriendDeliver {
+                    peer: caller.network.clone(),
+                    from: caller.account.clone(),
+                    line,
+                });
+            }
+        }
+        Ok(Flow::Continue)
+    }
 }

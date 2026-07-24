@@ -272,12 +272,37 @@ impl<S: ControlStream> Session<S> {
                         Err(e) => return self.internal(label, &e).await,
                     }
                 }
-                let joined = self
-                    .joined
-                    .get_mut(&channel)
-                    .expect("membership checked above");
-                joined.pending.push_back(label);
-                joined.handle.publish(self.id, body, meta).await;
+                // §11.13 home-authoritative: if this network owns the channel's
+                // namespace we mint locally (the common case, unchanged). Otherwise
+                // we're a spoke — relay the post to the home to be minted into the
+                // one total order; the minted copy returns over the event mirror and
+                // the client reconciles it by `meta.nonce`.
+                if self.ctx.registry.is_home(&channel) {
+                    let joined = self
+                        .joined
+                        .get_mut(&channel)
+                        .expect("membership checked above");
+                    joined.pending.push_back(label);
+                    joined.handle.publish(self.id, body, meta).await;
+                } else {
+                    let home = self.ctx.registry.home(&channel);
+                    let me = UserRef::new(account.clone(), self.ctx.info.network.clone());
+                    let cmd = Command::ChannelRelay {
+                        channel,
+                        sender: me,
+                        msgid: None,
+                        body,
+                        meta,
+                        echo: None,
+                    };
+                    if let Ok(line) = Request::new(cmd).serialize() {
+                        self.ctx.request_friend_deliver(crate::FriendDeliver {
+                            peer: home,
+                            from: account,
+                            line,
+                        });
+                    }
+                }
             }
             // §9.5 same-network DM, routed through the account directory.
             Target::User(to) => {
@@ -434,18 +459,6 @@ impl<S: ControlStream> Session<S> {
         }
         match root.scope.clone() {
             Scope::Channel(channel) => {
-                // §11.4: EDIT/DELETE of a channel message are honored only at the
-                // msgid's origin (a bridged message is edited on its home network).
-                if msgid.origin() != &self.ctx.info.network {
-                    self.send_err(
-                        label,
-                        ErrCode::Forbidden,
-                        Some("origin"),
-                        "not this message's origin",
-                    )
-                    .await?;
-                    return Ok(None);
-                }
                 let Some(joined) = self.joined.get(&channel) else {
                     self.not_member_cap(label, &channel, cap).await?;
                     return Ok(None);
@@ -455,11 +468,36 @@ impl<S: ControlStream> Session<S> {
                         .await?;
                     return Ok(None);
                 }
-                Ok(Some(MessageRoute::Channel {
-                    handle: joined.handle.clone(),
-                    channel,
-                    root: root.msgid,
-                }))
+                // §11.13 the channel's **home** is the sole writer. If we're the
+                // home (or a non-federated channel), apply locally — the msgid is
+                // ours. Otherwise relay the mutation to the home; the resulting
+                // EDITED/DELETED/REACTION returns over the event mirror.
+                if self.ctx.registry.is_home(&channel) {
+                    // §11.4: a home channel mints every message, so a foreign-origin
+                    // msgid here is a bridged message we must not author.
+                    if msgid.origin() != &self.ctx.info.network {
+                        self.send_err(
+                            label,
+                            ErrCode::Forbidden,
+                            Some("origin"),
+                            "not this message's origin",
+                        )
+                        .await?;
+                        return Ok(None);
+                    }
+                    Ok(Some(MessageRoute::Channel {
+                        handle: joined.handle.clone(),
+                        channel,
+                        root: root.msgid,
+                    }))
+                } else {
+                    let home = self.ctx.registry.home(&channel);
+                    Ok(Some(MessageRoute::ChannelRemote {
+                        channel,
+                        home,
+                        root: root.msgid,
+                    }))
+                }
             }
             Scope::Dm(a, b) => {
                 // Not your conversation → indistinguishable from
@@ -566,6 +604,15 @@ impl<S: ControlStream> Session<S> {
                 let me = UserRef::new(account, self.ctx.info.network.clone());
                 self.relay_group_mut(home, group, &me, root, GroupMutKind::Edit(body));
             }
+            Some(MessageRoute::ChannelRemote {
+                channel,
+                home,
+                root,
+            }) => {
+                // §11.13 spoke: relay to the home; the EDITED returns via the mirror.
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.relay_channel_mut(home, channel, &me, root, "edit", body);
+            }
         }
         Ok(Flow::Continue) // ack = the echoed EDITED broadcast
     }
@@ -605,6 +652,14 @@ impl<S: ControlStream> Session<S> {
             Some(MessageRoute::GroupRemote { group, home, root }) => {
                 let me = UserRef::new(account, self.ctx.info.network.clone());
                 self.relay_group_mut(home, group, &me, root, GroupMutKind::Delete);
+            }
+            Some(MessageRoute::ChannelRemote {
+                channel,
+                home,
+                root,
+            }) => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.relay_channel_mut(home, channel, &me, root, "delete", String::new());
             }
         }
         Ok(Flow::Continue)
@@ -653,6 +708,15 @@ impl<S: ControlStream> Session<S> {
             Some(MessageRoute::GroupRemote { group, home, root }) => {
                 let me = UserRef::new(account, self.ctx.info.network.clone());
                 self.relay_group_mut(home, group, &me, root, GroupMutKind::React { emoji, add });
+            }
+            Some(MessageRoute::ChannelRemote {
+                channel,
+                home,
+                root,
+            }) => {
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                let op = if add { "react-add" } else { "react-remove" };
+                self.relay_channel_mut(home, channel, &me, root, op, emoji);
             }
         }
         Ok(Flow::Continue)
@@ -774,9 +838,19 @@ impl<S: ControlStream> Session<S> {
         let ran_out = items.len() < limit;
         self.emit_batch(label, &target, items, truncated).await?;
         match target {
-            Target::Channel(channel) if ran_out => {
-                self.ctx
-                    .request_channel_backfill(crate::BackfillReq { channel, before });
+            Target::Channel(channel) => {
+                // §11.13 spoke: ask the home to replay recent messages we may have
+                // missed while unreachable (regardless of `ran_out` — the missed
+                // messages are the newest; no-op when we are the home).
+                if !self.ctx.registry.is_home(&channel) {
+                    self.request_channel_home_backfill(channel.clone()).await;
+                }
+                // §11.7 M5c lazy federated backfill for deeper scrollback when the
+                // local page ran out (fire-and-forget; gated + deduped downstream).
+                if ran_out {
+                    self.ctx
+                        .request_channel_backfill(crate::BackfillReq { channel, before });
+                }
             }
             // A cross-network group: catch up on anything the home minted while we
             // were unreachable. Fired regardless of `ran_out` — the messages we

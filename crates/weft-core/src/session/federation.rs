@@ -622,6 +622,15 @@ impl<S: ControlStream> Session<S> {
             if self.bridged.contains_key(channel) {
                 continue;
             }
+            // §11.13 provision a replica of a channel we don't host: the peer
+            // signed this manifest, so it owns the namespace and is the channel's
+            // home. A channel we already host (we're its home, or an earlier
+            // provision) is left untouched.
+            if !self.ctx.registry.exists(channel) {
+                self.ctx
+                    .registry
+                    .provision_replica(channel.clone(), record.peer.clone());
+            }
             if let Some(handle) = self.ctx.registry.get(channel) {
                 if let Some(rx) = handle.subscribe().await {
                     let forwarder = spawn_forwarder(channel.clone(), rx, self.events_tx.clone());
@@ -1517,6 +1526,39 @@ impl<S: ControlStream> Session<S> {
                 Some(caller) => self.on_group_backfill(label, caller, group, after).await,
                 None => Ok(Flow::Continue),
             },
+            // §11.13 home-authoritative channels — the same shape as the group
+            // tunnel, keyed on a channel.
+            Command::ChannelRelay {
+                channel,
+                sender,
+                msgid,
+                body,
+                meta,
+                echo,
+            } => {
+                self.on_channel_relay(label, channel, sender, msgid, body, meta, echo)
+                    .await
+            }
+            Command::ChannelMut {
+                channel,
+                sender,
+                root,
+                op,
+                arg,
+                msgid,
+            } => {
+                self.on_channel_mut(label, channel, sender, root, op, arg, msgid)
+                    .await
+            }
+            // A spoke catching up after downtime: replay this channel's messages
+            // after its cursor back to it (we're the home = the single writer).
+            Command::ChannelBackfill { channel, after } => match caller {
+                Some(caller) => {
+                    self.on_channel_backfill(label, caller, channel, after)
+                        .await
+                }
+                None => Ok(Flow::Continue),
+            },
             _ => {
                 self.unsupported(label, "not yet available over a federation session")
                     .await
@@ -1539,7 +1581,12 @@ fn ingest_record(peer: &NetworkName, event: &Event) -> Option<(ChannelName, Even
     match event {
         Event::Message(m) => {
             let channel = channel_of(&m.target)?;
-            if !from_peer(&m.msgid) || m.sender.network.as_str() != peer.as_str() {
+            // Invariant 2: the msgid must originate on the authenticated peer. The
+            // sender may be on a *different* network — under home-authoritative
+            // channels (§11.13) the home mints messages authored by spoke members,
+            // so `sender.network != peer` is expected; the peer vouches for the
+            // author under the same network-key trust as `FSESSION` (§11.11).
+            if !from_peer(&m.msgid) {
                 return None;
             }
             let record = EventRecord {

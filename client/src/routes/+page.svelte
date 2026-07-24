@@ -1198,6 +1198,18 @@
           break;
         }
         const ch = ensureChannel(key);
+        // §11.13 optimistic reconcile: our own live message carrying our nonce
+        // replaces the pending placeholder we showed on send, rather than adding a
+        // duplicate — matched across devices and across networks by the nonce.
+        if (e.own && e.nonce) {
+          const idx = ch.messages.findIndex((m) => m.pending && m.nonce === e.nonce);
+          if (idx !== -1) {
+            ch.messages.splice(idx, 1, msg);
+            const ti = threadMessages.findIndex((m) => m.pending && m.nonce === e.nonce);
+            if (ti !== -1) threadMessages = threadMessages.map((m, i) => (i === ti ? msg : m));
+            break;
+          }
+        }
         // Dedupe: history backfill may re-deliver a live message.
         if (e.msgid && ch.messages.some((m) => m.msgid === e.msgid)) break;
         ch.messages.push(msg);
@@ -1845,17 +1857,44 @@
     if (!text && !pendingAttachments.length) return;
     if (!active) return;
     const attachments = pendingAttachments.map((a) => a.uri);
-    // Clear only once the send is accepted, so a failure surfaces instead of
-    // silently eating the message (e.g. an over-long body).
+    const target = active;
+    const savedReply = replyTo?.msgid;
+    // §9.2/§11.13 optimistic send: show the message immediately as "sending",
+    // keyed by a client nonce. The authoritative MESSAGE echoes the nonce back
+    // (even when a home-authoritative channel mints it on another network) and
+    // reconcile replaces this placeholder — so the send feels instant regardless
+    // of federation latency.
+    const nonce = crypto.randomUUID();
+    ensureChannel(target).messages.push(
+      mkMsg({
+        author: account,
+        body: text,
+        time: clock(),
+        ts: Date.now(),
+        own: true,
+        md: true,
+        replyTo: savedReply,
+        attachments: attachments.length ? attachments : undefined,
+        nonce,
+        pending: true,
+      }),
+    );
+    // Clear the composer optimistically; the placeholder carries the text.
+    replyTo = null;
+    stopTyping();
+    composer = "";
+    pendingAttachments = [];
     weft
-      .sendMessage(active, text, replyTo?.msgid, attachments)
-      .then(() => {
-        replyTo = null;
-        stopTyping();
-        composer = "";
-        pendingAttachments = [];
-      })
-      .catch((e) => toast(String(e), "error"));
+      .sendMessage(target, text, savedReply, attachments, undefined, nonce)
+      .catch((e) => {
+        // The send was rejected (e.g. an over-long body): drop the placeholder,
+        // restore the text so it isn't silently eaten, and surface the error.
+        const ch = channels[target];
+        const i = ch?.messages.findIndex((m) => m.nonce === nonce) ?? -1;
+        if (ch && i !== -1) ch.messages.splice(i, 1);
+        composer = text;
+        toast(String(e), "error");
+      });
   }
 
   function composerKey(e: KeyboardEvent) {

@@ -103,6 +103,7 @@ export type WeftEvent =
       md: boolean;
       attachments: string[];
       system: string | null;
+      nonce: string | null;
     }
   | { kind: "typing"; channel: string; user: string; state: string }
   | { kind: "presence"; user: string; status: string }
@@ -418,6 +419,7 @@ export function sendMessage(
   replyTo?: string,
   attachments?: string[],
   thread?: string,
+  nonce?: string,
 ) {
   return invoke("send_message", {
     target,
@@ -425,6 +427,7 @@ export function sendMessage(
     replyTo: replyTo ?? null,
     attachments: attachments ?? [],
     thread: thread ?? null,
+    nonce: nonce ?? null,
   });
 }
 

@@ -337,6 +337,15 @@ pub struct MsgMeta {
     /// `part`); the client renders localized text, the body is empty. Only ever
     /// set by the server; stripped from inbound `MSG` so clients can't forge one.
     pub system: Option<String>,
+    /// `nonce=<opaque>` — a **client-generated** send correlation (§9.2). The
+    /// client stamps it on `MSG`, renders the message optimistically keyed by it,
+    /// and reconciles when the authoritative `MESSAGE` echoes the same nonce back
+    /// — across *every* one of the sender's devices, not just the posting session.
+    /// Load-bearing for home-authoritative channels (§11.13): a spoke poster's
+    /// message rides the relay to the home to be minted, and the nonce is how the
+    /// spoke's clients recognize the minted copy as their own. Opaque to the
+    /// server; carried verbatim through relay → mint → mirror.
+    pub nonce: Option<String>,
 }
 
 impl MsgMeta {
@@ -364,6 +373,7 @@ impl MsgMeta {
             thread: msgid_tag("thread")?,
             attachments: attachments.into_iter().map(|(_, v)| v).collect(),
             system: tags.get("system").filter(|v| !v.is_empty()).cloned(),
+            nonce: tags.get("nonce").filter(|v| !v.is_empty()).cloned(),
         })
     }
 
@@ -394,6 +404,12 @@ impl MsgMeta {
                 return Err(SerializeError::Unrepresentable("empty system kind"));
             }
             tags.insert("system".to_string(), system.clone());
+        }
+        if let Some(nonce) = &self.nonce {
+            if nonce.is_empty() {
+                return Err(SerializeError::Unrepresentable("empty nonce"));
+            }
+            tags.insert("nonce".to_string(), nonce.clone());
         }
         Ok(())
     }

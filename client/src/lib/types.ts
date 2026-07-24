@@ -33,6 +33,13 @@ export type Msg = {
   net?: string;
   /// §13 `attach.N=` media references (`weft-media://…` URIs), in order.
   attachments?: string[];
+  /// §9.2 client-generated send correlation. On an optimistic placeholder it is
+  /// the key the authoritative `MESSAGE` echoes back so we reconcile (§11.13);
+  /// cleared once the real copy arrives.
+  nonce?: string;
+  /// Optimistic placeholder: shown immediately on send, greyed as "sending",
+  /// until the authoritative copy (matched by `nonce`) replaces it.
+  pending?: boolean;
 };
 
 /// §9.4 a channel thread as summarized in a `THREADS` list: its root msgid,

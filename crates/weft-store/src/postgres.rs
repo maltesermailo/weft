@@ -92,6 +92,9 @@ impl PgStore {
                         .map(|s| s.split('\n').map(str::to_string).collect())
                         .unwrap_or_default(),
                     system: row.get("system"),
+                    // `nonce` is a live send-correlation (§9.2), not persisted
+                    // history — a replayed message never needs optimistic reconcile.
+                    nonce: None,
                 },
             },
             KIND_EDIT => EventKind::Edit { body: body() },

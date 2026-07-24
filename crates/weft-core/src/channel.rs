@@ -77,6 +77,26 @@ enum Cmd {
         body: String,
         meta: MsgMeta,
     },
+    /// §11.13 home-authoritative mint of a relayed spoke post: mint a home-origin
+    /// msgid for a (possibly foreign) `sender` and broadcast — the mirror fans it
+    /// out to spokes. No session (the poster is on another network); reconcile
+    /// rides the nonce in `meta`.
+    RelayPublish {
+        sender: UserRef,
+        body: String,
+        meta: MsgMeta,
+    },
+    /// §11.13 home-authoritative apply of a **relayed** mutation from a
+    /// (possibly foreign) `sender`: `op` ∈ `edit`|`delete`|`react-add`|
+    /// `react-remove`, `arg` = body/emoji. Mirrors Edit/Delete/React but with an
+    /// explicit sender and no session; the event mirror fans the result to spokes.
+    /// The caller (the home) has already verified authorship (§11.4).
+    RelayMutate {
+        sender: UserRef,
+        root: MsgId,
+        op: String,
+        arg: String,
+    },
     /// Pre-validated by the session (author, not tombstoned).
     Edit {
         session: SessionId,
@@ -202,6 +222,32 @@ impl ChannelHandle {
                 session,
                 body,
                 meta,
+            })
+            .await;
+    }
+
+    /// §11.13 home-authoritative mint of a **relayed** post: this network is the
+    /// channel's home, and `sender` (a possibly-foreign `account@network`) posted
+    /// on a spoke that relayed it here to be minted into the one total order. Mints
+    /// a home-origin msgid and broadcasts it — the ordinary event mirror then fans
+    /// it out one hop to every spoke (including the poster's, where the carried
+    /// nonce reconciles the optimistic copy).
+    pub async fn relay_publish(&self, sender: UserRef, body: String, meta: MsgMeta) {
+        let _ = self
+            .inbox
+            .send(Cmd::RelayPublish { sender, body, meta })
+            .await;
+    }
+
+    /// §11.13 home-authoritative apply of a relayed mutation (see [`Cmd::RelayMutate`]).
+    pub async fn relay_mutate(&self, sender: UserRef, root: MsgId, op: String, arg: String) {
+        let _ = self
+            .inbox
+            .send(Cmd::RelayMutate {
+                sender,
+                root,
+                op,
+                arg,
             })
             .await;
     }
@@ -472,6 +518,36 @@ impl Actor {
                     })),
                 );
             }
+            Cmd::RelayPublish { sender, body, meta } => {
+                let msgid = self.mint();
+                let record = EventRecord {
+                    scope: self.scope.clone(),
+                    msgid: msgid.clone(),
+                    root: msgid.clone(),
+                    sender: sender.clone(),
+                    kind: EventKind::Message {
+                        body: body.clone(),
+                        meta: meta.clone(),
+                    },
+                };
+                self.persist(record).await;
+                self.record_media_refs(&msgid, &meta).await;
+                // SENTINEL_ORIGIN: nobody's own local echo — fan out to every local
+                // member, and let the bridge forwarders mirror it (home-origin) to
+                // the spokes. The poster's client reconciles via `meta.nonce`.
+                self.broadcast(
+                    SENTINEL_ORIGIN,
+                    Event::Message(Box::new(MessageEvent {
+                        target: Target::Channel(self.name.clone()),
+                        sender,
+                        msgid,
+                        body,
+                        meta,
+                        edited: None,
+                        edited_at: None,
+                    })),
+                );
+            }
             Cmd::Edit {
                 session,
                 root,
@@ -584,6 +660,87 @@ impl Actor {
                         by: user,
                     },
                 );
+            }
+            Cmd::RelayMutate {
+                sender,
+                root,
+                op,
+                arg,
+            } => {
+                // Home applies a spoke member's mutation, minting a home-origin
+                // bookkeeping msgid; the mirror fans the event out to the spokes.
+                let msgid = self.mint();
+                match op.as_str() {
+                    "edit" => {
+                        self.persist(EventRecord {
+                            scope: self.scope.clone(),
+                            msgid: msgid.clone(),
+                            root: root.clone(),
+                            sender: sender.clone(),
+                            kind: EventKind::Edit { body: arg.clone() },
+                        })
+                        .await;
+                        self.broadcast(
+                            SENTINEL_ORIGIN,
+                            Event::Edited {
+                                target: Target::Channel(self.name.clone()),
+                                user: sender,
+                                msgid,
+                                edit_of: root,
+                                body: arg,
+                            },
+                        );
+                    }
+                    "delete" => {
+                        self.persist(EventRecord {
+                            scope: self.scope.clone(),
+                            msgid,
+                            root: root.clone(),
+                            sender: sender.clone(),
+                            kind: EventKind::Delete,
+                        })
+                        .await;
+                        let _ = self.media.drop_refs(&root).await;
+                        self.unpin_deleted(&root).await;
+                        self.broadcast(
+                            SENTINEL_ORIGIN,
+                            Event::Deleted {
+                                target: Target::Channel(self.name.clone()),
+                                msgid: root,
+                                by: Some(sender),
+                            },
+                        );
+                    }
+                    "react-add" | "react-remove" => {
+                        let add = op == "react-add";
+                        self.persist(EventRecord {
+                            scope: self.scope.clone(),
+                            msgid,
+                            root: root.clone(),
+                            sender: sender.clone(),
+                            kind: EventKind::React {
+                                emoji: arg.clone(),
+                                add,
+                            },
+                        })
+                        .await;
+                        self.broadcast(
+                            SENTINEL_ORIGIN,
+                            Event::Reaction {
+                                target: Target::Channel(self.name.clone()),
+                                msgid: root,
+                                emoji: arg,
+                                op: if add {
+                                    ReactionOp::Add
+                                } else {
+                                    ReactionOp::Remove
+                                },
+                                by: sender,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
             }
             Cmd::Typing { session, state } => {
                 if let Some(user) = self.member(session) {

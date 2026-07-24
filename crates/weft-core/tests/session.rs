@@ -4339,6 +4339,316 @@ async fn bridge_forwards_local_messages_to_peer() {
 }
 
 #[tokio::test]
+async fn home_authoritative_channel_mints_relayed_spoke_post_and_mirrors_it() {
+    // §11.13: a spoke relays a member's channel post to the home (`@id` absent);
+    // the home is the sole ULID writer — it mints a home-origin msgid, delivers to
+    // its local members, and the ordinary event mirror fans the minted message back
+    // out to the peer, carrying the `nonce` so the spoke reconciles the optimistic copy.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    assert!(matches!(ada.recv().await.event, Event::Manifest { .. }));
+
+    // A spoke relays alice's post to us (the home): @id absent = mint request.
+    let inner = weft_proto::Request::new(weft_proto::Command::ChannelRelay {
+        channel: "#general".parse().unwrap(),
+        sender: "alice@peer.example".parse().unwrap(),
+        msgid: None,
+        body: "hi from alice".to_string(),
+        meta: weft_proto::MsgMeta {
+            nonce: Some("n-alice-1".to_string()),
+            ..Default::default()
+        },
+        echo: None,
+    })
+    .serialize()
+    .unwrap();
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send(&format!("FSESSION 1 CMD :{inner}"));
+
+    // ada (a local home member) sees alice's message, minted by the home.
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("expected alice's minted message");
+    };
+    assert_eq!(m.sender.to_string(), "alice@peer.example");
+    assert_eq!(m.body, "hi from alice");
+    assert_eq!(m.msgid.origin().as_str(), "test.example"); // home is the origin
+    assert_eq!(m.meta.nonce.as_deref(), Some("n-alice-1")); // nonce carried for reconcile
+
+    // And the home-minted message is mirrored back out to the peer, nonce intact.
+    loop {
+        let line = bridge.recv_raw().await;
+        if line.contains("MESSAGE #general alice@peer.example") {
+            assert!(line.contains("hi from alice"), "{line}");
+            assert!(line.contains("test.example/"), "{line}"); // home-minted origin
+            assert!(line.contains("nonce=n-alice-1"), "{line}"); // reconcile token rides the mirror
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn spoke_relays_channel_post_to_the_home_instead_of_minting() {
+    // §11.13: on a network that is NOT the channel's home, a member's post is not
+    // minted locally — it is relayed to the home (`CHANNEL RELAY`, `@id` absent) to
+    // be minted into the one total order.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "home.example", &peer_key.public());
+    // We are a spoke: #general's home is home.example (as an acked manifest would set).
+    ctx.registry
+        .set_home("#general".parse().unwrap(), "home.example".parse().unwrap());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let ada = joined(&ctx, "ada", "#general").await;
+
+    ada.send("@l=m MSG #general :hello home");
+
+    let relay = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("delivery")
+        .expect("sink open");
+    assert_eq!(relay.peer.as_str(), "home.example");
+    assert!(
+        relay
+            .line
+            .contains("CHANNEL RELAY #general ada@test.example"),
+        "{}",
+        relay.line
+    );
+    assert!(!relay.line.contains("id="), "{}", relay.line); // @id absent = mint request
+    assert!(relay.line.contains("hello home"), "{}", relay.line);
+}
+
+#[tokio::test]
+async fn home_applies_relayed_channel_edit_and_rejects_a_non_author() {
+    // §11.13/§11.4: the home applies a spoke member's relayed mutation only after
+    // verifying authorship — a different sender's forged edit is dropped.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    assert!(matches!(ada.recv().await.event, Event::Manifest { .. }));
+
+    // A spoke relays alice's post → the home mints it.
+    let post = weft_proto::Request::new(weft_proto::Command::ChannelRelay {
+        channel: "#general".parse().unwrap(),
+        sender: "alice@peer.example".parse().unwrap(),
+        msgid: None,
+        body: "typo heer".to_string(),
+        meta: weft_proto::MsgMeta::default(),
+        echo: None,
+    })
+    .serialize()
+    .unwrap();
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send(&format!("FSESSION 1 CMD :{post}"));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("expected alice's minted message");
+    };
+    let minted = m.msgid.clone();
+    assert_eq!(minted.origin().as_str(), "test.example");
+
+    // A NON-author (bob) tries to edit alice's message: the home drops it.
+    let forged = weft_proto::Request::new(weft_proto::Command::ChannelMut {
+        channel: "#general".parse().unwrap(),
+        sender: "bob@peer.example".parse().unwrap(),
+        root: minted.clone(),
+        op: "edit".to_string(),
+        arg: "hijacked".to_string(),
+        msgid: None,
+    })
+    .serialize()
+    .unwrap();
+    bridge.send(&format!("FSESSION 1 CMD :{forged}"));
+
+    // The author (alice) edits: the home applies it.
+    let good = weft_proto::Request::new(weft_proto::Command::ChannelMut {
+        channel: "#general".parse().unwrap(),
+        sender: "alice@peer.example".parse().unwrap(),
+        root: minted.clone(),
+        op: "edit".to_string(),
+        arg: "typo here".to_string(),
+        msgid: None,
+    })
+    .serialize()
+    .unwrap();
+    bridge.send(&format!("FSESSION 1 CMD :{good}"));
+
+    // The first EDITED ada sees is alice's — the forged edit never applied.
+    let Event::Edited {
+        body,
+        edit_of,
+        user,
+        ..
+    } = ada.recv().await.event
+    else {
+        panic!("expected EDITED");
+    };
+    assert_eq!(body, "typo here");
+    assert_eq!(edit_of, minted);
+    assert_eq!(user.to_string(), "alice@peer.example");
+}
+
+#[tokio::test]
+async fn spoke_relays_a_channel_edit_to_the_home() {
+    // §11.13: a member editing their own message on a spoke relays a `CHANNEL MUT`
+    // (`@id` absent) to the home rather than mutating locally.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "home.example", &peer_key.public());
+    ctx.registry
+        .set_home("#general".parse().unwrap(), "home.example".parse().unwrap());
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bridge = bridged_peer(&ctx, "home.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    assert!(matches!(ada.recv().await.event, Event::Manifest { .. }));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+
+    // ada's own message exists on the spoke as a home-minted (home-origin) replica.
+    let mid = "home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    bridge.send(&format!(
+        "@msgid={mid} MESSAGE #general ada@test.example :helo"
+    ));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("expected the ingested message");
+    };
+    assert_eq!(m.msgid.to_string(), mid);
+
+    // ada edits it → we don't mutate locally; we relay to the home.
+    ada.send(&format!("@l=e EDIT {mid} :hello"));
+    let relay = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("delivery")
+        .expect("sink open");
+    assert_eq!(relay.peer.as_str(), "home.example");
+    assert!(
+        relay.line.contains("CHANNEL MUT #general ada@test.example"),
+        "{}",
+        relay.line
+    );
+    assert!(relay.line.contains("edit"), "{}", relay.line);
+    assert!(relay.line.contains("hello"), "{}", relay.line);
+    assert!(!relay.line.contains("id="), "{}", relay.line); // @id absent = apply request
+}
+
+#[tokio::test]
+async fn spoke_requests_channel_backfill_from_the_home_on_history() {
+    // §11.13: a spoke viewing a home-authoritative channel's history asks the home
+    // to replay anything it minted while the spoke was unreachable.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "home.example", &peer_key.public());
+    ctx.registry
+        .set_home("#general".parse().unwrap(), "home.example".parse().unwrap());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let ada = joined(&ctx, "ada", "#general").await;
+
+    ada.send("HISTORY #general");
+
+    // The catch-up request goes to the home, carrying our (empty) cursor.
+    let req = loop {
+        let d = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("delivery")
+            .expect("sink open");
+        if d.line.contains("CHANNEL BACKFILL") {
+            break d;
+        }
+    };
+    assert_eq!(req.peer.as_str(), "home.example");
+    let weft_proto::Command::ChannelBackfill { channel, .. } =
+        weft_proto::Request::parse(&req.line).unwrap().command
+    else {
+        panic!("expected CHANNEL BACKFILL, got {:?}", req.line);
+    };
+    assert_eq!(channel.to_string(), "#general");
+}
+
+#[tokio::test]
+async fn home_serves_channel_backfill_replaying_missed_messages() {
+    // §11.13: the home replays its channel's message roots after a spoke's cursor
+    // as `CHANNEL RELAY` (`@id` present) ingests — the recovery path for a spoke
+    // that was down when they were minted.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    assert!(matches!(ada.recv().await.event, Event::Manifest { .. }));
+
+    // Two messages the home mints (draining ada's echoes ensures they persist).
+    ada.send("MSG #general :first");
+    assert!(matches!(ada.recv().await.event, Event::Message(_)));
+    ada.send("MSG #general :second");
+    assert!(matches!(ada.recv().await.event, Event::Message(_)));
+
+    // The spoke asks us (the home) to replay from the start.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+    let bf = weft_proto::Request::new(weft_proto::Command::ChannelBackfill {
+        channel: "#general".parse().unwrap(),
+        after: None,
+    })
+    .serialize()
+    .unwrap();
+    bridge.send("FSESSION 1 OPEN alice");
+    bridge.send(&format!("FSESSION 1 CMD :{bf}"));
+
+    // We replay both messages as home-minted CHANNEL RELAY ingests to the peer.
+    let mut bodies = Vec::new();
+    while bodies.len() < 2 {
+        let d = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("delivery")
+            .expect("sink open");
+        if let weft_proto::Command::ChannelRelay { msgid, body, .. } =
+            weft_proto::Request::parse(&d.line).unwrap().command
+        {
+            assert_eq!(d.peer.as_str(), "peer.example");
+            assert!(msgid.is_some(), "replay carries the home-minted id"); // @id present
+            bodies.push(body);
+        }
+    }
+    assert!(bodies.contains(&"first".to_string()), "{bodies:?}");
+    assert!(bodies.contains(&"second".to_string()), "{bodies:?}");
+}
+
+#[tokio::test]
+async fn spoke_provisions_a_replica_for_a_manifested_foreign_channel() {
+    // §11.13: the spoke does not seed #gaming/room. When the home's manifest offers
+    // it, the spoke provisions a replica homed at the peer — so `is_home` reports
+    // the peer and mirrored events land (previously `ingest_bridged` no-op'd).
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "home.example", &peer_key.public());
+    let room: weft_proto::ChannelName = "#gaming/room".parse().unwrap();
+    assert!(!ctx.registry.exists(&room), "not seeded");
+
+    let mut bridge = bridged_peer(&ctx, "home.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#gaming/room"]).await;
+
+    // The replica now exists, homed at the peer (we are a spoke for it).
+    assert!(ctx.registry.exists(&room));
+    assert_eq!(ctx.registry.home(&room).as_str(), "home.example");
+    assert!(!ctx.registry.is_home(&room));
+
+    // A local member can join the provisioned replica, and a home-minted message
+    // now lands (it would have been dropped before provisioning).
+    let mut ada = joined(&ctx, "ada", "#gaming/room").await;
+    let mid = "home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    bridge.send(&format!(
+        "@msgid={mid} MESSAGE #gaming/room bob@home.example :hi"
+    ));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("expected the ingested message on the replica");
+    };
+    assert_eq!(m.msgid.to_string(), mid);
+    assert_eq!(m.body, "hi");
+}
+
+#[tokio::test]
 async fn bridge_drops_foreign_origin_events() {
     let peer_key = Keypair::generate();
     let ctx = ctx_bridged(&["#general"], &[], "peer.example", &peer_key.public());

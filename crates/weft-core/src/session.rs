@@ -398,6 +398,14 @@ enum MessageRoute {
         channel: ChannelName,
         root: MsgId,
     },
+    /// §11.13 a channel whose **home is another** network: the mutation is relayed
+    /// there (only the home applies it, authored-by), and the resulting
+    /// EDITED/DELETED/REACTION returns over the ordinary event mirror.
+    ChannelRemote {
+        channel: ChannelName,
+        home: NetworkName,
+        root: MsgId,
+    },
     Dm {
         peer: Account,
         root: MsgId,
@@ -1380,7 +1388,10 @@ impl<S: ControlStream> Session<S> {
             | Command::GroupSync { .. }
             | Command::GroupRelay { .. }
             | Command::GroupMut { .. }
-            | Command::GroupBackfill { .. } => Ok(Flow::Continue),
+            | Command::GroupBackfill { .. }
+            | Command::ChannelRelay { .. }
+            | Command::ChannelMut { .. }
+            | Command::ChannelBackfill { .. } => Ok(Flow::Continue),
             // Friend calls (social layer, federation-able): signaling + media. The
             // caller's identity is `account@thisnet` here; a tunnelled peer's call
             // commands run in `on_federated` with the caller's *foreign* UserRef.
