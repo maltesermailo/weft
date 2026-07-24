@@ -1110,9 +1110,12 @@ The social layer (<<s6-8,§6.8>>) federates over a generic one-way *friend-deliv
 "deliver this control line to that peer, attributed to this local account." A network
 opens `FSESSION <fsid> OPEN <from>` + `CMD :<line>` on the `F↔H` bridge (<<s11-11,§11.11>>); the
 receiver reconstructs `from@<sender-network>` (the bridge authenticated the sender's
-network key) and dispatches it. It is fire-and-forget — acks return as ordinary events,
-not tunnelled replies. This is the same homeserver-authority mechanism as <<s11-11,§11.11>>, reused
-for account-level relationships instead of namespace administration. Conceptual diagrams (*non-normative*): `weft-federation-flows.md` <<s9,§9>>.
+network key) and dispatches it. It is one-way — a receiver's response is a *fresh* reverse
+delivery over the conduit (another `FSESSION CMD`), never a tunnelled `FSESSION REPLY`: a
+posted message comes back as the home's minted copy, echo-labelled so the send is acked
+(<<s3-5,§3.5>>); a friend/call action comes back as an ordinary event. This is the same
+homeserver-authority mechanism as <<s11-11,§11.11>>, reused for account-level relationships
+instead of namespace administration. Conceptual diagrams (*non-normative*): `weft-federation-flows.md` <<s9,§9>>.
 
 *Home-authoritative ordering (normative).* A group DM with members on more than one
 network has a single *home* = the group creator's network. The home is the *sole
@@ -1120,6 +1123,38 @@ ULID writer* for the group's messages (<<s9-1,§9.1>>); every other member netwo
 that order. This is what makes a total order well-defined when several networks post into
 one group. A message a member's own network minted-elsewhere is identified by its origin
 msgid and is never re-minted (origin authority, <<s11-4,§11.4>>).
+
+*Message flow.* Same shape as the channel tunnel (<<s11-13,§11.13>>) — but a group has *no
+event mirror*, so the home fans each minted message out *explicitly* to every member network
+over the conduit, as `GROUP RELAY` (`@id` present). The whole flow — relay, fan-out, and the
+echo — rides the friend-delivery conduit:
+
+----
+   NETWORK  S  (spoke — alice is a member)          NETWORK  H  (the group's home)
+ ┌────────────────────────────────────────┐       ┌────────────────────────────────────────┐
+ │ alice: @label=L MSG &<group> :hi        │       │                                        │
+ │   │                                     │       │                                        │
+ │   ▼  (1) optimistic echo — show "hi"    │       │                                        │
+ │       now, pending, keyed by label L    │       │                                        │
+ │   │   (S mints echo E, remembers E→alice)│      │                                        │
+ │   ▼   relay — friend-delivery conduit    │ ────▶ │ (2) mint msgid = H/<ULID>              │
+ │  GROUP RELAY &<group> alice@S :hi       │       │     single ULID writer = the order     │
+ │  echo=E   (no @id  =  "mint this")      │       │   │                                    │
+ │                                         │       │   ├─▶ (3) deliver to H's local members  │
+ │                                         │       │   │      (no echo — not the poster)     │
+ │  (5) match echo E → alice's session,    │ ◀──── │ (4) fan out to each member network —   │
+ │      deliver as her @label=L echo,      │       │     no mirror; conduit again as        │
+ │      strip E → she reconciles by label  │       │     GROUP RELAY (@id); echo=E to S only │
+ │                                         │       │  GROUP RELAY &<group> @id=H/… echo=E :hi│
+ └────────────────────────────────────────┘       └────────────────────────────────────────┘
+        └───────── one authenticated bridge session (AUTH BRIDGE, network key) ─────────┘
+
+ No event mirror:      a group has no manifest or replica, so the home hand-delivers each
+                       message to every member network as GROUP RELAY (@id present).
+ Home-network member:  MSG &<group> :hi → H mints locally + delivers.  No relay, no wait.
+ Recovery / roster:    GROUP BACKFILL catches a member up; GROUP SYNC keeps the membership
+                       authoritative across networks.
+----
 
 The following verbs are *federation-internal* (bridge-session-only; a client can never
 send them — the server emits them). All ride the friend-delivery conduit:
@@ -1166,6 +1201,15 @@ forward would be the forbidden transitivity of <<s11-4,§11.4>>).
 leg* to the home to be minted, and the home-minted message returns over the *event mirror*.
 Both legs multiplex on the one authenticated bridge session (<<s11-2,§11.2>>) — the user
 never connects to the home.
+
+The relay leg (`CHANNEL RELAY`/`CHANNEL MUT`/`CHANNEL BACKFILL`) is sent over the same
+*friend-delivery conduit* the group tunnel uses (<<s11-12,§11.12>>): a generic, fire-and-forget
+"deliver this control line to that peer, attributed to this local account" mechanism — an
+`FSESSION <fsid> OPEN <account>` + `CMD :<line>` on the bridge, which the home reconstructs as
+`account@spoke` and dispatches. It is one-way and expects no tunnelled reply: the minted
+message comes back on the *event mirror* (a home-origin `MESSAGE`), not as an `FSESSION REPLY`.
+The event mirror is the only leg that is *not* the conduit — it is the ordinary channel event
+forwarder (<<s11-4,§11.4>>).
 
 ----
    NETWORK  S  (spoke — alice is a member)          NETWORK  H  (home — owns #ns/chan)
@@ -1296,7 +1340,8 @@ do not tunnel as-is — they become the channel/group content tunnels below. Non
 index; normative syntax lives in the cited subsection.
 
 _Direction:_ `S→H` = spoke → home · `H→S` = home → spokes · `↔` = either peer · `P↔P` = peer ↔
-peer · `→members` = fan-out to local members · `client→home` = a user to their own server.
+peer · `→members` = fan-out to local members · `client→home` = a user to their own server ·
+`mesh` = gossiped among all member networks · `local (op)` = an operator command on its own server.
 
 .Bridge session & homeserver authority (<<s11-2,§11.2>>, <<s11-11,§11.11>>)
 [cols="16,44,12,28",options="header"]
@@ -1323,10 +1368,10 @@ peer · `→members` = fan-out to local members · `client→home` = a user to t
 |===
 | Command | Syntax | Direction | Purpose
 
-| `BRIDGE PROPOSE` | `BRIDGE PROPOSE <scope> <peer> [history=] [media=] [typing=] [voice=]` (+ signed manifest) | ↔ | Offer a scope-authority-signed manifest for a namespace.
-| `BRIDGE ACCEPT` | `BRIDGE ACCEPT <peer> <version>` | ↔ | Mutual ack → the bridge goes live at `version`.
-| `BRIDGE ADD` | `BRIDGE ADD <peer> <#chan>` | ↔ | Amend the shared set (v+1, requires re-ack).
-| `BRIDGE REMOVE` | `BRIDGE REMOVE <peer> <#chan>` | ↔ | Drop a channel (v+1, unilateral, immediate).
+| `BRIDGE PROPOSE` | `BRIDGE PROPOSE <scope> <peer> [history=] [media=] [typing=] [voice=]` (+ signed manifest) | ↔ | Open a bridge by offering the channels + policy to share for a scope, as a manifest signed by the scope's authority; the peer verifies it and `BRIDGE ACCEPT`s.
+| `BRIDGE ACCEPT` | `BRIDGE ACCEPT <peer> <version>` | ↔ | Accept the peer's proposed manifest `version`; once both sides have acked, the bridge is live and forwarding starts.
+| `BRIDGE ADD` | `BRIDGE ADD <peer> <#chan>` | ↔ | Add a channel to an existing bridge's shared set (bumps the version; both re-ack).
+| `BRIDGE REMOVE` | `BRIDGE REMOVE <peer> <#chan>` | ↔ | Remove a channel from the shared set — takes effect at once, no re-ack (bumps the version).
 | `BRIDGE SEVER` | `BRIDGE SEVER <peer>` | ↔ | Tear the bridge down (unilateral).
 | `BRIDGE REQUEST` | `BRIDGE REQUEST <ns>` | S→H | Ask a peer to offer a manifest for one of its namespaces (auto-federation, <<s11-10,§11.10>>); answered with `BRIDGE PROPOSE` iff reachable, else `NO-SUCH-TARGET`.
 |===
@@ -1338,7 +1383,7 @@ peer · `→members` = fan-out to local members · `client→home` = a user to t
 
 | `CHANNEL RELAY` | `CHANNEL RELAY <#ns/chan> <sender@net> :body` + tags `id=`, `echo=`, msg-meta | S→H mint / H→S ingest | `id=` absent = relay a member's post to the home to be minted; `id=` present = a home-minted message to ingest (backfill replay).
 | `CHANNEL MUT` | `CHANNEL MUT <#ns/chan> <sender@net> <root-msgid> <op> [:arg]` + tag `id=` | S→H apply / H→S ingest | A mutation (`edit`/`delete`/`react-add`/`react-remove`); the home applies iff `sender` authored the target (<<s11-4,§11.4>>).
-| `CHANNEL BACKFILL` | `CHANNEL BACKFILL <#ns/chan>` + tag `after=` | S→H | Recovery pull; the home replays message roots after the cursor as `CHANNEL RELAY` (`id=` present).
+| `CHANNEL BACKFILL` | `CHANNEL BACKFILL <#ns/chan>` + tag `after=` | S→H | Catch up after downtime: the spoke asks the home to replay the channel's messages after its cursor, returned as `CHANNEL RELAY` (`id=` present).
 |===
 
 .Group tunnel — home-authoritative content (<<s11-12,§11.12>>)
@@ -1346,12 +1391,12 @@ peer · `→members` = fan-out to local members · `client→home` = a user to t
 |===
 | Command | Syntax | Direction | Purpose
 
-| `GROUP SYNC` | `GROUP SYNC <&id> <creator@net> [<member@net>…]` + tag `name=` | H→members | Authoritative membership snapshot; receivers reconcile.
+| `GROUP SYNC` | `GROUP SYNC <&id> <creator@net> [<member@net>…]` + tag `name=` | H→members | The group's authoritative membership; each receiver applies the add/remove diff and parts any of its own members that were removed. Sent on create + every change.
 | `GROUP RELAY` | `GROUP RELAY <&id> <sender@net> :body` + tags `id=`, `echo=`, msg-meta | S→H / H→S | Group message; `id=` absent = spoke→home mint, present = home→member ingest.
 | `GROUP MUT` | `GROUP MUT <&id> <sender@net> <root-msgid> <op> [:arg]` + tag `id=` | S→H / H→S | Group message mutation (same forms as `CHANNEL MUT`).
-| `GROUP BACKFILL` | `GROUP BACKFILL <&id>` + tag `after=` | member→home | Recovery replay of missed group messages.
-| `GROUP CALL` | `GROUP CALL <&id>` + tags `room=`, `token=`, `endpoint=` | H→members | Ring remote members; media tags carry the ringing network's relay leg (<<s16,§16>>).
-| `GROUP ROSTER` | `GROUP ROSTER <&id> <user@net> <active\|ended>` + tag `reply=yes` | mesh | Group-call roster gossip across member networks.
+| `GROUP BACKFILL` | `GROUP BACKFILL <&id>` + tag `after=` | member→home | Catch up after downtime: a member asks the home to replay the group's messages after its cursor (or all).
+| `GROUP CALL` | `GROUP CALL <&id>` + tags `room=`, `token=`, `endpoint=` | H→members | The home rings remote members into the group's voice call; the media tags carry each ringing network's leg of the room-to-room relay (<<s16,§16>>).
+| `GROUP ROSTER` | `GROUP ROSTER <&id> <user@net> <active\|ended>` + tag `reply=yes` | mesh (peer↔peer) | Keep the who's-on-the-call list in sync across the member networks; `reply=yes` asks the peer for its list back.
 |===
 
 .History & media backfill (<<s11-7,§11.7>>, <<s11-8,§11.8>>)
@@ -1360,7 +1405,7 @@ peer · `→members` = fan-out to local members · `client→home` = a user to t
 | Command | Syntax | Direction | Purpose
 
 | `HISTORY` | `HISTORY <#chan> [before=] [after=] [limit=]` (the <<s6-4,§6.4>> verb, over the bridge) | S→H | Federated scrollback pull; answered by `BATCH` or a `STREAM ACCEPT` offer, bounded by the manifest `history` flag + origin retention.
-| `MIRROR` | `MIRROR <requester-net> <hash> <sig>` (media data plane) | ↔ pull | Fetch content-addressed blob bytes from the origin network; self-authenticating, BLAKE3-verified.
+| `MIRROR` | `MIRROR <requester-net> <hash> <sig>` (media data plane) | ↔ pull | Pull the bytes of an attachment (a content-addressed blob) a receiver doesn't yet hold, from the blob's origin network; self-authenticating, BLAKE3-verified.
 |===
 
 .Moderation & safety (<<s11-6,§11.6>>, <<s11-9,§11.9>>)
@@ -1370,7 +1415,7 @@ peer · `→members` = fan-out to local members · `client→home` = a user to t
 
 | `NETBLOCK ADD` | `NETBLOCK ADD <network> [:reason]` | local (op) | Block a remote network; fires all four <<s11-6,§11.6>> effects. Cap `netblock` at `*`.
 | `NETBLOCK REMOVE` | `NETBLOCK REMOVE <network>` | local (op) | Lift the block.
-| `NETBLOCK LIST` | `NETBLOCK LIST` | local (op) | The operator's blocklist.
+| `NETBLOCK LIST` | `NETBLOCK LIST` | local (op) | Return the operator's list of blocked networks.
 | `REPORT-FORWARD` | `REPORT-FORWARD <report-id> <msgid> <category> [:note]` | P↔P | Forward a report to the content's origin network; reporter identity stripped (invariant 12).
 |===
 
@@ -1379,7 +1424,7 @@ peer · `→members` = fan-out to local members · `client→home` = a user to t
 |===
 | Command | Syntax | Direction | Purpose
 
-| `VOICE REQUEST` | `VOICE REQUEST <scope> <#chan>` | S→H | Bridge-only request for a federated voice room's relay credential (<<s16,§16>>).
+| `VOICE REQUEST` | `VOICE REQUEST <scope> <#chan>` | S→H | A spoke asks the home for the credential to join a federated channel's voice room — the server-to-server relay leg, so clients never cross networks (<<s16,§16>>).
 | `FEDERATE` | `FEDERATE <network>/<namespace>` | client→home | A user asks their own server to auto-establish a bridge to a foreign namespace; the server runs the `BRIDGE REQUEST` flow (<<s11-10,§11.10>>). The only federation command a client sends.
 |===
 

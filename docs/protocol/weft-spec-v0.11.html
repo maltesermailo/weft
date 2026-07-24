@@ -3670,6 +3670,16 @@ leg</strong> to the home to be minted, and the home-minted message returns over 
 Both legs multiplex on the one authenticated bridge session (<a href="#s11-2">§11.2</a>) — the user
 never connects to the home.</p>
 </div>
+<div class="paragraph">
+<p>The relay leg (<code>CHANNEL RELAY</code>/<code>CHANNEL MUT</code>/<code>CHANNEL BACKFILL</code>) is sent over the same
+<strong>friend-delivery conduit</strong> the group tunnel uses (<a href="#s11-12">§11.12</a>): a generic, fire-and-forget
+"deliver this control line to that peer, attributed to this local account" mechanism — an
+<code>FSESSION &lt;fsid&gt; OPEN &lt;account&gt;</code> + <code>CMD :&lt;line&gt;</code> on the bridge, which the home reconstructs as
+<code>account@spoke</code> and dispatches. It is one-way and expects no tunnelled reply: the minted
+message comes back on the <strong>event mirror</strong> (a home-origin <code>MESSAGE</code>), not as an <code>FSESSION REPLY</code>.
+The event mirror is the only leg that is <strong>not</strong> the conduit — it is the ordinary channel event
+forwarder (<a href="#s11-4">§11.4</a>).</p>
+</div>
 <div class="listingblock">
 <div class="content">
 <pre>   NETWORK  S  (spoke — alice is a member)          NETWORK  H  (home — owns #ns/chan)
@@ -3855,7 +3865,8 @@ index; normative syntax lives in the cited subsection.</p>
 </div>
 <div class="paragraph">
 <p><em>Direction:</em> <code>S→H</code> = spoke → home · <code>H→S</code> = home → spokes · <code>↔</code> = either peer · <code>P↔P</code> = peer ↔
-peer · <code>→members</code> = fan-out to local members · <code>client→home</code> = a user to their own server.</p>
+peer · <code>→members</code> = fan-out to local members · <code>client→home</code> = a user to their own server ·
+<code>mesh</code> = gossiped among all member networks · <code>local (op)</code> = an operator command on its own server.</p>
 </div>
 <table class="tableblock frame-all grid-all stretch">
 <caption class="title">Table 1. Bridge session &amp; homeserver authority (<a href="#s11-2">§11.2</a>, <a href="#s11-11">§11.11</a>)</caption>
@@ -3946,25 +3957,25 @@ peer · <code>→members</code> = fan-out to local members · <code>client→hom
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE PROPOSE</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE PROPOSE &lt;scope&gt; &lt;peer&gt; [history=] [media=] [typing=] [voice=]</code> (+ signed manifest)</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">↔</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Offer a scope-authority-signed manifest for a namespace.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Open a bridge by offering the channels + policy to share for a scope, as a manifest signed by the scope&#8217;s authority; the peer verifies it and `BRIDGE ACCEPT`s.</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE ACCEPT</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE ACCEPT &lt;peer&gt; &lt;version&gt;</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">↔</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Mutual ack → the bridge goes live at <code>version</code>.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Accept the peer&#8217;s proposed manifest <code>version</code>; once both sides have acked, the bridge is live and forwarding starts.</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE ADD</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE ADD &lt;peer&gt; &lt;#chan&gt;</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">↔</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Amend the shared set (v+1, requires re-ack).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Add a channel to an existing bridge&#8217;s shared set (bumps the version; both re-ack).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE REMOVE</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE REMOVE &lt;peer&gt; &lt;#chan&gt;</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">↔</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Drop a channel (v+1, unilateral, immediate).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Remove a channel from the shared set — takes effect at once, no re-ack (bumps the version).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>BRIDGE SEVER</code></p></td>
@@ -4013,7 +4024,7 @@ peer · <code>→members</code> = fan-out to local members · <code>client→hom
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL BACKFILL</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL BACKFILL &lt;#ns/chan&gt;</code> + tag <code>after=</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">S→H</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Recovery pull; the home replays message roots after the cursor as <code>CHANNEL RELAY</code> (<code>id=</code> present).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Catch up after downtime: the spoke asks the home to replay the channel&#8217;s messages after its cursor, returned as <code>CHANNEL RELAY</code> (<code>id=</code> present).</p></td>
 </tr>
 </tbody>
 </table>
@@ -4038,7 +4049,7 @@ peer · <code>→members</code> = fan-out to local members · <code>client→hom
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP SYNC</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP SYNC &lt;&amp;id&gt; &lt;creator@net&gt; [&lt;member@net&gt;…]</code> + tag <code>name=</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">H→members</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Authoritative membership snapshot; receivers reconcile.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">The group&#8217;s authoritative membership; each receiver applies the add/remove diff and parts any of its own members that were removed. Sent on create + every change.</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP RELAY</code></p></td>
@@ -4056,19 +4067,19 @@ peer · <code>→members</code> = fan-out to local members · <code>client→hom
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP BACKFILL</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP BACKFILL &lt;&amp;id&gt;</code> + tag <code>after=</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">member→home</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Recovery replay of missed group messages.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Catch up after downtime: a member asks the home to replay the group&#8217;s messages after its cursor (or all).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP CALL</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP CALL &lt;&amp;id&gt;</code> + tags <code>room=</code>, <code>token=</code>, <code>endpoint=</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">H→members</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Ring remote members; media tags carry the ringing network&#8217;s relay leg (<a href="#s16">§16</a>).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">The home rings remote members into the group&#8217;s voice call; the media tags carry each ringing network&#8217;s leg of the room-to-room relay (<a href="#s16">§16</a>).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP ROSTER</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP ROSTER &lt;&amp;id&gt; &lt;user@net&gt; &lt;active|ended&gt;</code> + tag <code>reply=yes</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">mesh</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Group-call roster gossip across member networks.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">mesh (peer↔peer)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Keep the who&#8217;s-on-the-call list in sync across the member networks; <code>reply=yes</code> asks the peer for its list back.</p></td>
 </tr>
 </tbody>
 </table>
@@ -4099,7 +4110,7 @@ peer · <code>→members</code> = fan-out to local members · <code>client→hom
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>MIRROR</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>MIRROR &lt;requester-net&gt; &lt;hash&gt; &lt;sig&gt;</code> (media data plane)</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">↔ pull</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Fetch content-addressed blob bytes from the origin network; self-authenticating, BLAKE3-verified.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Pull the bytes of an attachment (a content-addressed blob) a receiver doesn&#8217;t yet hold, from the blob&#8217;s origin network; self-authenticating, BLAKE3-verified.</p></td>
 </tr>
 </tbody>
 </table>
@@ -4136,7 +4147,7 @@ peer · <code>→members</code> = fan-out to local members · <code>client→hom
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>NETBLOCK LIST</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>NETBLOCK LIST</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">local (op)</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">The operator&#8217;s blocklist.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Return the operator&#8217;s list of blocked networks.</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>REPORT-FORWARD</code></p></td>
@@ -4167,7 +4178,7 @@ peer · <code>→members</code> = fan-out to local members · <code>client→hom
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>VOICE REQUEST</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>VOICE REQUEST &lt;scope&gt; &lt;#chan&gt;</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">S→H</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Bridge-only request for a federated voice room&#8217;s relay credential (<a href="#s16">§16</a>).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">A spoke asks the home for the credential to join a federated channel&#8217;s voice room — the server-to-server relay leg, so clients never cross networks (<a href="#s16">§16</a>).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>FEDERATE</code></p></td>
@@ -4936,7 +4947,7 @@ Non-normative index; event shapes are normative in the cited section.</p>
 <div id="footer">
 <div id="footer-text">
 Version 0.11<br>
-Last updated 2026-07-25 00:44:01 +0200
+Last updated 2026-07-25 01:30:08 +0200
 </div>
 </div>
 </body>
