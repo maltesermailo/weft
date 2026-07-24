@@ -390,15 +390,18 @@ impl<S: ControlStream> Session<S> {
         msgid: Option<MsgId>,
         body: String,
         meta: MsgMeta,
-        _echo: Option<String>,
+        echo: Option<String>,
     ) -> io::Result<Flow> {
         match msgid {
             None => {
                 // Only the home may mint; a misrouted relay is silently dropped
-                // (anti-enumeration — a non-home network reveals nothing).
+                // (anti-enumeration — a non-home network reveals nothing). The echo
+                // is paired with the poster's network so it is mirrored back there
+                // only (§11.13); everyone else gets it stripped.
                 if self.ctx.registry.is_home(&channel) {
                     if let Some(handle) = self.ctx.registry.get(&channel) {
-                        handle.relay_publish(sender, body, meta).await;
+                        let echo = echo.map(|e| (e, sender.network.clone()));
+                        handle.relay_publish(sender, body, meta, echo).await;
                     }
                 }
             }

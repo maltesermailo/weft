@@ -3,7 +3,7 @@
 **Status:** design (spec amended; implementation pending).
 **Supersedes:** the multi-origin channel model (each network minted its own users'
 channel posts, one-hop mirror, `msgid.origin == poster network`).
-**Companion spec text:** `docs/protocol/weft-protocol-spec.md` §9.1, §11.4, §11.11, §11.13.
+**Companion spec text:** `docs/protocol/weft-spec-v0.11.adoc` §9.1, §11.4, §11.11, §11.13.
 
 ---
 

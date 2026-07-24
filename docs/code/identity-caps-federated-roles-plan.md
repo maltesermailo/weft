@@ -247,7 +247,7 @@ to the vouched account.
     create**, **ns-meta edit** — each over the real bridge, enforced as
     `account@network`. **P5 done.**
 - **P6 ✅ (2026-07-09) — client + spec.**
-  - **Spec** (normative, `weft-protocol-spec.md`): §10.1 account ULID; §10.4
+  - **Spec** (normative, `weft-spec-v0.11.adoc`): §10.1 account ULID; §10.4
     token subject v2 (`pubkey | account-ULID | account@network | UNBOUND`, v1
     denied) + foreign role holders; **new §11.11** federation sessions &
     homeserver authority (FSESSION, content-via-mirror/control-via-session, IP

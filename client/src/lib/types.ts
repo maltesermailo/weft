@@ -33,12 +33,13 @@ export type Msg = {
   net?: string;
   /// §13 `attach.N=` media references (`weft-media://…` URIs), in order.
   attachments?: string[];
-  /// §9.2 client-generated send correlation. On an optimistic placeholder it is
-  /// the key the authoritative `MESSAGE` echoes back so we reconcile (§11.13);
-  /// cleared once the real copy arrives.
-  nonce?: string;
+  /// §3.5 the request label. On an optimistic placeholder it is the key the
+  /// server echoes back on our own `MESSAGE` — locally, or re-attached by our
+  /// server for a home-authoritative channel minted elsewhere (§11.13) — so we
+  /// reconcile; cleared once the real copy arrives.
+  label?: string;
   /// Optimistic placeholder: shown immediately on send, greyed as "sending",
-  /// until the authoritative copy (matched by `nonce`) replaces it.
+  /// until the authoritative copy (matched by `label`) replaces it.
   pending?: boolean;
 };
 

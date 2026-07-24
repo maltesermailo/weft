@@ -754,7 +754,7 @@ impl<S: ControlStream> Session<S> {
     /// never re-forwarded because their origin != our network).
     pub(super) async fn on_bridge_event(
         &mut self,
-        _peer: NetworkName,
+        peer: NetworkName,
         event: SessionEvent,
     ) -> io::Result<()> {
         let SessionEvent::Channel { event, .. } = event else {
@@ -797,8 +797,20 @@ impl<S: ControlStream> Session<S> {
             _ => false, // MEMBER/TYPING/POLICY/MANIFEST not forwarded in M5b
         };
         if forward {
-            if let Ok(line) = Reply::new(event.event).serialize() {
-                self.stream.send_line(&line).await?;
+            // §11.13 the transient reconcile echo rides **only** to the poster's
+            // network (the origin the relay came from), as the same `echo=` tag it
+            // arrived on; every other peer's copy is stripped.
+            let echo = match &event.echo {
+                Some((e, net)) if *net == peer => Some(e.clone()),
+                _ => None,
+            };
+            if let Ok(mut line) = Reply::new(event.event).to_line() {
+                if let Some(e) = echo {
+                    line.tags.insert("echo".to_string(), e);
+                }
+                if let Ok(serialized) = line.serialize() {
+                    self.stream.send_line(&serialized).await?;
+                }
             }
         }
         Ok(())
@@ -1718,8 +1730,21 @@ impl ServerCtx {
         if let Event::Message(m) = &reply.event {
             self.mirror_attachments(peer, &channel, m).await;
         }
+        // §11.13 pair a home-minted relayed post with the waiting session. The home
+        // put the `echo=` tag **only** on our copy (we are the poster's network);
+        // it lives on the wire line, never in stored content. Resolve it to the
+        // poster's session so its optimistic message is delivered as its own
+        // (labelled) — every other recipient saw a copy without it.
+        let origin = match &reply.event {
+            Event::Message(_) => line
+                .tags
+                .get("echo")
+                .and_then(|e| self.take_group_echo(e))
+                .unwrap_or(u64::MAX),
+            _ => u64::MAX,
+        };
         if let Some(handle) = self.registry.get(&channel) {
-            handle.ingest(u64::MAX, record, reply.event).await;
+            handle.ingest(origin, record, reply.event).await;
         }
     }
 

@@ -207,6 +207,12 @@ Strictest-policy negotiation (bridges): `e2ee` > `ephemeral` > `retained(shorter
 [[s6]]
 == 6. Command Reference
 
+This section (with <<s7,§7>>) is the *client↔server* surface: what a client sends and what it
+receives back. The parallel *home↔spoke* (server-to-server) surface is <<s11-14,§11.14>> /
+<<s11-15,§11.15>>; it reuses many of these commands and events, since a federated user's
+server tunnels the commands here to the home and receives these events back — so an entry may
+appear in both references.
+
 Every command accepts a `label` tag (<<s3-5,§3.5>>); the direct response — including `ERR` — echoes it. Each subsection is tagged with its scope: *S*ession · *N*etwork · *NS* namespace · *C* channel · *F* federation/operator. In the tables, the *Cap* column is the required capability (<<s10-4,§10.4>>) — `—` means none — and *→* lists the success event(s) and notable error codes. `|` separates alternatives.
 
 [[s6-1]]
@@ -868,31 +874,37 @@ Accounts carry *verification claims* — `(kind, subject, state)` where `kind` i
 *Tunnels at a glance.* Two networks share *one* authenticated bridge session (<<s11-2,§11.2>> — `AUTH BRIDGE`, ALPN `weft/1` over QUIC stream 0 or WS). Every control-plane tunnel below is multiplexed on that single link; media rides two _separate_ planes. Each tunnel is one-directional in intent (the return of an effect is usually a *fresh* delivery, not a threaded reply — see the social layer, <<s11-12,§11.12>>):
 
 ----
-              NETWORK  H                                     NETWORK  P
-  ┌─ one bridge session ─── AUTH BRIDGE (proves the network key) ───────────────┐
-  │                                                                            │
-  │        manifest control        ◄───── PROPOSE / ACCEPT / REQUEST ─────►    │  §11.1
-  │                                        ADD / REMOVE / SEVER  (+ MANIFEST)
-  │                                                                            │
-  │        event mirror            ──── H-origin events ──────────────────►    │  §11.4
-  │        (one hop, local-origin) ◄──────────────── P-origin events ─────     │       MESSAGE/EDITED/
-  │                                                                            │       DELETED/REACTION/PROFILE
-  │        history backfill        ──── HISTORY ──────────────────────────►    │  §11.7
-  │                                ◄──────────── BATCH / STREAM ───────────     │       bounded scrollback
-  │                                                                            │
-  │        report forwarding       ──── REPORT-FORWARD ───────────────────►    │  §11.9  (reporter stripped)
-  │                                                                            │
-  │        FSESSION — admin        ──── OPEN / CMD ───────────────────────►    │  §11.11 foreign user's
-  │        (homeserver authority)  ◄──────────────────── REPLY ───────────     │       control/admin cmds
-  │                                                                            │
-  │        FSESSION — social       ──── OPEN / CMD ───────────────────────►    │  §11.12 FRIEND*/CALL*/
-  │        (friend-delivery, 1-way)    (fire-and-forget; effects return as         GROUP SYNC/RELAY/
-  │                                     a NEW reverse delivery)                    MUT/BACKFILL/ROSTER
-  └────────────────────────────────────────────────────────────────────────────┘
-  ═══════════════════════ separate data / media planes ══════════════════════════
-           media mirror           ──── MIRROR <hash> (self-auth) ────────►       §11.8  blob bytes (pull)
-           voice relay            ◄═══════════ audio (LiveKit cascade) ══════►    §16    IP-safe, server↔server
+       NETWORK  S  (a spoke for #ns/chan)                     NETWORK  H  (its home)
+  ┌─ one bridge session — AUTH BRIDGE (each proves its network key) ──────────────────
+  │
+  │  manifest control   ◄──── PROPOSE / ACCEPT / REQUEST / ADD / REMOVE / SEVER ───►   §11.1
+  │  (symmetric)              (+ MANIFEST announced to members)
+  │
+  │  channel relay      ───── CHANNEL RELAY (mint) · MUT · BACKFILL ───────────────►   §11.13
+  │  (spoke → home)           a member's post/edit, sent to the home to be minted
+  │
+  │  event mirror       ◄──── home-origin events, one hop ─────────────────────────    §11.4
+  │  (home → spokes)          MESSAGE / EDITED / DELETED / REACTION / PROFILE
+  │
+  │  history backfill   ───── HISTORY ──►    ◄── BATCH / STREAM ───────────────────    §11.7
+  │
+  │  FSESSION — admin   ───── OPEN / CMD  (a foreign user's §6 admin command) ─────►   §11.11
+  │  (homeserver auth)  ◄──── REPLY  (the labelled §7 ack)                             vs H's grants
+  │
+  │  FSESSION — social  ───── OPEN / CMD  (FRIEND* / CALL* / GROUP*) ──────────────►   §11.12
+  │  (friend-delivery)        fire-and-forget; effects return as a fresh reverse delivery
+  │
+  │  report forwarding  ───── REPORT-FORWARD  (reporter stripped) ────────────────►   §11.9
+  └───────────────────────────────────────────────────────────────────────────────────
+  ══════════════════════ separate data / media planes ════════════════════════════════
+     media mirror        ───── MIRROR <hash> (self-auth) ──► pull                      §11.8
+     voice relay         ◄═══════════ audio (LiveKit cascade) ═══════►                 §16
 ----
+
+The manifest, media, and voice tunnels are *symmetric* (either peer initiates for its own
+scopes); the *channel relay* and *event mirror* are *home-authoritative* — a channel's home
+mints and fans out, spokes relay to it (<<s11-13,§11.13>>). Roles are per-scope: a network is
+the home of the namespaces it owns and a spoke for the rest.
 
 [cols="14,12,20,26,22,6",options="header"]
 |===
@@ -1158,19 +1170,20 @@ never connects to the home.
 ----
    NETWORK  S  (spoke — alice is a member)          NETWORK  H  (home — owns #ns/chan)
  ┌────────────────────────────────────────┐       ┌────────────────────────────────────────┐
- │ alice: MSG #ns/chan :hi  (nonce=N)      │       │                                        │
+ │ alice: @label=L MSG #ns/chan :hi        │       │                                        │
  │   │                                     │       │                                        │
  │   ▼  (1) optimistic echo — show "hi"    │       │                                        │
- │       now, pending, keyed by nonce N    │       │                                        │
- │   │                                     │       │                                        │
+ │       now, pending, keyed by label L    │       │                                        │
+ │   │   (S mints echo E, remembers E→alice)│      │                                        │
  │   ▼        relay leg  (spoke → home)     │ ────▶ │ (2) mint msgid = H/<ULID>              │
  │  CHANNEL RELAY #ns/chan alice@S :hi     │       │     single ULID writer = the order     │
- │  nonce=N   (no @id  =  "mint this")     │       │   │                                    │
+ │  echo=E   (no @id  =  "mint this")      │       │   │                                    │
  │                                         │       │   ├─▶ (3) deliver to H's local members  │
- │                                         │       │   │                                    │
- │  (5) reconcile: match nonce=N →         │ ◀──── │ (4) mirror one hop (home-origin)       │
- │      replace pending with H/<ULID>      │       │  MESSAGE @msgid=H/<ULID> nonce=N :hi    │
- │      (now confirmed, in canonical order)│       │     event mirror (home → every spoke)  │
+ │                                         │       │   │      (no echo — not the poster)     │
+ │  (5) match echo E → alice's session,    │ ◀──── │ (4) mirror one hop (home-origin); the  │
+ │      deliver as her @label=L echo,      │       │     forwarder puts echo E as echo= on │
+ │      strip E → she reconciles by label  │       │     THIS copy only (poster's network)  │
+ │                                         │       │  MESSAGE @msgid=H/<ULID> echo=E :hi    │
  └────────────────────────────────────────┘       └────────────────────────────────────────┘
         └───────── one authenticated bridge session (AUTH BRIDGE, network key) ─────────┘
 
@@ -1190,21 +1203,23 @@ is `h.example`. The relay leg carries `CHANNEL RELAY` inside the `FSESSION` cond
 one bridge; the return is a bare `MESSAGE` on the same bridge:
 
 ----
- client → S   @nonce=n-8F3A;fmt=md MSG #gaming/general :hi everyone
-              (S renders it at once — pending, keyed by nonce n-8F3A)
+ client → S   @label=L1;fmt=md MSG #gaming/general :hi everyone
+              (S renders it at once — pending, keyed by label L1; S mints echo E1,
+               remembers E1 → this session)
 
  S → H        relay leg — CHANNEL RELAY tunnelled in FSESSION (fire-and-forget):
               FSESSION 1 OPEN alice
-              FSESSION 1 CMD :@nonce=n-8F3A;fmt=md CHANNEL RELAY #gaming/general alice@s.example :hi everyone
+              FSESSION 1 CMD :@echo=E1;fmt=md CHANNEL RELAY #gaming/general alice@s.example :hi everyone
               (no @id  =  "mint this")
 
  H            mints  msgid = h.example/01ARZ3NDEKTSV4RRFFQ69G5FAV, delivers to H's locals
 
- H → S        event mirror — a bare line on the bridge, home-origin, nonce carried:
-              @msgid=h.example/01ARZ3NDEKTSV4RRFFQ69G5FAV;nonce=n-8F3A;fmt=md MESSAGE #gaming/general alice@s.example :hi everyone
+ H → S        event mirror — home-origin; the forwarder re-emits the echo= tag on THIS
+              copy only (S is the poster's network); every other spoke's copy omits it:
+              @msgid=h.example/01ARZ3NDEKTSV4RRFFQ69G5FAV;echo=E1;fmt=md MESSAGE #gaming/general alice@s.example :hi everyone
 
- S → client   the same MESSAGE; client matches nonce=n-8F3A → replaces the pending copy
-              with the confirmed h.example/01ARZ3NDEKTSV4RRFFQ69G5FAV (now in canonical order)
+ S → client   S matches echo=E1 → alice's session, strips the echo, delivers it as her own
+              @label=L1 MESSAGE; her client reconciles the pending copy by label L1
 ----
 
 Recovery, after `S` was unreachable — `S` pulls, `H` replays with `@id` **present** (the one
@@ -1223,28 +1238,32 @@ them — the server emits them). Channel membership is carried by the manifest (
 |===
 | Verb | Syntax | Direction | Meaning
 
-| `CHANNEL RELAY` | `CHANNEL RELAY <#ns/chan> <sender@net> :<body>` + tags `id=<msgid>`, `echo=<token>`, message meta (`nonce=`/`reply-to=`/`thread=`/`attach.N=`) | both | `id=` *absent* = a spoke relayed a member's post to the home → the home mints + fans out; `id=` *present* = a home-minted message → the spoke ingests + delivers locally.
+| `CHANNEL RELAY` | `CHANNEL RELAY <#ns/chan> <sender@net> :<body>` + tags `id=<msgid>`, `echo=<token>`, message meta (`reply-to=`/`thread=`/`attach.N=`) | both | `id=` *absent* = a spoke relayed a member's post to the home → the home mints + fans out; `id=` *present* = a home-minted message → the spoke ingests + delivers locally.
 | `CHANNEL MUT` | `CHANNEL MUT <#ns/chan> <sender@net> <root-msgid> <op> [:arg]` + tag `id=<msgid>` | both | A message mutation (`op` ∈ `edit`\|`delete`\|`react-add`\|`react-remove`; `arg` = body/emoji). `id=` absent = spoke → home (relay to apply + mint into order); present = home-applied → spoke ingests. The home applies iff `sender` authored the target or holds the moderation cap (<<s11-4,§11.4>>).
 | `CHANNEL BACKFILL` | `CHANNEL BACKFILL <#ns/chan>` + tag `after=<msgid>` | spoke → home | Recovery pull after a home outage or reconnect: replay every channel event after the cursor (or all). The home answers with `CHANNEL RELAY` (`id=` present) ingests. Idempotent on msgid; a non-member / unmanifested network gets nothing (anti-enumeration, <<s11-1,§11.1>>).
 |===
 
-*The nonce — optimistic reconcile.* A client stamps each `MSG` with an opaque `nonce` (a
-`MsgMeta` tag, <<s9-2,§9.2>>) and renders the message immediately as _pending_. The home
-carries that nonce through the mint onto the authoritative `MESSAGE`, which reaches the
-poster's network over the *event mirror* — so **every one of the sender's devices** (not
-just the posting session) reconciles its pending copy by matching the nonce and swaps in the
-home-minted id. This is what makes reconcile airtight across devices — a per-session ack
-token could not. If the home is slow or was unreachable, the message simply reconciles
-whenever it lands (live, or later via `CHANNEL BACKFILL`). Live home→spoke delivery is always
-the ordinary event mirror (<<s11-4,§11.4>>); `CHANNEL RELAY` with `@id` present is used only
-for backfill replay.
+*Optimistic reconcile — the label, and a transient echo.* The poster's client works exactly
+as on a single network (<<s3-5,§3.5>>): it stamps its `MSG` with a `label`, renders the
+message immediately as _pending_, and reconciles when it sees *its own* echoed `MESSAGE`
+carrying that label. The only extra machinery is server-side and invisible to users. When a
+spoke relays a post it mints an opaque *echo* token, remembers `echo → the posting session`,
+and puts the echo on the `CHANNEL RELAY`. The home mints and mirrors the message home-origin;
+its bridge forwarder emits that echo (the same `echo=` tag it arrived on) **only on the copy to the poster's
+network** and strips it everywhere else. The poster's spoke matches the echo back to the
+waiting session, delivers the minted message to it as that session's own *labelled* copy —
+the ordinary <<s3-5,§3.5>> ack — and strips the echo. So the echo lives on the F→home→F
+round-trip and nowhere else: never persisted, never on another member's or network's copy,
+never seen by a client. If the home was slow or unreachable, the message still reconciles
+when it lands live or via `CHANNEL BACKFILL`. Live home→spoke delivery is always the ordinary
+event mirror (<<s11-4,§11.4>>); `CHANNEL RELAY` with `@id` present is used only for backfill.
 
 [NOTE]
 .Staying fast (non-normative rationale)
 ====
 Home-authority adds a round-trip only to a cross-network post's _finalization_, not to its
 appearance or to reads: (a) the spoke renders the poster's own message *optimistically* at
-once and reconciles it to the home-minted copy by matching the `nonce`; (b) `HISTORY` and
+once and reconciles it to the home-minted copy by matching the `label`; (b) `HISTORY` and
 scrollback are served from the *local replica* with no round-trip; (c) the relay leg is
 fire-and-forget and pipelined, so posts do not head-of-line-block on confirmation; (d) a
 member whose network _is_ the home mints locally with no relay at all — the common case.
@@ -1263,11 +1282,18 @@ the blob's origin network (<<s11-8,§11.8>>).
 [[s11-14]]
 === 11.14 Federation command reference
 
-Every command here is exchanged *server-to-server* over a bridge session (<<s11-2,§11.2>>) and
-is *invisible on a single-network server* — a client can neither send nor receive it (the
-client-facing command surface is <<s6,§6>>). The one exception is `FEDERATE`, a user's request
-to their _own_ server, listed last. This is a *non-normative index*: the normative syntax,
-gating, and state transitions live in the cited subsection.
+This is the *home↔spoke* command surface — the federation counterpart to the client↔server
+reference (<<s6,§6>>). Implement it to be a server that federates. It has two kinds of entry:
+
+* commands that exist *only* between servers — bridge control, the home-authoritative content
+  tunnels, backfill, media mirror, report forwarding, voice;
+* ordinary <<s6,§6>> commands a federated user runs on the home by *tunnelling* them over an
+  `FSESSION` — these appear in *both* references (client→own server in <<s6,§6>>; own
+  server→home here).
+
+Content verbs (`MSG`/`EDIT`/`DELETE`/`REACT`) are the one exception to that second kind: they
+do not tunnel as-is — they become the channel/group content tunnels below. Non-normative
+index; normative syntax lives in the cited subsection.
 
 _Direction:_ `S→H` = spoke → home · `H→S` = home → spokes · `↔` = either peer · `P↔P` = peer ↔
 peer · `→members` = fan-out to local members · `client→home` = a user to their own server.
@@ -1279,6 +1305,17 @@ peer · `→members` = fan-out to local members · `client→home` = a user to t
 
 | `AUTH BRIDGE` | `AUTH BRIDGE <peer-network> <b64-key>` | ↔ | Open a bridge; the peer proves control of its network key (answered by `CHALLENGE` → `AUTH PROOF`, <<s6-1,§6.1>>). Pinned or accept-any.
 | `FSESSION` | `FSESSION <fsid> OPEN <account> \| CMD :<line> \| REPLY :<line> \| CLOSE` | ↔ | Multiplex a federated user's control/admin session; `H` attributes each `CMD` to `account@peer` and enforces against its own grants. Also the fire-and-forget conduit the channel + group tunnels ride.
+|===
+
+.Client commands a federated user runs, tunnelled as `FSESSION CMD :<§6 line>` — *shared with <<s6,§6>>*
+[cols="22,52,26",options="header"]
+|===
+| Class | The <<s6,§6>> verbs (syntax there) | On the home
+
+| Capabilities & roles | `GRANT`, `REVOKE`, `ROLE CREATE\|EDIT\|DELETE\|ASSIGN`, `CAPS` | Checked against `H`'s grant store for `account@F`; the signed `TOKEN` returns via `FSESSION REPLY` (<<s10-4,§10.4>>).
+| Moderation | `MUTE`/`UNMUTE`, `BAN`/`UNBAN`, `KICK`, `REPORT`, `REPORTS LIST\|RESOLVE` | Cap-gated on `H`; the `MODERATED`/ack returns via `FSESSION REPLY` (<<s6-7,§6.7>>).
+| Channel & namespace admin | `CHANNEL CREATE\|META\|POLICY\|DELETE\|RENAME`, `NS CREATE\|META\|VISIBILITY\|DELEGATE\|TRANSFER\|RECOVERY\|RECOVER\|DELETE`, `INVITE MINT\|REVOKE` | Owner/operator authority is *local-only* — the foreign actor holds exactly what `H` granted `account@F` (<<s11-11,§11.11>>).
+| Social (account-level) | `FRIEND ADD\|ACCEPT\|REMOVE`, `CALL [ACCEPT\|DECLINE\|END]`, `GROUP CREATE\|ADD\|REMOVE\|LEAVE\|NAME\|CALL\|HANGUP` | The <<s6-8,§6.8>> surface; rides the same conduit, effects return as a fresh reverse delivery.
 |===
 
 .Manifest lifecycle (<<s11-1,§11.1>>, <<s11-3,§11.3>>)
@@ -1349,11 +1386,12 @@ peer · `→members` = fan-out to local members · `client→home` = a user to t
 [[s11-15]]
 === 11.15 Federation event reference
 
-Events a server emits as part of federation. The bridge-handshake and manifest/block events
-travel *server-to-server* or *to local members*; the *mirrored content* events are the
-ordinary <<s7,§7>> events carried over the bridge with their origin msgids intact
-(<<s11-4,§11.4>>). None originate from a client. Non-normative index; event shapes are
-normative in the cited section.
+This is the *home↔spoke* event surface — the federation counterpart to <<s7,§7>>. A federated
+session both emits and receives events. Some are *federation-only* — the bridge handshake,
+`MANIFEST`/`NETBLOCKED`, backfill framing. The rest are ordinary <<s7,§7>> events that *cross
+the boundary* and so appear in *both* references: the *mirrored* channel events (live, one
+hop), and the labelled ack a *tunnelled command* yields, returned over `FSESSION REPLY`.
+Non-normative index; event shapes are normative in the cited section.
 
 .Bridge handshake (<<s11-2,§11.2>>)
 [cols="16,46,14,24",options="header"]
@@ -1378,8 +1416,19 @@ normative in the cited section.
 |===
 | Event | Syntax | Direction | Emitted when
 
-| `MESSAGE` / `EDITED` / `DELETED` / `REACTION` | shapes in <<s7,§7>> | H→S (mirror, one hop) | Live channel events fanned out by the home; `msgid` origin = the home, `nonce` echoed for reconcile (<<s11-13,§11.13>>).
+| `MESSAGE` / `EDITED` / `DELETED` / `REACTION` | shapes in <<s7,§7>> | H→S (mirror, one hop) | Live channel events fanned out by the home; `msgid` origin = the home. On a relayed post's copy to the *poster's* network only, the forwarder re-emits the `echo=` tag for the spoke's session reconcile (<<s11-13,§11.13>>).
 | `PROFILE` | signed profile update (<<s10-3,§10.3>>) | ↔ mirror | A federated user's profile crosses the bridge with its account-scoped signature.
+|===
+
+.Replies to a tunnelled command — the <<s7,§7>> ack, returned over `FSESSION REPLY` (*shared with <<s7,§7>>*)
+[cols="24,40,36",options="header"]
+|===
+| Event | Shape | Returned for the tunnelled
+
+| `TOKEN` | <<s7,§7>> (`@token=`) | `GRANT` / `REVOKE` / `ROLE ASSIGN` (the signed cap).
+| `MODERATED` | <<s7,§7>> | `MUTE` / `BAN` / `KICK`.
+| `INVITED` | <<s7,§7>> (`@token=`) | `INVITE MINT`.
+| `CHANNEL` / `CHANNEL-LAYOUT` / `NS` / `ROLE-MEMBER` / `REPORTS`… | <<s7,§7>> | its admin/query command's labelled ack (any <<s7,§7>> event the <<s6,§6>> verb produces).
 |===
 
 .Backfill data (<<s11-7,§11.7>>)

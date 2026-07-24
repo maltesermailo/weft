@@ -84,11 +84,9 @@ pub enum ClientEvent {
         thread: Option<String>,
         /// `fmt=md` — render the body as markdown (§9.4).
         md: bool,
-        /// `nonce=` — the client-generated send correlation (§9.2), echoed back so
-        /// the sender's clients reconcile the optimistic placeholder with this
-        /// authoritative copy (across devices, and across networks for a
-        /// home-authoritative channel, §11.13).
-        nonce: Option<String>,
+        /// The request `label` (§3.5) when this is our own echoed copy — the key an
+        /// optimistic send reconciles against, local or federated (§11.13).
+        label: Option<String>,
     },
     /// `TYPING <#chan> start|stop` from another member (§7).
     Typing {
@@ -530,6 +528,9 @@ pub fn on_line<E: EventSink>(
         _ => {}
     }
     // Steady-state events → structured pushes.
+    // §3.5 the request label rides our own echoed copies (MESSAGE/EDITED/…) — the
+    // client reconciles an optimistic send by matching it (§11.13).
+    let label = reply.label.clone();
     match reply.event {
         // §7 HISTORY framing — toggle the batch flag so the messages between
         // are tagged as older history for the frontend to prepend.
@@ -557,7 +558,7 @@ pub fn on_line<E: EventSink>(
             md: m.meta.fmt.as_deref() == Some("md"),
             attachments: m.meta.attachments.clone(),
             system: m.meta.system.clone(),
-            nonce: m.meta.nonce.clone(),
+            label,
             body: m.body,
         }),
         Event::Member {
@@ -992,7 +993,7 @@ pub fn build_msg(
     reply_to: Option<String>,
     attachments: Vec<String>,
     thread: Option<String>,
-    nonce: Option<String>,
+    label: Option<String>,
 ) -> Result<String, String> {
     let target: Target = target.parse().map_err(|_| "bad target".to_string())?;
     let reply_to = match reply_to.filter(|r| !r.is_empty()) {
@@ -1015,18 +1016,21 @@ pub fn build_msg(
         reply_to,
         thread,
         attachments,
-        // §9.2/§11.13 optimistic-send correlation: the server echoes it on the
-        // authoritative MESSAGE so the client reconciles its placeholder across
-        // every device — essential when a home-authoritative channel mints the
-        // message on another network.
-        nonce: nonce.filter(|n| !n.is_empty()),
         ..Default::default()
     };
-    weft_proto::Request::new(weft_proto::Command::Msg {
+    let cmd = weft_proto::Command::Msg {
         target,
         body: Some(body.to_string()),
         meta,
-    })
+    };
+    // §3.5/§11.13 the label is the send correlation: the server echoes it on our
+    // own `MESSAGE` copy (locally, or re-attached by our server for a message a
+    // home-authoritative channel minted elsewhere), so the client reconciles its
+    // optimistic placeholder by label — one mechanism, local or federated.
+    match label.filter(|l| !l.is_empty()) {
+        Some(l) => weft_proto::Request::with_label(cmd, &l),
+        None => weft_proto::Request::new(cmd),
+    }
     .serialize()
     .map_err(|e| e.to_string())
 }

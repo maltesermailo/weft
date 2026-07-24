@@ -3,7 +3,7 @@
 The single index of everything shipped, in progress, and planned — unifying the
 per-feature plans under [`docs/`](./docs) and the client tiers under
 [`client/`](./client). **Detail lives in the linked source doc; this page is the
-map + status.** Normative behavior is [`docs/protocol/weft-protocol-spec.md`](docs/protocol/weft-protocol-spec.md);
+map + status.** Normative behavior is [`docs/protocol/weft-spec-v0.11.adoc`](docs/protocol/weft-spec-v0.11.adoc);
 server milestones + conventions are in [`CLAUDE.md`](./CLAUDE.md).
 
 **Status:** ✅ shipped · ◑ partial · ⏳ in progress · ⬜ planned · 🚫 deferred (not building)
@@ -12,7 +12,7 @@ server milestones + conventions are in [`CLAUDE.md`](./CLAUDE.md).
 
 | Area | Detail doc |
 | --- | --- |
-| Protocol (normative) | [docs/protocol/weft-protocol-spec.md](docs/protocol/weft-protocol-spec.md) |
+| Protocol (normative) | [docs/protocol/weft-spec-v0.11.adoc](docs/protocol/weft-spec-v0.11.adoc) |
 | Protocol flows (conceptual) | [docs/protocol/weft-protocol-flows.md](docs/protocol/weft-protocol-flows.md) · [weft-federation-flows.md](docs/protocol/weft-federation-flows.md) |
 | Server architecture | [docs/architecture/weftd-server-architecture.md](docs/architecture/weftd-server-architecture.md) |
 | Security posture & threat model | [docs/security/security-posture.md](docs/security/security-posture.md) · [threat-model.md](docs/security/threat-model.md) |
@@ -122,4 +122,4 @@ task appears to need one; don't add the dependency.
 
 ---
 
-*Open questions and any protocol-shape decisions live in spec [§18](docs/protocol/weft-protocol-spec.md). When a plan doc and this index disagree, the plan doc (and ultimately the spec) win — update both in the same PR.*
+*Open questions and any protocol-shape decisions live in spec [§18](docs/protocol/weft-spec-v0.11.adoc). When a plan doc and this index disagree, the plan doc (and ultimately the spec) win — update both in the same PR.*

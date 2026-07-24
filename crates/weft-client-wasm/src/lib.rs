@@ -247,7 +247,7 @@ impl WeftClient {
                     opt("replyTo"),
                     attachments,
                     opt("thread"),
-                    opt("nonce"),
+                    opt("label"),
                 )?
             }
             "edit" => build_edit(&arg("msgid"), &arg("body"))?,

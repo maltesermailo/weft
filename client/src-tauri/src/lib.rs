@@ -298,7 +298,7 @@ fn send_message(
     reply_to: Option<String>,
     attachments: Option<Vec<String>>,
     thread: Option<String>,
-    nonce: Option<String>,
+    label: Option<String>,
 ) -> Result<(), String> {
     conn.send(weft::build_msg(
         &target,
@@ -306,7 +306,7 @@ fn send_message(
         reply_to,
         attachments.unwrap_or_default(),
         thread,
-        nonce,
+        label,
     )?)
 }
 

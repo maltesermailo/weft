@@ -4351,41 +4351,96 @@ async fn home_authoritative_channel_mints_relayed_spoke_post_and_mirrors_it() {
     propose(&mut bridge, &peer_key, &["#general"]).await;
     assert!(matches!(ada.recv().await.event, Event::Manifest { .. }));
 
-    // A spoke relays alice's post to us (the home): @id absent = mint request.
+    // A spoke relays alice's post to us (the home): @id absent = mint request,
+    // carrying the transient F↔H echo the poster's spoke is waiting on.
     let inner = weft_proto::Request::new(weft_proto::Command::ChannelRelay {
         channel: "#general".parse().unwrap(),
         sender: "alice@peer.example".parse().unwrap(),
         msgid: None,
         body: "hi from alice".to_string(),
-        meta: weft_proto::MsgMeta {
-            nonce: Some("n-alice-1".to_string()),
-            ..Default::default()
-        },
-        echo: None,
+        meta: weft_proto::MsgMeta::default(),
+        echo: Some("e-alice-1".to_string()),
     })
     .serialize()
     .unwrap();
     bridge.send("FSESSION 1 OPEN alice");
     bridge.send(&format!("FSESSION 1 CMD :{inner}"));
 
-    // ada (a local home member) sees alice's message, minted by the home.
+    // ada (a local home member) sees alice's message, minted by the home — and
+    // *without* the echo (only the poster's network's copy carries it).
     let Event::Message(m) = ada.recv().await.event else {
         panic!("expected alice's minted message");
     };
     assert_eq!(m.sender.to_string(), "alice@peer.example");
     assert_eq!(m.body, "hi from alice");
     assert_eq!(m.msgid.origin().as_str(), "test.example"); // home is the origin
-    assert_eq!(m.meta.nonce.as_deref(), Some("n-alice-1")); // nonce carried for reconcile
 
-    // And the home-minted message is mirrored back out to the peer, nonce intact.
+    // The home-minted message is mirrored back out to the poster's network
+    // (peer.example) carrying the echo as a `nonce=` tag — so its spoke can pair it
+    // with the waiting session. No other recipient's copy carries it.
     loop {
         let line = bridge.recv_raw().await;
         if line.contains("MESSAGE #general alice@peer.example") {
             assert!(line.contains("hi from alice"), "{line}");
             assert!(line.contains("test.example/"), "{line}"); // home-minted origin
-            assert!(line.contains("nonce=n-alice-1"), "{line}"); // reconcile token rides the mirror
+            assert!(line.contains("echo=e-alice-1"), "{line}"); // echo rides only to the origin network
             break;
         }
+    }
+}
+
+#[tokio::test]
+async fn spoke_delivers_home_minted_post_as_the_posters_labelled_echo() {
+    // §11.13: a spoke poster's message comes back over the mirror carrying the
+    // transient echo (as `nonce=`); the spoke pairs it with the waiting session and
+    // delivers it as that session's own **labelled** message — the §3.5 ack, by
+    // label, exactly like a local send. No user ever sees the echo.
+    let peer_key = Keypair::generate();
+    let ctx = ctx_bridged(&["#general"], &[], "home.example", &peer_key.public());
+    ctx.registry
+        .set_home("#general".parse().unwrap(), "home.example".parse().unwrap());
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    let mut bridge = bridged_peer(&ctx, "home.example", &peer_key).await;
+    propose(&mut bridge, &peer_key, &["#general"]).await;
+    assert!(matches!(ada.recv().await.event, Event::Manifest { .. }));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.set_friend_deliver_sink(tx);
+
+    // ada posts with a label → the spoke relays to the home, carrying an echo token.
+    ada.send("@label=post MSG #general :hello");
+    let relayed = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("relay")
+        .expect("sink open");
+    let weft_proto::Command::ChannelRelay {
+        echo: Some(token),
+        msgid: None,
+        sender,
+        ..
+    } = weft_proto::Request::parse(&relayed.line).unwrap().command
+    else {
+        panic!(
+            "expected a spoke relay with an echo token, got {:?}",
+            relayed.line
+        );
+    };
+    assert_eq!(sender.to_string(), "ada@test.example");
+
+    // The home mints it and mirrors it back to us carrying the same echo as `nonce=`.
+    let mid = "home.example/01ARZ3NDEKTSV4RRFFQ69G5FB0";
+    bridge.send(&format!(
+        "@msgid={mid};echo={token} MESSAGE #general ada@test.example :hello"
+    ));
+
+    // ada receives her message WITH the label — reconciled as her own send.
+    let reply = ada.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("post"));
+    match reply.event {
+        Event::Message(m) => {
+            assert_eq!(m.body, "hello");
+            assert_eq!(m.msgid.to_string(), mid);
+        }
+        e => panic!("expected labelled message, got {e:?}"),
     }
 }
 

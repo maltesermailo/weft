@@ -1198,14 +1198,16 @@
           break;
         }
         const ch = ensureChannel(key);
-        // §11.13 optimistic reconcile: our own live message carrying our nonce
-        // replaces the pending placeholder we showed on send, rather than adding a
-        // duplicate — matched across devices and across networks by the nonce.
-        if (e.own && e.nonce) {
-          const idx = ch.messages.findIndex((m) => m.pending && m.nonce === e.nonce);
+        // §3.5/§11.13 optimistic reconcile: our own echoed message carrying our
+        // label replaces the pending placeholder we showed on send, rather than
+        // adding a duplicate. Works identically for a local send and for one a
+        // home-authoritative channel minted elsewhere (our server re-attaches the
+        // label to the mirrored copy).
+        if (e.own && e.label) {
+          const idx = ch.messages.findIndex((m) => m.pending && m.label === e.label);
           if (idx !== -1) {
             ch.messages.splice(idx, 1, msg);
-            const ti = threadMessages.findIndex((m) => m.pending && m.nonce === e.nonce);
+            const ti = threadMessages.findIndex((m) => m.pending && m.label === e.label);
             if (ti !== -1) threadMessages = threadMessages.map((m, i) => (i === ti ? msg : m));
             break;
           }
@@ -1864,7 +1866,7 @@
     // (even when a home-authoritative channel mints it on another network) and
     // reconcile replaces this placeholder — so the send feels instant regardless
     // of federation latency.
-    const nonce = crypto.randomUUID();
+    const label = crypto.randomUUID();
     ensureChannel(target).messages.push(
       mkMsg({
         author: account,
@@ -1875,7 +1877,7 @@
         md: true,
         replyTo: savedReply,
         attachments: attachments.length ? attachments : undefined,
-        nonce,
+        label,
         pending: true,
       }),
     );
@@ -1885,12 +1887,12 @@
     composer = "";
     pendingAttachments = [];
     weft
-      .sendMessage(target, text, savedReply, attachments, undefined, nonce)
+      .sendMessage(target, text, savedReply, attachments, undefined, label)
       .catch((e) => {
         // The send was rejected (e.g. an over-long body): drop the placeholder,
         // restore the text so it isn't silently eaten, and surface the error.
         const ch = channels[target];
-        const i = ch?.messages.findIndex((m) => m.nonce === nonce) ?? -1;
+        const i = ch?.messages.findIndex((m) => m.label === label) ?? -1;
         if (ch && i !== -1) ch.messages.splice(i, 1);
         composer = text;
         toast(String(e), "error");

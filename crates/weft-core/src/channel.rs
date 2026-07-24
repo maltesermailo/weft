@@ -36,6 +36,12 @@ const INBOX_CAPACITY: usize = 256;
 pub struct ChannelEvent {
     pub origin: SessionId,
     pub event: Event,
+    /// §11.13 a transient reconcile token, set only on a home-minted relayed post:
+    /// `(echo, origin-network)`. A bridge forwarder emits it (as a `nonce=` tag)
+    /// **only** on the copy to the origin network, so the poster's spoke can pair
+    /// the minted message with the waiting session; every other recipient — local
+    /// or peer — gets it stripped. Never stored, never on a local member's copy.
+    pub echo: Option<(String, NetworkName)>,
 }
 
 /// What a joiner gets back; the session builds the §6.3 JOIN response
@@ -85,6 +91,9 @@ enum Cmd {
         sender: UserRef,
         body: String,
         meta: MsgMeta,
+        /// `(echo, origin-network)` — the transient reconcile token to echo back
+        /// to the poster's network only (§11.13).
+        echo: Option<(String, NetworkName)>,
     },
     /// §11.13 home-authoritative apply of a **relayed** mutation from a
     /// (possibly foreign) `sender`: `op` ∈ `edit`|`delete`|`react-add`|
@@ -232,10 +241,21 @@ impl ChannelHandle {
     /// a home-origin msgid and broadcasts it — the ordinary event mirror then fans
     /// it out one hop to every spoke (including the poster's, where the carried
     /// nonce reconciles the optimistic copy).
-    pub async fn relay_publish(&self, sender: UserRef, body: String, meta: MsgMeta) {
+    pub async fn relay_publish(
+        &self,
+        sender: UserRef,
+        body: String,
+        meta: MsgMeta,
+        echo: Option<(String, NetworkName)>,
+    ) {
         let _ = self
             .inbox
-            .send(Cmd::RelayPublish { sender, body, meta })
+            .send(Cmd::RelayPublish {
+                sender,
+                body,
+                meta,
+                echo,
+            })
             .await;
     }
 
@@ -518,7 +538,12 @@ impl Actor {
                     })),
                 );
             }
-            Cmd::RelayPublish { sender, body, meta } => {
+            Cmd::RelayPublish {
+                sender,
+                body,
+                meta,
+                echo,
+            } => {
                 let msgid = self.mint();
                 let record = EventRecord {
                     scope: self.scope.clone(),
@@ -532,11 +557,11 @@ impl Actor {
                 };
                 self.persist(record).await;
                 self.record_media_refs(&msgid, &meta).await;
-                // SENTINEL_ORIGIN: nobody's own local echo — fan out to every local
-                // member, and let the bridge forwarders mirror it (home-origin) to
-                // the spokes. The poster's client reconciles via `meta.nonce`.
-                self.broadcast(
-                    SENTINEL_ORIGIN,
+                // Fan out to every local member (no echo — they're not the poster),
+                // and let the bridge forwarders mirror it home-origin to the spokes.
+                // The `echo` rides only to the poster's network, where its spoke
+                // pairs the minted message with the waiting session (§11.13).
+                self.broadcast_relayed(
                     Event::Message(Box::new(MessageEvent {
                         target: Target::Channel(self.name.clone()),
                         sender,
@@ -546,6 +571,7 @@ impl Actor {
                         edited: None,
                         edited_at: None,
                     })),
+                    echo,
                 );
             }
             Cmd::Edit {
@@ -942,7 +968,21 @@ impl Actor {
 
     fn broadcast(&self, origin: SessionId, event: Event) {
         // Err = no subscribers right now; nothing to deliver, not a fault.
-        let _ = self.events.send(ChannelEvent { origin, event });
+        let _ = self.events.send(ChannelEvent {
+            origin,
+            event,
+            echo: None,
+        });
+    }
+
+    /// §11.13 broadcast a home-minted relayed post carrying its transient echo →
+    /// the bridge forwarder emits the echo only on the origin network's copy.
+    fn broadcast_relayed(&self, event: Event, echo: Option<(String, NetworkName)>) {
+        let _ = self.events.send(ChannelEvent {
+            origin: SENTINEL_ORIGIN,
+            event,
+            echo,
+        });
     }
 }
 

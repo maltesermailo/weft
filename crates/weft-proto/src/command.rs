@@ -3089,7 +3089,6 @@ mod tests {
                     thread: Some(MSGID.parse().unwrap()),
                     attachments: vec![],
                     system: None,
-                    nonce: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".into()),
                 },
             },
             "req-1",

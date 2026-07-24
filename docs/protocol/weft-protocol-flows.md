@@ -3,7 +3,7 @@
 *A conceptual, flow-by-flow map of the **entire WEFT protocol** — every major
 interaction, as boxes-and-arrows diagrams + tables, with the guarantees that hold at
 each step. This is the "how does it actually move" companion to the normative
-`weft-protocol-spec.md`. Federation gets its own deep dive in
+`weft-spec-v0.11.adoc`. Federation gets its own deep dive in
 `weft-federation-flows.md`; §16 here is the summary that points there.*
 
 **Contents**
@@ -592,5 +592,5 @@ a bug. There is no `UNKNOWN-COMMAND`. `AUTH-FAILED` is uniform.
 | 12 | Report confidentiality | §11, §16 — reporter identity never leaks. |
 | 13 | Auto-federation SSRF | §16 — auto-bridge dialer refuses non-public targets. |
 
-*Normative source: `weft-protocol-spec.md`. Architecture rationale:
+*Normative source: `weft-spec-v0.11.adoc`. Architecture rationale:
 `weftd-server-architecture.md`. Federation deep dive: `weft-federation-flows.md`.*

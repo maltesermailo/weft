@@ -1,7 +1,7 @@
 # Proposed spec amendment — Auto-federation (P0)
 
 Status: **proposed, for review** (2026-07-07). Folds into
-`docs/weft-protocol-spec.md` (§2/§6/§11 + Appendix A) when **P1** lands — kept
+`docs/protocol/weft-spec-v0.11.adoc` (§2/§6/§11 + Appendix A) when **P1** lands — kept
 here until then so the normative spec isn't changed ahead of code. Written in the
 spec's register. Design rationale: `docs/auto-federation-plan.md`.
 

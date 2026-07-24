@@ -1,6 +1,6 @@
 # WEFT Federation Flows
 
-*Conceptual companion to `weft-protocol-spec.md` (§11, §11.10, §16). This document
+*Conceptual companion to `weft-spec-v0.11.adoc` (§11, §11.10, §16). This document
 explains **how two sovereign WEFT networks talk to each other** — the tunnels they
 open, what rides each one, and the guarantees that hold at every hop. It is a map,
 not a wire reference: for exact line syntax see the spec; for the whole single-network
@@ -401,4 +401,4 @@ sequenceDiagram
 ```
 
 *See `weft-protocol-flows.md` for the single-network protocol these tunnels extend, and
-`weft-protocol-spec.md` §11/§16 for the normative rules.*
+`weft-spec-v0.11.adoc` §11/§16 for the normative rules.*

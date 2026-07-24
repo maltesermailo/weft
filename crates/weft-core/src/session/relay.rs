@@ -287,13 +287,24 @@ impl<S: ControlStream> Session<S> {
                 } else {
                     let home = self.ctx.registry.home(&channel);
                     let me = UserRef::new(account.clone(), self.ctx.info.network.clone());
+                    // §11.13 remember (echo → this session) and queue the label: the
+                    // home mints the post and mirrors it back to us carrying this
+                    // echo, and we deliver it as this session's own (labelled)
+                    // message — so the client reconciles it by label, like a local
+                    // send. The echo is stripped before any user sees it.
+                    let token = weft_proto::Ulid::new().to_string();
+                    self.ctx
+                        .register_group_echo(token.clone(), self.id, unix_now_ms());
+                    if let Some(joined) = self.joined.get_mut(&channel) {
+                        joined.pending.push_back(label);
+                    }
                     let cmd = Command::ChannelRelay {
                         channel,
                         sender: me,
                         msgid: None,
                         body,
                         meta,
-                        echo: None,
+                        echo: Some(token),
                     };
                     if let Ok(line) = Request::new(cmd).serialize() {
                         self.ctx.request_friend_deliver(crate::FriendDeliver {
