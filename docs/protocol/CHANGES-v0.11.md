@@ -50,6 +50,10 @@ Nineteen dense enumeration paragraphs restructured into tables and lists, meanin
 
 All §-cross-references machine-audited: **every reference resolves to a real heading** (§11.10 and §9.0 included). The two flow documents are marked **non-normative** at their §6.8 and §11.12 mentions. The §6.2 `categories` row now points at the in-section layout prose instead of "Appendix A layout". Federation-internal group verbs (`GROUP SYNC/RELAY/MUT/BACKFILL/ROSTER`) keep their syntax table in §11.12 by design — they are bridge-only and deliberately absent from the client-facing §6.
 
+## AsciiDoc edition
+
+`weft-spec-v0.11.adoc` is the same document converted and enhanced for AsciiDoc (renderable with `asciidoctor`): a generated left-hand TOC; **427 live cross-reference links** (every `§N.M` mention is now a clickable xref to a stable `[[sN-M]]` anchor — zero unresolved); admonition blocks for the §2.2 anti-enumeration rule (IMPORTANT), the §6.7 honest limitation (NOTE), and the §11.10 owner-TODO block (CAUTION); per-table column-width specs; `[source,json]` listings; document attributes (`revnumber`, `revremark`). Conversion verified lossless: all 259 wire examples extract from the `.adoc` **byte-identical** to the `.md` set and round-trip through the codec. The converter lives at the session scratchpad (`md2adoc.py`) if the `.md` ever needs re-deriving.
+
 ## Verification (all checklist items)
 
 - §11.10 exists; all references land; only owner-flagged `[TODO]`s inside — **pass**
