@@ -215,7 +215,13 @@ Signed NS verbs (`TRANSFER`, `RECOVERY CANCEL`) carry the root signature in a `@
 
 The `NS RECOVER` rungs in brief (normative text: §2.4): a quorum-signed rotation record starts the 7-day rung-2 window (announced, root-cancellable); a network-key-signed record is rung 3 and **applies immediately** — no window, no pending state — permanently marked operator-initiated in `root-history`.
 
-**Channel layout & server-authoritative categories (extension).** Channels carry a `category` (free label) and `position` (integer) set via `CHANNEL META` (§6.3); `CHANNELS <ns>` returns the ordered layout as `CHANNEL-LAYOUT` events sorted by (category, position, name), **led by the namespace's `NS-META`** so a client renders every group — including empty categories — purely from server state. The category *list* itself lives on the namespace (`NS META <ns> categories :<comma-list>`, echoed in NS-META's `cats=` tag); a `category`/`position` change **broadcasts `CHANNEL-LAYOUT`** to the channel's members, so re-ordering reaches every client, not just the mover. Clients keep no category state of their own. Private-namespace layouts are view-gated (invariant 1).
+**Channel layout & server-authoritative categories (extension).**
+
+- Channels carry a `category` (free label) and `position` (integer), set via `CHANNEL META` (§6.3).
+- `CHANNELS <ns>` returns the ordered layout as `CHANNEL-LAYOUT` events, sorted by (category, position, name), **led by the namespace's `NS-META`** — so a client renders every group, including empty categories, purely from server state.
+- The category *list* itself lives on the namespace: `NS META <ns> categories :<comma-list>`, echoed in NS-META's `cats=` tag.
+- A `category`/`position` change **broadcasts `CHANNEL-LAYOUT`** to the channel's members — re-ordering reaches every client, not just the mover. Clients keep no category state of their own.
+- Private-namespace layouts are view-gated (invariant 1).
 
 ### 6.3 Channel commands (C)
 
@@ -239,7 +245,10 @@ The `NS RECOVER` rungs in brief (normative text: §2.4): a quorum-signed rotatio
 
 **Presence vs. membership (Discord-style).** The roster is the *persistent* membership; online-ness is "holds a live session in the channel". A **disconnect** broadcasts `PRESENCE <user> offline` (membership retained) — only an explicit `PART`/kick/ban emits `MEMBER … part` (roster removal); a reconnect of an existing member broadcasts `PRESENCE <user> online`, not a fresh join. The presence map is live-only (§6.1: never stored, never bridged); a live `invisible` member reads `offline`.
 
-**Unread counts are pushed, not only polled.** A per-channel `UNREAD-COUNTS` follows each `MARKED` in the login snapshot (§9.7), and a fresh count rides the cross-device `MARK` sync to the account's *other* sessions — so badges survive reload/reconnect and stay consistent across devices. `unread` counts only real root messages from other senders (own messages and join/part system rows are excluded); `mentions` is the subset referencing the account (`@account`) or `@everyone`/`@here` (a body-text heuristic — there is no structured mention field).
+**Unread counts are pushed, not only polled.** A per-channel `UNREAD-COUNTS` follows each `MARKED` in the login snapshot (§9.7), and a fresh count rides the cross-device `MARK` sync to the account's *other* sessions — so badges survive reload/reconnect and stay consistent across devices. What is counted:
+
+- `unread` — real root messages from *other* senders; own messages and join/part system rows are excluded.
+- `mentions` — the subset referencing the account (`@account`) or `@everyone`/`@here`; a body-text heuristic — there is no structured mention field.
 
 ### 6.4 Messaging (C)
 
@@ -275,7 +284,11 @@ Invite tokens are capability tokens with an **unbound subject**: one object serv
 
 #### 6.5.1 Roles — named capability-token bundles
 
-A **role** is a named, colored bundle of capability tokens at a scope: `(scope, name, color, caps)`. Roles give clients human-readable, colored labels over §10.4 capabilities. **Enforcement stays purely token-based** — assigning a role grants exactly its `caps` as ordinary tokens, and every permission check is a pure capability-token check ("no role tables in the *enforcement* path"). **Membership, however, is explicit, not derived:** an account wears a role because it was *assigned* (recorded server-side, `ROLE ASSIGN` / `ROLE UNASSIGN`), never because its caps happen to be a superset of the bundle. Deriving membership from caps was rejected — it wrongly marks owners/operators (who hold every cap implicitly) as wearing every role, and can't distinguish a coincidental cap match from an intended assignment. The assignment record is metadata for *display and propagation*; it is never consulted for a permission decision.
+A **role** is a named, colored bundle of capability tokens at a scope — `(scope, name, color, caps)` — giving clients human-readable labels over §10.4 capabilities. Three rules define the model:
+
+- **Enforcement stays purely token-based.** Assigning a role grants exactly its `caps` as ordinary tokens; every permission check is a pure capability-token check — no role tables in the *enforcement* path.
+- **Membership is explicit, never derived.** An account wears a role because it was *assigned* (`ROLE ASSIGN` / `ROLE UNASSIGN`, recorded server-side) — never because its caps happen to be a superset of the bundle. Deriving membership from caps was rejected: it wrongly marks owners/operators (who hold every cap implicitly) as wearing every role, and can't distinguish a coincidental cap match from an intended assignment.
+- **The assignment record is display metadata.** It drives rendering and propagation; it is never consulted for a permission decision.
 
 | Command | Syntax | Cap | → Result / notes | Example (`→` = direct response) |
 |---|---|---|---|---|
@@ -290,7 +303,12 @@ A **role** is a named, colored bundle of capability tokens at a scope: `(scope, 
 
 The `ROLE` event carries a definition; the `ROLE-MEMBER` event carries an account's explicit assignments. Clients render pills from the intersection.
 
-**Why `ROLE RENAME` is server-side.** Roles are keyed by `(scope, name)`, so a client-side delete + re-create would silently drop every assignment — the rename is therefore one server-side migration carrying the definition *and* all membership rows together. Already-granted tokens need no migration: a role's authority is its `caps`, which a rename leaves untouched (consistent with `ROLE DELETE` also leaving granted tokens alone). Both names ride the trailing as a comma pair (the `ROLE REORDER` convention) — a role name may contain spaces but **not** a comma; `old` as a middle param was rejected because it would make spaced names unrenameable. Merging two bundles under one name is not a rename (hence `POLICY`), and the cap check precedes both existence probes (invariant 4), so neither can be used to enumerate roles.
+**Why `ROLE RENAME` is server-side.**
+
+- Roles are keyed by `(scope, name)`: a client-side delete + re-create would silently drop every assignment — so the rename is one server-side migration carrying the definition *and* all membership rows together.
+- Already-granted tokens need no migration: a role's authority is its `caps`, which a rename leaves untouched (consistent with `ROLE DELETE` also leaving granted tokens alone).
+- Both names ride the trailing as a comma pair (the `ROLE REORDER` convention) — a role name may contain spaces but **not** a comma; `old` as a middle param would have made spaced names unrenameable.
+- Merging two bundles under one name is not a rename (hence `POLICY`), and the cap check precedes both existence probes (invariant 4) — neither can be used to enumerate roles.
 
 **Role channel-permissions.** Two roles of the **same name** — one at a namespace, one at a channel — compose to give the Discord "role X has permission Y *in channel Z*" override, without a rules engine:
 
@@ -347,11 +365,29 @@ Two independent surfaces feed that check:
 
 A **mute always denies**, whatever the posting mode. Kick and ban broadcast a `MEMBER … part` so the target sees the removal; the acting moderator gets a `MODERATED <scope> <account> <mute\|unmute\|ban\|unban\|kick>` echo (`by=`/`reason=` tags).
 
-**`REPORT` arguments.** `category` — normative set `spam \| harassment \| violence \| sexual \| csam \| illegal \| self-harm \| other` (extensible with an `x-` prefix). `scope` — `ns` (namespace moderators, default) or `net` (network operator); `csam` and `illegal` are ALWAYS *also* routed to `net`, the legally accountable party. `note` — optional free text ≤ 1024 B. Membership-gated: you can only report what you can see — an invisible/absent msgid returns `NO-SUCH-TARGET` (anti-enumeration unchanged). Handlers are holders of the `reports` cap at the relevant scope (`ns:<name>` or `*`).
+**`REPORT` arguments.**
 
-**Routing (concrete).** An ns-scope report on a namespaced channel reaches the namespace owner; an ns-scope report on a top-level channel or a DM, and every net-scope report, reaches the operators; `csam`/`illegal` always *also* reach the operators. **Honest limitation:** the live `REPORT-FILED` push reaches a queue's *default* handlers (ns owner / operators); delegated `reports`-cap holders fetch via `REPORTS LIST` — pull, not push.
+| Argument | Values | Notes |
+|---|---|---|
+| `category` | `spam` · `harassment` · `violence` · `sexual` · `csam` · `illegal` · `self-harm` · `other` | Normative set; extensible with an `x-` prefix. |
+| `scope` | `ns` (default) \| `net` | Routing hint: namespace moderators vs. the network operator. `csam` and `illegal` are ALWAYS *also* routed to `net` — the legally accountable party. |
+| `note` | free text | Optional, ≤ 1024 B. |
 
-**`REPORTS RESOLVE` actions.** `dismissed \| content-removed \| user-actioned \| escalated`; `escalated` re-routes an ns-scope report up to net scope (keeping it open, holds intact). Handlers get the full `REPORT-RESOLVED` (`by=` + `note=`); the reporter gets the minimal form — no handler identity, no note.
+You can only report what you can see: reporting is membership-gated, and an invisible or absent msgid returns `NO-SUCH-TARGET` (anti-enumeration unchanged). Handlers are the holders of the `reports` cap at the concrete scope (`ns:<name>` or `*`).
+
+**Where a report lands:**
+
+- `ns`-scope on a namespaced channel → the namespace owner;
+- `ns`-scope on a top-level channel or a DM → the operators;
+- `net`-scope → the operators;
+- `csam` / `illegal` → **also** the operators, always.
+
+**Honest limitation:** the live `REPORT-FILED` push reaches a queue's *default* handlers (ns owner / operators); delegated `reports`-cap holders fetch via `REPORTS LIST` — pull, not push.
+
+**`REPORTS RESOLVE` actions:** `dismissed` · `content-removed` · `user-actioned` · `escalated`.
+
+- `escalated` re-routes an ns-scope report up to net scope — the report stays open, holds intact.
+- Handlers receive the full `REPORT-RESOLVED` (`by=`, `note=`); the reporter receives the minimal form — no handler identity, no note.
 
 **Content states** (marked honestly on the filed report):
 
@@ -566,7 +602,9 @@ The document cites these by number ("invariant N"). Each is normative wherever t
 Per-channel **total order** = origin actor's ULID order; bridged replicas preserve it. No cross-channel guarantees. DMs: total order per (network, pair).
 
 ### 9.2 Delivery & acks
-Send: `MSG`+`label` → echo `MESSAGE` (same label, assigned msgid) = ack; no echo → resend same label; servers dedup `(session,label)` for 5 min → effectively exactly-once. Receive: dedup by msgid. Backpressure: `SLOW` + forced resync; never unbounded buffering.
+- **Send:** `MSG` + `label` → the echoed `MESSAGE` (same label, assigned msgid) *is* the ack. No echo → resend with the **same** label; servers dedup `(session, label)` for 5 minutes → effectively exactly-once.
+- **Receive:** dedup by msgid.
+- **Backpressure:** a lagging client gets `SLOW` + a forced HISTORY resync; never unbounded buffering.
 
 ### 9.3 Message model (event sourcing)
 Edits/deletes/reactions are new events referencing the original msgid — never in-place mutation — **on the live path**; storage and batches use the compacted materialization (§12.1). Replies: `reply-to=`. **Threads are views, not channels**: `thread=` tag, no separate membership, `HISTORY thread=` filter.
@@ -574,7 +612,11 @@ Edits/deletes/reactions are new events referencing the original msgid — never 
 ### 9.4 Rich content
 UTF-8, optional `fmt=md` (CommonMark subset); oversize → `TOO-LARGE`, never truncation. Link embeds are server-generated sub-events — clients never implicitly fetch third-party URLs (the server-side unfurl proxy, §13, exists for exactly this reason).
 
-**Threads** are views, not channels (§9.3): a reply is an ordinary channel `MESSAGE` carrying `thread=<root>`; it broadcasts to the channel like any message, so every member and bridge sees it, and clients MAY hide replies from the main timeline (showing an "N replies" indicator) as presentation. `HISTORY <#chan> thread=<root>` returns just the thread (root + replies, oldest-first). Threads gain an optional **display name** — metadata keyed by the root msgid, never a new identity — set/cleared via `THREAD NAME` and listed via `THREADS` (§6.4); naming is authorized by the same rule as posting (`can_post`, §6.7).
+**Threads** are views, not channels (§9.3):
+
+- A reply is an ordinary channel `MESSAGE` carrying `thread=<root>` — it broadcasts to the channel like any message, so every member and bridge sees it; clients MAY hide replies from the main timeline (an "N replies" indicator) as presentation.
+- `HISTORY <#chan> thread=<root>` returns just the thread (root + replies, oldest-first).
+- A thread may carry an optional **display name** — metadata keyed by the root msgid, never a new identity — set/cleared via `THREAD NAME`, listed via `THREADS` (§6.4); naming is authorized by the same rule as posting (`can_post`, §6.7).
 
 **Custom emoji** are per-namespace (`EMOJI ADD/REMOVE/LIST`, §6.2): clients render `:name:` as an inline image in bodies **and reactions** — a custom-emoji reaction's key is the literal `:name:` string, so the reaction model is unchanged.
 
@@ -587,7 +629,11 @@ UTF-8, optional `fmt=md` (CommonMark subset); oversize → `TOO-LARGE`, never tr
 Server-stamped via ULIDs; client clocks untrusted.
 
 ### 9.7 Client reconnect (RECOMMENDED)
-Backoff 1→60 s jittered → `HELLO` → `AUTH KEY` → server sends `MEMBER`/`POLICY` snapshots (membership is server-side) → per channel `HISTORY after=<last msgid>` (render `truncated` as a visible gap) → resend unacked labels → `MARKED` snapshot restores read state (each marked channel is followed by an `UNREAD-COUNTS` so badges survive the reconnect).
+1. Reconnect with jittered backoff (1 → 60 s), then `HELLO` → `AUTH KEY`.
+2. The server replays `MEMBER`/`POLICY` snapshots — membership is server-side (§6.3).
+3. Per channel: `HISTORY after=<last msgid>`; render `truncated` as a visible gap.
+4. Resend unacked labels (§9.2 dedup makes this safe).
+5. The `MARKED` snapshot restores read state; each marked channel is followed by an `UNREAD-COUNTS`, so badges survive the reconnect.
 
 ---
 
@@ -635,7 +681,13 @@ child tokens (delegate); account/foreign/unbound subjects are leaves. The body i
 **version-tagged**: v1 (name-subject) tokens are refused on sight — an upgrade
 re-grants.
 
-Deterministic CBOR, encode-before-sign (Biscuit = possible upgrade). Delegation via `grant:X`; chains verify to the namespace root key or network key. "Roles" = named token templates; editing re-mints on refresh. A role's holder may be a **foreign `account@network`** — the membership + the granted caps key by that subject, so a partner network's user can wear a role here (§6.5). Revocation: short expiry + refresh (`TOKEN` events) + per-scope revocation epochs. Standard set: `send, edit-own, delete-own, delete-any, react, pin, invite, kick, ban, mute, policy, view, attach, chan-create, reports, bridge, ns-admin, ns-create, netblock, media-block, grant:<cap>` (`netblock`/`media-block`: `*` only; `reports` grantable at `ns:` and `*`; `mute`/`ban`/`kick` at `#chan`/`ns:`/`*` — the moderation tiers, §6.7). View gating gets full anti-enumeration. **Capability checks precede side effects, always.**
+- **Encoding:** deterministic CBOR, encode-before-sign (Biscuit is a possible future upgrade).
+- **Delegation:** via `grant:X`; chains verify up to the namespace root key or the network key.
+- **Roles** (§6.5.1) are named token templates; editing a role re-mints on refresh. A role's holder may be a **foreign `account@network`** — membership and granted caps key by that subject, so a partner network's user can wear a role here (§6.5).
+- **Revocation:** short expiry + refresh (`TOKEN` events) + per-scope revocation epochs.
+- **Standard capability set:** `send`, `edit-own`, `delete-own`, `delete-any`, `react`, `pin`, `invite`, `kick`, `ban`, `mute`, `policy`, `view`, `attach`, `chan-create`, `reports`, `bridge`, `ns-admin`, `ns-create`, `netblock`, `media-block`, `grant:<cap>`.
+- **Scope floors:** `netblock` / `media-block` at `*` only; `reports` grantable at `ns:` and `*`; `mute`/`ban`/`kick` at `#chan`/`ns:`/`*` — the moderation tiers (§6.7).
+- View gating gets full anti-enumeration (invariant 1). **Capability checks precede side effects, always** (invariant 4).
 
 ### 10.5 Account verification (email / age)
 
@@ -723,17 +775,47 @@ Origin msgids + attestations intact, verified against the origin's well-known ke
 Private/unlisted namespaces may bridge (root-signed only); their manifests are confidential — peers MUST NOT list their channels. `MANIFEST` notification to members on any audience change.
 
 ### 11.6 NETBLOCK
-Operator blocklist of remote networks; `{network, private reason, added, actor}`. Effects (normative): reject proposals both directions (`ERR BLOCKED`); sever existing manifests (members get `MANIFEST`, owners get `NETBLOCKED`); reject the network's attestations everywhere (AUTH, ingestion, invite redemption); stop fetching/mirroring its media. **Name-keyed** — rotation-proof; evasion requires a new domain. Authority: network key or `netblock` cap. Visibility: config `blocklist_visibility: operators|members|public`. NS owners can't override but may keep narrower denylists (extension). Non-transitivity ⇒ one block = total isolation, no propagation machinery.
+The operator's blocklist of remote networks — each entry `{network, private reason, added, actor}`. Blocking a network fires **all four effects (normative)**:
+
+1. Bridge **proposals are rejected**, both directions (`ERR BLOCKED`).
+2. Existing **manifests are severed** — members get `MANIFEST`, owners get `NETBLOCKED`.
+3. The network's **attestations are rejected** everywhere: AUTH, ingestion, invite redemption.
+4. Its **media is no longer fetched or mirrored**.
+
+The block is **name-keyed**, so key rotation never evades it — evasion requires a new domain. Authority: the network key or the `netblock` cap. List visibility is configurable (`blocklist_visibility: operators|members|public`). Namespace owners cannot override a netblock but may keep narrower denylists (extension). Because federation is non-transitive, one block is total isolation — no propagation machinery exists or is needed.
 
 ### 11.7 Federated history backfill
-Bridge peers use ordinary `HISTORY` over the bridge session. Served iff: channel in acked manifest ∧ range within `history` flag (`from-epoch` = nothing before manifest `created`; cheap ULID compare) ∧ origin retention still holds it. Backfilled events verified like live traffic; stored under negotiated policy (**not a retention loophole**). Bulk → `STREAM`, ULID-cursor resumable, independently rate-limitable: when a served page exceeds ~200 events the server answers the `HISTORY` with `STREAM ACCEPT <token>` instead of an inline `BATCH`; the requester opens a data-plane stream and sends `BACKFILL <token>` (QUIC bidi) or `GET /backfill?t=<token>` (HTTP) to pull the serialized batch (newline-delimited event lines, folded exactly like an inline batch). The token is one-time; a failed pull is retried by re-issuing the `HISTORY` (resume = new token). Reconnect: `HISTORY after=<last stored>` per channel; expired ranges marked `truncated` — never silent. Serves **compacted materialized view** only (§12.1) — backfill is not an undelete oracle. Flipping `history=full` = manifest amendment → version bump → re-ack → `MANIFEST` to members (built-in notification).
+Bridge peers use ordinary `HISTORY` over the bridge session. A request is served **iff all three hold**:
 
-Federated bulk backfill is fetched **lazily on client demand** — never eagerly on bridge-up: when a local client's `HISTORY` for a forwardable channel runs out of local scrollback (a short page), the bridge asks the peer for that same window, **deduped per `(channel, before)` cursor**; the pulled lines feed back through ordinary bridged ingestion (invariants 2, 3), broadcast to members, and persist — so the next page serves locally. A federated scrollback nobody asks to see is never pulled. Pre-bridge scrollback requires `history=full` (`from-epoch` serves only post-manifest history) — which is why auto-federation always offers `history=full` (§11.10).
+- the channel is in the mutually-acked manifest (invariant 3);
+- the range is within the manifest's `history` flag — `from-epoch` serves nothing before the manifest's `created` timestamp (a cheap ULID compare);
+- the origin's own retention still holds the data.
+
+Backfilled events are verified like live traffic and stored under the negotiated policy (**not a retention loophole**); only the **compacted materialized view** is served (§12.1) — backfill is not an undelete oracle.
+
+**Bulk transfer.** When a served page exceeds ~200 events, the server answers with `STREAM ACCEPT <token>` instead of an inline `BATCH`; the requester pulls the serialized batch over the data plane — `BACKFILL <token>` (QUIC bidi) or `GET /backfill?t=<token>` (HTTP) — as newline-delimited event lines, folded exactly like an inline batch. The token is one-time; a failed pull is retried by re-issuing the `HISTORY` (a fresh token), so the server holds no cursor state.
+
+**Reconnect.** `HISTORY after=<last stored>` per channel; expired ranges are marked `truncated` — never silent. Flipping `history=full` is a manifest amendment: version bump → re-ack → `MANIFEST` to members (the notification is built in).
+
+**Lazy federated pull.** Bulk backfill is fetched **on client demand** — never eagerly on bridge-up; a federated scrollback nobody asks to see is never pulled:
+
+1. A local client's `HISTORY` for a forwardable channel runs out of local scrollback (a short page).
+2. The bridge asks the peer for that same window, **deduped per `(channel, before)` cursor**.
+3. The pulled lines feed back through ordinary bridged ingestion (invariants 2, 3), broadcast to members, and persist — the next page serves locally.
+
+Pre-bridge scrollback requires `history=full` (`from-epoch` serves only post-manifest history) — which is why auto-federation always offers `history=full` (§11.10).
 
 ### 11.8 Media across bridges
 Referenced blobs **mirrored** (fetched over bridge data plane, BLAKE3-verified — substitution detectable). Rationale: clients only talk to home; hotlinking leaks reader IPs and breaks on origin outage. Bounded by manifest `media`; `none` renders unavailable-by-policy, never silent. Backfilled media rides `history`. Mirrors obey receiver retention **and receiver hash blocklist**.
 
-**Mirror pull (concrete).** On ingesting a bridged message whose attachment URI has a *foreign* origin, the receiver records the reference locally (its members are then gated + can fetch) and pulls the blob back over the **same authenticated bridge connection** to the origin, on a data-plane bidi stream: `MIRROR <requester-network> <b3-hash> <sig>` → `OK <mime> <len>\n<bytes…>` | `ERR nosuch`. `sig` is the **requester network's** signing key over `hash‖requester‖origin` (domain-separated), so the request is *self-authenticating* — the origin serves iff a network it already federates with (a known peer key) proves control of that key, and it need not correlate the data-plane stream with any control-plane bridge session (no origin↔member correlation). The receiver verifies the returned bytes hash to the requested `b3-hash` before storing (content addressing: the origin cannot substitute). Any failure — unknown requester, bad signature, absent blob — is the uniform `ERR nosuch` (invariant 1: presence never leaks). The pull is eager (fired on ingest); a receiver with no live connection to the origin simply records the reference and skips the fetch until one exists.
+**Mirror pull (concrete).** On ingesting a bridged message whose attachment URI has a *foreign* origin:
+
+1. The receiver **records the reference locally** — its members are gated and can fetch — then pulls the blob over the **same authenticated bridge connection**, on a data-plane bidi stream: `MIRROR <requester-network> <b3-hash> <sig>` → `OK <mime> <len>` + bytes, or `ERR nosuch`.
+2. `sig` is the **requester network's** signing key over `hash‖requester‖origin` (domain-separated), so the request is *self-authenticating*: the origin serves iff a network it already federates with (a known peer key) proves control of that key — and it never needs to correlate the data-plane stream with a control-plane session (no origin↔member correlation).
+3. The receiver **verifies the returned bytes** hash to the requested `b3-hash` before storing (content addressing — the origin cannot substitute).
+4. Any failure — unknown requester, bad signature, absent blob — is the uniform `ERR nosuch` (invariant 1: presence never leaks).
+
+The pull is eager (fired on ingest); a receiver with no live connection to the origin records the reference and skips the fetch until one exists.
 
 
 ### 11.9 Reports and federation
@@ -746,7 +828,11 @@ Referenced blobs **mirrored** (fetched over bridge data plane, BLAKE3-verified �
 
 Federation can be established **without operator ceremony**: a local user referencing a foreign namespace — `FEDERATE <network>/<namespace>` (§6.6), or a `weft://<network>/…` invite link whose network is not the user's home (§6.5) — triggers the **home** network to establish the bridge itself. Outbound auto-establishment is governed by network configuration (`auto_bridge = open | off`): `off` disables the trigger (`FEDERATE` answers `UNSUPPORTED`) and leaves inbound bridging (§11.2) unchanged.
 
-**Reachability — the foreign side's consent.** A namespace is *auto-federation-reachable* iff it is `public` **and** its `federation` flag is `open` (`NS META <ns> federation :open`, §6.2 — `open` requires `public` visibility). A `BRIDGE REQUEST` for anything else — absent, private, unlisted, or `federation: closed` — answers the uniform `NO-SUCH-TARGET` (invariant 1: a reachability probe learns nothing an existence probe couldn't). A netblocked requester gets `BLOCKED` (§11.6). Consent is structural: no request can compel a bridge — the foreign network offers its own signed manifest, or nothing.
+**Reachability — the foreign side's consent.** A namespace is *auto-federation-reachable* iff it is `public` **and** its `federation` flag is `open` (`NS META <ns> federation :open`, §6.2 — `open` requires `public` visibility).
+
+- Anything else — absent, private, unlisted, or `federation: closed` — answers the uniform `NO-SUCH-TARGET` (invariant 1: a reachability probe learns nothing an existence probe couldn't).
+- A netblocked requester gets `BLOCKED` (§11.6).
+- Consent is structural: no request can compel a bridge — the foreign network offers its own signed manifest, or nothing.
 
 **Triggers.**
 1. **Explicit** — `FEDERATE <network>/<namespace>` (§6.6): a user asks their home network to go get a namespace it does not carry. This is deliberately a separate verb from `NS JOIN`: joining what already exists locally and causing an outbound dial have different failure surfaces (SSRF, netblock, dial failure, policy-off), and the dial should be explicit.
@@ -887,7 +973,11 @@ Two regimes, one principle: **live is event-sourced, at-rest is materialized.**
 - `REACTIONS <#chan> <msgid> <emoji> <count>` summary events (`by=` lists the first ≤20 actors; the count is authoritative) — no add/remove ping-pong.
 - `DELETED` tombstones as-is.
 
-**Retention holds (reporting interplay):** filing a `verified` report places a hold on the reported event and its context (RECOMMENDED: ±25 surrounding events in the channel). Held events are exempt from **both** compaction and retention purge — including in `retained:<d>` channels and including pre-edit bodies still inside the audit window at filing time — until the report is resolved plus a 7-day grace. Holds are invisible to ordinary members (no protocol surface reveals that a message is under report). `ephemeral` channels store nothing, so nothing can be held (hence `unverified`); `e2ee` holds preserve ciphertext blobs only.
+**Retention holds (reporting interplay).** Filing a `verified` report places a hold on the reported event and its context (RECOMMENDED: ±25 surrounding events in the channel):
+
+- Held events are exempt from **both** compaction and retention purge — including in `retained:<d>` channels, and including pre-edit bodies still inside the audit window at filing time — until the report resolves plus a 7-day grace.
+- Holds are **invisible** to ordinary members: no protocol surface reveals that a message is under report.
+- `ephemeral` channels store nothing, so nothing can be held (hence `unverified`); `e2ee` holds preserve ciphertext blobs only.
 
 **Effects elsewhere:**
 - Backfill (§11.7) automatically benefits: bridge catch-up transfers shrink by the edit/reaction churn factor, and the existing "materialized view only" rule becomes precisely specified rather than implied.
@@ -903,7 +993,11 @@ Two regimes, one principle: **live is event-sourced, at-rest is materialized.**
 
 **Upload.** `STREAM OFFER media <mime> <bytes>` (checks `attach` + size config; RECOMMENDED 25 MiB image / 500 MiB video) → `STREAM ACCEPT <token>` → data-plane transfer → the server hashes and stores. The server probes image dimensions and derives a small thumbnail as its own auto-referenced blob.
 
-**Transfer surfaces (one blob store, three doors).** A conformant server exposes the blob store over: (1) a QUIC data-plane bidi framing — `PUT <upload-token>`, `GET <bearer> <hash> [range]`, and the §11.8 `MIRROR <requester-net> <hash> <sig>`; (2) HTTP — `POST /media` (upload, OFFER token or session bearer) and `GET /media/<hash>?t=<bearer>` (Range-capable, so video is ranged/segmented fetch; live A/V is WEFT-RT, §16); plus (3) the `BACKFILL <token>` pull for large history pages (§11.7). All share the `STREAM OFFER` → `STREAM ACCEPT <token>` grant flow.
+**Transfer surfaces (one blob store, three doors).** All share the `STREAM OFFER` → `STREAM ACCEPT <token>` grant flow:
+
+1. **QUIC data-plane bidi framing** — `PUT <upload-token>`, `GET <bearer> <hash> [range]`, and the §11.8 `MIRROR <requester-net> <hash> <sig>`.
+2. **HTTP** — `POST /media` (upload; OFFER token or session bearer) and `GET /media/<hash>?t=<bearer>` (Range-capable, so video is ranged/segmented fetch; live A/V is WEFT-RT, §16).
+3. **`BACKFILL <token>`** — the bulk pull for large history pages (§11.7).
 
 **Fetch authorization.** Right after auth the server pushes a per-session **bearer** as a `MEDIA TOKEN` event (§7.1); fetches are membership-gated by it. A bad bearer, a non-member fetch, and an absent blob are **one uniform not-found** (invariant 1).
 
@@ -911,7 +1005,12 @@ Two regimes, one principle: **live is event-sourced, at-rest is materialized.**
 
 **Moderation.** Hash-level blocking (`MEDIA BLOCK`, §6.6): blocking deletes the blob + its thumbnail and rejects re-upload *and* mirror of the same bytes — content = identity, so re-uploads are dead on arrival.
 
-**Link-preview (unfurl) proxy.** Clients never fetch third-party URLs (§9.4); instead the server offers `GET /unfurl?url=<href>&t=<bearer>` — an OpenGraph/meta preview as JSON (`url`, `title`, `description`, `image`, `site_name`) — and `GET /unfurl/image?url=<href>&t=<bearer>` to proxy the preview image, so the origin host never sees the viewer. Both require the same session bearer as `/media` (never an open proxy) and are **SSRF-guarded per §11.10 / invariant 13** (resolve → classify every address → pin the verified IP; re-check each redirect hop, ≤5; strip userinfo). Fetches are size- and time-bounded; non-HTML/non-image results yield an empty preview. A network MAY disable unfurling.
+**Link-preview (unfurl) proxy.** Clients never fetch third-party URLs (§9.4); the server fetches on their behalf, so the origin host never sees the viewer:
+
+- `GET /unfurl?url=<href>&t=<bearer>` — the page's OpenGraph/meta preview as JSON (`url`, `title`, `description`, `image`, `site_name`).
+- `GET /unfurl/image?url=<href>&t=<bearer>` — proxies the preview image bytes.
+
+Both require the same session bearer as `/media` (never an open proxy) and are **SSRF-guarded per §11.10 / invariant 13**: resolve → classify every address → pin the verified IP; re-check each redirect hop (≤5); strip userinfo. Fetches are size- and time-bounded; non-HTML/non-image results yield an empty preview. A network MAY disable unfurling.
 
 ## 14. E2EE
 
@@ -940,7 +1039,30 @@ Signaling in core: `VOICE JOIN` → SFU endpoint + short-lived media token (`spe
 
 ## 17. WEFT-IRC — Legacy IRC Compatibility (extension)
 
-Optional server-side RFC 2812 + IRCv3 gateway (:6697 TLS); the gateway is the home network. Mappings: NICK/SASL → display/AUTH; `JOIN #ns/chan` valid natively; PRIVMSG→MSG (`+draft/reply`→`reply-to=`); TAGMSG `+draft/react`→REACT; `server-time`/`msgid`→ULIDs/origin msgids; `chathistory`/`batch`→HISTORY/BATCH; MODE = coarse read-mostly projection; KICK/TOPIC capability-checked. Degradations (normative): edits/deletes as `* edited:`/`* message deleted` fallbacks (IRC users can't edit); threads flattened `[thread 01H…]`; media as short-lived tokened HTTPS URLs; **e2ee channels invisible** (`NO-SUCH-TARGET` treatment); DISCOVER→LIST, invites via `/msg WeftServ REDEEM`; 8 KiB↔512 B line splitting. Purpose: the likely operator audience is on IRC today; day-one irssi/WeeChat usability, and the gateway is a projection, not a lossy translator.
+Optional server-side RFC 2812 + IRCv3 gateway (`:6697` TLS); the gateway *is* the home network.
+
+| IRC surface | WEFT surface |
+|---|---|
+| `NICK` / SASL | display name / `AUTH` |
+| `JOIN #ns/chan` | valid natively (`/` is a legal chanstring char) |
+| `PRIVMSG` (+ `draft/reply`) | `MSG` (`reply-to=`) |
+| `TAGMSG +draft/react` | `REACT` |
+| `server-time` / `msgid` tags | ULIDs / origin msgids |
+| `chathistory` / `batch` | `HISTORY` / `BATCH` |
+| `MODE` | coarse, read-mostly projection |
+| `KICK` / `TOPIC` | capability-checked (§6.7, §6.3) |
+| `LIST` | `DISCOVER` |
+| invites | `/msg WeftServ REDEEM` |
+
+**Degradations (normative):**
+
+- Edits/deletes render as `* edited:` / `* message deleted` text fallbacks — IRC users can't edit.
+- Threads flatten to a `[thread 01H…]` prefix.
+- Media becomes short-lived tokened HTTPS URLs.
+- **e2ee channels are invisible** (the `NO-SUCH-TARGET` treatment).
+- 8 KiB WEFT lines split to 512 B IRC lines.
+
+Purpose: the likely operator audience is on IRC today — day-one irssi/WeeChat usability. The gateway is a projection, not a lossy translator.
 
 ---
 

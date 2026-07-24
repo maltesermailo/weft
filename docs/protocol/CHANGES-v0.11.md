@@ -42,6 +42,10 @@ Additional stale-reconciliation fixes in this pass: §6.8's four wrong `§11.11`
 
 §0 added (RFC 2119/8174 declaration + seven term definitions). §11.3's *"Blast radius priced in signatures"* expanded to full sentences. §2.3's escape rendering fixed (*"`\r`→`\r`"* → "CR (0x0D) → the two-character sequence `\r`", etc.); §4 notes the IRCv3 tag-escaping lineage. Paragraph-length rationale moved out of the `ROLE RENAME`, `NS RECOVER`, and `BRIDGE REQUEST` cells into short prose below their tables (one-line cells with pointers remain).
 
+## Pass 5b — Readability follow-up (owner feedback: "paragraphs such as these are unreadable")
+
+Nineteen dense enumeration paragraphs restructured into tables and lists, meaning-preserving: §6.7 `REPORT` arguments (→ argument table + routing list) and `REPORTS RESOLVE` actions; §11.6 NETBLOCK (→ the four effects as a numbered list); §11.7 (→ served-iff conditions, bulk-transfer, reconnect, lazy-pull steps); §11.8 mirror pull (→ numbered flow); §9.2 (→ send/receive/backpressure bullets); §9.7 reconnect (→ numbered sequence); §10.4 token model (→ bullets; the standard cap set and scope floors separated); §17 IRC (→ IRC↔WEFT mapping table + degradation list); §13 transfer surfaces + unfurl endpoints; §6.2 layout rules; §6.3 unread counting; §6.5.1 role model + rename rationale; §9.4 threads; §11.10 reachability; §12.1 retention holds. Machine-checked afterwards: zero >550-char prose lines remain; all 259 examples still round-trip; all cross-references still resolve.
+
 ## Pass 6 — Self-containment
 
 All §-cross-references machine-audited: **every reference resolves to a real heading** (§11.10 and §9.0 included). The two flow documents are marked **non-normative** at their §6.8 and §11.12 mentions. The §6.2 `categories` row now points at the in-section layout prose instead of "Appendix A layout". Federation-internal group verbs (`GROUP SYNC/RELAY/MUT/BACKFILL/ROSTER`) keep their syntax table in §11.12 by design — they are bridge-only and deliberately absent from the client-facing §6.
