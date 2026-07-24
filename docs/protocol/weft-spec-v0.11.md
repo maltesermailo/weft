@@ -16,8 +16,8 @@ Recurring terms, defined once:
 |---|---|
 | **namespace root key** | The client-generated Ed25519 key that owns a namespace (§2.1); every role, moderator token, channel policy, and invite chains from it. |
 | **manifest** | The signed document naming exactly which channels a bridge shares, at what version, with what history/media policy (§11.1); the mutually-acked manifest gates all forwarding. |
-| **home network** | The single network that mints the ULIDs — and therefore owns the order — for a scope: a channel's hosting network, or a group DM's creator network (§9.1, §11.12). |
-| **spoke** | Any non-home member network of a cross-network group DM; spokes relay posts to the home and mirror its minted order (§11.12). |
+| **home network** | The single network that mints the ULIDs — and therefore owns the order — for a scope: a channel's namespace-owning network (§11.13), or a group DM's creator network (§9.1, §11.12). |
+| **spoke** | Any non-home member network of a cross-network channel or group DM; spokes relay posts to the home and mirror its minted order (§11.13, §11.12). |
 | **compaction** | The post-audit-window rewrite of a channel's stored log into its surviving form: final bodies, per-emoji reaction summaries, tombstones (§12.1). |
 | **retention hold** | The reporting-placed exemption that keeps an event (and its context) out of both purge and compaction until resolution + grace (§12.1). |
 | **materialized view** | The compacted wire form batches carry (`HISTORY`/backfill): one `MESSAGE` per surviving message, `REACTIONS` summaries, `DELETED` tombstones — never edit chains (§12.1). |
@@ -587,7 +587,7 @@ The document cites these by number ("invariant N"). Each is normative wherever t
 | # | Invariant | Statement |
 |---|---|---|
 | 1 | **Anti-enumeration** | "A private thing you're not in" MUST be indistinguishable from "does not exist": one code (`NO-SUCH-TARGET`, §8), one timing envelope — covering nonexistent, private, view-gated, expired/foreign msgids, and dead invites (§2.2). The same uniformity extends to the data plane: a bad media bearer, a non-member fetch, an absent blob, and a spent backfill token are one not-found (§13, §11.7). The presence of hidden things never leaks. |
-| 2 | **Origin authority** | A message belongs to its origin: `msgid = <origin>/<ULID>` (§5.1). Bridged events keep their origin msgids (never re-minted); events on a bridge are accepted only when `msgid` origin = the authenticated peer; `EDIT`/`DELETE` are honored only at the msgid's origin (`FORBIDDEN origin` elsewhere) (§11.4). Backfilled events are verified exactly like live traffic (§11.7). |
+| 2 | **Origin authority** | A message belongs to its origin: `msgid = <origin>/<ULID>` (§5.1). Bridged events keep their origin msgids (never re-minted); events on a bridge are accepted only when `msgid` origin = the authenticated peer. For a channel the origin is its **home** (§11.13): the home is the sole minter and enforces `EDIT`/`DELETE` by **authored-by** (the relay leg vouches `sender@net`), while spoke replicas honor only home-origin events (`FORBIDDEN origin` elsewhere) (§11.4). Backfilled events are verified exactly like live traffic (§11.7). |
 | 3 | **Forwarding gate** | A channel is forwardable to a peer iff it appears in **both** the last mutually-acked manifest snapshot and the current one; the same gate applies to ingestion and to backfill (§11.1, §11.7). Forwarding outside it is a protocol violation, not a soft failure. |
 | 4 | **Caps before effects** | Capability checks precede side effects — and precede existence probes, so a permission check can never be used to enumerate hidden things (§10.4; e.g. the §6.5.1 `ROLE RENAME` error order). |
 | 5–7 | *[reserved — recover from repo history or retire]* | Not cited in this document. |
@@ -599,7 +599,7 @@ The document cites these by number ("invariant N"). Each is normative wherever t
 | 13 | **SSRF classifier guard** | Every server-side fetch of a user-influenced URL (auto-federation dial + well-known fetch, unfurl proxy) MUST classify every resolved address before connecting and refuse non-public targets; testable as a pure classifier (§11.10, §13). |
 
 ### 9.1 Ordering
-Per-channel **total order** = origin actor's ULID order; bridged replicas preserve it. No cross-channel guarantees. DMs: total order per (network, pair).
+Per-channel **total order** = the **home actor's** ULID order; bridged replicas preserve it. A channel's **home** is the network that owns its namespace, and that network is the **sole ULID writer** for the channel (§11.13) — exactly as a group DM's home is its creator's network (§11.12). Remote members' posts are relayed to the home to be minted into the one order; they are never minted independently by a spoke. No cross-channel guarantees. DMs: total order per (network, pair).
 
 ### 9.2 Delivery & acks
 - **Send:** `MSG` + `label` → the echoed `MESSAGE` (same label, assigned msgid) *is* the ack. No echo → resend with the **same** label; servers dedup `(session, label)` for 5 minutes → effectively exactly-once.
@@ -735,7 +735,8 @@ Accounts carry **verification claims** — `(kind, subject, state)` where `kind`
 |---|---|---|---|---|---|
 | **Bridge session** | ↔ base link | everything below | `AUTH BRIDGE` + `CHALLENGE`/`PROOF` | peer proves its **network key** (pinned or accept-any) | 11.2 |
 | **Manifest control** | ↔ either side proposes | the shared channel/namespace set + history/media policy | `BRIDGE PROPOSE`/`ACCEPT`/`REQUEST`/`ADD`/`REMOVE`/`SEVER`; `MANIFEST` to members | signed manifest, scope-authority-signed | 11.1 |
-| **Event mirror** | → each way (local-origin only) | live channel events | `MESSAGE`/`EDITED`/`DELETED`/`REACTION`/`PROFILE`… | manifest-gated ∩ acked; **one hop**; origin preserved | 11.4 |
+| **Event mirror** | → each way (home-origin only) | live channel events, fanned out by the home | `MESSAGE`/`EDITED`/`DELETED`/`REACTION`/`PROFILE`… | manifest-gated ∩ acked; **one hop from the home**; origin preserved | 11.4 |
+| **Channel relay** | spoke → home (mint), home → spokes (ingest) | a spoke member's channel post/mutation, sent to the home to be minted into the one order | `CHANNEL RELAY`/`MUT`/`BACKFILL` (`@echo` ack; `@id` absent = mint, present = ingest) | home = namespace owner's network is sole ULID writer; authored-by vouched by sender's network key | 11.13 |
 | **History backfill** | pull (req→origin, data←) | bounded scrollback for a shared channel | `HISTORY` → `BATCH` \| `STREAM ACCEPT`+`BACKFILL` | acked manifest ∧ `history` flag ∧ origin retention | 11.7 |
 | **Report forwarding** | → home→origin | a forwarded report | `REPORT-FORWARD` | reporter identity stripped (invariant 12) | 11.9 |
 | **FSESSION — admin** | → `CMD`, ← `REPLY` | a foreign user's control/admin commands (moderation, `GRANT`/`REVOKE`, ns/channel admin, invites, roles, reports) | `FSESSION OPEN`/`CMD`/`REPLY`/`CLOSE` | the foreign actor `account@F`, checked against **H's** grant store (homeserver authority) | 11.11 |
@@ -769,7 +770,7 @@ The `bridge` *capability* plays no role in session authentication — it is the 
 Proposing a manifest requires authority proportional to its blast radius: a single `#channel` needs a `bridge` capability holder; an `ns:<name>` scope needs the namespace root; a `*` (whole-network) scope needs the network signing key itself. The wider the scope a bridge shares, the stronger the signature that must stand behind it — blast radius is priced in signatures. The ladder is enforced *locally* on the proposing side; the wire manifest is uniformly **network-key-signed**, so the peer verifies it against the signer's well-known key.
 
 ### 11.4 Event flow
-Origin msgids + attestations intact, verified against the origin's well-known key. EDIT/DELETE honored only from the msgid's origin. Retention → strictest. `e2ee` bridges only pass-through MLS. Per-user attestation blocks without touching the manifest. **No transitivity — one hop from origin, loops structurally impossible, no shared state to resolve.**
+Origin msgids + attestations intact, verified against the origin's well-known key. **A channel's origin is its home** (the namespace owner's network, §11.13): the home mints every message into one total order and is the single point that fans it out one hop to each spoke. A remote member's post reaches the home over the **relay leg** (`CHANNEL RELAY`, §11.13), not the mirror; the mirror then carries the home-minted event. Because the home is the origin, a home→spoke copy is **one hop from origin** — this is what lets a channel with members on three or more networks deliver every message to everyone (a non-home spoke's post could otherwise never reach a second spoke without the forbidden transitivity). EDIT/DELETE are honored by the home on an **authored-by** basis (the relaying network vouches `sender@net`; the home applies iff the sender authored the target or holds the moderation cap) and minted into the same order — not gated on a per-spoke msgid origin. Retention → strictest. `e2ee` bridges only pass-through MLS. Per-user attestation blocks without touching the manifest. **No transitivity — one hop from origin, loops structurally impossible, no shared state to resolve.**
 
 ### 11.5 Visibility interaction
 Private/unlisted namespaces may bridge (root-signed only); their manifests are confidential — peers MUST NOT list their channels. `MANIFEST` notification to members on any audience change.
@@ -877,12 +878,16 @@ A federated user may hold **caps/roles** on a network she is not a member of
   device signature buys nothing against a malicious `F` — the trust boundary is
   the network. The backstop for a misbehaving `F` is `NETBLOCK` (§11.6).
 
-- **Content rides the mirror; control rides the session.** A federated user's
-  *content* — `MSG`/`EDIT`/`DELETE`/`REACT` — stays **F-origin** and forwards one
-  hop (§11.4); it is **never** authored through `H`, or origin authority would
-  break. Only **control/admin** actions (moderation, `GRANT`/`REVOKE`, channel
-  and namespace administration, invites, role assignment, report handling) travel
-  as commands over a **federation session**.
+- **Content rides the home relay; control rides the session.** A federated
+  member's channel *content* — `MSG`/`EDIT`/`DELETE`/`REACT` — is relayed to the
+  channel's **home** and minted there into the single total order (`CHANNEL RELAY`,
+  §11.13); the home then mirrors it one hop to every spoke. The **author** travels
+  as `<sender@net>` on the relay leg (attributed by `F`'s authenticated network
+  key, so `F` may vouch only its own users — §11.4), while the msgid origin is the
+  home. Only **control/admin** actions (moderation, `GRANT`/`REVOKE`, channel and
+  namespace administration, invites, role assignment, report handling) travel as
+  commands over a **federation session** and are enforced against `H`'s grants for
+  `account@F`; they never mint content.
 
 - **The session — `FSESSION` (bridge-session-only).** `F` multiplexes a user's
   command session over the *existing* authenticated `F↔H` bridge — one channel
@@ -945,6 +950,54 @@ just without the interactive label.
 **Attachments.** A cross-network group message carrying a `weft-media://` attachment
 triggers a mirror pull from the blob's **origin** network (§11.8), so local members can
 fetch it.
+
+### 11.13 Channels over federation — the channel tunnel
+
+**Home-authoritative ordering (normative).** A channel with members on more than one
+network has a single **home** = the network that owns its namespace. The home is the
+**sole ULID writer** for the channel (§9.1); every other member network (a **spoke**)
+runs a **replica** that mirrors the home's order and holds a bounded tail of pending
+local posts. A remote member's `MSG`/`EDIT`/`DELETE`/`REACT` is **relayed to the home
+to be minted** — a spoke never mints channel content independently. This is the group
+model (§11.12) applied to channels; it is what makes a channel's total order well-defined
+across networks, and — because the home becomes the single origin — what lets a post from
+one spoke reach *another* spoke at all (one hop from the home; a spoke→spoke forward would
+be the forbidden transitivity of §11.4).
+
+The following verbs are **federation-internal** (bridge-session-only; a client can never
+send them — the server emits them). Channel membership is carried by the manifest (§11.1)
++ the `MEMBER` mirror, so there is no `SYNC` analog.
+
+| Verb | Syntax | Direction | Meaning |
+|---|---|---|---|
+| `CHANNEL RELAY` | `CHANNEL RELAY <#ns/chan> <sender@net> [@id=<msgid>] [@echo=<token>] [msg-meta] :body` | both | `@id` **absent** = a spoke relayed a member's post to the home → the home mints + fans out; `@id` **present** = a home-minted message → the spoke ingests + delivers locally. |
+| `CHANNEL MUT` | `CHANNEL MUT <#ns/chan> <sender@net> <root-msgid> <op> [@id=<msgid>] [:arg]` | both | A message mutation (`op` ∈ `edit`\|`delete`\|`react-add`\|`react-remove`; `arg` = body/emoji). `@id` absent = spoke → home (relay to apply + mint into order); present = home-applied → spoke ingests. The home applies iff `sender` authored the target or holds the moderation cap (§11.4). |
+| `CHANNEL BACKFILL` | `CHANNEL BACKFILL <#ns/chan> [@after=<msgid>]` | spoke → home | Recovery pull after a home outage or reconnect: replay every channel event after the cursor (or all). The home answers with `CHANNEL RELAY` (`@id` present) ingests. Idempotent on msgid; a non-member / unmanifested network gets nothing (anti-enumeration, §11.1). |
+
+**The echo token** works exactly as for groups (§11.12): a spoke poster's `MSG` is
+relayed with an opaque `@echo=<token>`; the home echoes it back **only on the copy to the
+poster's network**, which then delivers the home-minted message as the poster's own
+labelled message (the send is acked, §3.5). Tokens are TTL-swept (≈60 s); if the home
+never answers, the message still arrives via `CHANNEL BACKFILL`, just without the
+interactive label.
+
+**Staying fast (non-normative rationale).** Home-authority adds a round-trip only to a
+cross-network post's *finalization*, not to its appearance or to reads: (a) the spoke
+renders the poster's own message **optimistically** at once and reconciles it to the
+home-minted copy when `@echo` returns; (b) `HISTORY` and scrollback are served from the
+**local replica** with no round-trip; (c) the relay leg is fire-and-forget and pipelined,
+so posts do not head-of-line-block on confirmation; (d) a member whose network *is* the
+home mints locally with no relay at all — the common case. See
+`docs/architecture/home-authoritative-channels.md`.
+
+**Availability.** Reads are served from the replica even while the home is unreachable.
+Posts are queued in a bounded outbox (invariant 6 backpressure) and stay visible as
+*pending*; on the home's recovery the spoke replays them via `CHANNEL BACKFILL` and they
+mint into order — nothing is lost. If the home is permanently gone the replica is frozen
+read-only at its last-mirrored state.
+
+**Attachments** behave as for groups: a `weft-media://` attachment triggers a mirror pull
+from the blob's origin network (§11.8).
 
 ---
 

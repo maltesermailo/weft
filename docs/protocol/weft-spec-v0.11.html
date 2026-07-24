@@ -538,6 +538,7 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 <li><a href="#s11-10">11.10 Auto-federation (on-demand bridging)</a></li>
 <li><a href="#s11-11">11.11 Federation sessions &amp; homeserver authority</a></li>
 <li><a href="#s11-12">11.12 Social layer over federation — the group tunnel</a></li>
+<li><a href="#s11-13">11.13 Channels over federation — the channel tunnel</a></li>
 </ul>
 </li>
 <li><a href="#s12">12. History, Retention &amp; Compaction (server duties)</a>
@@ -611,11 +612,11 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><strong>home network</strong></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">The single network that mints the ULIDs — and therefore owns the order — for a scope: a channel&#8217;s hosting network, or a group DM&#8217;s creator network (<a href="#s9-1">§9.1</a>, <a href="#s11-12">§11.12</a>).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">The single network that mints the ULIDs — and therefore owns the order — for a scope: a channel&#8217;s namespace-owning network (<a href="#s11-13">§11.13</a>), or a group DM&#8217;s creator network (<a href="#s9-1">§9.1</a>, <a href="#s11-12">§11.12</a>).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><strong>spoke</strong></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Any non-home member network of a cross-network group DM; spokes relay posts to the home and mirror its minted order (<a href="#s11-12">§11.12</a>).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Any non-home member network of a cross-network channel or group DM; spokes relay posts to the home and mirror its minted order (<a href="#s11-13">§11.13</a>, <a href="#s11-12">§11.12</a>).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><strong>compaction</strong></p></td>
@@ -2838,7 +2839,7 @@ S: @attestation=&lt;b64&gt; WELCOME test.example</pre>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock">2</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><strong>Origin authority</strong></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">A message belongs to its origin: <code>msgid = &lt;origin&gt;/&lt;ULID&gt;</code> (<a href="#s5-1">§5.1</a>). Bridged events keep their origin msgids (never re-minted); events on a bridge are accepted only when <code>msgid</code> origin = the authenticated peer; <code>EDIT</code>/<code>DELETE</code> are honored only at the msgid&#8217;s origin (<code>FORBIDDEN origin</code> elsewhere) (<a href="#s11-4">§11.4</a>). Backfilled events are verified exactly like live traffic (<a href="#s11-7">§11.7</a>).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">A message belongs to its origin: <code>msgid = &lt;origin&gt;/&lt;ULID&gt;</code> (<a href="#s5-1">§5.1</a>). Bridged events keep their origin msgids (never re-minted); events on a bridge are accepted only when <code>msgid</code> origin = the authenticated peer. For a channel the origin is its <strong>home</strong> (<a href="#s11-13">§11.13</a>): the home is the sole minter and enforces <code>EDIT</code>/<code>DELETE</code> by <strong>authored-by</strong> (the relay leg vouches <code>sender@net</code>), while spoke replicas honor only home-origin events (<code>FORBIDDEN origin</code> elsewhere) (<a href="#s11-4">§11.4</a>). Backfilled events are verified exactly like live traffic (<a href="#s11-7">§11.7</a>).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock">3</p></td>
@@ -2891,7 +2892,7 @@ S: @attestation=&lt;b64&gt; WELCOME test.example</pre>
 <div class="sect2">
 <h3 id="s9-1"><a class="anchor" href="#s9-1"></a>9.1 Ordering</h3>
 <div class="paragraph">
-<p>Per-channel <strong>total order</strong> = origin actor&#8217;s ULID order; bridged replicas preserve it. No cross-channel guarantees. DMs: total order per (network, pair).</p>
+<p>Per-channel <strong>total order</strong> = the <strong>home actor&#8217;s</strong> ULID order; bridged replicas preserve it. A channel&#8217;s <strong>home</strong> is the network that owns its namespace, and that network is the <strong>sole ULID writer</strong> for the channel (<a href="#s11-13">§11.13</a>) — exactly as a group DM&#8217;s home is its creator&#8217;s network (<a href="#s11-12">§11.12</a>). Remote members' posts are relayed to the home to be minted into the one order; they are never minted independently by a spoke. No cross-channel guarantees. DMs: total order per (network, pair).</p>
 </div>
 </div>
 <div class="sect2">
@@ -3163,11 +3164,19 @@ re-grants.</p>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><strong>Event mirror</strong></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">→ each way (local-origin only)</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">live channel events</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">→ each way (home-origin only)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">live channel events, fanned out by the home</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>MESSAGE</code>/<code>EDITED</code>/<code>DELETED</code>/<code>REACTION</code>/<code>PROFILE</code>…</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">manifest-gated ∩ acked; <strong>one hop</strong>; origin preserved</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">manifest-gated ∩ acked; <strong>one hop from the home</strong>; origin preserved</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">11.4</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><strong>Channel relay</strong></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">spoke → home (mint), home → spokes (ingest)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">a spoke member&#8217;s channel post/mutation, sent to the home to be minted into the one order</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL RELAY</code>/<code>MUT</code>/<code>BACKFILL</code> (<code>@echo</code> ack; <code>@id</code> absent = mint, present = ingest)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">home = namespace owner&#8217;s network is sole ULID writer; authored-by vouched by sender&#8217;s network key</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">11.13</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><strong>History backfill</strong></p></td>
@@ -3260,7 +3269,7 @@ re-grants.</p>
 <div class="sect2">
 <h3 id="s11-4"><a class="anchor" href="#s11-4"></a>11.4 Event flow</h3>
 <div class="paragraph">
-<p>Origin msgids + attestations intact, verified against the origin&#8217;s well-known key. EDIT/DELETE honored only from the msgid&#8217;s origin. Retention → strictest. <code>e2ee</code> bridges only pass-through MLS. Per-user attestation blocks without touching the manifest. <strong>No transitivity — one hop from origin, loops structurally impossible, no shared state to resolve.</strong></p>
+<p>Origin msgids + attestations intact, verified against the origin&#8217;s well-known key. <strong>A channel&#8217;s origin is its home</strong> (the namespace owner&#8217;s network, <a href="#s11-13">§11.13</a>): the home mints every message into one total order and is the single point that fans it out one hop to each spoke. A remote member&#8217;s post reaches the home over the <strong>relay leg</strong> (<code>CHANNEL RELAY</code>, <a href="#s11-13">§11.13</a>), not the mirror; the mirror then carries the home-minted event. Because the home is the origin, a home→spoke copy is <strong>one hop from origin</strong> — this is what lets a channel with members on three or more networks deliver every message to everyone (a non-home spoke&#8217;s post could otherwise never reach a second spoke without the forbidden transitivity). EDIT/DELETE are honored by the home on an <strong>authored-by</strong> basis (the relaying network vouches <code>sender@net</code>; the home applies iff the sender authored the target or holds the moderation cap) and minted into the same order — not gated on a per-spoke msgid origin. Retention → strictest. <code>e2ee</code> bridges only pass-through MLS. Per-user attestation blocks without touching the manifest. <strong>No transitivity — one hop from origin, loops structurally impossible, no shared state to resolve.</strong></p>
 </div>
 </div>
 <div class="sect2">
@@ -3485,12 +3494,16 @@ device signature buys nothing against a malicious `F</code> — the trust bounda
 the network. The backstop for a misbehaving <code>F</code> is <code>NETBLOCK</code> (<a href="#s11-6">§11.6</a>).</p>
 </li>
 <li>
-<p><strong>Content rides the mirror; control rides the session.</strong> A federated user&#8217;s
-<em>content</em> — <code>MSG</code>/<code>EDIT</code>/<code>DELETE</code>/<code>REACT</code> — stays <strong>F-origin</strong> and forwards one
-hop (<a href="#s11-4">§11.4</a>); it is <strong>never</strong> authored through <code>H</code>, or origin authority would
-break. Only <strong>control/admin</strong> actions (moderation, <code>GRANT</code>/<code>REVOKE</code>, channel
-and namespace administration, invites, role assignment, report handling) travel
-as commands over a <strong>federation session</strong>.</p>
+<p><strong>Content rides the home relay; control rides the session.</strong> A federated
+member&#8217;s channel <em>content</em> — <code>MSG</code>/<code>EDIT</code>/<code>DELETE</code>/<code>REACT</code> — is relayed to the
+channel&#8217;s <strong>home</strong> and minted there into the single total order (<code>CHANNEL RELAY</code>,
+<a href="#s11-13">§11.13</a>); the home then mirrors it one hop to every spoke. The <strong>author</strong>
+travels as <code>&lt;sender@net&gt;</code> on the relay leg (attributed by <code>F&#8217;s authenticated
+network key, so `F</code> may vouch only its own users — <a href="#s11-4">§11.4</a>), while the
+msgid origin is the home. Only <strong>control/admin</strong> actions (moderation,
+<code>GRANT</code>/<code>REVOKE</code>, channel and namespace administration, invites, role assignment,
+report handling) travel as commands over a <strong>federation session</strong> and are enforced
+against <code>H&#8217;s grants for `account@F</code>; they never mint content.</p>
 </li>
 <li>
 <p><strong>The session — <code>FSESSION</code> (bridge-session-only).</strong> <code>F</code> multiplexes a user&#8217;s
@@ -3619,6 +3632,102 @@ just without the interactive label.</p>
 <p><strong>Attachments.</strong> A cross-network group message carrying a <code>weft-media://</code> attachment
 triggers a mirror pull from the blob&#8217;s <strong>origin</strong> network (<a href="#s11-8">§11.8</a>), so local members can
 fetch it.</p>
+</div>
+</div>
+<div class="sect2">
+<h3 id="s11-13"><a class="anchor" href="#s11-13"></a>11.13 Channels over federation — the channel tunnel</h3>
+<div class="paragraph">
+<p><strong>Home-authoritative ordering (normative).</strong> A channel with members on more than one
+network has a single <strong>home</strong> = the network that owns its namespace. The home is the
+<strong>sole ULID writer</strong> for the channel (<a href="#s9-1">§9.1</a>); every other member network (a <strong>spoke</strong>)
+runs a <strong>replica</strong> that mirrors the home&#8217;s order and holds a bounded tail of pending local
+posts. A remote member&#8217;s <code>MSG</code>/<code>EDIT</code>/<code>DELETE</code>/<code>REACT</code> is <strong>relayed to the home to be
+minted</strong> — a spoke never mints channel content independently. This is the group model
+(<a href="#s11-12">§11.12</a>) applied to channels; it is what makes a channel&#8217;s total order
+well-defined across networks, and — because the home becomes the single origin — what lets
+a post from one spoke reach <em>another</em> spoke at all (one hop from the home; a spoke→spoke
+forward would be the forbidden transitivity of <a href="#s11-4">§11.4</a>).</p>
+</div>
+<div class="paragraph">
+<p>The following verbs are <strong>federation-internal</strong> (bridge-session-only; a client can never send
+them — the server emits them). Channel membership is carried by the manifest (<a href="#s11-1">§11.1</a>)
++ the <code>MEMBER</code> mirror, so there is no <code>SYNC</code> analog.</p>
+</div>
+<table class="tableblock frame-all grid-all stretch">
+<colgroup>
+<col style="width: 14%;">
+<col style="width: 30%;">
+<col style="width: 14%;">
+<col style="width: 42%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Verb</th>
+<th class="tableblock halign-left valign-top">Syntax</th>
+<th class="tableblock halign-left valign-top">Direction</th>
+<th class="tableblock halign-left valign-top">Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL RELAY</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL RELAY &lt;#ns/chan&gt; &lt;sender@net&gt; [@id=&lt;msgid&gt;] [@echo=&lt;token&gt;] [msg-meta] :body</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">both</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>@id</code> <strong>absent</strong> = a spoke relayed a member&#8217;s post to the home → the home mints + fans out; <code>@id</code> <strong>present</strong> = a home-minted message → the spoke ingests + delivers locally.</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL MUT</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL MUT &lt;#ns/chan&gt; &lt;sender@net&gt; &lt;root-msgid&gt; &lt;op&gt; [@id=&lt;msgid&gt;] [:arg]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">both</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">A message mutation (<code>op</code> ∈ <code>edit</code>|<code>delete</code>|<code>react-add</code>|<code>react-remove</code>; <code>arg</code> = body/emoji). <code>@id</code> absent = spoke → home (relay to apply + mint into order); present = home-applied → spoke ingests. The home applies iff <code>sender</code> authored the target or holds the moderation cap (<a href="#s11-4">§11.4</a>).</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL BACKFILL</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL BACKFILL &lt;#ns/chan&gt; [@after=&lt;msgid&gt;]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">spoke → home</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Recovery pull after a home outage or reconnect: replay every channel event after the cursor (or all). The home answers with <code>CHANNEL RELAY</code> (<code>@id</code> present) ingests. Idempotent on msgid; a non-member / unmanifested network gets nothing (anti-enumeration, <a href="#s11-1">§11.1</a>).</p></td>
+</tr>
+</tbody>
+</table>
+<div class="paragraph">
+<p><strong>The echo token</strong> works exactly as for groups (<a href="#s11-12">§11.12</a>): a spoke poster&#8217;s <code>MSG</code> is
+relayed with an opaque <code>@echo=&lt;token&gt;</code>; the home echoes it back <strong>only on the copy to the
+poster&#8217;s network</strong>, which then delivers the home-minted message as the poster&#8217;s own labelled
+message (the send is acked, <a href="#s3-5">§3.5</a>). Tokens are TTL-swept (≈60 s); if the home never
+answers, the message still arrives via <code>CHANNEL BACKFILL</code>, just without the interactive
+label.</p>
+</div>
+<div class="admonitionblock note">
+<table>
+<tr>
+<td class="icon">
+<div class="title">Note</div>
+</td>
+<td class="content">
+<div class="title">Staying fast (non-normative rationale)</div>
+<div class="paragraph">
+<p>Home-authority adds a round-trip only to a cross-network post&#8217;s <em>finalization</em>, not to its
+appearance or to reads: (a) the spoke renders the poster&#8217;s own message <strong>optimistically</strong> at
+once and reconciles it to the home-minted copy when <code>@echo</code> returns; (b) <code>HISTORY</code> and
+scrollback are served from the <strong>local replica</strong> with no round-trip; (c) the relay leg is
+fire-and-forget and pipelined, so posts do not head-of-line-block on confirmation; (d) a
+member whose network <em>is</em> the home mints locally with no relay at all — the common case.
+See <code>docs/architecture/home-authoritative-channels.md</code>.</p>
+</div>
+</td>
+</tr>
+</table>
+</div>
+<div class="paragraph">
+<p><strong>Availability.</strong> Reads are served from the replica even while the home is unreachable. Posts
+are queued in a bounded outbox (invariant 6 backpressure) and stay visible as <em>pending</em>; on
+the home&#8217;s recovery the spoke replays them via <code>CHANNEL BACKFILL</code> and they mint into order —
+nothing is lost. If the home is permanently gone the replica is frozen read-only at its
+last-mirrored state.</p>
+</div>
+<div class="paragraph">
+<p><strong>Attachments</strong> behave as for groups: a <code>weft-media://</code> attachment triggers a mirror pull from
+the blob&#8217;s origin network (<a href="#s11-8">§11.8</a>).</p>
 </div>
 <hr>
 </div>
@@ -4207,7 +4316,7 @@ fetch it.</p>
 <div id="footer">
 <div id="footer-text">
 Version 0.11<br>
-Last updated 2026-07-24 03:15:10 +0200
+Last updated 2026-07-24 03:45:13 +0200
 </div>
 </div>
 </body>

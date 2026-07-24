@@ -2,7 +2,7 @@
 
 Reference server for the **WEFT protocol** (working name): a federated chat protocol combining IRC's operational simplicity with Discord's feature semantics. Rust, tokio, QUIC-native.
 
-**Normative source**: `docs/weft-protocol-spec.md` (**v0.10, consolidated — fully self-contained**). Design rationale: `docs/weftd-server-architecture.md`. When code and spec disagree, the spec wins; if the spec is wrong, amend the spec in the same PR and note it in its Appendix A decision history.
+**Normative source**: `docs/protocol/weft-spec-v0.11.adoc` (**v0.11, AsciiDoc — the master edition; render with `asciidoctor`, gem on PATH via `export PATH="$(ruby -e 'print Gem.user_dir')/bin:$PATH"`**). Markdown mirrors (`docs/protocol/weft-spec-v0.11.md`, `docs/protocol/weft-protocol-spec.md`) are kept in sync but the AsciiDoc is authoritative — apply spec changes there first. Design rationale: `docs/architecture/weftd-server-architecture.md`; the home-authoritative channel model is `docs/architecture/home-authoritative-channels.md`. When code and spec disagree, the spec wins; if the spec is wrong, amend the spec in the same PR and note it in its Appendix A decision history.
 
 ## Protocol in one paragraph
 
