@@ -3745,21 +3745,21 @@ them — the server emits them). Channel membership is carried by the manifest (
 <tbody>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL RELAY</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL RELAY &lt;#ns/chan&gt; &lt;sender@net&gt; [@id=&lt;msgid&gt;] [@echo=&lt;token&gt;] [msg-meta] :body</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL RELAY &lt;#ns/chan&gt; &lt;sender@net&gt; :&lt;body&gt;</code> + tags <code>id=&lt;msgid&gt;</code>, <code>echo=&lt;token&gt;</code>, message meta (<code>nonce=</code>/<code>reply-to=</code>/<code>thread=</code>/<code>attach.N=</code>)</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">both</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>@id</code> <strong>absent</strong> = a spoke relayed a member&#8217;s post to the home → the home mints + fans out; <code>@id</code> <strong>present</strong> = a home-minted message → the spoke ingests + delivers locally.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>id=</code> <strong>absent</strong> = a spoke relayed a member&#8217;s post to the home → the home mints + fans out; <code>id=</code> <strong>present</strong> = a home-minted message → the spoke ingests + delivers locally.</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL MUT</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL MUT &lt;#ns/chan&gt; &lt;sender@net&gt; &lt;root-msgid&gt; &lt;op&gt; [@id=&lt;msgid&gt;] [:arg]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL MUT &lt;#ns/chan&gt; &lt;sender@net&gt; &lt;root-msgid&gt; &lt;op&gt; [:arg]</code> + tag <code>id=&lt;msgid&gt;</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">both</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">A message mutation (<code>op</code> ∈ <code>edit</code>|<code>delete</code>|<code>react-add</code>|<code>react-remove</code>; <code>arg</code> = body/emoji). <code>@id</code> absent = spoke → home (relay to apply + mint into order); present = home-applied → spoke ingests. The home applies iff <code>sender</code> authored the target or holds the moderation cap (<a href="#s11-4">§11.4</a>).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">A message mutation (<code>op</code> ∈ <code>edit</code>|<code>delete</code>|<code>react-add</code>|<code>react-remove</code>; <code>arg</code> = body/emoji). <code>id=</code> absent = spoke → home (relay to apply + mint into order); present = home-applied → spoke ingests. The home applies iff <code>sender</code> authored the target or holds the moderation cap (<a href="#s11-4">§11.4</a>).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL BACKFILL</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL BACKFILL &lt;#ns/chan&gt; [@after=&lt;msgid&gt;]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL BACKFILL &lt;#ns/chan&gt;</code> + tag <code>after=&lt;msgid&gt;</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">spoke → home</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Recovery pull after a home outage or reconnect: replay every channel event after the cursor (or all). The home answers with <code>CHANNEL RELAY</code> (<code>@id</code> present) ingests. Idempotent on msgid; a non-member / unmanifested network gets nothing (anti-enumeration, <a href="#s11-1">§11.1</a>).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Recovery pull after a home outage or reconnect: replay every channel event after the cursor (or all). The home answers with <code>CHANNEL RELAY</code> (<code>id=</code> present) ingests. Idempotent on msgid; a non-member / unmanifested network gets nothing (anti-enumeration, <a href="#s11-1">§11.1</a>).</p></td>
 </tr>
 </tbody>
 </table>
@@ -3926,21 +3926,21 @@ peer · <code>→members</code> = fan-out to local members · <code>client→hom
 <tbody>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL RELAY</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL RELAY &lt;#ns/chan&gt; &lt;sender@net&gt; [@id=] [@echo=] [msg-meta] :body</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL RELAY &lt;#ns/chan&gt; &lt;sender@net&gt; :body</code> + tags <code>id=</code>, <code>echo=</code>, msg-meta</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">S→H mint / H→S ingest</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>@id</code> absent = relay a member&#8217;s post to the home to be minted; <code>@id</code> present = a home-minted message to ingest (backfill replay).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>id=</code> absent = relay a member&#8217;s post to the home to be minted; <code>id=</code> present = a home-minted message to ingest (backfill replay).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL MUT</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL MUT &lt;#ns/chan&gt; &lt;sender@net&gt; &lt;root&gt; &lt;op&gt; [@id=] [:arg]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL MUT &lt;#ns/chan&gt; &lt;sender@net&gt; &lt;root-msgid&gt; &lt;op&gt; [:arg]</code> + tag <code>id=</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">S→H apply / H→S ingest</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">A mutation (<code>edit</code>/<code>delete</code>/<code>react-add</code>/<code>react-remove</code>); the home applies iff <code>sender</code> authored the target (<a href="#s11-4">§11.4</a>).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL BACKFILL</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL BACKFILL &lt;#ns/chan&gt; [@after=]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>CHANNEL BACKFILL &lt;#ns/chan&gt;</code> + tag <code>after=</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">S→H</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Recovery pull; the home replays message roots after the cursor as <code>CHANNEL RELAY</code> (<code>@id</code> present).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Recovery pull; the home replays message roots after the cursor as <code>CHANNEL RELAY</code> (<code>id=</code> present).</p></td>
 </tr>
 </tbody>
 </table>
@@ -3963,37 +3963,37 @@ peer · <code>→members</code> = fan-out to local members · <code>client→hom
 <tbody>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP SYNC</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP SYNC &lt;&amp;id&gt; &lt;creator@net&gt; [&lt;member@net&gt;…]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP SYNC &lt;&amp;id&gt; &lt;creator@net&gt; [&lt;member@net&gt;…]</code> + tag <code>name=</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">H→members</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">Authoritative membership snapshot; receivers reconcile.</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP RELAY</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP RELAY &lt;&amp;id&gt; &lt;sender@net&gt; [@id=] [@echo=] [msg-meta] :body</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP RELAY &lt;&amp;id&gt; &lt;sender@net&gt; :body</code> + tags <code>id=</code>, <code>echo=</code>, msg-meta</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">S→H / H→S</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Group message; <code>@id</code> absent = spoke→home mint, present = home→member ingest.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Group message; <code>id=</code> absent = spoke→home mint, present = home→member ingest.</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP MUT</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP MUT &lt;&amp;id&gt; &lt;sender@net&gt; &lt;root&gt; &lt;op&gt; [@id=] [:arg]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP MUT &lt;&amp;id&gt; &lt;sender@net&gt; &lt;root-msgid&gt; &lt;op&gt; [:arg]</code> + tag <code>id=</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">S→H / H→S</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">Group message mutation (same forms as <code>CHANNEL MUT</code>).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP BACKFILL</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP BACKFILL &lt;&amp;id&gt; [@after=]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP BACKFILL &lt;&amp;id&gt;</code> + tag <code>after=</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">member→home</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">Recovery replay of missed group messages.</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP CALL</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP CALL &lt;&amp;id&gt; [@room= @token= @endpoint=]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP CALL &lt;&amp;id&gt;</code> + tags <code>room=</code>, <code>token=</code>, <code>endpoint=</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">H→members</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">Ring remote members; media tags carry the ringing network&#8217;s relay leg (<a href="#s16">§16</a>).</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP ROSTER</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP ROSTER &lt;&amp;id&gt; &lt;user@net&gt; &lt;active|ended&gt; [@reply=yes]</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>GROUP ROSTER &lt;&amp;id&gt; &lt;user@net&gt; &lt;active|ended&gt;</code> + tag <code>reply=yes</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">mesh</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">Group-call roster gossip across member networks.</p></td>
 </tr>
@@ -4139,7 +4139,7 @@ normative in the cited section.</p>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>WELCOME</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>WELCOME &lt;network&gt; [:motd]</code> (<code>features=</code>, <code>attestation=</code>)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>WELCOME &lt;network&gt; [:motd]</code> + tags <code>features=</code>, <code>attestation=</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">H→peer</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">On a verified bridge <code>AUTH PROOF</code> — the session enters the bridge state.</p></td>
 </tr>
@@ -4164,7 +4164,7 @@ normative in the cited section.</p>
 <tbody>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>MANIFEST</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>MANIFEST &lt;peer&gt; &lt;version&gt; &lt;state&gt;</code> (<code>channels=</code> <code>history=</code> <code>media=</code> <code>typing=</code> <code>voice=</code>; <code>state</code> ∈ <code>live|added|removed|severed</code>)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>MANIFEST &lt;peer&gt; &lt;version&gt; &lt;state&gt;</code> (<code>state</code> ∈ <code>live|added|removed|severed</code>) + tags <code>channels=</code>, <code>history=</code>, <code>media=</code>, <code>typing=</code>, <code>voice=</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">→members</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">A bridge&#8217;s audience changes (accept / add / remove / sever), so members learn what is now shared (<a href="#s6-6">§6.6</a>).</p></td>
 </tr>
@@ -4226,7 +4226,7 @@ normative in the cited section.</p>
 <tbody>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>BATCH</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BATCH START</code> / <code>BATCH END</code> with <code>id=</code> (+ <code>truncated</code> / <code>compacted</code>)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>BATCH START</code> / <code>BATCH END</code> + tag <code>id=</code> (+ <code>truncated</code>/<code>compacted</code> flags on END)</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">H→S</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">A federated <code>HISTORY</code> page (the compacted view).</p></td>
 </tr>
@@ -4825,7 +4825,7 @@ normative in the cited section.</p>
 <div id="footer">
 <div id="footer-text">
 Version 0.11<br>
-Last updated 2026-07-24 21:54:45 +0200
+Last updated 2026-07-24 22:14:48 +0200
 </div>
 </div>
 </body>

@@ -740,12 +740,12 @@ send them — the server emits them). All ride FriendDeliver:
 
 | Verb | Syntax | Direction | Meaning |
 |---|---|---|---|
-| `GROUP SYNC` | `@name= GROUP SYNC <&id> <creator@net> [<member@net> …]` | home → members | The authoritative membership snapshot; receivers reconcile the diff (add/remove) and part removed local members. Sent on create + every membership/name change. |
-| `GROUP RELAY` | `GROUP RELAY <&id> <sender@net> [@id=<msgid>] [@echo=<token>] [msg-meta] :body` | both | `@id` **absent** = a spoke relayed a member's post to the home → the home mints + fans out; `@id` **present** = a home-minted message → the member ingests + delivers locally. |
-| `GROUP MUT` | `GROUP MUT <&id> <sender@net> <root-msgid> <op> [@id=<msgid>] [:arg]` | both | A message mutation (`op` ∈ `edit`\|`delete`\|`react-add`\|`react-remove`; `arg` = body/emoji). `@id` absent = spoke → home (relay to mint); present = home-minted → member ingests. |
-| `GROUP BACKFILL` | `GROUP BACKFILL <&id> [@after=<msgid>]` | member → home | Recovery pull: replay every group message after the member's cursor (or all). The home answers with `GROUP RELAY` (`@id` present) ingests. Idempotent on msgid; a non-member network gets nothing (anti-enumeration). |
-| `GROUP CALL` | `GROUP CALL <&id> [@room= @token= @endpoint=]` | home → members | Rings remote members; the media tags carry the ringing network's relay leg (§16). |
-| `GROUP ROSTER` | `GROUP ROSTER <&id> <user@net> <active\|ended> [@reply=yes]` | mesh | Group-call roster gossip across member networks; `@reply=yes` requests the peer's roster back. |
+| `GROUP SYNC` | `GROUP SYNC <&id> <creator@net> [<member@net> …]` + tag `name=` | home → members | The authoritative membership snapshot; receivers reconcile the diff (add/remove) and part removed local members. Sent on create + every membership/name change. |
+| `GROUP RELAY` | `GROUP RELAY <&id> <sender@net> :<body>` + tags `id=<msgid>`, `echo=<token>`, message meta (`reply-to=`/`thread=`/`attach.N=`) | both | `id=` **absent** = a spoke relayed a member's post to the home → the home mints + fans out; `id=` **present** = a home-minted message → the member ingests + delivers locally. |
+| `GROUP MUT` | `GROUP MUT <&id> <sender@net> <root-msgid> <op> [:arg]` + tag `id=<msgid>` | both | A message mutation (`op` ∈ `edit`\|`delete`\|`react-add`\|`react-remove`; `arg` = body/emoji). `id=` absent = spoke → home (relay to mint); present = home-minted → member ingests. |
+| `GROUP BACKFILL` | `GROUP BACKFILL <&id>` + tag `after=<msgid>` | member → home | Recovery pull: replay every group message after the member's cursor (or all, when `after=` is absent). The home answers with `GROUP RELAY` (`id=` present) ingests. Idempotent on msgid; a non-member network gets nothing (anti-enumeration). |
+| `GROUP CALL` | `GROUP CALL <&id>` + tags `room=`, `token=`, `endpoint=` | home → members | Rings remote members; the media tags carry the ringing network's relay leg (§16). |
+| `GROUP ROSTER` | `GROUP ROSTER <&id> <user@net> <active\|ended>` + tag `reply=yes` | mesh | Group-call roster gossip across member networks; `reply=yes` requests the peer's roster back. |
 
 **The echo token.** When a spoke poster's `MSG &<group>` is relayed to the home, the
 spoke attaches an opaque `@echo=<token>` and remembers it against the poster's session.
@@ -843,9 +843,9 @@ send them — the server emits them). Channel membership is carried by the manif
 
 | Verb | Syntax | Direction | Meaning |
 |---|---|---|---|
-| `CHANNEL RELAY` | `CHANNEL RELAY <#ns/chan> <sender@net> [@id=<msgid>] [@echo=<token>] [msg-meta] :body` | both | `@id` **absent** = a spoke relayed a member's post to the home → the home mints + fans out; `@id` **present** = a home-minted message → the spoke ingests + delivers locally. |
-| `CHANNEL MUT` | `CHANNEL MUT <#ns/chan> <sender@net> <root-msgid> <op> [@id=<msgid>] [:arg]` | both | A message mutation (`op` ∈ `edit`\|`delete`\|`react-add`\|`react-remove`; `arg` = body/emoji). `@id` absent = spoke → home (relay to apply + mint into order); present = home-applied → spoke ingests. The home applies iff `sender` authored the target or holds the moderation cap (§11.4). |
-| `CHANNEL BACKFILL` | `CHANNEL BACKFILL <#ns/chan> [@after=<msgid>]` | spoke → home | Recovery pull after a home outage or reconnect: replay every channel event after the cursor (or all). The home answers with `CHANNEL RELAY` (`@id` present) ingests. Idempotent on msgid; a non-member / unmanifested network gets nothing (anti-enumeration, §11.1). |
+| `CHANNEL RELAY` | `CHANNEL RELAY <#ns/chan> <sender@net> :<body>` + tags `id=<msgid>`, `echo=<token>`, message meta (`nonce=`/`reply-to=`/`thread=`/`attach.N=`) | both | `id=` **absent** = a spoke relayed a member's post to the home → the home mints + fans out; `id=` **present** = a home-minted message → the spoke ingests + delivers locally. |
+| `CHANNEL MUT` | `CHANNEL MUT <#ns/chan> <sender@net> <root-msgid> <op> [:arg]` + tag `id=<msgid>` | both | A message mutation (`op` ∈ `edit`\|`delete`\|`react-add`\|`react-remove`; `arg` = body/emoji). `id=` absent = spoke → home (relay to apply + mint into order); present = home-applied → spoke ingests. The home applies iff `sender` authored the target or holds the moderation cap (§11.4). |
+| `CHANNEL BACKFILL` | `CHANNEL BACKFILL <#ns/chan>` + tag `after=<msgid>` | spoke → home | Recovery pull after a home outage or reconnect: replay every channel event after the cursor (or all). The home answers with `CHANNEL RELAY` (`id=` present) ingests. Idempotent on msgid; a non-member / unmanifested network gets nothing (anti-enumeration, §11.1). |
 
 **The nonce — optimistic reconcile.** A client stamps each `MSG` with an opaque `nonce` (a
 `MsgMeta` tag, §9.2) and renders the message immediately as *pending*. The home carries that
@@ -908,20 +908,20 @@ gating, and state transitions live in the cited subsection.
 
 | Command | Syntax | Direction | Purpose |
 |---|---|---|---|
-| `CHANNEL RELAY` | `CHANNEL RELAY <#ns/chan> <sender@net> [@id=] [@echo=] [msg-meta] :body` | S→H mint / H→S ingest | `@id` absent = relay a member's post to the home to be minted; `@id` present = a home-minted message to ingest (backfill replay). |
-| `CHANNEL MUT` | `CHANNEL MUT <#ns/chan> <sender@net> <root> <op> [@id=] [:arg]` | S→H apply / H→S ingest | A mutation (`edit`/`delete`/`react-add`/`react-remove`); the home applies iff `sender` authored the target (§11.4). |
-| `CHANNEL BACKFILL` | `CHANNEL BACKFILL <#ns/chan> [@after=]` | S→H | Recovery pull; the home replays message roots after the cursor as `CHANNEL RELAY` (`@id` present). |
+| `CHANNEL RELAY` | `CHANNEL RELAY <#ns/chan> <sender@net> :body` + tags `id=`, `echo=`, msg-meta | S→H mint / H→S ingest | `id=` absent = relay a member's post to the home to be minted; `id=` present = a home-minted message to ingest (backfill replay). |
+| `CHANNEL MUT` | `CHANNEL MUT <#ns/chan> <sender@net> <root-msgid> <op> [:arg]` + tag `id=` | S→H apply / H→S ingest | A mutation (`edit`/`delete`/`react-add`/`react-remove`); the home applies iff `sender` authored the target (§11.4). |
+| `CHANNEL BACKFILL` | `CHANNEL BACKFILL <#ns/chan>` + tag `after=` | S→H | Recovery pull; the home replays message roots after the cursor as `CHANNEL RELAY` (`id=` present). |
 
 **Group tunnel — home-authoritative content (§11.12).**
 
 | Command | Syntax | Direction | Purpose |
 |---|---|---|---|
-| `GROUP SYNC` | `GROUP SYNC <&id> <creator@net> [<member@net>…]` | H→members | Authoritative membership snapshot; receivers reconcile. |
-| `GROUP RELAY` | `GROUP RELAY <&id> <sender@net> [@id=] [@echo=] [msg-meta] :body` | S→H / H→S | Group message; `@id` absent = spoke→home mint, present = home→member ingest. |
-| `GROUP MUT` | `GROUP MUT <&id> <sender@net> <root> <op> [@id=] [:arg]` | S→H / H→S | Group message mutation (same forms as `CHANNEL MUT`). |
-| `GROUP BACKFILL` | `GROUP BACKFILL <&id> [@after=]` | member→home | Recovery replay of missed group messages. |
-| `GROUP CALL` | `GROUP CALL <&id> [@room= @token= @endpoint=]` | H→members | Ring remote members; media tags carry the ringing network's relay leg (§16). |
-| `GROUP ROSTER` | `GROUP ROSTER <&id> <user@net> <active\|ended> [@reply=yes]` | mesh | Group-call roster gossip across member networks. |
+| `GROUP SYNC` | `GROUP SYNC <&id> <creator@net> [<member@net>…]` + tag `name=` | H→members | Authoritative membership snapshot; receivers reconcile. |
+| `GROUP RELAY` | `GROUP RELAY <&id> <sender@net> :body` + tags `id=`, `echo=`, msg-meta | S→H / H→S | Group message; `id=` absent = spoke→home mint, present = home→member ingest. |
+| `GROUP MUT` | `GROUP MUT <&id> <sender@net> <root-msgid> <op> [:arg]` + tag `id=` | S→H / H→S | Group message mutation (same forms as `CHANNEL MUT`). |
+| `GROUP BACKFILL` | `GROUP BACKFILL <&id>` + tag `after=` | member→home | Recovery replay of missed group messages. |
+| `GROUP CALL` | `GROUP CALL <&id>` + tags `room=`, `token=`, `endpoint=` | H→members | Ring remote members; media tags carry the ringing network's relay leg (§16). |
+| `GROUP ROSTER` | `GROUP ROSTER <&id> <user@net> <active\|ended>` + tag `reply=yes` | mesh | Group-call roster gossip across member networks. |
 
 **History & media backfill (§11.7, §11.8).**
 
@@ -958,13 +958,13 @@ originate from a client. Non-normative index; event shapes are normative in the 
 | Event | Syntax | Direction | Emitted when |
 |---|---|---|---|
 | `CHALLENGE` | `CHALLENGE <b64-nonce>` | H→peer | On `AUTH BRIDGE`, to be signed with the peer's network key. |
-| `WELCOME` | `WELCOME <network> [:motd]` (`features=`, `attestation=`) | H→peer | On a verified bridge `AUTH PROOF` — the session enters the bridge state. |
+| `WELCOME` | `WELCOME <network> [:motd]` + tags `features=`, `attestation=` | H→peer | On a verified bridge `AUTH PROOF` — the session enters the bridge state. |
 
 **Manifest & block state (§11.5, §11.6).**
 
 | Event | Syntax | Direction | Emitted when |
 |---|---|---|---|
-| `MANIFEST` | `MANIFEST <peer> <version> <state>` (`channels=` `history=` `media=` `typing=` `voice=`; `state` ∈ `live\|added\|removed\|severed`) | →members | A bridge's audience changes (accept / add / remove / sever), so members learn what is now shared (§6.6). |
+| `MANIFEST` | `MANIFEST <peer> <version> <state>` (`state` ∈ `live\|added\|removed\|severed`) + tags `channels=`, `history=`, `media=`, `typing=`, `voice=` | →members | A bridge's audience changes (accept / add / remove / sever), so members learn what is now shared (§6.6). |
 | `NETBLOCKED` | `NETBLOCKED <network> [:reason]` | →owners | A manifest is severed by a netblock (§11.6). |
 
 **Mirrored content — the §7 events, origin-preserved (§11.4).**
@@ -978,7 +978,7 @@ originate from a client. Non-normative index; event shapes are normative in the 
 
 | Event | Syntax | Direction | Emitted when |
 |---|---|---|---|
-| `BATCH` | `BATCH START` / `BATCH END` with `id=` (+ `truncated` / `compacted`) | H→S | A federated `HISTORY` page (the compacted view). |
+| `BATCH` | `BATCH START` / `BATCH END` + tag `id=` (+ `truncated`/`compacted` flags on END) | H→S | A federated `HISTORY` page (the compacted view). |
 | `STREAM ACCEPT` | `STREAM ACCEPT <token>` | H→S | A large backfill page is offered as a data-plane stream; the puller drains it and re-ingests each line. |
 
 ---
