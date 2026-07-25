@@ -211,6 +211,13 @@ pub struct ServerCtx {
     /// federated scrollback nobody has asked to see). Closed senders are pruned
     /// on send, so a dropped bridge deregisters itself.
     backfill_demand: std::sync::Mutex<Vec<tokio::sync::mpsc::UnboundedSender<BackfillReq>>>,
+    /// §11.14 live outbound-bridge line queues: `peer → that bridge session's
+    /// writer`. A local session's `@as` command to a bridged peer rides its
+    /// persistent bridge (one hop, homeserver authority) — no ephemeral dial —
+    /// and the command's effects return as events over the same bridge.
+    /// Registered when an outbound bridge enters `State::Bridge`, removed when it
+    /// closes.
+    bridge_out: std::sync::Mutex<HashMap<NetworkName, tokio::sync::mpsc::Sender<String>>>,
     /// §11.10 per-account cooldown on `FEDERATE` — a light dial-storm guard even
     /// under the open trigger policy (§6).
     federate_cooldown: std::sync::Mutex<HashMap<Account, std::time::Instant>>,
@@ -358,18 +365,31 @@ pub struct AutoBridgeRequest {
     pub namespace: NamespaceName,
 }
 
-/// Deliver a local user's social-layer command to a **peer network** over an
-/// FSession tunnel (§11.10 home-side driver). weftd reuses/establishes the
-/// bridge to `peer`, opens a tunnel as `from`, and forwards `line`. Fire-and-
-/// forget: the peer applies it and notifies its local user; each network keeps
-/// its own copy of the edge, so no reply routing is needed.
+/// Deliver a control line to a **peer network** (§11.14). Preferred path: the
+/// peer's persistent bridge (see [`ServerCtx::request_friend_deliver`]); the
+/// ephemeral tunnel driver is the fallback for a never-bridged peer. A user
+/// command carries `from` (run `@as=<from>`); a home-fan-out event carries
+/// `from = None`. Fire-and-forget: effects return as events over the bridge.
+/// §11.14 attribute a serialized command line to the acting local account by
+/// adding the `@as=<account>` tag. The peer reconstructs `account@<our-network>`
+/// from its authenticated bridge and enforces the command against its own grants.
+/// `None` if the line does not parse (never emitted by our own serializer).
+fn with_as_tag(line: &str, from: &Account) -> Option<String> {
+    let mut parsed = weft_proto::Line::parse(line).ok()?;
+    parsed.tags.insert("as".to_string(), from.to_string());
+    parsed.serialize().ok()
+}
+
 #[derive(Debug, Clone)]
 pub struct FriendDeliver {
-    /// The peer network that owns the *other* user (the target's network).
+    /// The peer network to deliver to.
     pub peer: NetworkName,
-    /// The local account acting — the tunnel is opened as `from@thisnetwork`.
-    pub from: Account,
-    /// The serialized friend command to run on the peer (`FRIEND ADD …` etc.).
+    /// The acting local account when this is a **user command** — the peer runs
+    /// it `@as=<from>` (§11.14). `None` when the line is an **event** the home
+    /// fans out to a member network (a group `MESSAGE`/`EDITED`/roster) — events
+    /// carry no actor tag and are ingested as bridged events.
+    pub from: Option<Account>,
+    /// The serialized line: a §6 command (when `from` is set) or a §7 event.
     pub line: String,
 }
 
@@ -483,6 +503,7 @@ impl ServerCtx {
             auto_bridge_tx: std::sync::OnceLock::new(),
             mirror_tx: std::sync::OnceLock::new(),
             friend_deliver_tx: std::sync::OnceLock::new(),
+            bridge_out: std::sync::Mutex::new(HashMap::new()),
             backfill_tx: std::sync::OnceLock::new(),
             backfill_demand: std::sync::Mutex::new(Vec::new()),
             federate_cooldown: std::sync::Mutex::new(HashMap::new()),
@@ -742,10 +763,55 @@ impl ServerCtx {
         let _ = self.friend_deliver_tx.set(tx);
     }
 
-    /// Hand a cross-network friend command to weftd's tunnel driver. `false` if
-    /// no sink is installed (federation off) — the local edge is still recorded,
-    /// so the peer simply isn't told until federation is available.
+    /// §11.14 register a live outbound bridge's writer so local `@as` commands to
+    /// `peer` route over it. Called when an outbound bridge enters `State::Bridge`.
+    pub(crate) fn register_bridge_out(
+        &self,
+        peer: NetworkName,
+        tx: tokio::sync::mpsc::Sender<String>,
+    ) {
+        self.bridge_out
+            .lock()
+            .expect("bridge_out lock")
+            .insert(peer, tx);
+    }
+
+    /// §11.14 drop a bridge's writer when its session ends.
+    pub(crate) fn unregister_bridge_out(&self, peer: &NetworkName) {
+        self.bridge_out
+            .lock()
+            .expect("bridge_out lock")
+            .remove(peer);
+    }
+
+    fn bridge_out_for(&self, peer: &NetworkName) -> Option<tokio::sync::mpsc::Sender<String>> {
+        self.bridge_out
+            .lock()
+            .expect("bridge_out lock")
+            .get(peer)
+            .cloned()
+    }
+
+    /// Send a cross-network command to `peer`, attributed to the acting local
+    /// account (§11.14). Preferred path: the peer's **persistent bridge** — tag
+    /// the line `@as=<from>` and hand it to that session's writer, so its effects
+    /// return as events over the same bridge (one hop, homeserver authority). If
+    /// we hold no live bridge to `peer` (e.g. a friend on a never-bridged
+    /// network), fall back to weftd's ephemeral tunnel driver. `false` if neither
+    /// is available — the local edge is still recorded, so the peer is simply not
+    /// told until a bridge exists.
     pub(crate) fn request_friend_deliver(&self, req: FriendDeliver) -> bool {
+        if let Some(tx) = self.bridge_out_for(&req.peer) {
+            // A command is tagged `@as=<from>`; an event (`from` = None) rides as-is.
+            let line = match &req.from {
+                Some(from) => match with_as_tag(&req.line, from) {
+                    Some(line) => line,
+                    None => return false,
+                },
+                None => req.line.clone(),
+            };
+            return tx.try_send(line).is_ok();
+        }
         matches!(self.friend_deliver_tx.get(), Some(tx) if tx.send(req).is_ok())
     }
 

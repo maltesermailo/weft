@@ -22,7 +22,7 @@ impl<S: ControlStream> Session<S> {
         if &me.network == local && &target.network != local && !line.is_empty() {
             self.ctx.request_friend_deliver(FriendDeliver {
                 peer: target.network.clone(),
-                from: me.account.clone(),
+                from: Some(me.account.clone()),
                 line,
             });
         }

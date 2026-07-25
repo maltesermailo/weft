@@ -55,23 +55,6 @@ impl Request {
     }
 }
 
-/// The four ops of a federation-session frame (§11.10). `Cmd`/`Event` carry a
-/// full inner control line verbatim (in the frame's trailing), so the tunnel is
-/// transport-agnostic — H re-parses the inner line, F re-emits the inner reply.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FSessionOp {
-    /// F opens a session for its local user `account` (H forms `account@<peer>`).
-    Open { account: String },
-    /// A command line from that user (F→H).
-    Cmd { line: String },
-    /// The **direct reply** to one of her commands (H→F) — a labeled ack or
-    /// `ERR`. Broadcast events never tunnel here; they ride the namespace mirror
-    /// (§10.3), so the session carries only the request/response pair.
-    Reply { line: String },
-    /// Close the sub-session.
-    Close,
-}
-
 /// The caller network's **relay leg** carried on a **federated** `CALL`
 /// (cross-network calls, §16 M-lk-3b cascade): its LiveKit `room`, a relay
 /// `token` authorizing the callee network's relay to join that room, and the
@@ -293,50 +276,6 @@ pub enum Command {
         channel: ChannelName,
         new_name: ChannelName,
     },
-    /// `@id=<msgid> @reply-to=… @thread=… @attach.N=… CHANNEL RELAY <#ns/chan>
-    /// <sender@net> :<body>` — a **federation-internal** cross-network channel
-    /// message. The channel's **home** network (its namespace owner's network) is
-    /// the single ULID writer (§9.1, §11.13). Two forms: `@id` **absent** = a spoke
-    /// relaying a member's post to the home (the home mints + fans out); `@id`
-    /// **present** = a home-minted message for a spoke to ingest (persist with the
-    /// origin msgid intact, invariant 2) and deliver to its local members. `meta`
-    /// carries replies/threads/attachments (§9.3). Never from a client.
-    ChannelRelay {
-        channel: ChannelName,
-        sender: UserRef,
-        msgid: Option<MsgId>,
-        body: String,
-        meta: MsgMeta,
-        /// An opaque correlation token so a **spoke poster** gets a labelled echo:
-        /// set on the spoke→home relay, echoed back by the home only in the copy
-        /// destined for the sender's network, which delivers it as the poster's
-        /// own (labelled) message.
-        echo: Option<String>,
-    },
-    /// `@id=<msgid> CHANNEL MUT <#ns/chan> <sender@net> <root> <op> :<arg>` — a
-    /// **federation-internal** cross-network channel message **mutation** (§11.4,
-    /// §11.13: applied at the home on an authored-by basis). `op` is `edit` /
-    /// `delete` / `react-add` / `react-remove`; `arg` is the new body (edit) or the
-    /// emoji (react). `@id` **absent** = a spoke relaying a member's mutation to the
-    /// home (the home applies + fans out); `@id` **present** = a home-minted mutation
-    /// for a spoke to ingest. Never from a client.
-    ChannelMut {
-        channel: ChannelName,
-        sender: UserRef,
-        root: MsgId,
-        op: String,
-        arg: String,
-        msgid: Option<MsgId>,
-    },
-    /// `@after=<msgid> CHANNEL BACKFILL <#ns/chan>` — a **federation-internal**
-    /// catch-up request sent by a spoke to the channel's **home**: replay every
-    /// channel message after `after` (the requester's latest, or all if absent), so
-    /// messages missed while the home was unreachable aren't lost. The home answers
-    /// with `CHANNEL RELAY` ingests. Never sent by a client.
-    ChannelBackfill {
-        channel: ChannelName,
-        after: Option<MsgId>,
-    },
     /// `INVITE MINT <scope> [max-uses=] [expiry=]` (§6.5) → `INVITED`.
     InviteMint {
         scope: String,
@@ -497,12 +436,6 @@ pub enum Command {
         network: NetworkName,
         namespace: NamespaceName,
     },
-    /// `FSESSION <fsid> <OPEN <account>|CMD :<line>|REPLY :<line>|CLOSE>`
-    /// (§11.10) — federation-session multiplexing over a bridge (homeserver
-    /// authority): F tunnels one of its users' command sessions to H, so a
-    /// federated user wields her caps on H without ever connecting to it (IP
-    /// non-exposure). Bridge-session-only.
-    FSession { fsid: String, op: FSessionOp },
     /// `NETBLOCK ADD <network> [:reason]` (§6.6, §11.6). Cap `netblock` at `*`.
     NetblockAdd {
         network: NetworkName,
@@ -660,62 +593,6 @@ pub enum Command {
         user: UserRef,
         active: bool,
         reply: bool,
-    },
-    /// `@name=… GROUP SYNC <&group> <creator@net> <member@net>…` — a
-    /// **federation-internal** cross-network group membership sync: record (or
-    /// update) the group with this id, creator, name, and members, so it exists
-    /// consistently on every member's network. Sent to remote member networks on
-    /// create/membership change. Never sent by a client.
-    GroupSync {
-        group: GroupId,
-        creator: UserRef,
-        name: Option<String>,
-        members: Vec<UserRef>,
-    },
-    /// `@id=<msgid> @reply-to=… @thread=… @attach.N=… GROUP RELAY <&group>
-    /// <sender@net> :<body>` — a **federation-internal** cross-network group
-    /// message. The group's **home** network (`creator`'s network) is the single
-    /// ULID writer (§9.1). Two forms: `@id` **absent** = a spoke relaying a
-    /// member's post to the home (the home mints + fans out); `@id` **present** =
-    /// a home-minted message for a member network to ingest (persist under
-    /// `Scope::Group` with the origin msgid intact, invariant 2) and deliver to
-    /// its local members. `meta` carries replies/threads/attachments (§9.3). Never
-    /// from a client.
-    GroupRelay {
-        group: GroupId,
-        sender: UserRef,
-        msgid: Option<MsgId>,
-        body: String,
-        meta: MsgMeta,
-        /// An opaque correlation token so a **spoke poster** gets a labelled echo:
-        /// set on the spoke→home relay, echoed back by the home only in the copy
-        /// destined for the sender's network, which delivers it as the poster's
-        /// own (labelled) message.
-        echo: Option<String>,
-    },
-    /// `@id=<msgid> GROUP MUT <&group> <sender@net> <root> <op> :<arg>` — a
-    /// **federation-internal** cross-network group message **mutation** (§11.4:
-    /// honored at the msgid's origin = the group's home). `op` is `edit` /
-    /// `delete` / `react-add` / `react-remove`; `arg` is the new body (edit) or
-    /// the emoji (react). `@id` **absent** = a spoke relaying a member's mutation
-    /// to the home (the home applies + fans out); `@id` **present** = a
-    /// home-minted mutation for a member network to ingest. Never from a client.
-    GroupMut {
-        group: GroupId,
-        sender: UserRef,
-        root: MsgId,
-        op: String,
-        arg: String,
-        msgid: Option<MsgId>,
-    },
-    /// `@after=<msgid> GROUP BACKFILL <&group>` — a **federation-internal** catch-up
-    /// request sent by a member network to the group's **home**: replay every
-    /// group message after `after` (the requester's latest, or all if absent), so
-    /// messages missed while the member was unreachable aren't lost. The home
-    /// answers with `GROUP RELAY` ingests. Never sent by a client.
-    GroupBackfill {
-        group: GroupId,
-        after: Option<MsgId>,
     },
     /// `CALL <user@net>` (social layer) — place a 1:1 friend call; the callee's
     /// sessions ring (`CALL-RING`). On accept both join an ad-hoc voice room.
@@ -1217,26 +1094,6 @@ impl Command {
                         channel: args.req("channel")?.parse()?,
                         new_name: args.req("new-name")?.parse()?,
                     }),
-                    "RELAY" => Ok(Command::ChannelRelay {
-                        channel: args.req("channel")?.parse()?,
-                        sender: args.req("sender")?.parse()?,
-                        msgid: line.tags.get("id").map(|v| v.parse()).transpose()?,
-                        body: line.trailing.clone().unwrap_or_default(),
-                        meta: MsgMeta::from_tags(&line.tags)?,
-                        echo: line.tags.get("echo").filter(|v| !v.is_empty()).cloned(),
-                    }),
-                    "MUT" => Ok(Command::ChannelMut {
-                        channel: args.req("channel")?.parse()?,
-                        sender: args.req("sender")?.parse()?,
-                        root: args.req("root")?.parse()?,
-                        op: args.req("op")?.to_ascii_lowercase(),
-                        arg: line.trailing.clone().unwrap_or_default(),
-                        msgid: line.tags.get("id").map(|v| v.parse()).transpose()?,
-                    }),
-                    "BACKFILL" => Ok(Command::ChannelBackfill {
-                        channel: args.req("channel")?.parse()?,
-                        after: line.tags.get("after").map(|v| v.parse()).transpose()?,
-                    }),
                     _ => Err(ParseError::BadParam {
                         verb: "CHANNEL",
                         what: "subcommand",
@@ -1443,28 +1300,6 @@ impl Command {
                     network: network.parse()?,
                     namespace: namespace.parse()?,
                 })
-            }
-            "FSESSION" => {
-                let mut args = Args::new(line, "FSESSION");
-                let fsid = args.req("fsid")?.to_string();
-                let op = match args.req("op")?.to_ascii_uppercase().as_str() {
-                    "OPEN" => FSessionOp::Open {
-                        account: args.req("account")?.to_string(),
-                    },
-                    "CMD" => FSessionOp::Cmd {
-                        line: line.trailing.clone().unwrap_or_default(),
-                    },
-                    "REPLY" => FSessionOp::Reply {
-                        line: line.trailing.clone().unwrap_or_default(),
-                    },
-                    "CLOSE" => FSessionOp::Close,
-                    other => {
-                        return Ok(Command::Unknown {
-                            verb: format!("FSESSION {other}"),
-                        })
-                    }
-                };
-                Ok(Command::FSession { fsid, op })
             }
             "REPORT" => {
                 let mut args = Args::new(line, "REPORT");
@@ -1880,40 +1715,6 @@ impl Command {
                         active: args.req("state")?.eq_ignore_ascii_case("active"),
                         reply: line.tags.get("reply").is_some_and(|v| v == "yes"),
                     }),
-                    "SYNC" => {
-                        let group = args.req("group")?.parse()?;
-                        let creator = args.req("creator")?.parse()?;
-                        let mut members = Vec::new();
-                        while let Some(m) = args.opt() {
-                            members.push(m.parse()?);
-                        }
-                        Ok(Command::GroupSync {
-                            group,
-                            creator,
-                            name: line.tags.get("name").filter(|v| !v.is_empty()).cloned(),
-                            members,
-                        })
-                    }
-                    "RELAY" => Ok(Command::GroupRelay {
-                        group: args.req("group")?.parse()?,
-                        sender: args.req("sender")?.parse()?,
-                        msgid: line.tags.get("id").map(|v| v.parse()).transpose()?,
-                        body: line.trailing.clone().unwrap_or_default(),
-                        meta: MsgMeta::from_tags(&line.tags)?,
-                        echo: line.tags.get("echo").filter(|v| !v.is_empty()).cloned(),
-                    }),
-                    "MUT" => Ok(Command::GroupMut {
-                        group: args.req("group")?.parse()?,
-                        sender: args.req("sender")?.parse()?,
-                        root: args.req("root")?.parse()?,
-                        op: args.req("op")?.to_ascii_lowercase(),
-                        arg: line.trailing.clone().unwrap_or_default(),
-                        msgid: line.tags.get("id").map(|v| v.parse()).transpose()?,
-                    }),
-                    "BACKFILL" => Ok(Command::GroupBackfill {
-                        group: args.req("group")?.parse()?,
-                        after: line.tags.get("after").map(|v| v.parse()).transpose()?,
-                    }),
                     _ => Err(ParseError::BadParam {
                         verb: "GROUP",
                         what: "subcommand",
@@ -2238,60 +2039,6 @@ impl Command {
                 ],
                 None,
             ),
-            Command::ChannelRelay {
-                channel,
-                sender,
-                msgid,
-                body,
-                meta,
-                echo,
-            } => {
-                if let Some(id) = msgid {
-                    tags.insert("id".to_string(), id.to_string());
-                }
-                if let Some(echo) = echo {
-                    tags.insert("echo".to_string(), echo.clone());
-                }
-                meta.write_tags(&mut tags)?;
-                (
-                    "CHANNEL",
-                    vec!["RELAY".to_string(), channel.to_string(), sender.to_string()],
-                    Some(body.clone()),
-                )
-            }
-            Command::ChannelMut {
-                channel,
-                sender,
-                root,
-                op,
-                arg,
-                msgid,
-            } => {
-                if let Some(id) = msgid {
-                    tags.insert("id".to_string(), id.to_string());
-                }
-                (
-                    "CHANNEL",
-                    vec![
-                        "MUT".to_string(),
-                        channel.to_string(),
-                        sender.to_string(),
-                        root.to_string(),
-                        op.clone(),
-                    ],
-                    Some(arg.clone()).filter(|a| !a.is_empty()),
-                )
-            }
-            Command::ChannelBackfill { channel, after } => {
-                if let Some(after) = after {
-                    tags.insert("after".to_string(), after.to_string());
-                }
-                (
-                    "CHANNEL",
-                    vec!["BACKFILL".to_string(), channel.to_string()],
-                    None,
-                )
-            }
             Command::InviteMint {
                 scope,
                 max_uses,
@@ -2444,24 +2191,6 @@ impl Command {
             Command::Federate { network, namespace } => {
                 ("FEDERATE", vec![format!("{network}/{namespace}")], None)
             }
-            Command::FSession { fsid, op } => match op {
-                FSessionOp::Open { account } => (
-                    "FSESSION",
-                    vec![fsid.clone(), "OPEN".to_string(), account.clone()],
-                    None,
-                ),
-                FSessionOp::Cmd { line } => (
-                    "FSESSION",
-                    vec![fsid.clone(), "CMD".to_string()],
-                    Some(line.clone()),
-                ),
-                FSessionOp::Reply { line } => (
-                    "FSESSION",
-                    vec![fsid.clone(), "REPLY".to_string()],
-                    Some(line.clone()),
-                ),
-                FSessionOp::Close => ("FSESSION", vec![fsid.clone(), "CLOSE".to_string()], None),
-            },
             Command::Channels { namespace } => ("CHANNELS", vec![namespace.to_string()], None),
             Command::Report {
                 msgid,
@@ -2741,73 +2470,6 @@ impl Command {
                         user.to_string(),
                         if *active { "active" } else { "ended" }.to_string(),
                     ],
-                    None,
-                )
-            }
-            Command::GroupSync {
-                group,
-                creator,
-                name,
-                members,
-            } => {
-                if let Some(name) = name {
-                    tags.insert("name".to_string(), name.clone());
-                }
-                let mut args = vec!["SYNC".to_string(), group.to_string(), creator.to_string()];
-                args.extend(members.iter().map(|m| m.to_string()));
-                ("GROUP", args, None)
-            }
-            Command::GroupRelay {
-                group,
-                sender,
-                msgid,
-                body,
-                meta,
-                echo,
-            } => {
-                if let Some(id) = msgid {
-                    tags.insert("id".to_string(), id.to_string());
-                }
-                if let Some(echo) = echo {
-                    tags.insert("echo".to_string(), echo.clone());
-                }
-                meta.write_tags(&mut tags)?;
-                (
-                    "GROUP",
-                    vec!["RELAY".to_string(), group.to_string(), sender.to_string()],
-                    Some(body.clone()),
-                )
-            }
-            Command::GroupMut {
-                group,
-                sender,
-                root,
-                op,
-                arg,
-                msgid,
-            } => {
-                if let Some(id) = msgid {
-                    tags.insert("id".to_string(), id.to_string());
-                }
-                (
-                    "GROUP",
-                    vec![
-                        "MUT".to_string(),
-                        group.to_string(),
-                        sender.to_string(),
-                        root.to_string(),
-                        op.clone(),
-                    ],
-                    Some(arg.clone()).filter(|a| !a.is_empty()),
-                )
-            }
-            Command::GroupBackfill { group, after } => {
-                if let Some(after) = after {
-                    tags.insert("after".to_string(), after.to_string());
-                }
-                (
-                    "GROUP",
-                    vec!["BACKFILL".to_string(), group.to_string()],
                     None,
                 )
             }
@@ -3691,30 +3353,6 @@ mod tests {
             network: "hda.example".parse().unwrap(),
             namespace: "gaming".parse().unwrap(),
         }));
-        // §11.10 federation-session tunnel frames.
-        round_trip(&Request::new(Command::FSession {
-            fsid: "7".to_string(),
-            op: FSessionOp::Open {
-                account: "alice".to_string(),
-            },
-        }));
-        round_trip(&Request::new(Command::FSession {
-            fsid: "7".to_string(),
-            op: FSessionOp::Cmd {
-                // The inner line keeps its own tags + trailing verbatim.
-                line: "@label=m1 MUTE #gaming/general bob :spam".to_string(),
-            },
-        }));
-        round_trip(&Request::new(Command::FSession {
-            fsid: "7".to_string(),
-            op: FSessionOp::Reply {
-                line: "MODERATED #gaming/general bob mute".to_string(),
-            },
-        }));
-        round_trip(&Request::new(Command::FSession {
-            fsid: "7".to_string(),
-            op: FSessionOp::Close,
-        }));
         assert!(Request::parse("FEDERATE nonslash").is_err());
         assert!(Request::parse("BRIDGE FROB peer.example").is_err());
         assert!(Request::parse("BRIDGE ACCEPT peer.example notanumber").is_err());
@@ -4042,66 +3680,6 @@ mod tests {
                 reply,
             }));
         }
-        round_trip(&Request::new(Command::GroupSync {
-            group: G.parse().unwrap(),
-            creator: "ada@home.example".parse().unwrap(),
-            name: Some("weekend".to_string()),
-            members: vec![
-                "ada@home.example".parse().unwrap(),
-                "carol@peer.example".parse().unwrap(),
-            ],
-        }));
-        // Relay: a spoke's post (no id) and a home-minted ingest (id + meta).
-        round_trip(&Request::new(Command::GroupRelay {
-            group: G.parse().unwrap(),
-            sender: "carol@peer.example".parse().unwrap(),
-            msgid: None,
-            body: "hi from a spoke".to_string(),
-            meta: MsgMeta::default(),
-            echo: None,
-        }));
-        round_trip(&Request::new(Command::GroupRelay {
-            group: G.parse().unwrap(),
-            sender: "carol@peer.example".parse().unwrap(),
-            msgid: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap()),
-            body: "minted".to_string(),
-            meta: MsgMeta {
-                reply_to: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap()),
-                thread: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FB1".parse().unwrap()),
-                attachments: vec!["weft-media://home.example/abc".to_string()],
-                ..Default::default()
-            },
-            echo: Some("01ARZ3NDEKTSV4RRFFQ69G5FB9".to_string()),
-        }));
-        round_trip(&Request::new(Command::GroupBackfill {
-            group: G.parse().unwrap(),
-            after: None,
-        }));
-        round_trip(&Request::new(Command::GroupBackfill {
-            group: G.parse().unwrap(),
-            after: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap()),
-        }));
-        const R: &str = "home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
-        for (op, arg) in [
-            ("edit", "fixed"),
-            ("delete", ""),
-            ("react-add", "🦀"),
-            ("react-remove", "🦀"),
-        ] {
-            for msgid in [
-                None,
-                Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FB3".parse().unwrap()),
-            ] {
-                round_trip(&Request::new(Command::GroupMut {
-                    group: G.parse().unwrap(),
-                    sender: "carol@peer.example".parse().unwrap(),
-                    root: R.parse().unwrap(),
-                    op: op.to_string(),
-                    arg: arg.to_string(),
-                    msgid,
-                }));
-            }
-        }
         // A group target is `&<ulid>`; MSG to it round-trips.
         round_trip(&Request::new(Command::Msg {
             target: G.parse().unwrap(),
@@ -4111,78 +3689,6 @@ mod tests {
 
         assert!(Request::parse("GROUP CREATE").is_err()); // needs ≥1 member
         assert!(Request::parse("GROUP FROB &x").is_err()); // bad subcommand
-    }
-
-    #[test]
-    fn channel_federation_verbs_round_trip() {
-        const C: &str = "#gaming/general";
-        // Relay: a spoke's post (no id) and a home-minted ingest (id + meta + echo).
-        round_trip(&Request::new(Command::ChannelRelay {
-            channel: C.parse().unwrap(),
-            sender: "carol@peer.example".parse().unwrap(),
-            msgid: None,
-            body: "hi from a spoke".to_string(),
-            meta: MsgMeta::default(),
-            echo: None,
-        }));
-        round_trip(&Request::new(Command::ChannelRelay {
-            channel: C.parse().unwrap(),
-            sender: "carol@peer.example".parse().unwrap(),
-            msgid: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap()),
-            body: "minted".to_string(),
-            meta: MsgMeta {
-                reply_to: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap()),
-                thread: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FB1".parse().unwrap()),
-                attachments: vec!["weft-media://home.example/abc".to_string()],
-                ..Default::default()
-            },
-            echo: Some("01ARZ3NDEKTSV4RRFFQ69G5FB9".to_string()),
-        }));
-        // A spoke→home relay serializes with tags before the verb (§4 grammar).
-        assert_eq!(
-            Request::new(Command::ChannelRelay {
-                channel: C.parse().unwrap(),
-                sender: "carol@peer.example".parse().unwrap(),
-                msgid: None,
-                body: "gg".to_string(),
-                meta: MsgMeta::default(),
-                echo: Some("tok1".to_string()),
-            })
-            .serialize()
-            .unwrap(),
-            "@echo=tok1 CHANNEL RELAY #gaming/general carol@peer.example :gg"
-        );
-        round_trip(&Request::new(Command::ChannelBackfill {
-            channel: C.parse().unwrap(),
-            after: None,
-        }));
-        round_trip(&Request::new(Command::ChannelBackfill {
-            channel: C.parse().unwrap(),
-            after: Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap()),
-        }));
-        const R: &str = "home.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
-        for (op, arg) in [
-            ("edit", "fixed"),
-            ("delete", ""),
-            ("react-add", "🦀"),
-            ("react-remove", "🦀"),
-        ] {
-            for msgid in [
-                None,
-                Some("home.example/01ARZ3NDEKTSV4RRFFQ69G5FB3".parse().unwrap()),
-            ] {
-                round_trip(&Request::new(Command::ChannelMut {
-                    channel: C.parse().unwrap(),
-                    sender: "carol@peer.example".parse().unwrap(),
-                    root: R.parse().unwrap(),
-                    op: op.to_string(),
-                    arg: arg.to_string(),
-                    msgid,
-                }));
-            }
-        }
-
-        assert!(Request::parse("CHANNEL FROB #x").is_err()); // bad subcommand
     }
 
     #[test]

@@ -431,30 +431,40 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
-    /// §11.13 relay a channel mutation to the channel's **home** (we're a spoke;
-    /// only the home applies it). The resulting EDITED/DELETED/REACTION returns
-    /// over the ordinary event mirror.
+    /// §11.14 relay a channel mutation to the channel's **home** (we're a spoke;
+    /// only the home applies it) as an ordinary `@as` command keyed on the target
+    /// msgid — the home resolves its channel + author and applies it, and the
+    /// resulting EDITED/DELETED/REACTION returns over the ordinary event mirror.
     pub(super) fn relay_channel_mut(
         &self,
         home: NetworkName,
-        channel: ChannelName,
+        _channel: ChannelName,
         sender: &UserRef,
         root: MsgId,
         op: &str,
         arg: String,
     ) {
-        let cmd = Command::ChannelMut {
-            channel,
-            sender: sender.clone(),
-            root,
-            op: op.to_string(),
-            arg,
-            msgid: None,
+        let cmd = match op {
+            "edit" => Command::Edit {
+                msgid: root,
+                body: arg,
+            },
+            "delete" => Command::Delete { msgid: root },
+            "react-add" => Command::React {
+                msgid: root,
+                emoji: arg,
+            },
+            "react-remove" => Command::Unreact {
+                msgid: root,
+                emoji: arg,
+            },
+            _ => return,
         };
+
         if let Ok(line) = Request::new(cmd).serialize() {
             self.ctx.request_friend_deliver(crate::FriendDeliver {
                 peer: home,
-                from: sender.account.clone(),
+                from: Some(sender.account.clone()),
                 line,
             });
         }
@@ -507,9 +517,11 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
-    /// §11.13 spoke → home recovery: ask the channel's home to replay anything it
-    /// minted while we were unreachable, carrying our newest local root as the
-    /// cursor (`None` = replay all). No-op when we are the home.
+    /// §11.14 spoke → home recovery: ask the channel's home to replay anything it
+    /// minted while we were unreachable — an ordinary `@as HISTORY #chan after=X`
+    /// carrying our newest local root as the cursor (`None` = replay all). The
+    /// home answers with `MESSAGE` events over the same bridge, which we ingest.
+    /// No-op when we are the home.
     pub(super) async fn request_channel_home_backfill(&mut self, channel: ChannelName) {
         let home = self.ctx.registry.home(&channel);
         if home == self.ctx.info.network {
@@ -531,24 +543,30 @@ impl<S: ControlStream> Session<S> {
             Err(_) => None,
         };
 
-        let cmd = Command::ChannelBackfill { channel, after };
+        let cmd = Command::History {
+            target: Target::Channel(channel),
+            before: None,
+            after,
+            limit: Some(weft_proto::MAX_HISTORY_LIMIT),
+            thread: None,
+        };
         if let Ok(line) = Request::new(cmd).serialize() {
             self.ctx.request_friend_deliver(crate::FriendDeliver {
                 peer: home,
-                from: account,
+                from: Some(account),
                 line,
             });
         }
     }
 
-    /// §11.13 home → spoke recovery: replay this channel's message roots after the
-    /// caller's cursor as `CHANNEL RELAY` (`@id` present) ingests. We must be the
-    /// home; the caller's network must mirror the channel in the acked manifest
-    /// (else it gets nothing — anti-enumeration, §11.1). Message roots only —
-    /// mutations ride the live mirror (matching the group backfill).
+    /// §11.14 home → spoke recovery: the down-leg of a spoke's `@as HISTORY`.
+    /// Replay this channel's message roots after the caller's cursor as `MESSAGE`
+    /// events over the same bridge session — the spoke ingests them. We must be
+    /// the home; the caller's network must mirror the channel in the acked
+    /// manifest (else it gets nothing — anti-enumeration, §11.1). Message roots
+    /// only — mutations ride the live mirror (matching the group backfill).
     pub(super) async fn on_channel_backfill(
         &mut self,
-        label: Option<String>,
         caller: UserRef,
         channel: ChannelName,
         after: Option<MsgId>,
@@ -579,7 +597,7 @@ impl<S: ControlStream> Session<S> {
         };
         let roots = match self.ctx.events.roots(&scope, page).await {
             Ok(roots) => roots,
-            Err(e) => return self.internal(label, &e).await,
+            Err(_) => return Ok(Flow::Continue),
         };
 
         for root in roots {
@@ -591,22 +609,22 @@ impl<S: ControlStream> Session<S> {
             if meta.system.is_some() {
                 continue;
             }
-            let cmd = Command::ChannelRelay {
-                channel: channel.clone(),
+            let event = Event::Message(Box::new(MessageEvent {
+                target: Target::Channel(channel.clone()),
                 sender: root.sender,
-                msgid: Some(root.msgid),
+                msgid: root.msgid,
                 body,
                 meta,
-                echo: None,
-            };
-            if let Ok(line) = Request::new(cmd).serialize() {
-                self.ctx.request_friend_deliver(crate::FriendDeliver {
-                    peer: caller.network.clone(),
-                    from: caller.account.clone(),
-                    line,
-                });
+                edited: None,
+                edited_at: None,
+            }));
+            if let Ok(line) = Reply::new(event).to_line() {
+                if let Ok(serialized) = line.serialize() {
+                    self.stream.send_line(&serialized).await?;
+                }
             }
         }
+
         Ok(Flow::Continue)
     }
 }

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Context};
 use tracing::info;
 use weft_core::{BlobHash, Keypair, MirrorRequest, PublicKey, ServerCtx};
-use weft_proto::{Command, Event, FSessionOp, NamespaceName, NetworkName, Reply, Request};
+use weft_proto::{Command, Event, Line, NamespaceName, NetworkName, Reply, Request};
 use weft_transport::QuicControlStream;
 
 /// An authenticated outbound bridge: the control stream plus the connection it
@@ -322,13 +322,13 @@ pub fn spawn_auto_bridge_consumer(
     })
 }
 
-/// §11.10 home-side tunnel driver — drain the social-layer friend-delivery port:
-/// for each cross-network friend command, resolve + SSRF-guard the peer, dial a
-/// fresh **authenticated** bridge, and forward the command inside an FSession
-/// tunnel opened as the local user. Fire-and-forget: the peer applies it and
-/// notifies its own user; we only await the tunnelled ack so the peer processes
-/// the command before we drop the connection. Peer keys/endpoints come from
-/// `[[peers]]` pins, else the §10.2 well-known key fetch (arbitrary domains).
+/// §11.14 ephemeral delivery fallback — drain the friend-delivery port for a
+/// peer we hold no persistent bridge to: for each line, resolve + SSRF-guard the
+/// peer, dial a fresh **authenticated** bridge, and send the line (`@as=<from>`
+/// for a user command, or verbatim for a home-fan-out event). Fire-and-forget:
+/// we only await one line so the peer processes it before we drop the connection.
+/// Peer keys/endpoints come from `[[peers]]` pins, else the §10.2 well-known key
+/// fetch (arbitrary domains).
 pub fn spawn_friend_deliver_consumer(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<weft_core::FriendDeliver>,
     peers: &[crate::config::Peer],
@@ -388,7 +388,7 @@ pub fn spawn_friend_deliver_consumer(
                 &client,
                 addr,
                 &peer,
-                &from.to_string(),
+                from.as_ref().map(|a| a.to_string()),
                 &line,
                 &identity,
                 &our_network,
@@ -401,45 +401,41 @@ pub fn spawn_friend_deliver_consumer(
     })
 }
 
-/// Dial + authenticate a bridge to `peer`, then tunnel one friend command as the
-/// local user `from` (`FSESSION OPEN` + `CMD`), awaiting the ack so the peer
-/// runs it before we close.
+/// Dial + authenticate a bridge to `peer`, then send one command as the local
+/// user `from` — a plain §4 line tagged `@as=<from>` (§11.14), no FSESSION
+/// frame. We await briefly so the peer runs it before we drop the link; its
+/// effects return as events over the persistent mirror, not on this ephemeral
+/// link, so the reply here is discarded.
 async fn deliver_friend(
     endpoint: &quinn::Endpoint,
     addr: SocketAddr,
     peer: &NetworkName,
-    from: &str,
+    from: Option<String>,
     line: &str,
     identity: &Keypair,
     our_network: &NetworkName,
 ) -> anyhow::Result<()> {
     let mut link = dial_bridge(endpoint, addr, peer, identity, our_network).await?;
-    let fsid = "1".to_string();
-    send(
-        &mut link.stream,
-        Command::FSession {
-            fsid: fsid.clone(),
-            op: FSessionOp::Open {
-                account: from.to_string(),
-            },
-        },
-    )
-    .await?;
-    send(
-        &mut link.stream,
-        Command::FSession {
-            fsid: fsid.clone(),
-            op: FSessionOp::Cmd {
-                line: line.to_string(),
-            },
-        },
-    )
-    .await?;
-    // Await the tunnelled reply (bounded) so the peer processes the command
-    // before we drop the link; the reply itself is not needed (each network
-    // records its own edge).
+    // A user command is attributed `@as=<from>`; an event (`from` = None) rides
+    // as-is for the peer to ingest.
+    let framed = match from {
+        Some(from) => with_as_tag(line, &from)?,
+        None => line.to_string(),
+    };
+    link.stream.send_line(&framed).await?;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), link.stream.recv_line()).await;
     Ok(())
+}
+
+/// Attribute a serialized command line to the acting local account by adding the
+/// `@as=<account>` tag (§11.14). The peer reconstructs `account@<our-network>`
+/// from its authenticated bridge and enforces the command against its own grants.
+fn with_as_tag(line: &str, from: &str) -> anyhow::Result<String> {
+    let mut parsed = Line::parse(line).context("parse friend-deliver line")?;
+    parsed.tags.insert("as".to_string(), from.to_string());
+    parsed
+        .serialize()
+        .context("re-serialize friend-deliver line")
 }
 
 /// Spawn one maintained outbound bridge per configured peer. Each task dials,

@@ -19,10 +19,10 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use weft_crypto::{Capability, PublicKey, SignedManifest, TokenScope};
 use weft_proto::{
     Account, BridgeState, ChannelKind, ChannelName, Command, ContentState, ErrCode, ErrEvent,
-    Event, FSessionOp, GroupId, HistoryMode, Line, MediaMode, MemberAction, MessageEvent,
-    ModAction, MsgId, MsgMeta, NamespaceName, NetworkName, ParseError, Reply, ReportScope,
-    ReportStatus, Request, ResolveAction, RetentionPolicy, StreamMode, Target, Ulid, UserRef,
-    VerifyState, Visibility, MAX_LABEL_BYTES,
+    Event, GroupId, HistoryMode, Line, MediaMode, MemberAction, MessageEvent, ModAction, MsgId,
+    MsgMeta, NamespaceName, NetworkName, ParseError, Reply, ReportScope, ReportStatus, Request,
+    ResolveAction, RetentionPolicy, StreamMode, Target, Ulid, UserRef, VerifyState, Visibility,
+    MAX_LABEL_BYTES,
 };
 
 use weft_store::{
@@ -180,6 +180,12 @@ async fn run_outbound_bridge<S: ControlStream>(
         session
             .ctx
             .register_backfill_demand(session.backfill_demand_tx.clone());
+        // §11.14 route local `@as` commands to this peer over this bridge (one
+        // hop, no ephemeral dial); its effects return as events over the same
+        // session. Deregistered below when the bridge closes.
+        session
+            .ctx
+            .register_bridge_out(peer.clone(), session.fed_out_tx.clone());
         match start {
             OutboundStart::Propose => session.begin_outbound_bridge(&peer).await,
             OutboundStart::Request(ns) => {
@@ -193,6 +199,7 @@ async fn run_outbound_bridge<S: ControlStream>(
             Ok(()) => debug!("outbound bridge closed"),
             Err(e) => debug!("outbound bridge ended: {e}"),
         }
+        session.ctx.unregister_bridge_out(&peer);
         session.cleanup().await;
         let _ = session.stream.close().await;
     }
@@ -221,72 +228,6 @@ pub async fn run_bridge_requester<S: ControlStream>(
     ns: NamespaceName,
 ) {
     run_outbound_bridge(stream, ctx, peer, key, OutboundStart::Request(ns)).await
-}
-
-/// §11.10 A federated user's [`ControlStream`], multiplexed over a peer's bridge
-/// (homeserver authority). Inbound = her command lines (fed by the bridge demux
-/// on `FSESSION CMD`); each outbound reply is wrapped as an `FSESSION <fsid>
-/// REPLY` frame and handed to the bridge session's writer — whose single run
-/// loop serializes every socket write, so tunnels never race the bridge.
-struct TunnelStream {
-    fsid: String,
-    inbound: mpsc::Receiver<String>,
-    outbound: mpsc::Sender<String>,
-}
-
-impl ControlStream for TunnelStream {
-    async fn recv_line(&mut self) -> io::Result<Option<String>> {
-        // `None` when the bridge drops the tunnel (`FSESSION CLOSE` / bridge end).
-        Ok(self.inbound.recv().await)
-    }
-
-    async fn send_line(&mut self, line: &str) -> io::Result<()> {
-        let framed = Request::new(Command::FSession {
-            fsid: self.fsid.clone(),
-            op: FSessionOp::Reply {
-                line: line.to_string(),
-            },
-        })
-        .serialize()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        self.outbound
-            .send(framed)
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "bridge writer gone"))
-    }
-}
-
-/// §11.10 Run a federated user's session over a bridge tunnel: enter
-/// `State::Federated` directly (F already vouched for `user` by proving its
-/// network key at `AUTH BRIDGE`), then reuse the ordinary session loop —
-/// commands enforce against H's grant store as `Actor::Foreign(user)`. Spawned
-/// per `FSESSION OPEN`; ends when the tunnel closes.
-/// Spawn a tunnelled federated session. A free (non-generic) function so the
-/// `tokio::spawn` Send-check runs on the concrete `TunnelStream` — the same
-/// footing as the acceptor spawning a concrete transport, avoiding the RPITIT
-/// auto-trait ambiguity that bites when spawning from inside `impl<S> Session`.
-fn spawn_federated_session(stream: TunnelStream, ctx: Arc<ServerCtx>, user: String) {
-    tokio::spawn(async move {
-        run_federated_session(stream, ctx, user).await;
-    });
-}
-
-async fn run_federated_session<S: ControlStream>(stream: S, ctx: Arc<ServerCtx>, user: String) {
-    let id = ctx.next_session_id();
-    let span = info_span!("fed-session", %user, id);
-    let _conn = ConnectionGuard::enter(&ctx);
-    async move {
-        let mut session = Session::new(id, stream, ctx);
-        session.state = State::Federated { user };
-        match session.run().await {
-            Ok(()) => debug!("federated session closed"),
-            Err(e) => debug!("federated session ended: {e}"),
-        }
-        session.cleanup().await;
-        let _ = session.stream.close().await;
-    }
-    .instrument(span)
-    .await;
 }
 
 /// AUTH KEY / AUTH BRIDGE state between CHALLENGE and PROOF (§6.1, §11.2).
@@ -325,14 +266,6 @@ enum State {
     Bridge {
         peer: NetworkName,
         key: PublicKey,
-    },
-    /// §11.10 a **federated** user's session, tunnelled over a peer's bridge
-    /// (homeserver authority): the peer network `F` vouched for `user`
-    /// (`account@F`) by proving its network key. Commands enforce against H's
-    /// grant store as `Actor::Foreign(user)`; it is a pure command conduit and
-    /// never subscribes to channels — broadcast events ride the mirror (§10.3).
-    Federated {
-        user: String,
     },
 }
 
@@ -453,13 +386,11 @@ struct Session<S> {
     /// §11: channels this (bridge) session forwards local-origin events on.
     /// One broadcast forwarder per bridged channel; empty for client sessions.
     bridged: HashMap<ChannelName, JoinHandle<()>>,
-    /// §11.10 bridge sessions only: the single outbound queue every tunnelled
-    /// federated session writes its `FSESSION … REPLY` frames to — drained by
-    /// this session's run loop so all socket writes stay serialized. `tunnels`
-    /// routes an inbound `FSESSION CMD` to the right sub-session by `fsid`.
+    /// §11.14 bridge sessions only: the outbound queue a local session's `@as`
+    /// command (routed via `bridge_out`) is written to — drained by this
+    /// session's run loop so all socket writes stay serialized.
     fed_out_tx: mpsc::Sender<String>,
     fed_out_rx: mpsc::Receiver<String>,
-    tunnels: HashMap<String, mpsc::Sender<String>>,
     /// §11.10 requester side: this outbound session asked for the peer's
     /// manifest, so it accepts the offer regardless of the auto-accept config.
     request_accept: bool,
@@ -521,7 +452,6 @@ impl<S: ControlStream> Session<S> {
             bridged: HashMap::new(),
             fed_out_tx,
             fed_out_rx,
-            tunnels: HashMap::new(),
             request_accept: false,
             backfilled: std::collections::HashSet::new(),
             backfill_demand_tx,
@@ -690,7 +620,6 @@ impl<S: ControlStream> Session<S> {
             State::Ready { account } => self.on_ready(label, cmd, account).await,
             // Bridge lines are intercepted in `on_line` before Command decode.
             State::Bridge { .. } => Ok(Flow::Continue),
-            State::Federated { user } => self.on_federated(label, cmd, user).await,
         }
     }
 
@@ -1299,12 +1228,6 @@ impl<S: ControlStream> Session<S> {
                 self.unsupported(label, "VOICE REQUEST is bridge-session-only")
                     .await
             }
-            // §11.10 FSESSION frames are spoken only over an authenticated bridge
-            // (F tunnels a user's session to H), never by a local client.
-            Command::FSession { .. } => {
-                self.unsupported(label, "FSESSION is bridge-session-only")
-                    .await
-            }
             Command::NetblockAdd { network, reason } => {
                 self.on_netblock_add(label, network, reason, account).await
             }
@@ -1384,14 +1307,7 @@ impl<S: ControlStream> Session<S> {
                 self.on_group_call_leave(label, group, account).await
             }
             // Federation-internal — a client can't send these.
-            Command::GroupCallRoster { .. }
-            | Command::GroupSync { .. }
-            | Command::GroupRelay { .. }
-            | Command::GroupMut { .. }
-            | Command::GroupBackfill { .. }
-            | Command::ChannelRelay { .. }
-            | Command::ChannelMut { .. }
-            | Command::ChannelBackfill { .. } => Ok(Flow::Continue),
+            Command::GroupCallRoster { .. } => Ok(Flow::Continue),
             // Friend calls (social layer, federation-able): signaling + media. The
             // caller's identity is `account@thisnet` here; a tunnelled peer's call
             // commands run in `on_federated` with the caller's *foreign* UserRef.

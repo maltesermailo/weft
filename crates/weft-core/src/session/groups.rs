@@ -362,7 +362,7 @@ impl<S: ControlStream> Session<S> {
     /// ingest (the origin msgid is preserved — invariant 2).
     pub(super) async fn fanout_group_message(
         &self,
-        group: GroupId,
+        _group: GroupId,
         members: &[UserRef],
         sender: &UserRef,
         msg: &MessageEvent,
@@ -374,21 +374,21 @@ impl<S: ControlStream> Session<S> {
             if member.network == local || !seen.insert(member.network.clone()) {
                 continue;
             }
-            // The correlation token rides only the copy to the poster's network,
-            // so only that spoke labels the poster's echo.
-            let echo = echo.clone().filter(|_| member.network == sender.network);
-            let cmd = Command::GroupRelay {
-                group,
-                sender: sender.clone(),
-                msgid: Some(msg.msgid.clone()),
-                body: msg.body.clone(),
-                meta: msg.meta.clone(),
-                echo,
+            // §11.14 fan the home-minted message out as a `MESSAGE` event (not an
+            // `@as` command — this is the down-leg). The reconcile label rides
+            // only the copy to the poster's network, so only that spoke labels the
+            // poster's echo; every other member gets it unlabelled.
+            let label = echo.clone().filter(|_| member.network == sender.network);
+            let Ok(mut wire) = Reply::new(Event::Message(Box::new(msg.clone()))).to_line() else {
+                continue;
             };
-            if let Ok(line) = Request::new(cmd).serialize() {
+            if let Some(l) = label {
+                wire.tags.insert("label".to_string(), l);
+            }
+            if let Ok(line) = wire.serialize() {
                 self.ctx.request_friend_deliver(crate::FriendDeliver {
                     peer: member.network.clone(),
-                    from: sender.account.clone(),
+                    from: None,
                     line,
                 });
             }
@@ -476,11 +476,17 @@ impl<S: ControlStream> Session<S> {
             Err(_) => None,
         };
 
-        let cmd = Command::GroupBackfill { group, after };
+        let cmd = Command::History {
+            target: Target::Group(group),
+            before: None,
+            after,
+            limit: Some(weft_proto::MAX_HISTORY_LIMIT),
+            thread: None,
+        };
         if let Ok(line) = Request::new(cmd).serialize() {
             self.ctx.request_friend_deliver(crate::FriendDeliver {
                 peer: home,
-                from: account,
+                from: Some(account),
                 line,
             });
         }
@@ -520,20 +526,25 @@ impl<S: ControlStream> Session<S> {
             let EventKind::Message { body, meta } = root.kind else {
                 continue;
             };
-            let cmd = Command::GroupRelay {
-                group,
+            // §11.14 replay as `MESSAGE` events (the down-leg of `@as HISTORY`);
+            // the member ingests them idempotently via the group directory.
+            let event = Event::Message(Box::new(MessageEvent {
+                target: Target::Group(group),
                 sender: root.sender,
-                msgid: Some(root.msgid),
+                msgid: root.msgid,
                 body,
                 meta,
-                echo: None,
-            };
-            if let Ok(line) = Request::new(cmd).serialize() {
-                self.ctx.request_friend_deliver(crate::FriendDeliver {
-                    peer: caller.network.clone(),
-                    from: caller.account.clone(),
-                    line,
-                });
+                edited: None,
+                edited_at: None,
+            }));
+            if let Ok(wire) = Reply::new(event).to_line() {
+                if let Ok(line) = wire.serialize() {
+                    self.ctx.request_friend_deliver(crate::FriendDeliver {
+                        peer: caller.network.clone(),
+                        from: None,
+                        line,
+                    });
+                }
             }
         }
 
@@ -554,68 +565,67 @@ impl<S: ControlStream> Session<S> {
     ) {
         let members = self.group_members(group).await.unwrap_or_default();
         let local = self.local_accounts(&members);
-        if let Some((_event, mut_msgid)) = self
+        if let Some((event, _mut_msgid)) = self
             .ctx
             .directory
-            .group_mutate(
-                origin,
-                sender.clone(),
-                group,
-                root.clone(),
-                kind.clone(),
-                local,
-            )
+            .group_mutate(origin, sender.clone(), group, root.clone(), kind, local)
             .await
         {
-            let (op, arg) = mut_op_arg(&kind);
+            // §11.14 fan the minted mutation out as its EDITED/DELETED/REACTION
+            // event (the down-leg — not an `@as` command); each member ingests it.
             let local_net = self.ctx.info.network.clone();
             let mut seen: std::collections::HashSet<NetworkName> = std::collections::HashSet::new();
             for member in &members {
                 if member.network == local_net || !seen.insert(member.network.clone()) {
                     continue;
                 }
-                let cmd = Command::GroupMut {
-                    group,
-                    sender: sender.clone(),
-                    root: root.clone(),
-                    op: op.to_string(),
-                    arg: arg.clone(),
-                    msgid: Some(mut_msgid.clone()),
-                };
-                if let Ok(line) = Request::new(cmd).serialize() {
-                    self.ctx.request_friend_deliver(crate::FriendDeliver {
-                        peer: member.network.clone(),
-                        from: sender.account.clone(),
-                        line,
-                    });
+                if let Ok(wire) = Reply::new(event.clone()).to_line() {
+                    if let Ok(line) = wire.serialize() {
+                        self.ctx.request_friend_deliver(crate::FriendDeliver {
+                            peer: member.network.clone(),
+                            from: None,
+                            line,
+                        });
+                    }
                 }
             }
         }
     }
 
-    /// Relay a group mutation to the group's **home** network (we're a spoke; only
-    /// the home applies it). The result arrives via a `GROUP MUT` ingest.
+    /// §11.14 relay a group mutation to the group's **home** (we're a spoke; only
+    /// the home applies it) as an ordinary `@as` command keyed on the target
+    /// msgid — the home resolves its group + author and applies it, and the
+    /// resulting EDITED/DELETED/REACTION returns as an event to our members.
     pub(super) fn relay_group_mut(
         &self,
         home: NetworkName,
-        group: GroupId,
+        _group: GroupId,
         sender: &UserRef,
         root: MsgId,
         kind: GroupMutKind,
     ) {
         let (op, arg) = mut_op_arg(&kind);
-        let cmd = Command::GroupMut {
-            group,
-            sender: sender.clone(),
-            root,
-            op: op.to_string(),
-            arg,
-            msgid: None,
+        let cmd = match op {
+            "edit" => Command::Edit {
+                msgid: root,
+                body: arg,
+            },
+            "delete" => Command::Delete { msgid: root },
+            "react-add" => Command::React {
+                msgid: root,
+                emoji: arg,
+            },
+            "react-remove" => Command::Unreact {
+                msgid: root,
+                emoji: arg,
+            },
+            _ => return,
         };
+
         if let Ok(line) = Request::new(cmd).serialize() {
             self.ctx.request_friend_deliver(crate::FriendDeliver {
                 peer: home,
-                from: sender.account.clone(),
+                from: Some(sender.account.clone()),
                 line,
             });
         }
@@ -655,11 +665,11 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
-    /// Tunnel a `GROUP SYNC` (membership) to each remote member network.
-    /// Tunnel a `GROUP SYNC` carrying the group's `payload` (its new membership +
-    /// name) to every remote network among `recipients`. Pass a wider
-    /// `recipients` than `payload` on a removal so the removed member's network is
-    /// still told (it reconciles by dropping them).
+    /// §11.12 fan the group's authoritative membership roster out to each remote
+    /// member network as a `GROUP-ROSTER` event carrying the group's `payload`
+    /// (its new membership + name). Pass a wider `recipients` than `payload` on a
+    /// removal so the removed member's network is still told (it reconciles by
+    /// dropping them). An event (not an `@as` command) — a down-leg fan-out.
     fn sync_group_to_remotes(
         &self,
         group: GroupId,
@@ -674,18 +684,20 @@ impl<S: ControlStream> Session<S> {
             if member.network == local || !seen.insert(member.network.clone()) {
                 continue;
             }
-            let cmd = Command::GroupSync {
+            let event = Event::GroupRoster {
                 group,
                 creator: creator.clone(),
                 name: name.clone(),
                 members: payload.to_vec(),
             };
-            if let Ok(line) = Request::new(cmd).serialize() {
-                self.ctx.request_friend_deliver(crate::FriendDeliver {
-                    peer: member.network.clone(),
-                    from: creator.account.clone(),
-                    line,
-                });
+            if let Ok(wire) = Reply::new(event).to_line() {
+                if let Ok(line) = wire.serialize() {
+                    self.ctx.request_friend_deliver(crate::FriendDeliver {
+                        peer: member.network.clone(),
+                        from: None,
+                        line,
+                    });
+                }
             }
         }
     }
@@ -698,10 +710,10 @@ impl<S: ControlStream> Session<S> {
         }
     }
 
-    /// Federation-internal `GROUP SYNC`: record/refresh the group locally so it
-    /// exists on this member network, **reconcile** its membership to the synced
-    /// list (add/remove), refresh the name, and notify local members — a removed
-    /// local member gets `GROUP-MEMBER part` (its client drops the group).
+    /// §11.12 apply an inbound `GROUP-ROSTER` event: record/refresh the group
+    /// locally so it exists on this member network, **reconcile** its membership
+    /// to the roster (add/remove), refresh the name, and notify local members — a
+    /// removed local member gets `GROUP-MEMBER part` (its client drops the group).
     pub(super) async fn on_group_sync(
         &mut self,
         _label: Option<String>,
@@ -1017,7 +1029,7 @@ impl<S: ControlStream> Session<S> {
         if let Ok(line) = Request::new(cmd).serialize() {
             self.ctx.request_friend_deliver(crate::FriendDeliver {
                 peer: net.clone(),
-                from: user.account.clone(),
+                from: Some(user.account.clone()),
                 line,
             });
         }
@@ -1086,7 +1098,7 @@ impl<S: ControlStream> Session<S> {
             if let Ok(line) = Request::new(cmd).serialize() {
                 self.ctx.request_friend_deliver(crate::FriendDeliver {
                     peer: member.network.clone(),
-                    from: me.account.clone(),
+                    from: Some(me.account.clone()),
                     line,
                 });
             }

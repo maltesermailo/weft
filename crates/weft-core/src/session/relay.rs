@@ -286,30 +286,28 @@ impl<S: ControlStream> Session<S> {
                     joined.handle.publish(self.id, body, meta).await;
                 } else {
                     let home = self.ctx.registry.home(&channel);
-                    let me = UserRef::new(account.clone(), self.ctx.info.network.clone());
-                    // §11.13 remember (echo → this session) and queue the label: the
-                    // home mints the post and mirrors it back to us carrying this
-                    // echo, and we deliver it as this session's own (labelled)
-                    // message — so the client reconciles it by label, like a local
-                    // send. The echo is stripped before any user sees it.
-                    let token = weft_proto::Ulid::new().to_string();
+                    // §11.14 we're a spoke: send the post to the home as an
+                    // ordinary `@as` MSG carrying a bridge label `B-<home>-<ULID>`.
+                    // We remember `B → this session` and queue the client's own
+                    // label; the home mints the post into the one total order and
+                    // mirrors it back tagged `@label=B`, which we deliver as this
+                    // session's own labelled send — so the client reconciles it by
+                    // label, exactly like a local post. `B` never reaches a user.
+                    let bridge_label = format!("B-{}-{}", home, weft_proto::Ulid::new());
                     self.ctx
-                        .register_group_echo(token.clone(), self.id, unix_now_ms());
+                        .register_group_echo(bridge_label.clone(), self.id, unix_now_ms());
                     if let Some(joined) = self.joined.get_mut(&channel) {
                         joined.pending.push_back(label);
                     }
-                    let cmd = Command::ChannelRelay {
-                        channel,
-                        sender: me,
-                        msgid: None,
-                        body,
+                    let cmd = Command::Msg {
+                        target: Target::Channel(channel),
+                        body: (!body.is_empty()).then_some(body),
                         meta,
-                        echo: Some(token),
                     };
-                    if let Ok(line) = Request::new(cmd).serialize() {
+                    if let Ok(line) = Request::with_label(cmd, bridge_label).serialize() {
                         self.ctx.request_friend_deliver(crate::FriendDeliver {
                             peer: home,
-                            from: account,
+                            from: Some(account),
                             line,
                         });
                     }
@@ -380,25 +378,24 @@ impl<S: ControlStream> Session<S> {
                         }
                         self.pending_direct.push_back(label);
                     } else {
-                        // Spoke: relay to the home, carrying an echo token so we can
-                        // deliver the home's minted copy back as the poster's own
-                        // (labelled) message.
-                        let token = weft_proto::Ulid::new().to_string();
+                        // §11.14 spoke: relay the post to the home as an `@as` MSG
+                        // carrying a bridge label. The home mints it and fans the
+                        // minted MESSAGE back to us tagged `@label=B`, which we
+                        // deliver as this session's own labelled send — the client
+                        // reconciles it by label, like a local post.
+                        let bridge_label = format!("B-{}-{}", home, weft_proto::Ulid::new());
                         self.ctx
-                            .register_group_echo(token.clone(), self.id, unix_now_ms());
+                            .register_group_echo(bridge_label.clone(), self.id, unix_now_ms());
                         self.pending_direct.push_back(label);
-                        let cmd = Command::GroupRelay {
-                            group,
-                            sender: me.clone(),
-                            msgid: None,
-                            body,
+                        let cmd = Command::Msg {
+                            target: Target::Group(group),
+                            body: (!body.is_empty()).then_some(body),
                             meta,
-                            echo: Some(token),
                         };
-                        if let Ok(line) = Request::new(cmd).serialize() {
+                        if let Ok(line) = Request::with_label(cmd, bridge_label).serialize() {
                             self.ctx.request_friend_deliver(crate::FriendDeliver {
                                 peer: home,
-                                from: account,
+                                from: Some(account),
                                 line,
                             });
                         }

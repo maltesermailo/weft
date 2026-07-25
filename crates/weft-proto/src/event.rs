@@ -504,6 +504,18 @@ pub enum Event {
         user: UserRef,
         action: MemberAction,
     },
+    /// `@name= GROUP-ROSTER <&id> <creator@net> :<member> <member>…` — the
+    /// authoritative membership roster of a cross-network group (§11.12), fanned
+    /// out by the group's home to every member network on create + every change.
+    /// A federation-internal event: each receiver reconciles its local group to
+    /// this list (add/remove) and parts any of its own removed members. `creator`
+    /// fixes the group's home.
+    GroupRoster {
+        group: GroupId,
+        creator: UserRef,
+        name: Option<String>,
+        members: Vec<UserRef>,
+    },
     /// `CALL-RING <from@net> <room>` — an incoming 1:1 friend call. `room` is
     /// the ad-hoc voice room to `VOICE JOIN` on accept (social layer).
     CallRing {
@@ -1278,6 +1290,24 @@ impl Event {
                     action: args.req("action")?.parse()?,
                 })
             }
+            "GROUP-ROSTER" => {
+                let mut args = Args::new(line, "GROUP-ROSTER");
+                let group = args.req("group")?.parse()?;
+                let creator = args.req("creator")?.parse()?;
+                let members = line
+                    .trailing
+                    .as_deref()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .map(str::parse)
+                    .collect::<Result<Vec<UserRef>, _>>()?;
+                Ok(Event::GroupRoster {
+                    group,
+                    creator,
+                    name: line.tags.get("name").filter(|v| !v.is_empty()).cloned(),
+                    members,
+                })
+            }
             "CALL-RING" => {
                 let mut args = Args::new(line, "CALL-RING");
                 Ok(Event::CallRing {
@@ -1998,6 +2028,32 @@ impl Event {
                 vec![group.to_string(), user.to_string(), action.to_string()],
                 None,
             ),
+            Event::GroupRoster {
+                group,
+                creator,
+                name,
+                members,
+            } => {
+                if let Some(name) = name.as_ref().filter(|n| !n.is_empty()) {
+                    tags.insert("name".to_string(), name.clone());
+                }
+                let trailing = if members.is_empty() {
+                    None
+                } else {
+                    Some(
+                        members
+                            .iter()
+                            .map(|m| m.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    )
+                };
+                (
+                    "GROUP-ROSTER",
+                    vec![group.to_string(), creator.to_string()],
+                    trailing,
+                )
+            }
             Event::CallRing { from, room } => {
                 ("CALL-RING", vec![from.to_string(), room.clone()], None)
             }
@@ -2889,6 +2945,28 @@ mod tests {
             group: G.parse().unwrap(),
             user: "carol@peer.example".parse().unwrap(),
             action: MemberAction::Part,
+        }));
+        // §11.12 the federation roster event: creator positional, members trailing.
+        let roster = Reply::new(Event::GroupRoster {
+            group: G.parse().unwrap(),
+            creator: "ada@home.example".parse().unwrap(),
+            name: Some("trip".to_string()),
+            members: vec![
+                "ada@home.example".parse().unwrap(),
+                "bob@peer.example".parse().unwrap(),
+            ],
+        });
+        assert_eq!(
+            roster.serialize().unwrap(),
+            "@name=trip GROUP-ROSTER &01ARZ3NDEKTSV4RRFFQ69G5FAV ada@home.example :ada@home.example bob@peer.example"
+        );
+        round_trip(&roster);
+        // Nameless (e.g. a removal that leaves the group unnamed).
+        round_trip(&Reply::new(Event::GroupRoster {
+            group: G.parse().unwrap(),
+            creator: "ada@home.example".parse().unwrap(),
+            name: None,
+            members: vec!["ada@home.example".parse().unwrap()],
         }));
     }
 

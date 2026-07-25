@@ -88,6 +88,19 @@ impl<S: ControlStream> Session<S> {
         key: PublicKey,
         line: &Line,
     ) -> io::Result<Flow> {
+        // §11.14 a **user command**: the peer runs an ordinary §6 verb on behalf
+        // of one of its accounts, attributed by `@as=<account>`. `F` proved its
+        // network key, so it speaks for `account@peer`; we reconstruct that
+        // identity and enforce the command against *our own* grant store
+        // (homeserver authority, §11.11). Its effects come back as events — a
+        // labelled command is acked by the event carrying the same label.
+        if let Some(account) = line.tags.get("as") {
+            let user = format!("{account}@{peer}");
+            return match Request::from_line(line) {
+                Ok(req) => self.on_federated(req.label, req.command, user).await,
+                Err(_) => Ok(Flow::Continue), // tolerate noise on a bridge
+            };
+        }
         match line.verb.as_str() {
             // §10.3 PROFILE is account-scoped (not channel-scoped) but still
             // ingested — `ingest_bridged` verifies + stores the signed profile.
@@ -97,6 +110,26 @@ impl<S: ControlStream> Session<S> {
             // Remote membership / typing / presence / marks are informational;
             // not stored, not re-broadcast in M5b.
             "MEMBER" | "TYPING" | "PRESENCE" | "MARKED" | "POLICY" => Ok(Flow::Continue),
+            // §11.12 a group's authoritative membership roster from its home:
+            // reconcile our local group to it (add/remove) and part removed members.
+            "GROUP-ROSTER" => {
+                if let Ok(Reply {
+                    event:
+                        Event::GroupRoster {
+                            group,
+                            creator,
+                            name,
+                            members,
+                        },
+                    ..
+                }) = Reply::from_line(line)
+                {
+                    self.on_group_sync(None, group, creator, name, members)
+                        .await
+                } else {
+                    Ok(Flow::Continue)
+                }
+            }
             // §11.7 the peer answered our backfill HISTORY with a stream offer
             // (large page) → hand weftd the pull; it drains the data plane and
             // feeds each line back through `ingest_bridged`.
@@ -146,7 +179,6 @@ impl<S: ControlStream> Session<S> {
             Command::VoiceRequest { scope, channel } => {
                 self.on_voice_request_in(peer, label, scope, channel).await
             }
-            Command::FSession { fsid, op } => self.on_fsession(&peer, fsid, op).await,
             // §11.7 federated backfill: the peer pulls history over the bridge.
             Command::History {
                 target,
@@ -175,44 +207,6 @@ impl<S: ControlStream> Session<S> {
             Command::Quit { .. } => Ok(Flow::Close),
             _ => Ok(Flow::Continue),
         }
-    }
-
-    /// §11.10 Demux a federation-session frame on a bridge (homeserver
-    /// authority): `OPEN` spawns a tunnelled session for `<account>@<peer>`
-    /// (`F` proved its network key, so it speaks for its users); `CMD` feeds
-    /// that sub-session; `CLOSE` ends it. `REPLY` is H→F only and never arrives
-    /// here. The spawned session's writes funnel back through this session's
-    /// `fed_out` queue, so the one socket is written by one task.
-    pub(super) async fn on_fsession(
-        &mut self,
-        peer: &NetworkName,
-        fsid: String,
-        op: FSessionOp,
-    ) -> io::Result<Flow> {
-        match op {
-            FSessionOp::Open { account } => {
-                let user = format!("{account}@{peer}");
-                let (in_tx, in_rx) = mpsc::channel(EVENT_QUEUE);
-                self.tunnels.insert(fsid.clone(), in_tx);
-                let stream = TunnelStream {
-                    fsid,
-                    inbound: in_rx,
-                    outbound: self.fed_out_tx.clone(),
-                };
-                spawn_federated_session(stream, Arc::clone(&self.ctx), user);
-            }
-            FSessionOp::Cmd { line } => {
-                if let Some(tx) = self.tunnels.get(&fsid) {
-                    let _ = tx.send(line).await; // dropped if the sub-session is gone
-                }
-            }
-            FSessionOp::Close => {
-                // Dropping the inbound sender ends the sub-session's recv loop.
-                self.tunnels.remove(&fsid);
-            }
-            FSessionOp::Reply { .. } => {} // H→F only; ignore any inbound REPLY
-        }
-        Ok(Flow::Continue)
     }
 
     /// A peer sent us a signed manifest (§11.1). Verify it against the peer's
@@ -797,16 +791,19 @@ impl<S: ControlStream> Session<S> {
             _ => false, // MEMBER/TYPING/POLICY/MANIFEST not forwarded in M5b
         };
         if forward {
-            // §11.13 the transient reconcile echo rides **only** to the poster's
-            // network (the origin the relay came from), as the same `echo=` tag it
-            // arrived on; every other peer's copy is stripped.
-            let echo = match &event.echo {
-                Some((e, net)) if *net == peer => Some(e.clone()),
+            // §11.14 the reconcile label rides **only** to the poster's own
+            // network (the one whose `@as` command produced this event), as the
+            // `@label` the command carried; every other peer in the audience gets
+            // the event unlabelled. That is the whole reconcile mechanism — the
+            // poster's client matches the labelled echo, everyone else displays a
+            // plain event.
+            let label = match &event.echo {
+                Some((l, net)) if *net == peer => Some(l.clone()),
                 _ => None,
             };
             if let Ok(mut line) = Reply::new(event.event).to_line() {
-                if let Some(e) = echo {
-                    line.tags.insert("echo".to_string(), e);
+                if let Some(l) = label {
+                    line.tags.insert("label".to_string(), l);
                 }
                 if let Ok(serialized) = line.serialize() {
                     self.stream.send_line(&serialized).await?;
@@ -1500,81 +1497,116 @@ impl<S: ControlStream> Session<S> {
                 self.on_group_call_roster(label, group, user, active, reply)
                     .await
             }
-            // Cross-network group membership + messaging (home-authoritative).
-            Command::GroupSync {
-                group,
-                creator,
-                name,
-                members,
-            } => {
-                self.on_group_sync(label, group, creator, name, members)
-                    .await
+            // §11.14 content a federated member posts — home-authoritative: the
+            // home mints it into the one total order and the event mirror fans
+            // the home-origin copy out to every network in the audience
+            // (manifest-sharers for a channel, member networks for a group).
+            // The command's `label` is the bridge reconcile token — it rides
+            // back only on the copy to the poster's own network, so their client
+            // reconciles the send by label exactly like a local post.
+            Command::Msg { target, body, meta } => {
+                let Some(sender) = caller else {
+                    return Ok(Flow::Continue);
+                };
+                let body = body.unwrap_or_default();
+                match target {
+                    Target::Channel(channel) => {
+                        self.on_channel_relay(None, channel, sender, None, body, meta, label)
+                            .await
+                    }
+                    Target::Group(group) => {
+                        self.on_group_relay(None, group, sender, None, body, meta, label)
+                            .await
+                    }
+                    Target::User(_) => Ok(Flow::Continue),
+                }
             }
-            Command::GroupRelay {
-                group,
-                sender,
-                msgid,
-                body,
-                meta,
-                echo,
-            } => {
-                self.on_group_relay(label, group, sender, msgid, body, meta, echo)
-                    .await
-            }
-            Command::GroupMut {
-                group,
-                sender,
-                root,
-                op,
-                arg,
-                msgid,
-            } => {
-                self.on_group_mut(label, group, sender, root, op, arg, msgid)
-                    .await
-            }
-            // A member network catching up after downtime: replay the group's
-            // messages after its cursor back to it (we're the home = single writer).
-            Command::GroupBackfill { group, after } => match caller {
-                Some(caller) => self.on_group_backfill(label, caller, group, after).await,
-                None => Ok(Flow::Continue),
-            },
-            // §11.13 home-authoritative channels — the same shape as the group
-            // tunnel, keyed on a channel.
-            Command::ChannelRelay {
-                channel,
-                sender,
-                msgid,
-                body,
-                meta,
-                echo,
-            } => {
-                self.on_channel_relay(label, channel, sender, msgid, body, meta, echo)
-                    .await
-            }
-            Command::ChannelMut {
-                channel,
-                sender,
-                root,
-                op,
-                arg,
-                msgid,
-            } => {
-                self.on_channel_mut(label, channel, sender, root, op, arg, msgid)
-                    .await
-            }
-            // A spoke catching up after downtime: replay this channel's messages
-            // after its cursor back to it (we're the home = the single writer).
-            Command::ChannelBackfill { channel, after } => match caller {
-                Some(caller) => {
-                    self.on_channel_backfill(label, caller, channel, after)
+            // §11.14 a federated member's mutation. The spoke sends only the
+            // msgid; the home resolves its scope + root, applies as the foreign
+            // author, and the mirror fans the EDITED/DELETED/REACTION out.
+            Command::Edit { msgid, body } => match caller {
+                Some(sender) => {
+                    self.on_federated_mut(label, msgid, "edit", body, sender)
                         .await
                 }
                 None => Ok(Flow::Continue),
+            },
+            Command::Delete { msgid } => match caller {
+                Some(sender) => {
+                    self.on_federated_mut(label, msgid, "delete", String::new(), sender)
+                        .await
+                }
+                None => Ok(Flow::Continue),
+            },
+            Command::React { msgid, emoji } => match caller {
+                Some(sender) => {
+                    self.on_federated_mut(label, msgid, "react-add", emoji, sender)
+                        .await
+                }
+                None => Ok(Flow::Continue),
+            },
+            Command::Unreact { msgid, emoji } => match caller {
+                Some(sender) => {
+                    self.on_federated_mut(label, msgid, "react-remove", emoji, sender)
+                        .await
+                }
+                None => Ok(Flow::Continue),
+            },
+            // §11.14 a spoke catching up: replay the target's history after its
+            // cursor as events over this same bridge (folds the old CHANNEL/GROUP
+            // BACKFILL into ordinary HISTORY).
+            Command::History { target, after, .. } => match (caller, target) {
+                (Some(sender), Target::Channel(channel)) => {
+                    self.on_channel_backfill(sender, channel, after).await
+                }
+                (Some(caller), Target::Group(group)) => {
+                    self.on_group_backfill(label, caller, group, after).await
+                }
+                _ => Ok(Flow::Continue),
             },
             _ => {
                 self.unsupported(label, "not yet available over a federation session")
                     .await
             }
+        }
+    }
+
+    /// §11.14 apply a federated member's mutation at the home. The spoke sends
+    /// only the target msgid, so we resolve its scope + root from the store,
+    /// then apply as the foreign author — the home is the sole writer, and the
+    /// event mirror fans the resulting EDITED/DELETED/REACTION out to the
+    /// audience. A msgid we don't home (unknown, or a channel we're only a spoke
+    /// of) drops silently — anti-enumeration, a misroute reveals nothing.
+    async fn on_federated_mut(
+        &mut self,
+        label: Option<String>,
+        msgid: MsgId,
+        op: &str,
+        arg: String,
+        sender: UserRef,
+    ) -> io::Result<Flow> {
+        let Ok(Some(root)) = self.ctx.events.find_root(msgid.ulid()).await else {
+            return Ok(Flow::Continue);
+        };
+
+        match root.scope {
+            Scope::Channel(channel) if self.ctx.registry.is_home(&channel) => {
+                self.on_channel_mut(
+                    label,
+                    channel,
+                    sender,
+                    root.msgid,
+                    op.to_string(),
+                    arg,
+                    None,
+                )
+                .await
+            }
+            Scope::Group(group) => {
+                self.on_group_mut(label, group, sender, root.msgid, op.to_string(), arg, None)
+                    .await
+            }
+            _ => Ok(Flow::Continue),
         }
     }
 }
@@ -1595,9 +1627,9 @@ fn ingest_record(peer: &NetworkName, event: &Event) -> Option<(ChannelName, Even
             let channel = channel_of(&m.target)?;
             // Invariant 2: the msgid must originate on the authenticated peer. The
             // sender may be on a *different* network — under home-authoritative
-            // channels (§11.13) the home mints messages authored by spoke members,
+            // channels (§11.14) the home mints messages authored by spoke members,
             // so `sender.network != peer` is expected; the peer vouches for the
-            // author under the same network-key trust as `FSESSION` (§11.11).
+            // author under the same network-key trust that authorizes `@as` (§11.11).
             if !from_peer(&m.msgid) {
                 return None;
             }
@@ -1681,7 +1713,100 @@ fn ingest_record(peer: &NetworkName, event: &Event) -> Option<(ChannelName, Even
     }
 }
 
+/// The group a bridged content event targets, if any — the `&group` down-leg of
+/// a federated group message/mutation (§11.14). Channel-targeted events return
+/// `None` and take the ordinary manifest-gated path.
+fn group_target(event: &Event) -> Option<GroupId> {
+    let target = match event {
+        Event::Message(m) => &m.target,
+        Event::Edited { target, .. }
+        | Event::Deleted { target, .. }
+        | Event::Reaction { target, .. } => target,
+        _ => return None,
+    };
+    match target {
+        Target::Group(g) => Some(*g),
+        _ => None,
+    }
+}
+
 impl ServerCtx {
+    /// §11.14 ingest a group content event the home fanned out to us (a member
+    /// network): a `MESSAGE` (with the `@label` reconcile) or an
+    /// EDITED/DELETED/REACTION mutation. Membership-gated by the local roster (the
+    /// home only fans to members). Delete/react events carry no mutation id of
+    /// their own, so we mint a local one — bookkeeping only, the tombstone/summary
+    /// keys on the target root.
+    async fn ingest_bridged_group(&self, line: &Line, group: GroupId, event: Event) {
+        use crate::directory::GroupMutKind;
+
+        let members = self.groups.group_members(group).await.unwrap_or_default();
+        let local: Vec<Account> = members
+            .iter()
+            .filter(|u| u.network.as_str() == self.network_name())
+            .map(|u| u.account.clone())
+            .collect();
+
+        match event {
+            Event::Message(m) => {
+                self.mirror_group_attachments(group, &m.meta, &m.msgid)
+                    .await;
+                // If our copy carries the reconcile label, deliver it as the
+                // awaiting poster's own session so its pending label attaches;
+                // else fan to all local members.
+                let origin = line
+                    .tags
+                    .get("label")
+                    .and_then(|l| self.take_group_echo(l))
+                    .unwrap_or(u64::MAX);
+                self.directory
+                    .group_ingest(origin, m.sender, group, m.msgid, m.body, m.meta, local)
+                    .await;
+            }
+            Event::Edited {
+                user,
+                msgid,
+                edit_of,
+                body,
+                ..
+            } => {
+                self.directory
+                    .group_mut_ingest(user, group, edit_of, msgid, GroupMutKind::Edit(body), local)
+                    .await;
+            }
+            Event::Deleted { msgid, by, .. } => {
+                let sender = by.unwrap_or_else(|| {
+                    UserRef::new(deleted_placeholder(), self.info.network.clone())
+                });
+                let mut_id = MsgId::new(self.info.network.clone(), Ulid::new());
+                self.directory
+                    .group_mut_ingest(sender, group, msgid, mut_id, GroupMutKind::Delete, local)
+                    .await;
+            }
+            Event::Reaction {
+                msgid,
+                emoji,
+                op,
+                by,
+                ..
+            } => {
+                let mut_id = MsgId::new(self.info.network.clone(), Ulid::new());
+                let add = matches!(op, weft_proto::ReactionOp::Add);
+                self.directory
+                    .group_mut_ingest(
+                        by,
+                        group,
+                        msgid,
+                        mut_id,
+                        GroupMutKind::React { emoji, add },
+                        local,
+                    )
+                    .await;
+            }
+            _ => {}
+        }
+    }
+
     /// §11.4 ingest one verified line from `peer` (a live bridge event, or a
     /// line pulled from a §11.7 backfill stream). Netblock-guarded (invariant
     /// 7), origin-authority-checked (invariant 2), manifest-gated (invariant 3),
@@ -1709,6 +1834,13 @@ impl ServerCtx {
             self.ingest_profile(peer, line, user, display, avatar).await;
             return;
         }
+        // §11.14 a group event (the home fanning a `&group` message out to a
+        // member network) ingests by membership, not the channel manifest —
+        // route it to the group directory with the `@label` reconcile.
+        if let Some(group) = group_target(&reply.event) {
+            self.ingest_bridged_group(line, group, reply.event).await;
+            return;
+        }
         let Some((channel, record)) = ingest_record(peer, &reply.event) else {
             return;
         };
@@ -1730,16 +1862,16 @@ impl ServerCtx {
         if let Event::Message(m) = &reply.event {
             self.mirror_attachments(peer, &channel, m).await;
         }
-        // §11.13 pair a home-minted relayed post with the waiting session. The home
-        // put the `echo=` tag **only** on our copy (we are the poster's network);
-        // it lives on the wire line, never in stored content. Resolve it to the
+        // §11.14 pair a home-minted post with the waiting session. The home put
+        // the `@label` **only** on our copy (we are the poster's network); it
+        // lives on the wire line, never in stored content. Resolve it to the
         // poster's session so its optimistic message is delivered as its own
-        // (labelled) — every other recipient saw a copy without it.
+        // (labelled) send — every other recipient saw a copy without it.
         let origin = match &reply.event {
             Event::Message(_) => line
                 .tags
-                .get("echo")
-                .and_then(|e| self.take_group_echo(e))
+                .get("label")
+                .and_then(|l| self.take_group_echo(l))
                 .unwrap_or(u64::MAX),
             _ => u64::MAX,
         };
