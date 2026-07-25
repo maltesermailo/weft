@@ -43,6 +43,7 @@
   import ReportsQueueModal from "$lib/components/modals/ReportsQueueModal.svelte";
   import InviteLinkModal from "$lib/components/modals/InviteLinkModal.svelte";
   import InvitesModal from "$lib/components/modals/InvitesModal.svelte";
+  import NewGroupModal from "$lib/components/modals/NewGroupModal.svelte";
   import PinsModal from "$lib/components/modals/PinsModal.svelte";
   import ThreadsModal from "$lib/components/modals/ThreadsModal.svelte";
   import CallOverlay from "$lib/components/CallOverlay.svelte";
@@ -166,13 +167,55 @@
       { label: "Leave", danger: true, run: () => weft.part(ch.name).catch(() => {}) },
     ]);
   }
-  function memberCtx(e: MouseEvent, name: string) {
-    if (name === account) return;
+  // The right-click menu for any user, anywhere (member list, friends, DMs).
+  // Items adapt to context: a DM shows Close DM (else Message), a channel adds
+  // Invite + moderation (only there is the user a server member you can act on),
+  // and a friend shows Remove friend.
+  function userCtx(e: MouseEvent, name: string) {
+    if (peerOf(name) === account) return; // no menu on yourself
+    const ref = qualify(name);
+    const items: CtxItem[] = [
+      { label: "Open profile", run: () => openProfile(name) },
+      { label: "Call", run: () => callUser(ref) },
+    ];
+
+    items.push(
+      dmOpen(name)
+        ? { label: "Close DM", run: () => closeDm(name) }
+        : { label: "Message", run: () => openDm(name) },
+    );
+
+    // Invite + moderation only make sense on a server member — i.e. when we're
+    // actually viewing one of the server's channels (not the friends/DM view).
+    if (active.startsWith("#")) {
+      items.push({ label: "Invite to server", run: inviteToServer });
+      items.push({ label: "Mute", run: () => moderate("mute", name) });
+      items.push({ label: "Ban", danger: true, run: () => moderate("ban", name) });
+    }
+
+    // Friendship: Add when unrelated, Remove when friends, and the sensible
+    // action for a pending request either way.
+    const rel = friends[ref];
+    if (rel === "friends")
+      items.push({ label: "Remove friend", danger: true, run: () => removeFriend(ref) });
+    else if (rel === "incoming")
+      items.push({ label: "Accept friend request", run: () => acceptFriend(ref) });
+    else if (rel === "outgoing")
+      items.push({ label: "Cancel friend request", run: () => removeFriend(ref) });
+    else
+      items.push({
+        label: "Add friend",
+        run: () => weft.friendAdd(ref).catch((err) => toast(String(err), "error")),
+      });
+
+    openCtx(e, items);
+  }
+  // The right-click menu for a group DM (in the DM list).
+  function groupCtx(e: MouseEvent, id: string) {
     openCtx(e, [
-      { label: "Message", run: () => openDm(name) },
-      { label: "Profile", run: () => openProfile(name) },
-      { label: "Mute", run: () => moderate("mute", name) },
-      { label: "Ban", danger: true, run: () => moderate("ban", name) },
+      { label: "Mark as read", run: () => markRead(id) },
+      { label: "Copy group ID", run: () => navigator.clipboard?.writeText(id) },
+      { label: "Leave group", danger: true, run: () => leaveGroup(id) },
     ]);
   }
   let theme = $state<"dark" | "light">("dark");
@@ -523,8 +566,13 @@
   }
 
   let profilePos = $state<{ left: number; top: number } | null>(null);
-  function openProfile(account: string, e?: MouseEvent) {
-    profileTarget = account;
+  function openProfile(handle: string, e?: MouseEvent) {
+    // Accept a bare account or a full `account@network` ref (the friends list
+    // passes full refs); the card keys on the bare *local* account, keeping a
+    // genuinely federated ref whole.
+    const at = handle.lastIndexOf("@");
+    const target = at > 0 && handle.slice(at + 1) === network ? handle.slice(0, at) : handle;
+    profileTarget = target;
     // Anchor the card next to the clicked row (Discord-style); centered fallback.
     const POP_W = 340;
     const POP_H = 360;
@@ -539,10 +587,10 @@
       profilePos = null;
     }
     const scope = roleScopeOf(active);
-    ensureCaps(account, active); // channel-scope owner/mod badges
-    ensureCapsAt(account, scope); // for the owner check
+    ensureCaps(target, active); // channel-scope owner/mod badges
+    ensureCapsAt(target, scope); // for the owner check
     fetchRoles(scope); // role definitions (names + colors)
-    fetchMemberRoles(account, scope); // this member's assigned roles
+    fetchMemberRoles(target, scope); // this member's assigned roles
   }
   function assignRoleTo(acct: string, role: RoleDefC) {
     const scope = roleScopeOf(active);
@@ -763,7 +811,11 @@
   let loadingHistory = $state<string | null>(null); // channel being backfilled
   let stickBottom = $state(true); // is the view pinned to the newest message?
   let loadingInitial = false; // this in-flight load is the first page
-  let historyBuf: Msg[] = []; // batch messages, buffered until BATCH END
+  // History pages buffered per *target channel*, keyed by the messages' own
+  // `target`. This is what makes history robust: a page flushes to the channel it
+  // names, so a concurrent MEMBERS/roles/… batch can never steal or clobber it,
+  // whatever its batch id or arrival order.
+  let histByTarget: Record<string, Msg[]> = {};
   let preScrollHeight = 0; // scrollHeight before a scroll-up prepend
 
   const oldestMsgid = (ch?: Channel) => ch?.messages.find((m) => m.msgid)?.msgid;
@@ -777,7 +829,7 @@
       return;
     loadingHistory = target;
     loadingInitial = initial;
-    historyBuf = [];
+    histByTarget[target] = [];
     const before = initial ? undefined : oldestMsgid(channels[target]);
     if (!initial) preScrollHeight = scrollEl?.scrollHeight ?? 0;
     weft.history(target, before).catch(() => (loadingHistory = null));
@@ -923,6 +975,7 @@
   function openDm(peer: string) {
     const key = "@" + peer.replace(/^@/, "");
     ensureChannel(key);
+    persistDms(); // keep the DM in the list across reconnects
     homeView = true;
     active = key;
   }
@@ -930,6 +983,54 @@
     const p = dmInput.trim().replace(/^@/, "");
     dmInput = "";
     if (p) openDm(p);
+  }
+  // The DM channel key for a user (`@peer`), and whether one is open.
+  const dmKeyFor = (name: string) => "@" + peerOf(name);
+  const dmOpen = (name: string) => !!channels[dmKeyFor(name)];
+  // Close (hide) an open DM — a local-only view action; nothing is deleted
+  // server-side. Switch away if it was the open conversation.
+  function closeDm(name: string) {
+    const key = dmKeyFor(name);
+    delete channels[key];
+    persistDms();
+    if (active === key) active = Object.keys(channels)[0] ?? "";
+  }
+  // The set of open 1:1 DMs is view state the server doesn't yet track (a
+  // server-owned DM list is §18 territory), so we persist it per account so a
+  // conversation — and its history on click — survives a reconnect / relaunch.
+  const dmStoreKey = () => `weft:dms:${account}@${network}`;
+  // v0.12 SYNC cursor, per account+device (localStorage). Stored on every
+  // `sync-end`, replayed on reconnect so `SYNC since=` catches up missed
+  // messages + offline edits/reactions in one round trip.
+  const syncCursorKey = () => `weft:sync:${account}@${network}`;
+  function loadSyncCursor(): string | undefined {
+    try {
+      return localStorage.getItem(syncCursorKey()) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  function persistDms() {
+    try {
+      const keys = Object.keys(channels).filter((k) => k.startsWith("@"));
+      localStorage.setItem(dmStoreKey(), JSON.stringify(keys));
+    } catch {
+      /* storage unavailable */
+    }
+  }
+  function restoreDms() {
+    try {
+      const keys: string[] = JSON.parse(localStorage.getItem(dmStoreKey()) ?? "[]");
+      for (const k of keys) if (k.startsWith("@")) ensureChannel(k);
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
+  // "Invite to server" — open the invites panel for the current server, where a
+  // shareable link is minted (invites are link-based, §6.5).
+  function inviteToServer() {
+    openInvites();
   }
 
   // ---- social layer: friends ----
@@ -1005,6 +1106,20 @@
     newGroupInput = "";
     weft.groupCreate(members).catch((e) => toast(String(e), "error"));
   }
+  // The "+" in a DM: pick friends to fold into a group with the current peer.
+  let groupPickerOpen = $state(false);
+  let groupPickerSeed = $state("");
+  function openGroupPicker() {
+    if (!activeIsDm) return;
+    groupPickerSeed = qualify(peerOf(active));
+    groupPickerOpen = true;
+  }
+  function createGroupWith(members: string[]) {
+    groupPickerOpen = false;
+    const uniq = [...new Set(members.map((m) => qualify(m)).filter((m) => m.includes("@")))];
+    if (uniq.length < 2) return; // the peer + at least one more
+    weft.groupCreate(uniq).catch((e) => toast(String(e), "error"));
+  }
   function openGroup(id: string) {
     ensureChannel(id);
     homeView = true;
@@ -1073,6 +1188,11 @@
         groups = {};
         weft.listFriends().catch(() => {}); // social layer: load friends + requests
         weft.listGroups().catch(() => {}); // and group DMs
+        restoreDms(); // re-open the 1:1 DMs from last session (history loads on click)
+        // Clear any half-finished history load from before a reconnect — its
+        // BATCH will never arrive, so a stale guard would block every new load.
+        loadingHistory = null;
+        histByTarget = {};
         // Remember creds so the next launch logs straight back in. NOTE: this
         // includes the password in localStorage — a dev convenience; the
         // hardening is OS-keychain storage in the backend.
@@ -1088,6 +1208,12 @@
         // (persistent membership, §6.3). A brand-new account joins nothing —
         // it's not forced into the seeded server; the empty-home screen guides
         // it to Discover / create / join instead.
+        //
+        // §6.9 SYNC (v0.12): pull the skeleton + a cursor on fresh login, or the
+        // delta of everything missed since our stored cursor on reconnect. The
+        // materialized rows flow through the ordinary message/edit/reaction
+        // handlers (upsert by msgid); `sync-end` gives the next cursor.
+        weft.sync(loadSyncCursor()).catch(() => {});
         break;
       case "media-token":
         weft.setMediaBearer(e.token); // §13 fetch bearer for /media URLs
@@ -1194,10 +1320,14 @@
           if (loadingThread) threadBuf.push(msg);
           else if (loadingSearch) searchBuf.push(msg);
           else if (loadingPins) pinsBuf.push(msg);
-          else historyBuf.push(msg);
+          else (histByTarget[e.target] ??= []).push(msg); // route to the page's own channel
           break;
         }
+        // A DM we haven't got open yet (someone messaged us) → persist it so the
+        // conversation survives a reconnect.
+        const newDm = key.startsWith("@") && !channels[key];
         const ch = ensureChannel(key);
+        if (newDm) persistDms();
         // §3.5/§11.13 optimistic reconcile: our own echoed message carrying our
         // label replaces the pending placeholder we showed on send, rather than
         // adding a duplicate. Works identically for a local send and for one a
@@ -1212,8 +1342,18 @@
             break;
           }
         }
-        // Dedupe: history backfill may re-deliver a live message.
-        if (e.msgid && ch.messages.some((m) => m.msgid === e.msgid)) break;
+        // Upsert by msgid (v0.12 SYNC apply rule): a re-delivered message —
+        // history backfill, or a reconnect delta carrying an offline edit —
+        // replaces the existing copy in place with the final body + edited
+        // state, preserving accumulated reactions (which arrive as own events).
+        if (e.msgid) {
+          const idx = ch.messages.findIndex((m) => m.msgid === e.msgid);
+          if (idx !== -1) {
+            msg.reactions = ch.messages[idx].reactions;
+            ch.messages.splice(idx, 1, msg);
+            break;
+          }
+        }
         ch.messages.push(msg);
         // If this is a live reply in the open thread, show it in the panel too.
         if (
@@ -1303,6 +1443,25 @@
         }
         break;
       }
+      case "sync-end": {
+        // §6.9 store the new cursor for this device's next reconnect delta.
+        try {
+          localStorage.setItem(syncCursorKey(), e.cursor);
+        } catch {
+          /* storage unavailable */
+        }
+        break;
+      }
+      case "ns-member": {
+        // §7.4 namespace-level join/part. Rosters + the sidebar are driven by
+        // the per-channel MEMBER/LAYOUT events; this is the ns-level marker
+        // (the acting client's ack). No dedicated UI state to update yet.
+        break;
+      }
+      case "chan-sync":
+        // §7.9 per-channel SYNC header — previews are withheld in v1, so there's
+        // nothing to apply; the `reset` flag lands with the body-stream work.
+        break;
       case "emoji": {
         // §9.4 a namespace custom emoji (from EMOJI LIST or a live add).
         (customEmoji[e.namespace] ??= {})[e.name] = e.media;
@@ -1562,6 +1721,15 @@
           currentBatchId = "";
           break;
         }
+        // A MEMBERS roster batch (`m…`): each MEMBER folded in live already, so
+        // there's nothing to flush here. Crucially it must NOT fall through to the
+        // history branch, or it would steal the in-flight HISTORY's `loadingHistory`
+        // and the real page would be discarded. (Checked after `mod`, which also
+        // starts with "m".)
+        if (currentBatchId.startsWith("m")) {
+          currentBatchId = "";
+          break;
+        }
         if (currentBatchId.startsWith("r")) {
           const scope = roleFetchQueue.shift();
           // Keep roles in position order (server sorts, but be safe).
@@ -1606,19 +1774,36 @@
           loadingInvites = false;
           break;
         }
-        const target = loadingHistory;
-        if (!target) break;
-        const ch = ensureChannel(target);
-        const seen = new Set(ch.messages.map((m) => m.msgid).filter(Boolean));
-        const older = historyBuf.filter((m) => !m.msgid || !seen.has(m.msgid));
-        ch.messages = [...older, ...ch.messages];
-        ch.historyLoaded = true;
-        ch.truncated = e.truncated;
-        ch.hasMore = !e.truncated && historyBuf.length >= HISTORY_LIMIT;
+        // Flush every channel that accumulated a history page. Each page goes to
+        // the channel its messages name (`target`), so this is correct no matter
+        // which batch's END fired or whether `loadingHistory` was cleared — a
+        // stray batch can't lose a page. The requested channel is always flushed
+        // (an empty page still marks it loaded, so we stop re-requesting).
+        const requested = loadingHistory;
+        const targets = new Set(Object.keys(histByTarget));
+        if (requested) targets.add(requested);
+        for (const t of targets) {
+          const buf = histByTarget[t] ?? [];
+          delete histByTarget[t];
+          const ch = ensureChannel(t);
+          const seen = new Set(ch.messages.map((m) => m.msgid).filter(Boolean));
+          const older = buf.filter((m) => !m.msgid || !seen.has(m.msgid));
+          ch.messages = [...older, ...ch.messages];
+          ch.historyLoaded = true;
+          if (t === requested) {
+            ch.truncated = e.truncated;
+            ch.hasMore = !e.truncated && buf.length >= HISTORY_LIMIT;
+          }
+        }
         const initial = loadingInitial;
         const prev = preScrollHeight;
-        historyBuf = [];
         loadingHistory = null;
+        // If the reader switched to another conversation while this page was in
+        // flight, its initial load was single-flight-blocked — kick it now.
+        const cur = channels[active];
+        if (active !== requested && cur && !cur.voice && !cur.historyLoaded) {
+          loadHistory(active, true);
+        }
         // Restore scroll after the DOM re-renders: bottom on first load, or
         // keep the reader's position when paging older.
         queueMicrotask(() => {
@@ -1979,11 +2164,11 @@
   // Curated emoji, categorized (§ Phase 8 polish).
   let pickerKey = $state<number | null>(null); // message whose picker is open
 
-  // Search the batch buffer first (target may not be committed yet), then the
-  // channel's messages.
+  // Search the target's in-flight history buffer first (not committed yet), then
+  // the channel's messages.
   function findMsg(target: string, msgid: string): Msg | undefined {
     return (
-      historyBuf.find((m) => m.msgid === msgid) ??
+      histByTarget[target]?.find((m) => m.msgid === msgid) ??
       channels[target]?.messages.find((m) => m.msgid === msgid)
     );
   }
@@ -2890,6 +3075,7 @@
     set newGroupInput(v: string) { newGroupInput = v; },
     groupLabel,
     createGroup,
+    openGroupPicker,
     openGroup,
     leaveGroup,
     addToGroup,
@@ -2957,7 +3143,9 @@
     serverMentionCount,
     retentionMeta,
     chanCtx,
-    memberCtx,
+    userCtx,
+    groupCtx,
+    closeDm,
     catCtx,
     get serverMenu() { return serverMenu; },
     set serverMenu(v: boolean) { serverMenu = v; },
@@ -3264,6 +3452,14 @@
 
     {#if invitesOpen}
       <InvitesModal onclose={() => (invitesOpen = false)} />
+    {/if}
+
+    {#if groupPickerOpen}
+      <NewGroupModal
+        seed={groupPickerSeed}
+        onclose={() => (groupPickerOpen = false)}
+        oncreate={createGroupWith}
+      />
     {/if}
 
     {#if pinsOpen}

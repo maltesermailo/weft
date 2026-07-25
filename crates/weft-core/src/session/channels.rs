@@ -48,6 +48,43 @@ impl<S: ControlStream> Session<S> {
                     return self.internal(label, &e).await;
                 }
                 debug!(%channel, ?kind, "channel created");
+                // v0.12: a channel created in a namespace is in every ns
+                // member's derived set immediately (no membership writes). Push
+                // its layout + policy live so it appears in members' sidebars
+                // without a reconnect (acceptance #1). Live subscription still
+                // needs the member's own JOIN/SYNC, so posting isn't zero-join
+                // yet — that's a follow-up (session auto-subscribe).
+                if let Some(ns) = channel
+                    .namespace()
+                    .and_then(|n| n.parse::<NamespaceName>().ok())
+                {
+                    if let Ok(members) = self.ctx.memberships.ns_members(&ns).await {
+                        for member in members {
+                            self.ctx
+                                .directory
+                                .notify(
+                                    member.clone(),
+                                    Event::ChannelLayout {
+                                        channel: channel.clone(),
+                                        category: None,
+                                        position: 0,
+                                        kind,
+                                    },
+                                )
+                                .await;
+                            self.ctx
+                                .directory
+                                .notify(
+                                    member,
+                                    Event::Policy {
+                                        channel: channel.clone(),
+                                        policy,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                }
                 self.send_event(label, Event::Policy { channel, policy })
                     .await?;
                 Ok(Flow::Continue)

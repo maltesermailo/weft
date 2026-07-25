@@ -101,6 +101,15 @@ struct Inner {
     /// (scope key, event ulid) → record; BTreeMap gives ordered range
     /// scans per scope — the msgid order IS the channel order (§9.1).
     events: BTreeMap<(String, Ulid), EventRecord>,
+    /// v0.12 modseq: a single monotonic sequence shared by every client-visible
+    /// write (events + metadata), the global source for SYNC cursors + deltas.
+    next_seq: i64,
+    /// `seq → event key` index for `WHERE seq > since` message deltas.
+    event_by_seq: BTreeMap<i64, (String, Ulid)>,
+    /// channel name → the seq of its last metadata change (SYNC metadata delta).
+    channel_seq: HashMap<ChannelName, i64>,
+    /// namespace name → the seq of its last NS-META change (SYNC metadata delta).
+    namespace_seq: HashMap<NamespaceName, i64>,
     /// Root ulid → its (scope key, ulid) — EDIT/DELETE/REACT lookups
     /// arrive with only a msgid.
     roots: HashMap<Ulid, (String, Ulid)>,
@@ -148,7 +157,12 @@ struct Inner {
     /// §9.4 custom emoji: namespace → (name → media ref), name-sorted.
     emoji: HashMap<NamespaceName, std::collections::BTreeMap<String, String>>,
     /// account → channels it's a member of (§6.3 persistent membership).
+    /// Top-level channels only under v0.12; namespaced access is derived.
     memberships: HashMap<Account, std::collections::HashSet<ChannelName>>,
+    /// account → namespace → join time (ms) (v0.12 ns-level membership).
+    ns_memberships: HashMap<Account, std::collections::HashMap<NamespaceName, i64>>,
+    /// account → channels it hides while still an ns member (v0.12 override).
+    channel_hides: HashMap<Account, std::collections::HashSet<ChannelName>>,
     /// scope → role name → (color, caps) (§6.5 role definitions).
     // scope → name → (color, caps, hoist, position)
     roles: HashMap<String, std::collections::BTreeMap<String, RoleEntry>>,
@@ -187,6 +201,11 @@ impl EventStore for MemoryStore {
         if matches!(record.kind, crate::types::EventKind::Delete) {
             inner.deleted.insert((key.clone(), record.root.ulid()));
         }
+        // v0.12: stamp a monotonic seq so SYNC deltas can serve this event (and
+        // any mutation it represents) via `WHERE seq > since`.
+        inner.next_seq += 1;
+        let seq = inner.next_seq;
+        inner.event_by_seq.insert(seq, (key.clone(), ulid));
         inner.events.insert((key, ulid), record);
         Ok(())
     }
@@ -477,9 +496,47 @@ impl EventStore for MemoryStore {
         }
         Ok(dropped)
     }
+
+    async fn sync_cursor(&self) -> Result<String, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        // Memory is ephemeral — the epoch never rotates.
+        Ok(format!("mem:{}", inner.next_seq))
+    }
+
+    async fn events_since(
+        &self,
+        scopes: &[Scope],
+        since_seq: i64,
+    ) -> Result<Vec<EventRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let wanted: std::collections::HashSet<String> = scopes.iter().map(|s| s.as_key()).collect();
+        let mut out = Vec::new();
+        for (_seq, key) in inner.event_by_seq.range((since_seq + 1)..) {
+            if !wanted.contains(&key.0) {
+                continue;
+            }
+            if let Some(record) = inner.events.get(key) {
+                out.push(record.clone());
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl Inner {
+    /// Stamp a channel's metadata change with the next global seq (v0.12 SYNC
+    /// metadata delta) — the memory analog of the Postgres stamping trigger.
+    fn stamp_channel(&mut self, name: &ChannelName) {
+        self.next_seq += 1;
+        self.channel_seq.insert(name.clone(), self.next_seq);
+    }
+
+    /// Stamp a namespace's NS-META change with the next global seq (v0.12).
+    fn stamp_namespace(&mut self, name: &NamespaceName) {
+        self.next_seq += 1;
+        self.namespace_seq.insert(name.clone(), self.next_seq);
+    }
+
     /// A message expires as a unit: root + children (tombstone included)
     /// go when the ROOT's timestamp passes the cutoff — children never
     /// outlive their message.
@@ -582,6 +639,8 @@ impl AccountStore for MemoryStore {
         // moderation + memberships key by the account name.
         let ulid = record.ulid;
         inner.memberships.remove(account);
+        inner.ns_memberships.remove(account);
+        inner.channel_hides.remove(account);
         inner.grants.retain(|(subject, _), _| subject != &ulid);
         inner.moderation.retain(|(_, acct, _), _| acct != account);
         inner
@@ -844,6 +903,7 @@ impl ChannelStore for MemoryStore {
                 position: 0,
                 kind,
             });
+        inner.stamp_channel(name);
         Ok(())
     }
 
@@ -868,6 +928,7 @@ impl ChannelStore for MemoryStore {
         if let Some(record) = inner.channels.get_mut(name) {
             record.topic = Some(topic.to_string());
         }
+        inner.stamp_channel(name);
         Ok(())
     }
 
@@ -880,6 +941,7 @@ impl ChannelStore for MemoryStore {
         if let Some(record) = inner.channels.get_mut(name) {
             record.view_gated = gated;
         }
+        inner.stamp_channel(name);
         Ok(())
     }
 
@@ -892,6 +954,7 @@ impl ChannelStore for MemoryStore {
         if let Some(record) = inner.channels.get_mut(name) {
             record.restricted = restricted;
         }
+        inner.stamp_channel(name);
         Ok(())
     }
 
@@ -900,6 +963,7 @@ impl ChannelStore for MemoryStore {
         if let Some(record) = inner.channels.get_mut(name) {
             record.frozen = frozen;
         }
+        inner.stamp_channel(name);
         Ok(())
     }
 
@@ -925,6 +989,8 @@ impl ChannelStore for MemoryStore {
         if let Some(rec) = inner.channels.remove(old) {
             inner.channels.insert(new.clone(), rec);
         }
+        inner.channel_seq.remove(old);
+        inner.stamp_channel(new);
         // 2. events — re-scope every (scope, ulid) entry.
         let ev: Vec<(String, Ulid)> = inner
             .events
@@ -1045,6 +1111,7 @@ impl ChannelStore for MemoryStore {
             record.category = category.map(str::to_string);
             record.position = position;
         }
+        inner.stamp_channel(name);
         Ok(())
     }
 
@@ -1067,6 +1134,24 @@ impl ChannelStore for MemoryStore {
                 .then(an.cmp(bn))
         });
         Ok(out)
+    }
+
+    async fn channels_changed_since(
+        &self,
+        since_seq: i64,
+    ) -> Result<Vec<(ChannelName, ChannelRecord)>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .channel_seq
+            .iter()
+            .filter(|(_, &seq)| seq > since_seq)
+            .filter_map(|(name, _)| {
+                inner
+                    .channels
+                    .get(name)
+                    .map(|record| (name.clone(), record.clone()))
+            })
+            .collect())
     }
 }
 
@@ -1220,7 +1305,9 @@ impl NamespaceStore for MemoryStore {
         if inner.namespaces.contains_key(&record.name) {
             return Ok(false);
         }
-        inner.namespaces.insert(record.name.clone(), record);
+        let name = record.name.clone();
+        inner.namespaces.insert(name.clone(), record);
+        inner.stamp_namespace(&name);
         Ok(true)
     }
 
@@ -1278,6 +1365,7 @@ impl NamespaceStore for MemoryStore {
                 _ => {}
             }
         }
+        inner.stamp_namespace(name);
         Ok(())
     }
 
@@ -1290,6 +1378,7 @@ impl NamespaceStore for MemoryStore {
         if let Some(ns) = inner.namespaces.get_mut(name) {
             ns.visibility = visibility.to_string();
         }
+        inner.stamp_namespace(name);
         Ok(())
     }
 
@@ -1302,6 +1391,7 @@ impl NamespaceStore for MemoryStore {
         if let Some(ns) = inner.namespaces.get_mut(name) {
             ns.frozen = frozen;
         }
+        inner.stamp_namespace(name);
         Ok(())
     }
 
@@ -1314,6 +1404,7 @@ impl NamespaceStore for MemoryStore {
         if let Some(ns) = inner.namespaces.get_mut(name) {
             ns.federation = open;
         }
+        inner.stamp_namespace(name);
         Ok(())
     }
 
@@ -1338,6 +1429,7 @@ impl NamespaceStore for MemoryStore {
                 ns.pending_recovery = None;
             }
         }
+        inner.stamp_namespace(name);
         inner
             .root_history
             .entry(name.clone())
@@ -1361,6 +1453,7 @@ impl NamespaceStore for MemoryStore {
         if let Some(ns) = inner.namespaces.get_mut(name) {
             ns.recovery_set = Some((m, keys.to_vec()));
         }
+        inner.stamp_namespace(name);
         Ok(())
     }
 
@@ -1373,6 +1466,7 @@ impl NamespaceStore for MemoryStore {
         if let Some(ns) = inner.namespaces.get_mut(name) {
             ns.pending_recovery = Some(pending);
         }
+        inner.stamp_namespace(name);
         Ok(())
     }
 
@@ -1381,6 +1475,7 @@ impl NamespaceStore for MemoryStore {
         if let Some(ns) = inner.namespaces.get_mut(name) {
             ns.pending_recovery = None;
         }
+        inner.stamp_namespace(name);
         Ok(())
     }
 
@@ -1404,6 +1499,19 @@ impl NamespaceStore for MemoryStore {
     ) -> Result<Vec<RootHistoryEntry>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner.root_history.get(name).cloned().unwrap_or_default())
+    }
+
+    async fn namespaces_changed_since(
+        &self,
+        since_seq: i64,
+    ) -> Result<Vec<NamespaceRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .namespace_seq
+            .iter()
+            .filter(|(_, &seq)| seq > since_seq)
+            .filter_map(|(name, _)| inner.namespaces.get(name).cloned())
+            .collect())
     }
 }
 
@@ -1727,6 +1835,123 @@ impl MembershipStore for MemoryStore {
             .filter(|(_, chans)| chans.contains(channel))
             .map(|(account, _)| account.clone())
             .collect())
+    }
+
+    async fn set_ns_membership(
+        &self,
+        account: &Account,
+        namespace: &NamespaceName,
+        joined_ms: i64,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        // Idempotent: a repeat join leaves the original join time in place.
+        inner
+            .ns_memberships
+            .entry(account.clone())
+            .or_default()
+            .entry(namespace.clone())
+            .or_insert(joined_ms);
+        Ok(())
+    }
+
+    async fn clear_ns_membership(
+        &self,
+        account: &Account,
+        namespace: &NamespaceName,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(map) = inner.ns_memberships.get_mut(account) {
+            map.remove(namespace);
+        }
+        // Drop every hide override for channels in this namespace.
+        if let Some(set) = inner.channel_hides.get_mut(account) {
+            set.retain(|chan| chan.namespace() != Some(namespace.as_str()));
+        }
+        Ok(())
+    }
+
+    async fn is_ns_member(
+        &self,
+        account: &Account,
+        namespace: &NamespaceName,
+    ) -> Result<bool, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .ns_memberships
+            .get(account)
+            .is_some_and(|map| map.contains_key(namespace)))
+    }
+
+    async fn ns_memberships(&self, account: &Account) -> Result<Vec<NamespaceName>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .ns_memberships
+            .get(account)
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    async fn ns_members(&self, namespace: &NamespaceName) -> Result<Vec<Account>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .ns_memberships
+            .iter()
+            .filter(|(_, map)| map.contains_key(namespace))
+            .map(|(account, _)| account.clone())
+            .collect())
+    }
+
+    async fn set_hidden(&self, account: &Account, channel: &ChannelName) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        inner
+            .channel_hides
+            .entry(account.clone())
+            .or_default()
+            .insert(channel.clone());
+        Ok(())
+    }
+
+    async fn clear_hidden(
+        &self,
+        account: &Account,
+        channel: &ChannelName,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(set) = inner.channel_hides.get_mut(account) {
+            set.remove(channel);
+        }
+        Ok(())
+    }
+
+    async fn is_hidden(
+        &self,
+        account: &Account,
+        channel: &ChannelName,
+    ) -> Result<bool, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .channel_hides
+            .get(account)
+            .is_some_and(|set| set.contains(channel)))
+    }
+
+    async fn hiders(&self, channel: &ChannelName) -> Result<Vec<Account>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .channel_hides
+            .iter()
+            .filter(|(_, chans)| chans.contains(channel))
+            .map(|(account, _)| account.clone())
+            .collect())
+    }
+
+    async fn hidden_channels(&self, account: &Account) -> Result<Vec<ChannelName>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .channel_hides
+            .get(account)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default())
     }
 }
 

@@ -14,6 +14,9 @@
 
   const b = $derived(app.badgeFor(target, app.active));
   const pr = $derived(app.presence[target] ?? "offline");
+  // Roles + moderation are server-member controls — show them only when we're
+  // actually viewing one of the server's channels, not from friends/DMs.
+  const inServer = $derived(app.active.startsWith("#"));
   const scope = $derived(app.roleScopeOf(app.active));
   const myRoles = $derived(app.rolesOf(target, scope));
   const allRoles = $derived(app.rolesByScope[scope] ?? []);
@@ -53,9 +56,9 @@
         {#if b?.owner}<span class="cap-badge owner">owner</span>
         {:else if b?.mod}<span class="cap-badge mod">mod</span>{/if}
       </div>
-      <div class="profile-handle">{target}@{app.network} · <span class="pres-{pr}">{pr}</span></div>
+      <div class="profile-handle">{target.includes("@") ? target : `${target}@${app.network}`} · <span class="pres-{pr}">{pr}</span></div>
 
-      {#if myRoles.length || canAssignRoles || targetIsOwner}
+      {#if inServer && (myRoles.length || canAssignRoles || targetIsOwner)}
         <div class="profile-divider"></div>
         <div class="profile-section-label">Roles</div>
         <div class="role-pills">
@@ -91,24 +94,26 @@
       <div class="profile-actions">
         {#if target !== app.account}
           <button class="pf-primary" onclick={() => { app.openDm(target); onclose(); }}>Message</button>
-          <div class="pf-mod">
-            <div class="profile-section-label">Moderation</div>
-            <div class="pf-mod-inputs">
-              <select bind:value={modScope} aria-label="Scope">
-                {#each app.scopesFor() as s (s)}<option value={s}>{s}</option>{/each}
-              </select>
-              <input bind:value={modReason} placeholder="reason (optional)" />
+          {#if inServer}
+            <div class="pf-mod">
+              <div class="profile-section-label">Moderation</div>
+              <div class="pf-mod-inputs">
+                <select bind:value={modScope} aria-label="Scope">
+                  {#each app.scopesFor() as s (s)}<option value={s}>{s}</option>{/each}
+                </select>
+                <input bind:value={modReason} placeholder="reason (optional)" />
+              </div>
+              <div class="pf-mod-actions">
+                <button class="pf-secondary" onclick={() => app.moderate("mute", target, modScope, modReason)}>Mute</button>
+                <button class="pf-secondary" onclick={() => app.moderate("unmute", target, modScope)}>Unmute</button>
+                <button class="pf-secondary" onclick={() => app.moderate("kick", target, app.active, modReason)}>Kick</button>
+                <button class="pf-secondary danger" onclick={() => app.moderate("ban", target, modScope, modReason)}>Ban</button>
+                <button class="pf-secondary" onclick={() => app.moderate("unban", target, modScope)}>Unban</button>
+              </div>
             </div>
-            <div class="pf-mod-actions">
-              <button class="pf-secondary" onclick={() => app.moderate("mute", target, modScope, modReason)}>Mute</button>
-              <button class="pf-secondary" onclick={() => app.moderate("unmute", target, modScope)}>Unmute</button>
-              <button class="pf-secondary" onclick={() => app.moderate("kick", target, app.active, modReason)}>Kick</button>
-              <button class="pf-secondary danger" onclick={() => app.moderate("ban", target, modScope, modReason)}>Ban</button>
-              <button class="pf-secondary" onclick={() => app.moderate("unban", target, modScope)}>Unban</button>
-            </div>
-          </div>
+          {/if}
         {/if}
-        <button class="pf-secondary" onclick={() => navigator.clipboard?.writeText(`${target}@${app.network}`)}>Copy ID</button>
+        <button class="pf-secondary" onclick={() => navigator.clipboard?.writeText(target.includes("@") ? target : `${target}@${app.network}`)}>Copy ID</button>
       </div>
     </div>
   </div>

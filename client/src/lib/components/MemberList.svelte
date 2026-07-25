@@ -50,7 +50,7 @@
 </script>
 
 {#snippet row(m: Member)}
-  <div class="member-row" class:member-offline={!isOnline(m.name)} role="listitem" oncontextmenu={(e) => app.memberCtx(e, m.name)}>
+  <div class="member-row" class:member-offline={!isOnline(m.name)} role="listitem" oncontextmenu={(e) => app.userCtx(e, m.name)}>
     <button class="member-id" onclick={(e) => app.openProfile(m.name, e)}>
       <div class="avatar"><Avatar account={m.name} /><span class="dot {statusOf(m.name)} corner"></span></div>
       <span class="mname">{app.displayName(m.name)}</span>

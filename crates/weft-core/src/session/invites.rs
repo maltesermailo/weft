@@ -200,7 +200,44 @@ impl<S: ControlStream> Session<S> {
             Some(TokenScope::Namespace(ns)) => match ns.parse::<weft_proto::NamespaceName>() {
                 Ok(name) => match self.ctx.namespaces.namespace(&name).await {
                     Ok(Some(record)) => {
+                        // v0.12: redeeming an ns invite creates the `(account,
+                        // ns)` membership row; the caps granted above unlock any
+                        // view-gated channels, all visible by derivation (1.2).
+                        if let Err(e) = self
+                            .ctx
+                            .memberships
+                            .set_ns_membership(&account, &name, unix_now() as i64)
+                            .await
+                        {
+                            return self.internal(label, &e).await;
+                        }
                         self.send_event(label, Self::ns_meta_event(&record)).await?;
+                        // Subscribe to the channels the redeemer can now see so
+                        // its client populates immediately (like NS JOIN).
+                        let channels = self
+                            .ctx
+                            .channel_store
+                            .channels_in_namespace(name.as_str())
+                            .await
+                            .unwrap_or_default();
+                        for (channel, _record) in channels {
+                            if self.channel_kind(&channel).await == ChannelKind::Voice {
+                                continue;
+                            }
+                            if self.view_gated_denied(&channel, &account).await {
+                                continue;
+                            }
+                            if self
+                                .ctx
+                                .memberships
+                                .is_hidden(&account, &channel)
+                                .await
+                                .unwrap_or(false)
+                            {
+                                continue;
+                            }
+                            self.join_one(&channel, &account, None).await?;
+                        }
                         Ok(Flow::Continue)
                     }
                     Ok(None) => self.no_such_target(label).await,
@@ -260,7 +297,6 @@ impl<S: ControlStream> Session<S> {
             Event::BatchEnd {
                 id,
                 truncated: false,
-                compacted: false,
             },
         )
         .await?;

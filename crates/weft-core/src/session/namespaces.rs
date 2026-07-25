@@ -4,9 +4,11 @@
 use super::*;
 
 impl<S: ControlStream> Session<S> {
-    /// §6.2 `NS JOIN <name>`: join every channel in the namespace the caller
-    /// can see, skipping view-gated and banned ones ("not hidden by
-    /// permissions"). No visible channel — nonexistent, private, or fully
+    /// §6.2 `NS JOIN <name>` (v0.12): become a member of the namespace — one
+    /// `(account, ns)` row; channel access is derived (Part 1.2). The caller
+    /// subscribes to every channel it can see (view-gated ones stay hidden), and
+    /// the join is announced once as `NS-MEMBER … join` rather than a per-channel
+    /// `MEMBER` fan-out (Q1). No visible channel — nonexistent, private, or fully
     /// gated — answers `NO-SUCH-TARGET` (one code, anti-enumeration).
     pub(super) async fn on_ns_join(
         &mut self,
@@ -23,20 +25,143 @@ impl<S: ControlStream> Session<S> {
             Ok(list) => list,
             Err(e) => return self.internal(label, &e).await,
         };
-        let mut joined_any = false;
+        // The channels the caller can actually see (anti-enum: none visible ⇒
+        // NO-SUCH-TARGET, exactly as before). Voice channels are entered
+        // separately (§16) and never text-subscribed here.
+        let mut visible = Vec::new();
         for (channel, _record) in channels {
-            // Per-channel joins are unlabeled (a bulk membership burst); the
-            // client processes each MEMBER/POLICY as it arrives.
-            if matches!(
-                self.join_one(&channel, &account, None).await?,
-                JoinResult::Joined
-            ) {
-                joined_any = true;
+            if self.channel_kind(&channel).await == ChannelKind::Voice {
+                continue;
             }
+            if self.view_gated_denied(&channel, &account).await {
+                continue;
+            }
+            visible.push(channel);
         }
-        if !joined_any {
+        if visible.is_empty() {
             return self.no_such_target(label).await;
         }
+
+        // Write the single ns membership row FIRST, so the per-channel
+        // subscriptions below read as auto-rejoin — quiet, no "joined" system
+        // spam for an ns-level action (the NS-MEMBER event is the signal).
+        if let Err(e) = self
+            .ctx
+            .memberships
+            .set_ns_membership(&account, &name, unix_now() as i64)
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        for channel in visible {
+            // A channel the caller previously hid stays hidden — NS JOIN never
+            // un-hides; that's a per-channel JOIN.
+            if self
+                .ctx
+                .memberships
+                .is_hidden(&account, &channel)
+                .await
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            // Unlabeled: a bulk subscription burst; the client folds each
+            // MEMBER/POLICY as it arrives.
+            self.join_one(&channel, &account, None).await?;
+        }
+
+        // Announce the ns-level membership once (client expands to the derived
+        // roster), carrying the distinct-account member count after the join.
+        let count = self
+            .ctx
+            .memberships
+            .ns_members(&name)
+            .await
+            .map(|m| m.len() as u64)
+            .ok();
+        let me = UserRef::new(account, self.ctx.info.network.clone());
+        self.send_event(
+            label,
+            Event::NsMember {
+                namespace: name,
+                user: me,
+                action: MemberAction::Join,
+                display: None,
+                count,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// §6.2 `NS LEAVE <name>` (v0.12): drop namespace membership — the
+    /// `(account, ns)` row, every hide override for its channels (both in the
+    /// store), and ns-scoped role assignments — then unsubscribe from its
+    /// channels and announce `NS-MEMBER … part`. Also reachable as the
+    /// `PART ns:<name>` alias. Not a member ⇒ `NO-SUCH-TARGET` (invariant 1).
+    pub(super) async fn on_ns_leave(
+        &mut self,
+        label: Option<String>,
+        name: NamespaceName,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if !self
+            .ctx
+            .memberships
+            .is_ns_member(&account, &name)
+            .await
+            .unwrap_or(false)
+        {
+            return self.no_such_target(label).await;
+        }
+
+        // Unsubscribe from every joined channel in this namespace (runtime).
+        // Silent part — an ns-level leave doesn't post per-channel "left" lines.
+        let leaving: Vec<ChannelName> = self
+            .joined
+            .keys()
+            .filter(|c| c.namespace() == Some(name.as_str()))
+            .cloned()
+            .collect();
+        for channel in leaving {
+            if let Some(joined) = self.joined.remove(&channel) {
+                joined.forwarder.abort();
+                joined.handle.part(self.id, false).await;
+            }
+        }
+
+        // Drop the membership row + all hide overrides for the namespace.
+        if let Err(e) = self
+            .ctx
+            .memberships
+            .clear_ns_membership(&account, &name)
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        // Clear ns-scoped role assignments (the store leaves these to us).
+        let scope = format!("ns:{name}");
+        let subject = account.to_string();
+        if let Ok(roles) = self.ctx.roles.roles_of(&scope, &subject).await {
+            for role in roles {
+                if let Err(e) = self.ctx.roles.unassign_role(&scope, &role, &subject).await {
+                    error!("ns role unassign failed: {e}");
+                }
+            }
+        }
+
+        let me = UserRef::new(account, self.ctx.info.network.clone());
+        self.send_event(
+            label,
+            Event::NsMember {
+                namespace: name,
+                user: me,
+                action: MemberAction::Part,
+                display: None,
+                count: None,
+            },
+        )
+        .await?;
         Ok(Flow::Continue)
     }
 
@@ -270,7 +395,6 @@ impl<S: ControlStream> Session<S> {
             Event::BatchEnd {
                 id,
                 truncated: false,
-                compacted: false,
             },
         )
         .await?;

@@ -20,7 +20,31 @@ impl<S: ControlStream> Session<S> {
                 .await;
         }
         match self.join_one(&channel, &account, label.clone()).await? {
-            JoinResult::Joined => Ok(Flow::Continue),
+            JoinResult::Joined => {
+                // v0.12: a successful JOIN on a **namespaced** channel makes the
+                // caller a member of its namespace (Discord model — and keeps
+                // `JOIN #ns/chan` natively valid for the IRC gateway, §17), then
+                // clears any hide override so the channel is derived-visible.
+                // A non-viewable channel never reaches here (join_one → Hidden →
+                // NO-SUCH-TARGET), so a private namespace can't be auto-joined.
+                // Written only after the join succeeds — no stray row on failure.
+                if let Some(ns) = channel.namespace() {
+                    if let Ok(ns) = ns.parse::<NamespaceName>() {
+                        if let Err(e) = self
+                            .ctx
+                            .memberships
+                            .set_ns_membership(&account, &ns, unix_now() as i64)
+                            .await
+                        {
+                            error!("ns membership on join failed: {e}");
+                        }
+                    }
+                    if let Err(e) = self.ctx.memberships.clear_hidden(&account, &channel).await {
+                        error!("clear hide failed: {e}");
+                    }
+                }
+                Ok(Flow::Continue)
+            }
             JoinResult::Banned => {
                 self.send_err(label, ErrCode::Banned, None, "you are banned")
                     .await?;
@@ -67,15 +91,11 @@ impl<S: ControlStream> Session<S> {
             return Ok(JoinResult::Banned);
         }
         // A persistent "joined" system line is posted only on a genuine *first*
-        // join (no membership recorded yet) — auto-rejoin on reconnect must not
-        // repost it, or reloading would spam the channel.
-        let first_join = !self
-            .ctx
-            .memberships
-            .memberships(account)
-            .await
-            .map(|chans| chans.contains(channel))
-            .unwrap_or(false);
+        // join (not currently a member) — auto-rejoin on reconnect must not
+        // repost it, or reloading would spam the channel. Derivation-aware:
+        // for a namespaced channel this is `¬member(ns) ∨ hidden` (Part 1.1),
+        // computed here *before* any membership mutation the caller applies.
+        let first_join = !self.is_member(account, channel).await;
         let Some(ack) = handle.join(self.id, account.clone(), first_join).await else {
             return Ok(JoinResult::Unavailable);
         };
@@ -115,9 +135,14 @@ impl<S: ControlStream> Session<S> {
             },
         )
         .await?;
-        // §6.3 persist membership for auto-rejoin on the next auth.
-        if let Err(e) = self.ctx.memberships.set_membership(account, channel).await {
-            error!("persist membership failed: {e}");
+        // §6.3 persist membership for auto-rejoin — **top-level channels only**.
+        // A namespaced channel's membership is derived from its namespace row +
+        // hide override (Part 1.1); the caller (NS JOIN / JOIN / redeem) writes
+        // those. `join_one` itself is pure runtime: subscribe + MEMBER/POLICY.
+        if channel.namespace().is_none() {
+            if let Err(e) = self.ctx.memberships.set_membership(account, channel).await {
+                error!("persist membership failed: {e}");
+            }
         }
         Ok(JoinResult::Joined)
     }
@@ -137,8 +162,14 @@ impl<S: ControlStream> Session<S> {
                 // Explicit PART = a genuine leave (clears membership) → post the
                 // persistent "left" system line.
                 joined.handle.part(self.id, true).await;
-                // §6.3 drop the persistent membership — no auto-rejoin.
-                if let Err(e) = self
+                // v0.12: PART on a **namespaced** channel sets the hide override
+                // (leave one channel, stay in the server — Part 1.2); a
+                // **top-level** PART drops the persistent membership row.
+                if channel.namespace().is_some() {
+                    if let Err(e) = self.ctx.memberships.set_hidden(&account, &channel).await {
+                        error!("set hide failed: {e}");
+                    }
+                } else if let Err(e) = self
                     .ctx
                     .memberships
                     .clear_membership(&account, &channel)
@@ -916,9 +947,10 @@ impl<S: ControlStream> Session<S> {
             return self.not_member_cap(label, &channel, "view").await;
         };
         // §6.3 the roster is the *persistent* membership — offline members are
-        // shown too (Discord-style). Online-ness is who currently holds a live
-        // session in the channel; the presence map only refines online→away/dnd.
-        let roster = match self.ctx.memberships.members(&channel).await {
+        // shown too (Discord-style). For a namespaced channel it's derived (ns
+        // members minus hiders minus view-denied, Part 1.3). Online-ness is who
+        // currently holds a live session; the presence map refines online→away.
+        let roster = match self.channel_roster(&channel).await {
             Ok(roster) => roster,
             Err(e) => return self.internal(label, &e).await,
         };
@@ -965,7 +997,6 @@ impl<S: ControlStream> Session<S> {
             Event::BatchEnd {
                 id,
                 truncated: false,
-                compacted: false,
             },
         )
         .await?;
@@ -1069,7 +1100,6 @@ impl<S: ControlStream> Session<S> {
             Event::BatchEnd {
                 id,
                 truncated: false,
-                compacted: false,
             },
         )
         .await?;
@@ -1131,7 +1161,6 @@ impl<S: ControlStream> Session<S> {
             Event::BatchEnd {
                 id,
                 truncated: false,
-                compacted: false,
             },
         )
         .await?;
@@ -1182,7 +1211,6 @@ impl<S: ControlStream> Session<S> {
             Event::BatchEnd {
                 id,
                 truncated: false,
-                compacted: false,
             },
         )
         .await?;
@@ -1395,11 +1423,7 @@ pub(super) fn batch_events(
             }
         }
     }
-    events.push(Event::BatchEnd {
-        id,
-        truncated,
-        compacted: true,
-    });
+    events.push(Event::BatchEnd { id, truncated });
     events
 }
 

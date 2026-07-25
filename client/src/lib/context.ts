@@ -68,6 +68,8 @@ export interface AppCtx {
   /** A group's display label (its name, else member handles). */
   groupLabel(id: string): string;
   createGroup(): void;
+  /** Open the friend-picker to grow the current DM into a group. */
+  openGroupPicker(): void;
   openGroup(id: string): void;
   leaveGroup(id: string): void;
   addToGroup(id: string, handle: string): void;
@@ -153,8 +155,12 @@ export interface AppCtx {
 
   // ---- context menus ----
   chanCtx(e: MouseEvent, ch: Channel): void;
-  memberCtx(e: MouseEvent, name: string): void;
+  userCtx(e: MouseEvent, name: string): void;
+  groupCtx(e: MouseEvent, id: string): void;
   catCtx(e: MouseEvent, cat: string): void;
+
+  // ---- user actions ----
+  closeDm(name: string): void;
 
   // ---- server menu / creation ----
   serverMenu: boolean;

@@ -122,6 +122,22 @@ pub trait EventStore: Send + Sync {
     /// to every message family whose stale rows have left the audit
     /// window. Returns rows dropped.
     async fn compact_before(&self, cutoff_ms: u64) -> Result<u64, StoreError>;
+
+    /// The current sync cursor token `epoch:seq` (v0.12 Part 2) — `seq` is the
+    /// committed event high-water mark. A client stores it and echoes it on the
+    /// next `SYNC since=`; the opaque epoch prefix forces a full resync after a
+    /// restore-from-backup that could re-issue seqs (Part 2.4).
+    async fn sync_cursor(&self) -> Result<String, StoreError>;
+
+    /// Events with `seq > since_seq` in any of `scopes`, ascending by seq — the
+    /// v0.12 SYNC delta feed. Serves new messages **and** mutations of older
+    /// ones (edits/reactions/tombstones each carry their own seq), which ULID
+    /// paging structurally misses. The caller materializes per scope.
+    async fn events_since(
+        &self,
+        scopes: &[Scope],
+        since_seq: i64,
+    ) -> Result<Vec<EventRecord>, StoreError>;
 }
 
 #[async_trait]
@@ -310,6 +326,14 @@ pub trait ChannelStore: Send + Sync {
         &self,
         namespace: &str,
     ) -> Result<Vec<(ChannelName, ChannelRecord)>, StoreError>;
+
+    /// Channels whose metadata changed after `since_seq` (v0.12 SYNC metadata
+    /// delta), each with its current record — so a reconnecting client catches
+    /// up `CHANNEL-LAYOUT`/`POLICY` changes it missed while offline.
+    async fn channels_changed_since(
+        &self,
+        since_seq: i64,
+    ) -> Result<Vec<(ChannelName, ChannelRecord)>, StoreError>;
 }
 
 /// Capability grants + per-scope revocation epochs (§6.5, §10.4). The
@@ -465,6 +489,14 @@ pub trait NamespaceStore: Send + Sync {
 
     async fn root_history(&self, name: &NamespaceName)
         -> Result<Vec<RootHistoryEntry>, StoreError>;
+
+    /// Namespaces whose NS-META changed after `since_seq` (v0.12 SYNC metadata
+    /// delta) — so a reconnecting member catches up title/icon/category/
+    /// visibility/recovery changes it missed while offline.
+    async fn namespaces_changed_since(
+        &self,
+        since_seq: i64,
+    ) -> Result<Vec<NamespaceRecord>, StoreError>;
 }
 
 /// Report queue + retention holds (§6.7, §12.1, invariant 11). Holds live
@@ -680,7 +712,68 @@ pub trait MembershipStore: Send + Sync {
 
     /// Every account that is a persistent member of `channel` — the roster
     /// (§6.3), including members currently offline (Discord-style member list).
+    /// **Top-level channels only**; a namespaced channel's roster is derived
+    /// (see [`ns_members`](Self::ns_members) + [`hiders`](Self::hiders)).
     async fn members(&self, channel: &ChannelName) -> Result<Vec<Account>, StoreError>;
+
+    // --- Namespace-level membership (v0.12). For namespaced channels, access
+    // --- is DERIVED: member(ns) ∧ can-view (caps, checked in core) ∧ ¬hidden.
+    // --- These rows never exist for top-level channels.
+
+    /// Record `account` as a member of `namespace`. Idempotent (join time is
+    /// left untouched on a repeat).
+    async fn set_ns_membership(
+        &self,
+        account: &Account,
+        namespace: &NamespaceName,
+        joined_ms: i64,
+    ) -> Result<(), StoreError>;
+
+    /// Drop ns membership **and every hide override** for channels in that
+    /// namespace (ns-scoped role assignments are cleared by the caller via
+    /// [`RoleStore`]). Idempotent.
+    async fn clear_ns_membership(
+        &self,
+        account: &Account,
+        namespace: &NamespaceName,
+    ) -> Result<(), StoreError>;
+
+    /// Is `account` a member of `namespace`?
+    async fn is_ns_member(
+        &self,
+        account: &Account,
+        namespace: &NamespaceName,
+    ) -> Result<bool, StoreError>;
+
+    /// Namespaces `account` belongs to — the auto-rejoin / skeleton base.
+    async fn ns_memberships(&self, account: &Account) -> Result<Vec<NamespaceName>, StoreError>;
+
+    /// Distinct accounts that are members of `namespace` — the derived-roster
+    /// base and the `members=` count source.
+    async fn ns_members(&self, namespace: &NamespaceName) -> Result<Vec<Account>, StoreError>;
+
+    /// Set a per-channel hide override for `account` (a `PART <#ns/chan>`).
+    /// Idempotent.
+    async fn set_hidden(&self, account: &Account, channel: &ChannelName) -> Result<(), StoreError>;
+
+    /// Clear a hide override (a `JOIN <#ns/chan>` while already an ns member).
+    /// Idempotent.
+    async fn clear_hidden(
+        &self,
+        account: &Account,
+        channel: &ChannelName,
+    ) -> Result<(), StoreError>;
+
+    /// Is `channel` hidden for `account`?
+    async fn is_hidden(&self, account: &Account, channel: &ChannelName)
+        -> Result<bool, StoreError>;
+
+    /// Accounts hiding `channel` — subtracted from the derived roster.
+    async fn hiders(&self, channel: &ChannelName) -> Result<Vec<Account>, StoreError>;
+
+    /// Every channel `account` currently hides — so the skeleton builder can
+    /// drop them without a per-channel probe.
+    async fn hidden_channels(&self, account: &Account) -> Result<Vec<ChannelName>, StoreError>;
 }
 
 /// §6.5 role definitions + assignments. Definitions are named, colored

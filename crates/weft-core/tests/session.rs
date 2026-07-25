@@ -216,6 +216,44 @@ async fn joined(ctx: &Arc<ServerCtx>, account: &str, channel: &str) -> Client {
     client
 }
 
+/// Drain an `NS JOIN` response (MEMBER/POLICY per visible channel) up to the
+/// trailing `NS-MEMBER … join`, returning its `count=` (v0.12).
+async fn drain_until_ns_member(client: &mut Client) -> Option<u64> {
+    loop {
+        match client.recv().await.event {
+            Event::Member { .. } | Event::Policy { .. } => {}
+            Event::NsMember {
+                action: MemberAction::Join,
+                count,
+                ..
+            } => return count,
+            other => panic!("unexpected before NS-MEMBER: {other:?}"),
+        }
+    }
+}
+
+/// Send-and-collect a `MEMBERS` roster: skip anything before the batch, then
+/// gather the member account names until `BATCH END`.
+async fn roster_names(client: &mut Client) -> std::collections::HashSet<String> {
+    loop {
+        if matches!(client.recv().await.event, Event::BatchStart { .. }) {
+            break;
+        }
+    }
+    let mut names = std::collections::HashSet::new();
+    loop {
+        match client.recv().await.event {
+            Event::Member { user, .. } => {
+                names.insert(user.account.as_str().to_string());
+            }
+            Event::Presence { .. } => {}
+            Event::BatchEnd { .. } => break,
+            other => panic!("unexpected in roster batch: {other:?}"),
+        }
+    }
+    names
+}
+
 #[tokio::test]
 async fn hello_gets_welcome_with_motd_and_label() {
     let ctx = ctx(&[]);
@@ -911,16 +949,12 @@ async fn history_serves_compacted_batches() {
     assert_eq!(msgid.to_string(), m3);
 
     let end = ada.recv().await;
-    let Event::BatchEnd {
-        id,
-        truncated,
-        compacted,
-    } = &end.event
-    else {
+    let Event::BatchEnd { id, truncated } = &end.event else {
         panic!("expected BATCH END, got {end:?}");
     };
     assert_eq!(id, &batch_id);
-    assert!(compacted, "wire form is always materialized (§12.1)");
+    // The wire form off the live path is always the materialized view (v0.12
+    // Part 4.1) — no `compacted` flag to carry.
     assert!(!truncated, "nothing purged yet");
 }
 
@@ -4755,13 +4789,9 @@ async fn bridge_backfill_serves_acked_channel_history() {
         panic!("expected second backfilled MESSAGE");
     };
     assert_eq!(m2.body, "second");
-    let Event::BatchEnd { compacted, .. } = bridge.recv().await.event else {
-        panic!("expected BATCH END");
-    };
-    assert!(
-        compacted,
-        "backfill serves the compacted materialization (§11.7)"
-    );
+    // Backfill serves the materialized view (§11.7); the wire form is always
+    // materialized off the live path (v0.12 Part 4.1), so BATCH END is bare.
+    assert!(matches!(bridge.recv().await.event, Event::BatchEnd { .. }));
 }
 
 /// §6/§13 a HISTORY page over the stream threshold is offered as a `STREAM
@@ -5233,6 +5263,296 @@ async fn ns_join_auto_joins_visible_channels_only() {
         !joined.contains("#gaming/secret"),
         "a view-gated channel must not be auto-joined"
     );
+}
+
+#[tokio::test]
+async fn part_hides_a_namespaced_channel_and_ns_leave_drops_membership() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    for c in ["#gaming/general", "#gaming/clips"] {
+        ada.send(&format!("CHANNEL CREATE {c}"));
+        assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
+    }
+    // Ada joins her own namespace so she can query rosters.
+    ada.send("NS JOIN gaming");
+    drain_until_ns_member(&mut ada).await;
+
+    // Bob joins → NS-MEMBER carries the derived member count (ada + bob).
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("NS JOIN gaming");
+    assert_eq!(drain_until_ns_member(&mut bob).await, Some(2));
+
+    // Both are derived-in every channel with zero per-channel joins.
+    ada.send("MEMBERS #gaming/clips");
+    assert!(roster_names(&mut ada).await.contains("bob"));
+
+    // Bob PARTs one channel → hidden. It drops him from that channel's derived
+    // roster only; the other channel still shows him (hide is per-channel).
+    bob.send("PART #gaming/clips");
+    assert!(matches!(
+        bob.recv().await.event,
+        Event::Member {
+            action: MemberAction::Part,
+            ..
+        }
+    ));
+    ada.send("MEMBERS #gaming/clips");
+    let clips = roster_names(&mut ada).await;
+    assert!(!clips.contains("bob"), "a hidden channel drops the hider");
+    assert!(clips.contains("ada"));
+    ada.send("MEMBERS #gaming/general");
+    assert!(
+        roster_names(&mut ada).await.contains("bob"),
+        "hide is per-channel, not per-namespace"
+    );
+
+    // NS LEAVE drops membership entirely: NS-MEMBER part + gone from every
+    // channel's derived roster.
+    bob.send("@label=l NS LEAVE gaming");
+    let reply = bob.recv().await;
+    assert!(matches!(
+        reply.event,
+        Event::NsMember {
+            action: MemberAction::Part,
+            ..
+        }
+    ));
+    assert_eq!(reply.label.as_deref(), Some("l"));
+    ada.send("MEMBERS #gaming/general");
+    assert!(
+        !roster_names(&mut ada).await.contains("bob"),
+        "NS LEAVE removes the account from all derived rosters"
+    );
+}
+
+#[tokio::test]
+async fn sync_fresh_skeleton_then_delta_catches_up() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    ada.send("CHANNEL CREATE #gaming/general");
+    assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
+    ada.send("NS JOIN gaming");
+    drain_until_ns_member(&mut ada).await;
+
+    // Fresh SYNC → skeleton (NS-META + CHANNEL-LAYOUT + POLICY) + a cursor.
+    ada.send("@label=s SYNC preview=0");
+    let mut saw_layout = false;
+    let mut saw_policy = false;
+    let cursor = loop {
+        let ev = ada.recv().await;
+        match ev.event {
+            Event::NsMeta { .. } => {}
+            Event::ChannelLayout { channel, .. } => {
+                saw_layout |= channel.as_str() == "#gaming/general";
+            }
+            Event::Policy { .. } => saw_policy = true,
+            Event::Marked { .. } | Event::UnreadCounts { .. } => {}
+            Event::SyncEnd { cursor } => {
+                assert_eq!(ev.label.as_deref(), Some("s"), "SYNC END echoes the label");
+                break cursor;
+            }
+            other => panic!("unexpected in skeleton: {other:?}"),
+        }
+    };
+    assert!(saw_layout, "skeleton carries the channel layout");
+    assert!(saw_policy, "skeleton carries the channel policy");
+
+    // Post a message after the cursor, drain its own echo.
+    ada.send("MSG #gaming/general :hello");
+    loop {
+        if let Event::Message(m) = ada.recv().await.event {
+            assert_eq!(m.body, "hello");
+            break;
+        }
+    }
+
+    // Delta SYNC since=<cursor> re-delivers the message (materialized upsert).
+    ada.send(&format!("SYNC since={cursor} preview=0"));
+    let mut got = false;
+    loop {
+        match ada.recv().await.event {
+            Event::Message(m) => got |= m.body == "hello",
+            Event::Reactions { .. } | Event::Deleted { .. } => {}
+            Event::SyncEnd { .. } => break,
+            other => panic!("unexpected in delta: {other:?}"),
+        }
+    }
+    assert!(got, "delta delivers a message posted after the cursor");
+}
+
+#[tokio::test]
+async fn sync_delta_catches_an_edit_of_an_old_message() {
+    // Acceptance #5: an edit of a message OLDER than the cursor is delivered by
+    // `SYNC since=` (re-materialized with edited=), which ULID paging misses.
+    let ctx = ctx(&["#general"]);
+    let mut ada = joined(&ctx, "ada", "#general").await;
+    ada.send("@label=m MSG #general :original");
+    let msgid = loop {
+        if let Event::Message(m) = ada.recv().await.event {
+            break m.msgid.to_string();
+        }
+    };
+
+    // Snapshot the cursor AFTER the message exists.
+    ada.send("SYNC preview=0");
+    let cursor = loop {
+        if let Event::SyncEnd { cursor } = ada.recv().await.event {
+            break cursor;
+        }
+    };
+
+    // Edit the (now "old") message; drain the live EDITED.
+    ada.send(&format!("EDIT {msgid} :fixed"));
+    loop {
+        if matches!(ada.recv().await.event, Event::Edited { .. }) {
+            break;
+        }
+    }
+
+    // The delta re-materializes it: final body + edited count.
+    ada.send(&format!("SYNC since={cursor} preview=0"));
+    let mut edited = None;
+    loop {
+        match ada.recv().await.event {
+            Event::Message(m) if m.msgid.to_string() == msgid => edited = Some((m.body, m.edited)),
+            Event::SyncEnd { .. } => break,
+            _ => {}
+        }
+    }
+    let (body, edited) = edited.expect("delta re-serves the edited message");
+    assert_eq!(body, "fixed");
+    assert_eq!(edited, Some(1));
+}
+
+#[tokio::test]
+async fn sync_delta_catches_up_a_dm() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+
+    // Bob snapshots a cursor before any DM exists.
+    bob.send("SYNC preview=0");
+    let c0 = loop {
+        if let Event::SyncEnd { cursor } = bob.recv().await.event {
+            break cursor;
+        }
+    };
+
+    // Ada DMs bob; drain both echoes.
+    ada.send("MSG @bob :hey");
+    loop {
+        if matches!(ada.recv().await.event, Event::Message(_)) {
+            break;
+        }
+    }
+    loop {
+        if let Event::Message(m) = bob.recv().await.event {
+            assert_eq!(m.body, "hey");
+            break;
+        }
+    }
+
+    // Bob's delta includes the DM scope, so a reconnect catches it up.
+    bob.send(&format!("SYNC since={c0} preview=0"));
+    let mut got = false;
+    loop {
+        match bob.recv().await.event {
+            Event::Message(m) => got |= m.body == "hey",
+            Event::SyncEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(
+        got,
+        "the SYNC delta catches up a DM received after the cursor"
+    );
+}
+
+#[tokio::test]
+async fn channel_create_pushes_layout_to_online_ns_members() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    ada.send("CHANNEL CREATE #gaming/general");
+    assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
+
+    // Bob joins the namespace (an online member).
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("NS JOIN gaming");
+    drain_until_ns_member(&mut bob).await;
+
+    // Ada creates a NEW channel → bob receives its layout + policy live, with no
+    // reconnect (acceptance #1: derived membership makes it his immediately).
+    ada.send("CHANNEL CREATE #gaming/clips");
+    assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
+    let mut layout = false;
+    let mut policy = false;
+    for _ in 0..2 {
+        match bob.recv().await.event {
+            Event::ChannelLayout { channel, .. } => layout |= channel.as_str() == "#gaming/clips",
+            Event::Policy { channel, .. } => policy |= channel.as_str() == "#gaming/clips",
+            other => panic!("unexpected push: {other:?}"),
+        }
+    }
+    assert!(
+        layout,
+        "a new channel's layout is pushed to online ns members"
+    );
+    assert!(policy, "…and its policy");
+}
+
+#[tokio::test]
+async fn sync_delta_catches_a_channel_metadata_change() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    ada.send("CHANNEL CREATE #gaming/general");
+    assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
+    ada.send("NS JOIN gaming");
+    drain_until_ns_member(&mut ada).await;
+
+    // Snapshot a cursor, then re-category the channel (a layout change).
+    ada.send("SYNC preview=0");
+    let c0 = loop {
+        if let Event::SyncEnd { cursor } = ada.recv().await.event {
+            break cursor;
+        }
+    };
+    ada.send("CHANNEL META #gaming/general category :Voice");
+
+    // The delta re-serves the channel's layout + policy. A *labeled* SYNC lets
+    // us ignore the live CHANNEL-LAYOUT broadcast from the change above — only
+    // the delta's own rows echo the label.
+    ada.send(&format!("@label=s2 SYNC since={c0} preview=0"));
+    let mut layout = false;
+    let mut policy = false;
+    loop {
+        let ev = ada.recv().await;
+        if ev.label.as_deref() != Some("s2") {
+            continue;
+        }
+        match ev.event {
+            Event::ChannelLayout {
+                channel, category, ..
+            } if channel.as_str() == "#gaming/general" => {
+                layout = category.as_deref() == Some("Voice");
+            }
+            Event::Policy { channel, .. } if channel.as_str() == "#gaming/general" => policy = true,
+            Event::SyncEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(
+        layout,
+        "delta re-serves the changed channel's layout (new category)"
+    );
+    assert!(policy, "…and its policy");
 }
 
 #[tokio::test]

@@ -52,6 +52,7 @@ mod namespaces;
 mod profile;
 mod relay;
 mod roles;
+mod sync;
 mod verify;
 mod voice;
 
@@ -1067,6 +1068,8 @@ impl<S: ControlStream> Session<S> {
                     .await
             }
             Command::NsJoin { name } => self.on_ns_join(label, name, account).await,
+            Command::NsLeave { name } => self.on_ns_leave(label, name, account).await,
+            Command::Sync { since, preview } => self.on_sync(label, since, preview, account).await,
             Command::Discover { cursor } => self.on_discover(label, cursor).await,
             Command::Channels { namespace } => self.on_channels(label, namespace).await,
             Command::Federate { network, namespace } => {
@@ -1411,6 +1414,136 @@ impl<S: ControlStream> Session<S> {
                 false
             }
         }
+    }
+
+    /// v0.12 membership derivation: is `account` a member of `channel`?
+    ///
+    /// - **Namespaced** (`#ns/chan`): `member(ns) ∧ ¬view-gated-denied ∧ ¬hidden`
+    ///   — access is derived, never stored per-channel (Part 1.1).
+    /// - **Top-level** (`#chan`): the stored per-channel membership row (the flat
+    ///   deployment mode, unchanged).
+    async fn is_member(&self, account: &Account, channel: &ChannelName) -> bool {
+        match channel.namespace() {
+            Some(ns) => {
+                let Ok(ns) = ns.parse::<NamespaceName>() else {
+                    return false;
+                };
+                let is_ns = self
+                    .ctx
+                    .memberships
+                    .is_ns_member(account, &ns)
+                    .await
+                    .unwrap_or(false);
+                if !is_ns {
+                    return false;
+                }
+                if self.view_gated_denied(channel, account).await {
+                    return false;
+                }
+                !self
+                    .ctx
+                    .memberships
+                    .is_hidden(account, channel)
+                    .await
+                    .unwrap_or(false)
+            }
+            None => self
+                .ctx
+                .memberships
+                .memberships(account)
+                .await
+                .map(|chans| chans.contains(channel))
+                .unwrap_or(false),
+        }
+    }
+
+    /// Every channel `account` currently sees — the runtime-subscription and
+    /// SYNC-skeleton base. Top-level membership rows, plus, for each namespace
+    /// the account belongs to, its channels minus the view-gated and hidden ones
+    /// (Part 1.1). Voice channels are excluded (entered via VOICE JOIN, §16).
+    pub(super) async fn derived_channels(&self, account: &Account) -> Vec<ChannelName> {
+        let mut out = self
+            .ctx
+            .memberships
+            .memberships(account)
+            .await
+            .unwrap_or_default();
+
+        let namespaces = self
+            .ctx
+            .memberships
+            .ns_memberships(account)
+            .await
+            .unwrap_or_default();
+        for ns in namespaces {
+            let channels = match self
+                .ctx
+                .channel_store
+                .channels_in_namespace(ns.as_str())
+                .await
+            {
+                Ok(list) => list,
+                Err(e) => {
+                    error!("ns channel enumeration failed: {e}");
+                    continue;
+                }
+            };
+            for (channel, _record) in channels {
+                if self.channel_kind(&channel).await == ChannelKind::Voice {
+                    continue;
+                }
+                if self.view_gated_denied(&channel, account).await {
+                    continue;
+                }
+                if self
+                    .ctx
+                    .memberships
+                    .is_hidden(account, &channel)
+                    .await
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                out.push(channel);
+            }
+        }
+        out
+    }
+
+    /// The roster of `channel` (§6.3). **Top-level**: the stored per-channel
+    /// members. **Namespaced**: derived — the namespace's members minus those
+    /// who hide it and those without `view` (Part 1.3). For a non-view-gated
+    /// channel the view filter is a no-op, so only gated channels pay the
+    /// per-member cap check.
+    pub(super) async fn channel_roster(
+        &self,
+        channel: &ChannelName,
+    ) -> Result<Vec<Account>, weft_store::StoreError> {
+        let Some(ns) = channel.namespace() else {
+            return self.ctx.memberships.members(channel).await;
+        };
+        let Ok(ns) = ns.parse::<NamespaceName>() else {
+            return Ok(Vec::new());
+        };
+        let members = self.ctx.memberships.ns_members(&ns).await?;
+        let hiders: std::collections::HashSet<Account> = self
+            .ctx
+            .memberships
+            .hiders(channel)
+            .await?
+            .into_iter()
+            .collect();
+        let mut out = Vec::with_capacity(members.len());
+        for m in members {
+            if hiders.contains(&m) {
+                continue;
+            }
+            if self.view_gated_denied(channel, &m).await {
+                continue;
+            }
+            out.push(m);
+        }
+        Ok(out)
     }
 
     async fn cap_required(&mut self, label: Option<String>, cap: &str) -> io::Result<Flow> {

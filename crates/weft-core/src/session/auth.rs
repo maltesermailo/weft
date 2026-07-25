@@ -123,15 +123,13 @@ impl<S: ControlStream> Session<S> {
             Err(e) => error!("marks snapshot failed: {e}"),
         }
         self.registered = Some(account.clone());
-        // §6.3 restore persistent channel memberships — the client's channels
-        // (and namespace tiles) reappear without re-joining.
-        match self.ctx.memberships.memberships(&account).await {
-            Ok(channels) => {
-                for channel in channels {
-                    self.join_one(&channel, &account, None).await?;
-                }
-            }
-            Err(e) => error!("membership restore failed: {e}"),
+        // §6.3 restore the **derived** channel set (v0.12, Part 1.1) — top-level
+        // memberships plus every visible, non-hidden channel of each namespace
+        // the account belongs to. Channels + namespace tiles reappear without
+        // re-joining. (Task 17's SYNC will replace this server-push with a
+        // client-pulled skeleton; until then this keeps reconnect working.)
+        for channel in self.derived_channels(&account).await {
+            self.join_one(&channel, &account, None).await?;
         }
         self.state = State::Ready { account };
         Ok(Flow::Continue)

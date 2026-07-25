@@ -1158,6 +1158,30 @@ where
     assert_eq!(record.title.as_deref(), Some("The Lounge"));
     assert_eq!(record.visibility, "public");
 
+    // v0.12 namespace metadata delta: an NS-META change re-stamps the namespace.
+    let ns_delta_seq: i64 = store
+        .sync_cursor()
+        .await
+        .unwrap()
+        .rsplit_once(':')
+        .unwrap()
+        .1
+        .parse()
+        .unwrap();
+    store
+        .set_namespace_meta(&ns, "description", "hangout")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .namespaces_changed_since(ns_delta_seq)
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.name == ns),
+        "an NS-META change appears in the metadata delta"
+    );
+
     // §11.10 auto-federation flag toggles + persists (default closed).
     assert!(!record.federation);
     store.set_namespace_federation(&ns, true).await.unwrap();
@@ -1728,6 +1752,147 @@ where
     assert_eq!(m, vec![mc1.clone(), mc2.clone()]);
     store.clear_membership(&acct, &mc1).await.unwrap();
     assert_eq!(store.memberships(&acct).await.unwrap(), vec![mc2]);
+
+    // ---- v0.12 namespace-level membership + hide overrides ----
+    let nm_a: Account = format!("nsm-a-{tag}").parse().unwrap();
+    let nm_b: Account = format!("nsm-b-{tag}").parse().unwrap();
+    let ns: weft_proto::NamespaceName = format!("nsm-{tag}").parse().unwrap();
+    let ns_gen: weft_proto::ChannelName = format!("#nsm-{tag}/general").parse().unwrap();
+    let ns_sec: weft_proto::ChannelName = format!("#nsm-{tag}/secret").parse().unwrap();
+
+    assert!(!store.is_ns_member(&nm_a, &ns).await.unwrap());
+    assert!(store.ns_memberships(&nm_a).await.unwrap().is_empty());
+
+    store.set_ns_membership(&nm_a, &ns, 100).await.unwrap();
+    store.set_ns_membership(&nm_b, &ns, 200).await.unwrap();
+    store.set_ns_membership(&nm_a, &ns, 999).await.unwrap(); // idempotent, keeps 100
+    assert!(store.is_ns_member(&nm_a, &ns).await.unwrap());
+    assert_eq!(store.ns_memberships(&nm_a).await.unwrap(), vec![ns.clone()]);
+    let mut ns_mem = store.ns_members(&ns).await.unwrap();
+    ns_mem.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    assert_eq!(ns_mem, vec![nm_a.clone(), nm_b.clone()]);
+
+    // Hide overrides: a PART of one channel while staying in the server.
+    assert!(!store.is_hidden(&nm_a, &ns_gen).await.unwrap());
+    store.set_hidden(&nm_a, &ns_gen).await.unwrap();
+    store.set_hidden(&nm_a, &ns_sec).await.unwrap();
+    store.set_hidden(&nm_a, &ns_gen).await.unwrap(); // idempotent
+    assert!(store.is_hidden(&nm_a, &ns_gen).await.unwrap());
+    assert_eq!(store.hiders(&ns_gen).await.unwrap(), vec![nm_a.clone()]);
+    let mut hidden = store.hidden_channels(&nm_a).await.unwrap();
+    hidden.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    assert_eq!(hidden, vec![ns_gen.clone(), ns_sec.clone()]);
+
+    // A JOIN clears one override.
+    store.clear_hidden(&nm_a, &ns_gen).await.unwrap();
+    assert!(!store.is_hidden(&nm_a, &ns_gen).await.unwrap());
+    assert_eq!(
+        store.hidden_channels(&nm_a).await.unwrap(),
+        vec![ns_sec.clone()]
+    );
+
+    // NS LEAVE drops membership AND every remaining hide override for the ns.
+    store.clear_ns_membership(&nm_a, &ns).await.unwrap();
+    assert!(!store.is_ns_member(&nm_a, &ns).await.unwrap());
+    assert!(store.hidden_channels(&nm_a).await.unwrap().is_empty());
+    assert_eq!(store.ns_members(&ns).await.unwrap(), vec![nm_b.clone()]);
+
+    // ---- v0.12 sync cursor + delta feed ----
+    let sync_scope: Scope = Scope::Channel(format!("#sync-{tag}").parse().unwrap());
+    let c0 = store.sync_cursor().await.unwrap();
+    let (epoch0, seq0) = c0.rsplit_once(':').expect("cursor is epoch:seq");
+    let seq0: i64 = seq0.parse().unwrap();
+    store
+        .append(message(&sync_scope, 90_001, "s1"))
+        .await
+        .unwrap();
+    store
+        .append(message(&sync_scope, 90_002, "s2"))
+        .await
+        .unwrap();
+    let delta = store
+        .events_since(std::slice::from_ref(&sync_scope), seq0)
+        .await
+        .unwrap();
+    assert_eq!(delta.len(), 2, "both messages appear after the cursor");
+    // The cursor advanced, keeping the same epoch.
+    let c1 = store.sync_cursor().await.unwrap();
+    let (epoch1, seq1) = c1.rsplit_once(':').unwrap();
+    assert_eq!(epoch0, epoch1, "epoch is stable across writes");
+    assert!(seq1.parse::<i64>().unwrap() > seq0);
+    // Nothing new since the latest cursor.
+    let empty = store
+        .events_since(std::slice::from_ref(&sync_scope), seq1.parse().unwrap())
+        .await
+        .unwrap();
+    assert!(empty.is_empty(), "no rows past the current cursor");
+    // A scope the account can't see returns nothing.
+    let other: Scope = Scope::Channel(format!("#other-{tag}").parse().unwrap());
+    assert!(store.events_since(&[other], seq0).await.unwrap().is_empty());
+
+    // ---- v0.12 channel metadata delta ----
+    let cchan: weft_proto::ChannelName = format!("#cc-{tag}").parse().unwrap();
+    let cc_seq: i64 = store
+        .sync_cursor()
+        .await
+        .unwrap()
+        .rsplit_once(':')
+        .unwrap()
+        .1
+        .parse()
+        .unwrap();
+    store
+        .upsert_channel(
+            &cchan,
+            RetentionPolicy::Ephemeral,
+            weft_proto::ChannelKind::Text,
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .channels_changed_since(cc_seq)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(n, _)| n == &cchan),
+        "a created channel appears in the metadata delta"
+    );
+    // A later metadata change re-stamps it past a fresh cursor.
+    let cc_seq2: i64 = store
+        .sync_cursor()
+        .await
+        .unwrap()
+        .rsplit_once(':')
+        .unwrap()
+        .1
+        .parse()
+        .unwrap();
+    store.set_channel_topic(&cchan, "hi").await.unwrap();
+    assert!(
+        store
+            .channels_changed_since(cc_seq2)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(n, _)| n == &cchan),
+        "a topic change re-appears in the delta"
+    );
+    // Nothing is unchanged past the newest cursor.
+    let cc_seq3: i64 = store
+        .sync_cursor()
+        .await
+        .unwrap()
+        .rsplit_once(':')
+        .unwrap()
+        .1
+        .parse()
+        .unwrap();
+    assert!(store
+        .channels_changed_since(cc_seq3)
+        .await
+        .unwrap()
+        .is_empty());
 
     // ---- §9.5 DM correspondents (admin surface only) ----
     let dm_a: Account = format!("dma-{tag}").parse().unwrap();

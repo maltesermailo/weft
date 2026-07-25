@@ -16,6 +16,7 @@ mod blob;
 mod compact;
 mod materialize;
 mod memory;
+mod modseq;
 #[cfg(feature = "postgres")]
 mod postgres;
 mod traits;
@@ -27,6 +28,7 @@ pub use blob::{
 pub use compact::compaction_plan;
 pub use materialize::{materialize, HistoryItem, ReactionSummary, MAX_REACTION_ACTORS};
 pub use memory::MemoryStore;
+pub use modseq::ModSeq;
 #[cfg(feature = "postgres")]
 pub use postgres::PgStore;
 pub use traits::{

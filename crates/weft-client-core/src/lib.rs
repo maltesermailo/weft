@@ -322,6 +322,28 @@ pub enum ClientEvent {
         id: String,
         truncated: bool,
     },
+    /// `SYNC END` (v0.12 §6.9) — a `SYNC` response finished; `cursor` is the
+    /// opaque token to store on this device and echo on the next `SYNC since=`.
+    SyncEnd {
+        cursor: String,
+    },
+    /// `CHANSYNC` (v0.12 §7.9) — a per-channel header in a SYNC body/delta.
+    /// `reset` means drop cached rows for the channel; `expired_before` is the
+    /// retention watermark (evict older).
+    ChanSync {
+        channel: String,
+        expired_before: Option<String>,
+        reset: bool,
+    },
+    /// `NS-MEMBER` (v0.12 §7.4) — namespace-level join/part; the client expands
+    /// it across the namespace's visible channels.
+    NsMember {
+        namespace: String,
+        user: String,
+        network: String,
+        action: String,
+        count: Option<u64>,
+    },
     Member {
         channel: String,
         user: String,
@@ -542,6 +564,35 @@ pub fn on_line<E: EventSink>(
             *in_batch = false;
             sink.emit(ClientEvent::BatchEnd { id, truncated });
         }
+        // v0.12 SYNC framing (§6.9/§7.9). The body/delta message rows arrive as
+        // ordinary Message/Reactions/Deleted events the frontend already
+        // upserts; these carry the cursor + per-channel headers around them.
+        Event::SyncEnd { cursor } => sink.emit(ClientEvent::SyncEnd { cursor }),
+        Event::ChanSync {
+            channel,
+            expired_before,
+            reset,
+        } => sink.emit(ClientEvent::ChanSync {
+            channel: channel.to_string(),
+            expired_before: expired_before.map(|m| m.to_string()),
+            reset,
+        }),
+        // SYNC START just brackets the body stream; the frontend keys off the
+        // per-channel CHANSYNC headers, so it needs no distinct event.
+        Event::SyncStart | Event::SyncBody { .. } => {}
+        Event::NsMember {
+            namespace,
+            user,
+            action,
+            count,
+            ..
+        } => sink.emit(ClientEvent::NsMember {
+            namespace: namespace.to_string(),
+            user: user.account.to_string(),
+            network: user.network.to_string(),
+            action: action.to_string(),
+            count,
+        }),
         Event::MediaToken { token } => sink.emit(ClientEvent::MediaToken { token }),
         // §6/§13 a HISTORY over the stream threshold — pull it off the data plane.
         Event::StreamAccept { token } => sink.emit(ClientEvent::Backfill { token }),
@@ -2092,4 +2143,74 @@ pub fn build_voice_cand(channel: &str, candidate: &str) -> Result<String, String
     })
     .serialize()
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct Collect(RefCell<Vec<ClientEvent>>);
+    impl EventSink for Collect {
+        fn emit(&self, event: ClientEvent) {
+            self.0.borrow_mut().push(event);
+        }
+    }
+
+    /// Feed one already-authed line and return the events it emits.
+    fn feed(line: &str) -> Vec<ClientEvent> {
+        let sink = Collect::default();
+        let mut net = "test.example".to_string();
+        let mut phase = Phase::Ready;
+        let mut in_batch = false;
+        let mut close = false;
+        on_line(
+            &sink,
+            "ada",
+            "",
+            Mode::Login,
+            None,
+            &mut net,
+            &mut phase,
+            &mut in_batch,
+            &mut close,
+            line,
+        );
+        sink.0.into_inner()
+    }
+
+    #[test]
+    fn sync_end_surfaces_the_cursor() {
+        let events = feed("@cursor=e7:8412 SYNC END");
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::SyncEnd { cursor }] if cursor == "e7:8412"
+        ));
+    }
+
+    #[test]
+    fn ns_member_maps_join() {
+        let events = feed("@count=42 NS-MEMBER gaming ada@test.example join");
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::NsMember { namespace, action, count: Some(42), .. }]
+                if namespace == "gaming" && action == "join"
+        ));
+    }
+
+    #[test]
+    fn chansync_maps_reset_flag() {
+        let events = feed("@reset CHANSYNC #gaming/general");
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::ChanSync { channel, reset: true, .. }] if channel == "#gaming/general"
+        ));
+    }
+
+    #[test]
+    fn sync_start_and_body_are_silent() {
+        assert!(feed("SYNC START").is_empty());
+        assert!(feed("SYNC BODY s_9f3c").is_empty());
+    }
 }

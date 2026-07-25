@@ -176,6 +176,15 @@ pub enum Command {
         limit: Option<u32>,
         thread: Option<MsgId>,
     },
+    /// `SYNC [since=<cursor>] [preview=<n>]` (§6.9) — one-shot client state
+    /// sync. No `since=` → fresh login (inline skeleton + a `SYNC BODY` token);
+    /// with `since=` → a delta of everything changed since the **opaque** cursor
+    /// (clients echo it verbatim, never parse it). `preview` caps per-channel
+    /// message previews; `preview=0` is skeleton-only.
+    Sync {
+        since: Option<String>,
+        preview: Option<u32>,
+    },
     /// `GRANT <subject> <scope> <caps> [expiry=<s>]` (§6.5). `subject` is an
     /// account or b64 pubkey, `scope` is `#chan|ns:<name>|*`, `caps` a comma
     /// list — all validated by the capability layer, not the codec.
@@ -337,9 +346,14 @@ pub enum Command {
         name: NamespaceName,
         confirm: NamespaceName,
     },
-    /// `NS JOIN <name>` — join every channel in the namespace the caller can
-    /// see (§6.2); view-gated and banned channels are skipped.
+    /// `NS JOIN <name>` — become a member of the namespace (§6.2); one
+    /// `(account, ns)` row, channel access derived. View-gated channels the
+    /// caller cannot see stay hidden.
     NsJoin { name: NamespaceName },
+    /// `NS LEAVE <name>` (§6.2) — drop namespace membership + all hide
+    /// overrides + ns-scoped role assignments. Also reachable as the
+    /// `PART ns:<name>` alias (lenient-in; strict-out is always `NS LEAVE`).
+    NsLeave { name: NamespaceName },
     /// `NS TRANSFER <name> <account>` with `@sig=<b64>` — rung-1 succession,
     /// signed by the current root (§2.4).
     NsTransfer {
@@ -738,8 +752,14 @@ impl Command {
             }
             "PART" => {
                 let mut args = Args::new(line, "PART");
+                let target = args.req("channel")?.to_string();
+                // `PART ns:<name>` is an alias for `NS LEAVE <name>` (§6.2) —
+                // convenient for the IRC gateway, which has no NS verbs.
+                if let Some(ns) = target.strip_prefix("ns:") {
+                    return Ok(Command::NsLeave { name: ns.parse()? });
+                }
                 Ok(Command::Part {
-                    channel: args.req("channel")?.parse()?,
+                    channel: target.parse()?,
                     reason: args.trailing_opt(),
                 })
             }
@@ -886,6 +906,30 @@ impl Command {
                     limit,
                     thread,
                 })
+            }
+            "SYNC" => {
+                let mut args = Args::new(line, "SYNC");
+                // key=value params in any order; unknown keys ignored
+                // (lenient-in). `since=` is an opaque cursor we never parse.
+                let mut since = None;
+                let mut preview = None;
+                while let Some(param) = args.opt() {
+                    let Some((key, value)) = param.split_once('=') else {
+                        continue;
+                    };
+                    match key {
+                        "since" => since = Some(value.to_string()),
+                        "preview" => {
+                            preview = Some(value.parse().map_err(|_| ParseError::BadParam {
+                                verb: "SYNC",
+                                what: "preview",
+                                value: value.to_string(),
+                            })?)
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Command::Sync { since, preview })
             }
             "GRANT" => {
                 let mut args = Args::new(line, "GRANT");
@@ -1230,6 +1274,9 @@ impl Command {
                         confirm: args.req("confirmation")?.parse()?,
                     }),
                     "JOIN" => Ok(Command::NsJoin {
+                        name: args.req("name")?.parse()?,
+                    }),
+                    "LEAVE" => Ok(Command::NsLeave {
                         name: args.req("name")?.parse()?,
                     }),
                     "TRANSFER" => {
@@ -1885,6 +1932,16 @@ impl Command {
                 }
                 ("HISTORY", params, None)
             }
+            Command::Sync { since, preview } => {
+                let mut params = Vec::new();
+                if let Some(since) = since {
+                    params.push(format!("since={since}"));
+                }
+                if let Some(preview) = preview {
+                    params.push(format!("preview={preview}"));
+                }
+                ("SYNC", params, None)
+            }
             Command::Grant {
                 subject,
                 scope,
@@ -2143,6 +2200,7 @@ impl Command {
                 None,
             ),
             Command::NsJoin { name } => ("NS", vec!["JOIN".to_string(), name.to_string()], None),
+            Command::NsLeave { name } => ("NS", vec!["LEAVE".to_string(), name.to_string()], None),
             Command::NsTransfer {
                 name,
                 new_owner,
@@ -3152,7 +3210,70 @@ mod tests {
         round_trip(&Request::new(Command::NsJoin {
             name: "gaming".parse().unwrap(),
         }));
+        round_trip(&Request::new(Command::NsLeave {
+            name: "gaming".parse().unwrap(),
+        }));
+        // `PART ns:<name>` is a lenient-in alias that parses to NS LEAVE; the
+        // canonical strict-out form is always `NS LEAVE`.
+        assert_eq!(
+            Request::parse("PART ns:gaming"),
+            Ok(Request::new(Command::NsLeave {
+                name: "gaming".parse().unwrap(),
+            }))
+        );
+        assert_eq!(
+            Request::new(Command::NsLeave {
+                name: "gaming".parse().unwrap(),
+            })
+            .serialize()
+            .unwrap(),
+            "NS LEAVE gaming"
+        );
         assert!(Request::parse("NS FROB x").is_err());
+    }
+
+    #[test]
+    fn sync_round_trip() {
+        // Fresh login: no cursor, just a preview cap.
+        let fresh = Request::with_label(
+            Command::Sync {
+                since: None,
+                preview: Some(30),
+            },
+            "s1",
+        );
+        assert_eq!(fresh.serialize().unwrap(), "@label=s1 SYNC preview=30");
+        round_trip(&fresh);
+
+        // Delta: opaque cursor echoed verbatim.
+        round_trip(&Request::new(Command::Sync {
+            since: Some("s_9f3c".into()),
+            preview: Some(30),
+        }));
+
+        // Skeleton-only mode.
+        round_trip(&Request::new(Command::Sync {
+            since: None,
+            preview: Some(0),
+        }));
+
+        // Bare `SYNC` is a fresh login with server-default preview.
+        assert_eq!(
+            Request::parse("SYNC"),
+            Ok(Request::new(Command::Sync {
+                since: None,
+                preview: None,
+            }))
+        );
+        // Unknown params are ignored (lenient-in).
+        assert_eq!(
+            Request::parse("SYNC since=abc preview=5 frob=nope"),
+            Ok(Request::new(Command::Sync {
+                since: Some("abc".into()),
+                preview: Some(5),
+            }))
+        );
+        assert!(Request::parse("SYNC preview=notanumber").is_err());
     }
 
     #[test]

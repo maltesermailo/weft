@@ -32,6 +32,9 @@ use crate::StoreError;
 
 pub struct PgStore {
     pool: PgPool,
+    /// The sync epoch (v0.12 Part 2.4), loaded at connect. The wire cursor is
+    /// `epoch:seq`; a mismatched epoch forces a full resync.
+    epoch: String,
 }
 
 fn backend_err(e: impl std::fmt::Display) -> StoreError {
@@ -58,7 +61,44 @@ impl PgStore {
             .run(&pool)
             .await
             .map_err(backend_err)?;
-        Ok(Self { pool })
+
+        // Load the sync epoch. Boot sanity check (Part 2.4): if the sequence's
+        // next value is at or below the highest stamped seq — a restore-from-
+        // backup that could re-issue seqs — bump the epoch so every existing
+        // client cursor is treated as stale (full resync) rather than silently
+        // losing rows.
+        let max_seq: i64 = sqlx::query_scalar(
+            "SELECT GREATEST(\
+                 (SELECT COALESCE(MAX(seq), 0) FROM weft_events), \
+                 (SELECT COALESCE(MAX(seq), 0) FROM weft_channels), \
+                 (SELECT COALESCE(MAX(seq), 0) FROM weft_namespaces))",
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(backend_err)?;
+        let next_seq: i64 = sqlx::query_scalar("SELECT last_value FROM weft_seq")
+            .fetch_one(&pool)
+            .await
+            .map_err(backend_err)?;
+        if next_seq < max_seq {
+            sqlx::query(
+                "UPDATE weft_sync_epoch SET epoch = replace(gen_random_uuid()::text, '-', '')",
+            )
+            .execute(&pool)
+            .await
+            .map_err(backend_err)?;
+            sqlx::query("SELECT setval('weft_seq', $1)")
+                .bind(max_seq + 1)
+                .execute(&pool)
+                .await
+                .map_err(backend_err)?;
+        }
+        let epoch: String = sqlx::query_scalar("SELECT epoch FROM weft_sync_epoch")
+            .fetch_one(&pool)
+            .await
+            .map_err(backend_err)?;
+
+        Ok(Self { pool, epoch })
     }
 
     fn record_from_row(row: &sqlx::postgres::PgRow) -> Result<EventRecord, StoreError> {
@@ -614,6 +654,42 @@ impl EventStore for PgStore {
             dropped += result.rows_affected();
         }
         Ok(dropped)
+    }
+
+    async fn sync_cursor(&self) -> Result<String, StoreError> {
+        // The global committed high-water across every seq-stamped table, so the
+        // cursor advances past metadata-only changes too (else a channel edit
+        // with no new messages would be re-served on every reconnect).
+        let max: i64 = sqlx::query_scalar(
+            "SELECT GREATEST(\
+                 (SELECT COALESCE(MAX(seq), 0) FROM weft_events), \
+                 (SELECT COALESCE(MAX(seq), 0) FROM weft_channels), \
+                 (SELECT COALESCE(MAX(seq), 0) FROM weft_namespaces))",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(format!("{}:{}", self.epoch, max))
+    }
+
+    async fn events_since(
+        &self,
+        scopes: &[Scope],
+        since_seq: i64,
+    ) -> Result<Vec<EventRecord>, StoreError> {
+        if scopes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let keys: Vec<String> = scopes.iter().map(|s| s.as_key()).collect();
+        let rows = sqlx::query(
+            "SELECT * FROM weft_events WHERE seq > $1 AND scope = ANY($2) ORDER BY seq ASC",
+        )
+        .bind(since_seq)
+        .bind(&keys)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.iter().map(Self::record_from_row).collect()
     }
 }
 
@@ -1196,6 +1272,26 @@ impl ChannelStore for PgStore {
             })
             .collect()
     }
+
+    async fn channels_changed_since(
+        &self,
+        since_seq: i64,
+    ) -> Result<Vec<(ChannelName, ChannelRecord)>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM weft_channels WHERE seq > $1")
+            .bind(since_seq)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter()
+            .map(|row| {
+                let name = row
+                    .get::<&str, _>("name")
+                    .parse()
+                    .map_err(|_| StoreError::Backend("corrupt channel name".to_string()))?;
+                Ok((name, channel_from_row(row)?))
+            })
+            .collect()
+    }
 }
 
 fn channel_from_row(row: &sqlx::postgres::PgRow) -> Result<ChannelRecord, StoreError> {
@@ -1733,6 +1829,18 @@ impl NamespaceStore for PgStore {
                 operator_initiated: row.get("operator_initiated"),
             })
             .collect())
+    }
+
+    async fn namespaces_changed_since(
+        &self,
+        since_seq: i64,
+    ) -> Result<Vec<NamespaceRecord>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM weft_namespaces WHERE seq > $1")
+            .bind(since_seq)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter().map(namespace_from_row).collect()
     }
 }
 
@@ -2933,6 +3041,169 @@ impl MembershipStore for PgStore {
                 r.get::<&str, _>("account")
                     .parse()
                     .map_err(|_| StoreError::Backend("corrupt membership account".to_string()))
+            })
+            .collect()
+    }
+
+    async fn set_ns_membership(
+        &self,
+        account: &Account,
+        namespace: &NamespaceName,
+        joined_ms: i64,
+    ) -> Result<(), StoreError> {
+        // Idempotent: a repeat join keeps the original join time.
+        sqlx::query(
+            "INSERT INTO weft_ns_membership (account, namespace, joined_ms) VALUES ($1,$2,$3) \
+             ON CONFLICT (account, namespace) DO NOTHING",
+        )
+        .bind(account.as_str())
+        .bind(namespace.as_str())
+        .bind(joined_ms)
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn clear_ns_membership(
+        &self,
+        account: &Account,
+        namespace: &NamespaceName,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(backend_err)?;
+        sqlx::query("DELETE FROM weft_ns_membership WHERE account = $1 AND namespace = $2")
+            .bind(account.as_str())
+            .bind(namespace.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(backend_err)?;
+        // Drop every hide override for channels in this namespace (`#ns/...`).
+        sqlx::query(
+            "DELETE FROM weft_channel_hide \
+             WHERE account = $1 AND substring(channel from '#([^/]+)/') = $2",
+        )
+        .bind(account.as_str())
+        .bind(namespace.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(backend_err)?;
+        tx.commit().await.map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn is_ns_member(
+        &self,
+        account: &Account,
+        namespace: &NamespaceName,
+    ) -> Result<bool, StoreError> {
+        let row =
+            sqlx::query("SELECT 1 FROM weft_ns_membership WHERE account = $1 AND namespace = $2")
+                .bind(account.as_str())
+                .bind(namespace.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        Ok(row.is_some())
+    }
+
+    async fn ns_memberships(&self, account: &Account) -> Result<Vec<NamespaceName>, StoreError> {
+        let rows = sqlx::query("SELECT namespace FROM weft_ns_membership WHERE account = $1")
+            .bind(account.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter()
+            .map(|r| {
+                r.get::<&str, _>("namespace")
+                    .parse()
+                    .map_err(|_| StoreError::Backend("corrupt ns membership namespace".to_string()))
+            })
+            .collect()
+    }
+
+    async fn ns_members(&self, namespace: &NamespaceName) -> Result<Vec<Account>, StoreError> {
+        let rows = sqlx::query("SELECT account FROM weft_ns_membership WHERE namespace = $1")
+            .bind(namespace.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter()
+            .map(|r| {
+                r.get::<&str, _>("account")
+                    .parse()
+                    .map_err(|_| StoreError::Backend("corrupt ns membership account".to_string()))
+            })
+            .collect()
+    }
+
+    async fn set_hidden(&self, account: &Account, channel: &ChannelName) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO weft_channel_hide (account, channel) VALUES ($1,$2) \
+             ON CONFLICT (account, channel) DO NOTHING",
+        )
+        .bind(account.as_str())
+        .bind(channel.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn clear_hidden(
+        &self,
+        account: &Account,
+        channel: &ChannelName,
+    ) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM weft_channel_hide WHERE account = $1 AND channel = $2")
+            .bind(account.as_str())
+            .bind(channel.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn is_hidden(
+        &self,
+        account: &Account,
+        channel: &ChannelName,
+    ) -> Result<bool, StoreError> {
+        let row =
+            sqlx::query("SELECT 1 FROM weft_channel_hide WHERE account = $1 AND channel = $2")
+                .bind(account.as_str())
+                .bind(channel.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        Ok(row.is_some())
+    }
+
+    async fn hiders(&self, channel: &ChannelName) -> Result<Vec<Account>, StoreError> {
+        let rows = sqlx::query("SELECT account FROM weft_channel_hide WHERE channel = $1")
+            .bind(channel.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter()
+            .map(|r| {
+                r.get::<&str, _>("account")
+                    .parse()
+                    .map_err(|_| StoreError::Backend("corrupt channel hide account".to_string()))
+            })
+            .collect()
+    }
+
+    async fn hidden_channels(&self, account: &Account) -> Result<Vec<ChannelName>, StoreError> {
+        let rows = sqlx::query("SELECT channel FROM weft_channel_hide WHERE account = $1")
+            .bind(account.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter()
+            .map(|r| {
+                r.get::<&str, _>("channel")
+                    .parse()
+                    .map_err(|_| StoreError::Backend("corrupt channel hide channel".to_string()))
             })
             .collect()
     }

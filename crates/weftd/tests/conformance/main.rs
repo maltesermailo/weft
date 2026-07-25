@@ -1270,10 +1270,8 @@ async fn message_lifecycle_and_history_over_quic() {
         panic!("expected REACTIONS summary")
     };
     assert_eq!((emoji.as_str(), count), ("🚀", 1));
-    let Event::BatchEnd { compacted, .. } = ada.recv().await.event else {
-        panic!()
-    };
-    assert!(compacted);
+    // The wire form off the live path is always materialized (v0.12 Part 4.1).
+    assert!(matches!(ada.recv().await.event, Event::BatchEnd { .. }));
 
     // Ephemeral channel: honest empty batch.
     ada.send("MSG #volatile :vanishes").await;

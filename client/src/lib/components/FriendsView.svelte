@@ -87,7 +87,7 @@
 
     <div class="fv-section">All Friends — {app.friendList.length}</div>
     {#each app.friendList as user (user)}
-      <div class="fv-row">
+      <div class="fv-row" oncontextmenu={(e) => app.userCtx(e, user)} role="listitem">
         <div class="avatar sm">
           <Avatar account={avatarAccount(user)} />
           {#if app.friendLocalAccount(user)}<span class={app.dotClass(app.friendLocalAccount(user) ?? "")}></span>{/if}

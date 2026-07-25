@@ -109,6 +109,9 @@ export type WeftEvent =
   | { kind: "presence"; user: string; status: string }
   | { kind: "marked"; channel: string; msgid: string }
   | { kind: "unread-counts"; channel: string; unread: number; mentions: number }
+  | { kind: "sync-end"; cursor: string }
+  | { kind: "chan-sync"; channel: string; expired_before: string | null; reset: boolean }
+  | { kind: "ns-member"; namespace: string; user: string; network: string; action: string; count: number | null }
   | { kind: "emoji"; namespace: string; name: string; media: string }
   | { kind: "emoji-removed"; namespace: string; name: string }
   | { kind: "pinned"; channel: string; msgid: string; by: string | null }
@@ -834,6 +837,15 @@ export function channels(namespace: string) {
 
 export function sendRaw(line: string) {
   return invoke("send_raw", { line });
+}
+
+/// §6.9 SYNC (v0.12): one-shot state sync. No cursor = fresh login (skeleton +
+/// a `sync-end` cursor); with a cursor = reconnect delta (missed messages +
+/// offline edits/reactions since that cursor). `preview=0` = skeleton only;
+/// message previews are withheld, so cold channels load on demand via HISTORY.
+export function sync(cursor?: string) {
+  const since = cursor ? ` since=${cursor}` : "";
+  return sendRaw(`SYNC${since} preview=0`);
 }
 
 export function onWeft(cb: (e: WeftEvent) => void): Promise<UnlistenFn> {

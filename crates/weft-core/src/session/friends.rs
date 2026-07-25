@@ -187,7 +187,6 @@ impl<S: ControlStream> Session<S> {
             Event::BatchEnd {
                 id,
                 truncated: false,
-                compacted: false,
             },
         )
         .await?;

@@ -43,7 +43,9 @@ Recurring terms, defined once:
 | Axis | Decision
 
 | Federation | Independent sovereign networks + opt-in scoped bridging (channel / namespace / network); signed manifests; *non-transitive*
-| History | Per-channel retention; peer backfill gated by manifest `history` flag; *compacted materialized form on the wire*
+| History | Per-channel retention; peer backfill gated by manifest `history` flag; *materialized form on the wire (no `compacted` flag, v0.12)*
+| *Membership* | *Namespace-level (`(account, ns)`), channel access derived; top-level channels keep per-channel membership (v0.12, <<s6-3,§6.3>>)*
+| *Sync* | *`SYNC` skeleton + `since=`-cursor delta over a server-global modseq; opaque `epoch:seq` cursor; replaces the startup fetch loop (v0.12, <<s6-9,§6.9>>)*
 | Wire format | Text control plane + binary data plane
 | Identity | Network account + portable Ed25519 keypair attestation
 | Permissions | Scoped capability tokens (signed CBOR, delegable, short-lived) — no role tables _in enforcement_. Roles (<<s6-5-1,§6.5.1>>) are named, colored _bundles_ of these tokens with explicit membership: assigning grants tokens, every check stays a pure token check
@@ -262,7 +264,8 @@ Signed NS verbs (`TRANSFER`, `RECOVERY CANCEL`) carry the root signature in a `@
 | `NS RECOVER` | `NS RECOVER <name> <b64-rotation-record>` | quorum / operator sig | Rung selection + windows: <<s2-4,§2.4>> (rung 2 delayed, rung 3 immediate). → `NS-META` \| `FORBIDDEN` (bad sig) \| `CONFLICT` (recovery already pending). | `NS RECOVER gaming <b64-rotation-record>` → `@recovery=pending;recovery-eta=<ms>;recovery-rung=2 NS-META gaming public`
 | `NS RECOVERY CANCEL` | `NS RECOVERY CANCEL <name>` | root key | Current root vetoes a pending recovery. | `@sig=<b64> NS RECOVERY CANCEL gaming` → `NS-META gaming public` (pending cleared)
 | `NS DELETE` | `NS DELETE <name> <name>` | `ns-admin` / operator | Confirmed by repetition. | `NS DELETE gaming gaming` → `@description=deleted NS-META gaming unlisted`
-| `NS JOIN` | `NS JOIN <name>` | membership | Auto-join every channel in the namespace the caller can see — view-gated and banned channels are skipped. → a `MEMBER` + `POLICY` per joined channel; no visible channel → `NO-SUCH-TARGET`. | `NS JOIN gaming` → `@count=1 MEMBER #gaming/general ada@test.example join` + `POLICY #gaming/general retained:90d` (per channel)
+| `NS JOIN` | `NS JOIN <name>` | membership | *The membership operation* (v0.12): one `(account, ns)` row — channel access is *derived* (member ∧ can-view ∧ ¬hidden), never stored per channel. Subscribes the caller to every visible channel (`MEMBER`+`POLICY` each) and announces `NS-MEMBER … join` once. No visible channel → `NO-SUCH-TARGET`. | `NS JOIN gaming` → `MEMBER`+`POLICY` per visible channel + `@count=1 NS-MEMBER gaming ada@test.example join`
+| `NS LEAVE` | `NS LEAVE <name>` | membership | Drop the ns membership row, *all* hide overrides for its channels, and ns-scoped role assignments; unsubscribe from its channels. Announces `NS-MEMBER … part`. Also reachable as the `PART ns:<name>` alias (for the IRC gateway, <<s17,§17>>). Not a member → `NO-SUCH-TARGET`. | `NS LEAVE gaming` → `NS-MEMBER gaming ada@test.example part`
 | `DISCOVER` | `DISCOVER [cursor]` | — | Public namespace directory. → `NS-META` per ns + `MORE <cursor>`. | `@label=d1 DISCOVER` → `@label=d1;owner=ada@test.example NS-META gaming public` + `@label=d1 MORE <cursor>`
 | `CHANNELS` | `CHANNELS <name>` | view | Ordered channel layout of a namespace (extension; the response leads with the namespace's `NS-META`, see below). → `CHANNEL-LAYOUT` per channel. | `CHANNELS gaming` → `@category=Text CHANNEL-LAYOUT #gaming/general 0` (per channel)
 | `EMOJI ADD` / `REMOVE` | `EMOJI ADD <ns> <name> <media>` / `EMOJI REMOVE <ns> <name>` | `ns-admin` | Per-namespace custom emoji (<<s9-4,§9.4>>): `name` = 1–32 of `[A-Za-z0-9_]`, `media` = a `weft-media://…` reference to an uploaded image. → `EMOJI` / `EMOJI-REMOVED`. | `EMOJI ADD gaming partyblob weft-media://test.example/<b3-hash>` → `EMOJI gaming partyblob weft-media://test.example/<b3-hash>`
@@ -293,15 +296,15 @@ The `NS RECOVER` rungs in brief (normative text: <<s2-4,§2.4>>): a quorum-signe
 | `CHANNEL META` | `CHANNEL META <#chan> <topic\|view-gated\|posting\|category\|position> :<value>` | `pin` / `ns-admin` | `category`/`position` = the layout extension (<<s6-2,§6.2>>); `posting :restricted` = send-gated posting (<<s6-7,§6.7>>). → `CHANMETA`. | `CHANNEL META #gaming/lounge topic :Hang out` → `CHANMETA #gaming/lounge topic :Hang out`
 | `CHANNEL DELETE` | `CHANNEL DELETE <#chan> <#chan>` | `ns-admin` / operator | → `CHANMETA … deleted`. | `CHANNEL DELETE #gaming/lounge #gaming/lounge` → `CHANMETA #gaming/lounge deleted :`
 | `CHANNEL RENAME` | `CHANNEL RENAME <#old> <#new>` | `ns-admin` / operator | Change a channel's identity within its namespace; server re-keys every scoped record (grants, membership, roles, holds, pins, history). → `CHANNEL-RENAMED <#old> <#new>` (broadcast to members + labeled to actor). | `CHANNEL RENAME #gaming/lounge #gaming/cafe` → `CHANNEL-RENAMED #gaming/lounge #gaming/cafe`
-| `JOIN` | `JOIN <#chan> [invite-ref]` | membership / invite | → `MEMBER` (`count=` tag) + `POLICY` \| `NO-SUCH-TARGET` \| `BANNED`. | `@label=j1 JOIN #gaming/general` → `@count=42;label=j1 MEMBER #gaming/general ada@test.example join` + `POLICY #gaming/general retained:90d`
-| `PART` | `PART <#chan> [:reason]` | — | → `MEMBER … part`. | `PART #gaming/general :later` → `MEMBER #gaming/general ada@test.example part`
-| `MEMBERS` | `MEMBERS <#chan> [cursor]` | membership | The *persistent roster* (offline members included) as a `BATCH` of `MEMBER … join` rows, each followed by a `PRESENCE` line for its dot; accounts deduped across devices. Non-member of an existing channel → `CAP-REQUIRED view`; hidden/nonexistent → `NO-SUCH-TARGET`. Bridge peers see remote members only as they've appeared. | `MEMBERS #gaming/general` → `@id=m1 BATCH START` … `@count=42 MEMBER #gaming/general ada@test.example join` + `PRESENCE ada@test.example online` … `@id=m1 BATCH END`
+| `JOIN` | `JOIN <#chan> [invite-ref]` | membership / invite | *Top-level* channel (no namespace): a real join (`(account, channel)` row). *Namespaced* (`#ns/chan`, v0.12): auto-joins the namespace if the caller isn't already a member, then clears any hide override — so `JOIN #ns/chan` stays natively valid (<<s17,§17>>). A non-viewable channel errors (anti-enum), so a private namespace can't be auto-joined. → `MEMBER` (`count=`) + `POLICY` \| `NO-SUCH-TARGET` \| `BANNED`. | `@label=j1 JOIN #gaming/general` → `@count=42;label=j1 MEMBER #gaming/general ada@test.example join` + `POLICY #gaming/general retained:90d`
+| `PART` | `PART <#chan> [:reason]` | — | *Top-level*: clears the membership row. *Namespaced* (v0.12): sets the *hide override* — leave one channel while staying in the server. `PART ns:<name>` is an alias for `NS LEAVE`. → `MEMBER … part`. | `PART #gaming/general :later` → `MEMBER #gaming/general ada@test.example part`
+| `MEMBERS` | `MEMBERS <#chan> [cursor]` | membership | The roster as a `BATCH` of `MEMBER … join` rows (offline members included), each followed by a `PRESENCE` line for its dot; accounts deduped across devices. *Top-level*: the stored per-channel members. *Namespaced* (v0.12): the *derived* set — the namespace's members minus those who hide the channel and those without `view`; the query surface stays per-channel and the server does all filtering (the client never learns who can't see a channel — invariant 1). Non-member of an existing channel → `CAP-REQUIRED view`; hidden/nonexistent → `NO-SUCH-TARGET`. | `MEMBERS #gaming/general` → `@id=m1 BATCH START` … `@count=42 MEMBER #gaming/general ada@test.example join` + `PRESENCE ada@test.example online` … `@id=m1 BATCH END`
 | `TYPING` | `TYPING <#chan> <start\|stop>` | `send` | Never stored; rate-limited (1/3 s RECOMMENDED); bridged only under manifest `typing: yes`. | `TYPING #gaming/general start` → (broadcast) `TYPING #gaming/general ada@test.example start`
 | `MARK` | `MARK <#chan> <msgid>` | membership | Account-scoped read marker, synced via `MARKED`; survives `ephemeral`. | `MARK #gaming/general test.example/01J…A` → `MARKED #gaming/general test.example/01J…A`
 | `UNREAD` | `UNREAD [<#chan>]` | membership | Request server-computed unread counts → one `UNREAD-COUNTS` per channel. No channel = every joined channel. Absent channel must be joined, else `NO-SUCH-TARGET`. | `UNREAD #gaming/general` → `UNREAD-COUNTS #gaming/general 3 1`
 |===
 
-*Membership is durable (normative).* `JOIN` records a persistent `(account, channel)` membership; `PART` and a forced part (kick / channel-scope ban) clear it. On auth the server *auto-rejoins* the account to its stored channels, so channels reappear on reconnect with no client-side re-join. Join/part announcements *dedupe by account* — a second device joining (or an auto-rejoin while another device is online) broadcasts no fresh `MEMBER`, and member counts are distinct-account counts.
+*Membership is durable (normative).* Under v0.12 membership is *namespace-level*: `NS JOIN` records one `(account, namespace)` row and a channel's access is *derived* — `member(ns) ∧ can-view ∧ ¬hidden` — never a stored per-channel row. A `PART <#ns/chan>` sets a per-account *hide override* (`hide_override(account, channel)`); `JOIN <#ns/chan>` clears it; `NS LEAVE` drops the ns row and every hide override for it. **Top-level channels (no namespace) keep the per-channel `(account, channel)` membership unchanged** — the flat/IRC deployment mode is untouched, and a `CHANNEL`-scope ban still force-parts + clears it. A channel *created* in a namespace is in every ns member's derived set immediately, with no membership writes. On auth the server auto-rejoins the account to its *derived* channel set, so channels reappear on reconnect with no client-side re-join (v0.12: also pullable via `SYNC`, <<s6-9,§6.9>>). Join/part announcements *dedupe by account* — a second device broadcasts no fresh `MEMBER`, and counts are distinct-account counts.
 
 *Presence vs. membership (Discord-style).* The roster is the _persistent_ membership; online-ness is "holds a live session in the channel". A *disconnect* broadcasts `PRESENCE <user> offline` (membership retained) — only an explicit `PART`/kick/ban emits `MEMBER … part` (roster removal); a reconnect of an existing member broadcasts `PRESENCE <user> online`, not a fresh join. The presence map is live-only (<<s6-1,§6.1>>: never stored, never bridged); a live `invisible` member reads `offline`.
 
@@ -323,7 +326,7 @@ The echoed `MESSAGE` — same `label`, server-assigned `msgid` — is the ack; b
 | `EDIT` | `EDIT <msgid> :<new>` | `edit-own` | No `edit-any` (deliberate). Honored only at the msgid's origin network; elsewhere `FORBIDDEN origin`. → `EDITED`. | `EDIT test.example/01J…A :gg all` → `@edit-of=test.example/01J…A;msgid=test.example/01J…E EDITED #gaming/general ada@test.example :gg all`
 | `DELETE` | `DELETE <msgid>` | `delete-own` \| `delete-any` | Tombstone. → `DELETED`. | `DELETE test.example/01J…A` → `@by=ada@test.example DELETED #gaming/general test.example/01J…A`
 | `REACT` / `UNREACT` | `REACT <msgid> <emoji>` | `react` | Unicode emoji ≤ 32 B; shortcodes travel *bare* (leading `:` collides with the <<s4,§4>> trailing marker — <<s18,§18>> #8). Idempotent. → `REACTION op=add\|remove` (live). | `REACT test.example/01J…A 🎉` → `@by=ada@test.example;op=add REACTION #gaming/general test.example/01J…A 🎉`
-| `HISTORY` | `HISTORY <target> [before=] [after=] [limit=≤500] [thread=]` | membership / acked manifest | `key=value` middle params, any order, unknown keys ignored; target = channel or `@user`. → `BATCH START` … *compacted* events (<<s12-1,§12.1>>) … `BATCH END [truncated]`. `truncated` marks gaps — silence about them is forbidden. | `@label=h1 HISTORY #gaming/general limit=50` → `@id=b1;label=h1 BATCH START` … (compacted events) … `@compacted;id=b1;label=h1 BATCH END`
+| `HISTORY` | `HISTORY <target> [before=] [after=] [limit=≤500] [thread=]` | membership / acked manifest | `key=value` middle params, any order, unknown keys ignored; target = channel or `@user`. → `BATCH START` … *materialized* events (<<s12-1,§12.1>>) … `BATCH END [truncated]`. The wire form off the live path is *always* materialized (v0.12) — there is no `compacted` flag. `truncated` marks gaps — silence about them is forbidden. | `@label=h1 HISTORY #gaming/general limit=50` → `@id=b1;label=h1 BATCH START` … (materialized events) … `@id=b1;label=h1 BATCH END`
 | `PIN` / `UNPIN` | `PIN <msgid>` | `pin` | Pin/unpin a message in its channel (resolved from the msgid). → `PINNED` (`by=` tag — the local account) / `UNPINNED`, broadcast to members. | `PIN test.example/01J…A` → `@by=ada PINNED #gaming/general test.example/01J…A`
 | `PINS` | `PINS <#chan>` | membership | The pinned messages. → `BATCH START` … `MESSAGE` per pin … `BATCH END`. | `PINS #gaming/general` → `@id=b5 BATCH START` … `MESSAGE` per pin … `@id=b5 BATCH END`
 | `SEARCH` | `SEARCH <#chan> :<query>` | membership | Message search in a channel. → `BATCH START` … `MESSAGE` per match (newest-first, ≤50) … `BATCH END`. | `SEARCH #gaming/general :gg` → `@id=b6 BATCH START` … `MESSAGE` per match … `@id=b6 BATCH END`
@@ -540,6 +543,29 @@ The federated forms of `CALL`/`GROUP CALL` carry the callee/host network's pre-m
 
 '''
 
+[[s6-9]]
+=== 6.9 Synchronization (SYNC) — v0.12
+
+`SYNC` is a one-shot client state sync that replaces the startup DISCOVER + CHANNELS-per-ns + HISTORY-per-channel loop. It has two forms, distinguished by the presence of a cursor:
+
+[cols="14,24,10,28,24",options="header"]
+|===
+| Command | Syntax | Cap | → Result / notes | Example
+
+| `SYNC` (fresh) | `SYNC [preview=<n>]` | authed | No cursor = fresh login. Emits the inline *skeleton* — per namespace the account belongs to: `NS-META`, then per *visible* channel `CHANNEL-LAYOUT` + `POLICY` + (`MARKED` + `UNREAD-COUNTS` where a read marker exists); plus top-level channels and `FRIEND`/`GROUP` rows — terminated by `@cursor=<token> SYNC END`. `preview=0` = skeleton only. | `@label=s SYNC preview=0` → `NS-META …` + `CHANNEL-LAYOUT …` + `POLICY …` + … + `@cursor=<token>;label=s SYNC END`
+| `SYNC` (delta) | `SYNC since=<cursor> [preview=<n>]` | authed | Serves every row with `seq > cursor` in the account's visible set, as *materialized* upsert rows (final `MESSAGE` + `REACTIONS` + `DELETED` — never event chains), then `SYNC END` with a fresh cursor. Catches offline *mutations of old messages* that ULID paging misses. A cursor whose epoch ≠ the server's current epoch is treated as cursor-less (full resync). | `@label=s2 SYNC since=<token>` → `MESSAGE …` + `REACTIONS …` + `@cursor=<token>;label=s2 SYNC END`
+|===
+
+*The cursor is opaque (normative).* A ≤64-byte token (same convention as `label` and the `MORE` cursor); the client stores it per device and echoes it verbatim, never parsing it. Internally it encodes `epoch:seq` — a server-global monotonic *modification sequence* (`seq`, stamped on every insert *and update* of a client-visible row) prefixed by a *sync epoch* (IMAP UIDVALIDITY, server-wide). The epoch is bumped on any restore-from-backup / storage rebuild that could re-issue seqs, so a stale-epoch `since=` cleanly forces a full resync instead of silently losing rows. The cursor a client receives is the *low-water mark* of committed seqs — never past an uncommitted lower seq.
+
+*Apply rule (normative).* A delta row whose key the client already has *replaces* it (upsert; keys: message → msgid, reaction summary → (msgid, emoji), meta → (target, key), marker → channel). Order-insensitive and idempotent. Purge is signalled by watermark, not tombstones: retention-purged rows produce no delta entry.
+
+*Previews (normative).* Message previews are a server-side optimization the server MAY withhold per channel; a conforming client MUST load a preview-less channel on demand via `HISTORY`. When served, previews and the per-channel `CHANSYNC` header ride a data-plane body stream handed off by `SYNC BODY <token>` in place of the inline `SYNC END` (<<s7-9,§7.9>>).
+
+*Delta horizon (RECOMMENDED).* The server need not retain change history forever; it serves deltas for cursors up to `max(retention window, 30 d)` old, and emits a per-channel `CHANSYNC … reset` (client drops its cached rows) for an older cursor, a newly-visible channel, or a re-keyed channel.
+
+'''
+
 [[s7]]
 == 7. Events Reference
 
@@ -569,11 +595,11 @@ Events are the server→client half of the protocol; a client *MUST ignore any e
 |===
 | Event | Payload / tags | Example
 
-| `MESSAGE <#chan\|@user> <user@net> :body` | `msgid=`, `reply-to=`, `thread=`, `attach.N=`, `fmt=`, `label=` (echo only); *in batches* `edited=<n>`, `edited-at=<ms>` | `@label=x;msgid=test.example/01J…A MESSAGE #gaming/general ada@test.example :gg`
-| `EDITED <#chan\|@user> <user@net> :new` | `msgid=` (the edit's own id), `edit-of=` (the root) — *live only* (compacted out of batches) | `@edit-of=test.example/01J…A;msgid=test.example/01J…E EDITED #gaming/general ada@test.example :gg all`
-| `DELETED <#chan\|@user> <msgid>` | `by=` — tombstone; the sole survivor in batches | `@by=ada@test.example DELETED #gaming/general test.example/01J…A`
+| `MESSAGE <#chan\|@user> <user@net> :body` | `msgid=`, `reply-to=`, `thread=`, `attach.N=`, `fmt=`, `label=` (echo only); in the *materialized* form (SYNC/HISTORY) `edited=<n>`, `edited-at=<ms>` carry the final edit state | `@label=x;msgid=test.example/01J…A MESSAGE #gaming/general ada@test.example :gg`
+| `EDITED <#chan\|@user> <user@net> :new` | `msgid=` (the edit's own id), `edit-of=` (the root) — *live only*; the materialized form (SYNC/HISTORY) folds edits into the final `MESSAGE` instead (<<s9-0,§9.0>> invariant 10) | `@edit-of=test.example/01J…A;msgid=test.example/01J…E EDITED #gaming/general ada@test.example :gg all`
+| `DELETED <#chan\|@user> <msgid>` | `by=` — the tombstone; also the sole mutation carried in the materialized form | `@by=ada@test.example DELETED #gaming/general test.example/01J…A`
 | `REACTION <#chan\|@user> <msgid> <emoji>` | `op=add\|remove`, `by=` — *live only* | `@by=ada@test.example;op=add REACTION #gaming/general test.example/01J…A 🎉`
-| `REACTIONS <#chan\|@user> <msgid> <emoji> <count>` | `by=` (first ≤20 actors, comma-sep) — *batch summary form* (<<s12-1,§12.1>>) | `@by=ada@test.example,bob@test.example REACTIONS #gaming/general test.example/01J…A 🎉 3`
+| `REACTIONS <#chan\|@user> <msgid> <emoji> <count>` | `by=` (first ≤20 actors, comma-sep) — the *materialized summary form* (SYNC/HISTORY, <<s12-1,§12.1>>); the only reaction form off the live path | `@by=ada@test.example,bob@test.example REACTIONS #gaming/general test.example/01J…A 🎉 3`
 |===
 
 [[s7-3]]
@@ -584,6 +610,7 @@ Events are the server→client half of the protocol; a client *MUST ignore any e
 | Event | Payload / tags | Example
 
 | `MEMBER <#chan> <user@net> <join\|part>` | `display=`, `count=` (members after the change) | `@count=42 MEMBER #gaming/general ada@test.example join`
+| `NS-MEMBER <ns> <user@net> <join\|part>` (v0.12) | `display=`, `count=` (distinct-account ns members after the change) — the namespace-level analog of `MEMBER`; the acting client's ns-join/leave ack, which a client expands across the namespace's visible channels | `@count=42 NS-MEMBER gaming ada@test.example join`
 | `TYPING <#chan> <user@net> <start\|stop>` | never stored; bridged only under manifest `typing:yes` | `TYPING #gaming/general ada@test.example start`
 | `MARKED <#chan> <msgid>` | read-marker sync to the account's own sessions | `MARKED #gaming/general test.example/01J…A`
 | `UNREAD-COUNTS <#chan> <unread> <mentions>` | server-computed tally since the marker; pushed on login + `MARK` | `UNREAD-COUNTS #gaming/general 3 1`
@@ -670,7 +697,10 @@ Events are the server→client half of the protocol; a client *MUST ignore any e
 |===
 | Event | Payload / tags | Example
 
-| `BATCH START` / `BATCH END` | `id=` on both; `truncated`, `compacted` (valueless flags) on END; every line of a batch echoes the request label (<<s3-5,§3.5>>) | `@id=b1 BATCH START` … `@compacted;id=b1;truncated BATCH END`
+| `BATCH START` / `BATCH END` | `id=` on both; `truncated` (valueless flag) on END; every line of a batch echoes the request label (<<s3-5,§3.5>>). There is *no* `compacted` flag (v0.12 — the batched wire form is always materialized); a legacy one is ignored on input. | `@id=b1 BATCH START` … `@id=b1;truncated BATCH END`
+| `SYNC START` / `SYNC END` (v0.12) | `SYNC END` carries `@cursor=<opaque>` — the low-water-mark token the client stores + echoes on the next `SYNC since=` (<<s6-9,§6.9>>). `SYNC START` brackets a body/delta stream. | `@cursor=<token> SYNC END`
+| `SYNC BODY <token>` (v0.12) | terminates a fresh `SYNC`'s inline skeleton and hands off a one-time data-plane token for the preview body; absent in `preview=0` mode | `SYNC BODY s_9f3c…`
+| `CHANSYNC <#chan>` (v0.12) | the per-channel header inside a SYNC body/delta: `expired-before=<msgid>` (retention watermark — evict older); the valueless `reset` flag means the server can't serve an honest delta, so the client drops its cached rows for the channel | `@expired-before=test.example/01H…;reset CHANSYNC #gaming/general`
 | `STREAM ACCEPT <token>` | data-plane handoff (large HISTORY / media, <<s6-4,§6.4>>/<<s13,§13>>) | `STREAM ACCEPT s_9f3c…`
 | `MORE <cursor>` | pagination continuation (DISCOVER / REPORTS LIST / …) | `MORE <cursor>`
 |===
@@ -733,20 +763,20 @@ No `UNKNOWN-COMMAND` — unknown verbs are ignored; labels make the silence dete
 [[s9-0]]
 === 9.0 Protocol invariants (normative)
 
-The document cites these by number ("invariant N"). Each is normative wherever the surface it names exists, and each is meant to be enforced *as a test*, not just as code. Numbers 5–7 and 10 are cited nowhere in this document and are left `[reserved]` rather than reconstructed.
+The document cites these by number ("invariant N"). Each is normative wherever the surface it names exists, and each is meant to be enforced *as a test*, not just as code. Numbers 5–7 are cited nowhere in this document and are left `[reserved]` rather than reconstructed.
 
 [cols="6,18,76",options="header"]
 |===
 | # | Invariant | Statement
 
-| 1 | *Anti-enumeration* | "A private thing you're not in" MUST be indistinguishable from "does not exist": one code (`NO-SUCH-TARGET`, <<s8,§8>>), one timing envelope — covering nonexistent, private, view-gated, expired/foreign msgids, and dead invites (<<s2-2,§2.2>>). The same uniformity extends to the data plane: a bad media bearer, a non-member fetch, an absent blob, and a spent backfill token are one not-found (<<s13,§13>>, <<s11-7,§11.7>>). The presence of hidden things never leaks.
+| 1 | *Anti-enumeration* | "A private thing you're not in" MUST be indistinguishable from "does not exist": one code (`NO-SUCH-TARGET`, <<s8,§8>>), one timing envelope — covering nonexistent, private, view-gated, expired/foreign msgids, and dead invites (<<s2-2,§2.2>>). The same uniformity extends to the data plane: a bad media bearer, a non-member fetch, an absent blob, and a spent backfill token are one not-found (<<s13,§13>>, <<s11-7,§11.7>>). *This applies inside the membership boundary too* (v0.12): a namespace member without `view` on a gated channel observes nothing — no `CHANNEL-LAYOUT` row, no sync section, `NO-SUCH-TARGET` on a probe, and absent from the derived roster (<<s6-3,§6.3>>). The presence of hidden things never leaks.
 | 2 | *Origin authority* | A message belongs to its origin: `msgid = <origin>/<ULID>` (<<s5-1,§5.1>>). Bridged events keep their origin msgids (never re-minted); events on a bridge are accepted only when `msgid` origin = the authenticated peer. For a channel the origin is its *home* (<<s11-12,§11.12>>): the home is the sole minter and enforces `EDIT`/`DELETE` by *authored-by* (the `@as` command vouches the actor), while spoke replicas honor only home-origin events (`FORBIDDEN origin` elsewhere) (<<s11-4,§11.4>>). Backfilled events are verified exactly like live traffic (<<s11-7,§11.7>>).
 | 3 | *Forwarding gate* | A channel is forwardable to a peer iff it appears in *both* the last mutually-acked manifest snapshot and the current one; the same gate applies to ingestion and to backfill (<<s11-1,§11.1>>, <<s11-7,§11.7>>). Forwarding outside it is a protocol violation, not a soft failure.
 | 4 | *Caps before effects* | Capability checks precede side effects — and precede existence probes, so a permission check can never be used to enumerate hidden things (<<s10-4,§10.4>>; e.g. the <<s6-5-1,§6.5.1>> `ROLE RENAME` error order).
 | 5–7 | _[reserved — recover from repo history or retire]_ | Not cited in this document.
 | 8 | *E2EE host-blindness survives everything* | Server-readable plaintext for an `e2ee` channel is _unrepresentable_ (<<s5-2,§5.2>>, <<s14,§14>>): no server search, embeds, thumbnails, or compaction — and recovery (<<s2-4,§2.4>>) restores administration, never history.
 | 9 | *No silent root rotation* | Every namespace root rotation is announced (`NS-META`); delayed rungs add a mandatory public window and a current-root veto; rung 3 drops the window but is network-key-authorized and permanently audit-marked operator-initiated in `root-history` (<<s2-4,§2.4>>).
-| 10 | _[reserved — recover from repo history or retire]_ | Not cited in this document.
+| 10 | *Sync is upsert* | Every non-live fetch (`SYNC`, `HISTORY`, federated backfill) serves *materialized current state* keyed for replacement; event chains (`EDITED`, reaction add/remove) never appear off the live path, and a client applies a delta row by *replacing* the row it already holds by key (<<s6-9,§6.9>>, <<s12-1,§12.1>>).
 | 11 | *Holds outrank retention* | Reported content and its context are exempt from purge *and* compaction until resolution plus grace; holds are invisible on every protocol surface and travel with their content (e.g. across a channel rename) (<<s12-1,§12.1>>, <<s6-3,§6.3>>).
 | 12 | *Reporter confidentiality* | The reported party never learns the reporter's identity from any protocol surface; bridge-forwarded reports strip it by default (<<s6-7,§6.7>>, <<s11-9,§11.9>>).
 | 13 | *SSRF classifier guard* | Every server-side fetch of a user-influenced URL (auto-federation dial + well-known fetch, unfurl proxy) MUST classify every resolved address before connecting and refuse non-public targets; testable as a pure classifier (<<s11-10,§11.10>>, <<s13,§13>>).
@@ -790,11 +820,13 @@ Server-stamped via ULIDs; client clocks untrusted.
 
 [[s9-7]]
 === 9.7 Client reconnect (RECOMMENDED)
+v0.12 collapses reconnect (and fresh login) to one code path:
+
 . Reconnect with jittered backoff (1 → 60 s), then `HELLO` → `AUTH KEY`.
-. The server replays `MEMBER`/`POLICY` snapshots — membership is server-side (<<s6-3,§6.3>>).
-. Per channel: `HISTORY after=<last msgid>`; render `truncated` as a visible gap.
+. `SYNC since=<stored cursor>` — the server replays every row changed since the cursor as materialized upsert rows, in one pass, and returns a fresh cursor on `SYNC END` (<<s6-9,§6.9>>). Fresh login is the same verb with no cursor (full skeleton). This *replaces* the old per-channel `HISTORY after=` catch-up loop, which structurally missed offline mutations of old messages.
 . Resend unacked labels (<<s9-2,§9.2>> dedup makes this safe).
-. The `MARKED` snapshot restores read state; each marked channel is followed by an `UNREAD-COUNTS`, so badges survive the reconnect.
+
+The skeleton's `MARKED` + `UNREAD-COUNTS` rows restore read state, so badges survive the reconnect. (For backward compatibility the server may still auto-replay `MEMBER`/`POLICY` on auth for clients — e.g. the IRC gateway — that do not issue `SYNC`.)
 
 '''
 
@@ -1364,7 +1396,7 @@ index; event shapes are normative in the cited section.
 |===
 | Event | Syntax | Direction | Emitted when
 
-| `BATCH` | `BATCH START` / `BATCH END` + tag `id=` (+ `truncated`/`compacted` flags on END) | H→S | A network-level federated `HISTORY` page (the compacted view). (An `@as HISTORY` member catch-up instead replays `MESSAGE` events, above.)
+| `BATCH` | `BATCH START` / `BATCH END` + tag `id=` (+ `truncated` flag on END) | H→S | A network-level federated `HISTORY` page (the materialized view). (An `@as HISTORY` member catch-up instead replays `MESSAGE` events, above.)
 | `STREAM ACCEPT` | `STREAM ACCEPT <token>` | H→S | A large backfill page is offered as a data-plane stream; the puller drains it and re-ingests each line.
 |===
 
@@ -1514,6 +1546,7 @@ Purpose: the likely operator audience is on IRC today — day-one irssi/WeeChat 
 . Custom emoji sets per namespace. *Note (M3):* the `:shortcode:` form cannot travel as a middle param — a leading `:` is the <<s4,§4>> trailing marker. Until decided, implementations send shortcodes bare and reject leading-colon emoji.
 . Recovery-set privacy: should members see _who_ the quorum is, or only that one exists? (Currently: existence only.)
 . Report data retention: how long do resolved reports themselves persist (distinct from content holds)? Legal-compliance minimums vary by jurisdiction — likely network config with a floor.
+. *BATCH retirement, Phase 2 (v0.12, flagged).* v0.12 kept `BATCH` framing on the request/response pages (`HISTORY`/`PINS`/`SEARCH`/`MEMBERS`/`THREADS`/`REPORTS LIST`) while `SYNC` (<<s6-9,§6.9>>) uses none. A later phase would replace `BATCH START`…`BATCH END` on those pages with label-echoed lines terminated by `DONE [more=<cursor>]`, keeping `BATCH` only for genuinely server-initiated bulk — behind a `features=` capability so no client breaks in one release.
 . Name. WEFT remains a placeholder.
 
 '''
@@ -1583,6 +1616,10 @@ Each entry: what changed, why, and where it now lives. Implementation detail liv
 === v0.11 — editorial consolidation
 
 * _v0.11:_ *no wire-behavior change.* Adds <<s0,§0>> (conformance + terminology), <<s9-0,§9.0>> (invariant registry; 5–7/10 reserved), <<s11-10,§11.10>> (auto-federation, reconstructed from scattered v0.10 text); rewrites <<s11-2,§11.2>> to the network-key model (the "bridge capability token" line was stale); makes every example <<s4,§4>>-grammar-true (tags before the verb); promotes appendix-only verbs (`VERIFY`, `EMOJI`, `THREADS`, `THREAD NAME`, `CAPS`, `MODLIST`) and behaviors into their home sections; moves implementation identifiers to <<appendix-b,Appendix B>>. Change log: `CHANGES-v0.11.md`; open judgment calls: `DECISIONS-NEEDED-v0.11.md`.
+
+=== v0.12 — namespace membership + SYNC
+
+* _v0.12 (wire-behavior change):_ two coupled changes. **(1) Namespace-level membership** — membership is keyed `(account, namespace)` and channel access is *derived* (`member ∧ can-view ∧ ¬hidden`) rather than a stored per-channel row; `PART <#ns/chan>` sets a per-account *hide override*, `JOIN` clears it (and auto-joins the ns — keeping `JOIN #ns/chan` natively valid for the IRC gateway, a deliberate ergonomic reading of the stricter "must `NS JOIN` first" design); new `NS LEAVE` / `PART ns:<name>`; new `NS-MEMBER` event; the derived roster (`MEMBERS` server-filtered) and invariant 1 now apply *inside* the membership boundary. Top-level channels keep per-channel membership unchanged. → <<s2-1,§2.1>>, <<s6-2,§6.2>>, <<s6-3,§6.3>>, <<s7-3,§7.3>>, <<s9-0,§9.0>>. **(2) `SYNC`** — a one-shot skeleton + `since=`-cursor delta (new <<s6-9,§6.9>>) over a server-global modification sequence + opaque `epoch:seq` cursor, replacing the startup DISCOVER/CHANNELS/HISTORY loop and catching offline mutations of old messages that ULID paging missed; the non-live wire form is now *always materialized* — the `compacted` batch flag is retired (invariant 10 becomes "sync is upsert"). → <<s6-9,§6.9>>, <<s7-9,§7.9>>, <<s9-7,§9.7>>, <<s12-1,§12.1>>. First implementation increment ships the skeleton + delta with previews withheld (client loads cold channels via `HISTORY`); the data-plane body stream + real previews, the `reset` flag, metadata-row deltas, and DM-scope deltas are staged follow-ups. Full plan: `docs/architecture/namespace-membership-sync-v0.12.md`.
 
 '''
 

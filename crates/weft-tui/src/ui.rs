@@ -282,22 +282,11 @@ pub fn reply_entry(raw: String, reply: &Reply, me: &str) -> LogEntry {
             )
         }
         Event::BatchStart { .. } => Line::styled(format!("── history ──{label}"), DIM),
-        Event::BatchEnd {
-            truncated,
-            compacted,
-            ..
-        } => {
-            let mut flags = Vec::new();
-            if *compacted {
-                flags.push("compacted");
-            }
-            if *truncated {
-                flags.push("older messages expired");
-            }
-            let flags = if flags.is_empty() {
-                String::new()
+        Event::BatchEnd { truncated, .. } => {
+            let flags = if *truncated {
+                " (older messages expired)"
             } else {
-                format!(" ({})", flags.join(", "))
+                ""
             };
             Line::styled(format!("── end{flags} ──{label}"), DIM)
         }

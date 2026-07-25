@@ -263,12 +263,49 @@ pub enum Event {
     BatchStart {
         id: String,
     },
-    /// `BATCH END` with `id=` + `truncated`/`compacted` flags. `truncated`
-    /// marks retention gaps — silence about gaps is forbidden (§6.4).
+    /// `BATCH END` with `id=` + a `truncated` flag marking retention gaps —
+    /// silence about gaps is forbidden (§6.4). The wire form off the live path
+    /// is always the materialized view (v0.12 Part 4.1), so there is no
+    /// `compacted` flag; an incoming one is ignored (lenient-in).
     BatchEnd {
         id: String,
         truncated: bool,
-        compacted: bool,
+    },
+    /// `NS-MEMBER <ns> <user@net> <join|part>` with optional `display=`/`count=`
+    /// (§7.4) — the namespace-level analog of `MEMBER`. On ns join/leave the
+    /// server emits one of these instead of a per-channel `MEMBER` fan-out;
+    /// clients expand it across the namespace's visible channels. `count=` is
+    /// the distinct-account ns member count after the change.
+    NsMember {
+        namespace: NamespaceName,
+        user: UserRef,
+        action: MemberAction,
+        display: Option<String>,
+        count: Option<u64>,
+    },
+    /// `CHANSYNC <#chan>` (§7.9) — the per-channel header inside a `SYNC` body
+    /// or delta. `expired-before=<msgid>` is the retention watermark (the client
+    /// evicts anything older); the valueless `reset` flag means the server can't
+    /// serve an honest delta for this channel, so the client MUST drop its
+    /// cached rows and treat what follows as a fresh head.
+    ChanSync {
+        channel: ChannelName,
+        expired_before: Option<MsgId>,
+        reset: bool,
+    },
+    /// `SYNC START` (§7.9) — opens the preview body/delta stream.
+    SyncStart,
+    /// `SYNC BODY <token>` (§7.9) — terminates a fresh `SYNC`'s inline skeleton
+    /// and hands off a one-time data-plane token; the client pulls the preview
+    /// body over `BACKFILL <token>`. Absent in `preview=0` mode.
+    SyncBody {
+        token: String,
+    },
+    /// `SYNC END` with `@cursor=<opaque>` (§7.9) — closes a `SYNC` response and
+    /// carries the opaque cursor the client stores and echoes on its next `SYNC
+    /// since=`. Clients never parse the cursor.
+    SyncEnd {
+        cursor: String,
     },
     /// `MEDIA TOKEN <token>` (§13) — a per-session fetch bearer, issued at auth;
     /// the client puts it on `/media/<hash>?t=<token>` fetch URLs.
@@ -953,7 +990,6 @@ impl Event {
                     "END" => Ok(Event::BatchEnd {
                         id,
                         truncated: line.tags.contains_key("truncated"),
-                        compacted: line.tags.contains_key("compacted"),
                     }),
                     _ => Err(ParseError::BadParam {
                         verb: "BATCH",
@@ -1107,6 +1143,56 @@ impl Event {
                     old: args.req("old")?.parse()?,
                     new: args.req("new")?.parse()?,
                 })
+            }
+            "NS-MEMBER" => {
+                let mut args = Args::new(line, "NS-MEMBER");
+                Ok(Event::NsMember {
+                    namespace: args.req("namespace")?.parse()?,
+                    user: args.req("user")?.parse()?,
+                    action: args.req("action")?.parse()?,
+                    display: line.tags.get("display").filter(|v| !v.is_empty()).cloned(),
+                    count: u64_tag(line, "count", "NS-MEMBER")?,
+                })
+            }
+            "CHANSYNC" => {
+                let mut args = Args::new(line, "CHANSYNC");
+                Ok(Event::ChanSync {
+                    channel: args.req("channel")?.parse()?,
+                    expired_before: line
+                        .tags
+                        .get("expired-before")
+                        .filter(|v| !v.is_empty())
+                        .map(|v| v.parse())
+                        .transpose()?,
+                    reset: line.tags.contains_key("reset"),
+                })
+            }
+            "SYNC" => {
+                let mut args = Args::new(line, "SYNC");
+                let sub = args.req("START|BODY|END")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "START" => Ok(Event::SyncStart),
+                    "BODY" => Ok(Event::SyncBody {
+                        token: args.req("token")?.to_string(),
+                    }),
+                    "END" => {
+                        let cursor = line
+                            .tags
+                            .get("cursor")
+                            .filter(|v| !v.is_empty())
+                            .cloned()
+                            .ok_or(ParseError::MissingParam {
+                                verb: "SYNC",
+                                what: "cursor tag",
+                            })?;
+                        Ok(Event::SyncEnd { cursor })
+                    }
+                    _ => Err(ParseError::BadParam {
+                        verb: "SYNC",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
             }
             "REPORTED" => {
                 let mut args = Args::new(line, "REPORTED");
@@ -1653,17 +1739,10 @@ impl Event {
                 tags.insert("id".to_string(), id.clone());
                 ("BATCH", vec!["START".to_string()], None)
             }
-            Event::BatchEnd {
-                id,
-                truncated,
-                compacted,
-            } => {
+            Event::BatchEnd { id, truncated } => {
                 tags.insert("id".to_string(), id.clone());
                 if *truncated {
                     tags.insert("truncated".to_string(), String::new());
-                }
-                if *compacted {
-                    tags.insert("compacted".to_string(), String::new());
                 }
                 ("BATCH", vec!["END".to_string()], None)
             }
@@ -1794,6 +1873,44 @@ impl Event {
                 vec![old.to_string(), new.to_string()],
                 None,
             ),
+            Event::NsMember {
+                namespace,
+                user,
+                action,
+                display,
+                count,
+            } => {
+                if let Some(display) = display {
+                    tags.insert("display".to_string(), display.clone());
+                }
+                if let Some(count) = count {
+                    tags.insert("count".to_string(), count.to_string());
+                }
+                (
+                    "NS-MEMBER",
+                    vec![namespace.to_string(), user.to_string(), action.to_string()],
+                    None,
+                )
+            }
+            Event::ChanSync {
+                channel,
+                expired_before,
+                reset,
+            } => {
+                if let Some(expired_before) = expired_before {
+                    tags.insert("expired-before".to_string(), expired_before.to_string());
+                }
+                if *reset {
+                    tags.insert("reset".to_string(), String::new());
+                }
+                ("CHANSYNC", vec![channel.to_string()], None)
+            }
+            Event::SyncStart => ("SYNC", vec!["START".to_string()], None),
+            Event::SyncBody { token } => ("SYNC", vec!["BODY".to_string(), token.clone()], None),
+            Event::SyncEnd { cursor } => {
+                tags.insert("cursor".to_string(), cursor.clone());
+                ("SYNC", vec!["END".to_string()], None)
+            }
             Event::Reported { report_id } => ("REPORTED", vec![report_id.clone()], None),
             Event::ReportFiled {
                 report_id,
@@ -2503,22 +2620,116 @@ mod tests {
             Event::BatchEnd {
                 id: "b1".into(),
                 truncated: true,
-                compacted: true,
             },
             "h1",
         );
-        // Flag tags carry no value (§4).
+        // Flag tags carry no value (§4). There is no `compacted` flag (v0.12).
         assert_eq!(
             end.serialize().unwrap(),
-            "@compacted;id=b1;label=h1;truncated BATCH END"
+            "@id=b1;label=h1;truncated BATCH END"
         );
         round_trip(&end);
         round_trip(&Reply::new(Event::BatchEnd {
             id: "b2".into(),
             truncated: false,
-            compacted: false,
         }));
-        assert!(Reply::parse("BATCH START").is_err()); // id required
+        // A legacy `@compacted` tag is tolerated (ignored) on input.
+        assert!(Reply::parse("@compacted;id=b3 BATCH END").is_ok());
+        assert!(Reply::parse("BATCH START").is_err()); // id tag required
+    }
+
+    #[test]
+    fn sync_framing_round_trip() {
+        // Skeleton hand-off to the data plane.
+        let body = Reply::with_label(
+            Event::SyncBody {
+                token: "s_9f3c".into(),
+            },
+            "s1",
+        );
+        assert_eq!(body.serialize().unwrap(), "@label=s1 SYNC BODY s_9f3c");
+        round_trip(&body);
+
+        round_trip(&Reply::new(Event::SyncStart));
+
+        // The terminating cursor is an opaque tag we never parse.
+        let end = Reply::with_label(
+            Event::SyncEnd {
+                cursor: "e7:8412".into(),
+            },
+            "s2",
+        );
+        assert_eq!(
+            end.serialize().unwrap(),
+            "@cursor=e7:8412;label=s2 SYNC END"
+        );
+        round_trip(&end);
+        assert!(Reply::parse("SYNC END").is_err()); // cursor tag required
+        assert!(Reply::parse("SYNC FROB").is_err());
+    }
+
+    #[test]
+    fn chansync_round_trip() {
+        // A plain per-channel header.
+        round_trip(&Reply::new(Event::ChanSync {
+            channel: "#gaming/general".parse().unwrap(),
+            expired_before: None,
+            reset: false,
+        }));
+
+        // Watermark carried as a tag.
+        let with_wm = Reply::new(Event::ChanSync {
+            channel: "#gaming/general".parse().unwrap(),
+            expired_before: Some("hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap()),
+            reset: false,
+        });
+        assert!(with_wm
+            .serialize()
+            .unwrap()
+            .contains("expired-before=hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        round_trip(&with_wm);
+
+        // `reset` is a valueless flag.
+        let reset = Reply::with_label(
+            Event::ChanSync {
+                channel: "#gaming/new-chan".parse().unwrap(),
+                expired_before: None,
+                reset: true,
+            },
+            "s2",
+        );
+        assert_eq!(
+            reset.serialize().unwrap(),
+            "@label=s2;reset CHANSYNC #gaming/new-chan"
+        );
+        round_trip(&reset);
+    }
+
+    #[test]
+    fn ns_member_round_trip() {
+        let join = Reply::with_label(
+            Event::NsMember {
+                namespace: "gaming".parse().unwrap(),
+                user: "ada@test.example".parse().unwrap(),
+                action: MemberAction::Join,
+                display: Some("Ada".into()),
+                count: Some(42),
+            },
+            "s1",
+        );
+        let wire = join.serialize().unwrap();
+        assert!(wire.contains("count=42"));
+        assert!(wire.contains("display=Ada"));
+        assert!(wire.contains("NS-MEMBER gaming ada@test.example join"));
+        round_trip(&join);
+
+        round_trip(&Reply::new(Event::NsMember {
+            namespace: "gaming".parse().unwrap(),
+            user: "bob@test.example".parse().unwrap(),
+            action: MemberAction::Part,
+            display: None,
+            count: None,
+        }));
     }
 
     #[test]
