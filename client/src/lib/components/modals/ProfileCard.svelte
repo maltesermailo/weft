@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
+  import { EVERYONE_ROLE } from "$lib/constants";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   let {
@@ -20,7 +21,8 @@
   const inServer = $derived(app.active.startsWith("#"));
   const scope = $derived(app.roleScopeOf(app.active));
   const myRoles = $derived(app.rolesOf(target, scope));
-  const allRoles = $derived(app.rolesByScope[scope] ?? []);
+  // Exclude the implicit @everyone role — it's baseline, never assigned.
+  const allRoles = $derived((app.rolesByScope[scope] ?? []).filter((r) => r.name !== EVERYONE_ROLE));
   const isSelf = $derived(target === app.account);
   const iAmOwner = $derived(app.isOwnerAt(app.account, scope));
   const targetIsOwner = $derived(app.isOwnerAt(target, scope));

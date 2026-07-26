@@ -408,6 +408,10 @@ export interface AppCtx {
   /// the role keeps its members and issued caps (§6.5).
   saveRole(role: RoleDefC, patch: { name: string; color: string; caps: string[]; hoist: boolean }): void;
   deleteRole(name: string): void;
+  /** The implicit @everyone role's current caps at the active server. */
+  everyoneCaps(): string[];
+  /** Set the @everyone baseline caps ([] clears it). */
+  setEveryoneCaps(caps: string[]): void;
   assignRole(name: string): void;
   showRecoveryKey(): void;
   startRecovery(): void;

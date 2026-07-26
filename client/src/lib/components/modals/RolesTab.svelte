@@ -4,11 +4,38 @@
   // create form. Order is top = highest, mirroring the member-list grouping.
   import { getApp } from "$lib/context";
   import type { RoleDefC } from "$lib/types";
-  import { CAPS, ROLE_COLORS } from "$lib/constants";
+  import { CAPS, ROLE_COLORS, EVERYONE_ROLE } from "$lib/constants";
   import CapChecklist from "$lib/components/CapChecklist.svelte";
 
   const app = getApp();
-  const roles = $derived(app.rolesByScope[app.nsRoleScope()] ?? []);
+  // The implicit @everyone role is edited in its own card, not the draggable
+  // list (it's never reordered, assigned or deleted like a normal role).
+  const roles = $derived(
+    (app.rolesByScope[app.nsRoleScope()] ?? []).filter((r) => r.name !== EVERYONE_ROLE),
+  );
+
+  const sameCaps = (a: string[], b: string[]) =>
+    a.length === b.length && [...a].sort().join() === [...b].sort().join();
+
+  // ---- @everyone (baseline) editor ----
+  let everyoneDraft = $state<string[]>([]);
+  let seededFor = $state("");
+  $effect(() => {
+    const scope = app.nsRoleScope();
+    // Seed once per server, after its roles have been fetched.
+    if (app.rolesByScope[scope] !== undefined && seededFor !== scope) {
+      seededFor = scope;
+      everyoneDraft = [...app.everyoneCaps()];
+    }
+  });
+  const everyoneDirty = $derived(!sameCaps(everyoneDraft, app.everyoneCaps()));
+  const toggleEveryoneCap = (c: string) =>
+    (everyoneDraft = everyoneDraft.includes(c)
+      ? everyoneDraft.filter((x) => x !== c)
+      : [...everyoneDraft, c]);
+  function saveEveryone() {
+    app.setEveryoneCaps(everyoneDraft);
+  }
 
   // ---- selection + edit draft ----
   let selected = $state<string | null>(null);
@@ -26,8 +53,6 @@
   const toggleDraftCap = (c: string) =>
     (draft.caps = draft.caps.includes(c) ? draft.caps.filter((x) => x !== c) : [...draft.caps, c]);
 
-  const sameCaps = (a: string[], b: string[]) =>
-    a.length === b.length && [...a].sort().join() === [...b].sort().join();
   const dirty = $derived(
     !!editing &&
       (draft.name.trim() !== editing.name ||
@@ -184,6 +209,20 @@
 </ul>
 
 <div class="section-sep"></div>
+<div class="everyone-card">
+  <div class="everyone-head">
+    <span class="role-swatch" style="background:#99aab5"></span>
+    <span class="role-title">@everyone</span>
+    <span class="everyone-note">Baseline — every member holds this implicitly</span>
+  </div>
+  <div class="field-label">Permissions</div>
+  <CapChecklist caps={CAPS} selected={everyoneDraft} onToggle={toggleEveryoneCap} />
+  <div class="editor-actions">
+    <button class="ok-btn" disabled={!everyoneDirty} onclick={saveEveryone}>Save changes</button>
+  </div>
+</div>
+
+<div class="section-sep"></div>
 <div class="field-label">Create a role</div>
 <input class="text-input" bind:value={app.newRoleName} placeholder="Role name (e.g. Moderator)" />
 <div class="color-row">
@@ -319,6 +358,22 @@
   }
   .rename-note {
     margin: 8px 0 0;
+    font-size: 11.5px;
+    color: var(--text-muted);
+  }
+  .everyone-card {
+    padding: 12px 14px;
+    border: 1px solid var(--border-hair-strong);
+    border-radius: var(--radius-md);
+    background: var(--bg-panel);
+  }
+  .everyone-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .everyone-note {
     font-size: 11.5px;
     color: var(--text-muted);
   }

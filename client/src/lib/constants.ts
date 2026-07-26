@@ -1,5 +1,10 @@
 // Static option lists shared across components.
 
+/// The reserved role every namespace member implicitly holds (the baseline
+/// permissions, Discord's @everyone). Never assigned or deleted like a normal
+/// role — its caps are edited in Server Settings and resolved server-side.
+export const EVERYONE_ROLE = "everyone";
+
 export const REPORT_CATEGORIES = [
   "spam",
   "harassment",

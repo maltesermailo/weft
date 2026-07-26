@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
   import * as weft from "$lib/weft";
+  import { EVERYONE_ROLE } from "$lib/constants";
   import type { Msg, Channel, CtxItem, RoleDefC, ThreadInfo } from "$lib/types";
   import { provideApp } from "$lib/context";
   import { highlightCode } from "$lib/highlight";
@@ -724,6 +725,19 @@
         newRoleHoist = false;
       })
       .catch((e) => toast(String(e), "error"));
+  }
+  // The implicit @everyone role's current caps at the active server (or []).
+  const everyoneCaps = (): string[] =>
+    (rolesByScope[nsRoleScope()] ?? []).find((r) => r.name === EVERYONE_ROLE)?.caps ?? [];
+  // Set the @everyone baseline. Non-empty → upsert the reserved role; empty →
+  // delete it (the server rejects an empty cap list, and "no role" = no
+  // baseline). It's never assigned or hoisted.
+  function setEveryoneCaps(caps: string[]) {
+    const scope = nsRoleScope();
+    const p = caps.length
+      ? createRoleAt(scope, EVERYONE_ROLE, "#99aab5", caps.join(","), false, 0)
+      : deleteRoleAt(scope, EVERYONE_ROLE);
+    p.catch((e) => toast(String(e), "error"));
   }
   // Move a role up/down in the ordered list, then persist the new order (§6.5).
   function moveRole(name: string, dir: -1 | 1) {
@@ -3544,6 +3558,8 @@
     reorderRoles,
     saveRole,
     deleteRole,
+    everyoneCaps,
+    setEveryoneCaps,
     assignRole,
     showRecoveryKey,
     startRecovery,

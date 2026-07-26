@@ -1167,6 +1167,31 @@ impl ServerCtx {
                 return Ok(true);
             }
         }
+        // Baseline: a namespace's implicit `@everyone` role grants its caps to
+        // every same-network **member** — no explicit assignment or grant. Only
+        // local members (never a federated actor, who holds exactly what this
+        // network granted `account@F`, §11.11). Resolved live here rather than
+        // materialized, so shrinking @everyone's caps takes effect immediately.
+        if let Actor::Local(account) = actor {
+            if let Some(ns_name) = scope_namespace(scope) {
+                if self.memberships.is_ns_member(account, &ns_name).await? {
+                    let ns_scope = format!("ns:{ns_name}");
+                    for role in self.roles.roles(&ns_scope).await? {
+                        if role.name != EVERYONE_ROLE {
+                            continue;
+                        }
+                        if role
+                            .caps
+                            .iter()
+                            .filter_map(|c| c.parse::<Capability>().ok())
+                            .any(|c| &c == cap)
+                        {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
         Ok(false)
     }
 
@@ -1448,6 +1473,11 @@ pub(crate) fn channel_namespace(channel: &ChannelName) -> Option<NamespaceName> 
         .parse()
         .ok()
 }
+
+/// The reserved role name every namespace member implicitly holds — the
+/// baseline-permission role (Discord's `@everyone`). Editable like any role, but
+/// never assigned or deleted; its caps are resolved live in `actor_has_cap`.
+pub(crate) const EVERYONE_ROLE: &str = "everyone";
 
 /// The namespace a scope belongs to, if any: `ns:<n>` → n; `#n/chan` → n
 /// (a channel names its namespace in its first segment, §2.1).

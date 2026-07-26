@@ -184,6 +184,18 @@ impl<S: ControlStream> Session<S> {
         name: String,
         actor: Actor,
     ) -> io::Result<Flow> {
+        // The `@everyone` role is implicit (every member holds it, resolved live
+        // in `actor_has_cap`) — assigning it would materialize stale grants.
+        if name == crate::context::EVERYONE_ROLE {
+            self.send_err(
+                label,
+                ErrCode::Malformed,
+                None,
+                "the everyone role is implicit and cannot be assigned",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
         let roles = match self.ctx.roles.roles(&scope).await {
             Ok(roles) => roles,
             Err(e) => return self.internal(label, &e).await,

@@ -6137,6 +6137,52 @@ async fn adding_a_channel_permission_propagates_to_existing_holders() {
 }
 
 #[tokio::test]
+async fn everyone_role_grants_baseline_caps_to_members() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+    let root = root_key_b64();
+
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
+    drain_until_label(&mut ada, "n").await;
+    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    drain_until_label(&mut ada, "c").await;
+
+    // bob joins the namespace → becomes a member (implicitly holds @everyone).
+    bob.send("@label=j NS JOIN gaming");
+    drain_until_label(&mut bob, "j").await;
+
+    // No @everyone caps yet → bob can't mint an invite (needs `invite`).
+    bob.send("@label=e1 INVITE MINT ns:gaming");
+    let e1 = drain_until_label(&mut bob, "e1").await;
+    assert!(
+        matches!(&e1.event, Event::Err(err) if err.code == ErrCode::CapRequired),
+        "member without @everyone caps is denied, got {e1:?}"
+    );
+
+    // Owner sets the implicit @everyone role's caps to include `invite`.
+    ada.send("@label=r ROLE CREATE ns:gaming #99aab5 invite :everyone");
+    drain_until_label(&mut ada, "r").await;
+
+    // Now bob — a member, with no role *assignment* — gains the baseline cap.
+    bob.send("@label=e2 INVITE MINT ns:gaming");
+    let e2 = drain_until_label(&mut bob, "e2").await;
+    assert!(
+        matches!(e2.event, Event::Invited { .. }),
+        "member gains @everyone's invite cap with no assignment, got {e2:?}"
+    );
+
+    // A non-member gets nothing from @everyone.
+    let mut carol = ready(&ctx, "carol").await;
+    carol.send("@label=e3 INVITE MINT ns:gaming");
+    let e3 = drain_until_label(&mut carol, "e3").await;
+    assert!(
+        matches!(&e3.event, Event::Err(err) if err.code == ErrCode::CapRequired),
+        "a non-member is unaffected by @everyone, got {e3:?}"
+    );
+}
+
+#[tokio::test]
 async fn roles_are_explicit_membership_not_derived() {
     let ctx = ctx_ops(&["#general"], &["root"]);
     let mut root = ready(&ctx, "root").await;
