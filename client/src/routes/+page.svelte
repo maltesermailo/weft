@@ -575,10 +575,11 @@
     color: string,
     caps: string,
     hoist = false,
+    pingable = false,
     position = 0,
   ) {
     roleFetchQueue.push(scope);
-    return weft.roleCreate(scope, color, caps, hoist, position, name);
+    return weft.roleCreate(scope, color, caps, hoist, pingable, position, name);
   }
   function deleteRoleAt(scope: string, name: string) {
     roleFetchQueue.push(scope);
@@ -734,6 +735,7 @@
   let newRoleColor = $state("#5865f2");
   let newRoleCaps = $state<string[]>([]);
   let newRoleHoist = $state(false);
+  let newRolePingable = $state(false);
   const toggleNewRoleCap = (c: string) =>
     (newRoleCaps = newRoleCaps.includes(c) ? newRoleCaps.filter((x) => x !== c) : [...newRoleCaps, c]);
   const nsRoleScope = () => (activeServer ? `ns:${activeServer}` : "*");
@@ -741,11 +743,20 @@
     if (!newRoleName.trim() || !newRoleCaps.length) return;
     // Append at the bottom of the ordered list.
     const position = rolesByScope[nsRoleScope()]?.length ?? 0;
-    createRoleAt(nsRoleScope(), newRoleName.trim(), newRoleColor, newRoleCaps.join(","), newRoleHoist, position)
+    createRoleAt(
+      nsRoleScope(),
+      newRoleName.trim(),
+      newRoleColor,
+      newRoleCaps.join(","),
+      newRoleHoist,
+      newRolePingable,
+      position,
+    )
       .then(() => {
         newRoleName = "";
         newRoleCaps = [];
         newRoleHoist = false;
+        newRolePingable = false;
       })
       .catch((e) => toast(String(e), "error"));
   }
@@ -758,7 +769,7 @@
   function setEveryoneCaps(caps: string[]) {
     const scope = nsRoleScope();
     const p = caps.length
-      ? createRoleAt(scope, EVERYONE_ROLE, "#99aab5", caps.join(","), false, 0)
+      ? createRoleAt(scope, EVERYONE_ROLE, "#99aab5", caps.join(","), false, false, 0)
       : deleteRoleAt(scope, EVERYONE_ROLE);
     p.catch((e) => toast(String(e), "error"));
   }
@@ -783,7 +794,7 @@
   // its members and issued caps; the rest rides the ordinary upsert (§6.5).
   function saveRole(
     role: RoleDefC,
-    patch: { name: string; color: string; caps: string[]; hoist: boolean },
+    patch: { name: string; color: string; caps: string[]; hoist: boolean; pingable: boolean },
   ) {
     const scope = nsRoleScope();
     const name = patch.name.trim() || role.name;
@@ -792,7 +803,7 @@
       return;
     }
     const upsert = () =>
-      createRoleAt(scope, name, patch.color, patch.caps.join(","), patch.hoist, role.position);
+      createRoleAt(scope, name, patch.color, patch.caps.join(","), patch.hoist, patch.pingable, role.position);
 
     if (name !== role.name) {
       roleFetchQueue.push(scope);
@@ -1536,7 +1547,7 @@
             ensureCaps(e.sender, key); // for the author badge
           }
         }
-        const pinged = !e.own && mentionsMe(e.body);
+        const pinged = !e.own && mentionsMe(e.body, nsOf(key));
         const level = notifLevel(key);
         // A muted scope shows no unread indicator; others tally unread/mentions.
         if (!e.own && key !== active && level !== "nothing") {
@@ -1768,6 +1779,7 @@
           color: e.color,
           caps: e.caps ? e.caps.split(",") : [],
           hoist: e.hoist,
+          pingable: e.pingable,
           position: e.position,
         });
         break;
@@ -2430,10 +2442,22 @@
       /\|\|([\s\S]+?)\|\|/g,
       '<span class="spoiler" role="button" tabindex="0" title="Spoiler — click to reveal">$1</span>',
     );
-    // @mentions → pills; a mention of me / @everyone / @here highlights.
+    // @mentions → pills; a mention of me / @everyone / @here / a pingable role
+    // I hold highlights. Role pills carry the role's color.
+    const pingable = (rolesByScope[`ns:${activeServer}`] ?? []).filter((r) => r.pingable);
+    const myRoles = new Set(memberRoles[`${account}|ns:${activeServer}`] ?? []);
     s = s.replace(/@(everyone|here|[a-z0-9][a-z0-9._-]*)/gi, (_full, name: string) => {
-      const me = name === account || name === "everyone" || name === "here";
-      return `<span class="mention${me ? " me" : ""}">@${name}</span>`;
+      const lower = name.toLowerCase();
+      const role = pingable.find((r) => r.name.toLowerCase() === lower);
+      const me =
+        name === account ||
+        lower === "everyone" ||
+        lower === "here" ||
+        (!!role && myRoles.has(role.name));
+      // Colors ride the wire, so only emit ones matching a strict hex pattern —
+      // never interpolate arbitrary text into a style attribute.
+      const style = role && /^#[0-9a-fA-F]{3,8}$/.test(role.color) ? ` style="color:${role.color}"` : "";
+      return `<span class="mention${me ? " me" : ""}"${style}>@${name}</span>`;
     });
     // :name: → this server's custom emoji (an inline image) if it exists, else a
     // standard unicode emoji (`:smile:` → 😄); an unknown shortcode stays literal.
@@ -2562,9 +2586,22 @@
     });
     return s;
   }
-  // Does a body mention the current account (or everyone/here)?
-  const mentionsMe = (body: string) =>
-    !!account && (new RegExp(`@${account}\\b`, "i").test(body) || /@(everyone|here)\b/i.test(body));
+  // Does a body mention the current account, @everyone/@here, or a pingable
+  // role the account holds at `ns` (the message's server; defaults to active)?
+  const mentionsMe = (body: string, ns: string = activeServer) => {
+    if (!account) return false;
+    if (new RegExp(`@${account}\\b`, "i").test(body) || /@(everyone|here)\b/i.test(body)) return true;
+    const scope = ns ? `ns:${ns}` : "*";
+    const mine = memberRoles[`${account}|${scope}`] ?? [];
+    const pingable = new Set(
+      (rolesByScope[scope] ?? []).filter((r) => r.pingable).map((r) => r.name.toLowerCase()),
+    );
+    return mine.some(
+      (r) =>
+        pingable.has(r.toLowerCase()) &&
+        new RegExp(`@${r.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(body),
+    );
+  };
 
   // ---- replies (Phase 4) ----
   let replyTo = $state<Msg | null>(null);
@@ -2622,6 +2659,10 @@
     const names: string[] = [];
     if ("everyone".startsWith(q)) names.push("everyone");
     if ("here".startsWith(q)) names.push("here");
+    // Pingable roles at this server (single-word names — the token can't hold
+    // spaces), so members can @-mention them from the composer.
+    for (const r of rolesByScope[`ns:${activeServer}`] ?? [])
+      if (r.pingable && !/\s/.test(r.name) && r.name.toLowerCase().startsWith(q)) names.push(r.name);
     for (const m of activeChannel?.members ?? [])
       if (m.name !== account && m.name.toLowerCase().startsWith(q)) names.push(m.name);
     return names.slice(0, 8);
@@ -3577,6 +3618,8 @@
     get newRoleCaps() { return newRoleCaps; },
     get newRoleHoist() { return newRoleHoist; },
     set newRoleHoist(v: boolean) { newRoleHoist = v; },
+    get newRolePingable() { return newRolePingable; },
+    set newRolePingable(v: boolean) { newRolePingable = v; },
     toggleNewRoleCap,
     get nsDelegSubject() { return nsDelegSubject; },
     set nsDelegSubject(v: string) { nsDelegSubject = v; },

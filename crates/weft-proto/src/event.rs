@@ -200,6 +200,8 @@ pub enum Event {
         caps: String,
         /// Display the role's members separately in the member list (§6.5).
         hoist: bool,
+        /// Whether members may `@`-mention this role to notify its holders (§9.3).
+        pingable: bool,
         /// Sort position (ascending) in the role list + member grouping (§6.5).
         position: i32,
         name: String,
@@ -782,10 +784,15 @@ impl Event {
                 let color = args.req("color")?.to_string();
                 let caps = args.req("caps")?.to_string();
                 let mut hoist = false;
+                let mut pingable = false;
                 let mut position = 0i32;
                 while let Some(param) = args.opt() {
                     if let Some(v) = param.strip_prefix("hoist=") {
                         hoist = v == "1"
+                            || v.eq_ignore_ascii_case("yes")
+                            || v.eq_ignore_ascii_case("true");
+                    } else if let Some(v) = param.strip_prefix("pingable=") {
+                        pingable = v == "1"
                             || v.eq_ignore_ascii_case("yes")
                             || v.eq_ignore_ascii_case("true");
                     } else if let Some(v) = param.strip_prefix("pos=") {
@@ -797,6 +804,7 @@ impl Event {
                     color,
                     caps,
                     hoist,
+                    pingable,
                     position,
                     name: line.trailing.clone().unwrap_or_default(),
                 })
@@ -1680,6 +1688,7 @@ impl Event {
                 color,
                 caps,
                 hoist,
+                pingable,
                 position,
                 name,
             } => (
@@ -1689,6 +1698,7 @@ impl Event {
                     color.clone(),
                     caps.clone(),
                     format!("hoist={}", if *hoist { 1 } else { 0 }),
+                    format!("pingable={}", if *pingable { 1 } else { 0 }),
                     format!("pos={position}"),
                 ],
                 Some(name.clone()),
@@ -2506,6 +2516,7 @@ mod tests {
             color: "#e8b93d".to_string(),
             caps: "mute,ban,kick,pin".to_string(),
             hoist: true,
+            pingable: false,
             position: 2,
             name: "Head Moderator".to_string(),
         }));

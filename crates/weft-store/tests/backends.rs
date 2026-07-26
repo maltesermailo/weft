@@ -1923,21 +1923,31 @@ where
             "#e8b93d",
             &["mute".into(), "ban".into()],
             true,
+            false,
             0,
         )
         .await
         .unwrap();
     store
-        .set_role(&rscope, "Member", "#3ba55d", &["send".into()], false, 1)
+        .set_role(
+            &rscope,
+            "Member",
+            "#3ba55d",
+            &["send".into()],
+            false,
+            false,
+            1,
+        )
         .await
         .unwrap();
-    // Upsert: same name replaces color + caps + hoist + position.
+    // Upsert: same name replaces color + caps + hoist + pingable + position.
     store
         .set_role(
             &rscope,
             "Moderator",
             "#ff0000",
             &["mute".into(), "ban".into(), "kick".into()],
+            true,
             true,
             0,
         )
@@ -1949,6 +1959,7 @@ where
         color: "#ff0000".into(),
         caps: vec!["mute".into(), "ban".into(), "kick".into()],
         hoist: true,
+        pingable: true,
         position: 0,
     }));
     assert_eq!(roles.len(), 2);
@@ -2011,7 +2022,15 @@ where
 
     // ---- §6.5 ROLE RENAME: definition + membership migrate together ----
     store
-        .set_role(&rscope, "Helper", "#e8b93d", &["pin".into()], true, 4)
+        .set_role(
+            &rscope,
+            "Helper",
+            "#e8b93d",
+            &["pin".into()],
+            true,
+            false,
+            4,
+        )
         .await
         .unwrap();
     store.assign_role(&rscope, "Helper", &racct).await.unwrap();
@@ -2030,6 +2049,7 @@ where
         color: "#e8b93d".into(),
         caps: vec!["pin".into()],
         hoist: true,
+        pingable: false,
         position: 4,
     }));
     assert!(!renamed.iter().any(|r| r.name == "Helper"));
@@ -2095,6 +2115,7 @@ where
             "Voice",
             "#fff",
             &["react".into()],
+            false,
             false,
             0,
         )

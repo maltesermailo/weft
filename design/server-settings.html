@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <title>Server Settings – Midnight Collective</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com"/>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"/>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+        html,body,#root{width:100%;height:100%;overflow:hidden}
+        body{font-family:'Inter',system-ui,sans-serif;font-size:16px;background:#313338;color:#dbdee1}
+        :root{--primary:#5865f2;--primary-hover:#4752c4;--bg:#313338;--sidebar:#2b2d31;--deep:#1e1f22;--deepest:#111214;--card:#2b2d31;--border:rgba(255,255,255,0.06);--muted:#949ba4;--fg:#dbdee1;--green:#23a55a;--red:#f04747;--yellow:#faa61a;--pink:#f47fff;--accent:#404249;--hover:#35373c;--radius:4px}
+        ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:99px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.15)}
+        *{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,0.08) transparent}
+        input,textarea{font-family:inherit;font-size:inherit;color:inherit}
+        button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+    </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+    const { useState, useEffect } = React;
+
+    // ─── Data ─────────────────────────────────────────────────────────────────────
+    const PERMISSION_GROUPS = [
+        { label: "General Server Permissions", perms: [
+                { key: "view_channels", label: "View Channels", desc: "Allows members to view channels by default (excluding private channels)." },
+                { key: "manage_channels", label: "Manage Channels", desc: "Allows members to create, edit, or delete channels." },
+                { key: "manage_roles", label: "Manage Roles", desc: "Allows members to create new roles and edit or delete roles lower than their highest role." },
+                { key: "manage_emojis", label: "Manage Emojis & Stickers", desc: "Allows members to add or remove custom emojis and stickers in this server." },
+                { key: "view_audit_log", label: "View Audit Log", desc: "Allows members to view a record of who made which changes in this server." },
+                { key: "manage_webhooks", label: "Manage Webhooks", desc: "Allows members to create, edit, and delete webhooks." },
+                { key: "manage_guild", label: "Manage Server", desc: "Allows members to change this server's settings, including the name, icon, and region." },
+            ]},
+        { label: "Membership Permissions", perms: [
+                { key: "create_invite", label: "Create Invite", desc: "Allows members to invite new people to this server." },
+                { key: "change_nickname", label: "Change Nickname", desc: "Allows members to change their own nickname." },
+                { key: "manage_nicknames", label: "Manage Nicknames", desc: "Allows members to change the nicknames of other members." },
+                { key: "kick_members", label: "Kick Members", desc: "Allows members to remove other members from this server." },
+                { key: "ban_members", label: "Ban Members", desc: "Allows members to permanently ban other members from this server." },
+                { key: "timeout_members", label: "Timeout Members", desc: "Allows members to temporarily timeout other members from participating in the server." },
+            ]},
+        { label: "Text Channel Permissions", perms: [
+                { key: "send_messages", label: "Send Messages", desc: "Allows members to send messages in text channels and create posts in forums." },
+                { key: "embed_links", label: "Embed Links", desc: "Links sent by members with this permission will be embedded automatically." },
+                { key: "attach_files", label: "Attach Files", desc: "Allows members to upload files and images." },
+                { key: "read_history", label: "Read Message History", desc: "Allows members to read previous messages sent in text channels." },
+                { key: "mention_everyone", label: "Mention @everyone, @here", desc: "Allows members to use @everyone or @here to notify all members in a channel." },
+                { key: "use_emojis", label: "Use External Emojis", desc: "Allows members to use emojis from other servers in this server." },
+                { key: "add_reactions", label: "Add Reactions", desc: "Allows members to add new emoji reactions to a message." },
+                { key: "manage_messages", label: "Manage Messages", desc: "Allows members to delete messages by other members or pin any message." },
+            ]},
+        { label: "Voice Channel Permissions", perms: [
+                { key: "connect", label: "Connect", desc: "Allows members to join voice and stage channels." },
+                { key: "speak", label: "Speak", desc: "Allows members to talk in voice channels." },
+                { key: "mute_members", label: "Mute Members", desc: "Allows members to mute other members in voice channels." },
+                { key: "deafen_members", label: "Deafen Members", desc: "Allows members to deafen other members in voice channels." },
+                { key: "move_members", label: "Move Members", desc: "Allows members to move other members between voice channels." },
+                { key: "use_vad", label: "Use Voice Activity", desc: "Allows members to speak in voice channels using voice activity detection." },
+            ]},
+    ];
+
+    const ROLE_COLORS = ["#99aab5","#1abc9c","#2ecc71","#3498db","#9b59b6","#e91e63","#f1c40f","#e67e22","#e74c3c","#5865f2","#faa61a","#43b581","#f04747","#f47fff","#ff7043","#00bcd4","#8bc34a","#ff5722","#607d8b","#795548"];
+
+    const INITIAL_ROLES = [
+        { id:"r6", name:"Admin", color:"#5865f2", memberCount:3, position:6, isAdmin:true, hoist:true, mentionable:true, permissions:{view_channels:true,manage_channels:true,manage_roles:true,manage_emojis:true,view_audit_log:true,manage_webhooks:true,manage_guild:true,create_invite:true,change_nickname:true,manage_nicknames:true,kick_members:true,ban_members:true,timeout_members:true,send_messages:true,embed_links:true,attach_files:true,read_history:true,mention_everyone:true,use_emojis:true,add_reactions:true,manage_messages:true,connect:true,speak:true,mute_members:true,deafen_members:true,move_members:true,use_vad:true}},
+        { id:"r2", name:"Moderator", color:"#f04747", memberCount:12, position:5, hoist:true, mentionable:true, permissions:{view_channels:true,send_messages:true,read_history:true,manage_messages:true,kick_members:true,ban_members:true,timeout_members:true,connect:true,speak:true,mute_members:true,deafen_members:true,move_members:true,use_vad:true,use_emojis:true,add_reactions:true,attach_files:true,embed_links:true,create_invite:true,change_nickname:true,manage_nicknames:true}},
+        { id:"r3", name:"VIP", color:"#faa61a", memberCount:89, position:4, hoist:true, mentionable:false, permissions:{view_channels:true,send_messages:true,read_history:true,connect:true,speak:true,use_emojis:true,add_reactions:true,attach_files:true,embed_links:true,create_invite:true,change_nickname:true,use_vad:true}},
+        { id:"r4", name:"Booster", color:"#f47fff", memberCount:156, position:3, hoist:true, mentionable:false, permissions:{view_channels:true,send_messages:true,read_history:true,connect:true,speak:true,use_emojis:true,add_reactions:true,attach_files:true,embed_links:true,create_invite:true,change_nickname:true,use_vad:true}},
+        { id:"r5", name:"Member", color:"#43b581", memberCount:891, position:2, hoist:false, mentionable:false, permissions:{view_channels:true,send_messages:true,read_history:true,connect:true,speak:true,use_emojis:true,add_reactions:true,attach_files:true,embed_links:true,create_invite:true,change_nickname:true,use_vad:true}},
+        { id:"r1", name:"@everyone", color:"#99aab5", memberCount:1247, position:1, hoist:false, mentionable:false, permissions:{view_channels:true,send_messages:true,read_history:true,connect:true,speak:true,use_emojis:true,add_reactions:true,attach_files:true,embed_links:true,use_vad:true}},
+    ];
+
+    const INITIAL_EMOJIS = [
+        {id:"e1",name:"pepe_wave",symbol:"👋",animated:false,uses:1243,uploadedBy:"xXProGamerXx"},
+        {id:"e2",name:"catjam",symbol:"🐱",animated:true,uses:8921,uploadedBy:"moonlightdev"},
+        {id:"e3",name:"pog",symbol:"😮",animated:false,uses:5432,uploadedBy:"void_walker"},
+        {id:"e4",name:"lul",symbol:"😂",animated:false,uses:3211,uploadedBy:"stellarcode"},
+        {id:"e5",name:"monkaS",symbol:"😰",animated:false,uses:2987,uploadedBy:"devnull99"},
+        {id:"e6",name:"pepehands",symbol:"😢",animated:false,uses:1876,uploadedBy:"arklight"},
+        {id:"e7",name:"ez_clap",symbol:"🤙",animated:true,uses:4521,uploadedBy:"xXProGamerXx"},
+        {id:"e8",name:"feelsbad",symbol:"😔",animated:false,uses:2134,uploadedBy:"moonlightdev"},
+        {id:"e9",name:"clap",symbol:"👏",animated:true,uses:3445,uploadedBy:"void_walker"},
+        {id:"e10",name:"weirdchamp",symbol:"🤨",animated:false,uses:1098,uploadedBy:"stellarcode"},
+        {id:"e11",name:"bigbrain",symbol:"🧠",animated:false,uses:876,uploadedBy:"devnull99"},
+        {id:"e12",name:"omegalul",symbol:"🤣",animated:true,uses:7654,uploadedBy:"xXProGamerXx"},
+        {id:"e13",name:"sadge",symbol:"😞",animated:false,uses:2341,uploadedBy:"arklight"},
+        {id:"e14",name:"hypers",symbol:"🎉",animated:true,uses:6123,uploadedBy:"moonlightdev"},
+        {id:"e15",name:"copium",symbol:"💊",animated:false,uses:3892,uploadedBy:"void_walker"},
+        {id:"e16",name:"kekw",symbol:"😹",animated:false,uses:5021,uploadedBy:"xXProGamerXx"},
+    ];
+
+    const NAV_SECTIONS = [
+        { label:"Server Settings", items:[{id:"overview",label:"Overview"},{id:"roles",label:"Roles"},{id:"emoji",label:"Emoji"},{id:"stickers",label:"Stickers"},{id:"soundboard",label:"Soundboard"}]},
+        { label:"Community", items:[{id:"widget",label:"Widget"},{id:"invites",label:"Invites"},{id:"integrations",label:"Integrations"}]},
+        { label:"User Management", items:[{id:"members",label:"Members"},{id:"bans",label:"Bans"}]},
+    ];
+
+    // ─── Atoms ─────────────────────────────────────────────────────────────────────
+    function Toggle({checked,onChange}){
+        return (
+            <button onClick={()=>onChange(!checked)} role="switch" aria-checked={checked} style={{
+                position:'relative',display:'inline-flex',alignItems:'center',width:44,height:24,borderRadius:12,
+                background:checked?'#23a55a':'#4e5058',border:'none',cursor:'pointer',transition:'background .15s',flexShrink:0,padding:0
+            }}>
+      <span style={{
+          display:'block',width:20,height:20,borderRadius:'50%',background:'#fff',
+          boxShadow:'0 1px 3px rgba(0,0,0,.4)',position:'absolute',
+          left:checked?22:2,transition:'left .15s'
+      }}/>
+            </button>
+        );
+    }
+
+    function FieldLabel({children}){
+        return <div style={{fontSize:12,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.08em',color:'var(--muted)',marginBottom:8}}>{children}</div>;
+    }
+
+    function TextInput({value,onChange,maxLength,placeholder,style}){
+        return <input value={value} onChange={e=>onChange(e.target.value)} maxLength={maxLength} placeholder={placeholder}
+                      style={{width:'100%',background:'var(--deep)',color:'var(--fg)',border:'1px solid var(--border)',borderRadius:4,padding:'10px 12px',fontSize:15,outline:'none',...style}}
+                      onFocus={e=>e.target.style.borderColor='var(--primary)'}
+                      onBlur={e=>e.target.style.borderColor='var(--border)'}/>;
+    }
+
+    // ─── Overview ──────────────────────────────────────────────────────────────────
+    function OverviewPanel(){
+        const [name,setName]=useState("Midnight Collective");
+        const [desc,setDesc]=useState("A community for developers, designers, and digital nomads. Share ideas, build cool things, and vibe together. Est. 2021.");
+        const [vanity,setVanity]=useState("midnight-collective");
+        const [hasChanges,setHasChanges]=useState(false);
+        const [saved,setSaved]=useState(false);
+        const [bannerHover,setBannerHover]=useState(false);
+        const [avatarHover,setAvatarHover]=useState(false);
+        const [welcome,setWelcome]=useState(true);
+        const [boost,setBoost]=useState(true);
+        const [sticker,setSticker]=useState(false);
+        const track=fn=>v=>{fn(v);setHasChanges(true);};
+        const save=()=>{setSaved(true);setHasChanges(false);setTimeout(()=>setSaved(false),2500);};
+
+        return (
+            <div style={{flex:1,overflowY:'auto',minHeight:0}}>
+                <div style={{maxWidth:740,margin:'0 auto',padding:'40px 40px'}}>
+                    <FieldLabel>Server Overview</FieldLabel>
+
+                    {/* Card */}
+                    <div style={{background:'var(--card)',borderRadius:8,overflow:'hidden',marginBottom:24}}>
+                        {/* Banner */}
+                        <div onMouseEnter={()=>setBannerHover(true)} onMouseLeave={()=>setBannerHover(false)}
+                             style={{height:136,background:'linear-gradient(135deg,#1a1b4b 0%,#2d1f6e 45%,#0d3b52 100%)',position:'relative',cursor:'pointer'}}>
+                            <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',gap:8,color:'#fff',fontSize:14,fontWeight:600,background:'rgba(0,0,0,.5)',opacity:bannerHover?1:0,transition:'opacity .15s'}}>
+                                📷 Change Banner
+                            </div>
+                            <button style={{position:'absolute',top:12,right:12,background:'rgba(0,0,0,.4)',border:'1px solid rgba(255,255,255,.2)',borderRadius:99,color:'#fff',padding:'5px 12px',fontSize:12,fontWeight:600}}>Remove</button>
+                        </div>
+                        {/* Avatar + fields */}
+                        <div style={{padding:'0 24px 24px'}}>
+                            <div style={{display:'flex',alignItems:'flex-end',gap:20,marginTop:-48,marginBottom:20}}>
+                                <div onMouseEnter={()=>setAvatarHover(true)} onMouseLeave={()=>setAvatarHover(false)}
+                                     style={{width:96,height:96,borderRadius:'50%',background:'linear-gradient(135deg,#5865f2,#8b5cf6)',border:'5px solid var(--card)',flexShrink:0,cursor:'pointer',position:'relative',display:'flex',alignItems:'center',justifyContent:'center',fontSize:40}}>
+                                    🌙
+                                    <div style={{position:'absolute',inset:0,borderRadius:'50%',background:'rgba(0,0,0,.6)',display:'flex',alignItems:'center',justifyContent:'center',opacity:avatarHover?1:0,transition:'opacity .15s',fontSize:22}}>📷</div>
+                                </div>
+                                <div style={{paddingBottom:4}}>
+                                    <div style={{fontWeight:700,fontSize:16,color:'var(--fg)'}}>Midnight Collective</div>
+                                    <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>PNG, JPG, GIF · Max 8 MB · Recommended 512×512</div>
+                                </div>
+                            </div>
+                            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20,marginBottom:20}}>
+                                <div>
+                                    <FieldLabel>Server Name</FieldLabel>
+                                    <TextInput value={name} onChange={track(setName)} maxLength={100}/>
+                                    <div style={{fontSize:12,color:'var(--muted)',marginTop:4,textAlign:'right'}}>{name.length}/100</div>
+                                </div>
+                                <div>
+                                    <FieldLabel>Vanity URL</FieldLabel>
+                                    <div style={{display:'flex',borderRadius:4,overflow:'hidden',border:'1px solid var(--border)'}}>
+                                        <span style={{background:'var(--deepest)',padding:'10px 12px',fontSize:14,color:'var(--muted)',borderRight:'1px solid var(--border)',whiteSpace:'nowrap'}}>discord.gg/</span>
+                                        <input value={vanity} onChange={e=>{setVanity(e.target.value);setHasChanges(true);}} style={{flex:1,background:'var(--deep)',color:'var(--fg)',border:'none',padding:'10px 12px',fontSize:14,outline:'none'}}/>
+                                    </div>
+                                </div>
+                            </div>
+                            <div>
+                                <FieldLabel>Server Description</FieldLabel>
+                                <textarea value={desc} onChange={e=>{setDesc(e.target.value);setHasChanges(true);}} maxLength={120} rows={3}
+                                          style={{width:'100%',background:'var(--deep)',color:'var(--fg)',border:'1px solid var(--border)',borderRadius:4,padding:'10px 12px',fontSize:15,outline:'none',resize:'none',fontFamily:'inherit'}}
+                                          onFocus={e=>e.target.style.borderColor='var(--primary)'}
+                                          onBlur={e=>e.target.style.borderColor='var(--border)'}/>
+                                <div style={{fontSize:12,color:'var(--muted)',marginTop:4,textAlign:'right'}}>{desc.length}/120</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* System Messages */}
+                    <div style={{background:'var(--card)',borderRadius:8,padding:24,marginBottom:24}}>
+                        <FieldLabel>System Messages</FieldLabel>
+                        <div style={{marginBottom:16}}>
+                            <FieldLabel>System Message Channel</FieldLabel>
+                            <button style={{display:'flex',alignItems:'center',gap:8,background:'var(--deep)',border:'1px solid var(--border)',borderRadius:4,padding:'10px 12px',fontSize:14,color:'var(--fg)',width:'100%',maxWidth:280,cursor:'pointer'}}>
+                                # <span style={{flex:1,textAlign:'left'}}>welcome</span> ▾
+                            </button>
+                        </div>
+                        {[
+                            {label:"Send a message when someone joins this server.",val:welcome,set:track(setWelcome)},
+                            {label:"Send a message when someone boosts this server.",val:boost,set:track(setBoost)},
+                            {label:"Reply to system messages with stickers.",val:sticker,set:track(setSticker)},
+                        ].map((item,i)=>(
+                            <div key={i} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 0',borderBottom:'1px solid var(--border)',gap:16}}>
+                                <span style={{fontSize:14,color:'var(--fg)'}}>{item.label}</span>
+                                <Toggle checked={item.val} onChange={item.set}/>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Stats */}
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:24}}>
+                        {[{l:"Members",v:"1,247",c:"#5865f2"},{l:"Online",v:"384",c:"#23a55a"},{l:"Boosts",v:"23",c:"#f47fff"},{l:"Channels",v:"47",c:"#faa61a"}].map(s=>(
+                            <div key={s.l} style={{background:'var(--card)',borderRadius:8,padding:20}}>
+                                <div style={{fontSize:28,fontWeight:700,color:s.c,lineHeight:1}}>{s.v}</div>
+                                <div style={{fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.08em',color:'var(--muted)',marginTop:4}}>{s.l}</div>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Danger zone */}
+                    <div style={{border:'1px solid rgba(240,71,71,.3)',borderRadius:8,padding:24}}>
+                        <div style={{fontSize:12,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.08em',color:'var(--red)',marginBottom:16}}>Danger Zone</div>
+                        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                            <div>
+                                <div style={{fontSize:14,fontWeight:600,color:'var(--fg)'}}>Delete This Server</div>
+                                <div style={{fontSize:13,color:'var(--muted)',marginTop:4}}>Once you delete a server, there is no going back.</div>
+                            </div>
+                            <button style={{background:'rgba(240,71,71,.1)',border:'1px solid rgba(240,71,71,.4)',borderRadius:4,color:'var(--red)',fontSize:14,fontWeight:600,padding:'8px 20px',cursor:'pointer'}}>Delete Server</button>
+                        </div>
+                    </div>
+                </div>
+
+                {hasChanges && (
+                    <div style={{position:'fixed',bottom:32,left:'50%',transform:'translateX(-50%)',background:'var(--deepest)',border:'1px solid var(--border)',borderRadius:8,padding:'14px 24px',display:'flex',alignItems:'center',gap:20,boxShadow:'0 8px 32px rgba(0,0,0,.6)',zIndex:100}}>
+                        <span style={{fontSize:15,color:'#faa61a'}}>⚠</span>
+                        <span style={{fontSize:14,color:'var(--fg)'}}>Careful — you have unsaved changes!</span>
+                        <button onClick={()=>setHasChanges(false)} style={{fontSize:14,color:'var(--muted)',cursor:'pointer'}}>Reset</button>
+                        <button onClick={save} style={{background:'#23a55a',border:'none',borderRadius:4,color:'#fff',fontSize:14,fontWeight:700,padding:'8px 20px',cursor:'pointer'}}>Save Changes</button>
+                    </div>
+                )}
+                {saved && (
+                    <div style={{position:'fixed',bottom:32,left:'50%',transform:'translateX(-50%)',background:'#23a55a',borderRadius:8,padding:'12px 20px',display:'flex',alignItems:'center',gap:10,boxShadow:'0 8px 32px rgba(0,0,0,.6)',zIndex:100}}>
+                        <span style={{color:'#fff',fontSize:14,fontWeight:700}}>✓ Changes saved!</span>
+                    </div>
+                )}
+            </div>
+        );
+    }
+
+    // ─── Roles ─────────────────────────────────────────────────────────────────────
+    function RolesPanel(){
+        const [roles,setRoles]=useState(INITIAL_ROLES);
+        const [sel,setSel]=useState(INITIAL_ROLES[0]);
+        const [tab,setTab]=useState("display");
+        const [draggedId,setDraggedId]=useState(null);
+        const [dragOverId,setDragOverId]=useState(null);
+        const [editName,setEditName]=useState(sel.name);
+        const [editColor,setEditColor]=useState(sel.color);
+        const [search,setSearch]=useState("");
+
+        useEffect(()=>{setEditName(sel.name);setEditColor(sel.color);},[sel.id]);
+
+        const drop=(targetId)=>{
+            if(!draggedId||draggedId===targetId){setDraggedId(null);setDragOverId(null);return;}
+            const from=roles.findIndex(r=>r.id===draggedId);
+            const to=roles.findIndex(r=>r.id===targetId);
+            const next=[...roles];const[moved]=next.splice(from,1);next.splice(to,0,moved);
+            setRoles(next.map((r,i)=>({...r,position:next.length-i})));
+            setDraggedId(null);setDragOverId(null);
+        };
+
+        const togglePerm=(key)=>{
+            const u={...sel,permissions:{...sel.permissions,[key]:!sel.permissions[key]}};
+            setSel(u);setRoles(roles.map(r=>r.id===u.id?u:r));
+        };
+
+        const addRole=()=>{
+            const nr={id:`r_${Date.now()}`,name:"new role",color:"#99aab5",memberCount:0,position:roles.length+1,hoist:false,mentionable:false,permissions:{view_channels:true,send_messages:true,read_history:true,connect:true,speak:true,add_reactions:true,use_vad:true}};
+            setRoles([nr,...roles]);setSel(nr);
+        };
+
+        const filtered=roles.filter(r=>r.name.toLowerCase().includes(search.toLowerCase()));
+
+        const s={
+            sideCol:{width:220,flexShrink:0,display:'flex',flexDirection:'column',background:'var(--card)',borderRight:'1px solid var(--border)'},
+            row:(active,dragging,over)=>({display:'flex',alignItems:'center',gap:10,padding:'8px 10px',borderRadius:4,cursor:'pointer',marginBottom:1,userSelect:'none',
+                background:active?'var(--accent)':'transparent',opacity:dragging?.5:1,
+                borderTop:over?'2px solid var(--primary)':'2px solid transparent',
+                transition:'background .1s'})
+        };
+
+        const MEMBER_NAMES=["xXProGamerXx","moonlightdev","void_walker","stellarcode","devnull99","arklight","syntaxx","nebulajane","prismcode","nullbyte"];
+        const MEMBER_COLORS=["#5865f2","#43b581","#faa61a","#f04747","#f47fff","#5865f2","#43b581","#faa61a","#f04747","#f47fff"];
+        const MEMBER_AVATARS=["🎮","🌙","🌌","⚡","🔮","🌑","💻","🌠","🎯","🛸"];
+
+        return (
+            <div style={{flex:1,display:'flex',minHeight:0,overflow:'hidden'}}>
+                {/* Role list */}
+                <div style={s.sideCol}>
+                    <div style={{padding:12,borderBottom:'1px solid var(--border)',display:'flex',flexDirection:'column',gap:8}}>
+                        <div style={{display:'flex',alignItems:'center',gap:8,background:'var(--deep)',borderRadius:4,padding:'8px 12px'}}>
+                            <span style={{color:'var(--muted)',fontSize:14}}>🔍</span>
+                            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search Roles"
+                                   style={{background:'none',border:'none',color:'var(--fg)',fontSize:14,outline:'none',flex:1,fontFamily:'inherit'}}/>
+                        </div>
+                        <button onClick={addRole} style={{display:'flex',alignItems:'center',justifyContent:'center',gap:6,background:'var(--primary)',borderRadius:4,color:'#fff',fontSize:14,fontWeight:700,padding:'8px 0',cursor:'pointer',border:'none'}}>
+                            + Create Role
+                        </button>
+                    </div>
+                    <div style={{padding:'8px 8px 0',fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.08em',color:'var(--muted)'}}>
+                        Roles — {roles.length}
+                    </div>
+                    <div style={{flex:1,overflowY:'auto',padding:'4px 8px 12px'}}>
+                        {filtered.map(role=>(
+                            <div key={role.id} draggable
+                                 onDragStart={()=>setDraggedId(role.id)}
+                                 onDragOver={e=>{e.preventDefault();setDragOverId(role.id);}}
+                                 onDrop={()=>drop(role.id)}
+                                 onDragEnd={()=>{setDraggedId(null);setDragOverId(null);}}
+                                 onClick={()=>{setSel(role);setTab("display");}}
+                                 style={s.row(sel.id===role.id,draggedId===role.id,dragOverId===role.id&&draggedId!==role.id)}
+                                 onMouseEnter={e=>{if(sel.id!==role.id)e.currentTarget.style.background='var(--hover)';}}
+                                 onMouseLeave={e=>{if(sel.id!==role.id)e.currentTarget.style.background='transparent';}}>
+                                <span style={{color:'var(--muted)',fontSize:12,cursor:'grab'}}>⠿</span>
+                                <div style={{width:12,height:12,borderRadius:'50%',background:role.color,flexShrink:0}}/>
+                                <span style={{fontSize:14,color:'var(--fg)',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{role.name}</span>
+                                <span style={{fontSize:11,color:'var(--muted)',fontVariantNumeric:'tabular-nums'}}>{role.memberCount}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                {/* Editor */}
+                <div style={{flex:1,minWidth:0,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+                    {/* Header */}
+                    <div style={{padding:'32px 32px 0',flexShrink:0}}>
+                        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
+                            <div style={{display:'flex',alignItems:'center',gap:12}}>
+                                <div style={{width:20,height:20,borderRadius:'50%',background:sel.color}}/>
+                                <span style={{fontSize:20,fontWeight:700,color:'var(--fg)'}}>{sel.name}</span>
+                                {sel.isAdmin&&<span style={{fontSize:11,fontWeight:700,background:'rgba(88,101,242,.2)',color:'#5865f2',padding:'3px 10px',borderRadius:99,textTransform:'uppercase',letterSpacing:'0.06em'}}>Administrator</span>}
+                            </div>
+                            <button style={{display:'flex',alignItems:'center',gap:6,color:'var(--red)',fontSize:13,fontWeight:600,padding:'7px 16px',borderRadius:4,border:'1px solid rgba(240,71,71,.4)',cursor:'pointer',background:'rgba(240,71,71,.08)'}}>🗑 Delete</button>
+                        </div>
+                        <div style={{display:'flex',borderBottom:'1px solid var(--border)'}}>
+                            {["display","permissions","members"].map(t=>(
+                                <button key={t} onClick={()=>setTab(t)} style={{padding:'12px 20px',fontSize:14,fontWeight:600,textTransform:'capitalize',cursor:'pointer',borderBottom:`2px solid ${tab===t?'var(--primary)':'transparent'}`,marginBottom:-1,color:tab===t?'var(--fg)':'var(--muted)',transition:'color .1s'}}>
+                                    {t}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div style={{flex:1,overflowY:'auto',padding:'24px 32px'}}>
+                        {tab==="display" && (
+                            <div style={{maxWidth:540,display:'flex',flexDirection:'column',gap:28}}>
+                                <div>
+                                    <FieldLabel>Role Name</FieldLabel>
+                                    <TextInput value={editName} onChange={setEditName} maxLength={100}/>
+                                </div>
+                                <div>
+                                    <FieldLabel>Role Color</FieldLabel>
+                                    <div style={{display:'flex',alignItems:'center',gap:16,marginBottom:16}}>
+                                        <div style={{width:48,height:48,borderRadius:8,background:editColor,border:'2px solid rgba(255,255,255,.15)',flexShrink:0}}/>
+                                        <div>
+                                            <div style={{fontSize:12,color:'var(--muted)',marginBottom:4}}>Hex value</div>
+                                            <input value={editColor} onChange={e=>setEditColor(e.target.value)} maxLength={7}
+                                                   style={{background:'var(--deep)',color:'var(--fg)',border:'1px solid var(--border)',borderRadius:4,padding:'8px 12px',fontSize:13,fontFamily:'monospace',width:110,outline:'none',textTransform:'uppercase'}}/>
+                                        </div>
+                                        <div>
+                                            <div style={{fontSize:12,color:'var(--muted)',marginBottom:4}}>Preview</div>
+                                            <span style={{fontSize:14,fontWeight:600,color:editColor}}>@{editName||"role"}</span>
+                                        </div>
+                                    </div>
+                                    <div style={{display:'grid',gridTemplateColumns:'repeat(10,1fr)',gap:8}}>
+                                        {ROLE_COLORS.map(c=>(
+                                            <button key={c} onClick={()=>setEditColor(c)} title={c}
+                                                    style={{width:32,height:32,borderRadius:6,background:c,border:editColor===c?'2px solid #fff':'2px solid transparent',cursor:'pointer',outline:editColor===c?'2px solid var(--primary)':'none',outlineOffset:2,transition:'transform .1s'}}/>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div>
+                                    <FieldLabel>Display Options</FieldLabel>
+                                    <div style={{background:'var(--deep)',borderRadius:8,overflow:'hidden'}}>
+                                        {[
+                                            {label:"Display role members separately from online members",sub:"This role is shown separately in the member list.",val:sel.hoist,key:"hoist"},
+                                            {label:"Allow anyone to @mention this role",sub:`Members can use @${editName||"role"} to ping everyone in this role.`,val:sel.mentionable,key:"mentionable"},
+                                        ].map((item,i)=>(
+                                            <div key={item.key} style={{display:'flex',alignItems:'flex-start',gap:20,padding:'16px 20px',borderBottom:i===0?'1px solid var(--border)':'none'}}>
+                                                <div style={{flex:1}}>
+                                                    <div style={{fontSize:14,fontWeight:600,color:'var(--fg)',marginBottom:4}}>{item.label}</div>
+                                                    <div style={{fontSize:13,color:'var(--muted)'}}>{item.sub}</div>
+                                                </div>
+                                                <Toggle checked={item.val} onChange={v=>{const u={...sel,[item.key]:v};setSel(u);setRoles(roles.map(r=>r.id===u.id?u:r));}}/>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div style={{display:'flex',gap:12}}>
+                                    <button style={{background:'var(--primary)',border:'none',borderRadius:4,color:'#fff',fontSize:14,fontWeight:700,padding:'10px 24px',cursor:'pointer'}}>Save Changes</button>
+                                    <button style={{background:'none',border:'none',color:'var(--muted)',fontSize:14,padding:'10px 16px',cursor:'pointer'}}>Reset</button>
+                                </div>
+                            </div>
+                        )}
+
+                        {tab==="permissions" && (
+                            <div style={{maxWidth:540}}>
+                                {sel.isAdmin&&(
+                                    <div style={{display:'flex',alignItems:'flex-start',gap:14,background:'rgba(250,166,26,.08)',border:'1px solid rgba(250,166,26,.25)',borderRadius:8,padding:'16px 20px',marginBottom:28}}>
+                                        <span style={{color:'#faa61a',fontSize:18,flexShrink:0}}>⚡</span>
+                                        <div>
+                                            <div style={{fontSize:14,fontWeight:700,color:'#faa61a',marginBottom:4}}>Administrator Permission Active</div>
+                                            <div style={{fontSize:13,color:'var(--muted)'}}>This role has every permission. Channel-specific overrides don't apply.</div>
+                                        </div>
+                                    </div>
+                                )}
+                                {PERMISSION_GROUPS.map(group=>(
+                                    <div key={group.label} style={{marginBottom:32}}>
+                                        <div style={{fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.08em',color:'var(--muted)',paddingBottom:12,borderBottom:'1px solid var(--border)',marginBottom:4}}>{group.label}</div>
+                                        {group.perms.map(perm=>(
+                                            <PermRow key={perm.key} label={perm.label} desc={perm.desc} checked={!!sel.permissions[perm.key]} disabled={!!sel.isAdmin} onChange={()=>togglePerm(perm.key)}/>
+                                        ))}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {tab==="members" && (
+                            <div style={{maxWidth:540}}>
+                                <div style={{display:'flex',alignItems:'center',gap:8,background:'var(--deep)',borderRadius:4,padding:'10px 14px',marginBottom:20}}>
+                                    <span style={{color:'var(--muted)'}}>🔍</span>
+                                    <input placeholder="Search Members" style={{background:'none',border:'none',color:'var(--fg)',fontSize:14,outline:'none',flex:1,fontFamily:'inherit'}}/>
+                                </div>
+                                <div style={{fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.08em',color:'var(--muted)',marginBottom:12}}>{sel.memberCount} Members</div>
+                                {Array.from({length:Math.min(sel.memberCount,10)},(_,i)=>(
+                                    <div key={i} style={{display:'flex',alignItems:'center',gap:14,padding:'10px 12px',borderRadius:4,cursor:'pointer'}}
+                                         onMouseEnter={e=>e.currentTarget.style.background='var(--hover)'}
+                                         onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                                        <div style={{width:36,height:36,borderRadius:'50%',background:MEMBER_COLORS[i],display:'flex',alignItems:'center',justifyContent:'center',fontSize:18,flexShrink:0}}>{MEMBER_AVATARS[i]}</div>
+                                        <div style={{flex:1}}>
+                                            <div style={{fontSize:14,fontWeight:600,color:'var(--fg)'}}>{MEMBER_NAMES[i]}</div>
+                                            <div style={{fontSize:12,color:'var(--muted)',fontFamily:'monospace'}}>#{String(1000+i*137)}</div>
+                                        </div>
+                                        <button style={{color:'var(--muted)',background:'none',border:'none',fontSize:16,cursor:'pointer',opacity:0.6}}>✕</button>
+                                    </div>
+                                ))}
+                                {sel.memberCount>10&&<div style={{textAlign:'center',padding:'16px 0',fontSize:13,color:'var(--muted)'}}>+{sel.memberCount-10} more members</div>}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    function PermRow({label,desc,checked,disabled,onChange}){
+        const [open,setOpen]=useState(false);
+        return (
+            <div style={{display:'flex',alignItems:'flex-start',gap:16,padding:'14px 8px',borderBottom:'1px solid rgba(255,255,255,.04)',opacity:disabled?.5:1}}>
+                <div style={{flex:1}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8}}>
+                        <span style={{fontSize:14,fontWeight:600,color:'var(--fg)'}}>{label}</span>
+                        <button onClick={()=>setOpen(!open)} style={{color:'var(--muted)',background:'none',border:'none',fontSize:13,cursor:'pointer',lineHeight:1}}>ℹ</button>
+                    </div>
+                    {open&&<p style={{fontSize:13,color:'var(--muted)',marginTop:6,lineHeight:1.5}}>{desc}</p>}
+                </div>
+                <Toggle checked={checked} onChange={disabled?()=>{}:onChange}/>
+            </div>
+        );
+    }
+
+    // ─── Emoji ─────────────────────────────────────────────────────────────────────
+    function EmojiPanel(){
+        const [emojis,setEmojis]=useState(INITIAL_EMOJIS);
+        const [search,setSearch]=useState("");
+        const [filter,setFilter]=useState("all");
+        const [selected,setSelected]=useState(new Set());
+        const [sortBy,setSortBy]=useState("uses");
+
+        const filtered=[...emojis]
+            .filter(e=>e.name.toLowerCase().includes(search.toLowerCase())&&(filter==="all"||(filter==="animated"?e.animated:!e.animated)))
+            .sort((a,b)=>sortBy==="uses"?b.uses-a.uses:a.name.localeCompare(b.name));
+
+        const toggleSel=(id)=>setSelected(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
+        const deleteSelected=()=>{setEmojis(e=>e.filter(em=>!selected.has(em.id)));setSelected(new Set());};
+
+        const SLOTS=50;
+        const staticCount=emojis.filter(e=>!e.animated).length;
+        const animCount=emojis.filter(e=>e.animated).length;
+
+        const tabBtn=(key,label)=>({
+            padding:'10px 16px',fontSize:14,fontWeight:600,cursor:'pointer',border:'none',fontFamily:'inherit',
+            background:filter===key||sortBy===key?'var(--accent)':'transparent',
+            color:filter===key||sortBy===key?'var(--fg)':'var(--muted)',transition:'all .1s'
+        });
+
+        return (
+            <div style={{flex:1,overflowY:'auto',minHeight:0}}>
+                <div style={{maxWidth:740,margin:'0 auto',padding:'40px 40px'}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:28}}>
+                        <div>
+                            <FieldLabel>Emoji</FieldLabel>
+                            <p style={{fontSize:14,color:'var(--muted)',marginTop:-4}}>Add up to {SLOTS} custom emojis to your server.</p>
+                        </div>
+                        <label style={{display:'flex',alignItems:'center',gap:8,background:'var(--primary)',borderRadius:4,color:'#fff',fontSize:14,fontWeight:700,padding:'10px 20px',cursor:'pointer'}}>
+                            ↑ Upload Emoji
+                            <input type="file" style={{display:'none'}} accept="image/*" multiple/>
+                        </label>
+                    </div>
+
+                    {/* Gauge */}
+                    <div style={{background:'var(--card)',borderRadius:8,padding:24,marginBottom:24}}>
+                        <div style={{display:'flex',justifyContent:'space-between',marginBottom:12}}>
+                            <span style={{fontSize:14,fontWeight:600,color:'var(--fg)'}}>Emoji Slots</span>
+                            <span style={{fontSize:14,fontFamily:'monospace',color:'var(--muted)'}}>{emojis.length} / {SLOTS}</span>
+                        </div>
+                        <div style={{height:10,background:'var(--deep)',borderRadius:5,overflow:'hidden'}}>
+                            <div style={{height:'100%',width:`${(emojis.length/SLOTS)*100}%`,background:emojis.length>40?'var(--red)':'var(--primary)',borderRadius:5,transition:'width .3s'}}/>
+                        </div>
+                        <div style={{display:'flex',gap:24,marginTop:12,fontSize:13,color:'var(--muted)'}}>
+                            <span>{staticCount} static</span>
+                            <span>{animCount} animated <span style={{color:'#f47fff'}}>✦ Nitro</span></span>
+                            <span>{SLOTS-emojis.length} slots remaining</span>
+                        </div>
+                    </div>
+
+                    {/* Controls */}
+                    <div style={{display:'flex',gap:12,marginBottom:16,flexWrap:'wrap',alignItems:'center'}}>
+                        <div style={{display:'flex',alignItems:'center',gap:8,background:'var(--deep)',borderRadius:4,padding:'10px 14px',flex:1,minWidth:180}}>
+                            <span style={{color:'var(--muted)'}}>🔍</span>
+                            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search emojis"
+                                   style={{background:'none',border:'none',color:'var(--fg)',fontSize:14,outline:'none',flex:1,fontFamily:'inherit'}}/>
+                        </div>
+                        <div style={{display:'flex',background:'var(--deep)',borderRadius:4,overflow:'hidden'}}>
+                            {["all","animated","static"].map(f=>(
+                                <button key={f} onClick={()=>setFilter(f)} style={{...tabBtn(f,f),textTransform:'capitalize'}}>{f}</button>
+                            ))}
+                        </div>
+                        <div style={{display:'flex',background:'var(--deep)',borderRadius:4,overflow:'hidden'}}>
+                            <button onClick={()=>setSortBy("uses")} style={tabBtn("uses","uses")}>Popular</button>
+                            <button onClick={()=>setSortBy("name")} style={tabBtn("name","name")}>A–Z</button>
+                        </div>
+                        {selected.size>0&&(
+                            <button onClick={deleteSelected} style={{marginLeft:'auto',display:'flex',alignItems:'center',gap:6,background:'var(--red)',border:'none',borderRadius:4,color:'#fff',fontSize:14,fontWeight:700,padding:'10px 16px',cursor:'pointer'}}>
+                                🗑 Delete {selected.size}
+                            </button>
+                        )}
+                    </div>
+
+                    {/* Table head */}
+                    <div style={{display:'grid',gridTemplateColumns:'20px 1fr 140px 80px 40px',gap:'0 16px',padding:'8px 16px',borderBottom:'1px solid var(--border)',marginBottom:4}}>
+                        {["","Emoji","Uploaded By","Uses",""].map((h,i)=>(
+                            <span key={i} style={{fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.08em',color:'var(--muted)',textAlign:i===3?'right':'left'}}>{h}</span>
+                        ))}
+                    </div>
+
+                    {filtered.map(emoji=>{
+                        const isSel=selected.has(emoji.id);
+                        return (
+                            <div key={emoji.id} onClick={()=>toggleSel(emoji.id)}
+                                 style={{display:'grid',gridTemplateColumns:'20px 1fr 140px 80px 40px',gap:'0 16px',alignItems:'center',padding:'12px 16px',borderRadius:6,cursor:'pointer',marginBottom:2,
+                                     background:isSel?'rgba(88,101,242,.12)':'transparent',border:isSel?'1px solid rgba(88,101,242,.25)':'1px solid transparent',transition:'background .1s'}}
+                                 onMouseEnter={e=>{if(!isSel)e.currentTarget.style.background='rgba(255,255,255,.03)';}}
+                                 onMouseLeave={e=>{if(!isSel)e.currentTarget.style.background='transparent';}}>
+                                <div style={{width:16,height:16,borderRadius:3,border:`2px solid ${isSel?'var(--primary)':'rgba(255,255,255,.3)'}`,background:isSel?'var(--primary)':'transparent',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'#fff'}}>
+                                    {isSel&&"✓"}
+                                </div>
+                                <div style={{display:'flex',alignItems:'center',gap:14,minWidth:0}}>
+                                    <span style={{fontSize:28,width:36,textAlign:'center',lineHeight:1}}>{emoji.symbol}</span>
+                                    <div>
+                                        <div style={{fontSize:14,fontWeight:600,color:'var(--fg)'}}>{emoji.name}</div>
+                                        <div style={{display:'flex',alignItems:'center',gap:8,marginTop:3}}>
+                                            {emoji.animated&&<span style={{fontSize:10,fontWeight:700,background:'rgba(250,166,26,.15)',color:'#faa61a',padding:'1px 6px',borderRadius:3,textTransform:'uppercase',letterSpacing:'0.06em'}}>GIF</span>}
+                                            <span style={{fontSize:12,color:'var(--muted)',fontFamily:'monospace'}}>:{emoji.name}:</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <span style={{fontSize:13,color:'var(--muted)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{emoji.uploadedBy}</span>
+                                <span style={{fontSize:13,fontFamily:'monospace',color:'var(--muted)',textAlign:'right',fontVariantNumeric:'tabular-nums'}}>{emoji.uses.toLocaleString()}</span>
+                                <div style={{display:'flex',justifyContent:'flex-end'}}>
+                                    <button onClick={e=>{e.stopPropagation();setEmojis(prev=>prev.filter(em=>em.id!==emoji.id));}}
+                                            style={{color:'var(--muted)',background:'none',border:'none',fontSize:15,cursor:'pointer',opacity:0.5,padding:4}}>🗑</button>
+                                </div>
+                            </div>
+                        );
+                    })}
+                    {filtered.length===0&&(
+                        <div style={{textAlign:'center',padding:'48px 0',color:'var(--muted)'}}>
+                            <div style={{fontSize:36,marginBottom:12,opacity:.3}}>😊</div>
+                            <p style={{fontSize:14}}>No emojis found</p>
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    }
+
+    // ─── Placeholder ───────────────────────────────────────────────────────────────
+    const PLACEHOLDER_META={
+        stickers:{icon:"⭐",title:"Stickers",desc:"Upload custom stickers that members can use in messages. Server boosters unlock more slots."},
+        soundboard:{icon:"🎵",title:"Soundboard",desc:"Upload custom sounds that members can play in voice channels to liven up conversations."},
+        widget:{icon:"🌐",title:"Widget",desc:"Embed a live server widget on your website showing online members and a join button."},
+        invites:{icon:"#",title:"Invites",desc:"Manage active invite links and see who used them to join your server."},
+        integrations:{icon:"🔌",title:"Integrations",desc:"Connect external apps — Twitch, YouTube, GitHub — to post updates directly in your server."},
+        members:{icon:"👥",title:"Members",desc:"Browse all server members, search by name or role, and manage their permissions."},
+        bans:{icon:"🚫",title:"Bans",desc:"Review and lift bans. Banned members can't rejoin until you remove their ban."},
+    };
+
+    function PlaceholderPanel({tab}){
+        const meta=PLACEHOLDER_META[tab]||{icon:"⚙",title:tab,desc:""};
+        return (
+            <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:20,padding:48,textAlign:'center'}}>
+                <div style={{width:80,height:80,borderRadius:'50%',background:'var(--card)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:32}}>{meta.icon}</div>
+                <div>
+                    <h2 style={{fontSize:20,fontWeight:700,color:'var(--fg)',marginBottom:8}}>{meta.title}</h2>
+                    <p style={{fontSize:14,color:'var(--muted)',maxWidth:360,lineHeight:1.6}}>{meta.desc}</p>
+                </div>
+                <button style={{display:'flex',alignItems:'center',gap:8,background:'var(--primary)',border:'none',borderRadius:4,color:'#fff',fontSize:14,fontWeight:700,padding:'10px 24px',cursor:'pointer'}}>
+                    ↗ Manage {meta.title}
+                </button>
+            </div>
+        );
+    }
+
+    // ─── Root App ──────────────────────────────────────────────────────────────────
+    function App(){
+        const [activeTab,setActiveTab]=useState("overview");
+
+        return (
+            <div style={{width:'100%',height:'100%',display:'flex',background:'var(--bg)',overflow:'hidden'}}>
+                {/* Nav sidebar */}
+                <div style={{width:232,flexShrink:0,display:'flex',flexDirection:'column',background:'var(--sidebar)'}}>
+                    {/* Server header */}
+                    <div style={{padding:'0 10px',paddingTop:24,paddingBottom:12}}>
+                        <div style={{display:'flex',alignItems:'center',gap:12,padding:'10px 10px',borderRadius:4,cursor:'pointer'}}
+                             onMouseEnter={e=>e.currentTarget.style.background='var(--hover)'}
+                             onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                            <div style={{width:40,height:40,borderRadius:'50%',background:'linear-gradient(135deg,#5865f2,#8b5cf6)',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:20}}>🌙</div>
+                            <div style={{flex:1,minWidth:0}}>
+                                <div style={{fontWeight:700,fontSize:14,color:'var(--fg)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',lineHeight:1.2}}>Midnight Collective</div>
+                                <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>Server Settings</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <nav style={{flex:1,overflowY:'auto',padding:'0 10px 16px'}}>
+                        {NAV_SECTIONS.map(section=>(
+                            <div key={section.label} style={{marginBottom:20}}>
+                                <div style={{fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.08em',color:'var(--muted)',padding:'0 10px',marginBottom:4}}>{section.label}</div>
+                                {section.items.map(item=>(
+                                    <button key={item.id} onClick={()=>setActiveTab(item.id)}
+                                            style={{width:'100%',textAlign:'left',padding:'6px 10px',borderRadius:4,fontSize:15,fontWeight:500,color:activeTab===item.id?'var(--fg)':'var(--muted)',background:activeTab===item.id?'var(--accent)':'transparent',border:'none',cursor:'pointer',fontFamily:'inherit',display:'block',marginBottom:1,transition:'background .1s'}}
+                                            onMouseEnter={e=>{if(activeTab!==item.id)e.currentTarget.style.background='var(--hover)';}}
+                                            onMouseLeave={e=>{if(activeTab!==item.id)e.currentTarget.style.background='transparent';}}>
+                                        {item.label}
+                                    </button>
+                                ))}
+                            </div>
+                        ))}
+                        <div style={{borderTop:'1px solid var(--border)',paddingTop:12,marginTop:4}}>
+                            <button style={{width:'100%',textAlign:'left',padding:'6px 10px',borderRadius:4,fontSize:15,fontWeight:500,color:'var(--red)',background:'transparent',border:'none',cursor:'pointer',fontFamily:'inherit'}}>Delete Server</button>
+                        </div>
+                    </nav>
+
+                    {/* User */}
+                    <div style={{padding:'12px 16px',borderTop:'1px solid var(--border)',display:'flex',alignItems:'center',gap:10}}>
+                        <div style={{position:'relative',flexShrink:0}}>
+                            <div style={{width:32,height:32,borderRadius:'50%',background:'var(--primary)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:14}}>🌙</div>
+                            <div style={{position:'absolute',bottom:-1,right:-1,width:13,height:13,borderRadius:'50%',background:'#23a55a',border:'2px solid var(--sidebar)'}}/>
+                        </div>
+                        <div>
+                            <div style={{fontSize:13,fontWeight:600,color:'var(--fg)',lineHeight:1}}>moonlightdev</div>
+                            <div style={{fontSize:11,color:'var(--muted)',fontFamily:'monospace',marginTop:2}}>#0042</div>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Content */}
+                <div style={{flex:1,minWidth:0,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+                    {activeTab==="overview"&&<OverviewPanel/>}
+                    {activeTab==="roles"&&<RolesPanel/>}
+                    {activeTab==="emoji"&&<EmojiPanel/>}
+                    {!["overview","roles","emoji"].includes(activeTab)&&<PlaceholderPanel tab={activeTab}/>}
+                </div>
+
+                {/* Close */}
+                <div style={{display:'flex',flexDirection:'column',alignItems:'center',padding:'24px 20px 0 16px',flexShrink:0}}>
+                    <button style={{width:40,height:40,borderRadius:'50%',border:'2px solid rgba(255,255,255,.2)',background:'none',color:'var(--muted)',fontSize:18,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',transition:'all .15s'}}
+                            onMouseEnter={e=>{e.currentTarget.style.borderColor='rgba(255,255,255,.5)';e.currentTarget.style.color='var(--fg)';}}
+                            onMouseLeave={e=>{e.currentTarget.style.borderColor='rgba(255,255,255,.2)';e.currentTarget.style.color='var(--muted)';}}>
+                        ✕
+                    </button>
+                    <span style={{fontSize:11,color:'var(--muted)',marginTop:6,fontFamily:'monospace',letterSpacing:'0.05em'}}>ESC</span>
+                </div>
+            </div>
+        );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>

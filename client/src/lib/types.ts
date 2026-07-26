@@ -78,11 +78,13 @@ export type CtxItem =
   | { header: string; mod?: boolean }
   | { divider: true };
 
-/// A namespace-scoped role definition (name + color + caps + hoist + position).
+/// A namespace-scoped role definition (name + color + caps + hoist + pingable + position).
 export type RoleDefC = {
   name: string;
   color: string;
   caps: string[];
   hoist: boolean;
+  /// Whether members may @-mention this role to ping its holders (§9.3).
+  pingable: boolean;
   position: number;
 };

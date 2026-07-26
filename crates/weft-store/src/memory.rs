@@ -93,8 +93,8 @@ fn email_domain(email: &str) -> String {
         .to_lowercase()
 }
 
-/// A stored role's value: (color, caps, hoist, position).
-type RoleEntry = (String, Vec<String>, bool, i32);
+/// A stored role's value: (color, caps, hoist, pingable, position).
+type RoleEntry = (String, Vec<String>, bool, bool, i32);
 
 #[derive(Default)]
 struct Inner {
@@ -1963,6 +1963,7 @@ impl MembershipStore for MemoryStore {
 
 #[async_trait]
 impl RoleStore for MemoryStore {
+    #[allow(clippy::too_many_arguments)]
     async fn set_role(
         &self,
         scope: &str,
@@ -1970,12 +1971,13 @@ impl RoleStore for MemoryStore {
         color: &str,
         caps: &[String],
         hoist: bool,
+        pingable: bool,
         position: i32,
     ) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         inner.roles.entry(scope.to_string()).or_default().insert(
             name.to_string(),
-            (color.to_string(), caps.to_vec(), hoist, position),
+            (color.to_string(), caps.to_vec(), hoist, pingable, position),
         );
         Ok(())
     }
@@ -1985,7 +1987,7 @@ impl RoleStore for MemoryStore {
         if let Some(defs) = inner.roles.get_mut(scope) {
             for (i, name) in order.iter().enumerate() {
                 if let Some(role) = defs.get_mut(name) {
-                    role.3 = i as i32;
+                    role.4 = i as i32;
                 }
             }
         }
@@ -2046,11 +2048,12 @@ impl RoleStore for MemoryStore {
             .map(|defs| {
                 let mut out: Vec<RoleDef> = defs
                     .iter()
-                    .map(|(name, (color, caps, hoist, position))| RoleDef {
+                    .map(|(name, (color, caps, hoist, pingable, position))| RoleDef {
                         name: name.clone(),
                         color: color.clone(),
                         caps: caps.clone(),
                         hoist: *hoist,
+                        pingable: *pingable,
                         position: *position,
                     })
                     .collect();

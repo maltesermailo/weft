@@ -44,13 +44,15 @@ pub enum Capability {
     Nick,
     /// Set ANY member's per-namespace display name (moderator, §10.3).
     ManageNicks,
+    /// Fire an `@everyone` / `@here` ping that notifies the whole scope (§9.3).
+    PingEveryone,
     /// `grant:<cap>` — may delegate the inner capability.
     Grant(Box<Capability>),
 }
 
 impl Capability {
     /// The standard set, sans `grant:` (which composes over these).
-    pub const STANDARD: [Capability; 24] = [
+    pub const STANDARD: [Capability; 25] = [
         Capability::Send,
         Capability::EditOwn,
         Capability::DeleteOwn,
@@ -75,6 +77,7 @@ impl Capability {
         Capability::Listen,
         Capability::Nick,
         Capability::ManageNicks,
+        Capability::PingEveryone,
     ];
 
     fn base_str(&self) -> Option<&'static str> {
@@ -103,6 +106,7 @@ impl Capability {
             Capability::Listen => "listen",
             Capability::Nick => "nick",
             Capability::ManageNicks => "manage-nicks",
+            Capability::PingEveryone => "ping-everyone",
             Capability::Grant(_) => return None,
         })
     }

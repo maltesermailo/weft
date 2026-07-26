@@ -784,6 +784,7 @@ pub trait MembershipStore: Send + Sync {
 #[async_trait]
 pub trait RoleStore: Send + Sync {
     /// Define or replace a role at a scope. Idempotent on `(scope, name)`.
+    #[allow(clippy::too_many_arguments)]
     async fn set_role(
         &self,
         scope: &str,
@@ -791,6 +792,7 @@ pub trait RoleStore: Send + Sync {
         color: &str,
         caps: &[String],
         hoist: bool,
+        pingable: bool,
         position: i32,
     ) -> Result<(), StoreError>;
 

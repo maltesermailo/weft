@@ -11,6 +11,7 @@ impl<S: ControlStream> Session<S> {
         color: String,
         caps: String,
         hoist: bool,
+        pingable: bool,
         position: i32,
         name: String,
         account: Account,
@@ -43,7 +44,15 @@ impl<S: ControlStream> Session<S> {
         if let Err(e) = self
             .ctx
             .roles
-            .set_role(&scope, &name, &color, &cap_strings, hoist, position)
+            .set_role(
+                &scope,
+                &name,
+                &color,
+                &cap_strings,
+                hoist,
+                pingable,
+                position,
+            )
             .await
         {
             return self.internal(label, &e).await;
@@ -369,6 +378,7 @@ impl<S: ControlStream> Session<S> {
                     color: role.color,
                     caps: role.caps.join(","),
                     hoist: role.hoist,
+                    pingable: role.pingable,
                     position: role.position,
                     name: role.name,
                 },

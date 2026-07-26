@@ -127,7 +127,7 @@ export type WeftEvent =
   | { kind: "call-state"; user: string; state: string }
   | { kind: "call-media"; room: string; mode: string; token: string; endpoint: string | null }
   | { kind: "caps"; account: string; scope: string; caps: string }
-  | { kind: "role"; scope: string; color: string; caps: string; hoist: boolean; position: number; name: string }
+  | { kind: "role"; scope: string; color: string; caps: string; hoist: boolean; pingable: boolean; position: number; name: string }
   | { kind: "role-member"; scope: string; account: string; roles: string }
   | { kind: "chanmeta"; channel: string; key: string; value: string }
   | {
@@ -732,10 +732,11 @@ export function roleCreate(
   color: string,
   caps: string,
   hoist: boolean,
+  pingable: boolean,
   position: number,
   name: string,
 ) {
-  return invoke("role_create", { scope, color, caps, hoist, position, name });
+  return invoke("role_create", { scope, color, caps, hoist, pingable, position, name });
 }
 /// Reorder roles: positions are set from the order of `names` (§6.5).
 export function rolesReorder(scope: string, names: string[]) {

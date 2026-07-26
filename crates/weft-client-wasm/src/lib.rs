@@ -303,6 +303,7 @@ impl WeftClient {
                 &arg("color"),
                 &arg("caps"),
                 flag("hoist"),
+                flag("pingable"),
                 num("position") as i32,
                 &arg("name"),
             )?,

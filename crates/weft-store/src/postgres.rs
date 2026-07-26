@@ -3213,6 +3213,7 @@ impl MembershipStore for PgStore {
 
 #[async_trait]
 impl RoleStore for PgStore {
+    #[allow(clippy::too_many_arguments)]
     async fn set_role(
         &self,
         scope: &str,
@@ -3220,19 +3221,22 @@ impl RoleStore for PgStore {
         color: &str,
         caps: &[String],
         hoist: bool,
+        pingable: bool,
         position: i32,
     ) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO weft_roles (scope, name, color, caps, hoist, position) \
-             VALUES ($1,$2,$3,$4,$5,$6) \
+            "INSERT INTO weft_roles (scope, name, color, caps, hoist, pingable, position) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7) \
              ON CONFLICT (scope, name) DO UPDATE SET color = EXCLUDED.color, \
-             caps = EXCLUDED.caps, hoist = EXCLUDED.hoist, position = EXCLUDED.position",
+             caps = EXCLUDED.caps, hoist = EXCLUDED.hoist, pingable = EXCLUDED.pingable, \
+             position = EXCLUDED.position",
         )
         .bind(scope)
         .bind(name)
         .bind(color)
         .bind(caps.join(","))
         .bind(hoist)
+        .bind(pingable)
         .bind(position)
         .execute(&self.pool)
         .await
@@ -3301,7 +3305,7 @@ impl RoleStore for PgStore {
 
     async fn roles(&self, scope: &str) -> Result<Vec<RoleDef>, StoreError> {
         let rows = sqlx::query(
-            "SELECT name, color, caps, hoist, position FROM weft_roles \
+            "SELECT name, color, caps, hoist, pingable, position FROM weft_roles \
              WHERE scope = $1 ORDER BY position, name",
         )
         .bind(scope)
@@ -3321,6 +3325,7 @@ impl RoleStore for PgStore {
                         .map(str::to_string)
                         .collect(),
                     hoist: r.get::<bool, _>("hoist"),
+                    pingable: r.get::<bool, _>("pingable"),
                     position: r.get::<i32, _>("position"),
                 }
             })

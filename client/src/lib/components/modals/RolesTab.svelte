@@ -39,7 +39,7 @@
 
   // ---- selection + edit draft ----
   let selected = $state<string | null>(null);
-  let draft = $state({ name: "", color: "", caps: [] as string[], hoist: false });
+  let draft = $state({ name: "", color: "", caps: [] as string[], hoist: false, pingable: false });
   const editing = $derived(roles.find((r) => r.name === selected) ?? null);
 
   function select(r: RoleDefC) {
@@ -48,7 +48,7 @@
       return;
     }
     selected = r.name;
-    draft = { name: r.name, color: r.color, caps: [...r.caps], hoist: r.hoist };
+    draft = { name: r.name, color: r.color, caps: [...r.caps], hoist: r.hoist, pingable: r.pingable };
   }
   const toggleDraftCap = (c: string) =>
     (draft.caps = draft.caps.includes(c) ? draft.caps.filter((x) => x !== c) : [...draft.caps, c]);
@@ -58,6 +58,7 @@
       (draft.name.trim() !== editing.name ||
         draft.color !== editing.color ||
         draft.hoist !== editing.hoist ||
+        draft.pingable !== editing.pingable ||
         !sameCaps(draft.caps, editing.caps)),
   );
 
@@ -68,6 +69,7 @@
       color: draft.color,
       caps: draft.caps,
       hoist: draft.hoist,
+      pingable: draft.pingable,
     });
     selected = null; // the refreshed ROLES batch is the confirmation
   }
@@ -153,6 +155,7 @@
             <span class="role-caps">{r.caps.join(" · ") || "no permissions"}</span>
           </span>
           {#if r.hoist}<span class="role-flag" title="Shown separately in the member list">★</span>{/if}
+          {#if r.pingable}<span class="role-flag" title="Members can @-mention this role">@</span>{/if}
         </button>
       </div>
 
@@ -183,6 +186,11 @@
           <label class="hoist-row">
             <input type="checkbox" bind:checked={draft.hoist} />
             Display this role's members separately in the sidebar
+          </label>
+
+          <label class="hoist-row">
+            <input type="checkbox" bind:checked={draft.pingable} />
+            Allow members to @-mention this role to notify its holders
           </label>
 
           <div class="field-label">Permissions</div>
@@ -239,6 +247,10 @@
 <label class="hoist-row">
   <input type="checkbox" bind:checked={app.newRoleHoist} />
   Display this role's members separately in the sidebar
+</label>
+<label class="hoist-row">
+  <input type="checkbox" bind:checked={app.newRolePingable} />
+  Allow members to @-mention this role to notify its holders
 </label>
 <div class="field-label">Permissions</div>
 <CapChecklist caps={CAPS} selected={app.newRoleCaps} onToggle={app.toggleNewRoleCap} />

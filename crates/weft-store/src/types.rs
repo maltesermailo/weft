@@ -200,6 +200,8 @@ pub struct RoleDef {
     pub caps: Vec<String>,
     /// Discord-style: display this role's members as a separate member-list group.
     pub hoist: bool,
+    /// Whether members may `@`-mention this role to notify its holders (§9.3).
+    pub pingable: bool,
     /// Sort position (ascending) in the role list + member-list grouping.
     pub position: i32,
 }

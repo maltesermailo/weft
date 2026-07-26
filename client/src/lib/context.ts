@@ -396,6 +396,7 @@ export interface AppCtx {
   newRoleColor: string;
   readonly newRoleCaps: string[];
   newRoleHoist: boolean;
+  newRolePingable: boolean;
   toggleNewRoleCap(c: string): void;
   nsDelegSubject: string;
   nsNewOwner: string;
@@ -412,7 +413,7 @@ export interface AppCtx {
   reorderRoles(names: string[]): void;
   /// Apply an edit to an existing role. A changed `name` renames in place, so
   /// the role keeps its members and issued caps (§6.5).
-  saveRole(role: RoleDefC, patch: { name: string; color: string; caps: string[]; hoist: boolean }): void;
+  saveRole(role: RoleDefC, patch: { name: string; color: string; caps: string[]; hoist: boolean; pingable: boolean }): void;
   deleteRole(name: string): void;
   /** The implicit @everyone role's current caps at the active server. */
   everyoneCaps(): string[];

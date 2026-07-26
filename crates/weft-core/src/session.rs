@@ -941,11 +941,14 @@ impl<S: ControlStream> Session<S> {
                 color,
                 caps,
                 hoist,
+                pingable,
                 position,
                 name,
             } => {
-                self.on_role_create(label, scope, color, caps, hoist, position, name, account)
-                    .await
+                self.on_role_create(
+                    label, scope, color, caps, hoist, pingable, position, name, account,
+                )
+                .await
             }
             Command::RolesReorder { scope, order } => {
                 self.on_roles_reorder(label, scope, order, account).await

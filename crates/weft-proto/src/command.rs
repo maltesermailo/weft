@@ -212,6 +212,8 @@ pub enum Command {
         caps: String,
         /// Discord-style "display separately in the member list" (§6.5).
         hoist: bool,
+        /// Whether members may `@`-mention this role to notify its holders (§9.3).
+        pingable: bool,
         /// Sort position in the role list / member-list grouping (§6.5).
         position: i32,
         name: String,
@@ -1000,12 +1002,17 @@ impl Command {
                             });
                         }
                         // Optional metadata as key=value middle params (like
-                        // INVITE MINT): `hoist=1 pos=<n>`. Absent ⇒ defaults.
+                        // INVITE MINT): `hoist=1 pingable=1 pos=<n>`. Absent ⇒ defaults.
                         let mut hoist = false;
+                        let mut pingable = false;
                         let mut position = 0i32;
                         while let Some(param) = args.opt() {
                             if let Some(v) = param.strip_prefix("hoist=") {
                                 hoist = v == "1"
+                                    || v.eq_ignore_ascii_case("yes")
+                                    || v.eq_ignore_ascii_case("true");
+                            } else if let Some(v) = param.strip_prefix("pingable=") {
+                                pingable = v == "1"
                                     || v.eq_ignore_ascii_case("yes")
                                     || v.eq_ignore_ascii_case("true");
                             } else if let Some(v) = param.strip_prefix("pos=") {
@@ -1021,6 +1028,7 @@ impl Command {
                             color,
                             caps,
                             hoist,
+                            pingable,
                             position,
                             name,
                         })
@@ -2009,6 +2017,7 @@ impl Command {
                 color,
                 caps,
                 hoist,
+                pingable,
                 position,
                 name,
             } => {
@@ -2026,6 +2035,7 @@ impl Command {
                         color.clone(),
                         caps.clone(),
                         format!("hoist={}", if *hoist { 1 } else { 0 }),
+                        format!("pingable={}", if *pingable { 1 } else { 0 }),
                         format!("pos={position}"),
                     ],
                     Some(name.clone()),
@@ -2781,6 +2791,7 @@ mod tests {
             color: "#e8b93d".to_string(),
             caps: "mute,ban,kick,pin".to_string(),
             hoist: true,
+            pingable: true,
             position: 3,
             name: "Head Moderator".to_string(),
         }));

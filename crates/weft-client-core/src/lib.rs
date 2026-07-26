@@ -208,6 +208,7 @@ pub enum ClientEvent {
         color: String,
         caps: String,
         hoist: bool,
+        pingable: bool,
         position: i32,
         name: String,
     },
@@ -769,6 +770,7 @@ pub fn on_line<E: EventSink>(
             color,
             caps,
             hoist,
+            pingable,
             position,
             name,
         } => sink.emit(ClientEvent::Role {
@@ -776,6 +778,7 @@ pub fn on_line<E: EventSink>(
             color,
             caps,
             hoist,
+            pingable,
             position,
             name,
         }),
@@ -1408,11 +1411,13 @@ pub fn build_roles(scope: &str) -> Result<String, String> {
     .map_err(|e| e.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_role_create(
     scope: &str,
     color: &str,
     caps: &str,
     hoist: bool,
+    pingable: bool,
     position: i32,
     name: &str,
 ) -> Result<String, String> {
@@ -1421,6 +1426,7 @@ pub fn build_role_create(
         color: color.to_string(),
         caps: caps.to_string(),
         hoist,
+        pingable,
         position,
         name: name.to_string(),
     })

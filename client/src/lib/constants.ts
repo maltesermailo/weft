@@ -19,7 +19,8 @@ export const REPORT_CATEGORIES = [
 /// The full standard capability set (§10.4), for role/grant pickers.
 export const CAPS = [
   "send", "react", "attach", "edit-own", "delete-own", "delete-any", "pin", "invite",
-  "nick", "manage-nicks", "mute", "ban", "kick", "policy", "view", "chan-create", "reports", "ns-admin",
+  "nick", "manage-nicks", "ping-everyone", "mute", "ban", "kick", "policy", "view", "chan-create",
+  "reports", "ns-admin",
 ];
 
 /// Channel-relevant capabilities for per-channel permission editing.

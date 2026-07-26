@@ -691,11 +691,12 @@ fn role_create(
     color: String,
     caps: String,
     hoist: bool,
+    pingable: bool,
     position: i32,
     name: String,
 ) -> Result<(), String> {
     conn.send(weft::build_role_create(
-        &scope, &color, &caps, hoist, position, &name,
+        &scope, &color, &caps, hoist, pingable, position, &name,
     )?)
 }
 
