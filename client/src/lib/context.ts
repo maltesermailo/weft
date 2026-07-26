@@ -271,6 +271,12 @@ export interface AppCtx {
 
   // ---- message list / items ----
   readonly loadingHistory: string | null;
+  /** A channel record by name — each kept-alive MessageList reads its own. */
+  channelRecord(name: string): Channel | undefined;
+  /** Fetch a channel's history page (first open / paging older). Single-flight. */
+  loadHistory(channel: string, initial: boolean): void;
+  /** Epoch-ms read boundary the active channel opened at (for the unread jump). */
+  readonly newBoundary: number | null;
   editingKey: number | null;
   editDraft: string;
   pickerKey: number | null;

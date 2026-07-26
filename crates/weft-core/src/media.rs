@@ -23,10 +23,40 @@ pub const MEDIA_MAX_BYTES: u64 = 500 * 1024 * 1024;
 
 /// Parse a `weft-media://<origin>/<b3-hash>` reference into `(origin, hash)`.
 /// `None` if malformed. Used to validate `attach.N=` and gate fetches (§13).
+///
+/// A `#…`/`?…` suffix is client-carried metadata (e.g. image dimensions,
+/// `weft-media://net/hash#800x600`) and is NOT part of the content address — it
+/// is stripped here so gating, refcounting and fetches all key on the true hash.
 pub fn parse_media_uri(uri: &str) -> Option<(&str, &str)> {
     let rest = uri.strip_prefix("weft-media://")?;
+    let rest = rest.split(['#', '?']).next().unwrap_or(rest);
     let (origin, hash) = rest.split_once('/')?;
     (!origin.is_empty() && !hash.is_empty() && !hash.contains('/')).then_some((origin, hash))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_media_uri;
+
+    #[test]
+    fn media_uri_parse_and_dims_suffix() {
+        assert_eq!(
+            parse_media_uri("weft-media://net/abc"),
+            Some(("net", "abc"))
+        );
+        // A client-carried dimensions suffix is ignored — the hash stays clean.
+        assert_eq!(
+            parse_media_uri("weft-media://net/abc#800x600"),
+            Some(("net", "abc"))
+        );
+        assert_eq!(
+            parse_media_uri("weft-media://net/abc?w=800"),
+            Some(("net", "abc"))
+        );
+        assert_eq!(parse_media_uri("weft-media://net/"), None);
+        assert_eq!(parse_media_uri("http://net/abc"), None);
+        assert_eq!(parse_media_uri("weft-media://net/a/b"), None);
+    }
 }
 
 /// A one-time authorization to upload exactly one blob.

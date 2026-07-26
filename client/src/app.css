@@ -943,6 +943,18 @@ button:disabled {
   flex-direction: column;
   position: relative;
 }
+/* One kept-alive list per recently-opened channel is stacked here, filling the
+   area; only the active one shows. Each wrap is the positioning context for its
+   own scrollbar + skeleton overlay. */
+.msg-list-wrap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+.msg-list-wrap.list-hidden {
+  display: none;
+}
 /* Bottom-anchored chat list (Discord-style): the newest message is the natural
    resting position, so it renders at the bottom with no scroll operation, and
    content growth (images loading, older pages prepended) never moves the

@@ -569,10 +569,28 @@ export function mediaUrl(ref: string): string {
   return avatarUrl(mediaHash(ref));
 }
 
-/** The BLAKE3 hash portion of a `weft-media://origin/hash` reference. */
+/** The BLAKE3 hash portion of a `weft-media://origin/hash` reference. A trailing
+ *  `#WxH` (or `?…`) dimensions suffix is metadata, not part of the hash. */
 export function mediaHash(ref: string): string {
-  const rest = ref.replace(/^weft-media:\/\//, "");
+  const rest = ref.replace(/^weft-media:\/\//, "").split(/[#?]/)[0];
   return rest.slice(rest.indexOf("/") + 1);
+}
+
+/** Intrinsic pixel size a sender stamped onto an image reference
+ *  (`weft-media://origin/hash#WxH`), so the renderer can reserve exact space
+ *  before the bytes load. `null` when absent (older messages / non-images). */
+export function mediaDims(ref: string): { w: number; h: number } | null {
+  const m = ref.match(/#(\d+)x(\d+)$/);
+  if (!m) return null;
+  const w = Number(m[1]);
+  const h = Number(m[2]);
+  return w > 0 && h > 0 ? { w, h } : null;
+}
+
+/** Append an intrinsic-size suffix to an image reference, for the exact-space
+ *  reservation on render (§13). Only when both dimensions are known. */
+export function withMediaDims(ref: string, width: number | null, height: number | null): string {
+  return width && height ? `${ref}#${width}x${height}` : ref;
 }
 
 /** §10.3 a fetchable URL for an avatar (or any) blob hash, home-network only. */

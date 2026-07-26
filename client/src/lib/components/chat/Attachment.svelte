@@ -1,44 +1,59 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getApp } from "$lib/context";
+  import { mediaHash, mediaDims } from "$lib/weft";
   import { openLightbox } from "$lib/lightbox.svelte";
 
   const app = getApp();
   let { uri }: { uri: string } = $props();
 
   const url = $derived(app.mediaUrl(uri));
-  const name = $derived(uri.split("/").pop()?.slice(0, 16) ?? "file");
-  // §13 attachments carry only a content-addressed URI (no mime). Probe the
-  // Content-Type to pick the right renderer — but a probe `fetch()` is subject
-  // to CORS/preflight (the Range header) while `<img>`/`<video>` display
-  // cross-origin freely. So if the probe is blocked or fails, we *guess* image
-  // and let the media tag's own `onerror` fall back — never pre-empting a real
-  // image with a download link just because the probe couldn't read a header.
-  let kind = $state<"loading" | "image" | "video" | "audio" | "file">("loading");
+  const name = $derived(mediaHash(uri).slice(0, 16) || "file");
+  // §13 intrinsic image size the sender stamped on the reference. Fitted into
+  // the display caps and given as the <img>'s width/height, so the browser
+  // reserves the exact box before the bytes load — zero layout shift, no visible
+  // "build". Absent on older messages / non-images → sizes to content as before.
+  const MAX_W = 420;
+  const MAX_H = 320;
+  const box = $derived.by(() => {
+    const d = mediaDims(uri);
+    if (!d) return null;
+    const scale = Math.min(MAX_W / d.w, MAX_H / d.h, 1);
+    return { w: Math.round(d.w * scale), h: Math.round(d.h * scale) };
+  });
+  // §13 attachments carry only a content-addressed URI (no mime). Render as an
+  // image *immediately* (the overwhelmingly common case) so it starts loading
+  // right away and exists for the open-time image wait — no blocking probe
+  // round-trip that would defer the <img> and let it pop in later. The probe
+  // still runs, but only to *downgrade* to video/audio/file; and the tag's own
+  // `onerror` chain (image → video → file) recovers if the guess was wrong.
+  let kind = $state<"image" | "video" | "audio" | "file">("image");
 
   onMount(async () => {
     try {
       const r = await fetch(url, { headers: { Range: "bytes=0-0" } });
-      if (!r.ok) throw new Error(`probe ${r.status}`);
+      if (!r.ok) return; // keep the optimistic image; onerror recovers if needed
       const ct = r.headers.get("content-type") ?? "";
-      kind = ct.startsWith("image/")
-        ? "image"
-        : ct.startsWith("video/")
-          ? "video"
-          : ct.startsWith("audio/")
-            ? "audio"
-            : "file";
+      if (ct.startsWith("video/")) kind = "video";
+      else if (ct.startsWith("audio/")) kind = "audio";
+      else if (ct && !ct.startsWith("image/")) kind = "file";
+      // image/* or an unreadable type → stay an image.
     } catch {
-      // Probe blocked/failed — optimistically render an image; the tag's
-      // onerror chain (image → video → file) recovers if it isn't one.
-      kind = "image";
+      // Probe blocked/failed — keep the optimistic image.
     }
   });
 </script>
 
 {#if kind === "image"}
   <button class="att-image" onclick={() => openLightbox(url, name)} aria-label="Open image">
-    <img src={url} alt="attachment" loading="lazy" onerror={() => (kind = "video")} />
+    <img
+      src={url}
+      alt="attachment"
+      loading="lazy"
+      width={box?.w}
+      height={box?.h}
+      onerror={() => (kind = "video")}
+    />
   </button>
 {:else if kind === "video"}
   <!-- svelte-ignore a11y_media_has_caption -->
@@ -60,8 +75,13 @@
     cursor: zoom-in;
   }
   .att-image img {
+    /* The width/height attributes carry the fitted box, so the browser reserves
+       the exact space before load (no shift). `max-width:100%`/`height:auto`
+       keep it responsive on a narrow window; the fallback caps size when a
+       sender didn't stamp dimensions (older messages). */
     max-width: min(420px, 100%);
     max-height: 320px;
+    height: auto;
     border-radius: 8px;
     display: block;
     margin-top: 4px;

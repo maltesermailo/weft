@@ -299,6 +299,7 @@
     settingsOpen = false;
     weft.disconnect().catch(() => {});
     channels = {};
+    keptChannels = [];
     active = "";
     activeServer = "";
     homeView = true;
@@ -399,7 +400,13 @@
   let joinInput = $state("");
   let composer = $state("");
   let membersVisible = $state(true);
-  let scrollEl: HTMLDivElement | null = $state(null);
+  // ---- kept-alive message lists (Discord-style instant switching) ----
+  // Each recently-opened text channel keeps its own self-contained <MessageList>
+  // mounted (hidden when inactive), so switching back is instant — DOM built,
+  // images decoded, scroll position preserved. All scroll mechanics live inside
+  // the component; here we just track which channels stay mounted.
+  const KEEP_ALIVE_MAX = 6;
+  let keptChannels = $state<string[]>([]);
   // ---- servers/namespaces as rail tiles (Phase 6, flavor A) ----
   let activeServer = $state(""); // "" = network top-level channels; else a namespace
   // "#gaming/general" → "gaming"; top-level "#general" → "".
@@ -879,30 +886,16 @@
   // ---- history / scrollback (Phase 1) ----
   const HISTORY_LIMIT = 50;
   let loadingHistory = $state<string | null>(null); // channel being backfilled
-  let stickBottom = $state(true); // is the view pinned to the newest message?
-  let loadingInitial = false; // this in-flight load is the first page
   // History pages buffered per *target channel*, keyed by the messages' own
   // `target`. This is what makes history robust: a page flushes to the channel it
   // names, so a concurrent MEMBERS/roles/… batch can never steal or clobber it,
   // whatever its batch id or arrival order.
   let histByTarget: Record<string, Msg[]> = {};
-  // True while a channel is being opened + positioned. Gates `onScroll` so the
-  // programmatic jump to the read position (and the transient top position of a
-  // freshly rendered list) can't trip the near-top "load older" trigger — the
-  // cause of the runaway "loads further and gets stuck" paging. Reactive so the
-  // loading screen can key off it.
-  let positioning = $state(false);
-  // Discord-style loading curtain (skeleton overlay) over the message area.
-  // Driven imperatively by the open flow, NOT derived from `loadingHistory`, so
-  // there's no frame where the real list is uncovered: it's raised synchronously
-  // the instant a not-yet-loaded channel is opened, then dropped only once that
-  // channel's page is fetched, rendered AND scrolled into position (end of
-  // `positionOnOpen`). An instant switch to an already-loaded channel raises no
-  // curtain, so it never flashes.
-  let showLoader = $state(false);
 
   const oldestMsgid = (ch?: Channel) => ch?.messages.find((m) => m.msgid)?.msgid;
 
+  // Fetch a channel's history page. Single-flight (`loadingHistory` guard);
+  // MessageList calls this on first open (initial) and on scroll-to-top (paging).
   function loadHistory(target: string, initial: boolean) {
     // Channels (`#`), DMs (`@`), and group DMs (`&`) all backfill; one at a time.
     if (
@@ -911,159 +904,16 @@
     )
       return;
     loadingHistory = target;
-    loadingInitial = initial;
     histByTarget[target] = [];
     const before = initial ? undefined : oldestMsgid(channels[target]);
     weft.history(target, before).catch(() => {
-      loadingHistory = null;
-      positioning = false; // don't wedge paging if the fetch never lands
-      if (initial) showLoader = false; // …or the open curtain
+      loadingHistory = null; // don't wedge paging if the fetch never lands
     });
   }
-
-  // On opening a channel, position the view at the server-tracked read position
-  // (Discord-style): the first unread message — the one the "New messages"
-  // divider sits before — brought to the top, or the newest message if we're
-  // caught up. The read marker comes from the server (`MARKED`, §9.7 / SYNC);
-  // `newBoundary` captured it before the auto-mark effect advanced it on open.
-  // Scrolling to a concrete message element is deterministic — unlike
-  // `scrollTop = scrollHeight`, which lands wrong when message heights are still
-  // settling and can leave the channel opened at earlier messages.
-  async function positionOnOpen(name: string | null) {
-    await tick(); // let the freshly loaded page render first
-    // Stale call — the reader moved on before this page landed. Leave the now-
-    // active channel's curtain/positioning flags to its own open flow.
-    if (!name || active !== name) return;
-    // Active but the list isn't mounted — clear so we don't wedge the curtain.
-    if (!scrollEl) {
-      positioning = false;
-      showLoader = false;
-      return;
-    }
-    const boundary = newBoundary; // pre-open read position (epoch ms) or null
-    const apply = () => {
-      if (!scrollEl) return;
-      if (boundary !== null) {
-        const msgs = channels[name]?.messages ?? [];
-        const idx = msgs.findIndex((m) => !m.system && !m.own && m.ts > boundary);
-        // Jump to the "New messages" divider ONLY when the read marker is
-        // genuinely *inside* the loaded page — i.e. there is read content above
-        // the first unread (idx > 0). If the marker is older than everything
-        // loaded (idx === 0, deep backlog) or we're caught up (idx === -1), show
-        // the newest instead.
-        if (idx > 0) {
-          const el = document.getElementById("new-divider");
-          if (el) {
-            stickBottom = false;
-            el.scrollIntoView({ block: "start" });
-            return;
-          }
-        }
-      }
-      // Default → the newest message. In a `column-reverse` list, scrollTop 0 is
-      // the bottom (newest) — and it's already the resting position, so this is
-      // usually a no-op; we set it for the case where an old scroll persisted.
-      stickBottom = true;
-      scrollEl.scrollTop = 0;
-    };
-    apply();
-    // Re-assert next frame (layout may still be settling), then re-enable paging.
-    // Guarded so a fast channel switch can't clobber the new channel.
-    requestAnimationFrame(() => {
-      if (active === name) apply();
-      requestAnimationFrame(() => {
-        if (active === name) {
-          positioning = false;
-          showLoader = false; // list is populated + positioned — drop the curtain
-        }
-      });
-    });
-  }
-
-  function onScroll() {
-    if (!scrollEl) {
-      return;
-    }
-    // `column-reverse`: scrollTop is 0 at the bottom (newest) and its magnitude
-    // grows as you scroll up toward older messages. Use |scrollTop| as "distance
-    // scrolled up" so the sign convention (WebKit/Blink use negative) doesn't
-    // matter.
-    updateScrollbar();
-    if (positioning) return;
-    const up = Math.abs(scrollEl.scrollTop);
-    stickBottom = up < 60;
-    const maxUp = scrollEl.scrollHeight - scrollEl.clientHeight;
-    if (maxUp - up < 80 && activeChannel?.hasMore) loadHistory(active, false);
-  }
-
-  // Custom overlay scrollbar. The native one is inverted under `column-reverse`
-  // (thumb near the top of the track when you're viewing the newest at scrollTop
-  // 0), so it's hidden in CSS and we draw our own, correctly oriented: the bottom
-  // of the track is the newest. `top`/`height` are percentages of the track.
-  let sbThumbTop = $state(0);
-  let sbThumbHeight = $state(0);
-  let sbVisible = $state(false);
-  function updateScrollbar() {
-    if (!scrollEl) return;
-    const { scrollHeight, clientHeight } = scrollEl;
-    const maxUp = scrollHeight - clientHeight;
-    if (maxUp <= 1) {
-      sbVisible = false;
-      return;
-    }
-    const up = Math.min(Math.abs(scrollEl.scrollTop), maxUp);
-    const thumbFrac = clientHeight / scrollHeight;
-    const scrollFrac = up / maxUp; // 0 = newest (bottom), 1 = oldest (top)
-    sbThumbHeight = thumbFrac * 100;
-    sbThumbTop = (1 - scrollFrac) * (1 - thumbFrac) * 100;
-    sbVisible = true;
-  }
-  let sbDrag = $state<{
-    y: number;
-    topFrac: number;
-    thumbFrac: number;
-    maxUp: number;
-    trackPx: number;
-  } | null>(null);
-  function sbDown(e: PointerEvent) {
-    if (!scrollEl) return;
-    const track = (e.currentTarget as HTMLElement).parentElement!;
-    sbDrag = {
-      y: e.clientY,
-      topFrac: sbThumbTop / 100,
-      thumbFrac: scrollEl.clientHeight / scrollEl.scrollHeight,
-      maxUp: scrollEl.scrollHeight - scrollEl.clientHeight,
-      trackPx: track.clientHeight,
-    };
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    e.preventDefault();
-  }
-  function sbMove(e: PointerEvent) {
-    if (!sbDrag || !scrollEl) return;
-    const maxTop = 1 - sbDrag.thumbFrac;
-    let topFrac = sbDrag.topFrac + (e.clientY - sbDrag.y) / sbDrag.trackPx;
-    topFrac = Math.max(0, Math.min(maxTop, topFrac));
-    const scrollFrac = maxTop > 0 ? 1 - topFrac / maxTop : 0;
-    scrollEl.scrollTop = -(scrollFrac * sbDrag.maxUp);
-  }
-  function sbUp() {
-    sbDrag = null;
-  }
-  // Recompute the thumb whenever the message set, the loading state, or the
-  // window size changes (scroll itself is handled in onScroll).
-  $effect(() => {
-    activeChannel?.messages.length;
-    positioning;
-    scrollEl;
-    requestAnimationFrame(updateScrollbar);
-  });
-  $effect(() => {
-    const onResize = () => updateScrollbar();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  });
 
   let activeChannel = $derived(active ? channels[active] : undefined);
+  // A channel record by name — each kept-alive MessageList reads its own.
+  const channelRecord = (name: string): Channel | undefined => channels[name];
   let activeIsDm = $derived(active.startsWith("@"));
   let activeIsGroup = $derived(active.startsWith("&"));
   // Namespaces we hold channels in — each becomes a rail tile (flavor A).
@@ -1521,7 +1371,11 @@
           queryProfile(e.user); // §10.3 learn their display name + avatar
 
           if (e.user === account) {
-            if (!active) active = e.channel;
+            // Jump to a channel we just joined only when we're actually browsing
+            // a server (not on the Friends/DMs home). This keeps startup — where
+            // the server auto-rejoins our channels — on the home view instead of
+            // yanking us into whichever channel's join event lands first.
+            if (!active && !homeView) active = e.channel;
             // Presence is broadcast to shared channels only, so re-announce
             // ours whenever we join one (lets its members see our status).
             weft.presence(myStatus).catch(() => {});
@@ -2059,19 +1913,15 @@
             ch.hasMore = !e.truncated && buf.length >= HISTORY_LIMIT;
           }
         }
-        const initial = loadingInitial;
         loadingHistory = null;
         // If the reader switched to another conversation while this page was in
-        // flight, its initial load was single-flight-blocked — kick it now.
+        // flight, its initial load was single-flight-blocked — kick it now. (The
+        // channel's own MessageList positions itself once its page lands; paging
+        // older needs no scroll adjustment — the column-reverse bottom is anchored.)
         const cur = channels[active];
         if (active !== requested && cur && !cur.voice && !cur.historyLoaded) {
           loadHistory(active, true);
         }
-        // First load → jump to the server-tracked read position (unread divider,
-        // or newest if caught up). Paging older needs NO scroll adjustment: in a
-        // `column-reverse` list the bottom is anchored, so prepending older
-        // messages at the top never moves the viewport.
-        if (initial) positionOnOpen(requested);
         break;
       }
       case "deleted": {
@@ -2241,7 +2091,9 @@
   }
 
   // ---- §13 media attachments ----
-  let pendingAttachments = $state<{ uri: string; name: string; mime: string; thumb: string | null }[]>([]);
+  let pendingAttachments = $state<
+    { uri: string; name: string; mime: string; thumb: string | null; width: number | null; height: number | null }[]
+  >([]);
 
   // Upload a batch of files into the pending tray (shared by the picker, paste,
   // and drag-drop). Caps at 10 per message (§13); a failure toasts, not throws.
@@ -2256,7 +2108,14 @@
         const up = await weft.upload(file);
         pendingAttachments = [
           ...pendingAttachments,
-          { uri: up.media, name: file.name || "pasted-file", mime: file.type, thumb: up.thumb },
+          {
+            uri: up.media,
+            name: file.name || "pasted-file",
+            mime: file.type,
+            thumb: up.thumb,
+            width: up.width,
+            height: up.height,
+          },
         ];
       } catch (e) {
         toast(`upload failed: ${e}`, "error");
@@ -2304,7 +2163,9 @@
     // §6.4: empty body is legal when there are attachments.
     if (!text && !pendingAttachments.length) return;
     if (!active) return;
-    const attachments = pendingAttachments.map((a) => a.uri);
+    // Stamp intrinsic image size onto the reference so every recipient (and the
+    // history replay) can reserve exact space before the bytes load (§13).
+    const attachments = pendingAttachments.map((a) => weft.withMediaDims(a.uri, a.width, a.height));
     const target = active;
     const savedReply = replyTo?.msgid;
     // §9.2/§11.13 optimistic send: show the message immediately as "sending",
@@ -2764,50 +2625,26 @@
     }
   }
 
-  // Keep the newest message in view when a new one arrives, but only while
-  // pinned to the bottom (a reader who scrolled up must not be yanked down). In
-  // `column-reverse` a new newest message usually stays pinned on its own;
-  // scrollTop 0 (the bottom) re-asserts it.
-  $effect(() => {
-    activeChannel?.messages.length;
-    if (scrollEl && stickBottom) {
-      queueMicrotask(() => (scrollEl!.scrollTop = 0));
-    }
-  });
-
-  // On opening a channel: load its first page (once) and position the view at
-  // the server-tracked read position. Guarded to run once per *switch*, so a new
-  // message arriving can't re-trigger the jump.
-  let positionedFor = "";
+  // On opening a text channel: keep it in the mounted set (most-recent first,
+  // capped) so a return to it is instant, and fetch its roster once. History
+  // load + scroll positioning are owned by the channel's own <MessageList>. Only
+  // `active` is a dependency here — `keptChannels` is read/written untracked, so
+  // this can never self-trigger (the trap that broke the last attempt).
   $effect(() => {
     const a = active;
     if (!a) return;
-    const ch = channels[a];
-    // Voice channels have no message timeline or text roster — HISTORY/MEMBERS on
-    // one you only voice-joined (not text-joined) would answer CAP-REQUIRED.
-    if (ch?.voice) return;
-    if (a !== positionedFor) {
-      positionedFor = a;
-      stickBottom = true;
-      // Suppress the near-top "load older" trigger until the view is positioned
-      // (kept true across the fetch for a fresh channel, cleared by
-      // `positionOnOpen`). Fresh channel → load, then position from the batch's
-      // end. Already loaded → jump straight to the read position now.
-      positioning = true;
-      const needsLoad = !!ch && !ch.historyLoaded;
-      // Raise the curtain BEFORE any paint for a channel that must fetch — the
-      // fetch, first render and scroll-into-position all happen behind it. An
-      // already-loaded channel is revealed instantly (no fetch, no fill-in).
-      showLoader = needsLoad;
-      if (needsLoad) loadHistory(a, true);
-      else if (ch) positionOnOpen(a);
-    }
-    // Fetch the full roster once (MEMBERS folds in as MEMBER-join rows). The
-    // guard stops the self-row in the snapshot from re-triggering us.
-    if (ch && a.startsWith("#") && !ch.rosterLoaded) {
-      ch.rosterLoaded = true;
-      weft.members(a).catch(() => {});
-    }
+    untrack(() => {
+      const ch = channels[a];
+      if (!ch || ch.voice) return; // voice has no message list
+      if (keptChannels[0] !== a) {
+        keptChannels = [a, ...keptChannels.filter((c) => c !== a)].slice(0, KEEP_ALIVE_MAX);
+      }
+      // Fetch the full roster once (MEMBERS folds in as MEMBER-join rows).
+      if (a.startsWith("#") && !ch.rosterLoaded) {
+        ch.rosterLoaded = true;
+        weft.members(a).catch(() => {});
+      }
+    });
   });
 
   // ---- unread "New messages" divider (Tier 1) ----
@@ -3585,6 +3422,9 @@
     emojiUrlFor,
     // message list / items
     get loadingHistory() { return loadingHistory; },
+    get newBoundary() { return newBoundary; },
+    channelRecord,
+    loadHistory,
     get editingKey() { return editingKey; },
     set editingKey(v: number | null) { editingKey = v; },
     get editDraft() { return editDraft; },
@@ -3795,33 +3635,12 @@
         <ChatTopbar />
 
         <div class="msg-area">
-          <MessageList bind:scrollEl onscroll={onScroll} />
-          {#if sbVisible}
-            <div class="msg-scrollbar">
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <div
-                class="msg-scrollbar-thumb"
-                class:dragging={sbDrag}
-                style="top: {sbThumbTop}%; height: {sbThumbHeight}%"
-                onpointerdown={sbDown}
-                onpointermove={sbMove}
-                onpointerup={sbUp}
-              ></div>
-            </div>
-          {/if}
-          {#if showLoader}
-            <div class="channel-loader" aria-busy="true" aria-label="Loading messages">
-              {#each Array.from({ length: 7 }) as _, i (i)}
-                <div class="skel-row" style="animation-delay: {i * 60}ms">
-                  <div class="skel-avatar"></div>
-                  <div class="skel-lines">
-                    <div class="skel-line" style="width: {30 + ((i * 17) % 40)}%"></div>
-                    <div class="skel-line" style="width: {50 + ((i * 23) % 45)}%"></div>
-                  </div>
-                </div>
-              {/each}
-            </div>
-          {/if}
+          <!-- One self-contained, kept-alive list per recently-opened channel;
+               only the active one is shown. Each owns its scroll, scrollbar and
+               skeleton — switching back is instant. -->
+          {#each keptChannels as ch (ch)}
+            <MessageList channel={ch} active={ch === active} />
+          {/each}
         </div>
         <Composer />
       {/if}
