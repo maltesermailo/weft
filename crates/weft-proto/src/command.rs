@@ -507,6 +507,17 @@ pub enum Command {
     /// scope (`#chan|ns:<name>|*`, §6.7). Cap `mute` or `ban` at the scope.
     /// Answered as a `BATCH` of `MODERATED` events (each a current mute/ban).
     ModList { scope: String },
+    /// `NICK <scope> <account> :<nick>` (§10.3) — set a per-namespace display
+    /// name (server nickname). Empty trailing clears it. Setting your OWN
+    /// requires the `nick` cap; setting another member's requires `manage-nicks`.
+    Nick {
+        scope: String,
+        account: Account,
+        nick: String,
+    },
+    /// `NICKS <scope>` — list a namespace's server nicknames. Answered as a
+    /// `BATCH` of `NICK` events (each a current nickname).
+    Nicks { scope: String },
     /// `VOICE JOIN <#chan>` (§16, WEFT-RT) — request to join a channel's voice
     /// room. The server checks `listen`/`speak` caps + membership + mutes, then
     /// answers `VOICE OFFER` with a media token; media rides WebRTC, not this line.
@@ -1551,6 +1562,21 @@ impl Command {
                     scope: args.req("scope")?.to_string(),
                 })
             }
+            "NICK" => {
+                let mut args = Args::new(line, "NICK");
+                Ok(Command::Nick {
+                    scope: args.req("scope")?.to_string(),
+                    account: args.req("account")?.parse()?,
+                    // Present-but-empty trailing clears the nickname.
+                    nick: args.trailing_opt().unwrap_or_default(),
+                })
+            }
+            "NICKS" => {
+                let mut args = Args::new(line, "NICKS");
+                Ok(Command::Nicks {
+                    scope: args.req("scope")?.to_string(),
+                })
+            }
             "REPORT-FORWARD" => {
                 let mut args = Args::new(line, "REPORT-FORWARD");
                 let report_id = args.req("report-id")?.to_string();
@@ -2421,6 +2447,16 @@ impl Command {
                 reason.clone(),
             ),
             Command::ModList { scope } => ("MODLIST", vec![scope.clone()], None),
+            Command::Nick {
+                scope,
+                account,
+                nick,
+            } => (
+                "NICK",
+                vec![scope.clone(), account.to_string()],
+                Some(nick.clone()),
+            ),
+            Command::Nicks { scope } => ("NICKS", vec![scope.clone()], None),
             Command::VoiceJoin { channel } => {
                 ("VOICE", vec!["JOIN".to_string(), channel.to_string()], None)
             }
@@ -3698,6 +3734,36 @@ mod tests {
         ));
         assert!(Request::parse("PROFILES").is_err()); // needs ≥1 account
         assert!(Request::parse("PROFILE FROB").is_err()); // bad subcommand
+    }
+
+    #[test]
+    fn nick_verbs_round_trip() {
+        let set = Request::with_label(
+            Command::Nick {
+                scope: "ns:gaming".into(),
+                account: "bob".parse().unwrap(),
+                nick: "Cool Bob".into(),
+            },
+            "n1",
+        );
+        assert!(set
+            .serialize()
+            .unwrap()
+            .contains("NICK ns:gaming bob :Cool Bob"));
+        round_trip(&set);
+        // Clearing = a present-but-empty trailing.
+        round_trip(&Request::new(Command::Nick {
+            scope: "ns:gaming".into(),
+            account: "ada".parse().unwrap(),
+            nick: String::new(),
+        }));
+        round_trip(&Request::with_label(
+            Command::Nicks {
+                scope: "ns:gaming".into(),
+            },
+            "q1",
+        ));
+        assert!(Request::parse("NICKS").is_err()); // needs a scope
     }
 
     #[test]

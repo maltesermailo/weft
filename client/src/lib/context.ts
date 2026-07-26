@@ -151,6 +151,10 @@ export interface AppCtx {
   displayName(account: string): string;
   /** §10.3 an account's free-text bio, or "" if unset. */
   bioOf(account: string): string;
+  /** §10.3 an account's server nickname at the active server, or "" if unset. */
+  nickOf(account: string): string;
+  /** Set a per-namespace nickname (empty clears). Own → `nick`, other → `manage-nicks`. */
+  setNick(scope: string, account: string, nick: string): void;
   chanShort(n: string): string;
   peerOf(n: string): string;
   dotClass(acct: string): string;
@@ -177,6 +181,8 @@ export interface AppCtx {
   openCreateChannel(prefill?: string): void;
   openCreateChannelInCat(cat: string): void;
   openNsSettings(): void;
+  /** Open the per-server profile editor (your own nickname on this server). */
+  openServerProfile(): void;
   mintInvite(): void;
   // ---- invites menu (Discord-style: list, creator, revoke) ----
   readonly invitesList: InviteInfo[];

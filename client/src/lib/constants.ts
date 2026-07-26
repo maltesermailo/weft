@@ -19,7 +19,7 @@ export const REPORT_CATEGORIES = [
 /// The full standard capability set (§10.4), for role/grant pickers.
 export const CAPS = [
   "send", "react", "attach", "edit-own", "delete-own", "delete-any", "pin", "invite",
-  "mute", "ban", "kick", "policy", "view", "chan-create", "reports", "ns-admin",
+  "nick", "manage-nicks", "mute", "ban", "kick", "policy", "view", "chan-create", "reports", "ns-admin",
 ];
 
 /// Channel-relevant capabilities for per-channel permission editing.
@@ -36,6 +36,8 @@ export const CAP_META: Record<string, { label: string; desc: string }> = {
   "delete-any": { label: "Delete any message", desc: "Remove messages from any member." },
   "pin": { label: "Pin messages", desc: "Pin and unpin messages." },
   "invite": { label: "Create invites", desc: "Mint invite links to this scope." },
+  "nick": { label: "Change own nickname", desc: "Set their own display name on this server." },
+  "manage-nicks": { label: "Manage nicknames", desc: "Change any member's display name on this server." },
   "mute": { label: "Mute members", desc: "Stop members from posting." },
   "ban": { label: "Ban members", desc: "Block members from joining and posting." },
   "kick": { label: "Kick members", desc: "Remove members from a channel." },

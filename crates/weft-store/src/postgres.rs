@@ -19,8 +19,8 @@ use crate::compact::compaction_plan;
 use crate::traits::{
     AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, FriendOutcome,
     FriendStore, GroupStore, InviteStore, MediaBlocklistStore, MediaStore, MembershipStore,
-    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore,
-    RoleStore, HOLD_RADIUS,
+    ModerationStore, NamespaceStore, NetblockStore, NickStore, PeerStore, PinStore, ProfileStore,
+    ReportStore, RoleStore, HOLD_RADIUS,
 };
 use crate::types::{
     audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventKind, EventRecord, GrantRecord,
@@ -3563,6 +3563,53 @@ impl ProfileStore for PgStore {
             .await
             .map_err(backend_err)?;
         Ok(row.is_some())
+    }
+}
+
+#[async_trait]
+impl NickStore for PgStore {
+    async fn set_nick(&self, scope: &str, account: &str, nick: &str) -> Result<(), StoreError> {
+        if nick.is_empty() {
+            sqlx::query("DELETE FROM weft_nicks WHERE scope = $1 AND account = $2")
+                .bind(scope)
+                .bind(account)
+                .execute(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        } else {
+            sqlx::query(
+                "INSERT INTO weft_nicks (scope, account, nick) VALUES ($1, $2, $3) \
+                 ON CONFLICT (scope, account) DO UPDATE SET nick = EXCLUDED.nick",
+            )
+            .bind(scope)
+            .bind(account)
+            .bind(nick)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        }
+        Ok(())
+    }
+
+    async fn nick(&self, scope: &str, account: &str) -> Result<Option<String>, StoreError> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT nick FROM weft_nicks WHERE scope = $1 AND account = $2")
+                .bind(scope)
+                .bind(account)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        Ok(row.map(|(n,)| n))
+    }
+
+    async fn nicks(&self, scope: &str) -> Result<Vec<(String, String)>, StoreError> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT account, nick FROM weft_nicks WHERE scope = $1")
+                .bind(scope)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        Ok(rows)
     }
 }
 

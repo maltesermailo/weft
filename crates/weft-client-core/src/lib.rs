@@ -406,6 +406,13 @@ pub enum ClientEvent {
         /// §10.3 free-text bio.
         about: Option<String>,
     },
+    /// §10.3 a per-namespace display name (server nickname) change.
+    Nick {
+        scope: String,
+        account: String,
+        network: String,
+        nick: String,
+    },
     /// §10.5 `VERIFIED <kind> <subject>` — one of the caller's own verification
     /// claims (email/birthday), `state` = `pending`|`confirmed`. Owner-only.
     /// (`claim_kind`, not `kind` — the enum's serde tag is already `kind`.)
@@ -950,6 +957,13 @@ pub fn on_line<E: EventSink>(
             display,
             avatar,
             about,
+        }),
+        // §10.3 per-namespace server nicknames.
+        Event::Nick { scope, user, nick } => sink.emit(ClientEvent::Nick {
+            scope,
+            account: user.account.to_string(),
+            network: user.network.to_string(),
+            nick,
         }),
         // §10.5 account verification claims (owner-only).
         Event::Verified {
@@ -2081,6 +2095,27 @@ pub fn build_profiles_query(accounts: Vec<String>) -> Result<String, String> {
     Request::new(Command::ProfilesQuery { accounts })
         .serialize()
         .map_err(|e| e.to_string())
+}
+
+/// `NICK <scope> <account> :<nick>` — set a per-namespace display name (§10.3).
+/// Empty `nick` clears it. Own → needs `nick`; another's → `manage-nicks`.
+pub fn build_nick(scope: &str, account: &str, nick: &str) -> Result<String, String> {
+    Request::new(Command::Nick {
+        scope: scope.to_string(),
+        account: account.parse().map_err(|_| "bad account".to_string())?,
+        nick: nick.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NICKS <scope>` — query a namespace's server nicknames (§10.3).
+pub fn build_nicks(scope: &str) -> Result<String, String> {
+    Request::new(Command::Nicks {
+        scope: scope.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
 }
 
 /// `VERIFY EMAIL <address>` (§10.5) — claim an email; the server mails a code.

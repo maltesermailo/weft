@@ -16,8 +16,8 @@ use crate::compact::compaction_plan;
 use crate::traits::{
     AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, FriendOutcome,
     FriendStore, GroupStore, InviteStore, MediaBlocklistStore, MediaStore, MembershipStore,
-    ModerationStore, NamespaceStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore,
-    RoleStore, HOLD_RADIUS,
+    ModerationStore, NamespaceStore, NetblockStore, NickStore, PeerStore, PinStore, ProfileStore,
+    ReportStore, RoleStore, HOLD_RADIUS,
 };
 use crate::types::{
     audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventRecord, GrantRecord, GroupRecord,
@@ -176,6 +176,8 @@ struct Inner {
     media_refs: Vec<(Scope, MsgId, String)>,
     /// §10.3 account handle → display profile (nick + avatar hash).
     profiles: HashMap<String, ProfileRecord>,
+    /// §10.3 per-namespace server nicknames: (scope, account) → nick.
+    nicks: HashMap<(String, String), String>,
 }
 
 #[derive(Default)]
@@ -2538,6 +2540,42 @@ impl ProfileStore for MemoryStore {
             .profiles
             .values()
             .any(|p| p.avatar.as_deref() == Some(hash)))
+    }
+}
+
+#[async_trait]
+impl NickStore for MemoryStore {
+    async fn set_nick(&self, scope: &str, account: &str, nick: &str) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let key = (scope.to_string(), account.to_string());
+        if nick.is_empty() {
+            inner.nicks.remove(&key);
+        } else {
+            inner.nicks.insert(key, nick.to_string());
+        }
+        Ok(())
+    }
+
+    async fn nick(&self, scope: &str, account: &str) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("store lock")
+            .nicks
+            .get(&(scope.to_string(), account.to_string()))
+            .cloned())
+    }
+
+    async fn nicks(&self, scope: &str) -> Result<Vec<(String, String)>, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("store lock")
+            .nicks
+            .iter()
+            .filter(|((s, _), _)| s == scope)
+            .map(|((_, a), n)| (a.clone(), n.clone()))
+            .collect())
     }
 }
 

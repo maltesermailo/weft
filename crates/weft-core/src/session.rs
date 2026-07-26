@@ -1264,6 +1264,12 @@ impl<S: ControlStream> Session<S> {
                     .await
             }
             Command::ProfilesQuery { accounts } => self.on_profiles_query(label, accounts).await,
+            Command::Nick {
+                scope,
+                account: target,
+                nick,
+            } => self.on_nick_set(label, scope, target, nick, account).await,
+            Command::Nicks { scope } => self.on_nicks_query(label, scope).await,
             // §10.5 account verification (email code flow + self-attested birthday).
             Command::VerifyEmail { address } => self.on_verify_email(label, address, account).await,
             Command::VerifyBirthday { date } => self.on_verify_birthday(label, date, account).await,

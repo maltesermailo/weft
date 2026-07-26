@@ -507,6 +507,14 @@ pub enum Event {
         /// `@about=` free-text bio (§10.3); a missing tag = unset.
         about: Option<String>,
     },
+    /// `NICK <scope> <user@network> :<nick>` (§10.3) — a per-namespace display
+    /// name (server nickname) change, broadcast to the namespace; also each
+    /// entry in a `NICKS` reply. Empty trailing = the nickname was cleared.
+    Nick {
+        scope: String,
+        user: UserRef,
+        nick: String,
+    },
     /// `@state= VERIFIED <kind> <subject>` (§10.5) — an account-verification claim
     /// state, sent **only to the claim's owner** (the subject is PII — email
     /// address / birth date — never broadcast). `state` is `pending` (email code
@@ -1344,6 +1352,14 @@ impl Event {
                     about: line.tags.get("about").cloned(),
                 })
             }
+            "NICK" => {
+                let mut args = Args::new(line, "NICK");
+                Ok(Event::Nick {
+                    scope: args.req("scope")?.to_string(),
+                    user: args.req("user")?.parse()?,
+                    nick: args.trailing_opt().unwrap_or_default(),
+                })
+            }
             "VERIFIED" => {
                 let mut args = Args::new(line, "VERIFIED");
                 Ok(Event::Verified {
@@ -2131,6 +2147,11 @@ impl Event {
                 }
                 ("PROFILE", vec![user.to_string()], None)
             }
+            Event::Nick { scope, user, nick } => (
+                "NICK",
+                vec![scope.clone(), user.to_string()],
+                Some(nick.clone()),
+            ),
             Event::Verified {
                 kind,
                 subject,
@@ -3102,6 +3123,29 @@ mod tests {
         });
         assert_eq!(bare.serialize().unwrap(), "PROFILE eve@hda.example");
         round_trip(&bare);
+    }
+
+    #[test]
+    fn nick_event_round_trips() {
+        let set = Reply::with_label(
+            Event::Nick {
+                scope: "ns:gaming".into(),
+                user: "bob@hda.example".parse().unwrap(),
+                nick: "Cool Bob".into(),
+            },
+            "n1",
+        );
+        assert!(set
+            .serialize()
+            .unwrap()
+            .contains("NICK ns:gaming bob@hda.example :Cool Bob"));
+        round_trip(&set);
+        // Cleared nickname — empty trailing.
+        round_trip(&Reply::new(Event::Nick {
+            scope: "ns:gaming".into(),
+            user: "ada@hda.example".parse().unwrap(),
+            nick: String::new(),
+        }));
     }
 
     #[test]

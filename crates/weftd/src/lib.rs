@@ -708,6 +708,7 @@ where
         + weft_store::MediaBlocklistStore
         + weft_store::RoleStore
         + weft_store::ProfileStore
+        + weft_store::NickStore
         + weft_store::FriendStore
         + weft_store::GroupStore
         + weft_store::AuditStore

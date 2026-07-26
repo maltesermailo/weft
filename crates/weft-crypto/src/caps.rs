@@ -40,13 +40,17 @@ pub enum Capability {
     Speak,
     /// Receive forwarded audio from a channel's voice room — WEFT-RT `listen` (§16).
     Listen,
+    /// Set your OWN per-namespace display name (server nickname, §10.3).
+    Nick,
+    /// Set ANY member's per-namespace display name (moderator, §10.3).
+    ManageNicks,
     /// `grant:<cap>` — may delegate the inner capability.
     Grant(Box<Capability>),
 }
 
 impl Capability {
     /// The standard set, sans `grant:` (which composes over these).
-    pub const STANDARD: [Capability; 22] = [
+    pub const STANDARD: [Capability; 24] = [
         Capability::Send,
         Capability::EditOwn,
         Capability::DeleteOwn,
@@ -69,6 +73,8 @@ impl Capability {
         Capability::MediaBlock,
         Capability::Speak,
         Capability::Listen,
+        Capability::Nick,
+        Capability::ManageNicks,
     ];
 
     fn base_str(&self) -> Option<&'static str> {
@@ -95,6 +101,8 @@ impl Capability {
             Capability::MediaBlock => "media-block",
             Capability::Speak => "speak",
             Capability::Listen => "listen",
+            Capability::Nick => "nick",
+            Capability::ManageNicks => "manage-nicks",
             Capability::Grant(_) => return None,
         })
     }

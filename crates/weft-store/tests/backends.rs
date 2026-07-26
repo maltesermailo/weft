@@ -13,7 +13,7 @@ use weft_store::{
     EventRecord, EventStore, FriendOutcome, FriendStore, GroupStore, HistoryItem, InviteRecord,
     InviteStore, MediaBlockRecord, MediaBlocklistStore, MediaStore, MembershipStore, MemoryStore,
     ModKind, ModRecord, ModerationStore, NamespaceRecord, NamespaceStore, NetblockRecord,
-    NetblockStore, Page, PeerRecord, PeerStore, PendingRecovery, PinStore, ProfileStore,
+    NetblockStore, NickStore, Page, PeerRecord, PeerStore, PendingRecovery, PinStore, ProfileStore,
     RedeemOutcome, ReportRecord, ReportResolution, ReportStore, RoleDef, RoleStore, Scope,
 };
 
@@ -78,6 +78,7 @@ where
         + MembershipStore
         + MediaStore
         + ProfileStore
+        + NickStore
         + RoleStore
         + FriendStore
         + GroupStore
@@ -2245,6 +2246,37 @@ where
         .await
         .unwrap();
     assert_eq!(batch.len(), 2);
+
+    // -- §10.3 per-namespace nicknames --
+    let nscope = format!("ns:nickclub-{tag}");
+    assert!(store.nick(&nscope, "ada").await.unwrap().is_none());
+    store
+        .set_nick(&nscope, "ada", "Ada the Great")
+        .await
+        .unwrap();
+    store.set_nick(&nscope, "bob", "Bobby").await.unwrap();
+    assert_eq!(
+        store.nick(&nscope, "ada").await.unwrap().as_deref(),
+        Some("Ada the Great")
+    );
+    let mut all = store.nicks(&nscope).await.unwrap();
+    all.sort();
+    assert_eq!(
+        all,
+        vec![
+            ("ada".to_string(), "Ada the Great".to_string()),
+            ("bob".to_string(), "Bobby".to_string()),
+        ]
+    );
+    // Overwrite, then clear (empty = delete).
+    store.set_nick(&nscope, "ada", "Ada2").await.unwrap();
+    assert_eq!(
+        store.nick(&nscope, "ada").await.unwrap().as_deref(),
+        Some("Ada2")
+    );
+    store.set_nick(&nscope, "ada", "").await.unwrap();
+    assert!(store.nick(&nscope, "ada").await.unwrap().is_none());
+    assert_eq!(store.nicks(&nscope).await.unwrap().len(), 1);
 }
 
 #[tokio::test]

@@ -216,6 +216,7 @@ export type WeftEvent =
       avatar: string | null;
       about: string | null;
     }
+  | { kind: "nick"; scope: string; account: string; network: string; nick: string }
   | { kind: "verified"; claim_kind: string; subject: string; state: string }
   | {
       kind: "voice-offer";
@@ -306,6 +307,14 @@ export function join(channel: string) {
 // unchanged, sends "" to clear it, or a value to set it (avatar = a blob hash).
 export function profileSet(opts: { display?: string; avatar?: string; about?: string }) {
   return invoke("profile_set", opts);
+}
+// §10.3 per-namespace display name (server nickname). Empty `nick` clears it.
+// Setting your own needs the `nick` cap; another member's needs `manage-nicks`.
+export function nick(scope: string, account: string, nick: string) {
+  return invoke("nick", { scope, account, nick });
+}
+export function nicksQuery(scope: string) {
+  return invoke("nicks", { scope });
 }
 export function profilesQuery(accounts: string[]) {
   return invoke("profiles_query", { accounts });

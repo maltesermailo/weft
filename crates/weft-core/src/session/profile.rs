@@ -121,4 +121,98 @@ impl<S: ControlStream> Session<S> {
         }
         Ok(Flow::Continue)
     }
+
+    /// `NICK <scope> <account> :<nick>` — set a per-namespace display name
+    /// (§10.3). Setting your OWN requires the `nick` cap at the scope; setting
+    /// another member's requires `manage-nicks`. Empty nick clears it.
+    pub(super) async fn on_nick_set(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        target: Account,
+        nick: String,
+        caller: Account,
+    ) -> io::Result<Flow> {
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.no_such_target(label).await;
+        };
+        // Own nickname vs. moderating someone else's — two distinct caps.
+        let cap = if target == caller {
+            Capability::Nick
+        } else {
+            Capability::ManageNicks
+        };
+        match self
+            .ctx
+            .account_has_cap(&caller, &cap, &token_scope, unix_now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                let name = cap.to_string();
+                return self.cap_required(label, &name).await;
+            }
+            Err(e) => return self.internal(label, &e).await,
+        }
+        if nick.len() > 128 {
+            self.send_err(
+                label,
+                ErrCode::Malformed,
+                None,
+                "nickname too long (≤128 B)",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        if let Err(e) = self
+            .ctx
+            .nicks
+            .set_nick(&scope, target.as_str(), &nick)
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        let event = Event::Nick {
+            scope,
+            user: UserRef::new(target, self.ctx.info.network.clone()),
+            nick,
+        };
+        // Labeled ack to the setter; broadcast to co-members. Clients key nicks
+        // by (scope, account), so a copy reaching a non-namespace channel is
+        // harmless — it's simply not displayed outside that namespace.
+        self.send_event(label, event.clone()).await?;
+        for joined in self.joined.values() {
+            joined.handle.announce_as(self.id, event.clone()).await;
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// `NICKS <scope>` — answer a `NICK` per set nickname in the namespace.
+    /// Nicknames are shown to co-members, so the list isn't gated.
+    pub(super) async fn on_nicks_query(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+    ) -> io::Result<Flow> {
+        let nicks = self.ctx.nicks.nicks(&scope).await.unwrap_or_default();
+        for (account, nick) in nicks {
+            let user = if let Ok(user) = account.parse::<UserRef>() {
+                user
+            } else if let Ok(account) = account.parse::<Account>() {
+                UserRef::new(account, self.ctx.info.network.clone())
+            } else {
+                continue;
+            };
+            self.send_event(
+                label.clone(),
+                Event::Nick {
+                    scope: scope.clone(),
+                    user,
+                    nick,
+                },
+            )
+            .await?;
+        }
+        Ok(Flow::Continue)
+    }
 }

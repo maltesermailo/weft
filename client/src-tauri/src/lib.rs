@@ -339,6 +339,17 @@ fn profiles_query(conn: State<'_, Conn>, accounts: Vec<String>) -> Result<(), St
     conn.send(weft::build_profiles_query(accounts)?)
 }
 
+// §10.3 per-namespace display names (server nicknames).
+#[tauri::command]
+fn nick(conn: State<'_, Conn>, scope: String, account: String, nick: String) -> Result<(), String> {
+    conn.send(weft::build_nick(&scope, &account, &nick)?)
+}
+
+#[tauri::command]
+fn nicks(conn: State<'_, Conn>, scope: String) -> Result<(), String> {
+    conn.send(weft::build_nicks(&scope)?)
+}
+
 // §10.5 account verification.
 #[tauri::command]
 fn verify_email(conn: State<'_, Conn>, address: String) -> Result<(), String> {
@@ -952,6 +963,8 @@ pub fn run() {
             join,
             profile_set,
             profiles_query,
+            nick,
+            nicks,
             verify_email,
             verify_birthday,
             verify_confirm,

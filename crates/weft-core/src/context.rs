@@ -14,8 +14,8 @@ use weft_proto::{
 use weft_store::{
     AccountStore, BlobStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, FriendStore,
     GroupStore, InviteStore, MediaBlocklistStore, MediaStore, MembershipStore, ModerationStore,
-    NamespaceStore, NetblockStore, PeerStore, PinStore, ProfileStore, ReportStore, RoleStore,
-    StoreError,
+    NamespaceStore, NetblockStore, NickStore, PeerStore, PinStore, ProfileStore, ReportStore,
+    RoleStore, StoreError,
 };
 
 use crate::accounts::Accounts;
@@ -147,6 +147,8 @@ pub struct ServerCtx {
     pub(crate) roles: Arc<dyn RoleStore>,
     /// §10.3 display profiles (nick + avatar) keyed by account handle.
     pub profiles: Arc<dyn ProfileStore>,
+    /// §10.3 per-namespace server nicknames.
+    pub(crate) nicks: Arc<dyn NickStore>,
     /// Social graph (friends + pending requests). Federation-able — peers are
     /// full `UserRef`s.
     pub(crate) friends: Arc<dyn FriendStore>,
@@ -428,6 +430,7 @@ impl ServerCtx {
             + MediaBlocklistStore
             + RoleStore
             + ProfileStore
+            + NickStore
             + FriendStore
             + GroupStore
             + 'static,
@@ -448,6 +451,7 @@ impl ServerCtx {
         let memberships: Arc<dyn MembershipStore> = store.clone();
         let roles: Arc<dyn RoleStore> = store.clone();
         let profiles: Arc<dyn ProfileStore> = store.clone();
+        let nicks: Arc<dyn NickStore> = store.clone();
         let friends: Arc<dyn FriendStore> = store.clone();
         let groups: Arc<dyn GroupStore> = store.clone();
         let namespaces: Arc<dyn NamespaceStore> = store;
@@ -487,6 +491,7 @@ impl ServerCtx {
             memberships,
             roles,
             profiles,
+            nicks,
             friends,
             groups,
             presence: std::sync::Mutex::new(std::collections::HashMap::new()),

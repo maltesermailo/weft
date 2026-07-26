@@ -350,6 +350,8 @@ The echoed `MESSAGE` — same `label`, server-assigned `msgid` — is the ack; b
 | `INVITE LIST` | `INVITE LIST <scope>` | `invite` | Lists the scope's live invites for an admin surface — one `INVITE-INFO` per invite (creator, uptake, remaining budget, expiry), then a `BATCH-END`. | `INVITE LIST ns:gaming` → `@uses=7;used=3;expiry=… INVITE-INFO ns:gaming iv_01J… ada@test.example` × N, then `BATCH-END`
 | `INVITE REDEEM` | `INVITE REDEEM <b64>` | — | Verifies chain + counter, mints a member token *bound to the redeemer's key*, auto-joins the default channel. Dead invites → `NO-SUCH-TARGET` (indistinct). | `INVITE REDEEM <b64>` → `@count=43 MEMBER #gaming/general bob@test.example join`
 | `CAPS` | `CAPS <account> <scope>` | — (public) | An account's *effective* capabilities at a scope (operators/ns-owners expand to all); caps aren't secret — powers client badges. → `CAPS`. | `CAPS bob ns:gaming` → `CAPS bob ns:gaming :send,react,invite`
+| `NICK` | `NICK <scope> <account> :<nick>` | `nick` (own) / `manage-nicks` (other) | Per-namespace display name (<<s10-3,§10.3>>); empty trailing clears. → a `NICK` broadcast. | `NICK ns:gaming bob :Cool Bob` → `NICK ns:gaming bob@test.example :Cool Bob`
+| `NICKS` | `NICKS <scope>` | — (public) | The namespace's nicknames (shown to co-members). → a `NICK` per set nickname. | `NICKS ns:gaming` → `NICK ns:gaming bob@test.example :Cool Bob` × N
 |===
 
 Invite tokens are capability tokens with an *unbound subject*: one object serves single-use / expiring / vanity links — offline-verifiable authorization, never itself a membership credential.
@@ -648,6 +650,7 @@ Events are the server→client half of the protocol; a client *MUST ignore any e
 | `ROLE <scope> <color> <caps> :<name>` | `hoist=`, `pos=` — a role definition | `ROLE ns:gaming #e8b93d send,react hoist=1 pos=0 :Speaker`
 | `ROLE-MEMBER <scope> <account> :<names>` | an account's explicit role assignments | `ROLE-MEMBER ns:gaming bob :Speaker`
 | `CAPS <account> <scope> :<caps>` | effective caps at a scope (public; badges) | `CAPS bob ns:gaming :send,react,invite`
+| `NICK <scope> <user@net> :<nick>` | per-namespace display name (<<s10-3,§10.3>>); empty trailing = cleared; also each entry in a `NICKS` reply | `NICK ns:gaming bob@test.example :Cool Bob`
 |===
 
 [[s7-6]]
@@ -861,6 +864,8 @@ Well-known document (JSON):
 === 10.3 Display identity
 Signed profile blob (nick, avatar) travels with the user; remotes MAY override display, MUST show canonical `user@network`. A profile also carries an optional free-text *bio* (`PROFILE SET @about=`, ≤512 B, shown on the full profile view); like the display name it is set by its owner and broadcast to co-members via `PROFILE @about=`. The bio is **not** part of the signed profile blob yet (M-prof-5), so it is stored and shown on its home network only — a bridged profile drops it.
 
+*Server nicknames.* A member MAY carry a *per-namespace* display name (`NICK <scope> <account> :<nick>`, ≤128 B, empty clears), which overrides the global display name for that member within that namespace only. Setting your OWN requires the `nick` capability at the scope; setting another member's requires `manage-nicks` (moderator). Changes broadcast as `NICK` events; a client pulls the current set with `NICKS <scope>`. Home-network only for now (nicknames aren't in the signed blob).
+
 [[s10-4]]
 === 10.4 Capability tokens
 ----
@@ -886,7 +891,8 @@ re-grants.
 * *Delegation:* via `grant:X`; chains verify up to the namespace root key or the network key.
 * *Roles* (<<s6-5-1,§6.5.1>>) are named token templates; editing a role re-mints on refresh. A role's holder may be a *foreign `account@network`* — membership and granted caps key by that subject, so a partner network's user can wear a role here (<<s6-5,§6.5>>).
 * *Revocation:* short expiry + refresh (`TOKEN` events) + per-scope revocation epochs.
-* *Standard capability set:* `send`, `edit-own`, `delete-own`, `delete-any`, `react`, `pin`, `invite`, `kick`, `ban`, `mute`, `policy`, `view`, `attach`, `chan-create`, `reports`, `bridge`, `ns-admin`, `ns-create`, `netblock`, `media-block`, `grant:<cap>`.
+* *Standard capability set:* `send`, `edit-own`, `delete-own`, `delete-any`, `react`, `pin`, `invite`, `nick`, `manage-nicks`, `kick`, `ban`, `mute`, `policy`, `view`, `attach`, `chan-create`, `reports`, `bridge`, `ns-admin`, `ns-create`, `netblock`, `media-block`, `grant:<cap>`. (`nick` = set your own per-namespace display name; `manage-nicks` = set any member's, <<s10-3,§10.3>>.)
+* *Implicit `@everyone` role:* a reserved namespace role every member holds without an explicit assignment — its caps are the namespace's baseline permissions (Discord's `@everyone`). Edited like any role but never assigned, reordered or deleted; resolved live for members alongside grants.
 * *Scope floors:* `netblock` / `media-block` at `*` only; `reports` grantable at `ns:` and `*`; `mute`/`ban`/`kick` at `#chan`/`ns:`/`*` — the moderation tiers (<<s6-7,§6.7>>).
 * View gating gets full anti-enumeration (invariant 1). *Capability checks precede side effects, always* (invariant 4).
 

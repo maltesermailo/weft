@@ -354,6 +354,8 @@ impl WeftClient {
                     .unwrap_or_default();
                 build_profiles_query(accounts)?
             }
+            "nick" => build_nick(&arg("scope"), &arg("account"), &arg("nick"))?,
+            "nicks" => build_nicks(&arg("scope"))?,
             // ---- §10.5 account verification ----
             "verify_email" => build_verify_email(&arg("address"))?,
             "verify_birthday" => build_verify_birthday(&arg("date"))?,

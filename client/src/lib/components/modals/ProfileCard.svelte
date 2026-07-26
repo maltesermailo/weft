@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   import { EVERYONE_ROLE } from "$lib/constants";
@@ -35,6 +36,8 @@
   const unheldRoles = $derived(allRoles.filter((r) => !myRoles.some((h) => h.name === r.name)));
   let roleMenuOpen = $state(false);
 
+  // §10.3 moderator nickname edit (server enforces `manage-nicks`).
+  let nickDraft = $state(untrack(() => app.nickOf(target)));
   // §6.7 moderation controls: scope (channel/namespace/network) + optional reason.
   let modScope = $state(app.scopesFor()[0]);
   let modReason = $state("");
@@ -98,6 +101,15 @@
         <button class="pf-primary" onclick={() => { app.openFullProfile(target); onclose(); }}>Open profile</button>
         {#if target !== app.account}
           <button class="pf-secondary" onclick={() => { app.openDm(target); onclose(); }}>Message</button>
+          {#if inServer && scope.startsWith("ns:")}
+            <div class="pf-mod">
+              <div class="profile-section-label">Server nickname</div>
+              <div class="pf-mod-inputs">
+                <input bind:value={nickDraft} maxlength="128" placeholder="nickname (blank = default)" />
+                <button class="pf-secondary" onclick={() => app.setNick(scope, target, nickDraft.trim())}>Set</button>
+              </div>
+            </div>
+          {/if}
           {#if inServer}
             <div class="pf-mod">
               <div class="profile-section-label">Moderation</div>

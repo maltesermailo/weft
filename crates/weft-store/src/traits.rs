@@ -894,6 +894,20 @@ pub trait ProfileStore: Send + Sync {
     async fn avatar_exists(&self, hash: &str) -> Result<bool, StoreError>;
 }
 
+/// §10.3 per-namespace display names (server nicknames), keyed by `(scope,
+/// account)`. `scope` is `ns:<name>`; `account` is the bare local handle.
+#[async_trait]
+pub trait NickStore: Send + Sync {
+    /// Set (non-empty) or clear (empty) a member's nickname at a scope.
+    async fn set_nick(&self, scope: &str, account: &str, nick: &str) -> Result<(), StoreError>;
+
+    /// A member's nickname at a scope, if set.
+    async fn nick(&self, scope: &str, account: &str) -> Result<Option<String>, StoreError>;
+
+    /// Every `(account, nick)` at a scope — the namespace's nickname snapshot.
+    async fn nicks(&self, scope: &str) -> Result<Vec<(String, String)>, StoreError>;
+}
+
 /// The result of a `FRIEND ADD` (social layer). One verb covers "ask" and
 /// "accept the ask they already sent me", so the store reports which happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

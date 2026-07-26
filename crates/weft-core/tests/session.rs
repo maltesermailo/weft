@@ -6183,6 +6183,54 @@ async fn everyone_role_grants_baseline_caps_to_members() {
 }
 
 #[tokio::test]
+async fn server_nicknames_are_cap_gated() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+    let root = root_key_b64();
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
+    drain_until_label(&mut ada, "n").await;
+    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    drain_until_label(&mut ada, "c").await;
+    bob.send("@label=j NS JOIN gaming");
+    drain_until_label(&mut bob, "j").await;
+
+    // No `nick` cap → bob can't even set his own nickname.
+    bob.send("@label=e1 NICK ns:gaming bob :Cool Bob");
+    let e1 = drain_until_label(&mut bob, "e1").await;
+    assert!(
+        matches!(&e1.event, Event::Err(err) if err.code == ErrCode::CapRequired),
+        "own nick needs the `nick` cap, got {e1:?}"
+    );
+
+    // Give @everyone the `nick` cap → bob can set his own.
+    ada.send("@label=r ROLE CREATE ns:gaming #99aab5 nick :everyone");
+    drain_until_label(&mut ada, "r").await;
+    bob.send("@label=e2 NICK ns:gaming bob :Cool Bob");
+    let e2 = drain_until_label(&mut bob, "e2").await;
+    assert!(
+        matches!(&e2.event, Event::Nick { nick, .. } if nick == "Cool Bob"),
+        "with `nick`, own nickname is set, got {e2:?}"
+    );
+
+    // `nick` does NOT let bob rename another member (that needs `manage-nicks`).
+    bob.send("@label=e3 NICK ns:gaming ada :Boss");
+    let e3 = drain_until_label(&mut bob, "e3").await;
+    assert!(
+        matches!(&e3.event, Event::Err(err) if err.code == ErrCode::CapRequired),
+        "renaming others needs `manage-nicks`, got {e3:?}"
+    );
+
+    // The owner can rename anyone.
+    ada.send("@label=e4 NICK ns:gaming bob :Renamed");
+    let e4 = drain_until_label(&mut ada, "e4").await;
+    assert!(
+        matches!(&e4.event, Event::Nick { nick, .. } if nick == "Renamed"),
+        "owner renames any member, got {e4:?}"
+    );
+}
+
+#[tokio::test]
 async fn roles_are_explicit_membership_not_derived() {
     let ctx = ctx_ops(&["#general"], &["root"]);
     let mut root = ready(&ctx, "root").await;

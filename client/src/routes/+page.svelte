@@ -57,6 +57,7 @@
   import UserSettingsModal from "$lib/components/modals/UserSettingsModal.svelte";
   import FederationPanel from "$lib/components/modals/FederationPanel.svelte";
   import ServerSettingsModal from "$lib/components/modals/ServerSettingsModal.svelte";
+  import ServerProfileModal from "$lib/components/modals/ServerProfileModal.svelte";
   import NotificationSettingsModal from "$lib/components/modals/NotificationSettingsModal.svelte";
 
   // ---- connection + form state ----
@@ -420,6 +421,22 @@
   // §10.3 account → display profile (nick + avatar hash). Filled from PROFILE
   // events (broadcast on change) + on-demand PROFILES queries.
   let profiles = $state<Record<string, { display?: string; avatar?: string; about?: string }>>({});
+  // §10.3 per-namespace display names (server nicknames), keyed "scope|account".
+  let nicks = $state<Record<string, string>>({});
+  const nickKey = (scope: string, account: string) => `${scope}|${account}`;
+  const nicksFetched = new Set<string>();
+  // Pull a server's nicknames once, the first time it's viewed.
+  $effect(() => {
+    const s = activeServer;
+    if (s && !nicksFetched.has(s)) {
+      nicksFetched.add(s);
+      weft.nicksQuery(`ns:${s}`).catch(() => {});
+    }
+  });
+  // Set a per-namespace nickname (empty clears it). `NICK` verb (§10.3).
+  function setNick(scope: string, account: string, value: string) {
+    weft.nick(scope, account, value).catch((e) => toast(String(e), "error"));
+  }
   let myStatus = $state("online");
   // §10.5 the caller's own verification claims, keyed by kind (email/birthday).
   let verifications = $state<Record<string, { subject: string; state: string }>>({});
@@ -682,6 +699,12 @@
   }
   // ---- namespace admin panel (§6.2 / §2.4 / §6.6) ----
   let nsSettingsOpen = $state(false);
+  // §10.3 per-server profile editor (your own nickname on this server).
+  let serverProfileOpen = $state(false);
+  function openServerProfile() {
+    if (activeServer) serverProfileOpen = true;
+    serverMenu = false;
+  }
   let nsTab = $state<
     | "overview"
     | "roles"
@@ -1054,12 +1077,17 @@
     const a = profiles[peerOf(acct)]?.avatar;
     return a ? weft.avatarUrl(a) : null;
   };
-  /** An account's display name, falling back to the bare account part (§10.3:
-   *  the canonical handle is always shown separately). */
+  /** An account's display name — the active server's nickname if set, else the
+   *  global display name, else the bare account part (§10.3: the canonical
+   *  handle is always shown separately). */
   const displayName = (acct: string): string => {
     const key = peerOf(acct);
-    return profiles[key]?.display || key.split("@")[0];
+    const nick = activeServer ? nicks[nickKey(`ns:${activeServer}`, key)] : undefined;
+    return nick || profiles[key]?.display || key.split("@")[0];
   };
+  /** An account's server nickname at the active server, or "" (for editors). */
+  const nickOf = (acct: string): string =>
+    (activeServer ? nicks[nickKey(`ns:${activeServer}`, peerOf(acct))] : "") ?? "";
   /** An account's free-text bio (§10.3), or "" if unset. */
   const bioOf = (acct: string): string => profiles[peerOf(acct)]?.about ?? "";
   /** Fetch a profile we don't have yet (deduped; own + co-members). */
@@ -1544,6 +1572,15 @@
           avatar: e.avatar ?? undefined,
           about: e.about ?? undefined,
         };
+        break;
+      }
+      case "nick": {
+        // §10.3 a per-namespace server nickname (empty = cleared).
+        const acct = e.network === network ? e.account : `${e.account}@${e.network}`;
+        const key = nickKey(e.scope, acct);
+        if (e.nick) nicks[key] = e.nick;
+        else delete nicks[key];
+        nicks = { ...nicks }; // re-trigger derivations (delete isn't tracked)
         break;
       }
       case "verified":
@@ -3338,6 +3375,8 @@
     avatarUrl,
     displayName,
     bioOf,
+    nickOf,
+    setNick,
     chanShort,
     peerOf,
     dotClass,
@@ -3365,6 +3404,7 @@
     openCreateChannel,
     openCreateChannelInCat,
     openNsSettings,
+    openServerProfile,
     mintInvite,
     // invites menu (Discord-style)
     get invitesList() { return invitesList; },
@@ -3751,6 +3791,10 @@
 
     {#if nsSettingsOpen}
       <ServerSettingsModal onclose={() => (nsSettingsOpen = false)} />
+    {/if}
+
+    {#if serverProfileOpen}
+      <ServerProfileModal onclose={() => (serverProfileOpen = false)} />
     {/if}
 
     {#if notifSettingsOpen}
