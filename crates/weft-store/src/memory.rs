@@ -1262,9 +1262,13 @@ impl InviteStore for MemoryStore {
             Some(0) => Ok(RedeemOutcome::Exhausted),
             Some(n) => {
                 invite.uses_left = Some(n - 1);
+                invite.uses += 1;
                 Ok(RedeemOutcome::Redeemed(invite.clone()))
             }
-            None => Ok(RedeemOutcome::Redeemed(invite.clone())),
+            None => {
+                invite.uses += 1;
+                Ok(RedeemOutcome::Redeemed(invite.clone()))
+            }
         }
     }
 

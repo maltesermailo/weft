@@ -339,6 +339,7 @@ impl WeftClient {
                 build_profile_set(
                     args.get("display").and_then(|v| v.as_str()),
                     args.get("avatar").and_then(|v| v.as_str()),
+                    args.get("about").and_then(|v| v.as_str()),
                 )?
             }
             "profiles_query" => {
@@ -375,7 +376,13 @@ impl WeftClient {
             "ns_recover" => build_ns_recover(&arg("name"), &arg("rotation"))?,
             "federate" => build_federate(&arg("target"))?,
             // ---- invites ----
-            "invite_mint" => build_invite_mint(&arg("scope"))?,
+            "invite_mint" => build_invite_mint(
+                &arg("scope"),
+                args.get("maxUses")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32),
+                args.get("expiry").and_then(|v| v.as_u64()),
+            )?,
             "invite_redeem" => build_invite_redeem(&arg("token"))?,
             "invite_revoke" => build_invite_revoke(&arg("inviteId"))?,
             "invite_list" => build_invite_list(&arg("scope"))?,

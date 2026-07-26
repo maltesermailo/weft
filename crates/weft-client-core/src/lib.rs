@@ -292,6 +292,8 @@ pub enum ClientEvent {
         invite_id: String,
         creator: String,
         uses_left: Option<u32>,
+        /// How many times this invite has been redeemed (§6.5).
+        used: u32,
         expiry: Option<u64>,
     },
     /// `REPORTED <report-id>` — ack to the reporter (§7).
@@ -401,6 +403,8 @@ pub enum ClientEvent {
         network: String,
         display: Option<String>,
         avatar: Option<String>,
+        /// §10.3 free-text bio.
+        about: Option<String>,
     },
     /// §10.5 `VERIFIED <kind> <subject>` — one of the caller's own verification
     /// claims (email/birthday), `state` = `pending`|`confirmed`. Owner-only.
@@ -843,12 +847,14 @@ pub fn on_line<E: EventSink>(
             invite_id,
             creator,
             uses_left,
+            used,
             expiry,
         } => sink.emit(ClientEvent::InviteInfo {
             scope,
             invite_id,
             creator: creator.to_string(),
             uses_left,
+            used,
             expiry,
         }),
         Event::Reported { report_id } => sink.emit(ClientEvent::Reported { report_id }),
@@ -937,11 +943,13 @@ pub fn on_line<E: EventSink>(
             user,
             display,
             avatar,
+            about,
         } => sink.emit(ClientEvent::Profile {
             account: user.account.to_string(),
             network: user.network.to_string(),
             display,
             avatar,
+            about,
         }),
         // §10.5 account verification claims (owner-only).
         Event::Verified {
@@ -1120,12 +1128,17 @@ pub fn build_revoke(subject: &str, scope: &str, caps: &str) -> Result<String, St
     .map_err(|e| e.to_string())
 }
 
-/// `INVITE MINT <scope>` — shareable invite for a channel/namespace (§6.5).
-pub fn build_invite_mint(scope: &str) -> Result<String, String> {
+/// `INVITE MINT <scope> [max-uses=] [expiry=]` — shareable invite for a
+/// channel/namespace (§6.5). `max_uses`/`expiry` (TTL seconds) `None` = unlimited.
+pub fn build_invite_mint(
+    scope: &str,
+    max_uses: Option<u32>,
+    expiry: Option<u64>,
+) -> Result<String, String> {
     Request::new(Command::InviteMint {
         scope: scope.to_string(),
-        max_uses: None,
-        expiry: None,
+        max_uses,
+        expiry,
     })
     .serialize()
     .map_err(|e| e.to_string())
@@ -2046,10 +2059,15 @@ pub fn build_ns_join(name: &str) -> Result<String, String> {
 /// `PROFILE SET` — set your own display name + avatar (§10.3). Each arg is
 /// `None` to leave that field unchanged, `Some("")` to clear it, or `Some(v)`
 /// to set it (`avatar` is the blob's BLAKE3 hash).
-pub fn build_profile_set(display: Option<&str>, avatar: Option<&str>) -> Result<String, String> {
+pub fn build_profile_set(
+    display: Option<&str>,
+    avatar: Option<&str>,
+    about: Option<&str>,
+) -> Result<String, String> {
     Request::new(Command::ProfileSet {
         display: display.map(String::from),
         avatar: avatar.map(String::from),
+        about: about.map(String::from),
     })
     .serialize()
     .map_err(|e| e.to_string())

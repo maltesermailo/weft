@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
+  import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   let {
     target,
@@ -47,7 +48,7 @@
     <div class="profile-banner" style="--pf-accent: {myRoles[0]?.color ?? 'var(--accent, #5865f2)'}"></div>
     <div class="profile-avwrap">
       <div class="avatar xl" style="--pf-ring: {myRoles[0]?.color ?? 'var(--accent, #5865f2)'}">
-        {app.initials(target)}<span class="dot {pr} corner"></span>
+        <Avatar account={target} /><span class="dot {pr} corner"></span>
       </div>
     </div>
     <div class="profile-body">
@@ -92,8 +93,9 @@
 
       <div class="profile-divider"></div>
       <div class="profile-actions">
+        <button class="pf-primary" onclick={() => { app.openFullProfile(target); onclose(); }}>Open profile</button>
         {#if target !== app.account}
-          <button class="pf-primary" onclick={() => { app.openDm(target); onclose(); }}>Message</button>
+          <button class="pf-secondary" onclick={() => { app.openDm(target); onclose(); }}>Message</button>
           {#if inServer}
             <div class="pf-mod">
               <div class="profile-section-label">Moderation</div>

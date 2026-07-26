@@ -347,6 +347,7 @@ The echoed `MESSAGE` — same `label`, server-assigned `msgid` — is the ack; b
 | `INVITE MINT` | `INVITE MINT <scope> [max-uses=] [expiry=]` | `invite` | → `INVITED` (`@token=`, link `weft://<net>/<ns>/i/<b64>` — the namespace is embedded so a _foreign_ redeemer can auto-federate to it, <<s11-10,§11.10>>; top-level channels have no `<ns>` and use `weft://<net>/i/<b64>`). | `INVITE MINT ns:gaming max-uses=10 expiry=604800` → `@max-uses=10;token=<b64> INVITED ns:gaming iv_01J… :weft://test.example/gaming/i/<b64>`
 | `INVITE REVOKE` | `INVITE REVOKE <invite-id>` | `invite` | Closes the counter; already-redeemed members unaffected. | `INVITE REVOKE iv_01J…` (counter closed)
 | `INVITE REVOKE-ALL` | `INVITE REVOKE-ALL <scope>` | `invite` | Bulk-closes every invite for the scope's namespace (`ns:<name>` + its `#<ns>/<chan>` scopes) in one shot. → an `INVITED` ack with `invite-id=*`, `max-uses=0`. Already-redeemed members unaffected. | `INVITE REVOKE-ALL ns:gaming` → `INVITED` ack (`invite-id=*`, `max-uses=0`)
+| `INVITE LIST` | `INVITE LIST <scope>` | `invite` | Lists the scope's live invites for an admin surface — one `INVITE-INFO` per invite (creator, uptake, remaining budget, expiry), then a `BATCH-END`. | `INVITE LIST ns:gaming` → `@uses=7;used=3;expiry=… INVITE-INFO ns:gaming iv_01J… ada@test.example` × N, then `BATCH-END`
 | `INVITE REDEEM` | `INVITE REDEEM <b64>` | — | Verifies chain + counter, mints a member token *bound to the redeemer's key*, auto-joins the default channel. Dead invites → `NO-SUCH-TARGET` (indistinct). | `INVITE REDEEM <b64>` → `@count=43 MEMBER #gaming/general bob@test.example join`
 | `CAPS` | `CAPS <account> <scope>` | — (public) | An account's *effective* capabilities at a scope (operators/ns-owners expand to all); caps aren't secret — powers client badges. → `CAPS`. | `CAPS bob ns:gaming` → `CAPS bob ns:gaming :send,react,invite`
 |===
@@ -643,6 +644,7 @@ Events are the server→client half of the protocol; a client *MUST ignore any e
 
 | `TOKEN <subject> <scope>` | `@token=<b64>`, `expiry=` — the signed cap token from `GRANT`/`REVOKE`/`ROLE ASSIGN` (<<s10-4,§10.4>>) | `@token=<b64-cap-token> TOKEN bob #gaming/general`
 | `INVITED <scope> <invite-id>` | `@token=<b64>` (required), `max-uses=`, `expiry=`; redeem link in the trailing | `@token=<b64> INVITED ns:gaming iv_01J… max-uses=10 :weft://test.example/gaming/i/<b64>`
+| `INVITE-INFO <scope> <invite-id> <creator@net>` | `uses=` (remaining, absent = unlimited), `used=` (redemption count, default 0), `expiry=` — one live invite in an `INVITE LIST` reply | `@uses=7;used=3;expiry=1700000000 INVITE-INFO ns:gaming iv_01J… ada@test.example`
 | `ROLE <scope> <color> <caps> :<name>` | `hoist=`, `pos=` — a role definition | `ROLE ns:gaming #e8b93d send,react hoist=1 pos=0 :Speaker`
 | `ROLE-MEMBER <scope> <account> :<names>` | an account's explicit role assignments | `ROLE-MEMBER ns:gaming bob :Speaker`
 | `CAPS <account> <scope> :<caps>` | effective caps at a scope (public; badges) | `CAPS bob ns:gaming :send,react,invite`
@@ -857,7 +859,7 @@ Well-known document (JSON):
 
 [[s10-3]]
 === 10.3 Display identity
-Signed profile blob (nick, avatar) travels with the user; remotes MAY override display, MUST show canonical `user@network`.
+Signed profile blob (nick, avatar) travels with the user; remotes MAY override display, MUST show canonical `user@network`. A profile also carries an optional free-text *bio* (`PROFILE SET @about=`, ≤512 B, shown on the full profile view); like the display name it is set by its owner and broadcast to co-members via `PROFILE @about=`. The bio is **not** part of the signed profile blob yet (M-prof-5), so it is stored and shown on its home network only — a bridged profile drops it.
 
 [[s10-4]]
 === 10.4 Capability tokens

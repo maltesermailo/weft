@@ -12,6 +12,7 @@ impl<S: ControlStream> Session<S> {
         label: Option<String>,
         display: Option<String>,
         avatar: Option<String>,
+        about: Option<String>,
         account: Account,
     ) -> io::Result<Flow> {
         let current = self
@@ -30,6 +31,10 @@ impl<S: ControlStream> Session<S> {
             Some(a) => (!a.is_empty()).then_some(a),
             None => current.avatar,
         };
+        let about = match about {
+            Some(a) => (!a.is_empty()).then_some(a),
+            None => current.about,
+        };
         // §2.3 display names ≤128 B.
         if display.as_ref().is_some_and(|d| d.len() > 128) {
             self.send_err(
@@ -41,10 +46,17 @@ impl<S: ControlStream> Session<S> {
             .await?;
             return Ok(Flow::Continue);
         }
+        // Bios are free text but bounded to keep the profile line sane (≤512 B).
+        if about.as_ref().is_some_and(|a| a.len() > 512) {
+            self.send_err(label, ErrCode::Malformed, None, "bio too long (≤512 B)")
+                .await?;
+            return Ok(Flow::Continue);
+        }
 
         let record = weft_store::ProfileRecord {
             display: display.clone(),
             avatar: avatar.clone(),
+            about: about.clone(),
             updated: unix_now_ms(),
         };
         if let Err(e) = self
@@ -60,6 +72,7 @@ impl<S: ControlStream> Session<S> {
             user: UserRef::new(account.clone(), self.ctx.info.network.clone()),
             display,
             avatar,
+            about,
         };
         // Labeled ack to the setter; broadcast to co-members in every channel
         // they're in (attributed to this session so the setter's own copy is
@@ -101,6 +114,7 @@ impl<S: ControlStream> Session<S> {
                     user,
                     display: record.display,
                     avatar: record.avatar,
+                    about: record.about,
                 },
             )
             .await?;

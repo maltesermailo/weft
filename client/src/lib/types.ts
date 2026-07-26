@@ -73,7 +73,10 @@ export type Channel = {
 };
 
 /// A right-click context-menu entry.
-export type CtxItem = { label: string; danger?: boolean; run: () => void };
+export type CtxItem =
+  | { label: string; danger?: boolean; run: () => void; icon?: string }
+  | { header: string; mod?: boolean }
+  | { divider: true };
 
 /// A namespace-scoped role definition (name + color + caps + hoist + position).
 export type RoleDefC = {

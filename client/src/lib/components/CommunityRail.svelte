@@ -9,10 +9,6 @@
   </button>
   <div class="rail-divider"></div>
   <div class="rail-communities">
-    <div class="comm-tile" class:active={!app.homeView && app.activeServer === ""} class:muted={app.serverMuted("")} title={app.network}>
-      <button onclick={() => app.selectServer("")} oncontextmenu={(e) => { e.preventDefault(); app.openServerMenu(""); }}>{app.initials(app.network)}</button>
-      <span class="trust-mark signed" title="Connected network"></span>
-    </div>
     {#each app.serverNamespaces as ns (ns)}
       <div class="comm-tile" class:active={!app.homeView && app.activeServer === ns} class:muted={app.serverMuted(ns)} title={ns}>
         <button onclick={() => app.selectServer(ns)} oncontextmenu={(e) => { e.preventDefault(); app.openServerMenu(ns); }}>{app.initials(ns)}</button>

@@ -343,13 +343,15 @@ pub enum Event {
         max_uses: Option<u32>,
         expiry: Option<u64>,
     },
-    /// `@uses=;expiry= INVITE-INFO <scope> <invite-id> <creator@net>` — one live
-    /// invite in an `INVITE LIST` response (§6.5). `uses` absent = unlimited.
+    /// `@uses=;used=;expiry= INVITE-INFO <scope> <invite-id> <creator@net>` — one
+    /// live invite in an `INVITE LIST` response (§6.5). `uses` absent = unlimited
+    /// remaining; `used` = how many times it has been redeemed (default 0).
     InviteInfo {
         scope: String,
         invite_id: String,
         creator: UserRef,
         uses_left: Option<u32>,
+        used: u32,
         expiry: Option<u64>,
     },
     /// `CHANMETA <#chan> <key> :<value>` (§7) — channel metadata change.
@@ -502,6 +504,8 @@ pub enum Event {
         user: UserRef,
         display: Option<String>,
         avatar: Option<String>,
+        /// `@about=` free-text bio (§10.3); a missing tag = unset.
+        about: Option<String>,
     },
     /// `@state= VERIFIED <kind> <subject>` (§10.5) — an account-verification claim
     /// state, sent **only to the claim's owner** (the subject is PII — email
@@ -1067,6 +1071,19 @@ impl Event {
                             })
                         })
                         .transpose()?,
+                    // Lenient-in: an older server that omits `used` reads as 0.
+                    used: line
+                        .tags
+                        .get("used")
+                        .map(|v| {
+                            v.parse().map_err(|_| ParseError::BadParam {
+                                verb: "INVITE-INFO",
+                                what: "used",
+                                value: v.clone(),
+                            })
+                        })
+                        .transpose()?
+                        .unwrap_or(0),
                     expiry: u64_tag(line, "expiry", "INVITE-INFO")?,
                 })
             }
@@ -1324,6 +1341,7 @@ impl Event {
                     user: args.req("user")?.parse()?,
                     display: line.tags.get("display").cloned(),
                     avatar: line.tags.get("avatar").cloned(),
+                    about: line.tags.get("about").cloned(),
                 })
             }
             "VERIFIED" => {
@@ -1784,11 +1802,13 @@ impl Event {
                 invite_id,
                 creator,
                 uses_left,
+                used,
                 expiry,
             } => {
                 if let Some(uses) = uses_left {
                     tags.insert("uses".to_string(), uses.to_string());
                 }
+                tags.insert("used".to_string(), used.to_string());
                 if let Some(expiry) = expiry {
                     tags.insert("expiry".to_string(), expiry.to_string());
                 }
@@ -2098,12 +2118,16 @@ impl Event {
                 user,
                 display,
                 avatar,
+                about,
             } => {
                 if let Some(display) = display {
                     tags.insert("display".to_string(), display.clone());
                 }
                 if let Some(avatar) = avatar {
                     tags.insert("avatar".to_string(), avatar.clone());
+                }
+                if let Some(about) = about {
+                    tags.insert("about".to_string(), about.clone());
                 }
                 ("PROFILE", vec![user.to_string()], None)
             }
@@ -2788,21 +2812,22 @@ mod tests {
                 invite_id: "i01ARZ".into(),
                 creator: "ada@hda.example".parse().unwrap(),
                 uses_left: Some(5),
+                used: 3,
                 expiry: Some(1_700_000_000),
             },
             "il1",
         );
-        assert!(info
-            .serialize()
-            .unwrap()
-            .contains("INVITE-INFO ns:gaming i01ARZ ada@hda.example"));
+        let wire = info.serialize().unwrap();
+        assert!(wire.contains("INVITE-INFO ns:gaming i01ARZ ada@hda.example"));
+        assert!(wire.contains("used=3"));
         round_trip(&info);
-        // Unlimited uses, no expiry.
+        // Unlimited uses, no expiry, never redeemed.
         round_trip(&Reply::new(Event::InviteInfo {
             scope: "#general".into(),
             invite_id: "i2".into(),
             creator: "bob@peer.example".parse().unwrap(),
             uses_left: None,
+            used: 0,
             expiry: None,
         }));
     }
@@ -3053,22 +3078,27 @@ mod tests {
                 user: "ada@hda.example".parse().unwrap(),
                 display: Some("Ada L.".into()),
                 avatar: Some("b3-abc".into()),
+                about: Some("Cryptographer & poet.".into()),
             },
             "p1",
         );
-        assert!(full.serialize().unwrap().contains("avatar=b3-abc"));
+        let wire = full.serialize().unwrap();
+        assert!(wire.contains("avatar=b3-abc"));
+        assert!(wire.contains("about="));
         round_trip(&full);
         // Avatar-only, no display; a federated user's fully-qualified handle.
         round_trip(&Reply::new(Event::Profile {
             user: "bob@peer.example".parse().unwrap(),
             display: None,
             avatar: Some("b3-xyz".into()),
+            about: None,
         }));
-        // Bare (both unset) — a cleared profile.
+        // Bare (all unset) — a cleared profile.
         let bare = Reply::new(Event::Profile {
             user: "eve@hda.example".parse().unwrap(),
             display: None,
             avatar: None,
+            about: None,
         });
         assert_eq!(bare.serialize().unwrap(), "PROFILE eve@hda.example");
         round_trip(&bare);

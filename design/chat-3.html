@@ -1,0 +1,1343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>NexusChat — Gaming</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --bg:       #07080C;
+  --rail:     #040508;
+  --sidebar:  #0A0B10;
+  --chat:     #0D0F15;
+  --surface:  #14161E;
+  --surface2: #191C26;
+  --hover:    rgba(255,77,0,0.09);
+  --border:   rgba(255,255,255,0.05);
+  --accent:   #FF4D00;
+  --accent2:  #FF7A3D;
+  --neon:     #00FFCC;
+  --green:    #00E87A;
+  --red:      #FF2D55;
+  --yellow:   #FFD60A;
+  --text:     #E8EAF2;
+  --muted:    #555A6E;
+  --muted2:   #383D50;
+  --glow:     0 0 24px rgba(255,77,0,0.45);
+  --glow-neon:0 0 16px rgba(0,255,204,0.3);
+  /* aliases so existing rules keep working */
+  --purple:   #FF4D00;
+  --purple2:  #FF7A3D;
+  --cyan:     #00FFCC;
+}
+html,body{height:100%;background:var(--bg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;-webkit-font-smoothing:antialiased;color:var(--text);overflow:hidden;}
+body{font-feature-settings:"cv02","cv03","cv04","cv11";}
+input::placeholder{color:var(--muted2);}
+::-webkit-scrollbar{width:3px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:rgba(255,77,0,0.35);border-radius:3px;}
+::-webkit-scrollbar-thumb:hover{background:var(--accent);}
+
+/* ── Layout ── */
+.app{display:flex;height:100vh;}
+
+/* ── Rail ── */
+.rail{
+  width:70px;background:var(--rail);display:flex;flex-direction:column;
+  align-items:center;padding:12px 0;gap:6px;flex-shrink:0;overflow-y:auto;
+  border-right:1px solid var(--border);
+}
+.rail-item{position:relative;cursor:pointer;}
+.rail-pip{
+  position:absolute;left:-8px;top:50%;transform:translateY(-50%);
+  width:4px;background:var(--text);border-radius:0 3px 3px 0;
+  transition:height .15s,background .15s;height:0;
+}
+.rail-item:hover .rail-pip{height:12px;background:var(--accent2);}
+.rail-item.active .rail-pip{height:40px;background:var(--accent);}
+.rail-icon{
+  width:48px;height:48px;border-radius:12px;background:var(--surface);
+  display:flex;align-items:center;justify-content:center;
+  transition:border-radius .18s,transform .15s,box-shadow .18s;
+  font-weight:800;font-size:13px;letter-spacing:-.5px;overflow:hidden;
+  border:2px solid transparent;
+}
+.rail-item:hover .rail-icon{border-radius:10px;transform:scale(1.06);}
+.rail-item.active .rail-icon{border-radius:10px;border-color:var(--accent);box-shadow:var(--glow);}
+.rail-div{width:32px;height:1px;background:var(--border);margin:2px 0;}
+.rail-add{
+  width:48px;height:48px;border-radius:12px;background:rgba(255,77,0,0.08);
+  border:1.5px dashed rgba(255,77,0,0.3);display:flex;align-items:center;justify-content:center;
+  cursor:pointer;transition:all .18s;color:var(--accent2);
+}
+.rail-add:hover{border-radius:10px;background:rgba(255,77,0,0.18);border-color:var(--accent);color:#fff;box-shadow:var(--glow);}
+
+/* ── Sidebar ── */
+.sidebar{
+  width:240px;background:var(--sidebar);display:flex;flex-direction:column;
+  flex-shrink:0;border-right:1px solid var(--border);
+}
+.server-header{
+  height:48px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 16px;border-bottom:1px solid var(--border);cursor:pointer;
+  background:linear-gradient(90deg,rgba(255,77,0,0.07),transparent);
+  flex-shrink:0;
+}
+.server-header:hover{background:linear-gradient(90deg,rgba(255,77,0,0.14),transparent);}
+.server-name{font-size:13px;font-weight:900;color:var(--text);letter-spacing:.05em;text-transform:uppercase;}
+.server-chevron{color:var(--muted);transition:transform .15s;}
+.server-header:hover .server-chevron{color:var(--text);}
+
+.channel-scroll{flex:1;overflow-y:auto;padding:8px 0;}
+.ch-category{
+  padding:16px 8px 4px 16px;font-size:9px;font-weight:900;
+  text-transform:uppercase;letter-spacing:.15em;color:var(--muted);
+  display:flex;align-items:center;justify-content:space-between;cursor:pointer;
+}
+.ch-category:hover{color:var(--accent2);}
+.ch-add-btn{padding:2px 4px;border:none;background:none;color:inherit;cursor:pointer;transition:color .1s;}
+.ch-item{
+  display:flex;align-items:center;gap:8px;padding:6px 8px 6px 14px;
+  border-radius:6px;margin:1px 8px;cursor:pointer;transition:background .1s;
+  color:var(--muted);font-size:14px;font-weight:500;position:relative;
+}
+.ch-item:hover{background:rgba(255,77,0,0.08);color:var(--text);}
+.ch-item.active{
+  background:rgba(255,77,0,0.12);color:var(--text);
+}
+.ch-item.active::before{
+  content:'';position:absolute;left:-8px;top:50%;transform:translateY(-50%);
+  width:3px;height:60%;background:var(--accent);border-radius:0 3px 3px 0;box-shadow:0 0 8px rgba(255,77,0,0.6);
+}
+.ch-hash{font-size:18px;line-height:1;flex-shrink:0;opacity:.6;}
+.ch-item.active .ch-hash{opacity:1;color:var(--accent);}.ch-item:hover .ch-hash{opacity:1;}
+.ch-unread-dot{
+  width:6px;height:6px;border-radius:50%;background:var(--text);
+  position:absolute;left:4px;top:50%;transform:translateY(-50%);flex-shrink:0;
+}
+.ch-badge{
+  margin-left:auto;background:var(--red);color:#fff;
+  font-size:10px;font-weight:700;border-radius:8px;padding:1px 5px;line-height:1.4;
+}
+.voice-ch{
+  display:flex;align-items:center;gap:8px;padding:5px 8px 5px 14px;
+  border-radius:6px;margin:1px 8px;cursor:pointer;transition:background .1s;
+  color:var(--muted);font-size:13px;font-weight:500;
+}
+.voice-ch:hover{background:rgba(255,77,0,0.08);color:var(--text);}
+.voice-users{padding-left:38px;display:flex;flex-direction:column;gap:2px;}
+.voice-user{display:flex;align-items:center;gap:6px;padding:3px 8px;border-radius:4px;font-size:12px;color:var(--muted);cursor:pointer;}
+.voice-user:hover{background:rgba(255,77,0,0.08);color:var(--text);}
+.voice-av{width:18px;height:18px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;flex-shrink:0;}
+
+/* user panel */
+.user-panel{
+  padding:8px;border-top:1px solid var(--border);
+  background:rgba(0,0,0,0.2);display:flex;align-items:center;gap:8px;flex-shrink:0;
+}
+.up-av{position:relative;flex-shrink:0;}
+.up-av-inner{width:32px;height:32px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;}
+.up-sdot{position:absolute;bottom:-1px;right:-1px;width:10px;height:10px;border-radius:50%;border:2px solid var(--sidebar);}
+.sdot-online{background:var(--green);}
+.up-info{flex:1;min-width:0;}
+.up-name{font-size:13px;font-weight:700;color:var(--text);}
+.up-tag{font-size:11px;color:var(--muted);}
+.up-btns{display:flex;gap:2px;}
+.up-btn{width:30px;height:30px;border-radius:6px;background:none;border:none;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .1s,color .1s;}
+.up-btn:hover{background:rgba(255,255,255,0.08);color:var(--text);}
+
+/* ── Main ── */
+.main{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--chat);overflow:hidden;}
+.chat-area{background:radial-gradient(ellipse 80% 60% at 50% 100%,rgba(255,77,0,0.03) 0%,transparent 70%);}
+
+/* Topbar */
+.topbar{
+  height:48px;display:flex;align-items:center;gap:10px;padding:0 16px;
+  border-bottom:1px solid var(--border);flex-shrink:0;
+  background:rgba(4,5,8,0.8);backdrop-filter:blur(10px);border-bottom:1px solid rgba(255,77,0,0.1);
+}
+.topbar-hash{color:var(--accent);font-size:16px;font-weight:900;line-height:1;letter-spacing:-.02em;text-shadow:0 0 10px rgba(255,77,0,0.5);}
+.topbar-name{font-size:13px;font-weight:900;color:var(--text);text-transform:uppercase;letter-spacing:.06em;}
+.topbar-div{width:1px;height:20px;background:var(--border);}
+.topbar-topic{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px;}
+.tb-right{margin-left:auto;display:flex;gap:4px;align-items:center;}
+.tb-btn{width:32px;height:32px;border-radius:6px;background:none;border:none;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .1s,color .1s;flex-shrink:0;}
+.tb-btn:hover{background:rgba(255,255,255,0.07);color:var(--text);}
+.tb-btn.active{color:var(--accent);}
+.tb-search{
+  display:flex;align-items:center;gap:6px;background:rgba(0,0,0,0.3);
+  border:1px solid var(--border);border-radius:6px;padding:4px 10px;
+  transition:border-color .15s;
+}
+.tb-search:focus-within{border-color:var(--accent);}
+.tb-search input{background:none;border:none;outline:none;font-size:13px;color:var(--text);width:120px;font-family:inherit;}
+
+/* Pins bar */
+.pins-bar{
+  display:none;background:#060709;border-bottom:1px solid rgba(255,77,0,0.12);
+  flex-shrink:0;max-height:220px;overflow-y:auto;
+}
+.pins-bar.open{display:block;}
+.pins-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 16px 6px;
+}
+.pins-title{font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.12em;color:var(--accent);text-shadow:0 0 8px rgba(255,77,0,0.4);}
+.pins-close{background:none;border:none;color:var(--muted);cursor:pointer;transition:color .1s;}
+.pins-close:hover{color:var(--text);}
+.pin-item{
+  display:flex;gap:10px;padding:6px 16px 10px;border-top:1px solid var(--border);
+}
+.pin-stripe{width:3px;background:var(--accent);border-radius:3px;flex-shrink:0;}
+.pin-body{flex:1;min-width:0;}
+.pin-meta{font-size:11px;color:var(--muted);margin-bottom:2px;}
+.pin-meta strong{color:var(--text);}
+.pin-text{font-size:13px;color:var(--text);line-height:1.5;}
+
+/* Chat area */
+.chat-area{flex:1;overflow-y:auto;padding:16px 0 4px;display:flex;flex-direction:column;}
+
+/* System messages */
+.sys-msg{
+  display:flex;align-items:center;gap:10px;padding:4px 20px;
+  font-size:9px;font-weight:700;color:var(--muted);margin:8px 0;letter-spacing:.1em;text-transform:uppercase;
+}
+.sys-line{flex:1;height:1px;background:var(--border);}
+
+/* Welcome banner */
+.welcome-banner{padding:20px 20px 4px;}
+.welcome-icon{
+  width:68px;height:68px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-size:28px;margin-bottom:12px;
+  background:linear-gradient(135deg,rgba(255,77,0,0.25),rgba(0,255,204,0.15));
+  border:2px solid rgba(255,77,0,0.5);box-shadow:0 0 20px rgba(255,77,0,0.2);
+}
+.welcome-title{font-size:20px;font-weight:900;color:var(--text);letter-spacing:-.2px;margin-bottom:4px;text-transform:uppercase;}
+.welcome-sub{font-size:14px;color:var(--muted);line-height:1.5;}
+
+/* Message group */
+.msg-group{display:flex;gap:14px;padding:2px 20px;position:relative;}
+.msg-group:hover{background:rgba(255,255,255,0.02);}
+.msg-group:hover .msg-actions{opacity:1;}
+.msg-group.continuation{padding-top:1px;padding-bottom:1px;}
+.msg-group.continuation .msg-av-col{justify-content:flex-start;padding-top:4px;}
+.msg-group.continuation .msg-timestamp-side{
+  display:flex;align-items:center;justify-content:flex-end;
+  width:40px;flex-shrink:0;font-size:10px;color:transparent;
+  transition:color .1s;
+}
+.msg-group:hover .msg-timestamp-side{color:var(--muted2);}
+.msg-group.system-join{padding:8px 20px;display:flex;align-items:center;gap:10px;}
+
+.msg-av-col{width:40px;flex-shrink:0;display:flex;justify-content:center;align-items:flex-start;padding-top:2px;}
+.msg-avatar{
+  width:40px;height:40px;border-radius:8px;display:flex;align-items:center;
+  justify-content:center;font-size:15px;font-weight:800;cursor:pointer;
+  transition:opacity .1s,box-shadow .15s;flex-shrink:0;
+}
+.msg-avatar:hover{opacity:.95;box-shadow:0 0 0 2px var(--accent),var(--glow);}
+.msg-body{flex:1;min-width:0;}
+.msg-header{display:flex;align-items:baseline;gap:8px;margin-bottom:2px;}
+.msg-author{
+  font-size:14px;font-weight:800;cursor:pointer;transition:text-decoration .1s;
+}
+.msg-author:hover{text-decoration:none;opacity:.8;}
+.msg-badge{
+  font-size:8px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;
+  padding:2px 5px;border-radius:2px;line-height:1.4;flex-shrink:0;
+}
+.badge-admin{background:rgba(255,45,85,0.2);color:#FF5C7A;letter-spacing:.06em;}
+.badge-mod{background:rgba(255,77,0,0.18);color:var(--accent2);letter-spacing:.06em;}
+.badge-bot{background:rgba(0,255,204,0.12);color:var(--neon);letter-spacing:.06em;}
+.msg-ts{font-size:11px;color:var(--muted2);}
+.msg-text{font-size:14px;color:var(--text);line-height:1.6;word-break:break-word;}
+.msg-text a{color:var(--cyan);text-decoration:none;}
+.msg-text a:hover{text-decoration:underline;}
+.msg-text code{
+  background:rgba(0,0,0,0.4);border:1px solid var(--border);border-radius:4px;
+  padding:0 5px;font-family:'SF Mono','Fira Code',monospace;font-size:13px;color:#E879F9;
+}
+.msg-edited{font-size:10px;color:var(--muted2);margin-left:4px;}
+
+/* Reactions */
+.reactions{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;}
+.reaction{
+  display:flex;align-items:center;gap:5px;padding:3px 8px;border-radius:8px;
+  background:rgba(255,255,255,0.05);border:1px solid var(--border);
+  cursor:pointer;transition:background .12s,border-color .12s;font-size:13px;
+}
+.reaction:hover{background:rgba(255,77,0,0.12);border-color:rgba(255,77,0,0.4);}
+.reaction.reacted{background:rgba(255,77,0,0.14);border-color:rgba(255,77,0,0.45);}
+.reaction-count{font-size:12px;font-weight:700;color:var(--text);}
+.reaction.reacted .reaction-count{color:var(--accent2);}
+
+/* Attachments / embeds */
+.embed{
+  margin-top:8px;background:var(--surface);border-radius:8px;
+  border-left:3px solid var(--accent);padding:10px 12px;max-width:480px;box-shadow:inset 0 0 20px rgba(255,77,0,0.04);
+}
+.embed-title{font-size:12px;font-weight:900;color:var(--accent2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em;}
+.embed-desc{font-size:13px;color:var(--muted);line-height:1.5;}
+.embed-img{width:100%;max-width:480px;border-radius:8px;margin-top:8px;object-fit:cover;display:block;}
+
+.img-attachment{
+  margin-top:8px;border-radius:8px;overflow:hidden;max-width:380px;cursor:pointer;
+  border:1px solid var(--border);transition:border-color .12s;
+}
+.img-attachment:hover{border-color:rgba(255,77,0,0.5);}
+.img-attachment img{display:block;width:100%;object-fit:cover;}
+
+/* Message hover actions */
+.msg-actions{
+  position:absolute;top:-16px;right:16px;
+  background:#0A0B10;border:1px solid rgba(255,77,0,0.15);border-radius:6px;
+  display:flex;gap:2px;padding:4px;opacity:0;transition:opacity .1s;
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:10;
+}
+.ma-btn{
+  width:28px;height:28px;border-radius:5px;background:none;border:none;
+  color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;
+  transition:background .08s,color .08s;font-size:15px;
+}
+.ma-btn:hover{background:rgba(255,77,0,0.18);color:var(--accent2);}
+
+/* Reply indicator */
+.reply-bar{
+  display:flex;align-items:center;gap:8px;padding:6px 16px;margin-bottom:2px;
+  font-size:12px;color:var(--muted);border-top:1px solid var(--border);
+  background:rgba(0,0,0,0.2);
+}
+.reply-bar strong{color:var(--text);}
+.reply-close{background:none;border:none;color:var(--muted);cursor:pointer;margin-left:auto;transition:color .1s;}
+.reply-close:hover{color:var(--text);}
+
+/* Chat input */
+.input-area{padding:0 16px 16px;flex-shrink:0;}
+.reply-indicator{
+  display:none;background:#060709;border-radius:6px 6px 0 0;
+  padding:8px 12px;border:1px solid rgba(255,77,0,0.2);border-bottom:none;
+  font-size:12px;color:var(--muted);
+}
+.reply-indicator.visible{display:flex;align-items:center;gap:6px;}
+.reply-indicator strong{color:var(--accent2);}
+.ri-close{background:none;border:none;color:var(--muted);cursor:pointer;margin-left:auto;font-size:16px;transition:color .1s;}
+.ri-close:hover{color:var(--text);}
+.input-box{
+  display:flex;align-items:center;gap:10px;
+  background:#0A0C12;border:1px solid rgba(255,255,255,0.06);
+  border-radius:6px;padding:10px 14px;transition:border-color .15s,box-shadow .15s;
+}
+.reply-indicator.visible + .input-box{border-radius:0 0 6px 6px;border-top:none;}
+.input-box:focus-within{border-color:rgba(255,77,0,0.5);box-shadow:0 0 0 1px rgba(255,77,0,0.15);}
+.ib-attach{
+  width:28px;height:28px;border-radius:6px;background:none;border:none;
+  color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;
+  transition:color .12s,background .12s;flex-shrink:0;
+}
+.ib-attach:hover{color:var(--accent2);background:rgba(255,77,0,0.12);}
+.ib-input{
+  flex:1;background:none;border:none;outline:none;font-size:14px;
+  color:var(--text);font-family:inherit;min-width:0;resize:none;max-height:120px;overflow-y:auto;
+}
+.ib-right{display:flex;gap:6px;align-items:center;flex-shrink:0;}
+.ib-icon{background:none;border:none;color:var(--muted);cursor:pointer;font-size:20px;transition:transform .1s;}
+.ib-icon:hover{transform:scale(1.2);color:var(--accent2);}
+.ib-send{
+  width:32px;height:32px;border-radius:6px;background:var(--accent);border:none;
+  color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;
+  transition:background .12s,transform .1s;opacity:.4;flex-shrink:0;
+}
+.ib-send.ready{opacity:1;}
+.ib-send.ready:hover{background:var(--accent2);transform:scale(1.04);box-shadow:var(--glow);}
+
+/* ── Member list ── */
+.members{
+  width:240px;background:var(--sidebar);border-left:1px solid var(--border);
+  display:flex;flex-direction:column;flex-shrink:0;overflow-y:auto;padding:8px 0;
+}
+.member-category{font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.16em;color:var(--accent);padding:12px 16px 4px;opacity:.7;}
+.member-item{
+  display:flex;align-items:center;gap:8px;padding:5px 8px 5px 14px;
+  border-radius:6px;margin:1px 8px;cursor:pointer;transition:background .1s;
+}
+.member-item:hover{background:rgba(255,77,0,0.07);}
+.m-av{width:32px;height:32px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;flex-shrink:0;position:relative;}
+.m-sdot{position:absolute;bottom:-1px;right:-1px;width:10px;height:10px;border-radius:50%;border:2px solid var(--sidebar);}
+.m-sdot.online{background:var(--green);}
+.m-sdot.idle{background:var(--yellow);}
+.m-sdot.dnd{background:var(--red);}
+.m-sdot.offline{background:#6B7280;}
+.m-info{flex:1;min-width:0;}
+.m-name{font-size:13px;font-weight:600;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.member-item:hover .m-name{color:var(--text);}
+.m-act{font-size:11px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
+/* ── Context menus ── */
+.ctx{
+  position:fixed;background:#060709;border:1px solid rgba(255,255,255,0.08);
+  border-radius:8px;padding:6px;min-width:200px;z-index:1000;
+  box-shadow:0 12px 40px rgba(0,0,0,0.8),0 0 0 1px rgba(255,77,0,0.12);
+  display:none;flex-direction:column;
+}
+.ctx.open{display:flex;}
+.ctx-label{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.1em;color:var(--muted2);padding:4px 10px 6px;}
+.ctx-btn{
+  display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:5px;
+  font-size:13px;font-weight:500;color:#B0B3C1;cursor:pointer;
+  border:none;background:none;width:100%;text-align:left;transition:background .08s,color .08s;
+}
+.ctx-btn:hover{background:var(--accent);color:#fff;}
+.ctx-btn.danger{color:#F87171;}
+.ctx-btn.danger:hover{background:var(--red);color:#fff;}
+.ctx-div{height:1px;background:var(--border);margin:4px 0;}
+
+/* Typing indicator */
+.typing-indicator{
+  padding:2px 20px 8px;font-size:12px;color:var(--muted);
+  display:flex;align-items:center;gap:6px;min-height:24px;
+}
+.typing-dots{display:flex;gap:3px;align-items:center;}
+.typing-dot{
+  width:4px;height:4px;border-radius:2px;background:var(--accent2);
+  animation:tdot 1.2s infinite;
+}
+.typing-dot:nth-child(2){animation-delay:.2s;}
+.typing-dot:nth-child(3){animation-delay:.4s;}
+@keyframes tdot{0%,80%,100%{transform:scale(.8);opacity:.4;}40%{transform:scale(1.1);opacity:1;}}
+
+/* Toast */
+.toast{
+  position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);
+  background:#0A0B10;border:1px solid rgba(255,77,0,0.35);color:var(--text);
+  padding:10px 20px;border-radius:6px;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;z-index:2000;
+  transition:transform .3s cubic-bezier(.34,1.56,.64,1);pointer-events:none;white-space:nowrap;
+  box-shadow:var(--glow),0 4px 20px rgba(0,0,0,0.6);
+}
+.toast.show{transform:translateX(-50%) translateY(0);}
+.toast.err{border-color:rgba(255,45,85,0.5);}
+
+/* Neon glow pulse on active channel */
+@keyframes pulse-border{0%,100%{box-shadow:0 0 0 0 rgba(255,77,0,0);}50%{box-shadow:0 0 12px 2px rgba(255,77,0,0.25);}}
+
+/* Scrollbar for chat */
+.chat-area::-webkit-scrollbar{width:4px;}
+
+@media(max-width:1100px){.members{display:none;}}
+@media(max-width:800px){.rail{display:none;}.sidebar{width:200px;}}
+@media(max-width:560px){.sidebar{display:none;}}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ── Rail ── -->
+<div class="rail">
+  <div class="rail-item active" title="NexusChat HQ" onclick="toast('NexusChat HQ')">
+    <div class="rail-pip"></div>
+    <div class="rail-icon" style="background:linear-gradient(135deg,#FF4D00,#FF9500);color:#fff;font-size:11px;letter-spacing:.04em;">NX</div>
+  </div>
+  <div class="rail-div"></div>
+  <div class="rail-item" title="Apex Legends EU" onclick="toast('Apex Legends EU')">
+    <div class="rail-pip"></div>
+    <div class="rail-icon" style="background:linear-gradient(135deg,#EF4444,#F59E0B);">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+    </div>
+  </div>
+  <div class="rail-item" title="Valorant Ranked" onclick="toast('Valorant Ranked')">
+    <div class="rail-pip"></div>
+    <div class="rail-icon" style="background:linear-gradient(135deg,#EC4899,#8B5CF6);">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    </div>
+  </div>
+  <div class="rail-item" title="Minecraft SMP" onclick="toast('Minecraft SMP')">
+    <div class="rail-pip"></div>
+    <div class="rail-icon" style="background:linear-gradient(135deg,#10B981,#3B82F6);">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+    </div>
+  </div>
+  <div class="rail-item" title="LoL Duo Queue" onclick="toast('LoL Duo Queue')">
+    <div class="rail-pip"></div>
+    <div class="rail-icon" style="background:linear-gradient(135deg,#F59E0B,#EF4444);">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+    </div>
+  </div>
+  <div class="rail-div"></div>
+  <div class="rail-add" title="Join or Create Server" onclick="toast('Add a server')">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+  </div>
+</div>
+
+<!-- ── Sidebar ── -->
+<div class="sidebar">
+  <div class="server-header" oncontextmenu="openServerCtx(event)">
+    <span class="server-name">⚡ NexusChat HQ</span>
+    <svg class="server-chevron" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </div>
+
+  <div class="channel-scroll">
+    <div class="ch-category" oncontextmenu="openCategoryCtx(event,'Info')">
+      Info
+      <button class="ch-add-btn" onclick="toast('Add channel')">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
+      </button>
+    </div>
+    <div class="ch-item" onclick="toast('📢 announcements')" oncontextmenu="openChannelCtx(event,'announcements')">
+      <span class="ch-hash">📢</span> announcements
+      <span class="ch-badge">1</span>
+    </div>
+    <div class="ch-item" onclick="toast('📋 rules')" oncontextmenu="openChannelCtx(event,'rules')">
+      <span class="ch-hash">📋</span> rules
+    </div>
+
+    <div class="ch-category" oncontextmenu="openCategoryCtx(event,'General')">
+      General
+      <button class="ch-add-btn" onclick="toast('Add channel')">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
+      </button>
+    </div>
+    <div class="ch-item active" id="ch-general" onclick="switchChannel('general','💬 general-chat','Drop anything gaming related here')" oncontextmenu="openChannelCtx(event,'general-chat')">
+      <span class="ch-hash">#</span> general-chat
+    </div>
+    <div class="ch-item" onclick="switchChannel('lfg','🎮 looking-for-group','Find your squad. Post your rank and region.')" oncontextmenu="openChannelCtx(event,'looking-for-group')">
+      <span class="ch-hash">#</span> looking-for-group
+      <span class="ch-badge">4</span>
+    </div>
+    <div class="ch-item" onclick="switchChannel('clips','🎬 clips-and-highlights','Share your best plays and moments')" oncontextmenu="openChannelCtx(event,'clips-and-highlights')">
+      <span class="ch-hash">#</span> clips-and-highlights
+    </div>
+    <div class="ch-item" onclick="switchChannel('meta','⚔️ meta-discussion','Patches, tier lists, strategies')" oncontextmenu="openChannelCtx(event,'meta-discussion')">
+      <span class="ch-hash">#</span> meta-discussion
+    </div>
+    <div class="ch-item" onclick="switchChannel('memes','😂 meme-dump','No further instructions')" oncontextmenu="openChannelCtx(event,'meme-dump')">
+      <span class="ch-hash">#</span> meme-dump
+      <div class="ch-unread-dot"></div>
+    </div>
+
+    <div class="ch-category" oncontextmenu="openCategoryCtx(event,'Voice')"  >Voice
+      <button class="ch-add-btn" onclick="toast('Add channel')">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
+      </button>
+    </div>
+    <div class="voice-ch" onclick="toast('Joined Lobby')" oncontextmenu="openVoiceCtx(event,'Lobby')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0118 0v6"/><path d="M21 19a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3zM3 19a2 2 0 002 2h1a2 2 0 002-2v-3a2 2 0 00-2-2H3z"/></svg>
+      Lobby — 2/10
+    </div>
+    <div class="voice-users">
+      <div class="voice-user">
+        <div class="voice-av" style="background:#FF4D00;color:#fff;">M</div>
+        Mia_Nexus
+      </div>
+      <div class="voice-user">
+        <div class="voice-av" style="background:#10B981;color:#fff;">J</div>
+        JackSlayer
+      </div>
+    </div>
+    <div class="voice-ch" onclick="toast('Joined Ranked Room')" oncontextmenu="openVoiceCtx(event,'Ranked Room')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0118 0v6"/><path d="M21 19a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3zM3 19a2 2 0 002 2h1a2 2 0 002-2v-3a2 2 0 00-2-2H3z"/></svg>
+      Ranked Room — 0/5
+    </div>
+  </div>
+
+  <div class="user-panel">
+    <div class="up-av">
+      <div class="up-av-inner" style="background:linear-gradient(135deg,#FF4D00,#FF9500);color:#fff;">P</div>
+      <div class="up-sdot sdot-online"></div>
+    </div>
+    <div class="up-info">
+      <div class="up-name">PlayerOne</div>
+      <div class="up-tag" style="color:var(--accent2);font-weight:700;letter-spacing:.04em;">⚡ IMMORTAL III</div>
+    </div>
+    <div class="up-btns">
+      <button class="up-btn" title="Mute" onclick="toast('Muted')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/></svg>
+      </button>
+      <button class="up-btn" title="Settings" onclick="toast('Settings')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Main ── -->
+<div class="main">
+
+  <!-- Topbar -->
+  <div class="topbar">
+    <span class="topbar-hash">#</span>
+    <span class="topbar-name" id="ch-name">general-chat</span>
+    <div class="topbar-div"></div>
+    <span class="topbar-topic" id="ch-topic">Drop anything gaming related here</span>
+    <div class="tb-right">
+      <button class="tb-btn" id="pin-toggle-btn" title="Pinned Messages" onclick="togglePins()">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V6h1a2 2 0 000-4H8a2 2 0 000 4h1v4.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24z"/></svg>
+      </button>
+      <button class="tb-btn" id="member-toggle-btn" title="Member List" onclick="toggleMembers()" style="color:var(--purple);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+      </button>
+      <div class="tb-search">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style="color:var(--muted);flex-shrink:0;"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.6"/><path d="M10.5 10.5l3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <input type="text" placeholder="Search" />
+      </div>
+      <button class="tb-btn" title="Inbox" onclick="toast('No new notifications')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 01-3.46 0"/></svg>
+      </button>
+      <button class="tb-btn" title="Help" onclick="toast('Help center')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Pins bar -->
+  <div class="pins-bar" id="pins-bar">
+    <div class="pins-header">
+      <span class="pins-title">📌 Pinned Messages</span>
+      <button class="pins-close" onclick="togglePins()">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l10 10M13 3L3 13"/></svg>
+      </button>
+    </div>
+    <div class="pin-item">
+      <div class="pin-stripe"></div>
+      <div class="pin-body">
+        <div class="pin-meta"><strong>KillSwitch_X</strong> · 2 days ago</div>
+        <div class="pin-text">🔥 New season starts Friday. Diamond+ get exclusive lobbies — make sure your rank is verified in #roles before Thursday midnight.</div>
+      </div>
+    </div>
+    <div class="pin-item">
+      <div class="pin-stripe" style="background:var(--cyan);"></div>
+      <div class="pin-body">
+        <div class="pin-meta"><strong>Mod_Vex</strong> · 5 days ago</div>
+        <div class="pin-text">Server rules updated — no smurfing discussion, keep clip spoilers in #clips-and-highlights. Violations = 7-day timeout.</div>
+      </div>
+    </div>
+    <div class="pin-item">
+      <div class="pin-stripe" style="background:var(--green);"></div>
+      <div class="pin-body">
+        <div class="pin-meta"><strong>NexusBot</strong> · 1 week ago</div>
+        <div class="pin-text">🎉 NexusChat hit 10,000 members! Tournament registration is now open — 4v4 bracket, $200 prize pool. Sign up in #announcements.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat -->
+  <div class="chat-area" id="chat-area">
+    <div class="welcome-banner">
+      <div class="welcome-icon">💬</div>
+      <div class="welcome-title"># general-chat</div>
+      <div class="welcome-sub">Welcome to the beginning of the <strong style="color:var(--accent2);">#general-chat</strong> channel. Drop anything gaming related here.</div>
+    </div>
+
+    <div class="sys-msg">
+      <div class="sys-line"></div>
+      <span>Today</span>
+      <div class="sys-line"></div>
+    </div>
+
+    <!-- Messages injected here by JS -->
+    <div id="messages"></div>
+
+    <div class="typing-indicator" id="typing">
+      <div class="typing-dots">
+        <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
+      </div>
+      <span id="typing-text">GhostRifle is typing…</span>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <div class="input-area">
+    <div class="reply-indicator" id="reply-indicator">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent2)" stroke-width="2" stroke-linecap="round"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 00-4-4H4"/></svg>
+      Replying to <strong id="reply-name">-</strong>
+      <button class="ri-close" onclick="clearReply()">×</button>
+    </div>
+    <div class="input-box">
+      <button class="ib-attach" title="Attach" onclick="toast('File picker coming soon')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+      </button>
+      <textarea class="ib-input" id="chat-input" placeholder="Message #general-chat" rows="1"
+        oninput="onInput(this)"
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg();}"
+      ></textarea>
+      <div class="ib-right">
+        <button class="ib-icon" title="GIF" onclick="toast('GIF picker coming soon')">🎞️</button>
+        <button class="ib-icon" title="Sticker" onclick="toast('Sticker picker coming soon')">🎭</button>
+        <button class="ib-icon" title="Emoji" onclick="toast('Emoji picker coming soon')">😄</button>
+        <button class="ib-send" id="send-btn" title="Send" onclick="sendMsg()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Member list ── -->
+<div class="members" id="members-panel">
+  <div class="member-category">Online — 6</div>
+  <div id="member-list"></div>
+  <div class="member-category" style="margin-top:8px;">Offline — 3</div>
+  <div id="member-list-offline"></div>
+</div>
+
+<!-- Message context menu -->
+<div class="ctx" id="ctx-msg">
+  <button class="ctx-btn" onclick="ctxMsg('reply')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 00-4-4H4"/></svg>Reply
+  </button>
+  <button class="ctx-btn" onclick="ctxMsg('react')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>Add Reaction
+  </button>
+  <button class="ctx-btn" id="ctx-edit-btn" onclick="ctxMsg('edit')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Edit Message
+  </button>
+  <button class="ctx-btn" onclick="ctxMsg('pin')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V6h1a2 2 0 000-4H8a2 2 0 000 4h1v4.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24z"/></svg>Pin Message
+  </button>
+  <div class="ctx-div"></div>
+  <button class="ctx-btn" onclick="ctxMsg('copy')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>Copy Text
+  </button>
+  <button class="ctx-btn" onclick="ctxMsg('copylink')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>Copy Message Link
+  </button>
+  <div class="ctx-div"></div>
+  <button class="ctx-btn danger" id="ctx-delete-btn" onclick="ctxMsg('delete')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>Delete Message
+  </button>
+  <button class="ctx-btn danger" onclick="ctxMsg('report')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Report Message
+  </button>
+</div>
+
+<!-- User context menu (MOD VIEW) -->
+<div class="ctx" id="ctx-user">
+  <div class="ctx-label" id="ctx-user-label">User</div>
+  <button class="ctx-btn" onclick="ctxUser('profile')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>View Profile
+  </button>
+  <button class="ctx-btn" onclick="ctxUser('mention')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 006 0v-1a10 10 0 10-3.92 7.94"/></svg>Mention
+  </button>
+  <button class="ctx-btn" onclick="ctxUser('message')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>Message
+  </button>
+  <button class="ctx-btn" onclick="ctxUser('add')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>Add Friend
+  </button>
+  <div class="ctx-div"></div>
+  <div class="ctx-label" style="color:var(--accent);opacity:1;">⚡ Mod Actions</div>
+  <button class="ctx-btn" onclick="ctxUser('warn')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Warn User
+  </button>
+  <button class="ctx-btn" onclick="ctxUser('modnotes')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>View Mod Notes
+  </button>
+  <button class="ctx-btn" onclick="ctxUser('move')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>Move to Channel
+  </button>
+  <button class="ctx-btn" onclick="ctxUser('mute')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/><path d="M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23M12 19v3M8 23h8"/></svg>Server Mute
+  </button>
+  <button class="ctx-btn" onclick="ctxUser('deafen')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0118 0v6"/><path d="M21 19a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3zM3 19a2 2 0 002 2h1a2 2 0 002-2v-3a2 2 0 00-2-2H3z"/><line x1="1" y1="1" x2="23" y2="23"/></svg>Server Deafen
+  </button>
+  <button class="ctx-btn" onclick="ctxUser('timeout')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Timeout (10 min)
+  </button>
+  <div class="ctx-div"></div>
+  <button class="ctx-btn" onclick="ctxUser('copyid')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>Copy User ID
+  </button>
+  <div class="ctx-div"></div>
+  <button class="ctx-btn danger" onclick="ctxUser('kick')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="22" y1="11" x2="16" y2="11"/></svg>Kick from Server
+  </button>
+  <button class="ctx-btn danger" onclick="ctxUser('ban')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>Ban from Server
+  </button>
+</div>
+
+<!-- Server context menu -->
+<div class="ctx" id="ctx-server">
+  <div class="ctx-label">⚡ NexusChat HQ</div>
+  <button class="ctx-btn" onclick="ctxServer('invite')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>Invite People
+  </button>
+  <button class="ctx-btn" onclick="ctxServer('copyinvite')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>Copy Invite Link
+  </button>
+  <button class="ctx-btn" onclick="ctxServer('notifications')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 01-3.46 0"/></svg>Notification Settings
+  </button>
+  <button class="ctx-btn" onclick="ctxServer('hidemuted')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>Hide Muted Channels
+  </button>
+  <div class="ctx-div"></div>
+  <div class="ctx-label" style="color:var(--accent);opacity:1;">⚙ Server Management</div>
+  <button class="ctx-btn" onclick="ctxServer('settings')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>Server Settings
+  </button>
+  <button class="ctx-btn" onclick="ctxServer('channels')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>Manage Channels
+  </button>
+  <button class="ctx-btn" onclick="ctxServer('roles')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Manage Roles
+  </button>
+  <button class="ctx-btn" onclick="ctxServer('members')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>Manage Members
+  </button>
+  <button class="ctx-btn" onclick="ctxServer('banlist')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>Ban List
+  </button>
+  <button class="ctx-btn" onclick="ctxServer('audit')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>Audit Log
+  </button>
+  <div class="ctx-div"></div>
+  <button class="ctx-btn" onclick="ctxServer('markread')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Mark as Read
+  </button>
+  <button class="ctx-btn danger" onclick="ctxServer('leave')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Leave Server
+  </button>
+</div>
+
+<!-- Channel context menu -->
+<div class="ctx" id="ctx-channel">
+  <div class="ctx-label" id="ctx-channel-label"># channel</div>
+  <button class="ctx-btn" onclick="ctxChannel('markread')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Mark as Read
+  </button>
+  <button class="ctx-btn" onclick="ctxChannel('copylink')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>Copy Link
+  </button>
+  <button class="ctx-btn" onclick="ctxChannel('mute')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/><path d="M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23M12 19v3M8 23h8"/></svg>Mute Channel
+  </button>
+  <button class="ctx-btn" onclick="ctxChannel('notifications')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 01-3.46 0"/></svg>Notification Settings
+  </button>
+  <div class="ctx-div"></div>
+  <div class="ctx-label" style="color:var(--accent);opacity:1;">⚡ Mod Actions</div>
+  <button class="ctx-btn" onclick="ctxChannel('edit')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Edit Channel
+  </button>
+  <button class="ctx-btn" onclick="ctxChannel('duplicate')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>Duplicate Channel
+  </button>
+  <button class="ctx-btn" onclick="ctxChannel('invite')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>Create Invite
+  </button>
+  <button class="ctx-btn" onclick="ctxChannel('copyid')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>Copy Channel ID
+  </button>
+  <div class="ctx-div"></div>
+  <button class="ctx-btn danger" onclick="ctxChannel('delete')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>Delete Channel
+  </button>
+</div>
+
+<!-- Category context menu -->
+<div class="ctx" id="ctx-category">
+  <div class="ctx-label" id="ctx-category-label">Category</div>
+  <button class="ctx-btn" onclick="ctxCategory('collapse')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>Collapse Category
+  </button>
+  <button class="ctx-btn" onclick="ctxCategory('markread')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Mark Category as Read
+  </button>
+  <div class="ctx-div"></div>
+  <div class="ctx-label" style="color:var(--accent);opacity:1;">⚡ Mod Actions</div>
+  <button class="ctx-btn" onclick="ctxCategory('edit')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Edit Category
+  </button>
+  <button class="ctx-btn" onclick="ctxCategory('newtext')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Create Text Channel
+  </button>
+  <button class="ctx-btn" onclick="ctxCategory('newvoice')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0118 0v6"/><path d="M21 19a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3zM3 19a2 2 0 002 2h1a2 2 0 002-2v-3a2 2 0 00-2-2H3z"/></svg>Create Voice Channel
+  </button>
+  <button class="ctx-btn" onclick="ctxCategory('copyid')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>Copy Category ID
+  </button>
+  <div class="ctx-div"></div>
+  <button class="ctx-btn danger" onclick="ctxCategory('delete')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>Delete Category
+  </button>
+</div>
+
+<!-- Voice channel context menu -->
+<div class="ctx" id="ctx-voice">
+  <div class="ctx-label" id="ctx-voice-label">🔊 Voice Channel</div>
+  <button class="ctx-btn" onclick="ctxVoice('join')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0118 0v6"/><path d="M21 19a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3zM3 19a2 2 0 002 2h1a2 2 0 002-2v-3a2 2 0 00-2-2H3z"/></svg>Join Voice Channel
+  </button>
+  <button class="ctx-btn" onclick="ctxVoice('copylink')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>Copy Link
+  </button>
+  <button class="ctx-btn" onclick="ctxVoice('mute')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/><path d="M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23M12 19v3M8 23h8"/></svg>Mute Channel
+  </button>
+  <div class="ctx-div"></div>
+  <div class="ctx-label" style="color:var(--accent);opacity:1;">⚡ Mod Actions</div>
+  <button class="ctx-btn" onclick="ctxVoice('muteall')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="23" y1="11" x2="17" y2="11"/></svg>Mute All Members
+  </button>
+  <button class="ctx-btn" onclick="ctxVoice('disconnectall')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Disconnect All Members
+  </button>
+  <button class="ctx-btn" onclick="ctxVoice('edit')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Edit Channel
+  </button>
+  <button class="ctx-btn" onclick="ctxVoice('copyid')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>Copy Channel ID
+  </button>
+  <div class="ctx-div"></div>
+  <button class="ctx-btn danger" onclick="ctxVoice('delete')">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>Delete Channel
+  </button>
+</div>
+
+<div class="toast" id="toast-el"></div>
+
+<script>
+const C=['#FF4D00','#00FFCC','#FFD60A','#FF2D55','#00E87A','#FF7A3D','#B44FFF','#00B4FF'];
+const cl=i=>C[i%C.length];
+
+/* ── Data ── */
+const members=[
+  {id:1,name:'KillSwitch_X',  act:'Playing Valorant · Immortal III', status:'online',  col:0, role:'admin'},
+  {id:2,name:'GhostRifle',    act:'In a match',                       status:'online',  col:1, role:'member'},
+  {id:3,name:'Mia_Nexus',     act:'Listening to Spotify',             status:'online',  col:2, role:'mod'},
+  {id:4,name:'ZeroRecoil',    act:'Streaming · twitch.tv/zerorecoil', status:'online',  col:3, role:'member'},
+  {id:5,name:'NexusBot',      act:'Serving NexusChat HQ',             status:'online',  col:6, role:'bot'},
+  {id:6,name:'VoidWalker_99', act:'Idle for 12 min',                  status:'idle',    col:4, role:'member'},
+  {id:7,name:'JackSlayer',    act:'Last seen 2 hours ago',            status:'offline', col:5, role:'member'},
+  {id:8,name:'Prism_Pro',     act:'Last seen yesterday',              status:'offline', col:7, role:'member'},
+  {id:9,name:'OverclockK',    act:'Offline',                          status:'offline', col:0, role:'member'},
+];
+
+const initialMessages=[
+  {id:1,  author:'KillSwitch_X',   col:0, role:'admin', ts:'Today at 8:02 AM',
+   text:'Morning squad 👋 anyone up for ranked grind today? trying to hit Radiant before the season ends',
+   reactions:[{e:'🔥',n:7,me:false},{e:'💀',n:3,me:true}]},
+  {id:2,  author:'GhostRifle',     col:1, role:'member', ts:'Today at 8:05 AM',
+   text:"I'm down. Been hardstuck Immortal 2 for two weeks, it's giving me war crimes",
+   reactions:[{e:'😂',n:12,me:false}]},
+  {id:3,  author:'KillSwitch_X',   col:0, role:'admin', ts:'Today at 8:05 AM',
+   text:'bro same. our last 4 games we had an afk every single game. Riot needs to fix their LP system fr',
+   cont:true},
+  {id:4,  author:'Mia_Nexus',      col:2, role:'mod', ts:'Today at 8:09 AM',
+   text:"just had the most insane clutch in my life, lemme share real quick",
+   reactions:[{e:'👀',n:8,me:false}]},
+  {id:5,  author:'Mia_Nexus',      col:2, role:'mod', ts:'Today at 8:09 AM',
+   text:'', cont:true, hasEmbed:true,
+   embed:{title:'🎬 Clip: 1v5 Clutch on Haven · Mia_Nexus',desc:"5 kills, 0 utility left, pistol round — the lobby went silent for 3 seconds"}},
+  {id:6,  author:'ZeroRecoil',     col:3, role:'member', ts:'Today at 8:11 AM',
+   text:"WAIT THAT'S INSANE. how did you peek that last guy through smoke??",
+   reactions:[{e:'🤯',n:14,me:true},{e:'🔥',n:6,me:false}]},
+  {id:7,  author:'GhostRifle',     col:1, role:'member', ts:'Today at 8:12 AM',
+   text:'the game sense here is astronomical. meanwhile im here missing point blank shots with sheriff',
+   reactions:[{e:'💀',n:9,me:false}]},
+  {id:8,  author:'VoidWalker_99',  col:4, role:'member', ts:'Today at 8:15 AM',
+   text:'anyone know if the new patch dropped? saw something about Op nerfs on twitter'},
+  {id:9,  author:'NexusBot',       col:6, role:'bot', ts:'Today at 8:15 AM',
+   text:'📋 <strong style="color:#8B5CF6">Patch 9.04</strong> is live! Key changes: OP bullet spread ↑ 15%, Jett dash distance ↓, new map Abyss enters competitive. Full notes: <a href="#" onclick="toast(\'Opening patch notes\');return false">nexus.gg/patch904</a>',
+   isBot:true},
+  {id:10, author:'KillSwitch_X',   col:0, role:'admin', ts:'Today at 8:17 AM',
+   text:'Finally. OP users are gonna cry. This is the patch the game needed',
+   reactions:[{e:'✅',n:11,me:false},{e:'🎉',n:5,me:true}]},
+  {id:11, author:'ZeroRecoil',     col:3, role:'member', ts:'Today at 8:18 AM',
+   text:'@KillSwitch_X you say that every patch lmaooo',cont:true},
+  {id:12, author:'KillSwitch_X',   col:0, role:'admin', ts:'Today at 8:18 AM',
+   text:'and every patch i am right. trust the process',cont:true},
+];
+
+/* ── State ── */
+let messages=[...initialMessages];
+let nextId=messages.length+1;
+let ctxMsgId=null, ctxUserId=null, replyToId=null;
+let membersOpen=true;
+let tt;
+
+/* ── Render members ── */
+function renderMembers(){
+  const on=members.filter(m=>m.status!=='offline');
+  const off=members.filter(m=>m.status==='offline');
+  document.getElementById('member-list').innerHTML=on.map(m=>`
+    <div class="member-item" oncontextmenu="openUserCtx(event,${m.id})">
+      <div class="m-av" style="background:${cl(m.col)};color:#fff;">${m.name[0]}
+        <div class="m-sdot ${m.status}"></div>
+      </div>
+      <div class="m-info">
+        <div class="m-name" style="${m.role==='admin'?'color:#F87171':m.role==='mod'?'color:#A78BFA':m.role==='bot'?'color:'+C[6]:''}">${m.name}${m.role==='admin'?'<span class="msg-badge badge-admin" style="margin-left:6px;">ADMIN</span>':m.role==='mod'?'<span class="msg-badge badge-mod" style="margin-left:6px;">MOD</span>':m.role==='bot'?'<span class="msg-badge badge-bot" style="margin-left:6px;">BOT</span>':''}</div>
+        <div class="m-act">${m.act}</div>
+      </div>
+    </div>`).join('');
+  document.getElementById('member-list-offline').innerHTML=off.map(m=>`
+    <div class="member-item" style="opacity:.45;" oncontextmenu="openUserCtx(event,${m.id})">
+      <div class="m-av" style="background:#2D2F3B;color:#6B7280;">${m.name[0]}
+        <div class="m-sdot offline"></div>
+      </div>
+      <div class="m-info">
+        <div class="m-name">${m.name}</div>
+        <div class="m-act">${m.act}</div>
+      </div>
+    </div>`).join('');
+}
+
+/* ── Render messages ── */
+function badge(role){
+  if(role==='admin') return '<span class="msg-badge badge-admin">ADMIN</span>';
+  if(role==='mod')   return '<span class="msg-badge badge-mod">MOD</span>';
+  if(role==='bot')   return '<span class="msg-badge badge-bot">BOT</span>';
+  return '';
+}
+function authorColor(role,col){
+  if(role==='admin') return '#F87171';
+  if(role==='mod')   return '#A78BFA';
+  if(role==='bot')   return C[6];
+  return cl(col);
+}
+function renderReactions(reactions,msgId){
+  if(!reactions||!reactions.length) return '';
+  return '<div class="reactions">'+reactions.map((r,i)=>`
+    <div class="reaction ${r.me?'reacted':''}" onclick="toggleReaction(${msgId},${i})" title="${r.n} reaction${r.n!==1?'s':''}">
+      ${r.e}<span class="reaction-count">${r.n}</span>
+    </div>`).join('')+'</div>';
+}
+function renderEmbed(e){
+  return `<div class="embed"><div class="embed-title">${e.title}</div><div class="embed-desc">${e.desc}</div></div>`;
+}
+function renderMsg(m){
+  const replyHtml= m.replyTo? `<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);margin-bottom:2px;cursor:pointer;">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 00-4-4H4"/></svg>
+    <span style="color:var(--purple2);font-weight:700;">${m.replyTo.author}</span>
+    <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;">${m.replyTo.text.replace(/<[^>]+>/g,'').slice(0,60)}</span>
+  </div>` : '';
+
+  if(m.cont){
+    return `<div class="msg-group continuation" id="msg-${m.id}" oncontextmenu="openMsgCtx(event,${m.id})">
+      <div class="msg-av-col"><span class="msg-timestamp-side">${m.ts.split(' ').pop()}</span></div>
+      <div class="msg-body">
+        ${replyHtml}
+        ${m.text?`<span class="msg-text">${m.text}</span>`:''}
+        ${m.hasEmbed?renderEmbed(m.embed):''}
+        ${renderReactions(m.reactions,m.id)}
+      </div>
+      <div class="msg-actions">${msgActions(m.id)}</div>
+    </div>`;
+  }
+
+  return `<div class="msg-group" id="msg-${m.id}" oncontextmenu="openMsgCtx(event,${m.id})" style="margin-top:12px;">
+    <div class="msg-av-col">
+      <div class="msg-avatar" style="background:${cl(m.col)};color:#fff;" onclick="openUserCtxById(event,${m.id})" oncontextmenu="event.stopPropagation();openUserCtxByName(event,'${m.author}',${m.col},${m.id})">${m.author[0]}</div>
+    </div>
+    <div class="msg-body">
+      ${replyHtml}
+      <div class="msg-header">
+        <span class="msg-author" style="color:${authorColor(m.role,m.col)}" onclick="openUserCtxByName(event,'${m.author}',${m.col},${m.id})">${m.author}</span>
+        ${badge(m.role)}
+        <span class="msg-ts">${m.ts}</span>
+      </div>
+      ${m.text?`<div class="msg-text">${m.text}</div>`:''}
+      ${m.hasEmbed?renderEmbed(m.embed):''}
+      ${renderReactions(m.reactions,m.id)}
+    </div>
+    <div class="msg-actions">${msgActions(m.id)}</div>
+  </div>`;
+}
+function msgActions(id){
+  return `
+    <button class="ma-btn" title="React" onclick="event.stopPropagation();quickReact(${id},'🔥')">🔥</button>
+    <button class="ma-btn" title="Reply" onclick="event.stopPropagation();setReply(${id})">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 00-4-4H4"/></svg>
+    </button>
+    <button class="ma-btn" title="More" onclick="event.stopPropagation();openMsgCtx(event,${id})">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
+    </button>`;
+}
+function renderAll(){
+  document.getElementById('messages').innerHTML=messages.map(renderMsg).join('');
+}
+function scrollBottom(){
+  const ca=document.getElementById('chat-area');
+  ca.scrollTop=ca.scrollHeight;
+}
+
+/* ── Reactions ── */
+function toggleReaction(msgId,idx){
+  const m=messages.find(x=>x.id===msgId); if(!m||!m.reactions) return;
+  const r=m.reactions[idx];
+  r.me=!r.me; r.n+=r.me?1:-1;
+  renderAll(); scrollBottom();
+}
+function quickReact(msgId,emoji){
+  const m=messages.find(x=>x.id===msgId); if(!m) return;
+  if(!m.reactions) m.reactions=[];
+  const ex=m.reactions.find(r=>r.e===emoji);
+  if(ex){ex.me=!ex.me;ex.n+=ex.me?1:-1;}
+  else m.reactions.push({e:emoji,n:1,me:true});
+  renderAll();
+}
+
+/* ── Reply ── */
+function setReply(id){
+  const m=messages.find(x=>x.id===id); if(!m) return;
+  replyToId=id;
+  document.getElementById('reply-name').textContent=m.author;
+  document.getElementById('reply-indicator').classList.add('visible');
+  document.getElementById('chat-input').focus();
+}
+function clearReply(){
+  replyToId=null;
+  document.getElementById('reply-indicator').classList.remove('visible');
+}
+
+/* ── Send ── */
+function onInput(el){
+  el.style.height='auto';
+  el.style.height=Math.min(el.scrollHeight,120)+'px';
+  document.getElementById('send-btn').classList.toggle('ready',el.value.trim().length>0);
+}
+function sendMsg(){
+  const inp=document.getElementById('chat-input');
+  const txt=inp.value.trim(); if(!txt) return;
+  const now=new Date();
+  const ts=`Today at ${now.getHours()}:${String(now.getMinutes()).padStart(2,'0')} ${now.getHours()>=12?'PM':'AM'}`;
+  const last=messages[messages.length-1];
+  const isCont=last&&last.author==='PlayerOne'&&!replyToId;
+  const m={
+    id:nextId++, author:'PlayerOne', col:1, role:'member',
+    ts, text:txt, cont:isCont, reactions:[],
+    replyTo: replyToId ? {author:messages.find(x=>x.id===replyToId).author, text:messages.find(x=>x.id===replyToId).text} : null
+  };
+  messages.push(m);
+  inp.value=''; inp.style.height='auto';
+  document.getElementById('send-btn').classList.remove('ready');
+  clearReply();
+  renderAll(); scrollBottom();
+}
+
+/* ── Channel switch ── */
+function switchChannel(id,name,topic){
+  document.querySelectorAll('.ch-item').forEach(c=>c.classList.remove('active'));
+  document.getElementById('ch-'+id)?.classList.add('active');
+  document.getElementById('ch-name').textContent=name.replace(/^[^ ]+ /,'');
+  document.getElementById('ch-topic').textContent=topic;
+  document.getElementById('chat-input').placeholder='Message '+name;
+  toast('Switched to '+name);
+}
+
+/* ── Pins ── */
+function togglePins(){
+  const b=document.getElementById('pins-bar');
+  const btn=document.getElementById('pin-toggle-btn');
+  b.classList.toggle('open');
+  btn.style.color=b.classList.contains('open')?'var(--purple)':'';
+}
+
+/* ── Members ── */
+function toggleMembers(){
+  const p=document.getElementById('members-panel');
+  const btn=document.getElementById('member-toggle-btn');
+  membersOpen=!membersOpen;
+  p.style.display=membersOpen?'flex':'none';
+  btn.style.color=membersOpen?'var(--purple)':'';
+}
+
+/* ── Message context ── */
+function openMsgCtx(e,id){
+  e.preventDefault(); e.stopPropagation();
+  ctxMsgId=id;
+  const m=messages.find(x=>x.id===id);
+  const isOwn=m&&m.author==='PlayerOne';
+  document.getElementById('ctx-edit-btn').style.display=isOwn?'flex':'none';
+  document.getElementById('ctx-delete-btn').style.display=isOwn?'flex':'none';
+  posCtx('ctx-msg',e);
+}
+function ctxMsg(a){
+  closeCtx();
+  const m=messages.find(x=>x.id===ctxMsgId);
+  if(!m) return;
+  if(a==='reply'){setReply(ctxMsgId); return;}
+  if(a==='react'){quickReact(ctxMsgId,'⭐');toast('Reaction added!'); return;}
+  if(a==='delete'){messages=messages.filter(x=>x.id!==ctxMsgId);renderAll();toast('Message deleted.',true); return;}
+  if(a==='pin'){toast('Message pinned!'); return;}
+  if(a==='copy'){toast('Text copied!'); return;}
+  if(a==='copylink'){toast('Message link copied!'); return;}
+  if(a==='edit'){toast('Editing message…'); return;}
+  if(a==='report'){toast('Message reported.',true); return;}
+}
+
+/* ── User context ── */
+let ctxUserName='';
+function openUserCtxByName(e,name,col,msgId){
+  e.preventDefault(); e.stopPropagation();
+  ctxUserName=name;
+  document.getElementById('ctx-user-label').textContent=name;
+  posCtx('ctx-user',e);
+}
+function openUserCtx(e,id){
+  e.preventDefault(); e.stopPropagation();
+  const m=members.find(x=>x.id===id);
+  ctxUserName=m?m.name:'User';
+  document.getElementById('ctx-user-label').textContent=ctxUserName;
+  posCtx('ctx-user',e);
+}
+function openUserCtxById(e,msgId){
+  const m=messages.find(x=>x.id===msgId);
+  if(!m) return;
+  openUserCtxByName(e,m.author,m.col,msgId);
+}
+function ctxUser(a){
+  closeCtx();
+  const msgs2={
+    profile:`Opening ${ctxUserName}'s profile…`,
+    mention:`Mentioned @${ctxUserName} in the input.`,
+    message:`Opening DM with ${ctxUserName}…`,
+    add:`Friend request sent to ${ctxUserName}!`,
+    warn:`Warning issued to ${ctxUserName}.`,
+    modnotes:`Opening mod notes for ${ctxUserName}…`,
+    move:`${ctxUserName} moved to channel.`,
+    mute:`${ctxUserName} muted in server.`,
+    deafen:`${ctxUserName} deafened in server.`,
+    timeout:`${ctxUserName} timed out for 10 minutes.`,
+    copyid:'User ID copied!',
+    kick:`${ctxUserName} has been kicked.`,
+    ban:`${ctxUserName} has been banned.`,
+  };
+  if(a==='mention'){
+    const inp=document.getElementById('chat-input');
+    inp.value=`@${ctxUserName} `+inp.value; inp.focus(); onInput(inp);
+  }
+  toast(msgs2[a]||a, a==='kick'||a==='ban'||a==='timeout');
+}
+
+/* ── Context menu utils ── */
+function posCtx(id,e){
+  closeCtx();
+  const m=document.getElementById(id);
+  m.classList.add('open');
+  const mw=215,mh=m.offsetHeight||320;
+  const x=e.clientX,y=e.clientY;
+  m.style.left=(x+mw>window.innerWidth?x-mw:x)+'px';
+  m.style.top=(y+mh>window.innerHeight?y-mh:y)+'px';
+}
+function closeCtx(){
+  document.querySelectorAll('.ctx').forEach(c=>c.classList.remove('open'));
+}
+document.addEventListener('click',closeCtx);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeCtx();});
+
+/* ── Server context ── */
+function openServerCtx(e){
+  e.preventDefault(); e.stopPropagation();
+  posCtx('ctx-server',e);
+}
+function ctxServer(a){
+  closeCtx();
+  const msgs={
+    invite:'Invite link created! Share it with your friends.',
+    copyinvite:'Invite link copied to clipboard!',
+    notifications:'Notification settings opened.',
+    hidemuted:'Muted channels hidden.',
+    settings:'Server Settings opened.',
+    channels:'Manage Channels opened.',
+    roles:'Manage Roles opened.',
+    members:'Manage Members opened.',
+    banlist:'Ban List opened.',
+    audit:'Audit Log opened.',
+    markread:'All channels marked as read.',
+    leave:'Left server.',
+  };
+  toast(msgs[a]||a, a==='leave');
+}
+
+/* ── Channel context ── */
+let ctxChannelName='';
+function openChannelCtx(e,name){
+  e.preventDefault(); e.stopPropagation();
+  ctxChannelName=name;
+  document.getElementById('ctx-channel-label').textContent='# '+name;
+  posCtx('ctx-channel',e);
+}
+function ctxChannel(a){
+  closeCtx();
+  const msgs={
+    markread:'Channel marked as read.',
+    copylink:'Channel link copied!',
+    mute:'Channel muted.',
+    notifications:'Channel notification settings opened.',
+    edit:'Edit Channel opened.',
+    duplicate:'Channel duplicated.',
+    invite:'Channel invite created!',
+    copyid:'Channel ID copied!',
+    delete:ctxChannelName+' deleted.',
+  };
+  toast(msgs[a]||a, a==='delete');
+}
+
+/* ── Category context ── */
+let ctxCategoryName='';
+function openCategoryCtx(e,name){
+  e.preventDefault(); e.stopPropagation();
+  ctxCategoryName=name;
+  document.getElementById('ctx-category-label').textContent=name.toUpperCase();
+  posCtx('ctx-category',e);
+}
+function ctxCategory(a){
+  closeCtx();
+  const msgs={
+    collapse:ctxCategoryName+' collapsed.',
+    markread:'Category marked as read.',
+    edit:'Edit Category opened.',
+    newtext:'New text channel created.',
+    newvoice:'New voice channel created.',
+    copyid:'Category ID copied!',
+    delete:ctxCategoryName+' deleted.',
+  };
+  toast(msgs[a]||a, a==='delete');
+}
+
+/* ── Voice context ── */
+let ctxVoiceName='';
+function openVoiceCtx(e,name){
+  e.preventDefault(); e.stopPropagation();
+  ctxVoiceName=name;
+  document.getElementById('ctx-voice-label').textContent='🔊 '+name;
+  posCtx('ctx-voice',e);
+}
+function ctxVoice(a){
+  closeCtx();
+  const msgs={
+    join:'Joined '+ctxVoiceName+'!',
+    copylink:'Voice channel link copied!',
+    mute:'Voice channel muted.',
+    muteall:'All members muted.',
+    disconnectall:'All members disconnected.',
+    edit:'Edit Channel opened.',
+    copyid:'Channel ID copied!',
+    delete:ctxVoiceName+' deleted.',
+  };
+  toast(msgs[a]||a, a==='delete'||a==='disconnectall');
+}
+
+/* ── Toast ── */
+function toast(msg,isErr=false){
+  const el=document.getElementById('toast-el');
+  el.textContent=msg; el.className='toast'+(isErr?' err':'');
+  requestAnimationFrame(()=>requestAnimationFrame(()=>el.classList.add('show')));
+  clearTimeout(tt); tt=setTimeout(()=>el.classList.remove('show'),2600);
+}
+
+/* ── Typing indicator ── */
+setTimeout(()=>{document.getElementById('typing').style.display='none';},3500);
+
+/* ── Init ── */
+renderMembers();
+renderAll();
+scrollBottom();
+</script>
+</body>
+</html>

@@ -167,6 +167,8 @@ pub struct ChannelRecord {
 pub struct ProfileRecord {
     pub display: Option<String>,
     pub avatar: Option<String>,
+    /// §10.3 free-text bio, shown on the full profile view.
+    pub about: Option<String>,
     pub updated: u64,
 }
 
@@ -211,6 +213,9 @@ pub struct InviteRecord {
     pub caps: Vec<String>,
     /// `None` = unlimited uses.
     pub uses_left: Option<u32>,
+    /// How many times this invite has been redeemed (starts at 0). Shown in the
+    /// invites list so an admin sees uptake independent of the remaining budget.
+    pub uses: u32,
     /// Unix seconds; `None` = no expiry.
     pub expiry: Option<u64>,
     /// Who minted the invite (§6.5) — shown in the invites list.

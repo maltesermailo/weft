@@ -6184,6 +6184,7 @@ async fn profile_set_acks_and_broadcasts_to_co_members() {
         user,
         display,
         avatar,
+        ..
     } = &reply.event
     else {
         panic!("expected PROFILE ack, got {reply:?}");
@@ -6226,6 +6227,7 @@ async fn profile_partial_update_and_query() {
         user,
         display,
         avatar,
+        ..
     } = &reply.event
     else {
         panic!("expected PROFILE, got {reply:?}");

@@ -166,7 +166,7 @@ export type WeftEvent =
   | { kind: "more"; cursor: string }
   | { kind: "token"; subject: string; scope: string }
   | { kind: "invited"; scope: string; invite_id: string; link: string | null; max_uses: number | null }
-  | { kind: "invite-info"; scope: string; invite_id: string; creator: string; uses_left: number | null; expiry: number | null }
+  | { kind: "invite-info"; scope: string; invite_id: string; creator: string; uses_left: number | null; used: number; expiry: number | null }
   | { kind: "reported"; report_id: string }
   | {
       kind: "report-filed";
@@ -214,6 +214,7 @@ export type WeftEvent =
       network: string;
       display: string | null;
       avatar: string | null;
+      about: string | null;
     }
   | { kind: "verified"; claim_kind: string; subject: string; state: string }
   | {
@@ -303,7 +304,7 @@ export function join(channel: string) {
 
 // §10.3 display profiles. `profileSet` omits a key to leave that field
 // unchanged, sends "" to clear it, or a value to set it (avatar = a blob hash).
-export function profileSet(opts: { display?: string; avatar?: string }) {
+export function profileSet(opts: { display?: string; avatar?: string; about?: string }) {
   return invoke("profile_set", opts);
 }
 export function profilesQuery(accounts: string[]) {
@@ -731,8 +732,10 @@ export function rolesOfAccount(scope: string, account: string) {
   return invoke("roles_of", { scope, account });
 }
 
-export function inviteMint(scope: string) {
-  return invoke("invite_mint", { scope });
+/// Mint a shareable invite (§6.5). `maxUses`/`expiry` (TTL seconds) omitted =
+/// unlimited uses / never expires.
+export function inviteMint(scope: string, maxUses?: number, expiry?: number) {
+  return invoke("invite_mint", { scope, maxUses, expiry });
 }
 
 export function inviteRedeem(token: string) {

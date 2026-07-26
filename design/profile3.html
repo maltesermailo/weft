@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>L3the – Profil</title>
+    <style>
+        :root{
+            --modal-bg:#0f1013;
+            --panel:#1a1b1e;
+            --banner:#bf4c85;
+            --text:#f2f3f5;
+            --text-muted:#b5bac1;
+            --text-body:#dbdee1;
+            --blurple:#5865f2;
+            --blurple-hover:#4752c4;
+            --btn-secondary:#2b2d31;
+            --btn-secondary-hover:#3a3c41;
+            --divider:#2e3035;
+            --offline:#80848e;
+        }
+        *{box-sizing:border-box;margin:0;padding:0}
+        html,body{height:100%}
+        body{
+            font-family:"gg sans","Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+            background:#000;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            padding:24px;
+            color:var(--text);
+            -webkit-font-smoothing:antialiased;
+        }
+
+        /* dimmed app behind the modal */
+        .backdrop{
+            position:fixed;
+            inset:0;
+            background:
+                    radial-gradient(900px 500px at 30% 20%, #1c1d20 0%, #0a0a0b 70%);
+            z-index:0;
+        }
+
+        .modal{
+            position:relative;
+            z-index:1;
+            width:min(950px,100%);
+            background:var(--modal-bg);
+            border-radius:10px;
+            display:grid;
+            grid-template-columns:400px 1fr;
+            gap:0;
+            padding:28px 28px 28px 48px;
+            box-shadow:0 12px 48px rgba(0,0,0,.7);
+        }
+
+        .close{
+            position:absolute;
+            top:16px;
+            right:16px;
+            width:34px;height:34px;
+            border:none;border-radius:6px;
+            background:transparent;
+            color:var(--text-muted);
+            cursor:pointer;
+            display:grid;place-items:center;
+            transition:background .12s,color .12s;
+        }
+        .close:hover{background:#2b2d31;color:#fff}
+
+        /* ── left column ───────────────────────────── */
+        .card{
+            background:var(--panel);
+            border-radius:8px;
+            overflow:hidden;
+            align-self:start;
+        }
+        .banner{height:140px;background:var(--banner)}
+
+        .avatar-wrap{
+            margin:-78px 0 0 24px;
+            width:130px;height:130px;
+            border-radius:50%;
+            background:var(--panel);
+            display:grid;place-items:center;
+            position:relative;
+        }
+        .avatar{width:114px;height:114px;border-radius:50%;display:block}
+        .status{
+            position:absolute;
+            right:2px;bottom:4px;
+            width:30px;height:30px;
+            border-radius:50%;
+            background:var(--panel);
+            display:grid;place-items:center;
+        }
+        .status::after{
+            content:"";
+            width:16px;height:16px;
+            border-radius:50%;
+            border:4px solid var(--offline);
+            background:transparent;
+        }
+
+        .card-body{padding:14px 24px 28px}
+
+        .display-name{font-size:26px;font-weight:700;letter-spacing:-.01em}
+        .handle-row{display:flex;align-items:center;gap:7px;margin-top:3px}
+        .handle{font-size:14px;color:var(--text-body)}
+        .badge{width:17px;height:17px;border-radius:50%;display:block}
+
+        .actions{display:flex;gap:8px;margin:18px 0 20px}
+        .btn{
+            border:none;border-radius:6px;
+            font-family:inherit;font-size:14px;font-weight:500;
+            color:#fff;cursor:pointer;
+            display:inline-flex;align-items:center;gap:8px;
+            transition:background .12s;
+        }
+        .btn-primary{background:var(--blurple);padding:0 16px;height:36px}
+        .btn-primary:hover{background:var(--blurple-hover)}
+        .btn-icon{background:var(--btn-secondary);width:36px;height:36px;justify-content:center;color:var(--text-body)}
+        .btn-icon:hover{background:var(--btn-secondary-hover)}
+
+        .bio{font-size:14px;line-height:1.35;color:var(--text-body)}
+
+        .section{margin-top:22px}
+        .section-label{
+            font-size:12px;font-weight:700;
+            color:var(--text-muted);
+            margin-bottom:6px;
+        }
+        .section-value{font-size:14px;color:var(--text-body)}
+
+        .connection{display:flex;align-items:center;gap:10px;margin-top:8px}
+        .connection-icon{
+            width:26px;height:26px;border-radius:6px;
+            background:#9146ff;
+            display:grid;place-items:center;
+        }
+        .connection a{
+            color:var(--text-body);font-size:14px;font-weight:500;
+            text-decoration:none;display:inline-flex;align-items:center;gap:4px;
+        }
+        .connection a:hover{text-decoration:underline}
+
+        .note-input{
+            width:100%;
+            background:transparent;border:none;outline:none;
+            font-family:inherit;font-size:14px;font-style:italic;
+            color:var(--text-body);
+            padding:2px 0;
+        }
+        .note-input::placeholder{color:#87898c;font-style:italic}
+
+        /* ── right column ──────────────────────────── */
+        .right{padding:26px 8px 0 40px;display:flex;flex-direction:column}
+        .tabs{display:flex;gap:28px;border-bottom:1px solid var(--divider)}
+        .tab{
+            background:none;border:none;cursor:pointer;
+            font-family:inherit;font-size:15px;
+            color:var(--text-muted);
+            padding:0 0 12px;
+            position:relative;
+            transition:color .12s;
+        }
+        .tab:hover{color:var(--text-body)}
+        .tab[aria-selected="true"]{color:#fff;font-weight:500}
+        .tab[aria-selected="true"]::after{
+            content:"";position:absolute;left:0;right:0;bottom:-1px;
+            height:2px;border-radius:2px;background:#fff;
+        }
+
+        .empty{
+            flex:1;
+            display:flex;flex-direction:column;
+            align-items:center;justify-content:center;
+            text-align:center;
+            gap:14px;
+            padding:0 40px 60px;
+        }
+        .empty h2{font-size:17px;font-weight:600;color:#fff;line-height:1.4;max-width:320px}
+        .empty p{font-size:14px;color:var(--text-body);line-height:1.4;max-width:330px}
+        .empty .btn-primary{margin-top:6px}
+
+        :focus-visible{outline:2px solid #fff;outline-offset:2px}
+
+        @media (max-width:860px){
+            .modal{grid-template-columns:1fr;padding:20px}
+            .right{padding:28px 4px 0;min-height:340px}
+        }
+    </style>
+</head>
+<body>
+<div class="backdrop"></div>
+
+<div class="modal" role="dialog" aria-label="Profil von L3the">
+    <button class="close" aria-label="Schließen">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+
+    <!-- left column -->
+    <div class="card">
+        <div class="banner"></div>
+
+        <div class="avatar-wrap">
+            <svg class="avatar" viewBox="0 0 100 100" role="img" aria-label="Profilbild">
+                <defs><clipPath id="c"><circle cx="50" cy="50" r="50"/></clipPath></defs>
+                <g clip-path="url(#c)">
+                    <rect width="100" height="100" fill="#d94f8e"/>
+                    <!-- face -->
+                    <ellipse cx="50" cy="58" rx="34" ry="33" fill="#f6c7dc"/>
+                    <!-- hair back / top -->
+                    <path d="M12 46c0-24 17-38 38-38s38 14 38 34c0 6-4 9-8 6-6-5-16-8-30-8-13 0-24 4-30 9-4 3-8 1-8-3z" fill="#e0619b"/>
+                    <!-- blonde swept bangs -->
+                    <path d="M16 40c6-18 22-28 38-27 13 1 24 8 29 20-9-6-21-9-33-8-13 1-25 6-34 15z" fill="#f2d9a0"/>
+                    <path d="M18 44c10-11 24-16 38-16 11 0 21 3 28 9-9-3-19-4-29-3-14 1-27 4-37 10z" fill="#e8c477"/>
+                    <!-- brows -->
+                    <path d="M28 55c5-4 12-4 16 0" stroke="#2b2b2b" stroke-width="2.6" fill="none" stroke-linecap="round"/>
+                    <path d="M58 55c5-4 12-4 16 0" stroke="#2b2b2b" stroke-width="2.6" fill="none" stroke-linecap="round"/>
+                    <!-- closed eyes -->
+                    <path d="M28 66c5 5 12 5 17 0" stroke="#2b2b2b" stroke-width="2.8" fill="none" stroke-linecap="round"/>
+                    <path d="M57 66c5 5 12 5 17 0" stroke="#2b2b2b" stroke-width="2.8" fill="none" stroke-linecap="round"/>
+                    <!-- mouth -->
+                    <path d="M43 82c4-4 11-4 15 0" stroke="#2b2b2b" stroke-width="2.6" fill="none" stroke-linecap="round"/>
+                </g>
+            </svg>
+            <span class="status" title="Offline" aria-label="Offline"></span>
+        </div>
+
+        <div class="card-body">
+            <div class="display-name">L3the</div>
+            <div class="handle-row">
+                <span class="handle">l3the</span>
+                <svg class="badge" viewBox="0 0 24 24" aria-label="Badge"><circle cx="12" cy="12" r="12" fill="#3ba55d"/><path d="M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 2c1 0 2.4 2 2.4 6S13 18 12 18s-2.4-2-2.4-6S11 6 12 6Zm-6 6h12" stroke="#0f1013" stroke-width="1.4" fill="none"/></svg>
+                <svg class="badge" viewBox="0 0 24 24" aria-label="Badge"><circle cx="12" cy="12" r="12" fill="#5865f2"/><circle cx="12" cy="12" r="4" fill="#0f1013"/><g stroke="#0f1013" stroke-width="2.2" stroke-linecap="round"><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></g></svg>
+            </div>
+
+            <div class="actions">
+                <button class="btn btn-primary">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3C6.9 3 3 6.6 3 11c0 2.4 1.2 4.5 3.1 5.9-.1 1.3-.7 2.6-1.7 3.6 1.9-.2 3.6-.9 4.9-1.9 .9.2 1.8.4 2.7.4 5.1 0 9-3.6 9-8s-3.9-8-9-8Z"/></svg>
+                    Nachricht
+                </button>
+                <button class="btn btn-icon" aria-label="Freund hinzufügen">
+                    <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor"><path d="M10 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0 1.5c-4 0-7 2-7 4.3V20h11.2a5.6 5.6 0 0 1-.7-2.7c0-1.4.5-2.7 1.4-3.6-1.4-.4-3-.2-4.9-.2Z"/><path d="M18.5 13.5v2.2h2.2v1.6h-2.2v2.2h-1.6v-2.2h-2.2v-1.6h2.2v-2.2h1.6Z"/></svg>
+                </button>
+                <button class="btn btn-icon" aria-label="Mehr">
+                    <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+                </button>
+            </div>
+
+            <p class="bio">Deliver me from mine enemies, O my God: defend me from them that rise up against me. Deliver me from the workers of iniquity, and save me from bloody men. The mighty are gathered against me</p>
+
+            <div class="section">
+                <div class="section-label">Mitglied seit</div>
+                <div class="section-value">6. Sept. 2016</div>
+            </div>
+
+            <div class="section">
+                <div class="section-label">Befreundet seit</div>
+                <div class="section-value">29. Dez. 2025</div>
+            </div>
+
+            <div class="section">
+                <div class="section-label">Verknüpfungen</div>
+                <div class="connection">
+          <span class="connection-icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="#fff"><path d="M4 3 2.5 7v12h4.5v2.5h2.5L12 19h4l5-5V3H4Zm15.5 10-3 3h-4l-2.5 2.5V16H6.5V4.5h13V13Z"/><path d="M15 7.5h1.5V12H15V7.5Zm-4 0h1.5V12H11V7.5Z"/></svg>
+          </span>
+                    <a href="#">l33the <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M7 17 17 7M8 7h9v9"/></svg></a>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-label">Notiz (nur für dich sichtbar)</div>
+                <input class="note-input" placeholder="Hier klicken, um eine Notiz hinzuzufügen">
+            </div>
+        </div>
+    </div>
+
+    <!-- right column -->
+    <div class="right">
+        <div class="tabs" role="tablist">
+            <button class="tab" role="tab" aria-selected="true">Aktivität</button>
+            <button class="tab" role="tab" aria-selected="false">10 gemeinsame Freunde</button>
+            <button class="tab" role="tab" aria-selected="false">4 gemeinsame Server</button>
+        </div>
+
+        <div class="empty">
+            <h2>L3the hat keine Aktivität, die er/sie hier teilen könnte</h2>
+            <p>Immer noch kein Anzeichen von Aktivität – warum brichst du nicht das Eis?</p>
+            <button class="btn btn-primary">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3C6.9 3 3 6.6 3 11c0 2.4 1.2 4.5 3.1 5.9-.1 1.3-.7 2.6-1.7 3.6 1.9-.2 3.6-.9 4.9-1.9 .9.2 1.8.4 2.7.4 5.1 0 9-3.6 9-8s-3.9-8-9-8Z"/></svg>
+                Nachricht
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.querySelectorAll('.tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected', 'false'));
+            tab.setAttribute('aria-selected', 'true');
+        });
+    });
+</script>
+</body>
+</html>

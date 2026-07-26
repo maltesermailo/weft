@@ -3,9 +3,34 @@
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
 
+  type Tab = "online" | "all" | "pending" | "add";
+  let tab = $state<Tab>("online");
+
   // Local friends get a presence dot + avatar by handle; federated friends
-  // render by their full `account@network` ref.
+  // render by their full `account@network` ref (no presence).
   const avatarAccount = (user: string) => app.friendLocalAccount(user) ?? user;
+  const statusOf = (user: string) => {
+    const acct = app.friendLocalAccount(user);
+    return acct ? (app.presence[acct] ?? "offline") : "offline";
+  };
+  const isOnline = (user: string) => {
+    const s = statusOf(user);
+    return s !== "offline" && s !== "invisible";
+  };
+  const STATUS: Record<string, string> = {
+    online: "Online",
+    idle: "Idle",
+    dnd: "Do Not Disturb",
+    offline: "Offline",
+    invisible: "Offline",
+  };
+  const subtitle = (user: string) => {
+    const acct = app.friendLocalAccount(user);
+    return acct ? (STATUS[statusOf(user)] ?? "Offline") : user;
+  };
+
+  const online = $derived(app.friendList.filter(isOnline));
+  const pendingCount = $derived(app.incomingRequests.length);
 
   function onAddKey(e: KeyboardEvent) {
     if (e.key === "Enter") {
@@ -13,218 +38,443 @@
       app.addFriend();
     }
   }
-  function onGroupKey(e: KeyboardEvent) {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      app.createGroup();
-    }
-  }
 </script>
 
-<div class="friends-view">
-  <div class="fv-head">
-    <div class="fv-title">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
+<div class="fv">
+  <!-- Topbar: title + tabs + new-group -->
+  <header class="fv-top">
+    <span class="fv-ttl">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /></svg>
       Friends
-    </div>
-  </div>
-
-  <div class="fv-add">
-    <input
-      placeholder="Add a friend — handle or account@network"
-      bind:value={app.addFriendInput}
-      onkeydown={onAddKey}
-    />
-    <button class="btn-primary" disabled={!app.addFriendInput.trim()} onclick={app.addFriend}>
-      Send Request
+    </span>
+    <span class="fv-div"></span>
+    <nav class="fv-tabs">
+      <button class="fv-tab" class:on={tab === "online"} onclick={() => (tab = "online")}>Online</button>
+      <button class="fv-tab" class:on={tab === "all"} onclick={() => (tab = "all")}>All</button>
+      <button class="fv-tab" class:on={tab === "pending"} onclick={() => (tab = "pending")}>
+        Pending{#if pendingCount}<span class="fv-badge">{pendingCount}</span>{/if}
+      </button>
+      <button class="fv-tab add" class:on={tab === "add"} onclick={() => (tab = "add")}>Add Friend</button>
+    </nav>
+    <button class="fv-icon" title="New group DM" aria-label="New group DM" onclick={app.openGroupPicker}>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /><line x1="20" y1="8" x2="20" y2="14" /><line x1="17" y1="11" x2="23" y2="11" /></svg>
     </button>
-  </div>
+  </header>
 
-  <div class="fv-add">
-    <input
-      placeholder="New group DM — handles, comma-separated"
-      bind:value={app.newGroupInput}
-      onkeydown={onGroupKey}
-    />
-    <button class="btn-primary" disabled={!app.newGroupInput.trim()} onclick={app.createGroup}>
-      Create Group
-    </button>
-  </div>
-
-  <div class="fv-scroll">
-    {#if app.incomingRequests.length}
-      <div class="fv-section">Incoming Requests — {app.incomingRequests.length}</div>
-      {#each app.incomingRequests as user (user)}
-        <div class="fv-row">
-          <div class="avatar sm"><Avatar account={avatarAccount(user)} /></div>
-          <div class="fv-name">{app.friendLabel(user)}<span class="fv-sub">wants to be friends</span></div>
-          <div class="fv-actions">
-            <button class="icon-pill accept" title="Accept" aria-label="Accept" onclick={() => app.acceptFriend(user)}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6 9 17l-5-5" /></svg>
-            </button>
-            <button class="icon-pill decline" title="Decline" aria-label="Decline" onclick={() => app.removeFriend(user)}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18M6 6l12 12" /></svg>
-            </button>
-          </div>
-        </div>
-      {/each}
-    {/if}
-
-    {#if app.outgoingRequests.length}
-      <div class="fv-section">Sent Requests — {app.outgoingRequests.length}</div>
-      {#each app.outgoingRequests as user (user)}
-        <div class="fv-row">
-          <div class="avatar sm"><Avatar account={avatarAccount(user)} /></div>
-          <div class="fv-name">{app.friendLabel(user)}<span class="fv-sub">request sent</span></div>
-          <div class="fv-actions">
-            <button class="icon-pill decline" title="Cancel" aria-label="Cancel" onclick={() => app.removeFriend(user)}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18M6 6l12 12" /></svg>
-            </button>
-          </div>
-        </div>
-      {/each}
-    {/if}
-
-    <div class="fv-section">All Friends — {app.friendList.length}</div>
-    {#each app.friendList as user (user)}
-      <div class="fv-row" oncontextmenu={(e) => app.userCtx(e, user)} role="listitem">
-        <div class="avatar sm">
-          <Avatar account={avatarAccount(user)} />
-          {#if app.friendLocalAccount(user)}<span class={app.dotClass(app.friendLocalAccount(user) ?? "")}></span>{/if}
-        </div>
-        <div class="fv-name">{app.friendLabel(user)}</div>
-        <div class="fv-actions">
-          {#if app.friendLocalAccount(user)}
-            <button class="icon-pill" title="Message" aria-label="Message" onclick={() => app.messageFriend(user)}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
-            </button>
-          {/if}
-          <button class="icon-pill call" title="Call" aria-label="Call" disabled={!!app.activeCall} onclick={() => app.callUser(user)}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" /></svg>
-          </button>
-          <button class="icon-pill decline" title="Remove friend" aria-label="Remove friend" onclick={() => app.removeFriend(user)}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M17 8l5 5m0-5-5 5" /></svg>
+  <div class="fv-body">
+    {#if tab === "add"}
+      <div class="fv-add-panel">
+        <h3>Add Friend</h3>
+        <p>Add a friend by their handle. Friends can live on other networks too — use <code>name@network</code>.</p>
+        <div class="fv-add-wrap">
+          <input
+            placeholder="Enter a handle or account@network"
+            bind:value={app.addFriendInput}
+            onkeydown={onAddKey}
+          />
+          <button class="fv-add-btn" disabled={!app.addFriendInput.trim()} onclick={app.addFriend}>
+            Send Friend Request
           </button>
         </div>
       </div>
-    {:else}
-      {#if !app.incomingRequests.length && !app.outgoingRequests.length}
-        <div class="fv-empty">No friends yet — add someone by their handle above. Friends can live on other networks too (<code>name@network</code>).</div>
+    {:else if tab === "pending"}
+      {#if app.incomingRequests.length}
+        <div class="fv-count">Incoming — {app.incomingRequests.length}</div>
+        {#each app.incomingRequests as user (user)}
+          <div class="fv-row" oncontextmenu={(e) => app.userCtx(e, user)} role="listitem">
+            <span class="fv-av"><Avatar account={avatarAccount(user)} /></span>
+            <span class="fv-meta">
+              <span class="fv-name">{app.friendLabel(user)}</span>
+              <span class="fv-sub">Incoming friend request</span>
+            </span>
+            <span class="fv-acts">
+              <button class="fv-act ok" title="Accept" aria-label="Accept" onclick={() => app.acceptFriend(user)}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+              </button>
+              <button class="fv-act no" title="Decline" aria-label="Decline" onclick={() => app.removeFriend(user)}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+              </button>
+            </span>
+          </div>
+        {/each}
       {/if}
-    {/each}
+      {#if app.outgoingRequests.length}
+        <div class="fv-count" style="margin-top:16px">Sent — {app.outgoingRequests.length}</div>
+        {#each app.outgoingRequests as user (user)}
+          <div class="fv-row" role="listitem">
+            <span class="fv-av"><Avatar account={avatarAccount(user)} /></span>
+            <span class="fv-meta">
+              <span class="fv-name">{app.friendLabel(user)}</span>
+              <span class="fv-sub">Outgoing friend request</span>
+            </span>
+            <span class="fv-acts">
+              <button class="fv-act no" title="Cancel" aria-label="Cancel" onclick={() => app.removeFriend(user)}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+              </button>
+            </span>
+          </div>
+        {/each}
+      {/if}
+      {#if !app.incomingRequests.length && !app.outgoingRequests.length}
+        <div class="fv-empty">
+          <svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 3.07 9.8" /><path d="M1 1l22 22" /></svg>
+          <p>No pending requests</p>
+          <span>Sent and received friend requests show up here.</span>
+        </div>
+      {/if}
+    {:else}
+      <!-- online | all -->
+      {@const list = tab === "online" ? online : app.friendList}
+      {#if list.length}
+        <div class="fv-count">{tab === "online" ? "Online" : "All Friends"} — {list.length}</div>
+        {#each list as user (user)}
+          <div class="fv-row" oncontextmenu={(e) => app.userCtx(e, user)} role="listitem">
+            <span class="fv-av">
+              <Avatar account={avatarAccount(user)} />
+              {#if app.friendLocalAccount(user)}<span class="fv-dot {statusOf(user)}"></span>{/if}
+            </span>
+            <span class="fv-meta">
+              <span class="fv-name">{app.friendLabel(user)}</span>
+              <span class="fv-sub">{subtitle(user)}</span>
+            </span>
+            <span class="fv-acts">
+              {#if app.friendLocalAccount(user)}
+                <button class="fv-act" title="Message" aria-label="Message" onclick={() => app.messageFriend(user)}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+                </button>
+              {/if}
+              <button class="fv-act call" title="Call" aria-label="Call" disabled={!!app.activeCall} onclick={() => app.callUser(user)}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" /></svg>
+              </button>
+              <button class="fv-act" title="More" aria-label="More" onclick={(e) => app.userCtx(e, user)}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></svg>
+              </button>
+            </span>
+          </div>
+        {/each}
+      {:else}
+        <div class="fv-empty">
+          <svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /></svg>
+          <p>{tab === "online" ? "No one's around" : "No friends yet"}</p>
+          <span>Add someone with <strong>Add Friend</strong> — they can be on another network too.</span>
+        </div>
+      {/if}
+    {/if}
   </div>
 </div>
 
 <style>
-  .friends-view {
+  .fv {
     display: flex;
     flex-direction: column;
     height: 100%;
     min-height: 0;
   }
-  .fv-head {
-    padding: 14px 20px;
-    border-bottom: 1px solid var(--border-hair);
-  }
-  .fv-title {
+  .fv-top {
     display: flex;
     align-items: center;
-    gap: 10px;
-    font-weight: 700;
-    font-size: 16px;
-  }
-  .fv-add {
-    display: flex;
-    gap: 10px;
-    padding: 16px 20px;
+    gap: 12px;
+    height: 48px;
+    padding: 0 16px;
+    flex-shrink: 0;
     border-bottom: 1px solid var(--border-hair);
   }
-  .fv-add input {
-    flex: 1;
-    padding: 10px 12px;
-    border-radius: var(--radius-md);
-    border: 1px solid var(--border-hair-strong);
-    background: var(--bg-panel-raised);
+  .fv-ttl {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-weight: 700;
+    font-size: 15px;
     color: var(--text-primary);
-    font: inherit;
   }
-  .fv-scroll {
+  .fv-ttl svg {
+    color: var(--text-muted);
+  }
+  .fv-div {
+    width: 1px;
+    height: 22px;
+    background: var(--border-hair-strong);
+  }
+  .fv-tabs {
+    display: flex;
+    gap: 2px;
+  }
+  .fv-tab {
+    padding: 5px 10px;
+    border-radius: var(--radius-md);
+    border: none;
+    background: none;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    transition:
+      background 0.1s,
+      color 0.1s;
+  }
+  .fv-tab:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .fv-tab.on {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .fv-tab.add {
+    background: #3ba55d;
+    color: #fff;
+    font-weight: 600;
+  }
+  .fv-tab.add:hover,
+  .fv-tab.add.on {
+    background: #359553;
+  }
+  .fv-badge {
+    background: var(--danger);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    border-radius: 10px;
+    padding: 0 5px;
+    line-height: 1.5;
+  }
+  .fv-icon {
+    margin-left: auto;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-md);
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition:
+      background 0.1s,
+      color 0.1s;
+  }
+  .fv-icon:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .fv-body {
     flex: 1;
     overflow-y: auto;
-    padding: 8px 12px 20px;
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
   }
-  .fv-section {
-    padding: 16px 8px 8px;
+  .fv-count {
     font-size: 12px;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.05em;
     color: var(--text-muted);
+    margin-bottom: 6px;
+    padding: 0 4px;
   }
   .fv-row {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 8px 8px;
+    padding: 9px 12px;
     border-radius: var(--radius-md);
+    cursor: pointer;
     border-top: 1px solid var(--border-hair);
+    transition: background 0.1s;
+  }
+  .fv-row:first-of-type {
+    border-top: none;
   }
   .fv-row:hover {
-    background: var(--bg-panel-raised);
+    background: var(--bg-hover);
+    border-top-color: transparent;
   }
-  .fv-name {
+  .fv-av {
+    position: relative;
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    display: flex;
+  }
+  .fv-av :global(.avatar),
+  .fv-av :global(img) {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+  }
+  .fv-dot {
+    position: absolute;
+    bottom: -1px;
+    right: -1px;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    border: 3px solid var(--bg-void);
+    background: #80848e;
+  }
+  .fv-dot.online {
+    background: #3ba55d;
+  }
+  .fv-dot.idle {
+    background: #f0b232;
+  }
+  .fv-dot.dnd {
+    background: var(--danger);
+  }
+  .fv-meta {
     flex: 1;
     min-width: 0;
-    font-weight: 600;
     display: flex;
     flex-direction: column;
   }
+  .fv-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .fv-sub {
     font-size: 12px;
-    font-weight: 400;
     color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .fv-actions {
+  .fv-acts {
     display: flex;
-    gap: 8px;
+    gap: 6px;
+    flex-shrink: 0;
   }
-  .icon-pill {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 34px;
-    height: 34px;
+  .fv-act {
+    width: 36px;
+    height: 36px;
     border-radius: 50%;
     border: none;
     background: var(--bg-panel);
-    color: var(--text-secondary, var(--text-muted));
+    color: var(--text-muted);
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition:
+      background 0.12s,
+      color 0.12s;
+    flex-shrink: 0;
   }
-  .icon-pill:hover {
+  .fv-act:hover {
+    background: var(--bg-panel-raised);
     color: var(--text-primary);
-    background: var(--bg-hover);
   }
-  .icon-pill.accept:hover {
-    color: #43b581;
+  .fv-act.call:hover {
+    color: #3ba55d;
   }
-  .icon-pill.decline:hover {
-    color: #f04747;
+  .fv-act.ok:hover {
+    background: rgba(59, 165, 93, 0.15);
+    color: #3ba55d;
   }
-  .icon-pill.call:hover {
-    color: #43b581;
+  .fv-act.no:hover {
+    background: rgba(217, 104, 95, 0.15);
+    color: var(--danger);
   }
-  .icon-pill:disabled {
+  .fv-act:disabled {
     opacity: 0.4;
     cursor: default;
   }
   .fv-empty {
-    padding: 30px 12px;
-    color: var(--text-muted);
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 40px;
     text-align: center;
-    line-height: 1.6;
   }
-  .fv-empty code {
+  .fv-empty svg {
+    color: var(--text-faint);
+    opacity: 0.5;
+  }
+  .fv-empty p {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+  .fv-empty span {
+    font-size: 13px;
+    color: var(--text-faint);
+    line-height: 1.5;
+    max-width: 320px;
+  }
+  /* Add-friend panel */
+  .fv-add-panel {
+    max-width: 660px;
+  }
+  .fv-add-panel h3 {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 6px;
+  }
+  .fv-add-panel p {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 20px;
+    line-height: 1.5;
+  }
+  .fv-add-panel code {
     font-family: var(--font-mono);
     font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .fv-add-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-hair-strong);
+    border-radius: 10px;
+    padding: 4px 4px 4px 14px;
+    transition: border-color 0.15s;
+  }
+  .fv-add-wrap:focus-within {
+    border-color: var(--accent);
+  }
+  .fv-add-wrap input {
+    flex: 1;
+    background: none;
+    border: none;
+    outline: none;
+    font: inherit;
+    font-size: 14px;
+    color: var(--text-primary);
+    padding: 8px 0;
+  }
+  .fv-add-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-md);
+    padding: 8px 16px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: filter 0.12s;
+  }
+  .fv-add-btn:hover {
+    filter: brightness(1.1);
+  }
+  .fv-add-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>

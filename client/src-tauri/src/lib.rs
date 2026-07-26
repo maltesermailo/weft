@@ -325,10 +325,12 @@ fn profile_set(
     conn: State<'_, Conn>,
     display: Option<String>,
     avatar: Option<String>,
+    about: Option<String>,
 ) -> Result<(), String> {
     conn.send(weft::build_profile_set(
         display.as_deref(),
         avatar.as_deref(),
+        about.as_deref(),
     )?)
 }
 
@@ -406,8 +408,13 @@ fn revoke(
 }
 
 #[tauri::command]
-fn invite_mint(conn: State<'_, Conn>, scope: String) -> Result<(), String> {
-    conn.send(weft::build_invite_mint(&scope)?)
+fn invite_mint(
+    conn: State<'_, Conn>,
+    scope: String,
+    max_uses: Option<u32>,
+    expiry: Option<u64>,
+) -> Result<(), String> {
+    conn.send(weft::build_invite_mint(&scope, max_uses, expiry)?)
 }
 
 #[tauri::command]

@@ -36,6 +36,7 @@ impl<S: ControlStream> Session<S> {
                 scope: scope.clone(),
                 caps,
                 uses_left: max_uses,
+                uses: 0,
                 expiry: absolute_expiry,
                 creator,
             })
@@ -287,6 +288,7 @@ impl<S: ControlStream> Session<S> {
                     invite_id: inv.id,
                     creator: inv.creator,
                     uses_left: inv.uses_left,
+                    used: inv.uses,
                     expiry: inv.expiry,
                 },
             )

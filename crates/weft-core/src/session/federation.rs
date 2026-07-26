@@ -760,6 +760,7 @@ impl<S: ControlStream> Session<S> {
             user,
             display,
             avatar,
+            .. // `about` rides the line unsigned; the peer ignores it (local-only bio)
         } = &event.event
         {
             if user.network.as_str() == self.ctx.network_name() {
@@ -1829,6 +1830,7 @@ impl ServerCtx {
             user,
             display,
             avatar,
+            .. // bridged bios aren't signed yet (M-prof-5) — stored local-only
         } = &reply.event
         {
             self.ingest_profile(peer, line, user, display, avatar).await;
@@ -1921,6 +1923,7 @@ impl ServerCtx {
             weft_store::ProfileRecord {
                 display: display.clone(),
                 avatar: avatar.clone(),
+                about: None, // §10.3 bios aren't in the signed profile yet (M-prof-5)
                 updated: signed.profile.updated,
             },
         )

@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+    <title>Profile — NexusChat</title>
+    <style>
+        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+        :root{
+            --bg:       #07080C;
+            --rail:     #040508;
+            --surface:  #0D0F15;
+            --surface2: #14161E;
+            --surface3: #191C26;
+            --border:   rgba(255,255,255,0.055);
+            --accent:   #FF4D00;
+            --accent2:  #FF7A3D;
+            --neon:     #00FFCC;
+            --green:    #00E87A;
+            --red:      #FF2D55;
+            --yellow:   #FFD60A;
+            --purple:   #B44FFF;
+            --blue:     #00B4FF;
+            --text:     #E8EAF2;
+            --muted:    #555A6E;
+            --muted2:   #383D50;
+            --glow:     0 0 28px rgba(255,77,0,0.4);
+            --glow-sm:  0 0 12px rgba(255,77,0,0.25);
+            --glow-neon:0 0 16px rgba(0,255,204,0.3);
+        }
+        html,body{height:100%;background:var(--bg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;-webkit-font-smoothing:antialiased;color:var(--text);display:flex;align-items:center;justify-content:center;overflow:hidden;}
+        ::-webkit-scrollbar{width:3px;}
+        ::-webkit-scrollbar-track{background:transparent;}
+        ::-webkit-scrollbar-thumb{background:rgba(255,77,0,0.3);border-radius:3px;}
+
+        /* Ambient bg */
+        body::before{
+            content:'';position:fixed;inset:0;
+            background:
+                    radial-gradient(ellipse 55% 50% at 30% 40%,rgba(255,77,0,0.05) 0%,transparent 70%),
+                    radial-gradient(ellipse 45% 40% at 75% 65%,rgba(180,79,255,0.04) 0%,transparent 70%);
+            pointer-events:none;
+        }
+        body::after{
+            content:'';position:fixed;inset:0;
+            background-image:linear-gradient(rgba(255,255,255,0.014) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.014) 1px,transparent 1px);
+            background-size:44px 44px;pointer-events:none;
+        }
+
+        /* ── Card ── */
+        .card{
+            position:relative;z-index:1;
+            width:420px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);
+            background:var(--surface);border:1px solid rgba(255,77,0,0.14);border-radius:16px;
+            box-shadow:0 24px 80px rgba(0,0,0,0.75),var(--glow);
+            overflow-y:auto;overflow-x:hidden;
+            animation:rise .35s cubic-bezier(.34,1.3,.64,1) both;
+        }
+        @keyframes rise{from{opacity:0;transform:translateY(18px) scale(.97);}to{opacity:1;transform:none;}}
+
+        /* ── Banner ── */
+        .banner{
+            height:116px;position:relative;flex-shrink:0;overflow:hidden;
+            background:linear-gradient(135deg,#1a0800 0%,#FF4D00 55%,#FF9500 100%);
+            cursor:pointer;
+        }
+        .banner-overlay{position:absolute;inset:0;background:rgba(0,0,0,0);transition:background .18s;}
+        .banner:hover .banner-overlay{background:rgba(0,0,0,0.35);}
+        .banner-edit{
+            position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+            opacity:0;transition:opacity .18s;gap:6px;font-size:12px;font-weight:800;
+            color:#fff;text-transform:uppercase;letter-spacing:.1em;
+        }
+        .banner:hover .banner-edit{opacity:1;}
+        .banner-picker{position:absolute;inset:0;opacity:0;cursor:pointer;}
+
+        /* Banner pattern overlay */
+        .banner::before{
+            content:'';position:absolute;inset:0;
+            background-image:repeating-linear-gradient(45deg,rgba(255,255,255,0.04) 0px,rgba(255,255,255,0.04) 1px,transparent 1px,transparent 12px);
+            pointer-events:none;
+        }
+
+        /* ── Avatar area ── */
+        .av-area{padding:0 20px;position:relative;margin-top:-40px;display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:16px;}
+        .av-wrap{position:relative;cursor:pointer;}
+        .av{
+            width:80px;height:80px;border-radius:16px;
+            background:linear-gradient(135deg,#FF4D00,#FF9500);
+            display:flex;align-items:center;justify-content:center;
+            font-size:28px;font-weight:900;color:#fff;
+            border:4px solid var(--surface);
+            box-shadow:0 8px 24px rgba(0,0,0,0.5),var(--glow-sm);
+            transition:opacity .15s;
+            position:relative;overflow:hidden;
+        }
+        .av-edit-overlay{
+            position:absolute;inset:0;background:rgba(0,0,0,0.5);
+            display:flex;align-items:center;justify-content:center;
+            opacity:0;transition:opacity .15s;border-radius:12px;
+            font-size:10px;font-weight:800;color:#fff;text-transform:uppercase;letter-spacing:.06em;
+            flex-direction:column;gap:4px;
+        }
+        .av-wrap:hover .av-edit-overlay{opacity:1;}
+        .av-status{
+            position:absolute;bottom:-3px;right:-3px;
+            width:20px;height:20px;border-radius:50%;
+            border:3px solid var(--surface);
+            cursor:pointer;transition:transform .15s;
+        }
+        .av-status:hover{transform:scale(1.15);}
+        .av-actions{display:flex;gap:8px;align-items:center;padding-bottom:4px;}
+        .av-action-btn{
+            padding:7px 14px;border-radius:7px;font-size:11px;font-weight:800;
+            text-transform:uppercase;letter-spacing:.07em;cursor:pointer;transition:all .14s;border:1px solid;
+        }
+        .btn-primary{background:var(--accent);border-color:var(--accent);color:#fff;}
+        .btn-primary:hover{background:var(--accent2);box-shadow:var(--glow-sm);}
+        .btn-ghost{background:var(--surface2);border-color:var(--border);color:var(--muted);}
+        .btn-ghost:hover{border-color:rgba(255,255,255,0.12);color:var(--text);}
+
+        /* ── Identity ── */
+        .identity{padding:0 20px 4px;}
+        .display-name-row{display:flex;align-items:center;gap:8px;margin-bottom:2px;}
+        .display-name{font-size:22px;font-weight:900;color:var(--text);letter-spacing:-.3px;line-height:1.1;}
+        .name-badge{
+            font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;
+            padding:3px 7px;border-radius:3px;flex-shrink:0;margin-top:2px;
+        }
+        .badge-mod{background:rgba(255,77,0,0.18);color:var(--accent2);}
+        .badge-admin{background:rgba(255,45,85,0.18);color:#FF5C7A;}
+        .username{font-size:13px;color:var(--muted);font-weight:500;margin-bottom:10px;}
+
+        /* Custom status */
+        .custom-status-row{
+            display:flex;align-items:center;gap:8px;padding:8px 12px;
+            background:var(--surface2);border:1px solid var(--border);border-radius:8px;
+            margin:0 20px 6px;cursor:pointer;transition:border-color .14s;
+        }
+        .custom-status-row:hover{border-color:rgba(255,77,0,0.3);}
+        .cs-emoji{font-size:16px;flex-shrink:0;}
+        .cs-text{flex:1;font-size:13px;color:var(--muted);font-style:italic;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+        .cs-text.set{color:var(--text);font-style:normal;}
+        .cs-edit-icon{color:var(--muted2);flex-shrink:0;transition:color .12s;}
+        .custom-status-row:hover .cs-edit-icon{color:var(--accent2);}
+
+        /* ── Divider ── */
+        .divider{height:1px;background:var(--border);margin:14px 20px;}
+
+        /* ── Section label ── */
+        .sec-label{
+            font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.16em;
+            color:var(--muted);padding:0 20px;margin-bottom:8px;
+            display:flex;align-items:center;justify-content:space-between;
+        }
+        .sec-edit{
+            font-size:10px;font-weight:800;color:var(--muted2);cursor:pointer;
+            text-transform:uppercase;letter-spacing:.1em;transition:color .12s;
+        }
+        .sec-edit:hover{color:var(--accent2);}
+
+        /* ── Bio ── */
+        .bio-area{padding:0 20px 4px;}
+        .bio-text{
+            font-size:13px;color:var(--muted);line-height:1.7;
+            cursor:pointer;padding:10px 12px;border-radius:8px;border:1px solid transparent;
+            transition:border-color .14s,background .14s;position:relative;
+        }
+        .bio-text:hover{background:var(--surface2);border-color:rgba(255,77,0,0.2);}
+        .bio-text.placeholder{font-style:italic;}
+        .bio-text.set{color:var(--text);}
+        .bio-edit-hint{
+            display:none;position:absolute;top:6px;right:8px;
+            font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.1em;color:var(--accent2);
+        }
+        .bio-text:hover .bio-edit-hint{display:block;}
+
+        /* Edit inputs */
+        .bio-input{
+            width:100%;background:var(--surface2);border:1px solid rgba(255,77,0,0.3);
+            border-radius:8px;padding:10px 12px;font-size:13px;color:var(--text);
+            font-family:inherit;resize:none;outline:none;line-height:1.7;
+            transition:border-color .14s,box-shadow .14s;
+        }
+        .bio-input:focus{border-color:rgba(255,77,0,0.6);box-shadow:0 0 0 1px rgba(255,77,0,0.12);}
+        .input-count{font-size:10px;color:var(--muted2);text-align:right;margin-top:4px;font-weight:600;}
+
+        /* ── Stats row ── */
+        .stats-row{display:flex;gap:0;padding:0 20px;}
+        .stat-block{
+            flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;
+            padding:10px 8px;border-radius:8px;cursor:pointer;transition:background .12s;
+            border:1px solid transparent;position:relative;
+        }
+        .stat-block:hover{background:var(--surface2);border-color:var(--border);}
+        .stat-block+.stat-block{margin-left:6px;}
+        .stat-val{font-size:20px;font-weight:900;color:var(--text);}
+        .stat-lbl{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);}
+        .stat-accent{color:var(--accent);}
+        .stat-neon{color:var(--neon);}
+        .stat-green{color:var(--green);}
+
+        /* ── Game activity ── */
+        .activity-list{display:flex;flex-direction:column;gap:8px;padding:0 20px;}
+        .activity-item{
+            display:flex;align-items:center;gap:12px;padding:10px 12px;
+            background:var(--surface2);border:1px solid var(--border);border-radius:10px;
+            transition:border-color .14s,transform .14s;cursor:pointer;
+        }
+        .activity-item:hover{border-color:rgba(255,77,0,0.25);transform:translateX(2px);}
+        .act-icon{
+            width:40px;height:40px;border-radius:10px;flex-shrink:0;
+            display:flex;align-items:center;justify-content:center;font-size:18px;
+        }
+        .act-info{flex:1;min-width:0;}
+        .act-game{font-size:13px;font-weight:800;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+        .act-detail{font-size:11px;color:var(--muted);margin-top:1px;}
+        .act-badge{
+            font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.08em;
+            padding:3px 7px;border-radius:4px;flex-shrink:0;
+        }
+
+        /* ── Badges / achievements ── */
+        .badges-row{display:flex;flex-wrap:wrap;gap:8px;padding:0 20px;}
+        .badge-item{
+            width:44px;height:44px;border-radius:10px;
+            display:flex;align-items:center;justify-content:center;font-size:20px;
+            background:var(--surface2);border:1px solid var(--border);
+            cursor:pointer;transition:transform .14s,border-color .14s,box-shadow .14s;
+            position:relative;
+        }
+        .badge-item:hover{transform:scale(1.1);border-color:rgba(255,77,0,0.35);box-shadow:var(--glow-sm);}
+        .badge-tooltip{
+            position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);
+            background:#060709;border:1px solid var(--border);border-radius:6px;
+            padding:5px 9px;font-size:11px;font-weight:700;color:var(--text);
+            white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .12s;z-index:10;
+            box-shadow:0 4px 12px rgba(0,0,0,0.5);
+        }
+        .badge-item:hover .badge-tooltip{opacity:1;}
+
+        /* ── Connections ── */
+        .connections-list{display:flex;flex-direction:column;gap:6px;padding:0 20px;}
+        .conn-item{
+            display:flex;align-items:center;gap:10px;padding:8px 12px;
+            background:var(--surface2);border:1px solid var(--border);border-radius:8px;
+        }
+        .conn-icon{width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;}
+        .conn-info{flex:1;min-width:0;}
+        .conn-name{font-size:12px;font-weight:700;color:var(--text);}
+        .conn-platform{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:700;}
+        .conn-verified{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--green);font-weight:700;}
+
+        /* ── Status picker ── */
+        .status-picker{
+            display:none;position:absolute;top:calc(100% + 8px);left:0;
+            background:#060709;border:1px solid rgba(255,255,255,0.08);border-radius:10px;
+            padding:6px;z-index:50;min-width:180px;
+            box-shadow:0 12px 40px rgba(0,0,0,0.7),0 0 0 1px rgba(255,77,0,0.1);
+        }
+        .status-picker.open{display:block;}
+        .sp-option{
+            display:flex;align-items:center;gap:10px;padding:8px 10px;
+            border-radius:6px;cursor:pointer;transition:background .08s;font-size:13px;color:var(--muted);
+        }
+        .sp-option:hover{background:rgba(255,77,0,0.09);color:var(--text);}
+        .sp-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
+
+        /* ── Edit modal ── */
+        .edit-overlay{
+            position:fixed;inset:0;background:rgba(0,0,0,0.65);backdrop-filter:blur(4px);
+            z-index:200;display:none;align-items:center;justify-content:center;
+        }
+        .edit-overlay.open{display:flex;}
+        .edit-modal{
+            background:var(--surface);border:1px solid rgba(255,77,0,0.18);border-radius:14px;
+            width:420px;max-width:calc(100vw - 24px);padding:24px;
+            box-shadow:0 24px 60px rgba(0,0,0,0.7),var(--glow);
+            animation:rise .28s cubic-bezier(.34,1.4,.64,1) both;
+        }
+        .em-title{font-size:14px;font-weight:900;color:var(--text);text-transform:uppercase;letter-spacing:.08em;margin-bottom:18px;}
+        .em-label{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin-bottom:6px;}
+        .em-input{
+            width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:8px;
+            padding:10px 12px;font-size:13px;color:var(--text);font-family:inherit;
+            outline:none;transition:border-color .14s,box-shadow .14s;
+        }
+        .em-input:focus{border-color:rgba(255,77,0,0.5);box-shadow:0 0 0 1px rgba(255,77,0,0.1);}
+        .em-row{display:flex;gap:8px;margin-bottom:14px;}
+        .em-emoji-btn{
+            width:44px;height:44px;border-radius:8px;background:var(--surface2);border:1px solid var(--border);
+            display:flex;align-items:center;justify-content:center;font-size:20px;cursor:pointer;
+            transition:border-color .12s;flex-shrink:0;
+        }
+        .em-emoji-btn:hover{border-color:rgba(255,77,0,0.3);}
+        .em-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:18px;}
+        .em-cancel{
+            padding:9px 18px;background:var(--surface2);border:1px solid var(--border);
+            border-radius:7px;color:var(--muted);font-size:12px;font-weight:700;cursor:pointer;transition:all .12s;
+        }
+        .em-cancel:hover{color:var(--text);}
+        .em-save{
+            padding:9px 20px;background:var(--accent);border:none;border-radius:7px;
+            color:#fff;font-size:12px;font-weight:900;cursor:pointer;
+            text-transform:uppercase;letter-spacing:.07em;transition:background .12s;
+        }
+        .em-save:hover{background:var(--accent2);box-shadow:var(--glow-sm);}
+
+        /* ── Toast ── */
+        .toast{
+            position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);
+            background:#0A0B10;border:1px solid rgba(255,77,0,0.35);color:var(--text);
+            padding:10px 20px;border-radius:6px;font-size:12px;font-weight:700;
+            letter-spacing:.04em;text-transform:uppercase;z-index:2000;
+            transition:transform .3s cubic-bezier(.34,1.56,.64,1);pointer-events:none;
+            box-shadow:var(--glow),0 4px 20px rgba(0,0,0,0.6);
+        }
+        .toast.show{transform:translateX(-50%) translateY(0);}
+        .toast.ok{border-color:rgba(0,232,122,0.4);}
+    </style>
+</head>
+<body>
+
+<div class="card" id="card">
+
+    <!-- Banner -->
+    <div class="banner" id="banner" onclick="changeBanner()">
+        <div class="banner-overlay"></div>
+        <div class="banner-edit">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            Change Banner
+        </div>
+    </div>
+
+    <!-- Avatar + actions -->
+    <div class="av-area">
+        <div class="av-wrap" style="position:relative;">
+            <div class="av" id="av">P</div>
+            <div class="av-edit-overlay" onclick="changeAvatar()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                Edit
+            </div>
+            <!-- Status indicator with picker -->
+            <div class="av-status" id="av-status" style="background:#00E87A;box-shadow:0 0 6px rgba(0,232,122,0.5);" onclick="toggleStatusPicker(event)" title="Set status"></div>
+            <div class="status-picker" id="status-picker">
+                <div class="sp-option" onclick="setStatus('online','#00E87A','rgba(0,232,122,0.5)')"><div class="sp-dot" style="background:#00E87A;box-shadow:0 0 5px rgba(0,232,122,0.5);"></div>Online</div>
+                <div class="sp-option" onclick="setStatus('idle','#FFD60A','rgba(255,214,10,0.4)')"><div class="sp-dot" style="background:#FFD60A;"></div>Idle</div>
+                <div class="sp-option" onclick="setStatus('dnd','#FF2D55','rgba(255,45,85,0.4)')"><div class="sp-dot" style="background:#FF2D55;"></div>Do Not Disturb</div>
+                <div class="sp-option" onclick="setStatus('invisible','#6B7280','none')"><div class="sp-dot" style="background:#6B7280;"></div>Invisible</div>
+            </div>
+        </div>
+        <div class="av-actions">
+            <button class="av-action-btn btn-ghost" onclick="copyProfileLink()">Copy Link</button>
+            <button class="av-action-btn btn-primary" onclick="openEditModal()">Edit Profile</button>
+        </div>
+    </div>
+
+    <!-- Identity -->
+    <div class="identity">
+        <div class="display-name-row">
+            <div class="display-name" id="display-name">PlayerOne</div>
+            <div class="name-badge badge-mod" id="role-badge">MOD</div>
+        </div>
+        <div class="username" id="username">@playerone · #4821</div>
+    </div>
+
+    <!-- Custom status -->
+    <div class="custom-status-row" onclick="openStatusModal()">
+        <div class="cs-emoji" id="cs-emoji">⚡</div>
+        <div class="cs-text set" id="cs-text">Grinding ranked. Don't tilt me.</div>
+        <svg class="cs-edit-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Stats -->
+    <div class="sec-label">Stats</div>
+    <div class="stats-row" style="margin-bottom:14px;">
+        <div class="stat-block">
+            <div class="stat-val stat-accent">847</div>
+            <div class="stat-lbl">Messages</div>
+        </div>
+        <div class="stat-block">
+            <div class="stat-val stat-neon">12</div>
+            <div class="stat-lbl">Servers</div>
+        </div>
+        <div class="stat-block">
+            <div class="stat-val stat-green">38</div>
+            <div class="stat-lbl">Friends</div>
+        </div>
+        <div class="stat-block">
+            <div class="stat-val" style="color:var(--yellow);">142d</div>
+            <div class="stat-lbl">Member Since</div>
+        </div>
+    </div>
+
+    <!-- About / Bio -->
+    <div class="sec-label">
+        About Me
+        <span class="sec-edit" onclick="focusBio()">Edit</span>
+    </div>
+    <div class="bio-area" style="margin-bottom:14px;">
+        <div class="bio-text set" id="bio-display" onclick="focusBio()">
+            Immortal III Valorant main. Ex-CSGO 2k hours. I play to win, not to vibe — but I'm chill off ranked 🎮<br><br>Streaming Tuesdays &amp; Thursdays on Twitch. Clips in #clips-and-highlights.
+            <div class="bio-edit-hint">Edit</div>
+        </div>
+        <textarea class="bio-input" id="bio-input" rows="4" maxlength="190" placeholder="Tell the server who you are…" oninput="onBioInput(this)" onblur="saveBio()" style="display:none;"></textarea>
+        <div class="input-count" id="bio-count" style="display:none;">0 / 190</div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Current activity -->
+    <div class="sec-label">Activity</div>
+    <div class="activity-list" style="margin-bottom:14px;">
+        <div class="activity-item">
+            <div class="act-icon" style="background:linear-gradient(135deg,#FF4D00,#FF9500);">🎮</div>
+            <div class="act-info">
+                <div class="act-game">VALORANT</div>
+                <div class="act-detail">Competitive · Ascent · 00:42 elapsed</div>
+            </div>
+            <div class="act-badge" style="background:rgba(255,77,0,0.15);border:1px solid rgba(255,77,0,0.3);color:var(--accent2);">LIVE</div>
+        </div>
+        <div class="activity-item">
+            <div class="act-icon" style="background:linear-gradient(135deg,#1DB954,#0a4223);">🎵</div>
+            <div class="act-info">
+                <div class="act-game">Spotify</div>
+                <div class="act-detail">Interworld — Miracle</div>
+            </div>
+            <div class="act-badge" style="background:rgba(29,185,84,0.12);border:1px solid rgba(29,185,84,0.3);color:#1DB954;">♫</div>
+        </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Badges / Achievements -->
+    <div class="sec-label">Badges</div>
+    <div class="badges-row" style="margin-bottom:14px;">
+        <div class="badge-item" style="background:linear-gradient(135deg,rgba(255,77,0,0.15),rgba(255,122,61,0.08));border-color:rgba(255,77,0,0.25);">
+            🔥<div class="badge-tooltip">Server Booster</div>
+        </div>
+        <div class="badge-item" style="background:linear-gradient(135deg,rgba(0,255,204,0.1),rgba(0,180,255,0.06));border-color:rgba(0,255,204,0.2);">
+            ⚡<div class="badge-tooltip">Early Supporter</div>
+        </div>
+        <div class="badge-item" style="background:linear-gradient(135deg,rgba(255,214,10,0.12),rgba(255,122,61,0.06));border-color:rgba(255,214,10,0.2);">
+            🏆<div class="badge-tooltip">Tournament Winner</div>
+        </div>
+        <div class="badge-item" style="background:linear-gradient(135deg,rgba(180,79,255,0.12),rgba(99,102,241,0.06));border-color:rgba(180,79,255,0.2);">
+            🎖️<div class="badge-tooltip">Moderator</div>
+        </div>
+        <div class="badge-item" style="background:linear-gradient(135deg,rgba(0,232,122,0.1),rgba(16,185,129,0.06));border-color:rgba(0,232,122,0.2);">
+            💎<div class="badge-tooltip">Diamond Rank Verified</div>
+        </div>
+        <div class="badge-item" style="background:var(--surface2);border-color:var(--border);color:var(--muted);">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            <div class="badge-tooltip">Earn more badges</div>
+        </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Connections -->
+    <div class="sec-label">
+        Connections
+        <span class="sec-edit" onclick="addConnection()">+ Add</span>
+    </div>
+    <div class="connections-list" style="margin-bottom:20px;">
+        <div class="conn-item">
+            <div class="conn-icon" style="background:#1a1a2e;">🎮</div>
+            <div class="conn-info">
+                <div class="conn-name">PlayerOne_VAL</div>
+                <div class="conn-platform">Riot Games</div>
+            </div>
+            <div class="conn-verified">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                Verified
+            </div>
+        </div>
+        <div class="conn-item">
+            <div class="conn-icon" style="background:#0e0e0e;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="#fff"><path d="M12 0C5.373 0 0 5.373 0 12c0 5.303 3.438 9.8 8.207 11.387.6.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
+            </div>
+            <div class="conn-info">
+                <div class="conn-name">pl4y3r0ne</div>
+                <div class="conn-platform">GitHub</div>
+            </div>
+            <div class="conn-verified">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                Verified
+            </div>
+        </div>
+        <div class="conn-item">
+            <div class="conn-icon" style="background:#1DB954;">🎵</div>
+            <div class="conn-info">
+                <div class="conn-name">PlayerOne</div>
+                <div class="conn-platform">Spotify</div>
+            </div>
+            <div class="conn-verified" style="color:var(--neon);">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                Live
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<!-- Edit Profile Modal -->
+<div class="edit-overlay" id="edit-overlay" onclick="closeEditOverlay(event)">
+    <div class="edit-modal">
+        <div class="em-title">Edit Profile</div>
+
+        <div class="em-label" style="margin-bottom:6px;">Display Name</div>
+        <input class="em-input" id="em-name" type="text" maxlength="32" value="PlayerOne" style="margin-bottom:14px;"/>
+
+        <div class="em-label" style="margin-bottom:6px;">Username</div>
+        <input class="em-input" id="em-username" type="text" maxlength="32" value="playerone" style="margin-bottom:14px;"/>
+
+        <div class="em-label" style="margin-bottom:6px;">Bio <span style="color:var(--muted2);font-size:9px;font-weight:700;">(190 chars)</span></div>
+        <textarea class="em-input" id="em-bio" rows="3" maxlength="190" style="resize:none;margin-bottom:4px;"></textarea>
+        <div class="input-count" id="em-bio-count" style="margin-bottom:14px;">0 / 190</div>
+
+        <div class="em-label" style="margin-bottom:6px;">Role</div>
+        <select class="em-input" id="em-role" style="margin-bottom:0;">
+            <option value="mod">Moderator</option>
+            <option value="admin">Admin</option>
+            <option value="member">Member</option>
+        </select>
+
+        <div class="em-actions">
+            <button class="em-cancel" onclick="closeEditOverlay()">Cancel</button>
+            <button class="em-save" onclick="saveProfile()">Save Changes</button>
+        </div>
+    </div>
+</div>
+
+<!-- Custom Status Modal -->
+<div class="edit-overlay" id="status-modal" onclick="closeStatusModal(event)">
+    <div class="edit-modal">
+        <div class="em-title">Set Custom Status</div>
+        <div class="em-label" style="margin-bottom:6px;">Status Text</div>
+        <div class="em-row">
+            <button class="em-emoji-btn" id="emoji-pick-btn" onclick="cycleEmoji()">⚡</button>
+            <input class="em-input" id="sm-text" type="text" maxlength="128" placeholder="What's your vibe?" value="Grinding ranked. Don't tilt me."/>
+        </div>
+        <div class="em-label" style="margin-bottom:6px;">Clear After</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <div class="av-action-btn btn-ghost" style="font-size:10px;cursor:pointer;" onclick="selectClearAfter(this,'30 min')">30 Min</div>
+            <div class="av-action-btn btn-ghost" style="font-size:10px;cursor:pointer;" onclick="selectClearAfter(this,'1 hour')">1 Hour</div>
+            <div class="av-action-btn btn-ghost btn-primary" style="font-size:10px;cursor:pointer;" onclick="selectClearAfter(this,'Today')">Today</div>
+            <div class="av-action-btn btn-ghost" style="font-size:10px;cursor:pointer;" onclick="selectClearAfter(this,'Never')">Never</div>
+        </div>
+        <div class="em-actions">
+            <button class="em-cancel" onclick="clearStatus()">Clear Status</button>
+            <button class="em-save" onclick="saveStatus()">Save</button>
+        </div>
+    </div>
+</div>
+
+<div class="toast" id="toast-el"></div>
+
+<script>
+    /* ── Toast ── */
+    let tt;
+    function toast(msg,type=''){
+        const el=document.getElementById('toast-el');
+        el.textContent=msg;el.className='toast'+(type?' '+type:'');
+        requestAnimationFrame(()=>requestAnimationFrame(()=>el.classList.add('show')));
+        clearTimeout(tt);tt=setTimeout(()=>el.classList.remove('show'),2500);
+    }
+
+    /* ── State ── */
+    let profile={
+        name:'PlayerOne',
+        username:'playerone',
+        tag:'4821',
+        bio:"Immortal III Valorant main. Ex-CSGO 2k hours. I play to win, not to vibe — but I'm chill off ranked 🎮\n\nStreaming Tuesdays & Thursdays on Twitch. Clips in #clips-and-highlights.",
+        statusEmoji:'⚡',
+        statusText:'Grinding ranked. Don\'t tilt me.',
+        role:'mod',
+        onlineStatus:'online',
+        bannerIndex:0,
+        avatarIndex:0,
+    };
+
+    const banners=[
+        'linear-gradient(135deg,#1a0800 0%,#FF4D00 55%,#FF9500 100%)',
+        'linear-gradient(135deg,#070C20 0%,#00B4FF 55%,#00FFCC 100%)',
+        'linear-gradient(135deg,#0D0020 0%,#B44FFF 55%,#FF2D55 100%)',
+        'linear-gradient(135deg,#001A0D 0%,#00E87A 55%,#00B4FF 100%)',
+        'linear-gradient(135deg,#1A1200 0%,#FFD60A 55%,#FF7A3D 100%)',
+    ];
+    const avatarColors=[
+        'linear-gradient(135deg,#FF4D00,#FF9500)',
+        'linear-gradient(135deg,#00FFCC,#00B4FF)',
+        'linear-gradient(135deg,#B44FFF,#FF2D55)',
+        'linear-gradient(135deg,#00E87A,#00B4FF)',
+        'linear-gradient(135deg,#FFD60A,#FF7A3D)',
+    ];
+    const EMOJIS=['⚡','🔥','💀','🎮','🏆','💎','🚀','🎯','⚔️','🦾','👾','😤'];
+    let emojiIdx=0;
+
+    /* ── Banner ── */
+    function changeBanner(){
+        profile.bannerIndex=(profile.bannerIndex+1)%banners.length;
+        document.getElementById('banner').style.background=banners[profile.bannerIndex];
+        toast('Banner updated!','ok');
+    }
+
+    /* ── Avatar ── */
+    function changeAvatar(){
+        profile.avatarIndex=(profile.avatarIndex+1)%avatarColors.length;
+        document.getElementById('av').style.background=avatarColors[profile.avatarIndex];
+        toast('Avatar updated!','ok');
+    }
+
+    /* ── Status dot ── */
+    const statusMap={
+        online:{bg:'#00E87A',sh:'rgba(0,232,122,0.5)',label:'Online'},
+        idle:{bg:'#FFD60A',sh:'rgba(255,214,10,0.4)',label:'Idle'},
+        dnd:{bg:'#FF2D55',sh:'rgba(255,45,85,0.4)',label:'Do Not Disturb'},
+        invisible:{bg:'#6B7280',sh:'none',label:'Invisible'},
+    };
+    function toggleStatusPicker(e){
+        e.stopPropagation();
+        document.getElementById('status-picker').classList.toggle('open');
+    }
+    function setStatus(s,bg,sh){
+        profile.onlineStatus=s;
+        const dot=document.getElementById('av-status');
+        dot.style.background=bg;
+        dot.style.boxShadow=sh==='none'?'none':`0 0 6px ${sh}`;
+        document.getElementById('status-picker').classList.remove('open');
+        toast(`Status set to ${statusMap[s].label}`,'ok');
+    }
+    document.addEventListener('click',()=>document.getElementById('status-picker').classList.remove('open'));
+
+    /* ── Bio inline edit ── */
+    function focusBio(){
+        const display=document.getElementById('bio-display');
+        const input=document.getElementById('bio-input');
+        const count=document.getElementById('bio-count');
+        display.style.display='none';
+        input.style.display='block';
+        count.style.display='block';
+        input.value=profile.bio;
+        onBioInput(input);
+        input.focus();
+    }
+    function onBioInput(el){
+        document.getElementById('bio-count').textContent=`${el.value.length} / 190`;
+    }
+    function saveBio(){
+        const input=document.getElementById('bio-input');
+        const display=document.getElementById('bio-display');
+        const count=document.getElementById('bio-count');
+        profile.bio=input.value;
+        display.innerHTML=profile.bio.replace(/\n/g,'<br>')||'<span style="color:var(--muted);font-style:italic;">Click to add a bio…</span>';
+        display.innerHTML+='<div class="bio-edit-hint">Edit</div>';
+        display.classList.toggle('set',!!profile.bio);
+        display.classList.toggle('placeholder',!profile.bio);
+        input.style.display='none';
+        count.style.display='none';
+        display.style.display='block';
+        if(profile.bio) toast('Bio saved!','ok');
+    }
+
+    /* ── Edit Profile Modal ── */
+    function openEditModal(){
+        document.getElementById('em-name').value=profile.name;
+        document.getElementById('em-username').value=profile.username;
+        document.getElementById('em-bio').value=profile.bio;
+        document.getElementById('em-role').value=profile.role;
+        updateEmBioCount();
+        document.getElementById('edit-overlay').classList.add('open');
+    }
+    function closeEditOverlay(e){
+        if(!e||e.target===document.getElementById('edit-overlay'))
+            document.getElementById('edit-overlay').classList.remove('open');
+    }
+    document.getElementById('em-bio').addEventListener('input',updateEmBioCount);
+    function updateEmBioCount(){
+        const v=document.getElementById('em-bio').value;
+        document.getElementById('em-bio-count').textContent=`${v.length} / 190`;
+    }
+    function saveProfile(){
+        profile.name=document.getElementById('em-name').value.trim()||profile.name;
+        profile.username=document.getElementById('em-username').value.trim().toLowerCase()||profile.username;
+        profile.bio=document.getElementById('em-bio').value;
+        profile.role=document.getElementById('em-role').value;
+        // Update DOM
+        document.getElementById('display-name').textContent=profile.name;
+        document.getElementById('username').textContent=`@${profile.username} · #${profile.tag}`;
+        document.getElementById('av').textContent=profile.name[0].toUpperCase();
+        const badge=document.getElementById('role-badge');
+        if(profile.role==='mod'){badge.textContent='MOD';badge.className='name-badge badge-mod';}
+        else if(profile.role==='admin'){badge.textContent='ADMIN';badge.className='name-badge badge-admin';}
+        else{badge.style.display='none';}
+        // Bio
+        const display=document.getElementById('bio-display');
+        display.innerHTML=(profile.bio||'<span style="color:var(--muted);font-style:italic;">Click to add a bio…</span>').replace(/\n/g,'<br>');
+        display.innerHTML+='<div class="bio-edit-hint">Edit</div>';
+        document.getElementById('edit-overlay').classList.remove('open');
+        toast('Profile saved!','ok');
+    }
+
+    /* ── Custom Status Modal ── */
+    function openStatusModal(){
+        document.getElementById('sm-text').value=profile.statusText;
+        document.getElementById('emoji-pick-btn').textContent=profile.statusEmoji;
+        emojiIdx=EMOJIS.indexOf(profile.statusEmoji)||0;
+        document.getElementById('status-modal').classList.add('open');
+    }
+    function closeStatusModal(e){
+        if(!e||e.target===document.getElementById('status-modal'))
+            document.getElementById('status-modal').classList.remove('open');
+    }
+    function cycleEmoji(){
+        emojiIdx=(emojiIdx+1)%EMOJIS.length;
+        document.getElementById('emoji-pick-btn').textContent=EMOJIS[emojiIdx];
+    }
+    function selectClearAfter(el,val){
+        document.querySelectorAll('#status-modal .av-action-btn').forEach(b=>b.classList.remove('btn-primary'));
+        el.classList.add('btn-primary');
+    }
+    function saveStatus(){
+        profile.statusEmoji=document.getElementById('emoji-pick-btn').textContent;
+        profile.statusText=document.getElementById('sm-text').value.trim();
+        document.getElementById('cs-emoji').textContent=profile.statusEmoji;
+        const csText=document.getElementById('cs-text');
+        if(profile.statusText){
+            csText.textContent=profile.statusText;
+            csText.classList.add('set');csText.style.fontStyle='normal';
+        } else {
+            csText.textContent='Set a custom status…';
+            csText.classList.remove('set');csText.style.fontStyle='italic';
+        }
+        document.getElementById('status-modal').classList.remove('open');
+        toast('Status updated!','ok');
+    }
+    function clearStatus(){
+        profile.statusText='';profile.statusEmoji='😶';
+        document.getElementById('cs-emoji').textContent='😶';
+        const csText=document.getElementById('cs-text');
+        csText.textContent='Set a custom status…';
+        csText.classList.remove('set');csText.style.fontStyle='italic';
+        document.getElementById('status-modal').classList.remove('open');
+        toast('Status cleared.');
+    }
+
+    /* ── Misc ── */
+    function copyProfileLink(){
+        navigator.clipboard.writeText('https://nexuschat.gg/u/'+profile.username).catch(()=>{});
+        toast('Profile link copied!','ok');
+    }
+    function addConnection(){toast('Opening connection settings…');}
+</script>
+</body>
+</html>

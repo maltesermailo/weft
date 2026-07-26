@@ -10,7 +10,7 @@
     voice.channel === name ? Object.values(voice.participants) : Object.values(voiceRosters[name] ?? {});
 </script>
 
-<div class="channel-scroll">
+<div class="channel-scroll" role="group" oncontextmenu={(e) => app.listCtx(e)}>
   {#each app.channelGroups as group (group.category)}
     <div
       class="retention-group"
@@ -18,10 +18,26 @@
       role="group"
       ondragover={(e) => app.draggingChan && e.preventDefault()}
       ondrop={(e) => { e.preventDefault(); if (app.draggingChan) app.moveChannel(app.draggingChan, group.category); app.draggingChan = null; }}>
-      <div class="retention-label cat-header" role="group" oncontextmenu={(e) => app.catCtx(e, group.category)}>
-        <span>{group.category}</span>
-        <button class="cat-add" title="Create channel" aria-label="Create channel in {group.category}" onclick={() => app.openCreateChannelInCat(group.category)}>+</button>
-      </div>
+      {#if group.category !== ""}
+        <div
+          class="retention-label cat-header"
+          class:cat-dragging={app.draggingCat === group.category}
+          class:cat-drop={app.draggingCat && app.draggingCat !== group.category && app.catDrop === group.category}
+          role="group"
+          draggable="true"
+          ondragstart={(e) => {
+            app.draggingCat = group.category;
+            e.dataTransfer?.setData("text/plain", group.category);
+            if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+          }}
+          ondragend={() => { app.draggingCat = null; app.catDrop = null; }}
+          ondragover={(e) => { if (!app.draggingCat) return; e.preventDefault(); e.stopPropagation(); app.catDrop = group.category; }}
+          ondrop={(e) => { if (!app.draggingCat) return; e.preventDefault(); e.stopPropagation(); app.moveCategory(app.draggingCat, group.category); app.draggingCat = null; app.catDrop = null; }}
+          oncontextmenu={(e) => app.catCtx(e, group.category)}>
+          <span>{group.category}</span>
+          <button class="cat-add" title="Create channel" aria-label="Create channel in {group.category}" onclick={() => app.openCreateChannelInCat(group.category)}>+</button>
+        </div>
+      {/if}
       {#each group.list as ch (ch.name)}
         {@const meta = app.retentionMeta[ch.retention]}
         {@const dt = app.dropTarget}
@@ -38,7 +54,7 @@
           ondragstart={(e) => { app.draggingChan = ch.name; e.dataTransfer?.setData("text/plain", ch.name); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}
           ondragend={() => { app.draggingChan = null; app.dropTarget = null; }}
           ondragover={(e) => { if (!app.draggingChan || app.draggingChan === ch.name) return; e.preventDefault(); const r = e.currentTarget.getBoundingClientRect(); app.dropTarget = { name: ch.name, after: e.clientY > r.top + r.height / 2 }; }}
-          ondrop={(e) => { e.preventDefault(); e.stopPropagation(); if (app.draggingChan) app.moveChannel(app.draggingChan, ch.category || "Channels", ch.name, app.dropTarget?.after ?? false); app.draggingChan = null; app.dropTarget = null; }}
+          ondrop={(e) => { e.preventDefault(); e.stopPropagation(); if (app.draggingChan) app.moveChannel(app.draggingChan, ch.category || "", ch.name, app.dropTarget?.after ?? false); app.draggingChan = null; app.dropTarget = null; }}
           onclick={() => (ch.voice ? app.openVoice(ch.name) : app.open(ch.name))}
           oncontextmenu={(e) => app.chanCtx(e, ch)}>
           {#if ch.voice}

@@ -19,6 +19,7 @@ export type InviteInfo = {
   invite_id: string;
   creator: string;
   uses_left: number | null;
+  used: number;
   expiry: number | null;
 };
 export type Badge = { owner: boolean; mod: boolean; list: string[] };
@@ -69,7 +70,7 @@ export interface AppCtx {
   groupLabel(id: string): string;
   createGroup(): void;
   /** Open the friend-picker to grow the current DM into a group. */
-  openGroupPicker(): void;
+  openGroupPicker(e?: MouseEvent): void;
   openGroup(id: string): void;
   leaveGroup(id: string): void;
   addToGroup(id: string, handle: string): void;
@@ -137,12 +138,19 @@ export interface AppCtx {
   dropTarget: { name: string; after: boolean } | null;
   moveChannel(dragName: string, targetCat: string, anchorName?: string, after?: boolean): void;
 
+  // ---- drag/drop (category reorder) ----
+  draggingCat: string | null;
+  catDrop: string | null;
+  moveCategory(dragCat: string, targetCat: string): void;
+
   // ---- helpers ----
   initials(n: string): string;
   /** §10.3 a fetchable avatar URL for an account, or null → render initials. */
   avatarUrl(account: string): string | null;
   /** §10.3 an account's display name, falling back to the canonical handle. */
   displayName(account: string): string;
+  /** §10.3 an account's free-text bio, or "" if unset. */
+  bioOf(account: string): string;
   chanShort(n: string): string;
   peerOf(n: string): string;
   dotClass(acct: string): string;
@@ -158,6 +166,7 @@ export interface AppCtx {
   userCtx(e: MouseEvent, name: string): void;
   groupCtx(e: MouseEvent, id: string): void;
   catCtx(e: MouseEvent, cat: string): void;
+  listCtx(e: MouseEvent): void;
 
   // ---- user actions ----
   closeDm(name: string): void;
@@ -173,13 +182,28 @@ export interface AppCtx {
   readonly invitesList: InviteInfo[];
   readonly invitesScope: string;
   openInvites(): void;
+  loadNsInvites(): void;
   revokeInvite(id: string): void;
   createInvite(): void;
   inviteLinkFor(inv: InviteInfo): string;
+  // ---- invite creation screen (expiry + max-uses, incl. unlimited) ----
+  readonly inviteLink: string | null;
+  readonly inviteId: string | null;
+  readonly inviteCreateScope: string;
+  generateInvite(maxUses: number | null, expiry: number | null): void;
+  sendInviteDM(ref: string, link: string): void;
   newCat(): void; // open the create-category modal
 
   // ---- members ----
   openProfile(name: string, e?: MouseEvent): void;
+  /** Open the full-profile modal (bio, status, mutual servers, actions). */
+  openFullProfile(name: string): void;
+  /** Namespaces I share with `target` (from visible memberships). */
+  mutualServers(target: string): string[];
+  /** My friendship state with `name` (bare or qualified handle). */
+  friendState(name: string): "friends" | "incoming" | "outgoing" | "none";
+  /** Act on a friendship: add / accept a request / remove. */
+  friendAction(name: string, action: "add" | "accept" | "remove"): void;
   openDm(name: string): void;
   moderate(kind: string, name: string, scope?: string, reason?: string): void;
 
@@ -220,6 +244,7 @@ export interface AppCtx {
   threadComposer: string;
   /** The active channel's messages excluding thread replies (main timeline). */
   readonly visibleMessages: Msg[];
+  readonly visibleMessagesReversed: Msg[];
   /** Number of loaded replies in a message's thread (for the indicator). */
   threadCount(msgid?: string): number;
   openThread(root: Msg): void;
@@ -297,6 +322,7 @@ export interface AppCtx {
   readonly rolesByScope: Record<string, RoleDefC[]>;
   rolesOf(account: string, scope: string): RoleDefC[];
   ensureMemberRoles(account: string): void;
+  ensureRoles(scope: string): void;
   roleScopeOf(channel: string): string;
   isOwnerAt(account: string, scope: string): boolean;
   assignRoleTo(acct: string, role: RoleDefC): void;
@@ -346,7 +372,7 @@ export interface AppCtx {
   readonly verifications: Record<string, { subject: string; state: string }>;
 
   // ---- server settings (ns overlay) ----
-  nsTab: "overview" | "roles" | "members" | "emoji" | "bans" | "federation" | "recovery" | "danger";
+  nsTab: "overview" | "roles" | "members" | "emoji" | "invites" | "bans" | "federation" | "recovery" | "danger";
   // §6.7 moderation deny-list (mutes + bans) for the active server.
   denyList(): { account: string; kind: string; by?: string | null; reason?: string | null }[];
   refreshBans(): void;

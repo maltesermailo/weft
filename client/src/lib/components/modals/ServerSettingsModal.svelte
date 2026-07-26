@@ -3,6 +3,7 @@
   import { getApp } from "$lib/context";
   import * as weft from "$lib/weft";
   import RolesTab from "$lib/components/modals/RolesTab.svelte";
+  import InviteList from "$lib/components/InviteList.svelte";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 
@@ -55,6 +56,7 @@
       <button class="so-navitem" class:active={app.nsTab === "roles"} onclick={() => (app.nsTab = "roles")}>Roles</button>
       <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => (app.nsTab = "members")}>Members &amp; roles</button>
       <button class="so-navitem" class:active={app.nsTab === "emoji"} onclick={() => (app.nsTab = "emoji")}>Emoji</button>
+      <button class="so-navitem" class:active={app.nsTab === "invites"} onclick={() => { app.nsTab = "invites"; app.loadNsInvites(); }}>Invites</button>
       <button class="so-navitem" class:active={app.nsTab === "bans"} onclick={() => { app.nsTab = "bans"; app.refreshBans(); }}>Bans &amp; mutes</button>
       <button class="so-navitem" class:active={app.nsTab === "federation"} onclick={() => (app.nsTab = "federation")}>Federation</button>
       <div class="so-heading">Security</div>
@@ -91,10 +93,15 @@
           <option value="private">private</option>
         </select>
         <div class="modal-actions"><button class="ok-btn" onclick={app.saveNsMeta}>Save changes</button></div>
+      {:else if app.nsTab === "invites"}
+        <h1>Invites</h1>
+        <p class="so-sub">Every active invite for <b>{app.activeServer}</b> — who created it, how many times it's been used, its remaining uses and expiry. Revoke one, or close them all at once.</p>
+        <div class="modal-actions">
+          <button class="ok-btn" onclick={app.createInvite}>Create invite</button>
+          <button class="danger-btn" onclick={app.revokeAllInvites}>Revoke all</button>
+        </div>
         <div class="section-sep"></div>
-        <div class="field-label">Invites</div>
-        <p class="so-sub">Immediately close every outstanding invite link for this namespace. People already in stay; new joins need a fresh invite.</p>
-        <div class="modal-actions"><button class="danger-btn" onclick={app.revokeAllInvites}>Revoke all invites</button></div>
+        <InviteList showCreate={false} />
       {:else if app.nsTab === "roles"}
         <RolesTab />
       {:else if app.nsTab === "members"}

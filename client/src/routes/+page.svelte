@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import * as weft from "$lib/weft";
   import type { Msg, Channel, CtxItem, RoleDefC, ThreadInfo } from "$lib/types";
   import { provideApp } from "$lib/context";
@@ -41,7 +41,7 @@
   import CreateChannelModal from "$lib/components/modals/CreateChannelModal.svelte";
   import CreateCategoryModal from "$lib/components/modals/CreateCategoryModal.svelte";
   import ReportsQueueModal from "$lib/components/modals/ReportsQueueModal.svelte";
-  import InviteLinkModal from "$lib/components/modals/InviteLinkModal.svelte";
+  import InviteCreateModal from "$lib/components/modals/InviteCreateModal.svelte";
   import InvitesModal from "$lib/components/modals/InvitesModal.svelte";
   import NewGroupModal from "$lib/components/modals/NewGroupModal.svelte";
   import PinsModal from "$lib/components/modals/PinsModal.svelte";
@@ -52,6 +52,7 @@
   import ReportModal from "$lib/components/modals/ReportModal.svelte";
   import ChannelSettings from "$lib/components/modals/ChannelSettings.svelte";
   import ProfileCard from "$lib/components/modals/ProfileCard.svelte";
+  import ProfileModal from "$lib/components/modals/ProfileModal.svelte";
   import UserSettingsModal from "$lib/components/modals/UserSettingsModal.svelte";
   import FederationPanel from "$lib/components/modals/FederationPanel.svelte";
   import ServerSettingsModal from "$lib/components/modals/ServerSettingsModal.svelte";
@@ -129,7 +130,8 @@
   let ctxMenu = $state<{ x: number; y: number; items: CtxItem[] } | null>(null);
   function openCtx(e: MouseEvent, items: CtxItem[]) {
     e.preventDefault();
-    ctxMenu = { x: Math.min(e.clientX, window.innerWidth - 190), y: e.clientY, items };
+    e.stopPropagation(); // don't let a channel/category menu bubble to the list background
+    ctxMenu = { x: Math.min(e.clientX, window.innerWidth - 220), y: e.clientY, items };
   }
   function msgCtx(e: MouseEvent, m: Msg) {
     if (m.system || !m.msgid) return;
@@ -160,11 +162,27 @@
     openCtx(e, items);
   }
   function chanCtx(e: MouseEvent, ch: Channel) {
+    const muted = isMuted(ch.name);
     openCtx(e, [
-      { label: "Mark as read", run: () => markRead(ch.name) },
-      { label: "Permissions", run: () => openChanPerms(ch.name) },
-      { label: "Copy name", run: () => navigator.clipboard?.writeText(ch.name) },
-      { label: "Leave", danger: true, run: () => weft.part(ch.name).catch(() => {}) },
+      { header: ch.name },
+      { label: "Mark as read", icon: "markread", run: () => markRead(ch.name) },
+      {
+        label: muted ? "Unmute channel" : "Mute channel",
+        icon: muted ? "unmute" : "mute",
+        run: () => setNotifLevel(scopeKeyOf(ch.name), muted ? "mentions" : "nothing"),
+      },
+      { label: "Copy name", icon: "copy", run: () => navigator.clipboard?.writeText(ch.name) },
+      { label: "Create invite", icon: "invite", run: () => openInviteCreate(scopesFor()[0]) },
+      { divider: true },
+      { header: "Mod Menu", mod: true },
+      { label: "Edit permissions", icon: "permissions", run: () => openChanPerms(ch.name) },
+      { divider: true },
+      {
+        label: "Delete channel",
+        icon: "delete",
+        danger: true,
+        run: () => weft.channelDelete(ch.name).catch((err) => toast(String(err), "error")),
+      },
     ]);
   }
   // The right-click menu for any user, anywhere (member list, friends, DMs).
@@ -175,47 +193,48 @@
     if (peerOf(name) === account) return; // no menu on yourself
     const ref = qualify(name);
     const items: CtxItem[] = [
-      { label: "Open profile", run: () => openProfile(name) },
-      { label: "Call", run: () => callUser(ref) },
-    ];
-
-    items.push(
+      { label: "Open profile", icon: "profile", run: () => openProfile(name) },
       dmOpen(name)
-        ? { label: "Close DM", run: () => closeDm(name) }
-        : { label: "Message", run: () => openDm(name) },
-    );
-
-    // Invite + moderation only make sense on a server member — i.e. when we're
-    // actually viewing one of the server's channels (not the friends/DM view).
-    if (active.startsWith("#")) {
-      items.push({ label: "Invite to server", run: inviteToServer });
-      items.push({ label: "Mute", run: () => moderate("mute", name) });
-      items.push({ label: "Ban", danger: true, run: () => moderate("ban", name) });
-    }
+        ? { label: "Close DM", icon: "close", run: () => closeDm(name) }
+        : { label: "Message", icon: "message", run: () => openDm(name) },
+      { label: "Call", icon: "call", run: () => callUser(ref) },
+    ];
 
     // Friendship: Add when unrelated, Remove when friends, and the sensible
     // action for a pending request either way.
     const rel = friends[ref];
     if (rel === "friends")
-      items.push({ label: "Remove friend", danger: true, run: () => removeFriend(ref) });
+      items.push({ label: "Remove friend", icon: "removefriend", danger: true, run: () => removeFriend(ref) });
     else if (rel === "incoming")
-      items.push({ label: "Accept friend request", run: () => acceptFriend(ref) });
+      items.push({ label: "Accept friend request", icon: "accept", run: () => acceptFriend(ref) });
     else if (rel === "outgoing")
-      items.push({ label: "Cancel friend request", run: () => removeFriend(ref) });
+      items.push({ label: "Cancel friend request", icon: "cancel", run: () => removeFriend(ref) });
     else
       items.push({
         label: "Add friend",
+        icon: "addfriend",
         run: () => weft.friendAdd(ref).catch((err) => toast(String(err), "error")),
       });
+
+    // Invite + moderation only make sense on a server member — i.e. when we're
+    // actually viewing one of the server's channels (not the friends/DM view).
+    if (active.startsWith("#")) {
+      items.push({ divider: true });
+      items.push({ label: "Invite to server", icon: "invite", run: inviteToServer });
+      items.push({ header: "Mod Menu", mod: true });
+      items.push({ label: "Mute", icon: "mute", run: () => moderate("mute", name) });
+      items.push({ label: "Kick", icon: "kick", run: () => moderate("kick", name) });
+      items.push({ label: "Ban", icon: "ban", danger: true, run: () => moderate("ban", name) });
+    }
 
     openCtx(e, items);
   }
   // The right-click menu for a group DM (in the DM list).
   function groupCtx(e: MouseEvent, id: string) {
     openCtx(e, [
-      { label: "Mark as read", run: () => markRead(id) },
-      { label: "Copy group ID", run: () => navigator.clipboard?.writeText(id) },
-      { label: "Leave group", danger: true, run: () => leaveGroup(id) },
+      { label: "Mark as read", icon: "markread", run: () => markRead(id) },
+      { label: "Copy group ID", icon: "copy", run: () => navigator.clipboard?.writeText(id) },
+      { label: "Leave group", icon: "leave", danger: true, run: () => leaveGroup(id) },
     ]);
   }
   let theme = $state<"dark" | "light">("dark");
@@ -282,7 +301,7 @@
     channels = {};
     active = "";
     activeServer = "";
-    homeView = false;
+    homeView = true;
     discovered = {};
     presence = {};
     reportQueue = {};
@@ -388,11 +407,11 @@
   // Short channel label under a server tile: "#gaming/general" → "general".
   const chanShort = (name: string) => name.replace(/^#[^/]+\//, "").replace(/^#/, "");
   // ---- DMs + presence (Phase 5) ----
-  let homeView = $state(false); // sidebar shows DMs instead of channels
+  let homeView = $state(true); // sidebar shows DMs; namespaces are the only servers
   let presence = $state<Record<string, string>>({}); // account → status
   // §10.3 account → display profile (nick + avatar hash). Filled from PROFILE
   // events (broadcast on change) + on-demand PROFILES queries.
-  let profiles = $state<Record<string, { display?: string; avatar?: string }>>({});
+  let profiles = $state<Record<string, { display?: string; avatar?: string; about?: string }>>({});
   let myStatus = $state("online");
   // §10.5 the caller's own verification claims, keyed by kind (email/birthday).
   let verifications = $state<Record<string, { subject: string; state: string }>>({});
@@ -424,6 +443,8 @@
   let profileTarget = $state<string | null>(null); // member profile popout
   let inviteLink = $state<string | null>(null);
   let inviteId = $state<string | null>(null); // for INVITE REVOKE
+  let inviteCreateOpen = $state(false); // the invite-creation screen
+  let inviteCreateScope = $state(""); // scope the create screen mints at
   // Discord-style invites menu: the live invites at a scope, each revocable.
   type InviteInfo = Extract<weft.WeftEvent, { kind: "invite-info" }>;
   let invitesOpen = $state(false);
@@ -559,6 +580,15 @@
     memberRolesFetched.add(key);
     fetchMemberRoles(account, scope);
   }
+  // Eagerly fetch a scope's role *definitions* (names/colors/hoist) once, so the
+  // member list can group by hoisted role on open — not only after a profile or
+  // the perms modal happens to fetch them. Deduped per scope.
+  const rolesFetched = new Set<string>();
+  function ensureRoles(scope: string) {
+    if (!scope || rolesFetched.has(scope)) return;
+    rolesFetched.add(scope);
+    fetchRoles(scope);
+  }
   /// The role definitions an account is assigned at a scope.
   function rolesOf(account: string, scope: string): RoleDefC[] {
     const names = new Set(memberRoles[`${account}|${scope}`] ?? []);
@@ -592,6 +622,38 @@
     fetchRoles(scope); // role definitions (names + colors)
     fetchMemberRoles(target, scope); // this member's assigned roles
   }
+
+  // The *full* profile modal (distinct from the anchored ProfileCard popover):
+  // a centered dialog with bio, status, mutual servers and quick actions.
+  let profileModalTarget = $state<string | null>(null);
+  function openFullProfile(handle: string) {
+    const at = handle.lastIndexOf("@");
+    const target = at > 0 && handle.slice(at + 1) === network ? handle.slice(0, at) : handle;
+    profileModalTarget = target;
+    profileTarget = null; // close the popover if it was open
+    queryProfile(target); // make sure we have their nick / avatar / bio
+    ensureCaps(target, active);
+  }
+  // Servers (namespaces) I share with `target`, derived from the memberships I
+  // can already see — a channel of that namespace listing them as a member.
+  function mutualServers(target: string): string[] {
+    return serverNamespaces.filter((ns) =>
+      Object.values(channels).some(
+        (c) => c.name.startsWith("#") && nsOf(c.name) === ns && c.members?.some((m) => m.name === target),
+      ),
+    );
+  }
+  // Friend helpers for the profile modal: normalize a (possibly bare) handle to
+  // the `account@network` friend key, then read state / act on it.
+  function friendState(handle: string): "friends" | "incoming" | "outgoing" | "none" {
+    return (friends[qualify(peerOf(handle))] as "friends" | "incoming" | "outgoing") ?? "none";
+  }
+  function friendAction(handle: string, action: "add" | "accept" | "remove") {
+    const ref = qualify(peerOf(handle));
+    if (action === "add") weft.friendAdd(ref).catch((e) => toast(String(e), "error"));
+    else if (action === "accept") acceptFriend(ref);
+    else removeFriend(ref);
+  }
   function assignRoleTo(acct: string, role: RoleDefC) {
     const scope = roleScopeOf(active);
     // Success is confirmed by the resulting ROLE-MEMBER event (see
@@ -613,7 +675,15 @@
   // ---- namespace admin panel (§6.2 / §2.4 / §6.6) ----
   let nsSettingsOpen = $state(false);
   let nsTab = $state<
-    "overview" | "roles" | "members" | "emoji" | "bans" | "federation" | "recovery" | "danger"
+    | "overview"
+    | "roles"
+    | "members"
+    | "emoji"
+    | "invites"
+    | "bans"
+    | "federation"
+    | "recovery"
+    | "danger"
   >("overview");
   // §6.7 moderation deny-list (mutes + bans) per scope, for the Bans tab.
   let modDeny = $state<
@@ -816,7 +886,20 @@
   // names, so a concurrent MEMBERS/roles/… batch can never steal or clobber it,
   // whatever its batch id or arrival order.
   let histByTarget: Record<string, Msg[]> = {};
-  let preScrollHeight = 0; // scrollHeight before a scroll-up prepend
+  // True while a channel is being opened + positioned. Gates `onScroll` so the
+  // programmatic jump to the read position (and the transient top position of a
+  // freshly rendered list) can't trip the near-top "load older" trigger — the
+  // cause of the runaway "loads further and gets stuck" paging. Reactive so the
+  // loading screen can key off it.
+  let positioning = $state(false);
+  // Discord-style loading curtain (skeleton overlay) over the message area.
+  // Driven imperatively by the open flow, NOT derived from `loadingHistory`, so
+  // there's no frame where the real list is uncovered: it's raised synchronously
+  // the instant a not-yet-loaded channel is opened, then dropped only once that
+  // channel's page is fetched, rendered AND scrolled into position (end of
+  // `positionOnOpen`). An instant switch to an already-loaded channel raises no
+  // curtain, so it never flashes.
+  let showLoader = $state(false);
 
   const oldestMsgid = (ch?: Channel) => ch?.messages.find((m) => m.msgid)?.msgid;
 
@@ -831,16 +914,154 @@
     loadingInitial = initial;
     histByTarget[target] = [];
     const before = initial ? undefined : oldestMsgid(channels[target]);
-    if (!initial) preScrollHeight = scrollEl?.scrollHeight ?? 0;
-    weft.history(target, before).catch(() => (loadingHistory = null));
+    weft.history(target, before).catch(() => {
+      loadingHistory = null;
+      positioning = false; // don't wedge paging if the fetch never lands
+      if (initial) showLoader = false; // …or the open curtain
+    });
+  }
+
+  // On opening a channel, position the view at the server-tracked read position
+  // (Discord-style): the first unread message — the one the "New messages"
+  // divider sits before — brought to the top, or the newest message if we're
+  // caught up. The read marker comes from the server (`MARKED`, §9.7 / SYNC);
+  // `newBoundary` captured it before the auto-mark effect advanced it on open.
+  // Scrolling to a concrete message element is deterministic — unlike
+  // `scrollTop = scrollHeight`, which lands wrong when message heights are still
+  // settling and can leave the channel opened at earlier messages.
+  async function positionOnOpen(name: string | null) {
+    await tick(); // let the freshly loaded page render first
+    // Stale call — the reader moved on before this page landed. Leave the now-
+    // active channel's curtain/positioning flags to its own open flow.
+    if (!name || active !== name) return;
+    // Active but the list isn't mounted — clear so we don't wedge the curtain.
+    if (!scrollEl) {
+      positioning = false;
+      showLoader = false;
+      return;
+    }
+    const boundary = newBoundary; // pre-open read position (epoch ms) or null
+    const apply = () => {
+      if (!scrollEl) return;
+      if (boundary !== null) {
+        const msgs = channels[name]?.messages ?? [];
+        const idx = msgs.findIndex((m) => !m.system && !m.own && m.ts > boundary);
+        // Jump to the "New messages" divider ONLY when the read marker is
+        // genuinely *inside* the loaded page — i.e. there is read content above
+        // the first unread (idx > 0). If the marker is older than everything
+        // loaded (idx === 0, deep backlog) or we're caught up (idx === -1), show
+        // the newest instead.
+        if (idx > 0) {
+          const el = document.getElementById("new-divider");
+          if (el) {
+            stickBottom = false;
+            el.scrollIntoView({ block: "start" });
+            return;
+          }
+        }
+      }
+      // Default → the newest message. In a `column-reverse` list, scrollTop 0 is
+      // the bottom (newest) — and it's already the resting position, so this is
+      // usually a no-op; we set it for the case where an old scroll persisted.
+      stickBottom = true;
+      scrollEl.scrollTop = 0;
+    };
+    apply();
+    // Re-assert next frame (layout may still be settling), then re-enable paging.
+    // Guarded so a fast channel switch can't clobber the new channel.
+    requestAnimationFrame(() => {
+      if (active === name) apply();
+      requestAnimationFrame(() => {
+        if (active === name) {
+          positioning = false;
+          showLoader = false; // list is populated + positioned — drop the curtain
+        }
+      });
+    });
   }
 
   function onScroll() {
-    if (!scrollEl) return;
-    stickBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 60;
-    // Near the top with more upstream → page older.
-    if (scrollEl.scrollTop < 80 && activeChannel?.hasMore) loadHistory(active, false);
+    if (!scrollEl) {
+      return;
+    }
+    // `column-reverse`: scrollTop is 0 at the bottom (newest) and its magnitude
+    // grows as you scroll up toward older messages. Use |scrollTop| as "distance
+    // scrolled up" so the sign convention (WebKit/Blink use negative) doesn't
+    // matter.
+    updateScrollbar();
+    if (positioning) return;
+    const up = Math.abs(scrollEl.scrollTop);
+    stickBottom = up < 60;
+    const maxUp = scrollEl.scrollHeight - scrollEl.clientHeight;
+    if (maxUp - up < 80 && activeChannel?.hasMore) loadHistory(active, false);
   }
+
+  // Custom overlay scrollbar. The native one is inverted under `column-reverse`
+  // (thumb near the top of the track when you're viewing the newest at scrollTop
+  // 0), so it's hidden in CSS and we draw our own, correctly oriented: the bottom
+  // of the track is the newest. `top`/`height` are percentages of the track.
+  let sbThumbTop = $state(0);
+  let sbThumbHeight = $state(0);
+  let sbVisible = $state(false);
+  function updateScrollbar() {
+    if (!scrollEl) return;
+    const { scrollHeight, clientHeight } = scrollEl;
+    const maxUp = scrollHeight - clientHeight;
+    if (maxUp <= 1) {
+      sbVisible = false;
+      return;
+    }
+    const up = Math.min(Math.abs(scrollEl.scrollTop), maxUp);
+    const thumbFrac = clientHeight / scrollHeight;
+    const scrollFrac = up / maxUp; // 0 = newest (bottom), 1 = oldest (top)
+    sbThumbHeight = thumbFrac * 100;
+    sbThumbTop = (1 - scrollFrac) * (1 - thumbFrac) * 100;
+    sbVisible = true;
+  }
+  let sbDrag = $state<{
+    y: number;
+    topFrac: number;
+    thumbFrac: number;
+    maxUp: number;
+    trackPx: number;
+  } | null>(null);
+  function sbDown(e: PointerEvent) {
+    if (!scrollEl) return;
+    const track = (e.currentTarget as HTMLElement).parentElement!;
+    sbDrag = {
+      y: e.clientY,
+      topFrac: sbThumbTop / 100,
+      thumbFrac: scrollEl.clientHeight / scrollEl.scrollHeight,
+      maxUp: scrollEl.scrollHeight - scrollEl.clientHeight,
+      trackPx: track.clientHeight,
+    };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    e.preventDefault();
+  }
+  function sbMove(e: PointerEvent) {
+    if (!sbDrag || !scrollEl) return;
+    const maxTop = 1 - sbDrag.thumbFrac;
+    let topFrac = sbDrag.topFrac + (e.clientY - sbDrag.y) / sbDrag.trackPx;
+    topFrac = Math.max(0, Math.min(maxTop, topFrac));
+    const scrollFrac = maxTop > 0 ? 1 - topFrac / maxTop : 0;
+    scrollEl.scrollTop = -(scrollFrac * sbDrag.maxUp);
+  }
+  function sbUp() {
+    sbDrag = null;
+  }
+  // Recompute the thumb whenever the message set, the loading state, or the
+  // window size changes (scroll itself is handled in onScroll).
+  $effect(() => {
+    activeChannel?.messages.length;
+    positioning;
+    scrollEl;
+    requestAnimationFrame(updateScrollbar);
+  });
+  $effect(() => {
+    const onResize = () => updateScrollbar();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  });
 
   let activeChannel = $derived(active ? channels[active] : undefined);
   let activeIsDm = $derived(active.startsWith("@"));
@@ -867,22 +1088,34 @@
       (sum, n) => (nsOf(n) === ns && n !== active ? sum + (mentionCount[n] ?? 0) : sum),
       0,
     );
-  // Discord-style grouping for the *active server*: by CHANNEL-LAYOUT category
-  // (position-ordered), uncategorized under "Channels".
+  // Discord-style grouping for the *active server*: uncategorized channels sit
+  // bare at the top (category "", no header), then each CHANNEL-LAYOUT category
+  // (position-ordered) in its persisted order.
   let channelGroups = $derived.by(() => {
+    const bare: Channel[] = [];
     const groups = new Map<string, Channel[]>();
     // Empty categories the admin created (client-side) show up too.
     for (const cat of discovered[activeServer]?.categories ?? layoutCache[activeServer]?.cats ?? [])
       groups.set(cat, []);
     for (const c of Object.values(channels)) {
       if (!c.name.startsWith("#") || nsOf(c.name) !== activeServer) continue;
-      const cat = c.category || "Channels";
+      const cat = c.category;
+      if (!cat) {
+        bare.push(c);
+        continue;
+      }
       if (!groups.has(cat)) groups.set(cat, []);
       groups.get(cat)!.push(c);
     }
-    for (const list of groups.values())
-      list.sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name));
-    return [...groups.entries()].map(([category, list]) => ({ category, list }));
+
+    const byPos = (a: Channel, b: Channel) =>
+      (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name);
+    bare.sort(byPos);
+    for (const list of groups.values()) list.sort(byPos);
+
+    const out = bare.length ? [{ category: "", list: bare }] : [];
+    for (const [category, list] of groups.entries()) out.push({ category, list });
+    return out;
   });
 
   function selectServer(ns: string) {
@@ -963,6 +1196,8 @@
     const key = peerOf(acct);
     return profiles[key]?.display || key.split("@")[0];
   };
+  /** An account's free-text bio (§10.3), or "" if unset. */
+  const bioOf = (acct: string): string => profiles[peerOf(acct)]?.about ?? "";
   /** Fetch a profile we don't have yet (deduped; own + co-members). */
   function queryProfile(acct: string) {
     const a = peerOf(acct);
@@ -1084,6 +1319,19 @@
     homeView = true;
     active = "";
   }
+  // Pressing the DM/home tile lands on the most recently active conversation
+  // (DM or group) — or the friends menu if there are none.
+  function goHome() {
+    homeView = true;
+    const convos = dmList;
+    if (!convos.length) {
+      active = "";
+      return;
+    }
+    active = convos.reduce((a, b) =>
+      (b.messages.at(-1)?.ts ?? 0) >= (a.messages.at(-1)?.ts ?? 0) ? b : a,
+    ).name;
+  }
 
   // ---- group DMs ----
   let newGroupInput = $state("");
@@ -1109,9 +1357,22 @@
   // The "+" in a DM: pick friends to fold into a group with the current peer.
   let groupPickerOpen = $state(false);
   let groupPickerSeed = $state("");
-  function openGroupPicker() {
-    if (!activeIsDm) return;
-    groupPickerSeed = qualify(peerOf(active));
+  let groupPickerPos = $state<{ left: number; top: number } | null>(null);
+  function openGroupPicker(e?: MouseEvent) {
+    // From a DM, seed the current peer into the group; from the Friends view
+    // there's no active peer, so open seedless — pick everyone from scratch.
+    groupPickerSeed = activeIsDm ? qualify(peerOf(active)) : "";
+    // Anchor the popover just under the button that opened it (speech-bubble
+    // style), right-aligned so it stays on-screen; centered fallback otherwise.
+    const POP_W = 300;
+    if (e?.currentTarget instanceof HTMLElement) {
+      const r = e.currentTarget.getBoundingClientRect();
+      const left = Math.max(8, Math.min(r.right - POP_W, window.innerWidth - POP_W - 8));
+      const top = Math.min(r.bottom + 8, window.innerHeight - 120);
+      groupPickerPos = { left, top };
+    } else {
+      groupPickerPos = null;
+    }
     groupPickerOpen = true;
   }
   function createGroupWith(members: string[]) {
@@ -1413,6 +1674,7 @@
         profiles[key] = {
           display: e.display ?? undefined,
           avatar: e.avatar ?? undefined,
+          about: e.about ?? undefined,
         };
         break;
       }
@@ -1675,8 +1937,10 @@
         } else {
           inviteLink = e.link ?? e.invite_id;
           inviteId = e.invite_id;
-          // A freshly-minted invite: reflect it live in the open menu.
-          if (invitesOpen && e.scope === invitesScope) weft.inviteList(invitesScope).catch(() => {});
+          // A freshly-minted invite: reflect it live wherever the list is shown —
+          // the standalone menu or the Server-Settings Invites tab.
+          const listShown = invitesOpen || (nsSettingsOpen && nsTab === "invites");
+          if (listShown && e.scope === invitesScope) weft.inviteList(invitesScope).catch(() => {});
         }
         break;
       case "invite-info":
@@ -1796,7 +2060,6 @@
           }
         }
         const initial = loadingInitial;
-        const prev = preScrollHeight;
         loadingHistory = null;
         // If the reader switched to another conversation while this page was in
         // flight, its initial load was single-flight-blocked — kick it now.
@@ -1804,13 +2067,11 @@
         if (active !== requested && cur && !cur.voice && !cur.historyLoaded) {
           loadHistory(active, true);
         }
-        // Restore scroll after the DOM re-renders: bottom on first load, or
-        // keep the reader's position when paging older.
-        queueMicrotask(() => {
-          if (!scrollEl) return;
-          if (initial) scrollEl.scrollTop = scrollEl.scrollHeight;
-          else scrollEl.scrollTop += scrollEl.scrollHeight - prev;
-        });
+        // First load → jump to the server-tracked read position (unread divider,
+        // or newest if caught up). Paging older needs NO scroll adjustment: in a
+        // `column-reverse` list the bottom is anchored, so prepending older
+        // messages at the top never moves the viewport.
+        if (initial) positionOnOpen(requested);
         break;
       }
       case "deleted": {
@@ -2503,25 +2764,44 @@
     }
   }
 
-  // Keep the newest message in view only while pinned to the bottom — a
-  // history prepend (reader scrolled up) must not yank them down.
+  // Keep the newest message in view when a new one arrives, but only while
+  // pinned to the bottom (a reader who scrolled up must not be yanked down). In
+  // `column-reverse` a new newest message usually stays pinned on its own;
+  // scrollTop 0 (the bottom) re-asserts it.
   $effect(() => {
     activeChannel?.messages.length;
     if (scrollEl && stickBottom) {
-      queueMicrotask(() => (scrollEl!.scrollTop = scrollEl!.scrollHeight));
+      queueMicrotask(() => (scrollEl!.scrollTop = 0));
     }
   });
 
-  // On opening a channel, pin to bottom and backfill its first page once.
+  // On opening a channel: load its first page (once) and position the view at
+  // the server-tracked read position. Guarded to run once per *switch*, so a new
+  // message arriving can't re-trigger the jump.
+  let positionedFor = "";
   $effect(() => {
     const a = active;
     if (!a) return;
-    stickBottom = true;
     const ch = channels[a];
     // Voice channels have no message timeline or text roster — HISTORY/MEMBERS on
     // one you only voice-joined (not text-joined) would answer CAP-REQUIRED.
     if (ch?.voice) return;
-    if (ch && !ch.historyLoaded) loadHistory(a, true);
+    if (a !== positionedFor) {
+      positionedFor = a;
+      stickBottom = true;
+      // Suppress the near-top "load older" trigger until the view is positioned
+      // (kept true across the fetch for a fresh channel, cleared by
+      // `positionOnOpen`). Fresh channel → load, then position from the batch's
+      // end. Already loaded → jump straight to the read position now.
+      positioning = true;
+      const needsLoad = !!ch && !ch.historyLoaded;
+      // Raise the curtain BEFORE any paint for a channel that must fetch — the
+      // fetch, first render and scroll-into-position all happen behind it. An
+      // already-loaded channel is revealed instantly (no fetch, no fill-in).
+      showLoader = needsLoad;
+      if (needsLoad) loadHistory(a, true);
+      else if (ch) positionOnOpen(a);
+    }
     // Fetch the full roster once (MEMBERS folds in as MEMBER-join rows). The
     // guard stops the self-row in the snapshot from re-triggering us.
     if (ch && a.startsWith("#") && !ch.rosterLoaded) {
@@ -2610,29 +2890,61 @@
   }
 
 
-  // Invites
+  // Invites — every entry point opens the creation screen (pick expiry + max
+  // uses, then generate), rather than minting a fixed invite immediately.
+  function openInviteCreate(scope?: string) {
+    inviteCreateScope = scope || scopesFor()[0] || "";
+    inviteLink = null;
+    inviteId = null;
+    inviteCreateOpen = true;
+  }
   function mintInvite() {
-    weft.inviteMint(scopesFor()[0]).catch(() => {});
+    openInviteCreate();
+  }
+  // Mint with the chosen limits — `null` = unlimited uses / never expires. The
+  // resulting link arrives on the `invited` event and fills `inviteLink`.
+  function generateInvite(maxUses: number | null, expiry: number | null) {
+    if (!inviteCreateScope) return;
+    weft
+      .inviteMint(inviteCreateScope, maxUses ?? undefined, expiry ?? undefined)
+      .catch((e) => toast(String(e), "error"));
+  }
+  // Share an invite link with a friend by dropping it into their DM. Only
+  // local-network friends are DM-able (cross-network DMs are out of scope).
+  function sendInviteDM(ref: string, link: string) {
+    const acct = friendLocalAccount(ref);
+    if (!acct) return;
+    const target = "@" + acct;
+    ensureChannel(target);
+    persistDms();
+    weft.sendMessage(target, link).catch((e) => toast(String(e), "error"));
   }
 
   // ---- Discord-style invites menu ----
-  function openInvites() {
-    invitesScope = scopesFor()[0];
+  function loadInvites(scope: string) {
+    invitesScope = scope;
     invitesList = [];
     invitesBuf = [];
     loadingInvites = true;
-    invitesOpen = true;
     weft.inviteList(invitesScope).catch((e) => {
       loadingInvites = false;
       toast(String(e), "error");
     });
+  }
+  function openInvites() {
+    loadInvites(scopesFor()[0]);
+    invitesOpen = true;
+  }
+  // The Server-Settings Invites tab lists the whole namespace's invites.
+  function loadNsInvites() {
+    if (activeServer) loadInvites(`ns:${activeServer}`);
   }
   function revokeInvite(id: string) {
     weft.inviteRevoke(id).catch((e) => toast(String(e), "error"));
     invitesList = invitesList.filter((i) => i.invite_id !== id); // optimistic
   }
   function createInvite() {
-    weft.inviteMint(invitesScope || scopesFor()[0]).catch((e) => toast(String(e), "error"));
+    openInviteCreate(invitesScope || scopesFor()[0]);
   }
   // Reconstruct the shareable link for an invite (the list doesn't carry it).
   function inviteLinkFor(inv: InviteInfo): string {
@@ -2706,18 +3018,23 @@
     newCatName = "";
     newCatOpen = false;
   }
+  function openCreateCategory() {
+    newCatName = "";
+    newCatOpen = true;
+    serverMenu = false;
+  }
   function openCreateChannelInCat(cat: string) {
     newChanName = "";
-    newChanCategory = cat === "Channels" ? "" : cat;
+    newChanCategory = cat; // "" = uncategorized (bare, top-level)
     newChanAnnounce = false;
     newChanRet = "";
     newChanVoice = false;
     newChanOpen = true;
   }
   function deleteCategory(cat: string) {
-    // Move its channels back to the default group, then drop the category.
+    // Uncategorize its channels (back to the bare top-level), then drop the category.
     for (const c of Object.values(channels)) {
-      if (c.name.startsWith("#") && nsOf(c.name) === activeServer && (c.category || "Channels") === cat) {
+      if (c.name.startsWith("#") && nsOf(c.name) === activeServer && (c.category || "") === cat) {
         c.category = undefined;
         weft.channelMeta(c.name, "category", "").catch(() => {});
       }
@@ -2725,11 +3042,44 @@
     setCategories(nsCategories().filter((x) => x !== cat));
   }
   function catCtx(e: MouseEvent, cat: string) {
-    if (cat === "Channels") return; // the default group isn't deletable
+    const items: CtxItem[] = [
+      { label: "Create channel", icon: "channel", run: () => openCreateChannelInCat(cat) },
+      { label: "Create category", icon: "folder", run: openCreateCategory },
+    ];
+    // The bare top-level group ("") is implicit (uncategorized) — not deletable.
+    if (cat !== "") {
+      items.push({ divider: true });
+      items.push({ label: "Delete category", icon: "delete", danger: true, run: () => deleteCategory(cat) });
+    }
+    openCtx(e, items);
+  }
+  // Right-click the empty channel-list background (Discord-style) → create.
+  function listCtx(e: MouseEvent) {
+    if (!activeServer) return;
     openCtx(e, [
-      { label: "Create channel here", run: () => openCreateChannelInCat(cat) },
-      { label: "Delete category", danger: true, run: () => deleteCategory(cat) },
+      { label: "Create channel", icon: "channel", run: () => openCreateChannel() },
+      { label: "Create category", icon: "folder", run: openCreateCategory },
     ]);
+  }
+  // ---- category reordering (drag one category header onto another) ----
+  // Only named categories are persisted (§6.3 NS categories list), so only they
+  // reorder; the bare top-level group ("") stays put.
+  let draggingCat = $state<string | null>(null);
+  let catDrop = $state<string | null>(null);
+  function moveCategory(dragCat: string, targetCat: string) {
+    if (dragCat === targetCat || dragCat === "") return;
+    const cats = [...nsCategories()];
+    const from = cats.indexOf(dragCat);
+    if (from < 0) return;
+    cats.splice(from, 1);
+
+    let to = cats.indexOf(targetCat);
+    if (to < 0) to = cats.length; // dropped on the implicit group → move to the end
+    cats.splice(to, 0, dragCat);
+
+    const meta = discovered[activeServer];
+    if (meta) meta.categories = cats; // optimistic; the NS-META echo confirms
+    setCategories(cats);
   }
 
   // ---- per-channel permissions (§6.5 grants at #chan scope, §6.7 restricted) ----
@@ -2770,8 +3120,8 @@
   function moveChannel(dragName: string, targetCat: string, anchorName?: string, after = false) {
     const dragged = channels[dragName];
     if (!dragged) return;
-    // The default "Channels" group is uncategorized (empty category).
-    const storedCat = targetCat === "Channels" ? "" : targetCat;
+    // "" = uncategorized (bare top-level group).
+    const storedCat = targetCat;
     dragged.category = storedCat || undefined; // optimistic
     weft.channelMeta(dragName, "category", storedCat).catch((e) => toast(String(e), "error"));
     // Renumber the target category so positions are stable + ordered.
@@ -2780,7 +3130,7 @@
         (c) =>
           c.name.startsWith("#") &&
           nsOf(c.name) === activeServer &&
-          (c.category || "Channels") === targetCat &&
+          (c.category || "") === targetCat &&
           c.name !== dragName,
       )
       .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name));
@@ -2869,6 +3219,8 @@
   }
   // Main timeline hides thread replies (they live in the thread panel), Discord-style.
   const visibleMessages = $derived(activeChannel?.messages.filter((m) => !m.thread) ?? []);
+  // Newest-first, for the `column-reverse` bottom-anchored message list.
+  const visibleMessagesReversed = $derived(visibleMessages.slice().reverse());
   // Close the thread panel when the active channel changes.
   let threadChannel = "";
   $effect(() => {
@@ -2989,6 +3341,7 @@
     if (!activeServer) return;
     if (!confirm(`Revoke ALL invites for ${activeServer}? Every existing invite link stops working.`)) return;
     weft.inviteRevokeAll(`ns:${activeServer}`).catch(() => {});
+    invitesList = []; // optimistic — the list is now empty
     toast(`Revoked all invites for ${activeServer}`, "info");
   }
 
@@ -3094,7 +3447,7 @@
     declineCall,
     endCall,
     toggleCallMute,
-    goHome: () => (homeView = true),
+    goHome,
     selectServer,
     openServerMenu,
     open: (name: string) => { active = name; markRead(name); },
@@ -3133,6 +3486,7 @@
     initials,
     avatarUrl,
     displayName,
+    bioOf,
     chanShort,
     peerOf,
     dotClass,
@@ -3147,6 +3501,12 @@
     groupCtx,
     closeDm,
     catCtx,
+    listCtx,
+    moveCategory,
+    get draggingCat() { return draggingCat; },
+    set draggingCat(v: string | null) { draggingCat = v; },
+    get catDrop() { return catDrop; },
+    set catDrop(v: string | null) { catDrop = v; },
     get serverMenu() { return serverMenu; },
     set serverMenu(v: boolean) { serverMenu = v; },
     get userMenu() { return userMenu; },
@@ -3159,11 +3519,22 @@
     get invitesList() { return invitesList; },
     get invitesScope() { return invitesScope; },
     openInvites,
+    loadNsInvites,
     revokeInvite,
     createInvite,
     inviteLinkFor,
-    newCat: () => { newCatName = ""; newCatOpen = true; serverMenu = false; },
+    // invite creation screen
+    get inviteLink() { return inviteLink; },
+    get inviteId() { return inviteId; },
+    get inviteCreateScope() { return inviteCreateScope; },
+    generateInvite,
+    sendInviteDM,
+    newCat: openCreateCategory,
     openProfile,
+    openFullProfile,
+    mutualServers,
+    friendState,
+    friendAction,
     openDm,
     moderate,
     openSettings: () => { userTab = "account"; settingsOpen = true; userMenu = false; },
@@ -3194,6 +3565,7 @@
     get threadComposer() { return threadComposer; },
     set threadComposer(v: string) { threadComposer = v; },
     get visibleMessages() { return visibleMessages; },
+    get visibleMessagesReversed() { return visibleMessagesReversed; },
     threadCount,
     openThread,
     closeThread,
@@ -3259,6 +3631,7 @@
     get rolesByScope() { return rolesByScope; },
     rolesOf,
     ensureMemberRoles,
+    ensureRoles,
     roleScopeOf,
     isOwnerAt,
     assignRoleTo,
@@ -3293,7 +3666,7 @@
     get verifications() { return verifications; },
     // server settings (ns overlay)
     get nsTab() { return nsTab; },
-    set nsTab(v: "overview" | "roles" | "members" | "emoji" | "bans" | "federation" | "recovery" | "danger") { nsTab = v; },
+    set nsTab(v: "overview" | "roles" | "members" | "emoji" | "invites" | "bans" | "federation" | "recovery" | "danger") { nsTab = v; },
     denyList,
     refreshBans,
     liftMod,
@@ -3421,7 +3794,35 @@
       {:else}
         <ChatTopbar />
 
-        <MessageList bind:scrollEl onscroll={onScroll} />
+        <div class="msg-area">
+          <MessageList bind:scrollEl onscroll={onScroll} />
+          {#if sbVisible}
+            <div class="msg-scrollbar">
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div
+                class="msg-scrollbar-thumb"
+                class:dragging={sbDrag}
+                style="top: {sbThumbTop}%; height: {sbThumbHeight}%"
+                onpointerdown={sbDown}
+                onpointermove={sbMove}
+                onpointerup={sbUp}
+              ></div>
+            </div>
+          {/if}
+          {#if showLoader}
+            <div class="channel-loader" aria-busy="true" aria-label="Loading messages">
+              {#each Array.from({ length: 7 }) as _, i (i)}
+                <div class="skel-row" style="animation-delay: {i * 60}ms">
+                  <div class="skel-avatar"></div>
+                  <div class="skel-lines">
+                    <div class="skel-line" style="width: {30 + ((i * 17) % 40)}%"></div>
+                    <div class="skel-line" style="width: {50 + ((i * 23) % 45)}%"></div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
         <Composer />
       {/if}
     </main>
@@ -3446,8 +3847,8 @@
       <ReportsQueueModal onclose={() => (reportsOpen = false)} />
     {/if}
 
-    {#if inviteLink}
-      <InviteLinkModal link={inviteLink} id={inviteId} onclose={() => (inviteLink = null)} />
+    {#if inviteCreateOpen}
+      <InviteCreateModal onclose={() => { inviteCreateOpen = false; inviteLink = null; inviteId = null; }} />
     {/if}
 
     {#if invitesOpen}
@@ -3457,6 +3858,7 @@
     {#if groupPickerOpen}
       <NewGroupModal
         seed={groupPickerSeed}
+        pos={groupPickerPos}
         onclose={() => (groupPickerOpen = false)}
         oncreate={createGroupWith}
       />
@@ -3498,6 +3900,10 @@
 
     {#if profileTarget}
       <ProfileCard target={profileTarget} pos={profilePos} onclose={() => (profileTarget = null)} />
+    {/if}
+
+    {#if profileModalTarget}
+      <ProfileModal target={profileModalTarget} onclose={() => (profileModalTarget = null)} />
     {/if}
 
     {#if settingsOpen}

@@ -2085,6 +2085,7 @@ async fn federated_profile_and_avatar_over_the_bridge() {
         user,
         display,
         avatar,
+        ..
     } = &reply.event
     else {
         unreachable!()

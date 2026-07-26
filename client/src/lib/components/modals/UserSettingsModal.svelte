@@ -10,6 +10,7 @@
   // if unset, so we don't accidentally re-set the handle as a display name).
   const current = app.displayName(app.account);
   let displayDraft = $state(current === app.account ? "" : current);
+  let bioDraft = $state(app.bioOf(app.account));
   let uploading = $state(false);
   let fileInput = $state<HTMLInputElement>();
 
@@ -46,6 +47,9 @@
 
   function saveDisplay() {
     weft.profileSet({ display: displayDraft.trim() }).catch((e) => app.toast(String(e), "error"));
+  }
+  function saveBio() {
+    weft.profileSet({ about: bioDraft.trim() }).catch((e) => app.toast(String(e), "error"));
   }
   async function onAvatarPicked(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
@@ -99,6 +103,17 @@
           </div>
         </div>
         <input type="file" accept="image/*" bind:this={fileInput} onchange={onAvatarPicked} hidden />
+        <div class="section-sep"></div>
+        <div class="field-label">Bio</div>
+        <p class="so-sub">A short bio shown on your full profile.</p>
+        <textarea
+          class="prof-input"
+          style="resize:vertical; min-height:64px; width:100%; font-family:inherit; line-height:1.5;"
+          bind:value={bioDraft}
+          maxlength="512"
+          rows="3"
+          placeholder="Tell people about yourself…"></textarea>
+        <div class="profile-actions"><button class="ok-btn" onclick={saveBio}>Save bio</button></div>
         <div class="section-sep"></div>
         <div class="field-label">Status</div>
         <div class="status-inline">

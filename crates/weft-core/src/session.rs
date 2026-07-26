@@ -1255,8 +1255,13 @@ impl<S: ControlStream> Session<S> {
             | Command::AuthProof { .. }
             | Command::Register { .. } => self.not_authed(label, "already authenticated").await,
             // §10.3 display profiles.
-            Command::ProfileSet { display, avatar } => {
-                self.on_profile_set(label, display, avatar, account).await
+            Command::ProfileSet {
+                display,
+                avatar,
+                about,
+            } => {
+                self.on_profile_set(label, display, avatar, about, account)
+                    .await
             }
             Command::ProfilesQuery { accounts } => self.on_profiles_query(label, accounts).await,
             // §10.5 account verification (email code flow + self-attested birthday).

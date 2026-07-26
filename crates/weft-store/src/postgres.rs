@@ -1470,13 +1470,14 @@ impl CapabilityStore for PgStore {
 impl InviteStore for PgStore {
     async fn create_invite(&self, invite: InviteRecord) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO weft_invites (id, scope, caps, uses_left, expiry, creator) \
-             VALUES ($1,$2,$3,$4,$5,$6)",
+            "INSERT INTO weft_invites (id, scope, caps, uses_left, uses, expiry, creator) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7)",
         )
         .bind(&invite.id)
         .bind(&invite.scope)
         .bind(invite.caps.join(","))
         .bind(invite.uses_left.map(|u| u as i32))
+        .bind(invite.uses as i32)
         .bind(invite.expiry.map(|e| e as i64))
         .bind(invite.creator.to_string())
         .execute(&self.pool)
@@ -1487,7 +1488,7 @@ impl InviteStore for PgStore {
 
     async fn invite(&self, id: &str) -> Result<Option<InviteRecord>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, scope, caps, uses_left, expiry, creator FROM weft_invites WHERE id = $1",
+            "SELECT id, scope, caps, uses_left, uses, expiry, creator FROM weft_invites WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -1502,11 +1503,11 @@ impl InviteStore for PgStore {
         let updated = sqlx::query(
             r#"
             UPDATE weft_invites
-            SET uses_left = uses_left - 1
+            SET uses_left = uses_left - 1, uses = uses + 1
             WHERE id = $1
               AND (expiry IS NULL OR expiry > $2)
               AND (uses_left IS NULL OR uses_left > 0)
-            RETURNING id, scope, caps, uses_left, expiry, creator
+            RETURNING id, scope, caps, uses_left, uses, expiry, creator
             "#,
         )
         .bind(id)
@@ -1543,7 +1544,7 @@ impl InviteStore for PgStore {
 
     async fn invites_for_scope(&self, scope: &str) -> Result<Vec<InviteRecord>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, scope, caps, uses_left, expiry, creator FROM weft_invites \
+            "SELECT id, scope, caps, uses_left, uses, expiry, creator FROM weft_invites \
              WHERE scope = $1 ORDER BY id DESC",
         )
         .bind(scope)
@@ -2182,6 +2183,7 @@ fn invite_from_row(row: &sqlx::postgres::PgRow) -> InviteRecord {
         scope: row.get("scope"),
         caps: split_caps(row.get("caps")),
         uses_left: row.get::<Option<i32>, _>("uses_left").map(|u| u as u32),
+        uses: row.get::<i32, _>("uses") as u32,
         expiry: row.get::<Option<i64>, _>("expiry").map(|e| e as u64),
         creator: row
             .get::<String, _>("creator")
@@ -3507,17 +3509,19 @@ impl ProfileStore for PgStore {
     async fn set_profile(&self, account: &str, profile: ProfileRecord) -> Result<(), StoreError> {
         sqlx::query(
             r#"
-            INSERT INTO weft_profiles (account, display, avatar, updated_ms)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO weft_profiles (account, display, avatar, about, updated_ms)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (account) DO UPDATE
               SET display = EXCLUDED.display,
                   avatar = EXCLUDED.avatar,
+                  about = EXCLUDED.about,
                   updated_ms = EXCLUDED.updated_ms
             "#,
         )
         .bind(account)
         .bind(profile.display.as_deref())
         .bind(profile.avatar.as_deref())
+        .bind(profile.about.as_deref())
         .bind(profile.updated as i64)
         .execute(&self.pool)
         .await
@@ -3566,6 +3570,7 @@ fn profile_from_row(row: &sqlx::postgres::PgRow) -> ProfileRecord {
     ProfileRecord {
         display: row.get("display"),
         avatar: row.get("avatar"),
+        about: row.get("about"),
         updated: row.get::<i64, _>("updated_ms") as u64,
     }
 }

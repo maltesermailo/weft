@@ -510,6 +510,27 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
 }
+.cat-header[draggable="true"] {
+  cursor: grab;
+}
+.cat-header.cat-dragging {
+  opacity: 0.5;
+}
+/* Drop indicator: a line above the category the dragged one lands before. */
+.cat-header.cat-drop {
+  position: relative;
+}
+.cat-header.cat-drop::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 4px;
+  top: -3px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent, #5865f2);
+  pointer-events: none;
+}
 .cat-add {
   border: none;
   background: none;
@@ -915,10 +936,127 @@ button:disabled {
   margin-left: auto;
   flex-shrink: 0;
 }
+.msg-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+/* Bottom-anchored chat list (Discord-style): the newest message is the natural
+   resting position, so it renders at the bottom with no scroll operation, and
+   content growth (images loading, older pages prepended) never moves the
+   viewport. Messages are rendered newest-first in the DOM; `column-reverse`
+   flips them so newest sits at the bottom. `scrollTop` is 0 at the bottom. */
 .message-scroll {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overflow-anchor: none; /* we anchor to the bottom ourselves via column-reverse */
   padding: 14px 20px 6px;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: stretch;
+  /* Hide the native scrollbar: with column-reverse the newest is at scrollTop 0,
+     so the browser paints the thumb near the *top* of the track (inverted) even
+     though you're at the bottom. Wheel/trackpad scrolling is unaffected. */
+  scrollbar-width: none; /* Firefox */
+}
+.message-scroll::-webkit-scrollbar {
+  display: none; /* WebKit/Chromium (Tauri) */
+}
+/* List children keep their natural height (overflow + scroll) rather than
+   shrinking to fit the flex container. */
+.message-scroll > * {
+  flex-shrink: 0;
+}
+/* Custom, correctly-oriented overlay scrollbar (replaces the hidden inverted
+   native one). Track spans the message area; the thumb's bottom = newest. */
+.msg-scrollbar {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  right: 3px;
+  width: 8px;
+  z-index: 4;
+  pointer-events: none;
+}
+.msg-scrollbar-thumb {
+  position: absolute;
+  right: 0;
+  width: 6px;
+  min-height: 28px;
+  border-radius: 4px;
+  background: var(--border-hair-strong);
+  opacity: 0.4; /* always visible, subtle */
+  pointer-events: auto;
+  cursor: pointer;
+  transition:
+    opacity 0.18s ease,
+    width 0.12s ease;
+}
+.msg-area:hover .msg-scrollbar-thumb {
+  opacity: 0.65;
+}
+.msg-scrollbar-thumb:hover,
+.msg-scrollbar-thumb.dragging {
+  opacity: 0.9;
+  width: 8px;
+}
+/* Discord-style loading screen: masks the fetch + render + scroll-positioning
+   on channel open, so none of that churn is ever visible. */
+.channel-loader {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  /* Fully opaque from the first frame — no opacity fade-in, or the message list
+     would show through while it populates behind the curtain. */
+  background: var(--bg-void);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end; /* skeletons pile up from the bottom, like a chat */
+  gap: 20px;
+  padding: 16px 20px 14px;
+}
+.skel-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  animation: skel-pulse 1.3s ease-in-out infinite;
+}
+.skel-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--bg-panel-raised);
+  flex: none;
+}
+.skel-lines {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 5px;
+}
+.skel-line {
+  height: 10px;
+  border-radius: 6px;
+  background: var(--bg-panel-raised);
+}
+@keyframes skel-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skel-row,
+  .channel-loader {
+    animation: none;
+  }
 }
 .day-sep {
   display: flex;
@@ -1972,16 +2110,19 @@ button:disabled {
 .ctx-menu {
   position: fixed;
   z-index: 400;
-  min-width: 170px;
-  padding: 4px;
+  min-width: 200px;
+  padding: 6px;
   background: var(--bg-elevated, #1b1e27);
   border: 1px solid var(--border-hair-strong, #2a2e3a);
-  border-radius: var(--radius-md);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
   display: flex;
   flex-direction: column;
 }
 .ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   text-align: left;
   padding: 7px 10px;
   background: none;
@@ -1991,16 +2132,40 @@ button:disabled {
   cursor: pointer;
   font: inherit;
   font-size: 13px;
+  font-weight: 500;
 }
 .ctx-item:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
+  background: var(--accent);
+  color: #fff;
+}
+.ctx-icon {
+  flex-shrink: 0;
+  opacity: 0.85;
 }
 .ctx-item.danger {
-  color: #e06c6c;
+  color: var(--danger, #e06c6c);
 }
 .ctx-item.danger:hover {
-  background: rgba(216, 60, 62, 0.15);
+  background: var(--danger, #e06c6c);
+  color: #fff;
+}
+/* Section label (e.g. a channel name, or the red "Mod Menu" header). */
+.ctx-header {
+  padding: 6px 10px 4px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+.ctx-header.mod {
+  color: var(--danger, #e06c6c);
+}
+.ctx-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border-hair, rgba(255, 255, 255, 0.06));
 }
 
 .key-login {

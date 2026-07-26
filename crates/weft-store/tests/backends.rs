@@ -999,6 +999,7 @@ where
             scope: format!("ns:club-{tag}"),
             caps: vec!["view".into(), "send".into()],
             uses_left: Some(2),
+            uses: 0,
             expiry: None,
             creator: user("inviter"),
         })
@@ -1016,6 +1017,10 @@ where
         store.redeem_invite(&limited, 100).await.unwrap(),
         RedeemOutcome::Exhausted
     );
+    // Redemptions accrue on the record even as the remaining budget hits zero.
+    let after = store.invite(&limited).await.unwrap().unwrap();
+    assert_eq!(after.uses, 2);
+    assert_eq!(after.uses_left, Some(0));
     // Expired invite reads Gone.
     let expiring = format!("inv-exp-{tag}");
     store
@@ -1024,6 +1029,7 @@ where
             scope: "#x".into(),
             caps: vec!["view".into()],
             uses_left: None,
+            uses: 0,
             expiry: Some(500),
             creator: user("inviter"),
         })
@@ -1062,6 +1068,7 @@ where
                 scope,
                 caps: vec!["view".into()],
                 uses_left: None,
+                uses: 0,
                 expiry: None,
                 creator: user("inviter"),
             })
@@ -1075,6 +1082,7 @@ where
             scope: format!("ns:keepme-{tag}"),
             caps: vec!["view".into()],
             uses_left: None,
+            uses: 0,
             expiry: None,
             creator: user("inviter"),
         })
@@ -2192,6 +2200,7 @@ where
             weft_store::ProfileRecord {
                 display: Some("Ada".into()),
                 avatar: Some("b3-ada".into()),
+                about: Some("Cryptographer & poet.".into()),
                 updated: 100,
             },
         )
@@ -2203,6 +2212,7 @@ where
             weft_store::ProfileRecord {
                 display: None,
                 avatar: Some("b3-bob".into()),
+                about: None,
                 updated: 100,
             },
         )
@@ -2211,6 +2221,7 @@ where
     let got = store.profile(&pa).await.unwrap().unwrap();
     assert_eq!(got.display.as_deref(), Some("Ada"));
     assert_eq!(got.avatar.as_deref(), Some("b3-ada"));
+    assert_eq!(got.about.as_deref(), Some("Cryptographer & poet."));
     // Replace (last-writer-wins) — a new avatar, display cleared.
     store
         .set_profile(
@@ -2218,6 +2229,7 @@ where
             weft_store::ProfileRecord {
                 display: None,
                 avatar: Some("b3-ada2".into()),
+                about: None,
                 updated: 200,
             },
         )

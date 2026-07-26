@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Friends — Discord Clone</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%; background: #0D0E10;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased; color: #F2F3F5; overflow: hidden;
+    }
+    input::placeholder { color: #4E5058; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+
+    .layout { display: flex; height: 100vh; }
+
+    /* Rail */
+    .rail {
+      width: 72px; background: #111214; display: flex; flex-direction: column;
+      align-items: center; padding: 12px 0; gap: 8px; flex-shrink: 0; overflow-y: auto;
+    }
+    .rail-btn {
+      width: 48px; height: 48px; border-radius: 50%; background: #1E1F22;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; transition: border-radius .18s, background .18s;
+      border: none; color: #87898C; flex-shrink: 0; position: relative;
+    }
+    .rail-btn:hover, .rail-btn.active { border-radius: 14px; background: #5865F2; color: #fff; }
+    .rail-btn.active::before {
+      content:''; position:absolute; left:-12px; top:50%; transform:translateY(-50%);
+      width:4px; height:70%; background:#fff; border-radius:0 4px 4px 0;
+    }
+    .rail-divider { width: 32px; height: 1px; background: rgba(255,255,255,0.08); margin: 2px 0; }
+    .rail-avatar {
+      width: 48px; height: 48px; border-radius: 50%;
+      cursor: pointer; transition: border-radius .18s; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 14px;
+    }
+    .rail-avatar:hover { border-radius: 14px; }
+
+    /* Sidebar */
+    .sidebar {
+      width: 240px; background: #1E1F22; display: flex; flex-direction: column; flex-shrink: 0;
+    }
+    .sidebar-header { padding: 12px 8px 8px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    .search-bar {
+      display: flex; align-items: center; gap: 6px; background: #111214;
+      border-radius: 6px; padding: 6px 8px;
+    }
+    .search-bar input { background:none; border:none; outline:none; font-size:13px; color:#F2F3F5; flex:1; font-family:inherit; }
+    .section-label {
+      font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing:.07em;
+      color: #87898C; padding: 16px 8px 4px 16px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .section-label button { background:none; border:none; color:#87898C; cursor:pointer; padding:0 4px; transition:color .1s; }
+    .section-label button:hover { color:#F2F3F5; }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 12px;
+      border-radius: 6px; margin: 0 8px; cursor: pointer;
+      transition: background .1s; color: #87898C; font-size: 14px; font-weight: 500;
+    }
+    .nav-item:hover { background: rgba(255,255,255,0.06); color:#F2F3F5; }
+    .nav-item.active { background: rgba(88,101,242,0.18); color:#F2F3F5; }
+    .nav-badge {
+      margin-left:auto; background:#F23F43; color:#fff;
+      font-size:10px; font-weight:700; border-radius:10px; padding:1px 5px; line-height:1.4;
+    }
+    .dm-list { flex:1; overflow-y:auto; padding:4px 0; }
+    .dm-item {
+      display:flex; align-items:center; gap:10px; padding:6px 8px 6px 12px;
+      border-radius:6px; margin:1px 8px; cursor:pointer; transition:background .1s; position:relative;
+    }
+    .dm-item:hover { background:rgba(255,255,255,0.06); }
+    .dm-item:hover .dm-close { opacity:1; }
+    .dm-item.active { background:rgba(88,101,242,0.18); }
+    .dm-avwrap { position:relative; flex-shrink:0; }
+    .dm-av {
+      width:32px; height:32px; border-radius:50%; display:flex;
+      align-items:center; justify-content:center; font-size:12px; font-weight:700;
+    }
+    .sdot {
+      position:absolute; bottom:-1px; right:-1px; width:10px; height:10px;
+      border-radius:50%; border:2px solid #1E1F22;
+    }
+    .sdot.online{background:#23A55A;} .sdot.idle{background:#F0B232;}
+    .sdot.dnd{background:#F23F43;}    .sdot.offline{background:#80848E;}
+    .dm-info { flex:1; min-width:0; }
+    .dm-name { font-size:13px; font-weight:600; color:#F2F3F5; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .dm-sub  { font-size:11px; color:#87898C; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .dm-close {
+      opacity:0; background:none; border:none; color:#87898C; cursor:pointer;
+      padding:2px; border-radius:4px; transition:color .1s, opacity .1s; flex-shrink:0;
+    }
+    .dm-close:hover { color:#F2F3F5; }
+
+    /* User panel */
+    .user-panel { padding:8px; border-top:1px solid rgba(255,255,255,0.06); display:flex; align-items:center; gap:8px; }
+    .up-info { flex:1; min-width:0; }
+    .up-name { font-size:13px; font-weight:600; color:#F2F3F5; }
+    .up-tag  { font-size:11px; color:#87898C; }
+    .panel-actions { display:flex; gap:2px; }
+    .panel-btn {
+      width:32px; height:32px; border-radius:6px; background:none; border:none;
+      color:#87898C; cursor:pointer; display:flex; align-items:center; justify-content:center;
+      transition:background .1s, color .1s;
+    }
+    .panel-btn:hover { background:rgba(255,255,255,0.1); color:#F2F3F5; }
+
+    /* Main */
+    .main { flex:1; display:flex; flex-direction:column; min-width:0; background:#313338; }
+    .topbar {
+      height:48px; background:#313338; border-bottom:1px solid rgba(0,0,0,.2);
+      display:flex; align-items:center; gap:12px; padding:0 16px; flex-shrink:0;
+    }
+    .topbar-icon { color:#5865F2; flex-shrink:0; }
+    .topbar-title { font-size:15px; font-weight:700; color:#F2F3F5; }
+    .topbar-div { width:1px; height:22px; background:rgba(255,255,255,.1); }
+    .tabs { display:flex; gap:2px; }
+    .tab {
+      padding:5px 10px; border-radius:6px; font-size:13px; font-weight:500;
+      color:#87898C; background:none; border:none; cursor:pointer; transition:background .1s, color .1s;
+    }
+    .tab:hover { background:rgba(255,255,255,.06); color:#F2F3F5; }
+    .tab.active { background:rgba(255,255,255,.1); color:#F2F3F5; }
+    .tab.add-tab { background:#23A55A; color:#fff; font-weight:600; }
+    .tab.add-tab:hover { background:#1e9150; }
+    .tb-right { margin-left:auto; display:flex; gap:6px; }
+    .icon-btn {
+      width:32px; height:32px; border-radius:6px; background:none; border:none;
+      color:#87898C; cursor:pointer; display:flex; align-items:center; justify-content:center;
+      transition:background .1s, color .1s;
+    }
+    .icon-btn:hover { background:rgba(255,255,255,.08); color:#F2F3F5; }
+
+    /* Panels */
+    .panel { display:none; flex:1; overflow-y:auto; padding:16px 20px; flex-direction:column; }
+    .panel.active { display:flex; }
+    .f-count {
+      font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.07em;
+      color:#87898C; margin-bottom:8px; padding:0 4px;
+    }
+    .f-item {
+      display:flex; align-items:center; gap:12px; padding:10px 12px;
+      border-radius:8px; cursor:pointer; transition:background .1s;
+      border-top:1px solid rgba(255,255,255,.04);
+    }
+    .f-item:first-of-type { border-top:none; }
+    .f-item:hover { background:rgba(255,255,255,.06); border-color:transparent; }
+    .f-item:hover + .f-item { border-color:transparent; }
+    .f-avwrap { position:relative; flex-shrink:0; }
+    .f-av {
+      width:40px; height:40px; border-radius:50%; display:flex;
+      align-items:center; justify-content:center; font-size:15px; font-weight:700;
+    }
+    .f-sdot { position:absolute; bottom:0; right:0; width:12px; height:12px; border-radius:50%; border:3px solid #313338; }
+    .f-info { flex:1; min-width:0; }
+    .f-name { font-size:14px; font-weight:600; color:#F2F3F5; }
+    .f-status { font-size:12px; color:#87898C; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .f-actions { display:flex; gap:6px; }
+    .fa {
+      width:36px; height:36px; border-radius:50%; background:#1E1F22; border:none;
+      color:#87898C; cursor:pointer; display:flex; align-items:center; justify-content:center;
+      transition:background .12s, color .12s; flex-shrink:0;
+    }
+    .fa:hover { background:rgba(255,255,255,.1); color:#F2F3F5; }
+    .fa.danger:hover { background:rgba(242,63,67,.15); color:#F23F43; }
+
+    /* Pending */
+    .p-accept {
+      width:36px; height:36px; border-radius:50%; background:#1E1F22; border:none;
+      color:#87898C; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:background .12s, color .12s;
+    }
+    .p-accept:hover { background:rgba(35,165,90,.2); color:#23A55A; }
+    .p-decline {
+      width:36px; height:36px; border-radius:50%; background:#1E1F22; border:none;
+      color:#87898C; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:background .12s, color .12s;
+    }
+    .p-decline:hover { background:rgba(242,63,67,.15); color:#F23F43; }
+
+    /* Add friend */
+    .add-panel { max-width:700px; }
+    .add-panel h3 { font-size:20px; font-weight:700; color:#F2F3F5; margin-bottom:6px; }
+    .add-panel p { font-size:13px; color:#87898C; margin-bottom:20px; line-height:1.5; }
+    .add-wrap {
+      display:flex; align-items:center; background:#1E1F22; border-radius:10px;
+      border:1px solid rgba(255,255,255,.08); padding:4px 4px 4px 14px; gap:8px; transition:border-color .15s;
+    }
+    .add-wrap:focus-within { border-color:#5865F2; }
+    .add-wrap input { flex:1; background:none; border:none; outline:none; font-size:14px; color:#F2F3F5; font-family:inherit; padding:8px 0; }
+    .add-btn {
+      background:#5865F2; color:#fff; border:none; border-radius:6px;
+      padding:8px 16px; font-size:13px; font-weight:600; cursor:pointer; transition:background .12s; white-space:nowrap;
+    }
+    .add-btn:hover { background:#4752c4; }
+    .add-btn:disabled { background:#3c3f8f; color:rgba(255,255,255,.4); cursor:not-allowed; }
+    .add-fb { margin-top:12px; font-size:13px; display:none; }
+    .add-fb.ok  { color:#23A55A; display:block; }
+    .add-fb.err { color:#F23F43; display:block; }
+    .sug-title {
+      font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.07em;
+      color:#87898C; margin:28px 0 10px;
+    }
+    .sug-item {
+      display:flex; align-items:center; gap:12px; padding:8px 10px;
+      border-radius:8px; cursor:pointer; transition:background .1s;
+    }
+    .sug-item:hover { background:rgba(255,255,255,.06); }
+    .sug-av { width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:15px; font-weight:700; flex-shrink:0; }
+    .sug-info { flex:1; min-width:0; }
+    .sug-name { font-size:14px; font-weight:600; color:#F2F3F5; }
+    .sug-mut  { font-size:12px; color:#87898C; }
+    .sug-add {
+      background:rgba(88,101,242,.15); color:#5865F2; border:none; border-radius:6px;
+      padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; transition:background .12s, color .12s;
+    }
+    .sug-add:hover { background:#5865F2; color:#fff; }
+
+    /* Empty */
+    .empty-state {
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      flex:1; gap:12px; padding:40px;
+    }
+    .empty-state svg { opacity:.2; }
+    .empty-state p { font-size:16px; font-weight:600; color:#87898C; }
+    .empty-state span { font-size:13px; color:#4E5058; text-align:center; line-height:1.5; }
+
+    /* Right panel */
+    .right-panel { width:320px; background:#2B2D31; border-left:1px solid rgba(0,0,0,.2); display:none; flex-direction:column; overflow-y:auto; flex-shrink:0; }
+    .right-panel.open { display:flex; }
+
+    /* Context menu */
+    .ctx {
+      position:fixed; background:#111214; border:1px solid rgba(255,255,255,.06);
+      border-radius:8px; padding:6px; min-width:200px; z-index:1000;
+      box-shadow:0 8px 32px rgba(0,0,0,.6); display:none; flex-direction:column;
+    }
+    .ctx.open { display:flex; }
+    .ctx-i {
+      display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:4px;
+      font-size:13px; font-weight:500; color:#B5BAC1; cursor:pointer;
+      transition:background .08s, color .08s; border:none; background:none; width:100%; text-align:left;
+    }
+    .ctx-i:hover { background:#5865F2; color:#fff; }
+    .ctx-i.danger { color:#F23F43; }
+    .ctx-i.danger:hover { background:#F23F43; color:#fff; }
+    .ctx-div { height:1px; background:rgba(255,255,255,.06); margin:4px 0; }
+    .ctx-lbl {
+      font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.08em;
+      color:#4E5058; padding:6px 10px 2px; pointer-events:none;
+    }
+
+    /* Toast */
+    .toast {
+      position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(80px);
+      background:#23A55A; color:#fff; padding:10px 20px; border-radius:8px;
+      font-size:13px; font-weight:600; z-index:2000;
+      transition:transform .3s cubic-bezier(.34,1.56,.64,1); pointer-events:none; white-space:nowrap;
+    }
+    .toast.show { transform:translateX(-50%) translateY(0); }
+    .toast.err  { background:#F23F43; }
+
+    /* DM chat input */
+    .chat-input-bar { padding:0 16px 16px; }
+    .chat-input-inner {
+      background:#1E1F22; border-radius:10px; padding:12px 14px;
+      display:flex; align-items:center; gap:10px;
+    }
+    .ci-attach {
+      width:32px; height:32px; border-radius:50%; background:#3A3C41; border:none;
+      color:#87898C; cursor:pointer; display:flex; align-items:center; justify-content:center;
+    }
+    .ci-attach:hover { background:#4a4d54; color:#F2F3F5; }
+    .ci-attach svg, .ci-emoji svg { flex-shrink:0; }
+    .ci-input { flex:1; background:none; border:none; outline:none; font-size:14px; color:#F2F3F5; font-family:inherit; }
+    .ci-emoji { background:none; border:none; color:#87898C; cursor:pointer; }
+    .ci-emoji:hover { color:#F2F3F5; }
+
+    @media (max-width:900px) { .rail{display:none;} .right-panel{display:none!important;} }
+    @media (max-width:600px) { .sidebar{display:none;} }
+  </style>
+</head>
+<body>
+<div class="layout">
+
+  <!-- Rail -->
+  <div class="rail">
+    <button class="rail-btn active" title="Direct Messages">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z"/></svg>
+    </button>
+    <div class="rail-divider"></div>
+    <div class="rail-avatar" style="background:#5865F2;color:#fff;" title="Devs Unite">DU</div>
+    <div class="rail-avatar" style="background:#23A55A;color:#fff;" title="Gaming Lounge">GL</div>
+    <div class="rail-avatar" style="background:#F0B232;color:#fff;" title="Art Hub">AH</div>
+    <div class="rail-avatar" style="background:#00B0F4;color:#fff;" title="Music Corner">MC</div>
+    <div class="rail-divider"></div>
+    <button class="rail-btn" title="Add Server" style="color:#23A55A;" onclick="toast('Add server coming soon!')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button class="rail-btn" title="Explore" onclick="toast('Explore coming soon!')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="16.24,7.76 14.12,14.12 7.76,16.24 9.88,9.88"/></svg>
+    </button>
+  </div>
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <div class="search-bar">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="color:#4E5058;flex-shrink:0;"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.6"/><path d="M10.5 10.5l3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <input type="text" placeholder="Find or start a conversation" />
+      </div>
+    </div>
+    <nav style="padding:4px 0;">
+      <div class="nav-item active" id="nav-friends" onclick="switchMain('friends')">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+        Friends
+        <span class="nav-badge" id="nav-badge">3</span>
+      </div>
+      <div class="nav-item" onclick="toast('Nitro coming soon!')">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" stroke-linejoin="round"/></svg>
+        Nitro
+      </div>
+      <div class="nav-item" onclick="toast('Shop coming soon!')">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 01-8 0"/></svg>
+        Shop
+      </div>
+    </nav>
+
+    <div class="section-label">
+      Direct Messages
+      <button title="New DM" onclick="toast('New DM coming soon!')">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
+      </button>
+    </div>
+
+    <div class="dm-list" id="dm-list"></div>
+
+    <div class="user-panel">
+      <div class="dm-avwrap">
+        <div class="dm-av" style="background:#5865F2;color:#fff;">Y</div>
+        <div class="sdot online"></div>
+      </div>
+      <div class="up-info">
+        <div class="up-name">you</div>
+        <div class="up-tag">#0001</div>
+      </div>
+      <div class="panel-actions">
+        <button class="panel-btn" title="Mute" onclick="toast('Muted.')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/></svg>
+        </button>
+        <button class="panel-btn" title="Deafen" onclick="toast('Deafened.')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0118 0v6"/><path d="M21 19a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3zM3 19a2 2 0 002 2h1a2 2 0 002-2v-3a2 2 0 00-2-2H3z"/></svg>
+        </button>
+        <button class="panel-btn" title="Settings" onclick="toast('Settings coming soon!')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+
+    <!-- Friends topbar -->
+    <div class="topbar" id="tb-friends">
+      <svg class="topbar-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+      <span class="topbar-title">Friends</span>
+      <div class="topbar-div"></div>
+      <div class="tabs">
+        <button class="tab active" id="t-online"  onclick="switchTab('online')">Online</button>
+        <button class="tab"        id="t-all"     onclick="switchTab('all')">All</button>
+        <button class="tab"        id="t-pending" onclick="switchTab('pending')">Pending <span class="nav-badge" id="t-pcount" style="margin-left:4px;position:static;">3</span></button>
+        <button class="tab"        id="t-blocked" onclick="switchTab('blocked')">Blocked</button>
+        <button class="tab add-tab"               onclick="switchTab('add')">Add Friend</button>
+      </div>
+      <div class="tb-right">
+        <button class="icon-btn" title="New Group DM" onclick="toast('Group DM coming soon!')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="17" y1="11" x2="23" y2="11"/></svg>
+        </button>
+        <button class="icon-btn" title="Help" onclick="toast('Help coming soon!')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- DM topbar -->
+    <div class="topbar" id="tb-dm" style="display:none;">
+      <div id="tb-dm-av" class="dm-avwrap" style="flex-shrink:0;margin-right:4px;"></div>
+      <span class="topbar-title" id="tb-dm-name">-</span>
+      <div class="tb-right">
+        <button class="icon-btn" title="Call" onclick="toast('Calling…')"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 013.07 9.8 19.79 19.79 0 012 1.18 2 2 0 014 0h3a2 2 0 012 1.72 12.84 12.84 0 00.7 2.81 2 2 0 01-.45 2.11L8.09 7.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45 12.84 12.84 0 002.81.7A2 2 0 0122 14.92z"/></svg></button>
+        <button class="icon-btn" title="Video" onclick="toast('Video calling…')"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg></button>
+        <button class="icon-btn" title="Pinned" onclick="toast('No pinned messages.')"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V6h1a2 2 0 000-4H8a2 2 0 000 4h1v4.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24z"/></svg></button>
+        <button class="icon-btn" title="Profile" onclick="document.getElementById('rp').classList.toggle('open')"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
+        <button class="icon-btn" title="Search" onclick="toast('Search coming soon!')"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
+      </div>
+    </div>
+
+    <div style="display:flex;flex:1;min-height:0;">
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden;">
+        <div class="panel active" id="p-online"></div>
+        <div class="panel" id="p-all"></div>
+        <div class="panel" id="p-pending"></div>
+        <div class="panel" id="p-blocked"></div>
+        <div class="panel" id="p-add">
+          <div class="add-panel">
+            <h3>Add Friend</h3>
+            <p>You can add friends with their username. It's case-sensitive!</p>
+            <div class="add-wrap">
+              <input type="text" id="add-inp" placeholder="Enter a username" oninput="onAddInp()" onkeydown="if(event.key==='Enter')doAdd()" />
+              <button class="add-btn" id="add-btn" disabled onclick="doAdd()">Send Friend Request</button>
+            </div>
+            <div class="add-fb" id="add-fb"></div>
+            <div class="sug-title">People You May Know</div>
+            <div id="sug-list"></div>
+          </div>
+        </div>
+        <div class="panel" id="p-dm" style="justify-content:flex-end;">
+          <div style="flex:1;display:flex;align-items:center;justify-content:center;">
+            <p style="color:#4E5058;font-size:14px;">Start of your conversation</p>
+          </div>
+          <div class="chat-input-bar">
+            <div class="chat-input-inner">
+              <button class="ci-attach" onclick="toast('Attachment picker coming soon!')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg></button>
+              <input class="ci-input" type="text" id="ci" placeholder="Message @user" onkeydown="if(event.key==='Enter'&&this.value.trim()){toast('Message sent!');this.value='';}">
+              <button class="ci-emoji" onclick="toast('Emoji picker coming soon!')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg></button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="right-panel" id="rp"><div id="rp-content" style="padding:16px;"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Context menu -->
+<div class="ctx" id="ctx">
+  <div class="ctx-lbl" id="ctx-lbl">User</div>
+  <button class="ctx-i" onclick="ctxDo('profile')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Open Profile</button>
+  <button class="ctx-i" onclick="ctxDo('message')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>Message</button>
+  <button class="ctx-i" onclick="ctxDo('call')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 013.07 9.8 19.79 19.79 0 012 1.18 2 2 0 014 0h3a2 2 0 012 1.72 12.84 12.84 0 00.7 2.81 2 2 0 01-.45 2.11L8.09 7.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45 12.84 12.84 0 002.81.7A2 2 0 0122 14.92z"/></svg>Call</button>
+  <button class="ctx-i" onclick="ctxDo('video')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>Video Call</button>
+  <div class="ctx-div"></div>
+  <button class="ctx-i" id="ctx-add" onclick="ctxDo('add')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>Add Friend</button>
+  <button class="ctx-i" id="ctx-rem" onclick="ctxDo('remove')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="22" y1="11" x2="16" y2="11"/></svg>Remove Friend</button>
+  <button class="ctx-i" onclick="ctxDo('mute')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23M12 19v3M8 23h8"/></svg>Mute</button>
+  <div class="ctx-div"></div>
+  <button class="ctx-i" onclick="ctxDo('note')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Add Note</button>
+  <button class="ctx-i" onclick="ctxDo('copy')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>Copy User ID</button>
+  <div class="ctx-div"></div>
+  <button class="ctx-i danger" onclick="ctxDo('block')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>Block</button>
+  <button class="ctx-i danger" onclick="ctxDo('report')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Report</button>
+</div>
+
+<div class="toast" id="toast-el"></div>
+
+<script>
+const C = ['#5865F2','#23A55A','#F0B232','#00B0F4','#F23F43','#9C59B6','#E67E22','#1ABC9C'];
+const c = i => C[i % C.length];
+
+const friends = [
+  {id:1,  name:'Mia Chen',       tag:'#4821', status:'online',  act:'Playing Valorant',          col:0},
+  {id:2,  name:'Jake Torres',    tag:'#1107', status:'idle',    act:'Idle for 28 minutes',        col:1},
+  {id:3,  name:'Priya Sharma',   tag:'#7734', status:'dnd',     act:'Do Not Disturb',             col:2},
+  {id:4,  name:'Leon Müller',    tag:'#3392', status:'online',  act:'Listening to Spotify',       col:3},
+  {id:5,  name:'Aisha Okonkwo',  tag:'#9915', status:'online',  act:'Working on a project',       col:4},
+  {id:6,  name:'Sam Rivera',     tag:'#2203', status:'offline', act:'Last seen 2 hours ago',      col:5},
+  {id:7,  name:'Yuki Tanaka',    tag:'#6680', status:'online',  act:'Streaming on Twitch',        col:6},
+  {id:8,  name:'Carlos Díaz',    tag:'#5541', status:'idle',    act:'Idle for 5 minutes',         col:7},
+  {id:9,  name:'Nour Al-Amin',   tag:'#8872', status:'offline', act:'Last seen yesterday',        col:0},
+  {id:10, name:'Ellie Brooks',   tag:'#1199', status:'online',  act:'In a voice channel',         col:1},
+];
+const pending = [
+  {id:101, name:'Riku Hayashi',  tag:'#3307', dir:'in',  mut:2, col:2},
+  {id:102, name:'Zara Patel',    tag:'#7721', dir:'out', mut:0, col:3},
+  {id:103, name:'Felix Wagner',  tag:'#4418', dir:'in',  mut:5, col:4},
+];
+const blocked = [
+  {id:201, name:'ghost_user92', tag:'#0000', col:5},
+];
+const dms = [
+  {id:1,  name:'Mia Chen',     status:'online',  last:'are you joining later?', col:0},
+  {id:2,  name:'Jake Torres',  status:'idle',    last:'thanks!!',               col:1},
+  {id:4,  name:'Leon Müller',  status:'online',  last:'check this out 👀',       col:3},
+  {id:7,  name:'Yuki Tanaka',  status:'online',  last:'stream starts at 8pm',   col:6},
+  {id:10, name:'Ellie Brooks', status:'online',  last:'omg same lmao',          col:1},
+];
+const sugs = [
+  {id:301, name:'Kai Nguyen',  mut:'3 mutual friends', col:7},
+  {id:302, name:'Sofia Lemos', mut:'1 mutual friend',  col:2},
+  {id:303, name:'Aran Kim',    mut:'7 mutual friends', col:5},
+];
+
+let curTab='online', openDM=null, ctxT=null;
+
+function av(name,col,sz=40,fs=15){
+  return `<div style="width:${sz}px;height:${sz}px;border-radius:50%;background:${c(col)};color:#fff;display:flex;align-items:center;justify-content:center;font-size:${fs}px;font-weight:700;">${name[0]}</div>`;
+}
+function dot(st,border='#313338'){
+  return `<div class="f-sdot ${st}" style="border-color:${border};"></div>`;
+}
+
+function renderDMs(){
+  document.getElementById('dm-list').innerHTML = dms.map(d=>`
+    <div class="dm-item ${openDM===d.id?'active':''}" onclick="openChat(${d.id})" oncontextmenu="openCtx(event,${d.id},'dm')">
+      <div class="dm-avwrap">
+        <div class="dm-av" style="background:${c(d.col)};color:#fff;">${d.name[0]}</div>
+        <div class="sdot ${d.status}"></div>
+      </div>
+      <div class="dm-info">
+        <div class="dm-name">${d.name}</div>
+        <div class="dm-sub">${d.last}</div>
+      </div>
+      <button class="dm-close" onclick="event.stopPropagation();closeDM(${d.id})" title="Close">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l10 10M13 3L3 13"/></svg>
+      </button>
+    </div>`).join('');
+}
+
+function closeDM(id){
+  const i=dms.findIndex(d=>d.id===id);
+  if(i!==-1)dms.splice(i,1);
+  if(openDM===id){openDM=null;switchMain('friends');}
+  renderDMs();
+}
+
+function openChat(id){
+  const d=dms.find(x=>x.id===id)||friends.find(x=>x.id===id);
+  if(!d)return;
+  openDM=id;
+  document.getElementById('tb-friends').style.display='none';
+  document.getElementById('tb-dm').style.display='flex';
+  const aw=document.getElementById('tb-dm-av');
+  aw.innerHTML=`<div class="dm-av" style="background:${c(d.col)};color:#fff;width:28px;height:28px;font-size:12px;">${d.name[0]}</div><div class="sdot ${d.status}" style="border-color:#313338;width:10px;height:10px;"></div>`;
+  document.getElementById('tb-dm-name').textContent=d.name;
+  const f=friends.find(x=>x.id===id);
+  const rpc=document.getElementById('rp-content');
+  if(f){
+    rpc.innerHTML=`
+      <div style="background:${c(f.col)};height:80px;border-radius:8px;margin:-16px -16px 0;"></div>
+      <div style="margin-top:-24px;padding:0 4px;">
+        <div style="width:68px;height:68px;border-radius:50%;background:${c(f.col)};display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:700;color:#fff;border:5px solid #2B2D31;">${f.name[0]}</div>
+        <div style="background:#111214;border-radius:10px;padding:12px;margin-top:14px;">
+          <div style="font-size:18px;font-weight:700;color:#F2F3F5;margin-bottom:2px;">${f.name}</div>
+          <div style="font-size:12px;color:#87898C;margin-bottom:12px;">${f.name.toLowerCase().replace(' ','_')}${f.tag}</div>
+          <div style="height:1px;background:rgba(255,255,255,.06);margin-bottom:12px;"></div>
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#87898C;margin-bottom:6px;">Activity</div>
+          <div style="font-size:13px;color:#B5BAC1;">${f.act}</div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button onclick="toast('Calling…')" style="flex:1;padding:8px;border-radius:8px;background:#1E1F22;border:none;color:#87898C;cursor:pointer;font-size:13px;font-weight:600;" onmouseover="this.style.background='#27292e'" onmouseout="this.style.background='#1E1F22'">📞 Call</button>
+          <button onclick="toast('Video calling…')" style="flex:1;padding:8px;border-radius:8px;background:#1E1F22;border:none;color:#87898C;cursor:pointer;font-size:13px;font-weight:600;" onmouseover="this.style.background='#27292e'" onmouseout="this.style.background='#1E1F22'">📹 Video</button>
+        </div>
+      </div>`;
+  }
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.getElementById('p-dm').classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  renderDMs();
+}
+
+function switchMain(v){
+  if(v==='friends'){
+    document.getElementById('tb-friends').style.display='flex';
+    document.getElementById('tb-dm').style.display='none';
+    document.getElementById('nav-friends').classList.add('active');
+    openDM=null;
+    renderDMs();
+    switchTab(curTab);
+  }
+}
+
+function switchTab(tab){
+  curTab=tab;
+  document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
+  const btn=document.getElementById('t-'+tab);
+  if(btn)btn.classList.add('active');
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  const p=document.getElementById('p-'+tab);
+  if(p){p.classList.add('active');renderP(tab);}
+}
+
+function renderP(tab){
+  if(tab==='online') renderList('p-online', friends.filter(f=>f.status!=='offline'), 'Online');
+  if(tab==='all')    renderList('p-all', friends, 'All Friends');
+  if(tab==='pending') renderPending();
+  if(tab==='blocked') renderBlocked();
+  if(tab==='add')     renderAdd();
+}
+
+function renderList(pid, list, label){
+  const p=document.getElementById(pid);
+  if(!list.length){
+    p.innerHTML=`<div class="empty-state"><svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#87898C" stroke-width="1"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg><p>No friends here</p><span>Add friends to see them listed here.</span></div>`;
+    return;
+  }
+  p.innerHTML=`<div class="f-count">${label} — ${list.length}</div>`+list.map(f=>`
+    <div class="f-item" oncontextmenu="openCtx(event,${f.id},'friend')">
+      <div class="f-avwrap">${av(f.name,f.col)}${dot(f.status)}</div>
+      <div class="f-info">
+        <div class="f-name">${f.name}</div>
+        <div class="f-status">${f.act}</div>
+      </div>
+      <div class="f-actions">
+        <button class="fa" title="Message" onclick="event.stopPropagation();toDM(${f.id})">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+        </button>
+        <button class="fa" title="More" onclick="event.stopPropagation();openCtx(event,${f.id},'friend')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg>
+        </button>
+      </div>
+    </div>`).join('');
+}
+
+function renderPending(){
+  const p=document.getElementById('p-pending');
+  const inc=pending.filter(x=>x.dir==='in'), out=pending.filter(x=>x.dir==='out');
+  let h='';
+  if(inc.length){
+    h+=`<div class="f-count">Incoming — ${inc.length}</div>`;
+    h+=inc.map(x=>`
+      <div class="f-item" oncontextmenu="openCtx(event,${x.id},'pending')">
+        <div class="f-avwrap">${av(x.name,x.col)}</div>
+        <div class="f-info">
+          <div class="f-name">${x.name}</div>
+          <div class="f-status">Incoming Friend Request${x.mut?` · ${x.mut} mutual friend${x.mut>1?'s':''}`:''}</div>
+        </div>
+        <div class="f-actions">
+          <button class="p-accept" title="Accept" onclick="accept(${x.id})">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          </button>
+          <button class="p-decline" title="Decline" onclick="decline(${x.id})">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>`).join('');
+  }
+  if(out.length){
+    h+=`<div class="f-count" style="margin-top:16px;">Sent — ${out.length}</div>`;
+    h+=out.map(x=>`
+      <div class="f-item" oncontextmenu="openCtx(event,${x.id},'pending')">
+        <div class="f-avwrap">${av(x.name,x.col)}</div>
+        <div class="f-info">
+          <div class="f-name">${x.name}</div>
+          <div class="f-status">Outgoing Friend Request</div>
+        </div>
+        <div class="f-actions">
+          <button class="p-decline" title="Cancel" onclick="cancel(${x.id})">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>`).join('');
+  }
+  if(!inc.length&&!out.length) h=`<div class="empty-state"><svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#87898C" stroke-width="1"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 013.07 9.8"/><path d="M1 1l22 22"/></svg><p>No pending requests</p><span>Sent and received friend requests show up here.</span></div>`;
+  p.innerHTML=h;
+}
+
+function renderBlocked(){
+  const p=document.getElementById('p-blocked');
+  if(!blocked.length){p.innerHTML=`<div class="empty-state"><svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#87898C" stroke-width="1"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg><p>No blocked users</p><span>Blocked users appear here.</span></div>`;return;}
+  p.innerHTML=`<div class="f-count">Blocked — ${blocked.length}</div>`+blocked.map(b=>`
+    <div class="f-item" oncontextmenu="openCtx(event,${b.id},'blocked')">
+      <div class="f-avwrap">${av(b.name,b.col)}</div>
+      <div class="f-info"><div class="f-name">${b.name}</div><div class="f-status">Blocked</div></div>
+      <div class="f-actions">
+        <button class="fa danger" title="Unblock" onclick="unblock(${b.id})">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+        </button>
+      </div>
+    </div>`).join('');
+}
+
+function renderAdd(){
+  document.getElementById('sug-list').innerHTML=sugs.map(s=>`
+    <div class="sug-item">
+      <div class="sug-av" style="background:${c(s.col)};color:#fff;">${s.name[0]}</div>
+      <div class="sug-info"><div class="sug-name">${s.name}</div><div class="sug-mut">${s.mut}</div></div>
+      <button class="sug-add" onclick="sendSug(${s.id},'${s.name}',this)">Add Friend</button>
+    </div>`).join('');
+}
+
+function toDM(id){
+  const f=friends.find(x=>x.id===id);
+  if(!f)return;
+  if(!dms.find(d=>d.id===id)) dms.unshift({id,name:f.name,status:f.status,last:'Say hi!',col:f.col});
+  renderDMs(); openChat(id);
+}
+
+function accept(id){
+  const i=pending.findIndex(p=>p.id===id);
+  if(i!==-1){toast('Friend request accepted!');pending.splice(i,1);}
+  updBadge(); renderP('pending');
+}
+function decline(id){
+  const i=pending.findIndex(p=>p.id===id);
+  if(i!==-1){toast('Request declined.',true);pending.splice(i,1);}
+  updBadge(); renderP('pending');
+}
+function cancel(id){
+  const i=pending.findIndex(p=>p.id===id);
+  if(i!==-1){toast('Request cancelled.');pending.splice(i,1);}
+  updBadge(); renderP('pending');
+}
+function unblock(id){
+  const i=blocked.findIndex(b=>b.id===id);
+  if(i!==-1){toast('User unblocked.');blocked.splice(i,1);}
+  renderP('blocked');
+}
+
+function updBadge(){
+  const n=pending.filter(p=>p.dir==='in').length;
+  ['nav-badge','t-pcount'].forEach(id=>{
+    const el=document.getElementById(id);
+    el.textContent=n; el.style.display=n?'inline':'none';
+  });
+}
+
+function sendSug(id,name,btn){
+  btn.textContent='Sent!'; btn.style.background='rgba(35,165,90,.15)'; btn.style.color='#23A55A'; btn.disabled=true;
+  toast(`Friend request sent to ${name}!`);
+  pending.push({id,name,tag:'#0000',dir:'out',mut:0,col:0}); updBadge();
+}
+
+function onAddInp(){
+  const v=document.getElementById('add-inp').value.trim();
+  document.getElementById('add-btn').disabled=!v;
+  document.getElementById('add-fb').className='add-fb';
+}
+function doAdd(){
+  const v=document.getElementById('add-inp').value.trim(); if(!v)return;
+  const fb=document.getElementById('add-fb');
+  const ex=friends.find(f=>f.name.toLowerCase()===v.toLowerCase())||sugs.find(s=>s.name.toLowerCase()===v.toLowerCase());
+  if(ex){
+    fb.className='add-fb ok'; fb.textContent=`✓ Friend request sent to ${ex.name}!`;
+    toast(`Request sent to ${ex.name}!`);
+    pending.push({id:Date.now(),name:ex.name,tag:'#0000',dir:'out',mut:0,col:0}); updBadge();
+  }else{
+    fb.className='add-fb err'; fb.textContent="Hm, that didn't work. Check that the username is correct.";
+  }
+  document.getElementById('add-inp').value=''; document.getElementById('add-btn').disabled=true;
+}
+
+// Context menu
+function openCtx(e,id,type){
+  e.preventDefault();
+  ctxT={id,type};
+  const u=friends.find(f=>f.id===id)||pending.find(p=>p.id===id)||blocked.find(b=>b.id===id)||dms.find(d=>d.id===id);
+  document.getElementById('ctx-lbl').textContent=u?u.name:'User';
+  const isFriend=friends.some(f=>f.id===id);
+  document.getElementById('ctx-add').style.display=isFriend?'none':'flex';
+  document.getElementById('ctx-rem').style.display=isFriend?'flex':'none';
+  const m=document.getElementById('ctx');
+  m.classList.add('open');
+  const mw=210,mh=330,{clientX:x,clientY:y}=e;
+  m.style.left=(x+mw>window.innerWidth?x-mw:x)+'px';
+  m.style.top=(y+mh>window.innerHeight?y-mh:y)+'px';
+}
+function closeCtx(){document.getElementById('ctx').classList.remove('open');}
+document.addEventListener('click',closeCtx);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeCtx();});
+
+function ctxDo(action){
+  if(!ctxT)return;
+  const {id}=ctxT;
+  const u=friends.find(f=>f.id===id)||pending.find(p=>p.id===id)||blocked.find(b=>b.id===id)||dms.find(d=>d.id===id);
+  const name=u?u.name:'User';
+  closeCtx();
+  if(action==='message'){toDM(id);return;}
+  if(action==='remove'){
+    const i=friends.findIndex(f=>f.id===id);
+    if(i!==-1)friends.splice(i,1);
+    toast(`Removed ${name} from friends.`,true);
+    if(curTab==='online'||curTab==='all')renderP(curTab);
+    return;
+  }
+  if(action==='block'){
+    const f=friends.find(x=>x.id===id), i=friends.findIndex(x=>x.id===id);
+    if(i!==-1)friends.splice(i,1);
+    if(f&&!blocked.find(b=>b.id===id))blocked.push({id:f.id,name:f.name,tag:f.tag,col:f.col});
+    toast(`${name} has been blocked.`,true);
+    if(curTab==='online'||curTab==='all')renderP(curTab);
+    return;
+  }
+  const msgs={profile:`Opening ${name}'s profile…`,call:`Calling ${name}…`,video:`Video calling ${name}…`,add:`Friend request sent to ${name}!`,mute:`Muted ${name}.`,note:`Note added for ${name}.`,copy:'User ID copied!',report:`${name} has been reported.`};
+  if(msgs[action])toast(msgs[action]);
+}
+
+// Toast
+let tt;
+function toast(msg,isErr=false){
+  const el=document.getElementById('toast-el');
+  el.textContent=msg; el.className='toast'+(isErr?' err':'');
+  requestAnimationFrame(()=>requestAnimationFrame(()=>el.classList.add('show')));
+  clearTimeout(tt); tt=setTimeout(()=>el.classList.remove('show'),2800);
+}
+
+// Init
+renderDMs(); renderP('online'); updBadge();
+</script>
+</body>
+</html>

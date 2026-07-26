@@ -10,10 +10,12 @@
     return s !== "offline" && s !== "invisible";
   };
 
-  // Roles live at the namespace scope; fetch each member's roles once so we can
-  // group by hoisted role (Discord-style).
+  // Roles live at the namespace scope; fetch the scope's role definitions AND
+  // each member's assignments once, so we can group by hoisted role (Discord-
+  // style) as soon as the list renders — not only after a profile is opened.
   const roleScope = $derived(app.nsRoleScope());
   $effect(() => {
+    app.ensureRoles(roleScope);
     for (const m of members) app.ensureMemberRoles(m.name);
   });
 

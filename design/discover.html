@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Discover — NexusChat</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --bg:       #07080C;
+  --rail:     #040508;
+  --surface:  #0D0F15;
+  --surface2: #14161E;
+  --surface3: #191C26;
+  --border:   rgba(255,255,255,0.055);
+  --accent:   #FF4D00;
+  --accent2:  #FF7A3D;
+  --neon:     #00FFCC;
+  --green:    #00E87A;
+  --red:      #FF2D55;
+  --yellow:   #FFD60A;
+  --text:     #E8EAF2;
+  --muted:    #555A6E;
+  --muted2:   #383D50;
+  --glow:     0 0 28px rgba(255,77,0,0.4);
+  --glow-sm:  0 0 12px rgba(255,77,0,0.28);
+}
+html,body{height:100%;background:var(--bg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;-webkit-font-smoothing:antialiased;color:var(--text);overflow:hidden;}
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:rgba(255,77,0,0.3);border-radius:4px;}
+::-webkit-scrollbar-thumb:hover{background:var(--accent);}
+
+/* ── Layout ── */
+.app{display:flex;height:100vh;}
+
+/* ── Rail ── */
+.rail{
+  width:70px;background:var(--rail);display:flex;flex-direction:column;
+  align-items:center;padding:12px 0;gap:6px;flex-shrink:0;
+  border-right:1px solid var(--border);
+}
+.rail-item{position:relative;cursor:pointer;}
+.rail-pip{
+  position:absolute;left:-8px;top:50%;transform:translateY(-50%);
+  width:4px;background:var(--text);border-radius:0 3px 3px 0;
+  transition:height .15s,background .15s;height:0;
+}
+.rail-item:hover .rail-pip{height:12px;}
+.rail-item.active .rail-pip{height:40px;background:var(--accent);}
+.rail-icon{
+  width:48px;height:48px;border-radius:12px;background:var(--surface2);
+  display:flex;align-items:center;justify-content:center;
+  transition:border-radius .18s,transform .14s,box-shadow .18s;
+  font-weight:900;font-size:11px;overflow:hidden;border:2px solid transparent;
+}
+.rail-item:hover .rail-icon{border-radius:10px;transform:scale(1.06);}
+.rail-item.active .rail-icon{border-radius:10px;border-color:var(--accent);box-shadow:var(--glow);}
+.rail-div{width:32px;height:1px;background:var(--border);margin:2px 0;}
+.rail-discover{
+  width:48px;height:48px;border-radius:12px;
+  background:rgba(0,255,204,0.08);border:1.5px dashed rgba(0,255,204,0.25);
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;transition:all .18s;color:var(--neon);
+}
+.rail-discover:hover{border-radius:10px;background:rgba(0,255,204,0.15);border-color:var(--neon);box-shadow:0 0 16px rgba(0,255,204,0.25);}
+.rail-discover.active{border-radius:10px;background:rgba(0,255,204,0.15);border-color:var(--neon);box-shadow:0 0 16px rgba(0,255,204,0.25);}
+
+/* ── Discover panel ── */
+.discover{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+
+/* Hero */
+.hero{
+  position:relative;flex-shrink:0;overflow:hidden;
+  background:linear-gradient(135deg,#0D0510 0%,#07080C 40%,#050A0D 100%);
+  border-bottom:1px solid var(--border);
+}
+.hero-bg{
+  position:absolute;inset:0;
+  background:
+    radial-gradient(ellipse 60% 100% at 80% 50%,rgba(0,255,204,0.07) 0%,transparent 70%),
+    radial-gradient(ellipse 50% 80% at 20% 50%,rgba(255,77,0,0.07) 0%,transparent 70%);
+  pointer-events:none;
+}
+.hero-grid{
+  position:absolute;inset:0;
+  background-image:linear-gradient(rgba(255,255,255,0.018) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.018) 1px,transparent 1px);
+  background-size:40px 40px;
+  pointer-events:none;
+}
+.hero-inner{position:relative;z-index:1;padding:40px 48px 36px;}
+.hero-eyebrow{
+  font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.18em;
+  color:var(--neon);margin-bottom:10px;
+  display:flex;align-items:center;gap:8px;
+}
+.hero-eyebrow::before{content:'';display:block;width:20px;height:1.5px;background:var(--neon);border-radius:2px;box-shadow:0 0 8px rgba(0,255,204,0.6);}
+.hero-title{font-size:32px;font-weight:900;color:var(--text);letter-spacing:-.5px;line-height:1.1;margin-bottom:10px;}
+.hero-title span{color:var(--accent);text-shadow:0 0 24px rgba(255,77,0,0.4);}
+.hero-sub{font-size:14px;color:var(--muted);max-width:500px;line-height:1.6;}
+
+/* Search bar */
+.search-wrap{padding:0 48px 32px;position:relative;z-index:1;}
+.search-bar{
+  display:flex;align-items:center;gap:12px;
+  background:var(--surface2);border:1px solid var(--border);
+  border-radius:10px;padding:13px 18px;max-width:640px;
+  transition:border-color .15s,box-shadow .15s;
+}
+.search-bar:focus-within{border-color:rgba(255,77,0,0.5);box-shadow:0 0 0 1px rgba(255,77,0,0.12),var(--glow-sm);}
+.search-bar input{
+  flex:1;background:none;border:none;outline:none;font-size:15px;
+  color:var(--text);font-family:inherit;
+}
+.search-bar svg{color:var(--muted);flex-shrink:0;}
+.search-bar kbd{
+  font-size:10px;font-weight:700;color:var(--muted2);
+  border:1px solid var(--muted2);border-radius:4px;padding:2px 6px;
+  font-family:inherit;flex-shrink:0;
+}
+
+/* ── Body ── */
+.body{flex:1;overflow-y:auto;padding:0 48px 48px;}
+
+/* Category pills */
+.cat-row{
+  display:flex;gap:8px;flex-wrap:wrap;padding:24px 0 8px;
+  position:sticky;top:0;z-index:10;
+  background:linear-gradient(var(--bg) 85%,transparent);
+  padding-bottom:12px;
+}
+.cat-pill{
+  padding:6px 16px;border-radius:20px;font-size:12px;font-weight:800;
+  text-transform:uppercase;letter-spacing:.08em;cursor:pointer;
+  border:1px solid var(--border);background:var(--surface2);color:var(--muted);
+  transition:all .14s;white-space:nowrap;
+}
+.cat-pill:hover{border-color:rgba(255,77,0,0.3);color:var(--text);}
+.cat-pill.active{background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:var(--glow-sm);}
+
+/* Section label */
+.section-label{
+  font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.14em;
+  color:var(--muted);margin:24px 0 14px;display:flex;align-items:center;gap:10px;
+}
+.section-label::after{content:'';flex:1;height:1px;background:var(--border);}
+
+/* ── Featured row (horizontal scroll) ── */
+.featured-row{display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;scrollbar-width:none;}
+.featured-row::-webkit-scrollbar{display:none;}
+.feat-card{
+  flex-shrink:0;width:300px;border-radius:12px;overflow:hidden;
+  background:var(--surface2);border:1px solid var(--border);cursor:pointer;
+  transition:transform .18s,box-shadow .18s,border-color .18s;position:relative;
+}
+.feat-card:hover{transform:translateY(-3px);box-shadow:0 16px 40px rgba(0,0,0,0.5),var(--glow-sm);border-color:rgba(255,77,0,0.3);}
+.feat-banner{height:120px;position:relative;overflow:hidden;}
+.feat-banner-img{width:100%;height:100%;object-fit:cover;display:block;}
+.feat-overlay{position:absolute;inset:0;background:linear-gradient(to bottom,transparent 30%,rgba(0,0,0,0.7));}
+.feat-badge{
+  position:absolute;top:10px;right:10px;
+  font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;
+  padding:3px 8px;border-radius:4px;
+}
+.feat-body{padding:14px;}
+.feat-row{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
+.feat-icon{
+  width:44px;height:44px;border-radius:10px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  font-size:11px;font-weight:900;color:#fff;margin-top:-28px;
+  border:2.5px solid var(--surface2);box-shadow:0 4px 12px rgba(0,0,0,0.4);
+}
+.feat-name{font-size:14px;font-weight:900;color:var(--text);letter-spacing:-.1px;}
+.feat-cat{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-top:1px;}
+.feat-desc{font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:10px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.feat-stats{display:flex;gap:14px;}
+.feat-stat{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);}
+.feat-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
+.join-btn{
+  display:none;position:absolute;bottom:14px;right:14px;
+  padding:6px 14px;background:var(--accent);border:none;border-radius:6px;
+  color:#fff;font-size:11px;font-weight:900;cursor:pointer;
+  text-transform:uppercase;letter-spacing:.06em;transition:background .12s;
+}
+.feat-card:hover .join-btn{display:block;}
+.join-btn:hover{background:var(--accent2);}
+
+/* ── Grid cards ── */
+.servers-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+  gap:12px;
+}
+.srv-card{
+  background:var(--surface2);border:1px solid var(--border);border-radius:12px;
+  cursor:pointer;transition:transform .16s,box-shadow .16s,border-color .16s;
+  overflow:hidden;position:relative;
+}
+.srv-card:hover{transform:translateY(-2px);box-shadow:0 12px 30px rgba(0,0,0,0.45),var(--glow-sm);border-color:rgba(255,77,0,0.25);}
+.srv-banner{height:72px;position:relative;overflow:hidden;flex-shrink:0;}
+.srv-icon{
+  position:absolute;bottom:-16px;left:14px;
+  width:48px;height:48px;border-radius:10px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:11px;font-weight:900;color:#fff;
+  border:2.5px solid var(--surface2);box-shadow:0 4px 10px rgba(0,0,0,0.35);
+  z-index:1;
+}
+.srv-body{padding:22px 14px 14px;}
+.srv-name{font-size:13px;font-weight:900;color:var(--text);margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.srv-desc{font-size:11px;color:var(--muted);line-height:1.5;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:10px;}
+.srv-footer{display:flex;align-items:center;justify-content:space-between;}
+.srv-stats{display:flex;align-items:center;gap:10px;}
+.srv-stat{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);}
+.srv-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
+.srv-join{
+  padding:5px 12px;background:rgba(255,77,0,0.1);border:1px solid rgba(255,77,0,0.2);
+  border-radius:5px;color:var(--accent2);font-size:10px;font-weight:900;cursor:pointer;
+  text-transform:uppercase;letter-spacing:.06em;transition:all .12s;
+}
+.srv-join:hover,.srv-card:hover .srv-join{background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:var(--glow-sm);}
+.srv-tag{
+  position:absolute;top:8px;right:8px;
+  font-size:8px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;
+  padding:2px 7px;border-radius:3px;
+}
+
+/* Join modal overlay */
+.overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(6px);
+  z-index:100;display:none;align-items:center;justify-content:center;
+}
+.overlay.open{display:flex;}
+.join-modal{
+  background:var(--surface);border:1px solid rgba(255,77,0,0.2);border-radius:14px;
+  width:400px;max-width:calc(100vw - 32px);overflow:hidden;
+  box-shadow:0 24px 80px rgba(0,0,0,0.7),var(--glow);
+  animation:rise .3s cubic-bezier(.34,1.4,.64,1) both;
+}
+@keyframes rise{from{opacity:0;transform:translateY(18px) scale(.96);}to{opacity:1;transform:none;}}
+.jm-banner{height:100px;position:relative;}
+.jm-body{padding:0 24px 24px;}
+.jm-icon{
+  width:64px;height:64px;border-radius:14px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:900;color:#fff;
+  border:3px solid var(--surface);margin-top:-32px;margin-bottom:12px;
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);
+}
+.jm-name{font-size:20px;font-weight:900;color:var(--text);letter-spacing:-.2px;margin-bottom:4px;}
+.jm-cat{font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin-bottom:12px;}
+.jm-desc{font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:16px;}
+.jm-stats{display:flex;gap:20px;margin-bottom:20px;}
+.jm-stat{display:flex;flex-direction:column;gap:2px;}
+.jm-stat-val{font-size:18px;font-weight:900;color:var(--text);}
+.jm-stat-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);}
+.jm-tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px;}
+.jm-tag-pill{
+  padding:4px 10px;border-radius:4px;font-size:11px;font-weight:700;
+  background:var(--surface3);border:1px solid var(--border);color:var(--muted);
+  text-transform:uppercase;letter-spacing:.06em;
+}
+.jm-actions{display:flex;gap:8px;}
+.jm-join{
+  flex:1;padding:11px;background:var(--accent);border:none;border-radius:8px;
+  color:#fff;font-size:13px;font-weight:900;cursor:pointer;
+  text-transform:uppercase;letter-spacing:.08em;transition:background .12s,transform .1s;
+}
+.jm-join:hover{background:var(--accent2);box-shadow:var(--glow);}
+.jm-join:active{transform:scale(.98);}
+.jm-join.joined{background:rgba(0,232,122,0.18);border:1px solid rgba(0,232,122,0.35);color:var(--green);}
+.jm-cancel{
+  padding:11px 18px;background:var(--surface2);border:1px solid var(--border);
+  border-radius:8px;color:var(--muted);font-size:13px;font-weight:700;cursor:pointer;transition:all .12s;
+}
+.jm-cancel:hover{border-color:rgba(255,255,255,0.12);color:var(--text);}
+
+/* Toast */
+.toast{
+  position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);
+  background:#0A0B10;border:1px solid rgba(255,77,0,0.35);color:var(--text);
+  padding:10px 20px;border-radius:6px;font-size:12px;font-weight:700;
+  letter-spacing:.04em;text-transform:uppercase;z-index:2000;
+  transition:transform .3s cubic-bezier(.34,1.56,.64,1);pointer-events:none;
+  box-shadow:var(--glow),0 4px 20px rgba(0,0,0,0.6);
+}
+.toast.show{transform:translateX(-50%) translateY(0);}
+.toast.ok{border-color:rgba(0,232,122,0.4);}
+
+@media(max-width:700px){
+  .hero-inner,.search-wrap,.body{padding-left:20px;padding-right:20px;}
+  .hero-title{font-size:22px;}
+  .servers-grid{grid-template-columns:1fr;}
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- Rail -->
+<div class="rail">
+  <div class="rail-item" title="NexusChat HQ" onclick="toast('NexusChat HQ')">
+    <div class="rail-pip"></div>
+    <div class="rail-icon" style="background:linear-gradient(135deg,#FF4D00,#FF9500);color:#fff;letter-spacing:.04em;">NX</div>
+  </div>
+  <div class="rail-div"></div>
+  <div class="rail-item" title="Apex Legends EU" onclick="toast('Apex Legends EU')">
+    <div class="rail-pip"></div>
+    <div class="rail-icon" style="background:linear-gradient(135deg,#EF4444,#F59E0B);">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+    </div>
+  </div>
+  <div class="rail-item" title="Valorant Ranked" onclick="toast('Valorant Ranked')">
+    <div class="rail-pip"></div>
+    <div class="rail-icon" style="background:linear-gradient(135deg,#EC4899,#8B5CF6);">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    </div>
+  </div>
+  <div class="rail-div"></div>
+  <div class="rail-discover active" title="Discover Namespaces">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+  </div>
+</div>
+
+<!-- Discover -->
+<div class="discover">
+
+  <!-- Hero -->
+  <div class="hero">
+    <div class="hero-bg"></div>
+    <div class="hero-grid"></div>
+    <div class="hero-inner">
+      <div class="hero-eyebrow">Namespace Discovery</div>
+      <div class="hero-title">Find your <span>next server.</span></div>
+      <div class="hero-sub">Browse thousands of gaming communities, find your squad, and drop in — all without leaving NexusChat.</div>
+    </div>
+    <div class="search-wrap">
+      <div class="search-bar">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.8"/><path d="M10.5 10.5l3 3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <input id="search-input" type="text" placeholder="Search communities, games, topics…" oninput="onSearch(this.value)"/>
+        <kbd>⌘K</kbd>
+      </div>
+    </div>
+  </div>
+
+  <!-- Body -->
+  <div class="body" id="body">
+
+    <!-- Category pills -->
+    <div class="cat-row" id="cat-row"></div>
+
+    <!-- Featured -->
+    <div id="featured-section">
+      <div class="section-label">🔥 Featured</div>
+      <div class="featured-row" id="featured-row"></div>
+    </div>
+
+    <!-- Grid -->
+    <div id="grid-section">
+      <div class="section-label" id="grid-label">Popular Right Now</div>
+      <div class="servers-grid" id="servers-grid"></div>
+    </div>
+
+    <div id="empty-state" style="display:none;text-align:center;padding:64px 20px;color:var(--muted);">
+      <div style="font-size:40px;margin-bottom:12px;">🔭</div>
+      <div style="font-size:16px;font-weight:900;color:var(--text);margin-bottom:6px;">No results found</div>
+      <div style="font-size:13px;">Try a different search term or category.</div>
+    </div>
+
+  </div>
+</div>
+</div>
+
+<!-- Join overlay -->
+<div class="overlay" id="overlay" onclick="closeOverlay(event)">
+  <div class="join-modal" id="join-modal">
+    <div class="jm-banner" id="jm-banner"></div>
+    <div class="jm-body">
+      <div class="jm-icon" id="jm-icon"></div>
+      <div class="jm-name" id="jm-name"></div>
+      <div class="jm-cat" id="jm-cat"></div>
+      <div class="jm-desc" id="jm-desc"></div>
+      <div class="jm-stats" id="jm-stats"></div>
+      <div class="jm-tags" id="jm-tags"></div>
+      <div class="jm-actions">
+        <button class="jm-cancel" onclick="closeOverlay()">Cancel</button>
+        <button class="jm-join" id="jm-join-btn" onclick="joinServer()">Join Server</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast-el"></div>
+
+<script>
+/* ── Palette ── */
+const C=['#FF4D00','#00FFCC','#FFD60A','#FF2D55','#00E87A','#FF7A3D','#B44FFF','#00B4FF','#EC4899','#10B981','#F59E0B','#6366F1'];
+const cl=i=>C[i%C.length];
+
+/* ── Server data ── */
+const servers=[
+  {id:1,  name:'VALORANT Ranked Hub',  cat:'FPS',          col:0,  feat:true,
+   desc:'The #1 ranked Valorant community. Duo queues, agent coaching, rank verification, and weekly tournaments. Immortal+ only lobby every Friday.',
+   members:84200, online:6300, tags:['Valorant','Ranked','FPS','Coaching','Tournament'],
+   bg:'linear-gradient(135deg,#FF4D00 0%,#7C0000 100%)',
+   banner:'linear-gradient(135deg,#7C0000,#FF4D00 60%,#FF9500)',
+   badge:'HOT', badgeColor:'#FF4D00'},
+
+  {id:2,  name:'Apex Predator Lounge', cat:'Battle Royale', col:8, feat:true,
+   desc:'Elite Apex Legends server for Predator and Diamond ranked players. Scrims, coaching sessions, and the most active meta discussion outside ranked.',
+   members:52100, online:4100, tags:['Apex','Battle Royale','Scrims','Meta'],
+   bg:'linear-gradient(135deg,#EF4444,#F59E0B)',
+   banner:'linear-gradient(135deg,#7B0000,#EF4444 60%,#F59E0B)',
+   badge:'TOP', badgeColor:'#FFD60A'},
+
+  {id:3,  name:'CS2 Fraggers Only',    cat:'FPS',          col:3, feat:true,
+   desc:"Premier CS2 community for serious players. Pugs, coaching, VOD review, and monthly 5v5 leagues. We don't carry — we grind.",
+   members:138000, online:9800, tags:['CS2','FPS','Pugs','5v5','Coaching'],
+   bg:'linear-gradient(135deg,#FF2D55,#B44FFF)',
+   banner:'linear-gradient(135deg,#4B0030,#FF2D55 60%,#B44FFF)',
+   badge:'LARGE', badgeColor:'#B44FFF'},
+
+  {id:4,  name:'LoL Diamond Duo',      cat:'MOBA',         col:11, feat:false,
+   desc:'Find your next Diamond duo in League of Legends. Role-specific channels, patch notes, and tier list debates 24/7.',
+   members:61000, online:2900, tags:['League','MOBA','Duo','Diamond'],
+   bg:'linear-gradient(135deg,#6366F1,#00B4FF)',
+   banner:'linear-gradient(135deg,#1a0060,#6366F1 60%,#00B4FF)'},
+
+  {id:5,  name:'Minecraft SMP Network', cat:'Sandbox',     col:9, feat:false,
+   desc:'Whitelisted survival SMP with custom plugins, player economy, land claiming, and seasonal events. Family-friendly, zero griefing.',
+   members:29400, online:1200, tags:['Minecraft','SMP','Survival','Economy'],
+   bg:'linear-gradient(135deg,#10B981,#3B82F6)',
+   banner:'linear-gradient(135deg,#003322,#10B981 60%,#3B82F6)'},
+
+  {id:6,  name:'Overwatch 2 Masters',  cat:'FPS',          col:7, feat:false,
+   desc:'High-level OW2 analysis, role queue coaching, and scrimmages. Rank verification required. Masters+ encouraged.',
+   members:43800, online:1800, tags:['Overwatch','FPS','Coaching','Masters'],
+   bg:'linear-gradient(135deg,#00B4FF,#6366F1)',
+   banner:'linear-gradient(135deg,#001a3d,#00B4FF 60%,#6366F1)'},
+
+  {id:7,  name:'Fortnite Build Wars',  cat:'Battle Royale', col:2, feat:false,
+   desc:'Creative build maps, zone wars, and live scrims for competitive Fortnite players. Weekly cash cups sign-ups inside.',
+   members:97500, online:5600, tags:['Fortnite','Build','Creative','Tournament'],
+   bg:'linear-gradient(135deg,#FFD60A,#FF7A3D)',
+   banner:'linear-gradient(135deg,#3d2800,#FFD60A 60%,#FF7A3D)'},
+
+  {id:8,  name:'Rocket League Pros',   cat:'Sports',       col:5, feat:false,
+   desc:'Training routines, replay analysis, car setup guides, and ranked match-ups for Diamond through Grand Champ.',
+   members:38600, online:1500, tags:['Rocket League','Mechanics','Ranked'],
+   bg:'linear-gradient(135deg,#FF7A3D,#FF2D55)',
+   banner:'linear-gradient(135deg,#3d0800,#FF7A3D 60%,#FF2D55)'},
+
+  {id:9,  name:'Elden Ring Lore Vault', cat:'RPG',         col:6, feat:false,
+   desc:'Soulsborne lore deep dives, boss strategies, PvP builds, and co-op help. All Soulsborne titles welcome.',
+   members:55200, online:2100, tags:['Elden Ring','FromSoft','PvP','Lore','Co-op'],
+   bg:'linear-gradient(135deg,#B44FFF,#FF2D55)',
+   banner:'linear-gradient(135deg,#1a0040,#B44FFF 60%,#FF2D55)'},
+
+  {id:10, name:'Dota 2 Ancient Stack', cat:'MOBA',         col:11, feat:false,
+   desc:'Ancient-bracket Dota 2 community. Coaching nights every Tuesday, replay reviews, and ranked MMR groups.',
+   members:22100, online:890, tags:['Dota 2','MOBA','Coaching','Ancient'],
+   bg:'linear-gradient(135deg,#6366F1,#B44FFF)',
+   banner:'linear-gradient(135deg,#0d0040,#6366F1 60%,#B44FFF)'},
+
+  {id:11, name:'Speedrun HQ',           cat:'Variety',     col:1, feat:false,
+   desc:'Any% and category extension speedrunning across all games. Submit runs, get verified, compete on live leaderboards.',
+   members:18900, online:540, tags:['Speedrun','Any%','Leaderboard'],
+   bg:'linear-gradient(135deg,#00FFCC,#00B4FF)',
+   banner:'linear-gradient(135deg,#003330,#00FFCC 60%,#00B4FF)'},
+
+  {id:12, name:'Retro Gaming Vault',    cat:'Variety',     col:10, feat:false,
+   desc:'NES to PS2 — classic game discussions, emulation guides, ROM hack releases, and retro tournament brackets.',
+   members:14300, online:320, tags:['Retro','Emulation','Classic','NES','SNES'],
+   bg:'linear-gradient(135deg,#F59E0B,#10B981)',
+   banner:'linear-gradient(135deg,#2d1600,#F59E0B 60%,#10B981)'},
+];
+
+const categories=['All','FPS','Battle Royale','MOBA','RPG','Sandbox','Sports','Variety'];
+let activeCategory='All';
+let searchQuery='';
+let joinedIds=new Set();
+let currentServer=null;
+let tt;
+
+/* ── Toast ── */
+function toast(msg,type=''){
+  const el=document.getElementById('toast-el');
+  el.textContent=msg; el.className='toast'+(type?' '+type:'');
+  requestAnimationFrame(()=>requestAnimationFrame(()=>el.classList.add('show')));
+  clearTimeout(tt); tt=setTimeout(()=>el.classList.remove('show'),2600);
+}
+
+/* ── Filter ── */
+function filtered(){
+  return servers.filter(s=>{
+    const catMatch=activeCategory==='All'||s.cat===activeCategory;
+    const q=searchQuery.toLowerCase();
+    const textMatch=!q||s.name.toLowerCase().includes(q)||s.cat.toLowerCase().includes(q)||s.tags.some(t=>t.toLowerCase().includes(q));
+    return catMatch&&textMatch;
+  });
+}
+
+/* ── Format numbers ── */
+function fmt(n){return n>=1000?(n/1000).toFixed(n>=10000?0:1)+'K':n;}
+
+/* ── Render categories ── */
+function renderCats(){
+  const el=document.getElementById('cat-row');
+  el.innerHTML=categories.map(c=>`
+    <div class="cat-pill${activeCategory===c?' active':''}" onclick="selectCat('${c}')">${c}</div>
+  `).join('');
+}
+function selectCat(c){
+  activeCategory=c; renderCats(); renderAll();
+}
+
+/* ── Render featured ── */
+function renderFeatured(list){
+  const featSection=document.getElementById('featured-section');
+  const featured=list.filter(s=>s.feat);
+  if(!featured.length||searchQuery){featSection.style.display='none';return;}
+  featSection.style.display='block';
+  document.getElementById('featured-row').innerHTML=featured.map(s=>`
+    <div class="feat-card" onclick="openServer(${s.id})">
+      <div class="feat-banner" style="background:${s.banner};">
+        <div class="feat-overlay"></div>
+        ${s.badge?`<div class="feat-badge" style="background:${s.badgeColor}22;border:1px solid ${s.badgeColor}55;color:${s.badgeColor};">${s.badge}</div>`:''}
+      </div>
+      <div class="feat-body">
+        <div class="feat-row">
+          <div class="feat-icon" style="background:${s.bg};">${s.name.slice(0,2).toUpperCase()}</div>
+          <div>
+            <div class="feat-name">${s.name}</div>
+            <div class="feat-cat">${s.cat}</div>
+          </div>
+        </div>
+        <div class="feat-desc">${s.desc}</div>
+        <div class="feat-stats">
+          <div class="feat-stat"><div class="feat-dot" style="background:#00E87A;box-shadow:0 0 5px rgba(0,232,122,0.5);"></div>${fmt(s.online)} online</div>
+          <div class="feat-stat"><div class="feat-dot" style="background:var(--muted2);"></div>${fmt(s.members)} members</div>
+        </div>
+      </div>
+      <button class="join-btn" onclick="event.stopPropagation();quickJoin(${s.id})">${joinedIds.has(s.id)?'Joined ✓':'Join'}</button>
+    </div>
+  `).join('');
+}
+
+/* ── Render grid ── */
+function renderGrid(list){
+  const gridSection=document.getElementById('grid-section');
+  const gridLabel=document.getElementById('grid-label');
+  const grid=list.filter(s=>!s.feat||searchQuery||activeCategory!=='All');
+  const allList=searchQuery||activeCategory!=='All'?list:list.filter(s=>!s.feat);
+  if(!allList.length){gridSection.style.display='none';return;}
+  gridSection.style.display='block';
+  gridLabel.textContent=searchQuery?`Results for "${searchQuery}"`:activeCategory!=='All'?`${activeCategory} Servers`:'Popular Right Now';
+
+  document.getElementById('servers-grid').innerHTML=allList.map(s=>`
+    <div class="srv-card" onclick="openServer(${s.id})">
+      <div class="srv-banner" style="background:${s.banner};">
+        ${s.badge?`<div class="srv-tag" style="background:${s.badgeColor}22;border:1px solid ${s.badgeColor}55;color:${s.badgeColor};">${s.badge}</div>`:''}
+      </div>
+      <div class="srv-icon" style="background:${s.bg};">${s.name.slice(0,2).toUpperCase()}</div>
+      <div class="srv-body">
+        <div class="srv-name">${s.name}</div>
+        <div class="srv-desc">${s.desc}</div>
+        <div class="srv-footer">
+          <div class="srv-stats">
+            <div class="srv-stat"><div class="srv-dot" style="background:#00E87A;box-shadow:0 0 4px rgba(0,232,122,0.5);"></div>${fmt(s.online)}</div>
+            <div class="srv-stat"><div class="srv-dot" style="background:var(--muted2);"></div>${fmt(s.members)}</div>
+          </div>
+          <button class="srv-join" onclick="event.stopPropagation();quickJoin(${s.id})">${joinedIds.has(s.id)?'✓ Joined':'Join'}</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderAll(){
+  const list=filtered();
+  const empty=document.getElementById('empty-state');
+  renderFeatured(list);
+  renderGrid(list);
+  empty.style.display=!list.length?'block':'none';
+}
+
+/* ── Search ── */
+function onSearch(q){
+  searchQuery=q.trim();
+  renderAll();
+}
+
+/* ── Quick join (from card button) ── */
+function quickJoin(id){
+  const s=servers.find(x=>x.id===id);
+  if(joinedIds.has(id)){toast(`Already in ${s.name}`);return;}
+  joinedIds.add(id);
+  renderAll();
+  toast(`Joined ${s.name}!`,'ok');
+}
+
+/* ── Open server modal ── */
+function openServer(id){
+  const s=servers.find(x=>x.id===id);
+  if(!s) return;
+  currentServer=s;
+
+  document.getElementById('jm-banner').style.background=s.banner;
+  document.getElementById('jm-icon').style.background=s.bg;
+  document.getElementById('jm-icon').textContent=s.name.slice(0,2).toUpperCase();
+  document.getElementById('jm-name').textContent=s.name;
+  document.getElementById('jm-cat').textContent=s.cat.toUpperCase();
+  document.getElementById('jm-desc').textContent=s.desc;
+  document.getElementById('jm-stats').innerHTML=`
+    <div class="jm-stat">
+      <div class="jm-stat-val" style="color:#00E87A;">${fmt(s.online)}</div>
+      <div class="jm-stat-lbl">Online Now</div>
+    </div>
+    <div class="jm-stat">
+      <div class="jm-stat-val">${fmt(s.members)}</div>
+      <div class="jm-stat-lbl">Members</div>
+    </div>
+    <div class="jm-stat">
+      <div class="jm-stat-val" style="color:var(--accent2);">${s.cat}</div>
+      <div class="jm-stat-lbl">Category</div>
+    </div>
+  `;
+  document.getElementById('jm-tags').innerHTML=s.tags.map(t=>`<div class="jm-tag-pill">${t}</div>`).join('');
+
+  const btn=document.getElementById('jm-join-btn');
+  if(joinedIds.has(id)){
+    btn.textContent='Joined ✓'; btn.classList.add('joined');
+  } else {
+    btn.textContent='Join Server'; btn.classList.remove('joined');
+  }
+
+  document.getElementById('overlay').classList.add('open');
+}
+function closeOverlay(e){
+  if(!e||e.target===document.getElementById('overlay'))
+    document.getElementById('overlay').classList.remove('open');
+}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')document.getElementById('overlay').classList.remove('open');});
+
+function joinServer(){
+  if(!currentServer) return;
+  const btn=document.getElementById('jm-join-btn');
+  if(joinedIds.has(currentServer.id)){
+    toast(`You're already in ${currentServer.name}`); return;
+  }
+  joinedIds.add(currentServer.id);
+  btn.textContent='Joined ✓'; btn.classList.add('joined');
+  renderAll();
+  toast(`Welcome to ${currentServer.name}!`,'ok');
+  setTimeout(()=>document.getElementById('overlay').classList.remove('open'),900);
+}
+
+/* ── Init ── */
+renderCats();
+renderAll();
+</script>
+</body>
+</html>
