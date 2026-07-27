@@ -1237,6 +1237,17 @@ impl CapabilityStore for MemoryStore {
         *epoch += 1;
         Ok(*epoch)
     }
+
+    async fn revoke_grants_for_namespace(&self, ns: &str) -> Result<u64, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let ns_scope = format!("ns:{ns}");
+        let chan_prefix = format!("#{ns}/");
+        let before = inner.grants.len();
+        inner
+            .grants
+            .retain(|(_, scope), _| *scope != ns_scope && !scope.starts_with(&chan_prefix));
+        Ok((before - inner.grants.len()) as u64)
+    }
 }
 
 #[async_trait]

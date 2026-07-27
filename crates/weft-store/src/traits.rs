@@ -374,6 +374,12 @@ pub trait CapabilityStore: Send + Sync {
     /// Bump and return the new epoch — invalidates every grant/token at the
     /// scope issued before it (§10.4).
     async fn bump_epoch(&self, scope: &str) -> Result<u64, StoreError>;
+
+    /// Remove every grant belonging to namespace `ns` — its `ns:<ns>` scope plus
+    /// any `#<ns>/<chan>` channel scope — across all subjects. Used by NS DELETE
+    /// so a namespace recreated under the same name can't inherit stale grants
+    /// (the grant record is the enforcement fast path, §10.4). Returns the count.
+    async fn revoke_grants_for_namespace(&self, ns: &str) -> Result<u64, StoreError>;
 }
 
 /// Invite lifecycle (§6.5).

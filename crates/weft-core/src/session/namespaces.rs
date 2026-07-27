@@ -738,6 +738,15 @@ impl<S: ControlStream> Session<S> {
             .invites
             .revoke_invites_for_namespace(name.as_str())
             .await;
+        // Grant records are the enforcement fast path (§10.4) and key by subject,
+        // not scope — so a role/direct grant at `ns:<name>` or `#<name>/<chan>`
+        // survives the role-definition delete above. Purge them by namespace so a
+        // recreated same-name namespace can't resurrect a former admin's caps.
+        let _ = self
+            .ctx
+            .caps
+            .revoke_grants_for_namespace(name.as_str())
+            .await;
 
         if let Err(e) = self.ctx.namespaces.delete_namespace(&name).await {
             return self.internal(label, &e).await;

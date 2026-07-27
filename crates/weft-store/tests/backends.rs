@@ -1105,6 +1105,60 @@ where
         .is_none());
     assert!(store.invite(&other).await.unwrap().is_some()); // other namespace untouched
 
+    // Bulk grant revoke by namespace (the NS DELETE cascade): drops grant records
+    // at the namespace scope + its channel scopes across subjects, leaving other
+    // scopes untouched — so a recreated same-name namespace inherits no ghosts.
+    let gns = format!("grantns-{tag}");
+    store
+        .record_grant(
+            &format!("gm-a-{tag}"),
+            &format!("ns:{gns}"),
+            &["ban".into()],
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .record_grant(
+            &format!("gm-b-{tag}"),
+            &format!("#{gns}/general"),
+            &["send".into()],
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .record_grant(
+            &format!("gm-c-{tag}"),
+            &format!("ns:keepgrant-{tag}"),
+            &["send".into()],
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.revoke_grants_for_namespace(&gns).await.unwrap(), 2);
+    assert!(store
+        .grants_at_scope(&format!("ns:{gns}"))
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .grants_at_scope(&format!("#{gns}/general"))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .grants_at_scope(&format!("ns:keepgrant-{tag}"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
     // -- namespaces (§2.1, §2.2) --
     let ns: weft_proto::NamespaceName = format!("gaming{tag}").parse().unwrap();
     assert!(store
