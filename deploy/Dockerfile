@@ -6,7 +6,7 @@
 # ---- builder: browser client (wasm + SPA) + weftd ----
 FROM rust:1-bookworm AS builder
 
-# Node 20 (SvelteKit build), pnpm, and the wasm toolchain (the client bundles a
+# Node (SvelteKit build), pnpm, and the wasm toolchain (the client bundles a
 # wasm build of weft-client-wasm — see client/package.json `build:web`).
 #
 # Install Node from the official nodejs.org **tarball**, NOT the NodeSource apt
@@ -15,7 +15,10 @@ FROM rust:1-bookworm AS builder
 # error mid-build. The static tarball has no apt-repo/signing dependency, is
 # well-mirrored, and pins an exact version for reproducibility. All network fetches
 # retry to ride out transient CDN blips.
-ENV NODE_VERSION=20.18.1
+#
+# Must satisfy Vite 8's engine floor (Node >=20.19 or >=22.12, per client's
+# `vite ^8`); we track the 22 LTS line.
+ENV NODE_VERSION=22.19.0
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates xz-utils \
  && rm -rf /var/lib/apt/lists/* \
