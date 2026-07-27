@@ -506,7 +506,7 @@ async fn account_detail_carries_devices_and_related_and_channel_roster() {
     // A channel with alice + bob as persistent members.
     let chan: weft_proto::ChannelName = "#team".parse().unwrap();
     store
-        .upsert_channel(&chan, RetentionPolicy::Permanent, ChannelKind::Text)
+        .upsert_channel(&chan, "", RetentionPolicy::Permanent, ChannelKind::Text)
         .await
         .unwrap();
     store.set_membership(&alice, &chan).await.unwrap();
@@ -1405,6 +1405,7 @@ async fn channel_freeze_and_typed_name_delete() {
     store
         .upsert_channel(
             &channel,
+            "",
             weft_proto::RetentionPolicy::Permanent,
             weft_proto::ChannelKind::Text,
         )
@@ -1608,8 +1609,12 @@ async fn namespace_detail_and_operator_takeover() {
             .unwrap();
     }
     let ns: weft_proto::NamespaceName = "gaming".parse().unwrap();
+    // v0.13: channels + scopes are keyed by the immutable id; the vanity is the
+    // route/display name. Keep the seeded channel's ns segment == the record id.
+    let ns_id = "01arz3ndektsv4rrffq69g5fav";
     store
         .create_namespace(NamespaceRecord {
+            id: ns_id.to_string(),
             name: ns.clone(),
             owner: "owner".parse().unwrap(),
             root_key: "OLDROOTKEY".to_string(),
@@ -1628,7 +1633,8 @@ async fn namespace_detail_and_operator_takeover() {
         .unwrap();
     store
         .upsert_channel(
-            &"#gaming/general".parse().unwrap(),
+            &format!("#{ns_id}/general").parse().unwrap(),
+            "general",
             weft_proto::RetentionPolicy::Permanent,
             weft_proto::ChannelKind::Text,
         )
@@ -1654,8 +1660,49 @@ async fn namespace_detail_and_operator_takeover() {
             .unwrap(),
     )
     .await;
-    assert!(detail.contains("#gaming/general"), "{detail}");
+    assert!(detail.contains(&format!("#{ns_id}/general")), "{detail}");
     assert!(detail.contains("\"owner\":\"owner\"") && detail.contains("\"recovery_set\":false"));
+    // §2.3 vanity lock: exposed in the detail, default off.
+    assert!(detail.contains("\"vanity_locked\":false"), "{detail}");
+
+    // Reserve the vanity, then the detail + the reserved-names list reflect it.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/gaming/vanity-lock",
+            &cookie,
+            r#"{"locked":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let detail = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/v1/namespaces/gaming/detail", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(detail.contains("\"vanity_locked\":true"), "{detail}");
+    let locks = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/v1/vanity-locks", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(locks.contains("gaming"), "{locks}");
+    // Release it by name (works even for a namespace-less reservation).
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/vanity-locks",
+            &cookie,
+            r#"{"name":"gaming","locked":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
     // Auto-federation refuses to open on a non-public namespace rather than
     // storing a flag that silently does nothing.
@@ -1748,8 +1795,11 @@ async fn admin_assigns_and_unassigns_a_namespace_role() {
             .unwrap();
     }
     let ns: weft_proto::NamespaceName = "gaming".parse().unwrap();
+    let ns_id = "01arz3ndektsv4rrffq69g5fav";
+    let ns_scope = format!("ns:{ns_id}");
     store
         .create_namespace(NamespaceRecord {
+            id: ns_id.to_string(),
             name: ns.clone(),
             owner: "owner".parse().unwrap(),
             root_key: "ROOT".into(),
@@ -1766,14 +1816,15 @@ async fn admin_assigns_and_unassigns_a_namespace_role() {
         })
         .await
         .unwrap();
-    // bob is a member; a "mod" role grants `ban`.
+    // bob is a member; a "mod" role grants `ban`. Membership + role scope are
+    // keyed by the ns id (v0.13).
     store
-        .set_ns_membership(&"bob".parse().unwrap(), &ns, 0)
+        .set_ns_membership(&"bob".parse().unwrap(), ns_id, 0)
         .await
         .unwrap();
     store
         .set_role(
-            "ns:gaming",
+            &ns_scope,
             "mod",
             "#e8b93d",
             &["ban".to_string()],
@@ -1808,7 +1859,7 @@ async fn admin_assigns_and_unassigns_a_namespace_role() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
     assert!(store
-        .role_members("ns:gaming", "mod")
+        .role_members(&ns_scope, "mod")
         .await
         .unwrap()
         .contains(&"bob".to_string()));
@@ -1819,7 +1870,7 @@ async fn admin_assigns_and_unassigns_a_namespace_role() {
         .unwrap();
     assert!(
         store
-            .grants_at_scope("ns:gaming")
+            .grants_at_scope(&ns_scope)
             .await
             .unwrap()
             .iter()
@@ -1852,13 +1903,13 @@ async fn admin_assigns_and_unassigns_a_namespace_role() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
     assert!(store
-        .role_members("ns:gaming", "mod")
+        .role_members(&ns_scope, "mod")
         .await
         .unwrap()
         .is_empty());
     assert!(
         store
-            .grants_at_scope("ns:gaming")
+            .grants_at_scope(&ns_scope)
             .await
             .unwrap()
             .iter()

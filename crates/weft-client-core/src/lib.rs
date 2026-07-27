@@ -212,6 +212,9 @@ pub enum ClientEvent {
     /// `ROLE <scope> <color> <caps> :<name>` — a role definition (§6.5).
     Role {
         scope: String,
+        /// Stable role ULID id (v0.13) — the identity commands address; `name`
+        /// is the mutable display label.
+        role: String,
         color: String,
         caps: String,
         hoist: bool,
@@ -233,6 +236,9 @@ pub enum ClientEvent {
     },
     /// `NS-META` — a namespace descriptor (DISCOVER result / ns update, §7).
     NsMeta {
+        /// Stable namespace ULID id (v0.13) — the identity commands address.
+        id: String,
+        /// The mutable per-network-unique vanity name (display + IRC addressing).
         name: String,
         visibility: String,
         owner: Option<String>,
@@ -255,6 +261,8 @@ pub enum ClientEvent {
         category: Option<String>,
         position: i64,
         channel_kind: String,
+        /// Human display name for the channel (v0.13); empty for none.
+        vanity: String,
     },
     /// `CHANNEL-RENAMED <#old> <#new>` — a channel changed identity (§6.3).
     ChannelRenamed {
@@ -807,6 +815,7 @@ pub fn on_line<E: EventSink>(
         }),
         Event::Role {
             scope,
+            role,
             color,
             caps,
             hoist,
@@ -815,6 +824,7 @@ pub fn on_line<E: EventSink>(
             name,
         } => sink.emit(ClientEvent::Role {
             scope,
+            role: role.to_string(),
             color,
             caps,
             hoist,
@@ -841,7 +851,8 @@ pub fn on_line<E: EventSink>(
             value,
         }),
         Event::NsMeta {
-            name,
+            id,
+            vanity,
             visibility,
             owner,
             title,
@@ -852,7 +863,8 @@ pub fn on_line<E: EventSink>(
             federation,
             ..
         } => sink.emit(ClientEvent::NsMeta {
-            name: name.to_string(),
+            id: id.to_string(),
+            name: vanity.to_string(),
             visibility: visibility.to_string(),
             owner,
             title,
@@ -868,11 +880,13 @@ pub fn on_line<E: EventSink>(
             category,
             position,
             kind,
+            vanity,
         } => sink.emit(ClientEvent::ChannelLayout {
             channel: channel.to_string(),
             category,
             position,
             channel_kind: kind.to_string(),
+            vanity,
         }),
         Event::ChannelRenamed { old, new } => sink.emit(ClientEvent::ChannelRenamed {
             old: old.to_string(),
@@ -1466,10 +1480,9 @@ pub fn build_grants_at(scope: &str) -> Result<String, String> {
 /// `NS INFO MEMBERS <ns>` — the moderator roster (members + join times +
 /// assigned roles) as a `BATCH` of `NS-MEMBER-INFO`.
 pub fn build_ns_info_members(namespace: &str) -> Result<String, String> {
-    let name: weft_proto::NamespaceName =
-        namespace.parse().map_err(|_| "bad namespace".to_string())?;
+    let ns: weft_proto::NamespaceId = namespace.parse().map_err(|_| "bad namespace".to_string())?;
     Request::new(Command::NsInfo {
-        name,
+        ns,
         detail: NsInfoKind::Members,
     })
     .serialize()
@@ -1500,52 +1513,73 @@ pub fn build_role_create(
 }
 
 pub fn build_roles_reorder(scope: &str, order: &[String]) -> Result<String, String> {
+    // Order is a list of role **ids** (v0.13).
+    let order = order
+        .iter()
+        .map(|r| {
+            r.parse::<weft_proto::RoleId>()
+                .map_err(|_| "bad role id".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Request::new(Command::RolesReorder {
         scope: scope.to_string(),
-        order: order.to_vec(),
+        order,
     })
     .serialize()
     .map_err(|e| e.to_string())
 }
 
-pub fn build_role_delete(scope: &str, name: &str) -> Result<String, String> {
+pub fn build_role_delete(scope: &str, role: &str) -> Result<String, String> {
     Request::new(Command::RoleDelete {
         scope: scope.to_string(),
+        role: role.parse().map_err(|_| "bad role id".to_string())?,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `ROLE UPDATE <scope> <role-id> …` — edit a role in place by its id (v0.13);
+/// subsumes the old `ROLE RENAME` (pass the new label as `name`).
+#[allow(clippy::too_many_arguments)]
+pub fn build_role_update(
+    scope: &str,
+    role: &str,
+    color: &str,
+    caps: &str,
+    hoist: bool,
+    pingable: bool,
+    position: i32,
+    name: &str,
+) -> Result<String, String> {
+    Request::new(Command::RoleUpdate {
+        scope: scope.to_string(),
+        role: role.parse().map_err(|_| "bad role id".to_string())?,
+        color: color.to_string(),
+        caps: caps.to_string(),
+        hoist,
+        pingable,
+        position,
         name: name.to_string(),
     })
     .serialize()
     .map_err(|e| e.to_string())
 }
 
-pub fn build_role_rename(scope: &str, old: &str, new: &str) -> Result<String, String> {
-    // Both names ride one trailing as a comma pair, so neither may contain one.
-    if old.contains(',') || new.contains(',') {
-        return Err("a role name cannot contain a comma".to_string());
-    }
-    Request::new(Command::RoleRename {
-        scope: scope.to_string(),
-        old: old.to_string(),
-        new: new.to_string(),
-    })
-    .serialize()
-    .map_err(|e| e.to_string())
-}
-
-pub fn build_role_assign(scope: &str, account: &str, name: &str) -> Result<String, String> {
+pub fn build_role_assign(scope: &str, account: &str, role: &str) -> Result<String, String> {
     Request::new(Command::RoleAssign {
         scope: scope.to_string(),
         account: account.parse().map_err(|_| "bad account".to_string())?,
-        name: name.to_string(),
+        role: role.parse().map_err(|_| "bad role id".to_string())?,
     })
     .serialize()
     .map_err(|e| e.to_string())
 }
 
-pub fn build_role_unassign(scope: &str, account: &str, name: &str) -> Result<String, String> {
+pub fn build_role_unassign(scope: &str, account: &str, role: &str) -> Result<String, String> {
     Request::new(Command::RoleUnassign {
         scope: scope.to_string(),
         account: account.parse().map_err(|_| "bad account".to_string())?,
-        name: name.to_string(),
+        role: role.parse().map_err(|_| "bad role id".to_string())?,
     })
     .serialize()
     .map_err(|e| e.to_string())
@@ -1571,7 +1605,7 @@ pub fn build_pins(channel: &str) -> Result<String, String> {
 
 /// `EMOJI ADD <ns> <name> <media>` — add/replace a namespace custom emoji.
 pub fn build_emoji_add(namespace: &str, name: &str, media: &str) -> Result<String, String> {
-    let namespace: weft_proto::NamespaceName =
+    let namespace: weft_proto::NamespaceId =
         namespace.parse().map_err(|_| "bad namespace".to_string())?;
     Request::new(Command::EmojiAdd {
         namespace,
@@ -1584,7 +1618,7 @@ pub fn build_emoji_add(namespace: &str, name: &str, media: &str) -> Result<Strin
 
 /// `EMOJI REMOVE <ns> <name>` — remove a namespace custom emoji.
 pub fn build_emoji_remove(namespace: &str, name: &str) -> Result<String, String> {
-    let namespace: weft_proto::NamespaceName =
+    let namespace: weft_proto::NamespaceId =
         namespace.parse().map_err(|_| "bad namespace".to_string())?;
     Request::new(Command::EmojiRemove {
         namespace,
@@ -1596,7 +1630,7 @@ pub fn build_emoji_remove(namespace: &str, name: &str) -> Result<String, String>
 
 /// `EMOJI LIST <ns>` — a namespace's custom emoji as a `BATCH`.
 pub fn build_emoji_list(namespace: &str) -> Result<String, String> {
-    let namespace: weft_proto::NamespaceName =
+    let namespace: weft_proto::NamespaceId =
         namespace.parse().map_err(|_| "bad namespace".to_string())?;
     Request::new(Command::EmojiList { namespace })
         .serialize()
@@ -1912,7 +1946,7 @@ pub fn build_discover(cursor: Option<String>) -> Result<String, String> {
 
 /// `CHANNELS <ns>` — a namespace's ordered channel layout (§6.2).
 pub fn build_channels(namespace: &str) -> Result<String, String> {
-    let namespace: weft_proto::NamespaceName =
+    let namespace: weft_proto::NamespaceId =
         namespace.parse().map_err(|_| "bad namespace".to_string())?;
     Request::new(Command::Channels { namespace })
         .serialize()
@@ -2011,14 +2045,14 @@ pub fn build_history(
 
 /// `NS CREATE <name> <tier>` with `@root=<b64-pubkey>` (§6.2). The keypair is
 /// generated + stored by [`crate::keys`]; only the public key rides the wire.
-pub fn build_ns_create(name: &str, visibility: &str, root_key: &str) -> Result<String, String> {
-    let name: weft_proto::NamespaceName =
-        name.parse().map_err(|_| "bad namespace name".to_string())?;
+pub fn build_ns_create(vanity: &str, visibility: &str, root_key: &str) -> Result<String, String> {
+    let vanity: weft_proto::VanityName =
+        vanity.parse().map_err(|_| "bad vanity name".to_string())?;
     let visibility: weft_proto::Visibility = visibility
         .parse()
         .map_err(|_| "bad visibility".to_string())?;
     Request::new(Command::NsCreate {
-        name,
+        vanity,
         visibility,
         root_key: root_key.to_string(),
     })
@@ -2026,10 +2060,11 @@ pub fn build_ns_create(name: &str, visibility: &str, root_key: &str) -> Result<S
     .map_err(|e| e.to_string())
 }
 
-/// `NS META <name> <key> :<value>` — title/description/icon (§6.2).
-pub fn build_ns_meta(name: &str, key: &str, value: &str) -> Result<String, String> {
+/// `NS META <ns-id> <key> :<value>` — title/description/icon/vanity (§6.2). The
+/// `vanity` key renames the namespace's mutable label (v0.13).
+pub fn build_ns_meta(ns: &str, key: &str, value: &str) -> Result<String, String> {
     Request::new(Command::NsMeta {
-        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        ns: ns.parse().map_err(|_| "bad namespace id".to_string())?,
         key: key.to_string(),
         value: value.to_string(),
     })
@@ -2060,9 +2095,9 @@ pub fn build_federate(target: &str, invite: Option<&str>) -> Result<String, Stri
 }
 
 /// `NS VISIBILITY <name> <tier>` (§6.2).
-pub fn build_ns_visibility(name: &str, visibility: &str) -> Result<String, String> {
+pub fn build_ns_visibility(ns: &str, visibility: &str) -> Result<String, String> {
     Request::new(Command::NsVisibility {
-        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        ns: ns.parse().map_err(|_| "bad namespace id".to_string())?,
         visibility: visibility
             .parse()
             .map_err(|_| "bad visibility".to_string())?,
@@ -2071,10 +2106,10 @@ pub fn build_ns_visibility(name: &str, visibility: &str) -> Result<String, Strin
     .map_err(|e| e.to_string())
 }
 
-/// `NS DELEGATE <name> <subject> <caps>` — delegate ns caps (§6.2).
-pub fn build_ns_delegate(name: &str, subject: &str, caps: &str) -> Result<String, String> {
+/// `NS DELEGATE <ns-id> <subject> <caps>` — delegate ns caps (§6.2).
+pub fn build_ns_delegate(ns: &str, subject: &str, caps: &str) -> Result<String, String> {
     Request::new(Command::NsDelegate {
-        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        ns: ns.parse().map_err(|_| "bad namespace id".to_string())?,
         subject: subject.to_string(),
         caps: caps.to_string(),
     })
@@ -2082,30 +2117,27 @@ pub fn build_ns_delegate(name: &str, subject: &str, caps: &str) -> Result<String
     .map_err(|e| e.to_string())
 }
 
-/// `NS DELETE <name> <name>` — confirmed by repetition (§6.2).
-pub fn build_ns_delete(name: &str) -> Result<String, String> {
-    let name: weft_proto::NamespaceName = name.parse().map_err(|_| "bad namespace".to_string())?;
-    Request::new(Command::NsDelete {
-        name: name.clone(),
-        confirm: name,
-    })
-    .serialize()
-    .map_err(|e| e.to_string())
-}
-
-/// `NS LEAVE <name>` — drop your own membership in a namespace (§6.2).
-pub fn build_ns_leave(name: &str) -> Result<String, String> {
-    let name: weft_proto::NamespaceName = name.parse().map_err(|_| "bad namespace".to_string())?;
-    Request::new(Command::NsLeave { name })
+/// `NS DELETE <ns-id> <ns-id>` — confirmed by repetition (§6.2).
+pub fn build_ns_delete(ns: &str) -> Result<String, String> {
+    let ns: weft_proto::NamespaceId = ns.parse().map_err(|_| "bad namespace id".to_string())?;
+    Request::new(Command::NsDelete { ns, confirm: ns })
         .serialize()
         .map_err(|e| e.to_string())
 }
 
-/// `NS TRANSFER <name> <account>` with `@sig=` — root-signed succession (§2.4).
+/// `NS LEAVE <ns-id>` — drop your own membership in a namespace (§6.2).
+pub fn build_ns_leave(ns: &str) -> Result<String, String> {
+    let ns: weft_proto::NamespaceId = ns.parse().map_err(|_| "bad namespace id".to_string())?;
+    Request::new(Command::NsLeave { ns })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `NS TRANSFER <ns-id> <account>` with `@sig=` — root-signed succession (§2.4).
 /// The signature is produced from the stored root key by the caller.
-pub fn build_ns_transfer(name: &str, new_owner: &str, signature: &str) -> Result<String, String> {
+pub fn build_ns_transfer(ns: &str, new_owner: &str, signature: &str) -> Result<String, String> {
     Request::new(Command::NsTransfer {
-        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        ns: ns.parse().map_err(|_| "bad namespace id".to_string())?,
         new_owner: new_owner.parse().map_err(|_| "bad account".to_string())?,
         signature: signature.to_string(),
     })
@@ -2113,10 +2145,10 @@ pub fn build_ns_transfer(name: &str, new_owner: &str, signature: &str) -> Result
     .map_err(|e| e.to_string())
 }
 
-/// `NS RECOVERY SET <name> <m> <keys>` — designate the M-of-N quorum (§2.4).
-pub fn build_ns_recovery_set(name: &str, m: u32, keys: &str) -> Result<String, String> {
+/// `NS RECOVERY SET <ns-id> <m> <keys>` — designate the M-of-N quorum (§2.4).
+pub fn build_ns_recovery_set(ns: &str, m: u32, keys: &str) -> Result<String, String> {
     Request::new(Command::NsRecoverySet {
-        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        ns: ns.parse().map_err(|_| "bad namespace id".to_string())?,
         m,
         keys: keys.to_string(),
     })
@@ -2124,31 +2156,30 @@ pub fn build_ns_recovery_set(name: &str, m: u32, keys: &str) -> Result<String, S
     .map_err(|e| e.to_string())
 }
 
-/// `NS RECOVER <name> <b64-rotation-record>` — submit a co-signed rotation.
-pub fn build_ns_recover(name: &str, rotation: &str) -> Result<String, String> {
+/// `NS RECOVER <ns-id> <b64-rotation-record>` — submit a co-signed rotation.
+pub fn build_ns_recover(ns: &str, rotation: &str) -> Result<String, String> {
     Request::new(Command::NsRecover {
-        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        ns: ns.parse().map_err(|_| "bad namespace id".to_string())?,
         rotation: rotation.to_string(),
     })
     .serialize()
     .map_err(|e| e.to_string())
 }
 
-/// `NS RECOVERY CANCEL <name>` with `@sig=` — root veto of a pending recovery.
-pub fn build_ns_recovery_cancel(name: &str, signature: &str) -> Result<String, String> {
+/// `NS RECOVERY CANCEL <ns-id>` with `@sig=` — root veto of a pending recovery.
+pub fn build_ns_recovery_cancel(ns: &str, signature: &str) -> Result<String, String> {
     Request::new(Command::NsRecoveryCancel {
-        name: name.parse().map_err(|_| "bad namespace".to_string())?,
+        ns: ns.parse().map_err(|_| "bad namespace id".to_string())?,
         signature: signature.to_string(),
     })
     .serialize()
     .map_err(|e| e.to_string())
 }
 
-/// `NS JOIN <name>` — auto-join every visible channel in the namespace (§6.2).
-pub fn build_ns_join(name: &str) -> Result<String, String> {
-    let name: weft_proto::NamespaceName =
-        name.parse().map_err(|_| "bad namespace name".to_string())?;
-    weft_proto::Request::new(weft_proto::Command::NsJoin { name })
+/// `NS JOIN <ns-id>` — auto-join every visible channel in the namespace (§6.2).
+pub fn build_ns_join(ns: &str) -> Result<String, String> {
+    let ns: weft_proto::NamespaceId = ns.parse().map_err(|_| "bad namespace id".to_string())?;
+    weft_proto::Request::new(weft_proto::Command::NsJoin { ns })
         .serialize()
         .map_err(|e| e.to_string())
 }
@@ -2331,11 +2362,15 @@ mod tests {
 
     #[test]
     fn ns_member_maps_join() {
-        let events = feed("@count=42 NS-MEMBER gaming ada@test.example join");
+        // v0.13: NS-MEMBER addresses the namespace by its ULID id.
+        let ns_id = "01arz3ndektsv4rrffq69g5fav";
+        let events = feed(&format!(
+            "@count=42 NS-MEMBER {ns_id} ada@test.example join"
+        ));
         assert!(matches!(
             events.as_slice(),
             [ClientEvent::NsMember { namespace, action, count: Some(42), .. }]
-                if namespace == "gaming" && action == "join"
+                if namespace == ns_id && action == "join"
         ));
     }
 

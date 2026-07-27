@@ -324,18 +324,24 @@ impl<S: ControlStream> Session<S> {
         &mut self,
         peer: NetworkName,
         label: Option<String>,
-        ns: NamespaceName,
+        vanity: weft_proto::VanityName,
         invite: Option<String>,
     ) -> io::Result<Flow> {
-        let reachable = match self.ctx.namespaces.namespace(&ns).await {
-            Ok(Some(rec)) => {
-                rec.federation
-                    && (rec.visibility == "public"
-                        || self.invite_authorizes_ns(invite.as_deref(), &ns).await)
-            }
-            Ok(None) => false,
+        // The peer addresses our namespace by its human vanity name (it typed
+        // `ournet/vanity`); resolve to the immutable id, then everything
+        // downstream — scope, invite, manifest — is id-keyed (v0.13).
+        let Ok(ns_name) = vanity.as_str().parse::<NamespaceName>() else {
+            return self.no_such_target(label).await;
+        };
+        let record = match self.ctx.namespaces.namespace(&ns_name).await {
+            Ok(Some(rec)) => rec,
+            Ok(None) => return self.no_such_target(label).await,
             Err(e) => return self.internal(label, &e).await,
         };
+        let ns_id = record.id.clone();
+        let reachable = record.federation
+            && (record.visibility == "public"
+                || self.invite_authorizes_ns(invite.as_deref(), &ns_id).await);
         let blocked = self
             .ctx
             .netblocks
@@ -347,7 +353,7 @@ impl<S: ControlStream> Session<S> {
         }
 
         // Compile + sign a v1 manifest for the namespace's channels and offer it.
-        let scope = format!("ns:{ns}");
+        let scope = format!("ns:{ns_id}");
         let Some(tscope) = TokenScope::parse(&scope) else {
             return self.no_such_target(label).await;
         };
@@ -393,14 +399,14 @@ impl<S: ControlStream> Session<S> {
     /// survives reconnects, so it doesn't burn a redemption. A revoked invite
     /// is already gone from the store, so it fails here like an absent one —
     /// keeping the outcome uniform with "no such namespace" (invariant 1).
-    async fn invite_authorizes_ns(&self, invite: Option<&str>, ns: &NamespaceName) -> bool {
+    async fn invite_authorizes_ns(&self, invite: Option<&str>, ns_id: &str) -> bool {
         let Some(id) = invite else {
             return false;
         };
         let now = unix_now();
         match self.ctx.invites.invite(id).await {
             Ok(Some(rec)) => {
-                rec.scope == format!("ns:{ns}")
+                rec.scope == format!("ns:{ns_id}")
                     && rec.expiry.map_or(true, |e| now < e)
                     && rec.uses_left.map_or(true, |u| u > 0)
             }
@@ -759,7 +765,7 @@ impl<S: ControlStream> Session<S> {
     /// by the ordinary bridge loop and auto-accepted (`request_accept`).
     pub(super) async fn begin_outbound_request(
         &mut self,
-        ns: &NamespaceName,
+        ns: &weft_proto::VanityName,
         invite: Option<&str>,
     ) {
         let cmd = Command::BridgeRequest {
@@ -866,7 +872,7 @@ impl<S: ControlStream> Session<S> {
         &mut self,
         label: Option<String>,
         network: NetworkName,
-        namespace: NamespaceName,
+        namespace: weft_proto::VanityName,
         invite: Option<String>,
         account: Account,
     ) -> io::Result<Flow> {
@@ -1249,10 +1255,14 @@ impl<S: ControlStream> Session<S> {
         // only the namespace *owner* and network operators may speak. A
         // delegated `ns-admin` cannot — that's the point of the higher rung.
         if let Some(ns) = channel_namespace(channel) {
+            // v0.13: `channel_namespace` returns the namespace **id** (channels are
+            // `#<ns-id>/<chan-id>`), so resolve by id — the vanity-keyed
+            // `namespace()` would never match and the full freeze would silently
+            // not enforce.
             if self
                 .ctx
                 .namespaces
-                .namespace(&ns)
+                .namespace_by_id(ns.as_str())
                 .await?
                 .is_some_and(|n| n.frozen && &n.owner != account)
                 && !self
@@ -1432,39 +1442,54 @@ impl<S: ControlStream> Session<S> {
             Command::InviteRevokeAll { scope } => {
                 self.on_invite_revoke_all(label, scope, actor).await
             }
-            // §6.5 role membership.
+            // §6.5 role membership (roles addressed by id — resolve to the name
+            // the name-keyed handlers still take).
             Command::RoleAssign {
                 scope,
                 account: subject,
-                name,
+                role,
             } => {
-                self.on_role_assign(label, scope, subject, name, actor)
+                let Some((_, def)) = self
+                    .ctx
+                    .roles
+                    .role_by_id(&role.to_string())
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return self.no_such_target(label).await;
+                };
+                self.on_role_assign(label, scope, subject, def.name, actor)
                     .await
             }
             Command::RoleUnassign {
                 scope,
                 account: subject,
-                name,
+                role,
             } => {
-                self.on_role_unassign(label, scope, subject, name, actor)
+                let Some((_, def)) = self
+                    .ctx
+                    .roles
+                    .role_by_id(&role.to_string())
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return self.no_such_target(label).await;
+                };
+                self.on_role_unassign(label, scope, subject, def.name, actor)
                     .await
             }
             // §6.2 namespace administration.
-            Command::NsMeta { name, key, value } => {
-                self.on_ns_meta(label, name, key, value, actor).await
+            Command::NsMeta { ns, key, value } => {
+                self.on_ns_meta(label, ns, key, value, actor).await
             }
-            Command::NsVisibility { name, visibility } => {
-                self.on_ns_visibility(label, name, visibility, actor).await
+            Command::NsVisibility { ns, visibility } => {
+                self.on_ns_visibility(label, ns, visibility, actor).await
             }
-            Command::NsDelete { name, confirm } => {
-                self.on_ns_delete(label, name, confirm, actor).await
-            }
-            Command::NsDelegate {
-                name,
-                subject,
-                caps,
-            } => {
-                self.on_grant(label, subject, format!("ns:{name}"), caps, None, actor)
+            Command::NsDelete { ns, confirm } => self.on_ns_delete(label, ns, confirm, actor).await,
+            Command::NsDelegate { ns, subject, caps } => {
+                self.on_grant(label, subject, format!("ns:{ns}"), caps, None, actor)
                     .await
             }
             // §6.7 report handling.

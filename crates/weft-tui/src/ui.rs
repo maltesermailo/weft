@@ -349,7 +349,8 @@ pub fn reply_entry(raw: String, reply: &Reply, me: &str) -> LogEntry {
         } => Line::styled(format!("{channel} ✦ {key}: {value}{label}"), DIM),
         // ---- M4b: namespaces + discovery ----
         Event::NsMeta {
-            name,
+            id,
+            vanity,
             visibility,
             owner,
             title,
@@ -372,7 +373,7 @@ pub fn reply_entry(raw: String, reply: &Reply, me: &str) -> LogEntry {
                 recovery = " · recovery quorum set".to_string();
             }
             Line::styled(
-                format!("🌐 ns {name} [{visibility}]{owner}{title}{recovery}{label}"),
+                format!("🌐 ns {vanity} ({id}) [{visibility}]{owner}{title}{recovery}{label}"),
                 Style::new().fg(Color::Cyan),
             )
         }

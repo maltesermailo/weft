@@ -51,7 +51,7 @@ impl<S: ControlStream> Session<S> {
             .await
             .unwrap_or_default();
         for ns in namespaces {
-            if let Ok(Some(record)) = self.ctx.namespaces.namespace(&ns).await {
+            if let Ok(Some(record)) = self.ctx.namespaces.namespace_by_id(&ns).await {
                 self.send_event(label.clone(), Self::ns_meta_event(&record))
                     .await?;
             }
@@ -85,6 +85,7 @@ impl<S: ControlStream> Session<S> {
                         category: record.category.clone(),
                         position: record.position,
                         kind: record.kind,
+                        vanity: record.vanity.clone(),
                     },
                 )
                 .await?;
@@ -272,6 +273,7 @@ impl<S: ControlStream> Session<S> {
                         category: record.category.clone(),
                         position: record.position,
                         kind: record.kind,
+                        vanity: record.vanity.clone(),
                     },
                 )
                 .await?;
@@ -301,7 +303,7 @@ impl<S: ControlStream> Session<S> {
                 if self
                     .ctx
                     .memberships
-                    .is_ns_member(&account, &record.name)
+                    .is_ns_member(&account, &record.id)
                     .await
                     .unwrap_or(false)
                 {

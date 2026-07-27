@@ -4,7 +4,7 @@
 use crate::error::{ParseError, SerializeError};
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
-use crate::name::{Account, ChannelName, GroupId, NamespaceName, NetworkName, Target, UserRef};
+use crate::name::{Account, ChannelName, GroupId, NetworkName, Target, UserRef};
 use crate::types::{
     report_category_ok, HistoryMode, MediaMode, MsgMeta, PresenceStatus, ReportScope, ReportStatus,
     ResolveAction, StreamMode, TypingState, Visibility,
@@ -235,36 +235,43 @@ pub enum Command {
         position: i32,
         name: String,
     },
-    /// `ROLE REORDER <scope> :<name1,name2,…>` — set every role's position from
-    /// its index in the list (§6.5).
-    RolesReorder { scope: String, order: Vec<String> },
-    /// `ROLE DELETE <scope> :<name>` — remove a role definition (§6.5).
-    RoleDelete { scope: String, name: String },
-    /// `ROLE RENAME <scope> :<old>,<new>` — change a role's display name while
-    /// keeping its definition *and every assignment of it* (§6.5). Roles are
-    /// keyed by name, so this is a store-level migration, not a delete+create.
-    /// Both names ride the trailing as a comma pair — the same convention
-    /// `ROLE REORDER` uses, so a role name may contain spaces but not a comma.
-    RoleRename {
+    /// `ROLE UPDATE <scope> <role-id> <color> <caps> [meta] :<name>` (§6.5, v0.13)
+    /// — edit an existing role by its ULID id. Subsumes the old `ROLE RENAME`
+    /// (the label is just the trailing here) and the "re-create to edit" path,
+    /// now that roles have a stable id independent of the display name.
+    RoleUpdate {
         scope: String,
-        old: String,
-        new: String,
+        role: crate::RoleId,
+        color: String,
+        caps: String,
+        hoist: bool,
+        pingable: bool,
+        position: i32,
+        name: String,
     },
-    /// `ROLE ASSIGN <scope> <account> :<name>` — grant the role's token bundle
+    /// `ROLE REORDER <scope> :<id1,id2,…>` — set every role's position from its
+    /// index in the list (§6.5). Order is a list of role **ids** (v0.13).
+    RolesReorder {
+        scope: String,
+        order: Vec<crate::RoleId>,
+    },
+    /// `ROLE DELETE <scope> <role-id>` — remove a role definition (§6.5).
+    RoleDelete { scope: String, role: crate::RoleId },
+    /// `ROLE ASSIGN <scope> <account> <role-id>` — grant the role's token bundle
     /// to an account and record explicit membership (§6.5).
     RoleAssign {
         scope: String,
         /// Local account name **or** foreign `account@network` (§10.4) — a role
         /// can be worn by a federated user, so this is a subject string.
         account: String,
-        name: String,
+        role: crate::RoleId,
     },
-    /// `ROLE UNASSIGN <scope> <account> :<name>` — drop membership + revoke the
+    /// `ROLE UNASSIGN <scope> <account> <role-id>` — drop membership + revoke the
     /// role's caps (§6.5).
     RoleUnassign {
         scope: String,
         account: String,
-        name: String,
+        role: crate::RoleId,
     },
     /// `ROLES <scope>` — list the role definitions at a scope (§6.5) → a BATCH
     /// of `ROLE` events.
@@ -328,95 +335,98 @@ pub enum Command {
     /// `EMOJI ADD <ns> <name> <media>` — add/replace a namespace custom emoji
     /// (§9.4); cap `ns-admin`. `media` is a `weft-media://…` reference.
     EmojiAdd {
-        namespace: NamespaceName,
+        namespace: crate::NamespaceId,
         name: String,
         media: String,
     },
-    /// `EMOJI REMOVE <ns> <name>` — remove a namespace emoji (§9.4).
+    /// `EMOJI REMOVE <ns-id> <name>` — remove a namespace emoji (§9.4).
     EmojiRemove {
-        namespace: NamespaceName,
+        namespace: crate::NamespaceId,
         name: String,
     },
-    /// `EMOJI LIST <ns>` — a namespace's emoji → an `EMOJI` batch (§9.4).
-    EmojiList { namespace: NamespaceName },
-    /// `NS CREATE <name> [tier]` with `@root=<b64-pubkey>` (§6.2). The
-    /// client generates the namespace root key and submits its pubkey.
+    /// `EMOJI LIST <ns-id>` — a namespace's emoji → an `EMOJI` batch (§9.4).
+    EmojiList { namespace: crate::NamespaceId },
+    /// `NS CREATE <vanity> [tier]` with `@root=<b64-pubkey>` (§6.2, v0.13). The
+    /// client generates the namespace root key and submits its pubkey + a desired
+    /// **vanity** name; the server mints the namespace ULID id and returns it in
+    /// the `NS-META` reply.
     NsCreate {
-        name: NamespaceName,
+        vanity: crate::VanityName,
         visibility: Visibility,
         root_key: String,
     },
-    /// `NS META <name> <title|description|icon> :<value>` (§6.2).
+    /// `NS META <ns-id> <title|description|icon|vanity> :<value>` (§6.2). The
+    /// `vanity` key renames the namespace's mutable label (refused if locked).
     NsMeta {
-        name: NamespaceName,
+        ns: crate::NamespaceId,
         key: String,
         value: String,
     },
-    /// `NS VISIBILITY <name> <tier>` (§6.2).
+    /// `NS VISIBILITY <ns-id> <tier>` (§6.2).
     NsVisibility {
-        name: NamespaceName,
+        ns: crate::NamespaceId,
         visibility: Visibility,
     },
-    /// `NS DELEGATE <name> <account|pubkey> <cap>[,...]` — sugar for GRANT
-    /// at `ns:` scope (§6.2).
+    /// `NS DELEGATE <ns-id> <account|pubkey> <cap>[,...]` — sugar for GRANT
+    /// at `ns:<id>` scope (§6.2).
     NsDelegate {
-        name: NamespaceName,
+        ns: crate::NamespaceId,
         subject: String,
         caps: String,
     },
-    /// `NS DELETE <name> <name>` — confirmed by repetition (§6.2).
+    /// `NS DELETE <ns-id> <ns-id>` — confirmed by repetition of the id (§6.2).
     NsDelete {
-        name: NamespaceName,
-        confirm: NamespaceName,
+        ns: crate::NamespaceId,
+        confirm: crate::NamespaceId,
     },
-    /// `NS JOIN <name>` — become a member of the namespace (§6.2); one
+    /// `NS JOIN <ns-id>` — become a member of the namespace (§6.2); one
     /// `(account, ns)` row, channel access derived. View-gated channels the
     /// caller cannot see stay hidden.
-    NsJoin { name: NamespaceName },
-    /// `NS LEAVE <name>` (§6.2) — drop namespace membership + all hide
+    NsJoin { ns: crate::NamespaceId },
+    /// `NS LEAVE <ns-id>` (§6.2) — drop namespace membership + all hide
     /// overrides + ns-scoped role assignments. Also reachable as the
-    /// `PART ns:<name>` alias (lenient-in; strict-out is always `NS LEAVE`).
-    NsLeave { name: NamespaceName },
-    /// `NS TRANSFER <name> <account>` with `@sig=<b64>` — rung-1 succession,
+    /// `PART ns:<id>` alias (lenient-in; strict-out is always `NS LEAVE`).
+    NsLeave { ns: crate::NamespaceId },
+    /// `NS TRANSFER <ns-id> <account>` with `@sig=<b64>` — rung-1 succession,
     /// signed by the current root (§2.4).
     NsTransfer {
-        name: NamespaceName,
+        ns: crate::NamespaceId,
         new_owner: Account,
         signature: String,
     },
-    /// `NS RECOVERY SET <name> <m> <key1,key2,...>` — designate the M-of-N
+    /// `NS RECOVERY SET <ns-id> <m> <key1,key2,...>` — designate the M-of-N
     /// recovery quorum (§2.4). Root only.
     NsRecoverySet {
-        name: NamespaceName,
+        ns: crate::NamespaceId,
         m: u32,
         keys: String,
     },
-    /// `NS RECOVER <name> <b64-rotation-record>` — submit a quorum-signed
+    /// `NS RECOVER <ns-id> <b64-rotation-record>` — submit a quorum-signed
     /// (rung 2) or operator-signed (rung 3) rotation; starts the delay
     /// window (§2.4).
     NsRecover {
-        name: NamespaceName,
+        ns: crate::NamespaceId,
         rotation: String,
     },
-    /// `NS RECOVERY CANCEL <name>` with `@sig=<b64>` — the current root
+    /// `NS RECOVERY CANCEL <ns-id>` with `@sig=<b64>` — the current root
     /// vetoes a pending recovery (§2.4).
     NsRecoveryCancel {
-        name: NamespaceName,
+        ns: crate::NamespaceId,
         signature: String,
     },
-    /// `NS INFO <detail> <name>` — moderator-only fetch of server-relevant
+    /// `NS INFO <detail> <ns-id>` — moderator-only fetch of server-relevant
     /// namespace details (§6.2). `detail` selects the query; the response is a
     /// `BATCH`. Cap-gated to holders of a moderation capability at
-    /// `ns:<name>` (owner / ns-admin / ban / kick / mute / reports).
+    /// `ns:<id>` (owner / ns-admin / ban / kick / mute / reports).
     NsInfo {
-        name: NamespaceName,
+        ns: crate::NamespaceId,
         detail: NsInfoKind,
     },
     /// `DISCOVER [cursor]` — public namespace directory (§6.2).
     Discover { cursor: Option<String> },
-    /// `CHANNELS <ns>` — the ordered channel layout of a namespace (spec
+    /// `CHANNELS <ns-id>` — the ordered channel layout of a namespace (spec
     /// extension: Discord-style categories + order).
-    Channels { namespace: NamespaceName },
+    Channels { namespace: crate::NamespaceId },
     /// `REPORT <msgid> <category> [scope] [:note]` (§6.7). Routed to the
     /// reporter's home network; `scope` defaults to `ns`.
     Report {
@@ -477,16 +487,20 @@ pub enum Command {
     /// auto-federation-reachable — `public`, or (with a valid `invite`) an
     /// `unlisted`/`private` namespace that has `federation` open.
     BridgeRequest {
-        ns: NamespaceName,
+        /// The peer's **vanity** name for one of its namespaces — the peer
+        /// resolves it to its own ns id and offers a manifest pinned to that id
+        /// (§11.10). Cross-network, so the requester knows only the vanity.
+        ns: crate::VanityName,
         invite: Option<String>,
     },
-    /// `FEDERATE <network>/<namespace>` with an optional `@invite=<token>`
+    /// `FEDERATE <network>/<vanity>` with an optional `@invite=<token>`
     /// (§11.10) — a local user asks their home network to auto-establish a
-    /// bridge to a foreign namespace on demand. The `invite` (a foreign-ns
-    /// invite the user holds) unlocks non-public namespaces.
+    /// bridge to a foreign namespace on demand, named by the peer's **vanity**
+    /// (resolved + pinned to the peer's ns id during the handshake). The `invite`
+    /// (a foreign-ns invite the user holds) unlocks non-public namespaces.
     Federate {
         network: NetworkName,
-        namespace: NamespaceName,
+        namespace: crate::VanityName,
         invite: Option<String>,
     },
     /// `NETBLOCK ADD <network> [:reason]` (§6.6, §11.6). Cap `netblock` at `*`.
@@ -703,6 +717,15 @@ fn caps_ok(caps: &str) -> bool {
     !caps.is_empty() && !caps.contains(' ')
 }
 
+/// Parse a role ULID id from a wire token (§6.5, v0.13). Typed error on garbage.
+fn role_id(raw: &str) -> Result<crate::RoleId, ParseError> {
+    raw.parse().map_err(|_| ParseError::BadParam {
+        verb: "ROLE",
+        what: "role-id",
+        value: raw.to_string(),
+    })
+}
+
 /// Read the mandatory `@sig=` tag for signed NS verbs (§2.4).
 fn ns_sig_tag(line: &Line) -> Result<String, ParseError> {
     line.tags
@@ -811,7 +834,7 @@ impl Command {
                 // `PART ns:<name>` is an alias for `NS LEAVE <name>` (§6.2) —
                 // convenient for the IRC gateway, which has no NS verbs.
                 if let Some(ns) = target.strip_prefix("ns:") {
-                    return Ok(Command::NsLeave { name: ns.parse()? });
+                    return Ok(Command::NsLeave { ns: ns.parse()? });
                 }
                 Ok(Command::Part {
                     channel: target.parse()?,
@@ -1073,6 +1096,49 @@ impl Command {
                             name,
                         })
                     }
+                    "UPDATE" => {
+                        let scope = args.req("scope")?.to_string();
+                        let role = role_id(args.req("role-id")?)?;
+                        let color = args.req("color")?.to_string();
+                        let caps = args.req("caps")?.to_string();
+                        if !caps_ok(&caps) {
+                            return Err(ParseError::BadParam {
+                                verb: "ROLE",
+                                what: "caps",
+                                value: caps,
+                            });
+                        }
+                        let mut hoist = false;
+                        let mut pingable = false;
+                        let mut position = 0i32;
+                        while let Some(param) = args.opt() {
+                            if let Some(v) = param.strip_prefix("hoist=") {
+                                hoist = v == "1"
+                                    || v.eq_ignore_ascii_case("yes")
+                                    || v.eq_ignore_ascii_case("true");
+                            } else if let Some(v) = param.strip_prefix("pingable=") {
+                                pingable = v == "1"
+                                    || v.eq_ignore_ascii_case("yes")
+                                    || v.eq_ignore_ascii_case("true");
+                            } else if let Some(v) = param.strip_prefix("pos=") {
+                                position = v.parse().unwrap_or(0);
+                            }
+                        }
+                        let name = line.trailing.clone().ok_or(ParseError::MissingParam {
+                            verb: "ROLE",
+                            what: "name",
+                        })?;
+                        Ok(Command::RoleUpdate {
+                            scope,
+                            role,
+                            color,
+                            caps,
+                            hoist,
+                            pingable,
+                            position,
+                            name,
+                        })
+                    }
                     "REORDER" => Ok(Command::RolesReorder {
                         scope: args.req("scope")?.to_string(),
                         order: line
@@ -1080,58 +1146,22 @@ impl Command {
                             .clone()
                             .unwrap_or_default()
                             .split(',')
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string)
+                            .filter_map(|s| s.parse().ok())
                             .collect(),
                     }),
                     "DELETE" => Ok(Command::RoleDelete {
                         scope: args.req("scope")?.to_string(),
-                        name: line.trailing.clone().ok_or(ParseError::MissingParam {
-                            verb: "ROLE",
-                            what: "name",
-                        })?,
+                        role: role_id(args.req("role-id")?)?,
                     }),
-                    "RENAME" => {
-                        let scope = args.req("scope")?.to_string();
-                        let pair = line.trailing.clone().ok_or(ParseError::MissingParam {
-                            verb: "ROLE",
-                            what: "names",
-                        })?;
-                        // `<old>,<new>` — only the first comma splits, so neither
-                        // half may contain one (same constraint as REORDER).
-                        let (old, new) = pair.split_once(',').ok_or(ParseError::BadParam {
-                            verb: "ROLE",
-                            what: "names",
-                            value: pair.clone(),
-                        })?;
-                        if old.is_empty() || new.is_empty() {
-                            return Err(ParseError::BadParam {
-                                verb: "ROLE",
-                                what: "names",
-                                value: pair,
-                            });
-                        }
-                        Ok(Command::RoleRename {
-                            scope,
-                            old: old.to_string(),
-                            new: new.to_string(),
-                        })
-                    }
                     "ASSIGN" => Ok(Command::RoleAssign {
                         scope: args.req("scope")?.to_string(),
                         account: args.req("account")?.to_string(),
-                        name: line.trailing.clone().ok_or(ParseError::MissingParam {
-                            verb: "ROLE",
-                            what: "name",
-                        })?,
+                        role: role_id(args.req("role-id")?)?,
                     }),
                     "UNASSIGN" => Ok(Command::RoleUnassign {
                         scope: args.req("scope")?.to_string(),
                         account: args.req("account")?.to_string(),
-                        name: line.trailing.clone().ok_or(ParseError::MissingParam {
-                            verb: "ROLE",
-                            what: "name",
-                        })?,
+                        role: role_id(args.req("role-id")?)?,
                     }),
                     other => Ok(Command::Unknown {
                         verb: format!("ROLE {other}"),
@@ -1288,7 +1318,7 @@ impl Command {
                 let sub = args.req("subcommand")?.to_ascii_uppercase();
                 match sub.as_str() {
                     "CREATE" => {
-                        let name = args.req("name")?.parse()?;
+                        let vanity = args.req("vanity")?.parse()?;
                         // Default tier is `unlisted` (§6.2).
                         let visibility = args
                             .opt()
@@ -1305,22 +1335,22 @@ impl Command {
                                 what: "root tag (namespace root pubkey)",
                             })?;
                         Ok(Command::NsCreate {
-                            name,
+                            vanity,
                             visibility,
                             root_key,
                         })
                     }
                     "META" => Ok(Command::NsMeta {
-                        name: args.req("name")?.parse()?,
+                        ns: args.req("ns")?.parse()?,
                         key: args.req("key")?.to_string(),
                         value: args.trailing_req("value")?.to_string(),
                     }),
                     "VISIBILITY" => Ok(Command::NsVisibility {
-                        name: args.req("name")?.parse()?,
+                        ns: args.req("ns")?.parse()?,
                         visibility: args.req("tier")?.parse()?,
                     }),
                     "DELEGATE" => {
-                        let name = args.req("name")?.parse()?;
+                        let ns = args.req("ns")?.parse()?;
                         let subject = args.req("subject")?.to_string();
                         let caps = args.req("caps")?.to_string();
                         if !caps_ok(&caps) {
@@ -1330,39 +1360,35 @@ impl Command {
                                 value: caps,
                             });
                         }
-                        Ok(Command::NsDelegate {
-                            name,
-                            subject,
-                            caps,
-                        })
+                        Ok(Command::NsDelegate { ns, subject, caps })
                     }
                     "DELETE" => Ok(Command::NsDelete {
-                        name: args.req("name")?.parse()?,
+                        ns: args.req("ns")?.parse()?,
                         confirm: args.req("confirmation")?.parse()?,
                     }),
                     "JOIN" => Ok(Command::NsJoin {
-                        name: args.req("name")?.parse()?,
+                        ns: args.req("ns")?.parse()?,
                     }),
                     "LEAVE" => Ok(Command::NsLeave {
-                        name: args.req("name")?.parse()?,
+                        ns: args.req("ns")?.parse()?,
                     }),
                     "TRANSFER" => {
-                        let name = args.req("name")?.parse()?;
+                        let ns = args.req("ns")?.parse()?;
                         let new_owner = args.req("account")?.parse()?;
                         let signature = ns_sig_tag(line)?;
                         Ok(Command::NsTransfer {
-                            name,
+                            ns,
                             new_owner,
                             signature,
                         })
                     }
                     "RECOVER" => Ok(Command::NsRecover {
-                        name: args.req("name")?.parse()?,
+                        ns: args.req("ns")?.parse()?,
                         rotation: args.req("rotation-record")?.to_string(),
                     }),
                     "INFO" => {
                         let detail = args.req("detail")?.to_ascii_uppercase();
-                        let name = args.req("name")?.parse()?;
+                        let ns = args.req("ns")?.parse()?;
                         let detail = match detail.as_str() {
                             "MEMBERS" => NsInfoKind::Members,
                             _ => {
@@ -1373,14 +1399,14 @@ impl Command {
                                 })
                             }
                         };
-                        Ok(Command::NsInfo { name, detail })
+                        Ok(Command::NsInfo { ns, detail })
                     }
                     // Three-word: NS RECOVERY SET | NS RECOVERY CANCEL.
                     "RECOVERY" => {
                         let action = args.req("action")?.to_ascii_uppercase();
                         match action.as_str() {
                             "SET" => {
-                                let name = args.req("name")?.parse()?;
+                                let ns = args.req("ns")?.parse()?;
                                 let m = args.req("m")?;
                                 let m = m.parse().map_err(|_| ParseError::BadParam {
                                     verb: "NS",
@@ -1388,12 +1414,12 @@ impl Command {
                                     value: m.to_string(),
                                 })?;
                                 let keys = args.req("keys")?.to_string();
-                                Ok(Command::NsRecoverySet { name, m, keys })
+                                Ok(Command::NsRecoverySet { ns, m, keys })
                             }
                             "CANCEL" => {
-                                let name = args.req("name")?.parse()?;
+                                let ns = args.req("ns")?.parse()?;
                                 Ok(Command::NsRecoveryCancel {
-                                    name,
+                                    ns,
                                     signature: ns_sig_tag(line)?,
                                 })
                             }
@@ -2105,38 +2131,80 @@ impl Command {
                     Some(name.clone()),
                 )
             }
+            Command::RoleUpdate {
+                scope,
+                role,
+                color,
+                caps,
+                hoist,
+                pingable,
+                position,
+                name,
+            } => {
+                if !caps_ok(caps) {
+                    return Err(SerializeError::BadParam {
+                        param: caps.clone(),
+                        reason: "caps must be a non-empty space-free list",
+                    });
+                }
+                (
+                    "ROLE",
+                    vec![
+                        "UPDATE".to_string(),
+                        scope.clone(),
+                        role.to_string(),
+                        color.clone(),
+                        caps.clone(),
+                        format!("hoist={}", if *hoist { 1 } else { 0 }),
+                        format!("pingable={}", if *pingable { 1 } else { 0 }),
+                        format!("pos={position}"),
+                    ],
+                    Some(name.clone()),
+                )
+            }
             Command::RolesReorder { scope, order } => (
                 "ROLE",
                 vec!["REORDER".to_string(), scope.clone()],
-                Some(order.join(",")),
+                Some(
+                    order
+                        .iter()
+                        .map(|r| r.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
             ),
-            Command::RoleDelete { scope, name } => (
+            Command::RoleDelete { scope, role } => (
                 "ROLE",
-                vec!["DELETE".to_string(), scope.clone()],
-                Some(name.clone()),
-            ),
-            Command::RoleRename { scope, old, new } => (
-                "ROLE",
-                vec!["RENAME".to_string(), scope.clone()],
-                Some(format!("{old},{new}")),
+                vec!["DELETE".to_string(), scope.clone(), role.to_string()],
+                None,
             ),
             Command::RoleAssign {
                 scope,
                 account,
-                name,
+                role,
             } => (
                 "ROLE",
-                vec!["ASSIGN".to_string(), scope.clone(), account.to_string()],
-                Some(name.clone()),
+                vec![
+                    "ASSIGN".to_string(),
+                    scope.clone(),
+                    account.to_string(),
+                    role.to_string(),
+                ],
+                None,
             ),
             Command::RoleUnassign {
                 scope,
                 account,
-                name,
+                role,
             } => (
                 "ROLE",
-                vec!["UNASSIGN".to_string(), scope.clone(), account.to_string()],
-                Some(name.clone()),
+                vec![
+                    "UNASSIGN".to_string(),
+                    scope.clone(),
+                    account.to_string(),
+                    role.to_string(),
+                ],
+                None,
             ),
             Command::RolesList { scope } => ("ROLES", vec![scope.clone()], None),
             Command::RolesOf { scope, account } => {
@@ -2255,7 +2323,7 @@ impl Command {
                 None,
             ),
             Command::NsCreate {
-                name,
+                vanity,
                 visibility,
                 root_key,
             } => {
@@ -2264,49 +2332,45 @@ impl Command {
                     "NS",
                     vec![
                         "CREATE".to_string(),
-                        name.to_string(),
+                        vanity.to_string(),
                         visibility.to_string(),
                     ],
                     None,
                 )
             }
-            Command::NsMeta { name, key, value } => (
+            Command::NsMeta { ns, key, value } => (
                 "NS",
-                vec!["META".to_string(), name.to_string(), key.clone()],
+                vec!["META".to_string(), ns.to_string(), key.clone()],
                 Some(value.clone()),
             ),
-            Command::NsVisibility { name, visibility } => (
+            Command::NsVisibility { ns, visibility } => (
                 "NS",
                 vec![
                     "VISIBILITY".to_string(),
-                    name.to_string(),
+                    ns.to_string(),
                     visibility.to_string(),
                 ],
                 None,
             ),
-            Command::NsDelegate {
-                name,
-                subject,
-                caps,
-            } => (
+            Command::NsDelegate { ns, subject, caps } => (
                 "NS",
                 vec![
                     "DELEGATE".to_string(),
-                    name.to_string(),
+                    ns.to_string(),
                     subject.clone(),
                     caps.clone(),
                 ],
                 None,
             ),
-            Command::NsDelete { name, confirm } => (
+            Command::NsDelete { ns, confirm } => (
                 "NS",
-                vec!["DELETE".to_string(), name.to_string(), confirm.to_string()],
+                vec!["DELETE".to_string(), ns.to_string(), confirm.to_string()],
                 None,
             ),
-            Command::NsJoin { name } => ("NS", vec!["JOIN".to_string(), name.to_string()], None),
-            Command::NsLeave { name } => ("NS", vec!["LEAVE".to_string(), name.to_string()], None),
+            Command::NsJoin { ns } => ("NS", vec!["JOIN".to_string(), ns.to_string()], None),
+            Command::NsLeave { ns } => ("NS", vec!["LEAVE".to_string(), ns.to_string()], None),
             Command::NsTransfer {
-                name,
+                ns,
                 new_owner,
                 signature,
             } => {
@@ -2315,46 +2379,42 @@ impl Command {
                     "NS",
                     vec![
                         "TRANSFER".to_string(),
-                        name.to_string(),
+                        ns.to_string(),
                         new_owner.to_string(),
                     ],
                     None,
                 )
             }
-            Command::NsRecoverySet { name, m, keys } => (
+            Command::NsRecoverySet { ns, m, keys } => (
                 "NS",
                 vec![
                     "RECOVERY".to_string(),
                     "SET".to_string(),
-                    name.to_string(),
+                    ns.to_string(),
                     m.to_string(),
                     keys.clone(),
                 ],
                 None,
             ),
-            Command::NsRecover { name, rotation } => (
+            Command::NsRecover { ns, rotation } => (
                 "NS",
-                vec!["RECOVER".to_string(), name.to_string(), rotation.clone()],
+                vec!["RECOVER".to_string(), ns.to_string(), rotation.clone()],
                 None,
             ),
-            Command::NsInfo { name, detail } => (
+            Command::NsInfo { ns, detail } => (
                 "NS",
                 vec![
                     "INFO".to_string(),
                     detail.as_wire().to_string(),
-                    name.to_string(),
+                    ns.to_string(),
                 ],
                 None,
             ),
-            Command::NsRecoveryCancel { name, signature } => {
+            Command::NsRecoveryCancel { ns, signature } => {
                 tags.insert("sig".to_string(), signature.clone());
                 (
                     "NS",
-                    vec![
-                        "RECOVERY".to_string(),
-                        "CANCEL".to_string(),
-                        name.to_string(),
-                    ],
+                    vec!["RECOVERY".to_string(), "CANCEL".to_string(), ns.to_string()],
                     None,
                 )
             }
@@ -2883,47 +2943,50 @@ mod tests {
             position: 3,
             name: "Head Moderator".to_string(),
         }));
+        round_trip(&Request::new(Command::RoleUpdate {
+            scope: "ns:gaming".to_string(),
+            role: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            color: "#e8b93d".to_string(),
+            caps: "mute,ban".to_string(),
+            hoist: false,
+            pingable: true,
+            position: 1,
+            name: "Lead Mod".to_string(),
+        }));
         round_trip(&Request::new(Command::RolesReorder {
             scope: "ns:gaming".to_string(),
-            order: vec!["Head Moderator".to_string(), "Member".to_string()],
+            order: vec![
+                "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+                "01BX5ZZKBKACTAV9WEVGEMMVRZ".parse().unwrap(),
+            ],
         }));
         round_trip(&Request::new(Command::RoleDelete {
             scope: "ns:gaming".to_string(),
-            name: "Head Moderator".to_string(),
-        }));
-        round_trip(&Request::new(Command::RoleRename {
-            scope: "ns:gaming".to_string(),
-            old: "Head Moderator".to_string(),
-            new: "Lead Mod".to_string(),
+            role: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
         }));
         round_trip(&Request::new(Command::RoleAssign {
             scope: "ns:gaming".to_string(),
             account: "bob".parse().unwrap(),
-            name: "Head Moderator".to_string(),
+            role: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
         }));
         round_trip(&Request::new(Command::RoleUnassign {
             scope: "ns:gaming".to_string(),
             account: "bob".parse().unwrap(),
-            name: "Head Moderator".to_string(),
+            role: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
         }));
-        // RENAME carries both names in the trailing; only the first comma
-        // splits, so a spaced name survives and a missing pair is rejected.
+        // v0.13: roles are addressed by ULID id — DELETE/ASSIGN take it
+        // positionally, UPDATE subsumes the old RENAME (label is the trailing).
         assert_eq!(
-            Request::parse("ROLE RENAME ns:gaming :Head Moderator,Lead Mod")
+            Request::parse("ROLE DELETE ns:gaming 01ARZ3NDEKTSV4RRFFQ69G5FAV")
                 .unwrap()
                 .command,
-            Command::RoleRename {
+            Command::RoleDelete {
                 scope: "ns:gaming".to_string(),
-                old: "Head Moderator".to_string(),
-                new: "Lead Mod".to_string(),
+                role: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
             }
         );
         assert!(matches!(
-            Request::parse("ROLE RENAME ns:gaming :OnlyOne"),
-            Err(ParseError::BadParam { verb: "ROLE", .. })
-        ));
-        assert!(matches!(
-            Request::parse("ROLE RENAME ns:gaming :,Lead"),
+            Request::parse("ROLE DELETE ns:gaming not-a-ulid"),
             Err(ParseError::BadParam { verb: "ROLE", .. })
         ));
         round_trip(&Request::new(Command::RolesList {
@@ -3282,9 +3345,10 @@ mod tests {
 
     #[test]
     fn emoji_verbs_round_trip() {
+        let ns = "01arz3ndektsv4rrffq69g5fav";
         let add = Request::with_label(
             Command::EmojiAdd {
-                namespace: "gaming".parse().unwrap(),
+                namespace: ns.parse().unwrap(),
                 name: "partyblob".into(),
                 media: "weft-media://hda.example/abc123".into(),
             },
@@ -3292,15 +3356,15 @@ mod tests {
         );
         assert_eq!(
             add.serialize().unwrap(),
-            "@label=e1 EMOJI ADD gaming partyblob weft-media://hda.example/abc123"
+            format!("@label=e1 EMOJI ADD {ns} partyblob weft-media://hda.example/abc123")
         );
         round_trip(&add);
         round_trip(&Request::new(Command::EmojiRemove {
-            namespace: "gaming".parse().unwrap(),
+            namespace: ns.parse().unwrap(),
             name: "partyblob".into(),
         }));
         round_trip(&Request::new(Command::EmojiList {
-            namespace: "gaming".parse().unwrap(),
+            namespace: ns.parse().unwrap(),
         }));
         assert_eq!(
             Request::parse("EMOJI FROB gaming"),
@@ -3316,7 +3380,7 @@ mod tests {
     fn ns_verbs_round_trip() {
         let create = Request::with_label(
             Command::NsCreate {
-                name: "gaming".parse().unwrap(),
+                vanity: "gaming".parse().unwrap(),
                 visibility: crate::types::Visibility::Public,
                 root_key: "B64ROOTKEY==".into(),
             },
@@ -3343,71 +3407,78 @@ mod tests {
             })
         );
 
+        // v0.13: existing namespaces are addressed by ULID id (creation carries
+        // the desired vanity above).
+        let ns = "01arz3ndektsv4rrffq69g5fav";
         round_trip(&Request::new(Command::NsMeta {
-            name: "gaming".parse().unwrap(),
+            ns: ns.parse().unwrap(),
             key: "title".into(),
             value: "The Gaming Lounge".into(),
         }));
         round_trip(&Request::new(Command::NsVisibility {
-            name: "gaming".parse().unwrap(),
+            ns: ns.parse().unwrap(),
             visibility: crate::types::Visibility::Private,
         }));
         round_trip(&Request::new(Command::NsDelegate {
-            name: "gaming".parse().unwrap(),
+            ns: ns.parse().unwrap(),
             subject: "ada".into(),
             caps: "ban,kick".into(),
         }));
         round_trip(&Request::new(Command::NsDelete {
-            name: "gaming".parse().unwrap(),
-            confirm: "gaming".parse().unwrap(),
+            ns: ns.parse().unwrap(),
+            confirm: ns.parse().unwrap(),
         }));
         round_trip(&Request::new(Command::NsJoin {
-            name: "gaming".parse().unwrap(),
+            ns: ns.parse().unwrap(),
         }));
         round_trip(&Request::new(Command::NsLeave {
-            name: "gaming".parse().unwrap(),
+            ns: ns.parse().unwrap(),
         }));
-        // `PART ns:<name>` is a lenient-in alias that parses to NS LEAVE; the
+        // `PART ns:<id>` is a lenient-in alias that parses to NS LEAVE; the
         // canonical strict-out form is always `NS LEAVE`.
         assert_eq!(
-            Request::parse("PART ns:gaming"),
+            Request::parse(&format!("PART ns:{ns}")),
             Ok(Request::new(Command::NsLeave {
-                name: "gaming".parse().unwrap(),
+                ns: ns.parse().unwrap(),
             }))
         );
         assert_eq!(
             Request::new(Command::NsLeave {
-                name: "gaming".parse().unwrap(),
+                ns: ns.parse().unwrap(),
             })
             .serialize()
             .unwrap(),
-            "NS LEAVE gaming"
+            format!("NS LEAVE {ns}")
         );
         assert!(Request::parse("NS FROB x").is_err());
     }
 
     #[test]
     fn ns_info_round_trip() {
+        let ns = "01arz3ndektsv4rrffq69g5fav";
         let req = Request::with_label(
             Command::NsInfo {
-                name: "gaming".parse().unwrap(),
+                ns: ns.parse().unwrap(),
                 detail: NsInfoKind::Members,
             },
             "i1",
         );
-        assert_eq!(req.serialize().unwrap(), "@label=i1 NS INFO MEMBERS gaming");
+        assert_eq!(
+            req.serialize().unwrap(),
+            format!("@label=i1 NS INFO MEMBERS {ns}")
+        );
         round_trip(&req);
 
         // Detail selector is case-insensitive (lenient-in).
         assert_eq!(
-            Request::parse("NS INFO members gaming"),
+            Request::parse(&format!("NS INFO members {ns}")),
             Ok(Request::new(Command::NsInfo {
-                name: "gaming".parse().unwrap(),
+                ns: ns.parse().unwrap(),
                 detail: NsInfoKind::Members,
             }))
         );
         // Unknown detail is a typed error, not a silent Unknown.
-        assert!(Request::parse("NS INFO FROB gaming").is_err());
+        assert!(Request::parse(&format!("NS INFO FROB {ns}")).is_err());
     }
 
     #[test]
@@ -3456,9 +3527,10 @@ mod tests {
 
     #[test]
     fn ns_recovery_verbs_round_trip() {
+        let ns = "01arz3ndektsv4rrffq69g5fav";
         let transfer = Request::with_label(
             Command::NsTransfer {
-                name: "gaming".parse().unwrap(),
+                ns: ns.parse().unwrap(),
                 new_owner: "bob".parse().unwrap(),
                 signature: "B64SIG==".into(),
             },
@@ -3467,7 +3539,7 @@ mod tests {
         assert!(transfer.serialize().unwrap().contains("sig=B64SIG=="));
         round_trip(&transfer);
         assert_eq!(
-            Request::parse("NS TRANSFER gaming bob"),
+            Request::parse(&format!("NS TRANSFER {ns} bob")),
             Err(ParseError::MissingParam {
                 verb: "NS",
                 what: "sig tag (root signature)"
@@ -3475,17 +3547,17 @@ mod tests {
         );
 
         round_trip(&Request::new(Command::NsRecoverySet {
-            name: "gaming".parse().unwrap(),
+            ns: ns.parse().unwrap(),
             m: 2,
             keys: "K1==,K2==,K3==".into(),
         }));
         round_trip(&Request::new(Command::NsRecover {
-            name: "gaming".parse().unwrap(),
+            ns: ns.parse().unwrap(),
             rotation: "B64ROTATION==".into(),
         }));
         round_trip(&Request::with_label(
             Command::NsRecoveryCancel {
-                name: "gaming".parse().unwrap(),
+                ns: ns.parse().unwrap(),
                 signature: "B64SIG==".into(),
             },
             "c1",
@@ -3497,7 +3569,7 @@ mod tests {
     #[test]
     fn channels_round_trips() {
         round_trip(&Request::new(Command::Channels {
-            namespace: "gaming".parse().unwrap(),
+            namespace: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
         }));
     }
 

@@ -13,7 +13,9 @@ use weft_core::{
     VoiceError, VoiceGrant, VoiceJoinReq, VoiceRelay,
 };
 use weft_proto::RetentionPolicy;
-use weft_proto::{CallState, ErrCode, Event, FriendState, MemberAction, Reply, VoiceAction};
+use weft_proto::{
+    CallState, ChannelName, ErrCode, Event, FriendState, MemberAction, Reply, VoiceAction,
+};
 use weft_store::{ChannelStore, NamespaceStore};
 
 struct MockStream {
@@ -119,6 +121,31 @@ impl Client {
             .await
             .map(|line| line.is_none())
             .unwrap_or(false)
+    }
+
+    /// v0.13 helper: create a `public` namespace with vanity `vanity`, returning
+    /// its minted ULID id (the token every ns/channel/scope now addresses by).
+    /// Consumes the `NS-META` reply.
+    async fn create_ns(&mut self, vanity: &str) -> String {
+        self.send(&format!(
+            "@root={} NS CREATE {vanity} public",
+            root_key_b64()
+        ));
+        match self.recv().await.event {
+            Event::NsMeta { id, .. } => id.to_string(),
+            other => panic!("expected NS-META creating {vanity}, got {other:?}"),
+        }
+    }
+
+    /// v0.13 helper: create a channel with desired display name `vanity` in
+    /// namespace `ns_id`, returning its canonical `#<ns-id>/<chan-id>` wire name
+    /// (both segments minted ULIDs). Consumes the `POLICY` reply.
+    async fn create_channel(&mut self, ns_id: &str, vanity: &str) -> ChannelName {
+        self.send(&format!("CHANNEL CREATE #{ns_id}/{vanity}"));
+        match self.recv().await.event {
+            Event::Policy { channel, .. } => channel,
+            other => panic!("expected POLICY creating {vanity}, got {other:?}"),
+        }
     }
 }
 
@@ -2948,17 +2975,20 @@ async fn custom_emoji_add_list_remove_and_gating() {
     let ctx = ctx(&["#general"]);
     let mut ada = joined(&ctx, "ada", "#general").await;
     // ada creates a namespace → she owns it (holds ns-admin there).
-    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
-    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    let ns_id = ada.create_ns("gaming").await;
 
     // Owner adds two emoji.
-    ada.send("EMOJI ADD gaming partyblob weft-media://test.example/aaa");
+    ada.send(&format!(
+        "EMOJI ADD {ns_id} partyblob weft-media://test.example/aaa"
+    ));
     assert!(matches!(&ada.recv().await.event, Event::Emoji { name, .. } if name == "partyblob"));
-    ada.send("EMOJI ADD gaming catjam weft-media://test.example/bbb");
+    ada.send(&format!(
+        "EMOJI ADD {ns_id} catjam weft-media://test.example/bbb"
+    ));
     assert!(matches!(ada.recv().await.event, Event::Emoji { .. }));
 
     // List → a BATCH of both.
-    ada.send("@label=el EMOJI LIST gaming");
+    ada.send(&format!("@label=el EMOJI LIST {ns_id}"));
     assert!(matches!(ada.recv().await.event, Event::BatchStart { .. }));
     let mut names = Vec::new();
     loop {
@@ -2972,16 +3002,16 @@ async fn custom_emoji_add_list_remove_and_gating() {
     assert_eq!(names, vec!["catjam".to_string(), "partyblob".to_string()]);
 
     // Remove one.
-    ada.send("EMOJI REMOVE gaming catjam");
+    ada.send(&format!("EMOJI REMOVE {ns_id} catjam"));
     assert!(matches!(ada.recv().await.event, Event::EmojiRemoved { .. }));
 
     // An invalid shortcode is rejected regardless of authority.
-    ada.send("EMOJI ADD gaming bad-name! weft-media://x/y");
+    ada.send(&format!("EMOJI ADD {ns_id} bad-name! weft-media://x/y"));
     ada.expect_err(ErrCode::Policy).await;
 
     // A non-admin can't add (ns-admin gate).
     let mut bob = joined(&ctx, "bob", "#general").await;
-    bob.send("EMOJI ADD gaming sneaky weft-media://x/y");
+    bob.send(&format!("EMOJI ADD {ns_id} sneaky weft-media://x/y"));
     bob.expect_err(ErrCode::CapRequired).await;
 }
 
@@ -3037,14 +3067,18 @@ async fn grant_lets_a_member_use_an_elevated_cap() {
     assert_eq!(reply.label.as_deref(), Some("g1"));
     assert!(matches!(&reply.event, Event::Token { subject, .. } if subject == "ada"));
 
-    // Now ada can create.
+    // Now ada can create. The server mints the channel's canonical `#<chan-id>`
+    // wire name (v0.13); "ada-chan" is just the desired vanity.
     ada.send("@label=c2 CHANNEL CREATE #ada-chan retained:30d");
     let reply = ada.recv().await;
     assert_eq!(reply.label.as_deref(), Some("c2"));
-    assert!(matches!(&reply.event, Event::Policy { channel, policy }
-            if channel.as_str() == "#ada-chan" && policy.to_string() == "retained:30d"));
+    let Event::Policy { channel, policy } = &reply.event else {
+        panic!("expected POLICY, got {reply:?}");
+    };
+    assert_eq!(policy.to_string(), "retained:30d");
+    let ada_chan = channel.clone();
     // And join the channel she made.
-    ada.send("JOIN #ada-chan");
+    ada.send(&format!("JOIN {ada_chan}"));
     assert!(matches!(ada.recv().await.event, Event::Member { .. }));
 }
 
@@ -3086,10 +3120,13 @@ async fn channel_policy_and_delete_require_caps() {
     let ctx = ctx_ops(&["#general"], &["boss"]);
     let mut boss = ready_op(&ctx, "boss").await;
 
-    // Operator creates and reconfigures a channel.
+    // Operator creates and reconfigures a channel. The server mints its
+    // canonical `#<chan-id>` (v0.13) — capture it for the later verbs.
     boss.send("CHANNEL CREATE #ops");
-    boss.recv().await;
-    boss.send("@label=p1 CHANNEL POLICY #ops ephemeral");
+    let Event::Policy { channel: ops, .. } = boss.recv().await.event else {
+        panic!("expected POLICY");
+    };
+    boss.send(&format!("@label=p1 CHANNEL POLICY {ops} ephemeral"));
     let reply = boss.recv().await;
     assert_eq!(reply.label.as_deref(), Some("p1"));
     assert!(
@@ -3097,18 +3134,18 @@ async fn channel_policy_and_delete_require_caps() {
     );
 
     // META view-gated.
-    boss.send("@label=m1 CHANNEL META #ops view-gated :yes");
+    boss.send(&format!("@label=m1 CHANNEL META {ops} view-gated :yes"));
     let reply = boss.recv().await;
     assert!(matches!(&reply.event, Event::Chanmeta { key, .. } if key == "view-gated"));
 
     // DELETE requires the confirmation to match.
-    boss.send("CHANNEL DELETE #ops #wrong");
+    boss.send(&format!("CHANNEL DELETE {ops} #wrong"));
     boss.expect_err(ErrCode::Policy).await;
-    boss.send("@label=d1 CHANNEL DELETE #ops #ops");
+    boss.send(&format!("@label=d1 CHANNEL DELETE {ops} {ops}"));
     let reply = boss.recv().await;
     assert!(matches!(&reply.event, Event::Chanmeta { key, .. } if key == "deleted"));
     // Gone: joining now is NO-SUCH-TARGET.
-    boss.send("JOIN #ops");
+    boss.send(&format!("JOIN {ops}"));
     boss.expect_err(ErrCode::NoSuchTarget).await;
 }
 
@@ -3117,20 +3154,25 @@ async fn view_gated_channel_hides_without_the_view_cap() {
     let ctx = ctx_ops(&["#general"], &["boss"]);
     let mut boss = ready_op(&ctx, "boss").await;
     boss.send("CHANNEL CREATE #secret");
-    boss.recv().await;
-    boss.send("CHANNEL META #secret view-gated :yes");
+    let Event::Policy {
+        channel: secret, ..
+    } = boss.recv().await.event
+    else {
+        panic!("expected POLICY");
+    };
+    boss.send(&format!("CHANNEL META {secret} view-gated :yes"));
     boss.recv().await;
 
     // A plain account can't even tell it exists (invariant 1).
     let mut ada = ready(&ctx, "ada").await;
-    ada.send("@label=j JOIN #secret");
+    ada.send(&format!("@label=j JOIN {secret}"));
     let reply = ada.expect_err(ErrCode::NoSuchTarget).await;
     assert_eq!(reply.label.as_deref(), Some("j"));
 
     // Grant view → it becomes reachable.
-    boss.send("GRANT ada #secret view");
+    boss.send(&format!("GRANT ada {secret} view"));
     boss.recv().await;
-    ada.send("JOIN #secret");
+    ada.send(&format!("JOIN {secret}"));
     assert!(matches!(ada.recv().await.event, Event::Member { .. }));
 }
 
@@ -3139,12 +3181,14 @@ async fn invite_mint_and_redeem_grants_membership() {
     let ctx = ctx_ops(&["#general"], &["boss"]);
     let mut boss = ready_op(&ctx, "boss").await;
     boss.send("CHANNEL CREATE #club");
-    boss.recv().await;
-    boss.send("CHANNEL META #club view-gated :yes");
+    let Event::Policy { channel: club, .. } = boss.recv().await.event else {
+        panic!("expected POLICY");
+    };
+    boss.send(&format!("CHANNEL META {club} view-gated :yes"));
     boss.recv().await;
 
     // Mint a 1-use invite for the gated channel.
-    boss.send("@label=i1 INVITE MINT #club max-uses=1");
+    boss.send(&format!("@label=i1 INVITE MINT {club} max-uses=1"));
     let reply = boss.recv().await;
     assert_eq!(reply.label.as_deref(), Some("i1"));
     let Event::Invited {
@@ -3158,7 +3202,7 @@ async fn invite_mint_and_redeem_grants_membership() {
 
     // Ada can't join the gated channel directly...
     let mut ada = ready(&ctx, "ada").await;
-    ada.send("JOIN #club");
+    ada.send(&format!("JOIN {club}"));
     ada.expect_err(ErrCode::NoSuchTarget).await;
     // ...but redeeming the invite grants membership and auto-joins.
     ada.send(&format!("@label=rd INVITE REDEEM {id}"));
@@ -3179,18 +3223,18 @@ async fn invite_mint_and_redeem_grants_membership() {
 async fn invite_link_carries_namespace_for_federation() {
     let ctx = ctx(&[]);
     let mut ada = ready(&ctx, "ada").await;
-    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
-    ada.recv().await;
+    let ns_id = ada.create_ns("gaming").await;
 
     // A namespace-scoped invite's link carries the namespace (§11.10), so a
-    // foreign redeemer can auto-federate to it.
-    ada.send("INVITE MINT ns:gaming");
+    // foreign redeemer can auto-federate to it. The scope is `ns:<id>`, so the
+    // link carries the ns id.
+    ada.send(&format!("INVITE MINT ns:{ns_id}"));
     let Event::Invited { link, .. } = ada.recv().await.event else {
         panic!("expected INVITED");
     };
     let link = link.expect("a namespace invite should carry a link");
     assert!(
-        link.starts_with("weft://test.example/gaming/i/"),
+        link.starts_with(&format!("weft://test.example/{ns_id}/i/")),
         "link must carry the namespace: {link}"
     );
 }
@@ -3259,7 +3303,8 @@ async fn any_user_can_create_a_namespace_and_owns_it() {
     let reply = ada.recv().await;
     assert_eq!(reply.label.as_deref(), Some("n1"));
     let Event::NsMeta {
-        name,
+        id,
+        vanity,
         visibility,
         owner,
         ..
@@ -3267,29 +3312,50 @@ async fn any_user_can_create_a_namespace_and_owns_it() {
     else {
         panic!("expected NS-META, got {reply:?}");
     };
-    assert_eq!(name.as_str(), "gaming");
+    let ns_id = id.to_string();
+    assert_eq!(vanity.as_str(), "gaming");
     assert_eq!(visibility.to_string(), "public");
     assert_eq!(owner.as_deref(), Some("ada"));
 
     // As owner, ada holds every cap in her namespace — she can create a
-    // namespaced channel (deferred in M4a, unlocked by ownership).
-    ada.send("@label=c1 CHANNEL CREATE #gaming/general");
+    // namespaced channel (deferred in M4a, unlocked by ownership). The wire name
+    // is the minted `#<ns-id>/<chan-id>`; she sent the desired vanity "general".
+    ada.send(&format!("@label=c1 CHANNEL CREATE #{ns_id}/general"));
     let reply = ada.recv().await;
     assert!(
-        matches!(&reply.event, Event::Policy { channel, .. } if channel.as_str() == "#gaming/general"),
+        matches!(&reply.event, Event::Policy { channel, .. } if channel.namespace() == Some(ns_id.as_str())),
         "owner should create channels in her ns, got {reply:?}"
     );
 
     // ...and delegate ns caps to someone else (who must exist — caps key by the
-    // target's ULID, §10.4).
+    // target's ULID, §10.4). Delegation addresses the namespace by id.
     let _bob = ready(&ctx, "bob").await;
-    ada.send("@label=d1 NS DELEGATE gaming bob ban,kick");
+    ada.send(&format!("@label=d1 NS DELEGATE {ns_id} bob ban,kick"));
     assert!(matches!(ada.recv().await.event, Event::Token { .. }));
 
     // A non-owner cannot create channels in the namespace.
     let mut eve = ready(&ctx, "eve").await;
-    eve.send("CHANNEL CREATE #gaming/secret");
+    eve.send(&format!("CHANNEL CREATE #{ns_id}/secret"));
     eve.expect_err(ErrCode::CapRequired).await;
+}
+
+#[tokio::test]
+async fn ns_create_is_blocked_by_an_admin_vanity_lock() {
+    // §2.3: an operator reserves a vanity in the web admin panel (store-direct);
+    // NS CREATE of that name is then refused until the lock is lifted.
+    let (ctx, store) = ctx_full_store(&[], true, &[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let vanity: weft_proto::NamespaceName = "reserved".parse().unwrap();
+    assert!(store.set_vanity_locked(&vanity, true).await.unwrap());
+
+    let root = root_key_b64();
+    ada.send(&format!("@root={root} NS CREATE reserved public"));
+    ada.expect_err(ErrCode::Conflict).await;
+
+    // Lifting the reservation lets the name be registered.
+    assert!(store.set_vanity_locked(&vanity, false).await.unwrap());
+    ada.send(&format!("@root={root} NS CREATE reserved public"));
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
 }
 
 #[tokio::test]
@@ -3298,14 +3364,16 @@ async fn ns_delete_cascades_channels() {
     let mut ada = ready(&ctx, "ada").await;
     let root = root_key_b64();
     ada.send(&format!("@root={root} NS CREATE gaming public"));
-    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
-    ada.send("@label=c1 CHANNEL CREATE #gaming/general");
-    assert!(matches!(
-        &ada.recv().await.event,
-        Event::Policy { channel, .. } if channel.as_str() == "#gaming/general"
-    ));
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c1 CHANNEL CREATE #{ns_id}/general"));
+    let Event::Policy { channel, .. } = ada.recv().await.event else {
+        panic!("expected POLICY");
+    };
+    assert_eq!(channel.namespace(), Some(ns_id.as_str()));
 
-    let channel: weft_proto::ChannelName = "#gaming/general".parse().unwrap();
     assert!(
         ctx.registry.exists(&channel),
         "channel should be live after create"
@@ -3314,7 +3382,7 @@ async fn ns_delete_cascades_channels() {
     // Deleting the namespace must tear its channels down with it. Leaving the
     // actor + store row orphaned is the bug: the channel stays live (writable)
     // and advertised, and a same-name namespace later inherits the ghost.
-    ada.send("@label=del NS DELETE gaming gaming");
+    ada.send(&format!("@label=del NS DELETE {ns_id} {ns_id}"));
     let reply = ada.recv().await;
     assert!(
         matches!(&reply.event, Event::NsMeta { description, .. } if description.as_deref() == Some("deleted")),
@@ -3371,24 +3439,30 @@ async fn namespace_meta_and_visibility_are_owner_only() {
         "@root={} NS CREATE gaming unlisted",
         root_key_b64()
     ));
-    ada.recv().await;
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
 
-    ada.send("@label=m1 NS META gaming title :The Gaming Lounge");
+    ada.send(&format!(
+        "@label=m1 NS META {ns_id} title :The Gaming Lounge"
+    ));
     let reply = ada.recv().await;
     assert!(
         matches!(&reply.event, Event::NsMeta { title: Some(t), .. } if t == "The Gaming Lounge")
     );
-    ada.send("@label=v1 NS VISIBILITY gaming public");
+    ada.send(&format!("@label=v1 NS VISIBILITY {ns_id} public"));
     assert!(
         matches!(&ada.recv().await.event, Event::NsMeta { visibility, .. } if visibility.to_string() == "public")
     );
 
     // A non-owner can't administer it.
     let mut eve = ready(&ctx, "eve").await;
-    eve.send("NS META gaming title :hijacked");
+    eve.send(&format!("NS META {ns_id} title :hijacked"));
     eve.expect_err(ErrCode::CapRequired).await;
     // ...and a nonexistent namespace is NO-SUCH-TARGET.
-    eve.send("NS META ghost title :x");
+    let ghost = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+    eve.send(&format!("NS META {ghost} title :x"));
     eve.expect_err(ErrCode::NoSuchTarget).await;
 }
 
@@ -3417,10 +3491,10 @@ async fn discover_lists_only_public_namespaces() {
         let reply = eve.recv().await;
         match reply.event {
             Event::NsMeta {
-                name, visibility, ..
+                vanity, visibility, ..
             } => {
                 assert_eq!(visibility.to_string(), "public");
-                seen.push(name.to_string());
+                seen.push(vanity.to_string());
             }
             Event::More { .. } => continue,
             other => panic!("unexpected in DISCOVER: {other:?}"),
@@ -3474,26 +3548,29 @@ async fn channel_categories_and_ordering() {
     let mut ada = ready(&ctx, "ada").await;
     // Own a namespace, then build a channel layout inside it.
     ada.send(&format!("@root={} NS CREATE team", root_key_b64()));
-    ada.recv().await;
-    for chan in ["#team/general", "#team/random", "#team/voice"] {
-        ada.send(&format!("CHANNEL CREATE {chan}"));
-        ada.recv().await; // POLICY
-    }
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    // Each CHANNEL CREATE mints a canonical `#<ns-id>/<chan-id>`; keep the handles.
+    let general = ada.create_channel(&ns_id, "general").await;
+    let random = ada.create_channel(&ns_id, "random").await;
+    let voice = ada.create_channel(&ns_id, "voice").await;
     // Categorize + order: general/random under "text", voice uncategorized.
-    ada.send("CHANNEL META #team/general category :text");
+    ada.send(&format!("CHANNEL META {general} category :text"));
     assert!(matches!(&ada.recv().await.event, Event::Chanmeta { key, .. } if key == "category"));
-    ada.send("CHANNEL META #team/general position :0");
+    ada.send(&format!("CHANNEL META {general} position :0"));
     ada.recv().await;
-    ada.send("CHANNEL META #team/random category :text");
+    ada.send(&format!("CHANNEL META {random} category :text"));
     ada.recv().await;
-    ada.send("CHANNEL META #team/random position :1");
+    ada.send(&format!("CHANNEL META {random} position :1"));
     ada.recv().await;
     // Reorder: move random ahead of general.
-    ada.send("CHANNEL META #team/random position :-1");
+    ada.send(&format!("CHANNEL META {random} position :-1"));
     ada.recv().await;
 
     // Read the layout back, ordered.
-    ada.send("@label=cl CHANNELS team");
+    ada.send(&format!("@label=cl CHANNELS {ns_id}"));
     let mut layout = Vec::new();
     while layout.len() < 3 {
         let reply = ada.recv().await;
@@ -3511,22 +3588,22 @@ async fn channel_categories_and_ordering() {
         }
     }
     // voice (uncategorized) first, then text by position: random(-1) before general(0).
-    assert_eq!(layout[0].0, "#team/voice");
+    assert_eq!(layout[0].0, voice.to_string());
     assert_eq!(
         layout[1],
-        ("#team/random".to_string(), Some("text".to_string()), -1)
+        (random.to_string(), Some("text".to_string()), -1)
     );
     assert_eq!(
         layout[2],
-        ("#team/general".to_string(), Some("text".to_string()), 0)
+        (general.to_string(), Some("text".to_string()), 0)
     );
 
     // Non-owner can set neither (needs pin cap in the ns).
     let mut eve = ready(&ctx, "eve").await;
-    eve.send("CHANNEL META #team/general category :hijack");
+    eve.send(&format!("CHANNEL META {general} category :hijack"));
     eve.expect_err(ErrCode::CapRequired).await;
     // ...but can read a public/unlisted namespace's layout (NS-META, then layout).
-    eve.send("CHANNELS team");
+    eve.send(&format!("CHANNELS {ns_id}"));
     assert!(matches!(eve.recv().await.event, Event::NsMeta { .. }));
     assert!(matches!(
         eve.recv().await.event,
@@ -3538,34 +3615,43 @@ async fn channel_categories_and_ordering() {
 
 /// Create a namespace owned by `owner`, returning its root Keypair (held
 /// client-side) so tests can sign transfer/recovery/cancel statements.
-async fn make_namespace(ctx: &Arc<ServerCtx>, owner: &str, name: &str) -> (Client, Keypair) {
+async fn make_namespace(
+    ctx: &Arc<ServerCtx>,
+    owner: &str,
+    name: &str,
+) -> (Client, Keypair, String) {
     let root = Keypair::generate();
     let mut client = ready(ctx, owner).await;
     client.send(
         &format!("root={} NS CREATE {name} unlisted", root.public().to_b64())
             .replace("root=", "@root="),
     );
-    assert!(matches!(client.recv().await.event, Event::NsMeta { .. }));
-    (client, root)
+    let Event::NsMeta { id, .. } = client.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    // The rotation/transfer/cancel signatures still cover the vanity `name`
+    // (the server verifies against `record.name`); commands address by this id.
+    (client, root, id.to_string())
 }
 
 #[tokio::test]
 async fn ns_transfer_is_root_signed_rung_one() {
     let ctx = ctx(&[]);
-    let (mut ada, root) = make_namespace(&ctx, "ada", "gaming").await;
+    let (mut ada, root, ns_id) = make_namespace(&ctx, "ada", "gaming").await;
 
     // A forged signature is FORBIDDEN.
-    ada.send("@sig=Zm9yZ2Vk NS TRANSFER gaming bob");
+    ada.send(&format!("@sig=Zm9yZ2Vk NS TRANSFER {ns_id} bob"));
     let reply = ada.expect_err(ErrCode::Forbidden).await;
     let Event::Err(err) = &reply.event else {
         unreachable!()
     };
     assert_eq!(err.context.as_deref(), Some("signature"));
 
-    // A real root signature transfers ownership immediately (no delay).
+    // A real root signature transfers ownership immediately (no delay). The
+    // signature still covers the vanity name; the command addresses by id.
     let sig = weft_crypto::sign_transfer(&root, "gaming", "bob");
     ada.send(&format!(
-        "@sig={} NS TRANSFER gaming bob",
+        "@sig={} NS TRANSFER {ns_id} bob",
         weft_crypto::signature_to_b64(&sig)
     ));
     let reply = ada.recv().await;
@@ -3573,16 +3659,16 @@ async fn ns_transfer_is_root_signed_rung_one() {
 
     // Bob is now the owner: he can administer, ada can't.
     let mut bob = ready(&ctx, "bob").await;
-    bob.send("NS META gaming title :Bob's Lounge");
+    bob.send(&format!("NS META {ns_id} title :Bob's Lounge"));
     assert!(matches!(bob.recv().await.event, Event::NsMeta { .. }));
-    ada.send("NS META gaming title :ada's");
+    ada.send(&format!("NS META {ns_id} title :ada's"));
     ada.expect_err(ErrCode::CapRequired).await;
 }
 
 #[tokio::test]
 async fn recovery_rung_two_quorum_then_cancel() {
     let ctx = ctx(&[]);
-    let (mut ada, root) = make_namespace(&ctx, "ada", "gaming").await;
+    let (mut ada, root, ns_id) = make_namespace(&ctx, "ada", "gaming").await;
     // Designate a 2-of-3 quorum.
     let (q1, q2, q3) = (
         Keypair::generate(),
@@ -3595,7 +3681,7 @@ async fn recovery_rung_two_quorum_then_cancel() {
         q2.public().to_b64(),
         q3.public().to_b64()
     );
-    ada.send(&format!("NS RECOVERY SET gaming 2 {keys}"));
+    ada.send(&format!("NS RECOVERY SET {ns_id} 2 {keys}"));
     let reply = ada.recv().await;
     assert!(matches!(
         &reply.event,
@@ -3616,7 +3702,7 @@ async fn recovery_rung_two_quorum_then_cancel() {
         record: record.clone(),
         signatures: vec![record.sign(&q1), record.sign(&q2)],
     };
-    ada.send(&format!("NS RECOVER gaming {}", signed.to_b64()));
+    ada.send(&format!("NS RECOVER {ns_id} {}", signed.to_b64()));
     let reply = ada.recv().await;
     let Event::NsMeta {
         recovery_pending: Some((_, rung)),
@@ -3628,13 +3714,14 @@ async fn recovery_rung_two_quorum_then_cancel() {
     assert_eq!(*rung, 2, "quorum → rung 2");
 
     // A second RECOVER while one is pending → CONFLICT.
-    ada.send(&format!("NS RECOVER gaming {}", signed.to_b64()));
+    ada.send(&format!("NS RECOVER {ns_id} {}", signed.to_b64()));
     ada.expect_err(ErrCode::Conflict).await;
 
-    // The live root cancels it (a live root always wins, §2.4).
+    // The live root cancels it (a live root always wins, §2.4). The cancel
+    // signature covers the vanity name; the command addresses by id.
     let cancel = weft_crypto::sign_cancel(&root, "gaming");
     ada.send(&format!(
-        "@sig={} NS RECOVERY CANCEL gaming",
+        "@sig={} NS RECOVERY CANCEL {ns_id}",
         weft_crypto::signature_to_b64(&cancel)
     ));
     let reply = ada.recv().await;
@@ -3650,10 +3737,10 @@ async fn recovery_rung_two_quorum_then_cancel() {
 #[tokio::test]
 async fn recovery_rejects_insufficient_or_wrong_signatures() {
     let ctx = ctx(&[]);
-    let (mut ada, _root) = make_namespace(&ctx, "ada", "gaming").await;
+    let (mut ada, _root, ns_id) = make_namespace(&ctx, "ada", "gaming").await;
     let (q1, q2) = (Keypair::generate(), Keypair::generate());
     ada.send(&format!(
-        "NS RECOVERY SET gaming 2 {},{}",
+        "NS RECOVERY SET {ns_id} 2 {},{}",
         q1.public().to_b64(),
         q2.public().to_b64()
     ));
@@ -3670,7 +3757,7 @@ async fn recovery_rejects_insufficient_or_wrong_signatures() {
         record: record.clone(),
         signatures: vec![record.sign(&q1)],
     };
-    ada.send(&format!("NS RECOVER gaming {}", under.to_b64()));
+    ada.send(&format!("NS RECOVER {ns_id} {}", under.to_b64()));
     ada.expect_err(ErrCode::Forbidden).await;
 
     // A rotation record for a *different* namespace is refused.
@@ -3683,7 +3770,7 @@ async fn recovery_rejects_insufficient_or_wrong_signatures() {
         record: wrong.clone(),
         signatures: vec![wrong.sign(&q1), wrong.sign(&q2)],
     };
-    ada.send(&format!("NS RECOVER gaming {}", wrong_signed.to_b64()));
+    ada.send(&format!("NS RECOVER {ns_id} {}", wrong_signed.to_b64()));
     ada.expect_err(ErrCode::Forbidden).await;
 }
 
@@ -3716,15 +3803,19 @@ async fn recovery_applies_at_expiry_via_scheduler() {
         "@root={} NS CREATE gaming unlisted",
         root.public().to_b64()
     ));
-    ada.recv().await;
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
     let q1 = Keypair::generate();
     ada.send(&format!(
-        "NS RECOVERY SET gaming 1 {}",
+        "NS RECOVERY SET {ns_id} 1 {}",
         q1.public().to_b64()
     ));
     ada.recv().await;
 
     let new_root = Keypair::generate();
+    // The rotation record still names the vanity (server verifies against it).
     let record = weft_crypto::RotationRecord {
         namespace: "gaming".into(),
         new_root_key: new_root.public(),
@@ -3734,7 +3825,7 @@ async fn recovery_applies_at_expiry_via_scheduler() {
         record: record.clone(),
         signatures: vec![record.sign(&q1)],
     };
-    ada.send(&format!("NS RECOVER gaming {}", signed.to_b64()));
+    ada.send(&format!("NS RECOVER {ns_id} {}", signed.to_b64()));
     ada.recv().await; // pending
 
     let ns_name: weft_proto::NamespaceName = "gaming".parse().unwrap();
@@ -3787,7 +3878,10 @@ async fn operator_takeover_seizes_the_namespace_immediately() {
         "@root={} NS CREATE gaming unlisted",
         root.public().to_b64()
     ));
-    ada.recv().await;
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
 
     // The operator signs a rotation with the *network* key — that signature is
     // what makes it rung 3. No recovery set is configured, so rung 2 can't apply.
@@ -3801,7 +3895,7 @@ async fn operator_takeover_seizes_the_namespace_immediately() {
         record: record.clone(),
         signatures: vec![record.sign(&network_key)],
     };
-    ada.send(&format!("@label=r NS RECOVER gaming {}", signed.to_b64()));
+    ada.send(&format!("@label=r NS RECOVER {ns_id} {}", signed.to_b64()));
     let reply = drain_until_label(&mut ada, "r").await;
     assert!(
         matches!(&reply.event, Event::NsMeta { .. }),
@@ -3844,7 +3938,10 @@ async fn a_takeover_still_needs_the_network_key() {
         "@root={} NS CREATE gaming unlisted",
         root.public().to_b64()
     ));
-    ada.recv().await;
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
 
     let impostor = Keypair::generate();
     let record = weft_crypto::RotationRecord {
@@ -3856,7 +3953,7 @@ async fn a_takeover_still_needs_the_network_key() {
         record: record.clone(),
         signatures: vec![record.sign(&impostor)],
     };
-    ada.send(&format!("@label=x NS RECOVER gaming {}", signed.to_b64()));
+    ada.send(&format!("@label=x NS RECOVER {ns_id} {}", signed.to_b64()));
     ada.expect_err(ErrCode::Forbidden).await;
 }
 
@@ -4096,12 +4193,15 @@ async fn ns_meta_federation_opt_in_on_any_visibility() {
         "@root={} NS CREATE gaming unlisted",
         root_key_b64()
     ));
-    ada.recv().await;
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
 
     // §11.10: federation is an explicit opt-in for *any* visibility (an invite,
     // not public visibility, gates reachability for a non-public namespace).
     // It is off by default, so opening it flips the flag and re-emits NS-META.
-    ada.send("NS META gaming federation :open");
+    ada.send(&format!("NS META {ns_id} federation :open"));
     let ev = ada.recv().await;
     let Event::NsMeta {
         federation,
@@ -4126,13 +4226,17 @@ async fn bridge_request_offers_only_reachable_namespaces() {
     // Owner makes a public namespace reachable.
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
-    ada.recv().await;
-    ada.send("NS META gaming federation :open");
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let gaming_id = id.to_string();
+    ada.send(&format!("NS META {gaming_id} federation :open"));
     ada.recv().await;
 
     let mut peer = bridged_peer(&ctx, "peer.example", &peer_key).await;
 
-    // Reachable → the peer receives a signed BRIDGE PROPOSE offer.
+    // Reachable → the peer receives a signed BRIDGE PROPOSE offer. The peer
+    // addresses our namespace by its human vanity (it typed `ournet/gaming`).
     peer.send("BRIDGE REQUEST gaming");
     let offer = peer.recv_raw().await;
     assert!(
@@ -4158,10 +4262,13 @@ async fn bridge_request_offers_only_reachable_namespaces() {
         "@root={} NS CREATE secret unlisted",
         root_key_b64()
     ));
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let secret_id = id.to_string();
+    ada.send(&format!("NS META {secret_id} federation :open"));
     ada.recv().await;
-    ada.send("NS META secret federation :open");
-    ada.recv().await;
-    ada.send("INVITE MINT ns:secret");
+    ada.send(&format!("INVITE MINT ns:{secret_id}"));
     let Event::Invited { invite_id, .. } = ada.recv().await.event else {
         panic!("expected INVITED");
     };
@@ -4183,7 +4290,7 @@ async fn bridge_request_offers_only_reachable_namespaces() {
     );
 
     // An invite for a *different* namespace must not unlock `secret`.
-    ada.send("INVITE MINT ns:gaming");
+    ada.send(&format!("INVITE MINT ns:{gaming_id}"));
     let Event::Invited {
         invite_id: other, ..
     } = ada.recv().await.event
@@ -4397,9 +4504,11 @@ async fn federated_admin_creates_a_channel_over_the_bridge() {
     assert!(matches!(boss.recv().await.event, Event::Token { .. }));
 
     let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
+    // The server mints the channel's canonical `#<chan-id>` (v0.13), so the
+    // POLICY echo carries the id, not the "lounge" vanity.
     bridge.send("@as=alice;label=c CHANNEL CREATE #lounge");
     let raw = bridge.recv_raw().await;
-    assert!(raw.contains("POLICY #lounge"), "{raw}");
+    assert!(raw.contains("POLICY") && raw.contains("label=c"), "{raw}");
 }
 
 #[tokio::test]
@@ -4410,13 +4519,19 @@ async fn federated_admin_edits_namespace_meta_over_the_bridge() {
     let ctx = ctx_bridged(&[], &["boss"], "peer.example", &peer_key.public());
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
-    ada.recv().await;
-    ada.send("GRANT alice@peer.example ns:gaming ns-admin");
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("GRANT alice@peer.example ns:{ns_id} ns-admin"));
     assert!(matches!(ada.recv().await.event, Event::Token { .. }));
 
     let mut bridge = bridged_peer(&ctx, "peer.example", &peer_key).await;
-    bridge.send("@as=alice;label=n NS META gaming title :Alice's Lounge");
+    bridge.send(&format!(
+        "@as=alice;label=n NS META {ns_id} title :Alice's Lounge"
+    ));
     let raw = bridge.recv_raw().await;
+    // The NS-META event still carries the "gaming" vanity for display.
     assert!(raw.contains("NS-META") && raw.contains("gaming"), "{raw}");
 }
 
@@ -5158,17 +5273,22 @@ async fn ns_scope_mute_covers_a_namespaced_channel() {
     let mut ada = ready(&ctx, "ada").await;
     let root = root_key_b64();
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
-    drain_until_label(&mut ada, "n").await;
-    ada.send("@label=c CHANNEL CREATE #gaming/general");
-    drain_until_label(&mut ada, "c").await;
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
+    let Event::Policy { channel: chan, .. } = drain_until_label(&mut ada, "c").await.event else {
+        panic!("expected POLICY");
+    };
 
     // Joining the namespaced channel makes bob an ns member (drains MEMBER+POLICY).
-    let mut bob = joined(&ctx, "bob", "#gaming/general").await;
+    let mut bob = joined(&ctx, "bob", chan.as_str()).await;
 
-    ada.send("@label=m MUTE ns:gaming bob");
+    ada.send(&format!("@label=m MUTE ns:{ns_id} bob"));
     drain_until_label(&mut ada, "m").await;
 
-    bob.send("MSG #gaming/general :hi");
+    bob.send(&format!("MSG {chan} :hi"));
     let Event::Err(e) = bob.expect_err(ErrCode::Forbidden).await.event else {
         panic!()
     };
@@ -5217,18 +5337,23 @@ async fn restricted_channel_gates_posting_on_send_cap() {
     let ctx = ctx_ops(&[], &["mod"]);
     let mut op = ready(&ctx, "mod").await;
     op.send("CHANNEL CREATE #locked");
-    op.recv().await; // POLICY (create ack)
-    op.send("JOIN #locked");
+    let Event::Policy {
+        channel: locked, ..
+    } = op.recv().await.event
+    else {
+        panic!("expected POLICY");
+    };
+    op.send(&format!("JOIN {locked}"));
     op.recv().await; // MEMBER
     op.recv().await; // POLICY
-    op.send("CHANNEL META #locked posting :restricted");
+    op.send(&format!("CHANNEL META {locked} posting :restricted"));
     op.recv().await; // CHANMETA
 
     // A normal member (no send grant) can't post in a restricted channel.
-    let mut bob = joined(&ctx, "bob", "#locked").await;
+    let mut bob = joined(&ctx, "bob", locked.as_str()).await;
     bob.recv().await; // join-time CHANMETA posting:restricted (initial-state push)
     op.recv().await; // bob's MEMBER join broadcast
-    bob.send("MSG #locked :hello");
+    bob.send(&format!("MSG {locked} :hello"));
     let Event::Err(e) = bob.expect_err(ErrCode::CapRequired).await.event else {
         panic!()
     };
@@ -5236,9 +5361,9 @@ async fn restricted_channel_gates_posting_on_send_cap() {
 
     // The grant path (the "both" story): granting `send` lets them post — and
     // REVOKE would take it away again.
-    op.send("GRANT bob #locked send");
+    op.send(&format!("GRANT bob {locked} send"));
     op.recv().await; // TOKEN
-    bob.send("MSG #locked :now i can");
+    bob.send(&format!("MSG {locked} :now i can"));
     loop {
         if matches!(bob.recv().await.event, Event::Message(ref m) if m.body == "now i can") {
             break;
@@ -5254,28 +5379,32 @@ async fn a_frozen_channel_takes_nobody_but_a_moderator() {
     let (ctx, store) = ctx_full_store(&[], true, &["mod"]);
     let mut op = ready(&ctx, "mod").await;
     op.send("CHANNEL CREATE #cooldown");
-    op.recv().await; // POLICY
-    op.send("JOIN #cooldown");
+    let Event::Policy {
+        channel: cooldown, ..
+    } = op.recv().await.event
+    else {
+        panic!("expected POLICY");
+    };
+    op.send(&format!("JOIN {cooldown}"));
     op.recv().await; // MEMBER
     op.recv().await; // POLICY
 
-    let mut bob = joined(&ctx, "bob", "#cooldown").await;
+    let mut bob = joined(&ctx, "bob", cooldown.as_str()).await;
     op.recv().await; // bob's join broadcast
                      // Give bob `send`, so the freeze — not a missing cap — is what stops him.
-    op.send("GRANT bob #cooldown send");
+    op.send(&format!("GRANT bob {cooldown} send"));
     op.recv().await; // TOKEN
 
-    let channel: weft_proto::ChannelName = "#cooldown".parse().unwrap();
-    store.set_channel_frozen(&channel, true).await.unwrap();
+    store.set_channel_frozen(&cooldown, true).await.unwrap();
 
-    bob.send("MSG #cooldown :can i talk");
+    bob.send(&format!("MSG {cooldown} :can i talk"));
     let Event::Err(e) = bob.expect_err(ErrCode::Forbidden).await.event else {
         panic!()
     };
     assert_eq!(e.context.as_deref(), Some("frozen"));
 
     // The moderator (operator ⇒ holds ns-admin everywhere) still can.
-    op.send("MSG #cooldown :locked while we sort this out");
+    op.send(&format!("MSG {cooldown} :locked while we sort this out"));
     loop {
         if matches!(op.recv().await.event, Event::Message(ref m) if m.body.starts_with("locked")) {
             break;
@@ -5284,8 +5413,8 @@ async fn a_frozen_channel_takes_nobody_but_a_moderator() {
 
     // Unfreezing restores bob's access — the freeze is reversible and left his
     // grant untouched.
-    store.set_channel_frozen(&channel, false).await.unwrap();
-    bob.send("MSG #cooldown :thanks");
+    store.set_channel_frozen(&cooldown, false).await.unwrap();
+    bob.send(&format!("MSG {cooldown} :thanks"));
     loop {
         if matches!(bob.recv().await.event, Event::Message(ref m) if m.body == "thanks") {
             break;
@@ -5303,31 +5432,37 @@ async fn a_full_namespace_freeze_admits_only_the_owner() {
     let (ctx, store) = ctx_full_store(&[], true, &[]);
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
-    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
-    ada.send("CHANNEL CREATE #gaming/lobby");
-    ada.recv().await; // POLICY
-    ada.send("JOIN #gaming/lobby");
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("CHANNEL CREATE #{ns_id}/lobby"));
+    let Event::Policy { channel: lobby, .. } = ada.recv().await.event else {
+        panic!("expected POLICY");
+    };
+    ada.send(&format!("JOIN {lobby}"));
     ada.recv().await; // MEMBER
     ada.recv().await; // POLICY
 
     // bob is a delegated ns-admin — full moderation authority in the namespace.
-    let mut bob = joined(&ctx, "bob", "#gaming/lobby").await;
+    let mut bob = joined(&ctx, "bob", lobby.as_str()).await;
     ada.recv().await; // bob's join broadcast
-    ada.send("GRANT bob ns:gaming ns-admin");
+    ada.send(&format!("GRANT bob ns:{ns_id} ns-admin"));
     ada.recv().await; // TOKEN
 
+    // The freeze setter keys the namespace by its vanity name.
     let ns: weft_proto::NamespaceName = "gaming".parse().unwrap();
     store.set_namespace_frozen(&ns, true).await.unwrap();
 
     // Even an ns-admin is silenced by a full freeze.
-    bob.send("MSG #gaming/lobby :i'm an admin though");
+    bob.send(&format!("MSG {lobby} :i'm an admin though"));
     let Event::Err(e) = bob.expect_err(ErrCode::Forbidden).await.event else {
         panic!()
     };
     assert_eq!(e.context.as_deref(), Some("frozen"));
 
     // The owner still speaks.
-    ada.send("MSG #gaming/lobby :everything is paused");
+    ada.send(&format!("MSG {lobby} :everything is paused"));
     loop {
         if matches!(ada.recv().await.event, Event::Message(ref m) if m.body.starts_with("everything"))
         {
@@ -5337,7 +5472,7 @@ async fn a_full_namespace_freeze_admits_only_the_owner() {
 
     // Lifting it restores the namespace.
     store.set_namespace_frozen(&ns, false).await.unwrap();
-    bob.send("MSG #gaming/lobby :back");
+    bob.send(&format!("MSG {lobby} :back"));
     loop {
         if matches!(bob.recv().await.event, Event::Message(ref m) if m.body == "back") {
             break;
@@ -5352,18 +5487,20 @@ async fn ns_join_auto_joins_visible_channels_only() {
     let ctx = ctx(&[]);
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
-    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
     // Owner creates three channels; one is view-gated (hidden by permissions).
-    for c in ["#gaming/general", "#gaming/lounge", "#gaming/secret"] {
-        ada.send(&format!("CHANNEL CREATE {c}"));
-        assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
-    }
-    ada.send("CHANNEL META #gaming/secret view-gated :yes");
+    let general = ada.create_channel(&ns_id, "general").await;
+    let lounge = ada.create_channel(&ns_id, "lounge").await;
+    let secret = ada.create_channel(&ns_id, "secret").await;
+    ada.send(&format!("CHANNEL META {secret} view-gated :yes"));
     assert!(matches!(ada.recv().await.event, Event::Chanmeta { .. }));
 
     // A regular user joins the namespace → auto-joins the two visible channels.
     let mut bob = ready(&ctx, "bob").await;
-    bob.send("NS JOIN gaming");
+    bob.send(&format!("NS JOIN {ns_id}"));
     let mut joined = std::collections::HashSet::new();
     for _ in 0..4 {
         // Two channels × (MEMBER + POLICY).
@@ -5375,10 +5512,10 @@ async fn ns_join_auto_joins_visible_channels_only() {
             other => panic!("unexpected {other:?}"),
         }
     }
-    assert!(joined.contains("#gaming/general"));
-    assert!(joined.contains("#gaming/lounge"));
+    assert!(joined.contains(general.as_str()));
+    assert!(joined.contains(lounge.as_str()));
     assert!(
-        !joined.contains("#gaming/secret"),
+        !joined.contains(secret.as_str()),
         "a view-gated channel must not be auto-joined"
     );
 }
@@ -5388,27 +5525,28 @@ async fn part_hides_a_namespaced_channel_and_ns_leave_drops_membership() {
     let ctx = ctx(&[]);
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
-    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
-    for c in ["#gaming/general", "#gaming/clips"] {
-        ada.send(&format!("CHANNEL CREATE {c}"));
-        assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
-    }
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    let general = ada.create_channel(&ns_id, "general").await;
+    let clips = ada.create_channel(&ns_id, "clips").await;
     // Ada joins her own namespace so she can query rosters.
-    ada.send("NS JOIN gaming");
+    ada.send(&format!("NS JOIN {ns_id}"));
     drain_until_ns_member(&mut ada).await;
 
     // Bob joins → NS-MEMBER carries the derived member count (ada + bob).
     let mut bob = ready(&ctx, "bob").await;
-    bob.send("NS JOIN gaming");
+    bob.send(&format!("NS JOIN {ns_id}"));
     assert_eq!(drain_until_ns_member(&mut bob).await, Some(2));
 
     // Both are derived-in every channel with zero per-channel joins.
-    ada.send("MEMBERS #gaming/clips");
+    ada.send(&format!("MEMBERS {clips}"));
     assert!(roster_names(&mut ada).await.contains("bob"));
 
     // Bob PARTs one channel → hidden. It drops him from that channel's derived
     // roster only; the other channel still shows him (hide is per-channel).
-    bob.send("PART #gaming/clips");
+    bob.send(&format!("PART {clips}"));
     assert!(matches!(
         bob.recv().await.event,
         Event::Member {
@@ -5416,11 +5554,14 @@ async fn part_hides_a_namespaced_channel_and_ns_leave_drops_membership() {
             ..
         }
     ));
-    ada.send("MEMBERS #gaming/clips");
-    let clips = roster_names(&mut ada).await;
-    assert!(!clips.contains("bob"), "a hidden channel drops the hider");
-    assert!(clips.contains("ada"));
-    ada.send("MEMBERS #gaming/general");
+    ada.send(&format!("MEMBERS {clips}"));
+    let clips_roster = roster_names(&mut ada).await;
+    assert!(
+        !clips_roster.contains("bob"),
+        "a hidden channel drops the hider"
+    );
+    assert!(clips_roster.contains("ada"));
+    ada.send(&format!("MEMBERS {general}"));
     assert!(
         roster_names(&mut ada).await.contains("bob"),
         "hide is per-channel, not per-namespace"
@@ -5428,7 +5569,7 @@ async fn part_hides_a_namespaced_channel_and_ns_leave_drops_membership() {
 
     // NS LEAVE drops membership entirely: NS-MEMBER part + gone from every
     // channel's derived roster.
-    bob.send("@label=l NS LEAVE gaming");
+    bob.send(&format!("@label=l NS LEAVE {ns_id}"));
     let reply = bob.recv().await;
     assert!(matches!(
         reply.event,
@@ -5438,7 +5579,7 @@ async fn part_hides_a_namespaced_channel_and_ns_leave_drops_membership() {
         }
     ));
     assert_eq!(reply.label.as_deref(), Some("l"));
-    ada.send("MEMBERS #gaming/general");
+    ada.send(&format!("MEMBERS {general}"));
     assert!(
         !roster_names(&mut ada).await.contains("bob"),
         "NS LEAVE removes the account from all derived rosters"
@@ -5451,14 +5592,19 @@ async fn owner_cannot_leave_their_namespace() {
     let mut ada = ready(&ctx, "ada").await;
     let root = root_key_b64();
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
-    drain_until_label(&mut ada, "n").await;
-    ada.send("@label=c CHANNEL CREATE #gaming/general");
-    drain_until_label(&mut ada, "c").await;
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
+    let Event::Policy { channel: chan, .. } = drain_until_label(&mut ada, "c").await.event else {
+        panic!("expected POLICY");
+    };
     // Join makes the owner a namespace member; leaving would then orphan it.
-    ada.send("@label=j JOIN #gaming/general");
+    ada.send(&format!("@label=j JOIN {chan}"));
     drain_until_label(&mut ada, "j").await;
 
-    ada.send("@label=l NS LEAVE gaming");
+    ada.send(&format!("@label=l NS LEAVE {ns_id}"));
     let reply = drain_until_label(&mut ada, "l").await;
     assert!(
         matches!(&reply.event, Event::Err(err) if err.code == ErrCode::Policy),
@@ -5473,19 +5619,27 @@ async fn ns_welcome_channel_greets_new_members() {
     let bob = ready(&ctx, "bob").await;
     let root = root_key_b64();
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
-    drain_until_label(&mut ada, "n").await;
-    ada.send("@label=c1 CHANNEL CREATE #gaming/general");
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c1 CHANNEL CREATE #{ns_id}/general"));
     drain_until_label(&mut ada, "c1").await;
-    ada.send("@label=c2 CHANNEL CREATE #gaming/welcome");
-    drain_until_label(&mut ada, "c2").await;
-    ada.send("@label=w NS META gaming welcome :#gaming/welcome");
+    ada.send(&format!("@label=c2 CHANNEL CREATE #{ns_id}/welcome"));
+    let Event::Policy {
+        channel: welcome, ..
+    } = drain_until_label(&mut ada, "c2").await.event
+    else {
+        panic!("expected POLICY");
+    };
+    ada.send(&format!("@label=w NS META {ns_id} welcome :{welcome}"));
     drain_until_label(&mut ada, "w").await;
     // ada watches the welcome channel so she receives the greeting broadcast.
-    ada.send("@label=jw JOIN #gaming/welcome");
+    ada.send(&format!("@label=jw JOIN {welcome}"));
     drain_until_label(&mut ada, "jw").await;
 
-    // bob joins the namespace → a "welcome" system line lands in #gaming/welcome.
-    bob.send("@label=j NS JOIN gaming");
+    // bob joins the namespace → a "welcome" system line lands in the welcome channel.
+    bob.send(&format!("@label=j NS JOIN {ns_id}"));
 
     // recv() skips system messages, so read raw and match bob's welcome line
     // (ada's own first join fired one too — that's expected).
@@ -5495,7 +5649,7 @@ async fn ns_welcome_channel_greets_new_members() {
         if let Event::Message(m) = &reply.event {
             if m.meta.system.as_deref() == Some("welcome") && m.sender.account.as_str() == "bob" {
                 assert!(
-                    matches!(&m.target, weft_proto::Target::Channel(c) if c.as_str() == "#gaming/welcome"),
+                    matches!(&m.target, weft_proto::Target::Channel(c) if c.as_str() == welcome.as_str()),
                     "welcome posts to the designated channel, got {:?}",
                     m.target
                 );
@@ -5510,10 +5664,12 @@ async fn sync_fresh_skeleton_then_delta_catches_up() {
     let ctx = ctx(&[]);
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
-    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
-    ada.send("CHANNEL CREATE #gaming/general");
-    assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
-    ada.send("NS JOIN gaming");
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    let general = ada.create_channel(&ns_id, "general").await;
+    ada.send(&format!("NS JOIN {ns_id}"));
     drain_until_ns_member(&mut ada).await;
 
     // Fresh SYNC → skeleton (NS-META + CHANNEL-LAYOUT + POLICY) + a cursor.
@@ -5525,7 +5681,7 @@ async fn sync_fresh_skeleton_then_delta_catches_up() {
         match ev.event {
             Event::NsMeta { .. } => {}
             Event::ChannelLayout { channel, .. } => {
-                saw_layout |= channel.as_str() == "#gaming/general";
+                saw_layout |= channel.as_str() == general.as_str();
             }
             Event::Policy { .. } => saw_policy = true,
             Event::Marked { .. } | Event::UnreadCounts { .. } => {}
@@ -5540,7 +5696,7 @@ async fn sync_fresh_skeleton_then_delta_catches_up() {
     assert!(saw_policy, "skeleton carries the channel policy");
 
     // Post a message after the cursor, drain its own echo.
-    ada.send("MSG #gaming/general :hello");
+    ada.send(&format!("MSG {general} :hello"));
     loop {
         if let Event::Message(m) = ada.recv().await.event {
             assert_eq!(m.body, "hello");
@@ -5655,25 +5811,30 @@ async fn channel_create_pushes_layout_to_online_ns_members() {
     let ctx = ctx(&[]);
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
-    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
-    ada.send("CHANNEL CREATE #gaming/general");
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("CHANNEL CREATE #{ns_id}/general"));
     assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
 
     // Bob joins the namespace (an online member).
     let mut bob = ready(&ctx, "bob").await;
-    bob.send("NS JOIN gaming");
+    bob.send(&format!("NS JOIN {ns_id}"));
     drain_until_ns_member(&mut bob).await;
 
     // Ada creates a NEW channel → bob receives its layout + policy live, with no
     // reconnect (acceptance #1: derived membership makes it his immediately).
-    ada.send("CHANNEL CREATE #gaming/clips");
-    assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
+    ada.send(&format!("CHANNEL CREATE #{ns_id}/clips"));
+    let Event::Policy { channel: clips, .. } = ada.recv().await.event else {
+        panic!("expected POLICY");
+    };
     let mut layout = false;
     let mut policy = false;
     for _ in 0..2 {
         match bob.recv().await.event {
-            Event::ChannelLayout { channel, .. } => layout |= channel.as_str() == "#gaming/clips",
-            Event::Policy { channel, .. } => policy |= channel.as_str() == "#gaming/clips",
+            Event::ChannelLayout { channel, .. } => layout |= channel.as_str() == clips.as_str(),
+            Event::Policy { channel, .. } => policy |= channel.as_str() == clips.as_str(),
             other => panic!("unexpected push: {other:?}"),
         }
     }
@@ -5689,10 +5850,12 @@ async fn sync_delta_catches_a_channel_metadata_change() {
     let ctx = ctx(&[]);
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
-    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
-    ada.send("CHANNEL CREATE #gaming/general");
-    assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
-    ada.send("NS JOIN gaming");
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    let general = ada.create_channel(&ns_id, "general").await;
+    ada.send(&format!("NS JOIN {ns_id}"));
     drain_until_ns_member(&mut ada).await;
 
     // Snapshot a cursor, then re-category the channel (a layout change).
@@ -5702,7 +5865,7 @@ async fn sync_delta_catches_a_channel_metadata_change() {
             break cursor;
         }
     };
-    ada.send("CHANNEL META #gaming/general category :Voice");
+    ada.send(&format!("CHANNEL META {general} category :Voice"));
 
     // The delta re-serves the channel's layout + policy. A *labeled* SYNC lets
     // us ignore the live CHANNEL-LAYOUT broadcast from the change above — only
@@ -5718,10 +5881,10 @@ async fn sync_delta_catches_a_channel_metadata_change() {
         match ev.event {
             Event::ChannelLayout {
                 channel, category, ..
-            } if channel.as_str() == "#gaming/general" => {
+            } if channel.as_str() == general.as_str() => {
                 layout = category.as_deref() == Some("Voice");
             }
-            Event::Policy { channel, .. } if channel.as_str() == "#gaming/general" => policy = true,
+            Event::Policy { channel, .. } if channel.as_str() == general.as_str() => policy = true,
             Event::SyncEnd { .. } => break,
             _ => {}
         }
@@ -5737,7 +5900,9 @@ async fn sync_delta_catches_a_channel_metadata_change() {
 async fn ns_join_with_no_visible_channels_is_no_such_target() {
     let ctx = ctx(&[]);
     let mut bob = ready(&ctx, "bob").await;
-    bob.send("@label=j NS JOIN nope");
+    // A well-formed but nonexistent ns id → uniform NO-SUCH-TARGET (invariant 1).
+    let ghost = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+    bob.send(&format!("@label=j NS JOIN {ghost}"));
     let reply = bob.expect_err(ErrCode::NoSuchTarget).await;
     assert_eq!(reply.label.as_deref(), Some("j"));
 }
@@ -6086,6 +6251,7 @@ async fn roles_define_list_and_assign_grants_the_bundle() {
         caps,
         color,
         scope,
+        role,
         ..
     } = &ev.event
     else {
@@ -6095,10 +6261,11 @@ async fn roles_define_list_and_assign_grants_the_bundle() {
     assert_eq!(color, "#e8b93d");
     assert_eq!(scope, "*");
     assert_eq!(caps, "mute,ban,kick");
+    let role_id = role.to_string();
     assert!(matches!(root.recv().await.event, Event::BatchEnd { .. }));
 
-    // Assign it to bob → grants the bundle (a signed Token).
-    root.send("@label=a ROLE ASSIGN * bob :Moderator");
+    // Assign it to bob (by the minted role id) → grants the bundle (a Token).
+    root.send(&format!("@label=a ROLE ASSIGN * bob {role_id}"));
     let ev = root.recv().await;
     assert!(matches!(&ev.event, Event::Token { .. }), "got {ev:?}");
 
@@ -6120,13 +6287,13 @@ async fn role_assigns_to_a_foreign_user() {
     let mut root = ready(&ctx, "root").await;
     // Define a role at the global scope.
     root.send("ROLE CREATE * #e8b93d mute,ban :Moderator");
-    root.recv().await; // BatchStart
-    root.recv().await; // Role
-    root.recv().await; // BatchEnd
+    let role_id = role_id_named(&mut root, "Moderator").await;
 
     // Assign it to a *federated* user (account@network) — membership recorded by
     // the network-qualified handle, caps granted to the foreign subject (§10.4).
-    root.send("@label=a ROLE ASSIGN * alice@peer.example :Moderator");
+    root.send(&format!(
+        "@label=a ROLE ASSIGN * alice@peer.example {role_id}"
+    ));
     let reply = root.recv().await;
     assert_eq!(reply.label.as_deref(), Some("a"));
     assert!(
@@ -6151,14 +6318,15 @@ async fn renaming_a_role_keeps_its_members_and_caps() {
     let _bob = ready(&ctx, "bob").await;
 
     root.send("ROLE CREATE * #e8b93d mute,ban :Moderator");
-    root.recv().await; // BatchStart
-    root.recv().await; // Role
-    root.recv().await; // BatchEnd
-    root.send("@label=a ROLE ASSIGN * bob :Moderator");
+    let role_id = role_id_named(&mut root, "Moderator").await;
+    root.send(&format!("@label=a ROLE ASSIGN * bob {role_id}"));
     root.recv().await; // Token
 
-    // Rename → the ROLES batch comes back under the new name, definition intact.
-    root.send("@label=r ROLE RENAME * :Moderator,Head Moderator");
+    // Rename (v0.13: folded into ROLE UPDATE, addressed by the role id) → the
+    // ROLES batch comes back under the new name, definition intact.
+    root.send(&format!(
+        "@label=r ROLE UPDATE * {role_id} #e8b93d mute,ban :Head Moderator"
+    ));
     assert!(matches!(root.recv().await.event, Event::BatchStart { .. }));
     let ev = root.recv().await;
     let Event::Role { name, caps, .. } = &ev.event else {
@@ -6189,21 +6357,23 @@ async fn renaming_a_role_keeps_its_members_and_caps() {
 async fn renaming_onto_an_existing_role_is_refused() {
     let ctx = ctx_ops(&["#general"], &["root"]);
     let mut root = ready(&ctx, "root").await;
-    for name in ["Moderator", "Helper"] {
-        root.send(&format!("ROLE CREATE * #e8b93d mute :{name}"));
-        root.recv().await;
-        root.recv().await;
-        if name == "Helper" {
-            root.recv().await; // second role in the batch
-        }
-        root.recv().await;
-    }
-    // Merging two bundles under one name is not a rename.
-    root.send("@label=x ROLE RENAME * :Helper,Moderator");
+    root.send("ROLE CREATE * #e8b93d mute :Moderator");
+    role_id_named(&mut root, "Moderator").await; // drain the batch
+    root.send("ROLE CREATE * #e8b93d mute :Helper");
+    let helper_id = role_id_named(&mut root, "Helper").await;
+
+    // Merging two bundles under one name is not a rename (renaming Helper onto the
+    // existing "Moderator" via ROLE UPDATE).
+    root.send(&format!(
+        "@label=x ROLE UPDATE * {helper_id} #e8b93d mute :Moderator"
+    ));
     root.expect_err(ErrCode::Policy).await;
 
-    // An absent source is NO-SUCH-TARGET, same as any other hidden/absent target.
-    root.send("@label=y ROLE RENAME * :Ghost,Phantom");
+    // An absent source id is NO-SUCH-TARGET, same as any other hidden/absent target.
+    let ghost = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+    root.send(&format!(
+        "@label=y ROLE UPDATE * {ghost} #e8b93d mute :Phantom"
+    ));
     root.expect_err(ErrCode::NoSuchTarget).await;
 }
 
@@ -6212,12 +6382,12 @@ async fn role_rename_needs_admin_authority() {
     let ctx = ctx_ops(&["#general"], &["root"]);
     let mut root = ready(&ctx, "root").await;
     root.send("ROLE CREATE * #fff send :Member");
-    root.recv().await;
-    root.recv().await;
-    root.recv().await;
+    let role_id = role_id_named(&mut root, "Member").await;
 
     let mut mallory = ready(&ctx, "mallory").await; // no caps
-    mallory.send("@label=x ROLE RENAME * :Member,Owner");
+    mallory.send(&format!(
+        "@label=x ROLE UPDATE * {role_id} #fff send :Owner"
+    ));
     let reply = mallory.expect_err(ErrCode::CapRequired).await;
     let Event::Err(err) = &reply.event else {
         unreachable!()
@@ -6248,6 +6418,23 @@ async fn drain_until_label(c: &mut Client, label: &str) -> Reply {
     }
 }
 
+/// v0.13: drain a `ROLES` reply batch (the ack for ROLE CREATE/UPDATE) and return
+/// the server-minted ULID id of the role whose display name is `name`. Stops at
+/// the batch's `BATCH END`, so it works for both labeled and unlabeled batches.
+async fn role_id_named(c: &mut Client, name: &str) -> String {
+    let mut found: Option<String> = None;
+    loop {
+        let r = c.recv().await;
+        match &r.event {
+            Event::Role { role, name: n, .. } if n == name => found = Some(role.to_string()),
+            Event::BatchEnd { .. } => {
+                return found.unwrap_or_else(|| panic!("no role named {name} in the batch"));
+            }
+            _ => {}
+        }
+    }
+}
+
 #[tokio::test]
 async fn assigning_a_namespace_role_grants_its_channel_permissions() {
     let ctx = ctx(&[]);
@@ -6256,22 +6443,31 @@ async fn assigning_a_namespace_role_grants_its_channel_permissions() {
     let root = root_key_b64();
 
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
-    drain_until_label(&mut ada, "n").await;
-    ada.send("@label=c CHANNEL CREATE #gaming/stage");
-    drain_until_label(&mut ada, "c").await;
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/stage"));
+    let Event::Policy { channel: stage, .. } = drain_until_label(&mut ada, "c").await.event else {
+        panic!("expected POLICY");
+    };
 
     // A namespace role (react) plus a same-named *channel* role (send) — the
     // channel role is the role's per-channel permission.
-    ada.send("@label=r1 ROLE CREATE ns:gaming #e8b93d react :Speaker");
-    drain_until_label(&mut ada, "r1").await;
-    ada.send("@label=r2 ROLE CREATE #gaming/stage #e8b93d send :Speaker");
+    ada.send(&format!(
+        "@label=r1 ROLE CREATE ns:{ns_id} #e8b93d react :Speaker"
+    ));
+    let speaker = role_id_named(&mut ada, "Speaker").await;
+    ada.send(&format!(
+        "@label=r2 ROLE CREATE {stage} #e8b93d send :Speaker"
+    ));
     drain_until_label(&mut ada, "r2").await;
 
     // Assigning the namespace role should propagate the channel permission.
-    ada.send("@label=a ROLE ASSIGN ns:gaming bob :Speaker");
+    ada.send(&format!("@label=a ROLE ASSIGN ns:{ns_id} bob {speaker}"));
     drain_until_label(&mut ada, "a").await;
 
-    ada.send("@label=q CAPS bob #gaming/stage");
+    ada.send(&format!("@label=q CAPS bob {stage}"));
     let ev = drain_until_label(&mut ada, "q").await;
     let Event::Caps { caps, .. } = &ev.event else {
         panic!("expected CAPS, got {ev:?}");
@@ -6315,25 +6511,30 @@ async fn ns_info_members_lists_the_roster_with_roles_and_join_times() {
     // Ada owns gaming (holds ns-admin implicitly) and joins it. NS JOIN needs a
     // visible channel to land on, so give it one first.
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
-    drain_until_label(&mut ada, "n").await;
-    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
     drain_until_label(&mut ada, "c").await;
-    ada.send("@label=j NS JOIN gaming");
+    ada.send(&format!("@label=j NS JOIN {ns_id}"));
     drain_until_label(&mut ada, "j").await;
 
     // Bob joins as a plain member.
     let mut bob = ready(&ctx, "bob").await;
-    bob.send("@label=jb NS JOIN gaming");
+    bob.send(&format!("@label=jb NS JOIN {ns_id}"));
     drain_until_label(&mut bob, "jb").await;
 
     // A moderator role, assigned to bob.
-    ada.send("@label=r ROLE CREATE ns:gaming #e8654f mute,kick :Moderator");
-    drain_until_label(&mut ada, "r").await;
-    ada.send("@label=a ROLE ASSIGN ns:gaming bob :Moderator");
+    ada.send(&format!(
+        "@label=r ROLE CREATE ns:{ns_id} #e8654f mute,kick :Moderator"
+    ));
+    let mod_id = role_id_named(&mut ada, "Moderator").await;
+    ada.send(&format!("@label=a ROLE ASSIGN ns:{ns_id} bob {mod_id}"));
     drain_until_label(&mut ada, "a").await;
 
     // Owner queries the roster.
-    ada.send("@label=i NS INFO MEMBERS gaming");
+    ada.send(&format!("@label=i NS INFO MEMBERS {ns_id}"));
     let roster = ns_member_info(&mut ada).await;
 
     let ada_row = roster
@@ -6358,15 +6559,18 @@ async fn ns_info_members_requires_a_moderation_cap() {
     let mut ada = ready(&ctx, "ada").await;
     let root = root_key_b64();
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
-    drain_until_label(&mut ada, "n").await;
-    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
     drain_until_label(&mut ada, "c").await;
 
     // A plain member (no moderation cap) is refused the roster.
     let mut carol = ready(&ctx, "carol").await;
-    carol.send("@label=jc NS JOIN gaming");
+    carol.send(&format!("@label=jc NS JOIN {ns_id}"));
     drain_until_label(&mut carol, "jc").await;
-    carol.send("@label=i NS INFO MEMBERS gaming");
+    carol.send(&format!("@label=i NS INFO MEMBERS {ns_id}"));
     assert_eq!(
         carol
             .expect_err(ErrCode::CapRequired)
@@ -6384,21 +6588,30 @@ async fn adding_a_channel_permission_propagates_to_existing_holders() {
     let _bob = ready(&ctx, "bob").await;
     let root = root_key_b64();
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
-    drain_until_label(&mut ada, "n").await;
-    ada.send("@label=c CHANNEL CREATE #gaming/stage");
-    drain_until_label(&mut ada, "c").await;
-    ada.send("@label=r1 ROLE CREATE ns:gaming #e8b93d react :Speaker");
-    drain_until_label(&mut ada, "r1").await;
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/stage"));
+    let Event::Policy { channel: stage, .. } = drain_until_label(&mut ada, "c").await.event else {
+        panic!("expected POLICY");
+    };
+    ada.send(&format!(
+        "@label=r1 ROLE CREATE ns:{ns_id} #e8b93d react :Speaker"
+    ));
+    let speaker = role_id_named(&mut ada, "Speaker").await;
 
-    // Assign the role FIRST (bob holds react at ns:gaming, no channel perm yet).
-    ada.send("@label=a ROLE ASSIGN ns:gaming bob :Speaker");
+    // Assign the role FIRST (bob holds react at ns:<id>, no channel perm yet).
+    ada.send(&format!("@label=a ROLE ASSIGN ns:{ns_id} bob {speaker}"));
     drain_until_label(&mut ada, "a").await;
 
     // THEN add the channel permission — it must reach bob with no re-assignment.
-    ada.send("@label=r2 ROLE CREATE #gaming/stage #e8b93d send :Speaker");
+    ada.send(&format!(
+        "@label=r2 ROLE CREATE {stage} #e8b93d send :Speaker"
+    ));
     drain_until_label(&mut ada, "r2").await;
 
-    ada.send("@label=q CAPS bob #gaming/stage");
+    ada.send(&format!("@label=q CAPS bob {stage}"));
     let ev = drain_until_label(&mut ada, "q").await;
     let Event::Caps { caps, .. } = &ev.event else {
         panic!("expected CAPS, got {ev:?}");
@@ -6417,20 +6630,25 @@ async fn everyone_role_grants_baseline_caps_to_members() {
     let root = root_key_b64();
 
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
-    drain_until_label(&mut ada, "n").await;
-    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
     drain_until_label(&mut ada, "c").await;
     // A fresh namespace seeds @everyone with `send,invite`; narrow it to just
     // `send` so we can exercise the baseline gate on `invite`.
-    ada.send("@label=r0 ROLE CREATE ns:gaming #99aab5 send :everyone");
+    ada.send(&format!(
+        "@label=r0 ROLE CREATE ns:{ns_id} #99aab5 send :everyone"
+    ));
     drain_until_label(&mut ada, "r0").await;
 
     // bob joins the namespace → becomes a member (implicitly holds @everyone).
-    bob.send("@label=j NS JOIN gaming");
+    bob.send(&format!("@label=j NS JOIN {ns_id}"));
     drain_until_label(&mut bob, "j").await;
 
     // @everyone lacks `invite` → bob can't mint an invite.
-    bob.send("@label=e1 INVITE MINT ns:gaming");
+    bob.send(&format!("@label=e1 INVITE MINT ns:{ns_id}"));
     let e1 = drain_until_label(&mut bob, "e1").await;
     assert!(
         matches!(&e1.event, Event::Err(err) if err.code == ErrCode::CapRequired),
@@ -6438,11 +6656,13 @@ async fn everyone_role_grants_baseline_caps_to_members() {
     );
 
     // Owner sets the implicit @everyone role's caps to include `invite`.
-    ada.send("@label=r ROLE CREATE ns:gaming #99aab5 send,invite :everyone");
+    ada.send(&format!(
+        "@label=r ROLE CREATE ns:{ns_id} #99aab5 send,invite :everyone"
+    ));
     drain_until_label(&mut ada, "r").await;
 
     // Now bob — a member, with no role *assignment* — gains the baseline cap.
-    bob.send("@label=e2 INVITE MINT ns:gaming");
+    bob.send(&format!("@label=e2 INVITE MINT ns:{ns_id}"));
     let e2 = drain_until_label(&mut bob, "e2").await;
     assert!(
         matches!(e2.event, Event::Invited { .. }),
@@ -6451,7 +6671,7 @@ async fn everyone_role_grants_baseline_caps_to_members() {
 
     // A non-member gets nothing from @everyone.
     let mut carol = ready(&ctx, "carol").await;
-    carol.send("@label=e3 INVITE MINT ns:gaming");
+    carol.send(&format!("@label=e3 INVITE MINT ns:{ns_id}"));
     let e3 = drain_until_label(&mut carol, "e3").await;
     assert!(
         matches!(&e3.event, Event::Err(err) if err.code == ErrCode::CapRequired),
@@ -6470,23 +6690,35 @@ async fn channel_everyone_role_grants_a_per_channel_baseline() {
     let root = root_key_b64();
 
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
-    drain_until_label(&mut ada, "n").await;
-    ada.send("@label=c CHANNEL CREATE #gaming/general");
-    drain_until_label(&mut ada, "c").await;
-    ada.send("@label=r CHANNEL META #gaming/general posting :restricted");
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
+    let Event::Policy {
+        channel: general, ..
+    } = drain_until_label(&mut ada, "c").await.event
+    else {
+        panic!("expected POLICY");
+    };
+    ada.send(&format!(
+        "@label=r CHANNEL META {general} posting :restricted"
+    ));
     drain_until_label(&mut ada, "r").await;
     // A fresh namespace seeds @everyone with `send`; strip it so the restricted
     // channel actually gates and we can isolate the *channel*-level baseline.
-    ada.send("@label=r0 ROLE CREATE ns:gaming #99aab5 invite :everyone");
+    ada.send(&format!(
+        "@label=r0 ROLE CREATE ns:{ns_id} #99aab5 invite :everyone"
+    ));
     drain_until_label(&mut ada, "r0").await;
 
-    bob.send("@label=j NS JOIN gaming");
+    bob.send(&format!("@label=j NS JOIN {ns_id}"));
     drain_until_label(&mut bob, "j").await;
-    bob.send("@label=jc JOIN #gaming/general");
+    bob.send(&format!("@label=jc JOIN {general}"));
     drain_until_label(&mut bob, "jc").await;
 
     // Restricted + no send anywhere → posting is denied.
-    bob.send("@label=m1 MSG #gaming/general :hello");
+    bob.send(&format!("@label=m1 MSG {general} :hello"));
     let m1 = drain_until_label(&mut bob, "m1").await;
     assert!(
         matches!(&m1.event, Event::Err(err) if err.code == ErrCode::CapRequired),
@@ -6494,12 +6726,14 @@ async fn channel_everyone_role_grants_a_per_channel_baseline() {
     );
 
     // Owner sets the *channel's* @everyone role to include `send`.
-    ada.send("@label=e ROLE CREATE #gaming/general #99aab5 send :everyone");
+    ada.send(&format!(
+        "@label=e ROLE CREATE {general} #99aab5 send :everyone"
+    ));
     drain_until_label(&mut ada, "e").await;
 
     // Now bob — a member with no assignment or grant — can post, purely from
     // the channel-scoped baseline.
-    bob.send("MSG #gaming/general :now i can");
+    bob.send(&format!("MSG {general} :now i can"));
     loop {
         if matches!(bob.recv().await.event, Event::Message(ref m) if m.body == "now i can") {
             break;
@@ -6518,30 +6752,42 @@ async fn grants_lists_member_overrides_but_not_role_holders() {
     let root = root_key_b64();
 
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
-    drain_until_label(&mut ada, "n").await;
-    ada.send("@label=c CHANNEL CREATE #gaming/general");
-    drain_until_label(&mut ada, "c").await;
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
+    let Event::Policy {
+        channel: general, ..
+    } = drain_until_label(&mut ada, "c").await.event
+    else {
+        panic!("expected POLICY");
+    };
 
-    bob.send("@label=jb NS JOIN gaming");
+    bob.send(&format!("@label=jb NS JOIN {ns_id}"));
     drain_until_label(&mut bob, "jb").await;
-    carol.send("@label=jc NS JOIN gaming");
+    carol.send(&format!("@label=jc NS JOIN {ns_id}"));
     drain_until_label(&mut carol, "jc").await;
 
     // carol holds an ns role that then gets a channel override → she's covered
     // by the role (propagation), not a genuine individual override.
-    ada.send("@label=r1 ROLE CREATE ns:gaming #e8b93d send :speaker");
-    drain_until_label(&mut ada, "r1").await;
-    ada.send("@label=a ROLE ASSIGN ns:gaming carol :speaker");
+    ada.send(&format!(
+        "@label=r1 ROLE CREATE ns:{ns_id} #e8b93d send :speaker"
+    ));
+    let speaker = role_id_named(&mut ada, "speaker").await;
+    ada.send(&format!("@label=a ROLE ASSIGN ns:{ns_id} carol {speaker}"));
     drain_until_label(&mut ada, "a").await;
-    ada.send("@label=r2 ROLE CREATE #gaming/general #e8b93d send :speaker");
+    ada.send(&format!(
+        "@label=r2 ROLE CREATE {general} #e8b93d send :speaker"
+    ));
     drain_until_label(&mut ada, "r2").await;
 
     // bob gets an individual channel override (holds no role).
-    ada.send("@label=g GRANT bob #gaming/general send");
+    ada.send(&format!("@label=g GRANT bob {general} send"));
     drain_until_label(&mut ada, "g").await;
 
     // GRANTS lists bob (genuine override) but not carol (role-covered).
-    ada.send("@label=q GRANTS #gaming/general");
+    ada.send(&format!("@label=q GRANTS {general}"));
     let list = grant_infos(&mut ada).await;
     assert_eq!(
         list.len(),
@@ -6555,7 +6801,7 @@ async fn grants_lists_member_overrides_but_not_role_holders() {
     );
 
     // The roster is ns-admin gated — a normal member can't enumerate it.
-    bob.send("@label=deny GRANTS #gaming/general");
+    bob.send(&format!("@label=deny GRANTS {general}"));
     let deny = drain_until_label(&mut bob, "deny").await;
     assert!(
         matches!(&deny.event, Event::Err(err) if err.code == ErrCode::CapRequired),
@@ -6571,19 +6817,27 @@ async fn delete_any_lets_a_moderator_remove_another_members_message() {
     let root = root_key_b64();
 
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
-    drain_until_label(&mut ada, "n").await;
-    ada.send("@label=c CHANNEL CREATE #gaming/general");
-    drain_until_label(&mut ada, "c").await;
-    ada.send("@label=ja JOIN #gaming/general");
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
+    let Event::Policy {
+        channel: general, ..
+    } = drain_until_label(&mut ada, "c").await.event
+    else {
+        panic!("expected POLICY");
+    };
+    ada.send(&format!("@label=ja JOIN {general}"));
     drain_until_label(&mut ada, "ja").await;
 
-    bob.send("@label=j NS JOIN gaming");
+    bob.send(&format!("@label=j NS JOIN {ns_id}"));
     drain_until_label(&mut bob, "j").await;
-    bob.send("@label=jc JOIN #gaming/general");
+    bob.send(&format!("@label=jc JOIN {general}"));
     drain_until_label(&mut bob, "jc").await;
 
     // bob posts; his own echo carries the msgid.
-    bob.send("@label=m MSG #gaming/general :hi");
+    bob.send(&format!("@label=m MSG {general} :hi"));
     let echo = drain_until_label(&mut bob, "m").await;
     let Event::Message(m) = echo.event else {
         panic!("expected message echo, got {echo:?}");
@@ -6599,7 +6853,7 @@ async fn delete_any_lets_a_moderator_remove_another_members_message() {
     );
 
     // A plain member (no delete-any) cannot delete someone else's message.
-    bob.send("@label=m2 MSG #gaming/general :hi again");
+    bob.send(&format!("@label=m2 MSG {general} :hi again"));
     let echo2 = drain_until_label(&mut bob, "m2").await;
     let Event::Message(m2) = echo2.event else {
         panic!("expected message echo, got {echo2:?}");
@@ -6607,9 +6861,9 @@ async fn delete_any_lets_a_moderator_remove_another_members_message() {
     let mid2 = m2.msgid.to_string();
 
     let mut carol = ready(&ctx, "carol").await;
-    carol.send("@label=jn NS JOIN gaming");
+    carol.send(&format!("@label=jn NS JOIN {ns_id}"));
     drain_until_label(&mut carol, "jn").await;
-    carol.send("@label=jcc JOIN #gaming/general");
+    carol.send(&format!("@label=jcc JOIN {general}"));
     drain_until_label(&mut carol, "jcc").await;
     carol.send(&format!("@label=dn DELETE {mid2}"));
     let dn = drain_until_label(&mut carol, "dn").await;
@@ -6626,14 +6880,17 @@ async fn server_nicknames_are_cap_gated() {
     let mut bob = ready(&ctx, "bob").await;
     let root = root_key_b64();
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
-    drain_until_label(&mut ada, "n").await;
-    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
     drain_until_label(&mut ada, "c").await;
-    bob.send("@label=j NS JOIN gaming");
+    bob.send(&format!("@label=j NS JOIN {ns_id}"));
     drain_until_label(&mut bob, "j").await;
 
     // No `nick` cap → bob can't even set his own nickname.
-    bob.send("@label=e1 NICK ns:gaming bob :Cool Bob");
+    bob.send(&format!("@label=e1 NICK ns:{ns_id} bob :Cool Bob"));
     let e1 = drain_until_label(&mut bob, "e1").await;
     assert!(
         matches!(&e1.event, Event::Err(err) if err.code == ErrCode::CapRequired),
@@ -6641,9 +6898,11 @@ async fn server_nicknames_are_cap_gated() {
     );
 
     // Give @everyone the `nick` cap → bob can set his own.
-    ada.send("@label=r ROLE CREATE ns:gaming #99aab5 nick :everyone");
+    ada.send(&format!(
+        "@label=r ROLE CREATE ns:{ns_id} #99aab5 nick :everyone"
+    ));
     drain_until_label(&mut ada, "r").await;
-    bob.send("@label=e2 NICK ns:gaming bob :Cool Bob");
+    bob.send(&format!("@label=e2 NICK ns:{ns_id} bob :Cool Bob"));
     let e2 = drain_until_label(&mut bob, "e2").await;
     assert!(
         matches!(&e2.event, Event::Nick { nick, .. } if nick == "Cool Bob"),
@@ -6651,7 +6910,7 @@ async fn server_nicknames_are_cap_gated() {
     );
 
     // `nick` does NOT let bob rename another member (that needs `manage-nicks`).
-    bob.send("@label=e3 NICK ns:gaming ada :Boss");
+    bob.send(&format!("@label=e3 NICK ns:{ns_id} ada :Boss"));
     let e3 = drain_until_label(&mut bob, "e3").await;
     assert!(
         matches!(&e3.event, Event::Err(err) if err.code == ErrCode::CapRequired),
@@ -6659,7 +6918,7 @@ async fn server_nicknames_are_cap_gated() {
     );
 
     // The owner can rename anyone.
-    ada.send("@label=e4 NICK ns:gaming bob :Renamed");
+    ada.send(&format!("@label=e4 NICK ns:{ns_id} bob :Renamed"));
     let e4 = drain_until_label(&mut ada, "e4").await;
     assert!(
         matches!(&e4.event, Event::Nick { nick, .. } if nick == "Renamed"),
@@ -6674,7 +6933,7 @@ async fn roles_are_explicit_membership_not_derived() {
     let _bob = ready(&ctx, "bob").await;
 
     root.send("@label=c ROLE CREATE * #e8b93d mute,ban :Mod");
-    drain_until_label(&mut root, "c").await;
+    let mod_id = role_id_named(&mut root, "Mod").await;
 
     // bob holds no roles yet, even though the operator implicitly has every cap.
     root.send("@label=q1 ROLES-OF * bob");
@@ -6682,7 +6941,7 @@ async fn roles_are_explicit_membership_not_derived() {
     assert!(matches!(&ev.event, Event::RoleMember { roles, .. } if roles.is_empty()));
 
     // Assign, then it shows; unassign, then it's gone.
-    root.send("@label=a ROLE ASSIGN * bob :Mod");
+    root.send(&format!("@label=a ROLE ASSIGN * bob {mod_id}"));
     drain_until_label(&mut root, "a").await;
     root.send("@label=q2 ROLES-OF * bob");
     let ev = drain_until_label(&mut root, "q2").await;
@@ -6691,7 +6950,7 @@ async fn roles_are_explicit_membership_not_derived() {
         "got {ev:?}"
     );
 
-    root.send("@label=u ROLE UNASSIGN * bob :Mod");
+    root.send(&format!("@label=u ROLE UNASSIGN * bob {mod_id}"));
     let ev = drain_until_label(&mut root, "u").await; // UNASSIGN → ROLE-MEMBER
     assert!(
         matches!(&ev.event, Event::RoleMember { roles, .. } if roles.is_empty()),
@@ -6838,14 +7097,17 @@ async fn next_voice_state(client: &mut Client) -> Reply {
     }
 }
 
-/// Create a voice channel `name` via a fresh operator session, which then drops
-/// (the channel persists in the registry + store). Returns a voice-enabled ctx.
-async fn voice_ctx_with(name: &str) -> Arc<ServerCtx> {
+/// Create a voice channel with desired vanity `name` via a fresh operator session,
+/// which then drops (the channel persists in the registry + store). Returns a
+/// voice-enabled ctx and the channel's minted canonical `#<chan-id>` (v0.13).
+async fn voice_ctx_with(name: &str) -> (Arc<ServerCtx>, ChannelName) {
     let ctx = ctx_voice(&[], &["boss"]);
     let mut boss = ready_op(&ctx, "boss").await;
     boss.send(&format!("CHANNEL CREATE {name} voice"));
-    assert!(matches!(boss.recv().await.event, Event::Policy { .. }));
-    ctx
+    let Event::Policy { channel, .. } = boss.recv().await.event else {
+        panic!("expected POLICY");
+    };
+    (ctx, channel)
 }
 
 #[tokio::test]
@@ -6888,9 +7150,9 @@ async fn voice_join_a_text_or_missing_channel_is_no_such_target() {
 async fn voice_channel_is_not_text_joinable() {
     // §16 the IRC-protection guarantee: a text JOIN to a voice channel is
     // NO-SUCH-TARGET, so voice channels never surface to text-only (IRC) clients.
-    let ctx = voice_ctx_with("#lounge").await;
+    let (ctx, lounge) = voice_ctx_with("#lounge").await;
     let mut alice = ready(&ctx, "alice").await;
-    alice.send("@label=j JOIN #lounge");
+    alice.send(&format!("@label=j JOIN {lounge}"));
     assert_eq!(
         alice
             .expect_err(ErrCode::NoSuchTarget)
@@ -6907,16 +7169,16 @@ async fn a_crashed_voice_client_leaves_the_roster_promptly() {
     // only signal the server gets is silence. A session *in a voice room* must
     // therefore be reaped on the short voice deadline (~30 s), not the 120 s
     // text one — else the caller haunts every co-member's roster for two minutes.
-    let ctx = voice_ctx_with("#lounge").await;
+    let (ctx, lounge) = voice_ctx_with("#lounge").await;
 
     let mut bob = ready(&ctx, "bob").await;
-    bob.send("VOICE JOIN #lounge");
+    bob.send(&format!("VOICE JOIN {lounge}"));
     assert!(matches!(bob.recv().await.event, Event::VoiceOffer { .. }));
     // bob is a *healthy* client: he keeps PINGing, so only alice goes quiet.
     let _bob_alive = bob.keepalive();
 
     let mut alice = ready(&ctx, "alice").await;
-    alice.send("VOICE JOIN #lounge");
+    alice.send(&format!("VOICE JOIN {lounge}"));
     assert!(matches!(alice.recv().await.event, Event::VoiceOffer { .. }));
     let reply = next_voice_state(&mut bob).await; // alice entered
     assert!(
@@ -6953,16 +7215,16 @@ const READY_IDLE_SECS: Duration = Duration::from_secs(120);
 
 #[tokio::test]
 async fn voice_join_offers_token_and_announces_to_members() {
-    let ctx = voice_ctx_with("#lounge").await;
+    let (ctx, lounge) = voice_ctx_with("#lounge").await;
 
     // bob joins voice first (subscribing to the room).
     let mut bob = ready(&ctx, "bob").await;
-    bob.send("VOICE JOIN #lounge");
+    bob.send(&format!("VOICE JOIN {lounge}"));
     assert!(matches!(bob.recv().await.event, Event::VoiceOffer { .. }));
 
     // alice joins voice → labeled VOICE OFFER with a token, endpoint absent.
     let mut alice = ready(&ctx, "alice").await;
-    alice.send("@label=v1 VOICE JOIN #lounge");
+    alice.send(&format!("@label=v1 VOICE JOIN {lounge}"));
     let reply = alice.recv().await;
     assert_eq!(reply.label.as_deref(), Some("v1"));
     let Event::VoiceOffer {
@@ -6975,7 +7237,7 @@ async fn voice_join_offers_token_and_announces_to_members() {
     else {
         panic!("expected VOICE OFFER, got {reply:?}");
     };
-    assert_eq!(channel.as_str(), "#lounge");
+    assert_eq!(channel.as_str(), lounge.as_str());
     assert_eq!(*mode, weft_proto::VoiceTransport::Webrtc);
     assert!(token.starts_with("vtok-"), "token: {token}");
     assert!(endpoint.is_none());
@@ -6997,7 +7259,7 @@ async fn voice_join_offers_token_and_announces_to_members() {
 
     // alice negotiates: her SDP offer gets the SFU's answer back as VOICE DESC
     // (skipping the roster snapshot she also received on join).
-    alice.send("@label=v2 VOICE DESC #lounge :v=0\\r\\nmy-offer");
+    alice.send(&format!("@label=v2 VOICE DESC {lounge} :v=0\\r\\nmy-offer"));
     let reply = drain_until_label(&mut alice, "v2").await;
     let Event::VoiceDesc { sdp, .. } = &reply.event else {
         panic!("expected VOICE DESC answer, got {reply:?}");
@@ -7005,7 +7267,7 @@ async fn voice_join_offers_token_and_announces_to_members() {
     assert_eq!(sdp, "answer-to:v=0\r\nmy-offer");
 
     // alice leaves → labeled VOICE STATE leave ack; bob sees the leave too.
-    alice.send("@label=v3 VOICE LEAVE #lounge");
+    alice.send(&format!("@label=v3 VOICE LEAVE {lounge}"));
     let reply = drain_until_label(&mut alice, "v3").await;
     assert!(matches!(
         &reply.event,
@@ -7018,7 +7280,7 @@ async fn voice_join_offers_token_and_announces_to_members() {
     );
 
     // Leaving again → nothing to leave (uniform NO-SUCH-TARGET).
-    alice.send("VOICE LEAVE #lounge");
+    alice.send(&format!("VOICE LEAVE {lounge}"));
     alice.expect_err(ErrCode::NoSuchTarget).await;
 }
 
@@ -7027,7 +7289,12 @@ async fn voice_muted_member_joins_but_renders_muted() {
     let ctx = ctx_voice(&[], &["boss"]);
     let mut boss = ready_op(&ctx, "boss").await;
     boss.send("CHANNEL CREATE #lounge voice");
-    assert!(matches!(boss.recv().await.event, Event::Policy { .. }));
+    let Event::Policy {
+        channel: lounge, ..
+    } = boss.recv().await.event
+    else {
+        panic!("expected POLICY");
+    };
 
     // A network-wide mute (M7) removes `speak` but not the join itself.
     boss.send("@label=m MUTE * alice");
@@ -7035,11 +7302,11 @@ async fn voice_muted_member_joins_but_renders_muted() {
     assert!(matches!(reply.event, Event::Moderated { .. }));
 
     let mut bob = ready(&ctx, "bob").await;
-    bob.send("VOICE JOIN #lounge");
+    bob.send(&format!("VOICE JOIN {lounge}"));
     assert!(matches!(bob.recv().await.event, Event::VoiceOffer { .. }));
 
     let mut alice = ready(&ctx, "alice").await;
-    alice.send("VOICE JOIN #lounge");
+    alice.send(&format!("VOICE JOIN {lounge}"));
     assert!(matches!(alice.recv().await.event, Event::VoiceOffer { .. }));
 
     // bob sees alice join voice, flagged muted (can't speak).
@@ -7055,15 +7322,20 @@ async fn voice_banned_member_cannot_join() {
     let ctx = ctx_voice(&[], &["boss"]);
     let mut boss = ready_op(&ctx, "boss").await;
     boss.send("CHANNEL CREATE #lounge voice");
-    assert!(matches!(boss.recv().await.event, Event::Policy { .. }));
+    let Event::Policy {
+        channel: lounge, ..
+    } = boss.recv().await.event
+    else {
+        panic!("expected POLICY");
+    };
 
-    // A `*`-scope ban covers #lounge — she is barred from voice.
+    // A `*`-scope ban covers the voice channel — she is barred from voice.
     boss.send("@label=b BAN * alice");
     let reply = drain_until_label(&mut boss, "b").await;
     assert!(matches!(reply.event, Event::Moderated { .. }));
 
     let mut alice = ready(&ctx, "alice").await;
-    alice.send("@label=v VOICE JOIN #lounge");
+    alice.send(&format!("@label=v VOICE JOIN {lounge}"));
     let reply = alice.expect_err(ErrCode::Forbidden).await;
     assert_eq!(reply.label.as_deref(), Some("v"));
 }
@@ -7072,13 +7344,13 @@ async fn voice_banned_member_cannot_join() {
 async fn voice_join_receives_roster_snapshot() {
     // §16 (M-voice-4) a joiner learns who's already in the room, not just future
     // arrivals — a VOICE STATE snapshot follows the OFFER.
-    let ctx = voice_ctx_with("#lounge").await;
+    let (ctx, lounge) = voice_ctx_with("#lounge").await;
     let mut bob = ready(&ctx, "bob").await;
-    bob.send("VOICE JOIN #lounge");
+    bob.send(&format!("VOICE JOIN {lounge}"));
     assert!(matches!(bob.recv().await.event, Event::VoiceOffer { .. }));
 
     let mut alice = ready(&ctx, "alice").await;
-    alice.send("@label=j VOICE JOIN #lounge");
+    alice.send(&format!("@label=j VOICE JOIN {lounge}"));
     assert!(matches!(
         drain_until_label(&mut alice, "j").await.event,
         Event::VoiceOffer { .. }
@@ -7100,17 +7372,22 @@ async fn voice_mute_silences_live_and_updates_the_room() {
     let ctx = ctx_voice(&[], &["boss"]);
     let mut boss = ready_op(&ctx, "boss").await;
     boss.send("CHANNEL CREATE #lounge voice");
-    assert!(matches!(boss.recv().await.event, Event::Policy { .. }));
+    let Event::Policy {
+        channel: lounge, ..
+    } = boss.recv().await.event
+    else {
+        panic!("expected POLICY");
+    };
 
     let mut bob = ready(&ctx, "bob").await;
-    bob.send("VOICE JOIN #lounge");
+    bob.send(&format!("VOICE JOIN {lounge}"));
     assert!(matches!(bob.recv().await.event, Event::VoiceOffer { .. }));
     let mut alice = ready(&ctx, "alice").await;
-    alice.send("VOICE JOIN #lounge");
+    alice.send(&format!("VOICE JOIN {lounge}"));
     assert!(matches!(alice.recv().await.event, Event::VoiceOffer { .. }));
 
     // boss mutes alice at the channel scope.
-    boss.send("@label=m MUTE #lounge alice");
+    boss.send(&format!("@label=m MUTE {lounge} alice"));
     assert!(matches!(
         drain_until_label(&mut boss, "m").await.event,
         Event::Moderated { .. }
@@ -7137,17 +7414,22 @@ async fn voice_ban_ejects_the_target_from_the_room() {
     let ctx = ctx_voice(&[], &["boss"]);
     let mut boss = ready_op(&ctx, "boss").await;
     boss.send("CHANNEL CREATE #lounge voice");
-    assert!(matches!(boss.recv().await.event, Event::Policy { .. }));
+    let Event::Policy {
+        channel: lounge, ..
+    } = boss.recv().await.event
+    else {
+        panic!("expected POLICY");
+    };
 
     let mut bob = ready(&ctx, "bob").await;
-    bob.send("VOICE JOIN #lounge");
+    bob.send(&format!("VOICE JOIN {lounge}"));
     assert!(matches!(bob.recv().await.event, Event::VoiceOffer { .. }));
     let mut alice = ready(&ctx, "alice").await;
-    alice.send("VOICE JOIN #lounge");
+    alice.send(&format!("VOICE JOIN {lounge}"));
     assert!(matches!(alice.recv().await.event, Event::VoiceOffer { .. }));
 
     // boss bans alice at the channel scope.
-    boss.send("@label=b BAN #lounge alice :raid");
+    boss.send(&format!("@label=b BAN {lounge} alice :raid"));
     assert!(matches!(
         drain_until_label(&mut boss, "b").await.event,
         Event::Moderated { .. }

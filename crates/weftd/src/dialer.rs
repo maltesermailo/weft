@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Context};
 use tracing::info;
 use weft_core::{BlobHash, Keypair, MirrorRequest, PublicKey, ServerCtx};
-use weft_proto::{Command, Event, Line, NamespaceName, NetworkName, Reply, Request};
+use weft_proto::{Command, Event, Line, NetworkName, Reply, Request};
 use weft_transport::QuicControlStream;
 
 /// An authenticated outbound bridge: the control stream plus the connection it
@@ -118,7 +118,7 @@ pub async fn auto_bridge(
     addr: SocketAddr,
     peer: &NetworkName,
     peer_key: PublicKey,
-    ns: NamespaceName,
+    ns: weft_proto::VanityName,
     invite: Option<String>,
     identity: &Keypair,
     our_network: &NetworkName,
@@ -152,7 +152,7 @@ pub async fn run_peer_requester(
     addr: SocketAddr,
     peer: &NetworkName,
     peer_key: PublicKey,
-    ns: NamespaceName,
+    ns: weft_proto::VanityName,
     invite: Option<String>,
     identity: &Keypair,
     our_network: &NetworkName,

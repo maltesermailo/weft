@@ -5,8 +5,8 @@
 //! when absent so `cargo test` needs no database.
 
 use weft_proto::{
-    Account, ChannelName, ContentState, FriendState, GroupId, MsgId, MsgMeta, NamespaceName,
-    NetworkName, ReportStatus, ResolveAction, RetentionPolicy, Ulid, UserRef,
+    Account, ChannelName, ContentState, FriendState, GroupId, MsgId, MsgMeta, NetworkName,
+    ReportStatus, ResolveAction, RetentionPolicy, Ulid, UserRef,
 };
 use weft_store::{
     materialize, AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventKind,
@@ -785,10 +785,8 @@ where
     assert!(!store.add_group_member(ghost, &ga).await.unwrap());
     assert!(store.group(ghost).await.unwrap().is_none());
 
-    // -- custom emoji (§9.4) --
-    let ns: NamespaceName = format!("emo{}", tag.replace(['-', '_'], ""))
-        .parse()
-        .unwrap();
+    // -- custom emoji (§9.4) — keyed by namespace ULID id (v0.13) --
+    let ns = format!("01EMOJI{}", tag.replace(['-', '_'], "").to_uppercase());
     assert!(store.list_emoji(&ns).await.unwrap().is_empty());
     store
         .set_emoji(&ns, "partyblob", "weft-media://test.example/aaa")
@@ -899,6 +897,7 @@ where
     store
         .upsert_channel(
             &name,
+            "",
             RetentionPolicy::Ephemeral,
             weft_proto::ChannelKind::Text,
         )
@@ -907,6 +906,7 @@ where
     store
         .upsert_channel(
             &name,
+            "",
             "retained:7d".parse().unwrap(),
             weft_proto::ChannelKind::Text,
         )
@@ -925,6 +925,17 @@ where
     assert_eq!(record.policy.to_string(), "retained:7d");
     // WC7 freeze: independent of `restricted` — both can hold at once.
     assert!(!record.frozen && !record.restricted);
+
+    // v0.13: stable channel ULID id — minted lazily, stable across calls; an
+    // unknown channel has none.
+    let cid = store.channel_id(&name).await.unwrap().expect("id minted");
+    assert_eq!(
+        store.channel_id(&name).await.unwrap().as_deref(),
+        Some(cid.as_str())
+    );
+    let absent: ChannelName = "#totallyabsentchannelxyz".parse().unwrap();
+    assert!(store.channel_id(&absent).await.unwrap().is_none());
+
     store.set_channel_frozen(&name, true).await.unwrap();
     store.set_channel_restricted(&name, true).await.unwrap();
     let record = store.channel(&name).await.unwrap().unwrap();
@@ -1163,6 +1174,7 @@ where
     let ns: weft_proto::NamespaceName = format!("gaming{tag}").parse().unwrap();
     assert!(store
         .create_namespace(NamespaceRecord {
+            id: String::new(), // empty ⇒ lazily backfilled by namespace_id
             name: ns.clone(),
             owner: format!("owner-{tag}").parse().unwrap(),
             root_key: "B64ROOT==".into(),
@@ -1182,6 +1194,7 @@ where
     // Name taken → false (CONFLICT).
     assert!(!store
         .create_namespace(NamespaceRecord {
+            id: String::new(), // empty ⇒ lazily backfilled by namespace_id
             name: ns.clone(),
             owner: format!("someone-{tag}").parse().unwrap(),
             root_key: "OTHER==".into(),
@@ -1201,6 +1214,44 @@ where
     let record = store.namespace(&ns).await.unwrap().unwrap();
     assert_eq!(record.owner.as_str(), format!("owner-{tag}"));
     assert_eq!(record.root_key, "B64ROOT==");
+
+    // v0.13: stable ULID id — minted lazily, stable across calls, and reverse-
+    // resolvable; an unknown vanity has no id.
+    let id = store.namespace_id(&ns).await.unwrap().expect("id minted");
+    assert_eq!(
+        store.namespace_id(&ns).await.unwrap().as_deref(),
+        Some(id.as_str())
+    );
+    assert_eq!(
+        store.namespace_by_id(&id).await.unwrap().map(|r| r.name),
+        Some(ns.clone())
+    );
+    let absent: weft_proto::NamespaceName = format!("no-such-{tag}").parse().unwrap();
+    assert!(store.namespace_id(&absent).await.unwrap().is_none());
+    assert!(store
+        .namespace_by_id("01BX5ZZKBKACTAV9WEVGEMMVRZ")
+        .await
+        .unwrap()
+        .is_none());
+
+    // Admin vanity lock (§2.3): a standalone reservation — default unlocked,
+    // toggleable, and settable even for a name with no namespace.
+    assert!(!store.vanity_locked(&ns).await.unwrap());
+    assert!(store.set_vanity_locked(&ns, true).await.unwrap());
+    assert!(store.vanity_locked(&ns).await.unwrap());
+    assert!(store
+        .vanity_locks()
+        .await
+        .unwrap()
+        .contains(&ns.to_string()));
+    assert!(store.set_vanity_locked(&ns, false).await.unwrap());
+    assert!(!store.vanity_locked(&ns).await.unwrap());
+    // A free (namespace-less) vanity can be reserved, and the reservation
+    // survives deletion of any same-named namespace.
+    assert!(store.set_vanity_locked(&absent, true).await.unwrap());
+    assert!(store.vanity_locked(&absent).await.unwrap());
+    // Clean up so the reservation doesn't leak into later assertions.
+    assert!(store.set_vanity_locked(&absent, false).await.unwrap());
     assert_eq!(
         store
             .namespaces_owned(&format!("owner-{tag}"))
@@ -1323,11 +1374,27 @@ where
     let c2: weft_proto::ChannelName = format!("#{nsl}/random").parse().unwrap();
     let c3: weft_proto::ChannelName = format!("#{nsl}/voice").parse().unwrap();
     for c in [&c1, &c2, &c3] {
+        let vanity = c.as_str().rsplit_once('/').unwrap().1;
         store
-            .upsert_channel(c, RetentionPolicy::Permanent, weft_proto::ChannelKind::Text)
+            .upsert_channel(
+                c,
+                vanity,
+                RetentionPolicy::Permanent,
+                weft_proto::ChannelKind::Text,
+            )
             .await
             .unwrap();
     }
+    // v0.13: resolve a channel by its ns + vanity (the IRC/rename path).
+    assert_eq!(
+        store
+            .channel_by_vanity(&nsl, "general")
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&c1)
+    );
+    assert_eq!(store.channel_by_vanity(&nsl, "nope").await.unwrap(), None);
     // general: text/0, random: text/1, voice: (no category)/0
     store
         .set_channel_layout(&c1, Some("text"), 0)
@@ -1356,6 +1423,7 @@ where
     let rns: weft_proto::NamespaceName = format!("recov{tag}").parse().unwrap();
     store
         .create_namespace(NamespaceRecord {
+            id: String::new(),
             name: rns.clone(),
             owner: format!("owner-{tag}").parse().unwrap(),
             root_key: "ROOT1==".into(),
@@ -1850,12 +1918,14 @@ where
     store.clear_membership(&acct, &mc1).await.unwrap();
     assert_eq!(store.memberships(&acct).await.unwrap(), vec![mc2]);
 
-    // ---- v0.12 namespace-level membership + hide overrides ----
+    // ---- v0.12 namespace-level membership + hide overrides (v0.13: keyed by the
+    // namespace ULID id; channels embed it as their first segment, lowercased to
+    // match ChannelName case-folding) ----
     let nm_a: Account = format!("nsm-a-{tag}").parse().unwrap();
     let nm_b: Account = format!("nsm-b-{tag}").parse().unwrap();
-    let ns: weft_proto::NamespaceName = format!("nsm-{tag}").parse().unwrap();
-    let ns_gen: weft_proto::ChannelName = format!("#nsm-{tag}/general").parse().unwrap();
-    let ns_sec: weft_proto::ChannelName = format!("#nsm-{tag}/secret").parse().unwrap();
+    let ns = format!("01nsm{}", tag.replace(['-', '_'], ""));
+    let ns_gen: weft_proto::ChannelName = format!("#{ns}/general").parse().unwrap();
+    let ns_sec: weft_proto::ChannelName = format!("#{ns}/secret").parse().unwrap();
 
     assert!(!store.is_ns_member(&nm_a, &ns).await.unwrap());
     assert!(store.ns_memberships(&nm_a).await.unwrap().is_empty());
@@ -1947,6 +2017,7 @@ where
     store
         .upsert_channel(
             &cchan,
+            "",
             RetentionPolicy::Ephemeral,
             weft_proto::ChannelKind::Text,
         )
@@ -2057,6 +2128,52 @@ where
         position: 0,
     }));
     assert_eq!(roles.len(), 2);
+
+    // v0.13: stable role ULID ids — minted lazily, stable across calls, reverse-
+    // resolvable, and carried across a rename (identity survives the label change).
+    let mod_id = store
+        .role_id(&rscope, "Moderator")
+        .await
+        .unwrap()
+        .expect("id");
+    assert_eq!(
+        store
+            .role_id(&rscope, "Moderator")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(mod_id.as_str())
+    );
+    let (by_scope, by_def) = store.role_by_id(&mod_id).await.unwrap().expect("reverse");
+    assert_eq!(by_scope, rscope);
+    assert_eq!(by_def.name, "Moderator");
+    assert!(store.role_id(&rscope, "Ghost").await.unwrap().is_none());
+    assert!(store
+        .role_by_id("01BX5ZZKBKACTAV9WEVGEMMVRZ")
+        .await
+        .unwrap()
+        .is_none());
+    store
+        .rename_role(&rscope, "Moderator", "Lead Mod")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .role_by_id(&mod_id)
+            .await
+            .unwrap()
+            .map(|(_, d)| d.name),
+        Some("Lead Mod".to_string())
+    );
+    assert_eq!(
+        store.role_id(&rscope, "Lead Mod").await.unwrap().as_deref(),
+        Some(mod_id.as_str())
+    );
+    store
+        .rename_role(&rscope, "Lead Mod", "Moderator")
+        .await
+        .unwrap(); // restore for downstream assertions
+
     // Reorder: Member first, Moderator second → positions by index.
     store
         .reorder_roles(&rscope, &["Member".into(), "Moderator".into()])
@@ -2189,6 +2306,7 @@ where
     store
         .upsert_channel(
             &old,
+            "old",
             RetentionPolicy::Permanent,
             weft_proto::ChannelKind::Text,
         )
@@ -2247,6 +2365,7 @@ where
     store
         .upsert_channel(
             &old,
+            "old",
             RetentionPolicy::Ephemeral,
             weft_proto::ChannelKind::Text,
         )
@@ -2398,21 +2517,46 @@ where
     assert_eq!(store.nicks(&nscope).await.unwrap().len(), 1);
 }
 
-#[tokio::test]
-async fn memory_backend_contract() {
-    suite(&MemoryStore::default(), "mem").await;
+/// Run one async body on a dedicated thread with a large stack + its own
+/// current-thread runtime. The `suite` future is enormous (the whole store
+/// contract in one `async fn`), and with the bigger sqlx/Pg futures it exceeds
+/// the default 2 MiB test-thread stack — overflowing at runtime. An 32 MiB
+/// stack keeps both backends comfortably inside the frame.
+fn on_big_stack<F>(body: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build runtime")
+                .block_on(body);
+        })
+        .expect("spawn contract thread")
+        .join()
+        .expect("contract thread panicked");
+}
+
+#[test]
+fn memory_backend_contract() {
+    on_big_stack(async { suite(&MemoryStore::default(), "mem").await });
 }
 
 #[cfg(feature = "postgres")]
-#[tokio::test]
-async fn postgres_backend_contract() {
+#[test]
+fn postgres_backend_contract() {
     let Ok(url) = std::env::var("WEFT_TEST_DATABASE_URL") else {
         eprintln!("WEFT_TEST_DATABASE_URL not set — Postgres contract test skipped");
         return;
     };
-    let store = weft_store::PgStore::connect(&url).await.expect("connect");
-    // Unique tag per run: a persistent database must not collide with
-    // earlier runs (no Date::now — the ULID crate provides entropy).
-    let tag = format!("pg{}", Ulid::new().to_string().to_lowercase());
-    suite(&store, &tag).await;
+    on_big_stack(async move {
+        let store = weft_store::PgStore::connect(&url).await.expect("connect");
+        // Unique tag per run: a persistent database must not collide with
+        // earlier runs (no Date::now — the ULID crate provides entropy).
+        let tag = format!("pg{}", Ulid::new().to_string().to_lowercase());
+        suite(&store, &tag).await;
+    });
 }

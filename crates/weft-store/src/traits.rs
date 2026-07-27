@@ -264,9 +264,15 @@ pub trait ChannelStore: Send + Sync {
     /// Insert or update a channel's policy + kind (leaves topic/view-gated
     /// intact). `kind` is set on first insert and not changed by later upserts
     /// (§16 kind is immutable after creation).
+    /// `vanity` is the channel's human display name (v0.13, the segment a client
+    /// typed at CREATE) — unique within the namespace, unrelated to the immutable
+    /// `<chan-id>` in `name`. Pass `""` for a channel with no separate display
+    /// name (a legacy or top-level channel). Set on first insert; later upserts
+    /// leave it intact (rename goes through [`rename_channel`]).
     async fn upsert_channel(
         &self,
         name: &ChannelName,
+        vanity: &str,
         policy: RetentionPolicy,
         kind: weft_proto::ChannelKind,
     ) -> Result<(), StoreError>;
@@ -275,6 +281,22 @@ pub trait ChannelStore: Send + Sync {
 
     /// Full settings for one channel.
     async fn channel(&self, name: &ChannelName) -> Result<Option<ChannelRecord>, StoreError>;
+
+    /// The channel's stable ULID id (v0.13) — minted + persisted on first access
+    /// for a pre-id row (like account/namespace/role ULIDs). `None` = no such
+    /// channel. After the name-flip re-key this id is the `<chan-id>` segment of
+    /// the channel's `#<ns-id>/<chan-id>` wire name.
+    async fn channel_id(&self, name: &ChannelName) -> Result<Option<String>, StoreError>;
+
+    /// Resolve a channel by its namespace id + human vanity name to its canonical
+    /// `#<ns-id>/<chan-id>` wire name (v0.13). Powers the IRC gateway's
+    /// `#<ns-vanity>/<chan-name>` addressing and a native rename's uniqueness
+    /// check. `None` = no channel with that vanity in that namespace.
+    async fn channel_by_vanity(
+        &self,
+        ns_id: &str,
+        vanity: &str,
+    ) -> Result<Option<ChannelName>, StoreError>;
 
     /// CHANNEL META topic (§6.3).
     async fn set_channel_topic(&self, name: &ChannelName, topic: &str) -> Result<(), StoreError>;
@@ -412,6 +434,35 @@ pub trait NamespaceStore: Send + Sync {
     async fn create_namespace(&self, record: NamespaceRecord) -> Result<bool, StoreError>;
 
     async fn namespace(&self, name: &NamespaceName) -> Result<Option<NamespaceRecord>, StoreError>;
+
+    /// The namespace's stable ULID id (v0.13) — minted + persisted on first
+    /// access for a pre-id row (like account ULIDs, §10.4). `None` = no such
+    /// namespace. The wire references namespaces by this id; the vanity `name`
+    /// resolves to it via this call at the wire boundary.
+    async fn namespace_id(&self, name: &NamespaceName) -> Result<Option<String>, StoreError>;
+
+    /// Reverse of [`Self::namespace_id`]: the record for a stable id. `None` =
+    /// unknown id. Lets the wire boundary resolve an incoming `ns:<id>` back to
+    /// its namespace (owner, vanity, visibility, …).
+    async fn namespace_by_id(&self, id: &str) -> Result<Option<NamespaceRecord>, StoreError>;
+
+    /// Is this vanity name admin-locked (§2.3)? A locked vanity can't be
+    /// (re-)registered via NS CREATE without an operator lifting the lock.
+    async fn vanity_locked(&self, name: &NamespaceName) -> Result<bool, StoreError>;
+
+    /// Set/clear the admin reservation on a vanity name (operator / web-admin
+    /// only). A **standalone reservation**: it may name a vanity that has no
+    /// namespace, and it survives the namespace's deletion — so an operator can
+    /// hold a name out of circulation. Idempotent; always `Ok(true)`.
+    async fn set_vanity_locked(
+        &self,
+        name: &NamespaceName,
+        locked: bool,
+    ) -> Result<bool, StoreError>;
+
+    /// Every currently locked vanity name, sorted — the web admin's reserved-name
+    /// list (including reservations whose namespace no longer exists).
+    async fn vanity_locks(&self) -> Result<Vec<String>, StoreError>;
 
     /// Namespaces owned by an account (for quota enforcement, §2.2).
     async fn namespaces_owned(&self, owner: &str) -> Result<u64, StoreError>;
@@ -687,22 +738,15 @@ pub trait PinStore: Send + Sync {
 #[async_trait]
 pub trait EmojiStore: Send + Sync {
     /// Add or replace a namespace emoji (idempotent by `(namespace, name)`).
-    async fn set_emoji(
-        &self,
-        namespace: &NamespaceName,
-        name: &str,
-        media: &str,
-    ) -> Result<(), StoreError>;
+    /// `namespace` is the namespace **ULID id** (v0.13, rename-safe), not the
+    /// vanity — core resolves the vanity → id at the wire boundary.
+    async fn set_emoji(&self, namespace: &str, name: &str, media: &str) -> Result<(), StoreError>;
 
     /// Remove a namespace emoji. Returns false iff it didn't exist.
-    async fn remove_emoji(&self, namespace: &NamespaceName, name: &str)
-        -> Result<bool, StoreError>;
+    async fn remove_emoji(&self, namespace: &str, name: &str) -> Result<bool, StoreError>;
 
-    /// All emoji for a namespace as `(name, media)`, name-sorted.
-    async fn list_emoji(
-        &self,
-        namespace: &NamespaceName,
-    ) -> Result<Vec<(String, String)>, StoreError>;
+    /// All emoji for a namespace (by id) as `(name, media)`, name-sorted.
+    async fn list_emoji(&self, namespace: &str) -> Result<Vec<(String, String)>, StoreError>;
 
     /// Every media reference used by a custom emoji across all namespaces — so
     /// the orphan-blob GC keeps their images (an emoji references its blob here,
@@ -744,10 +788,13 @@ pub trait MembershipStore: Send + Sync {
 
     /// Record `account` as a member of `namespace`. Idempotent (join time is
     /// left untouched on a repeat).
+    /// `namespace` is the namespace **ULID id** (v0.13, rename-safe) throughout
+    /// the ns-membership methods; `clear_ns_membership`'s hide-override match
+    /// lines up because channel names embed the same id (`#<ns-id>/…`).
     async fn set_ns_membership(
         &self,
         account: &Account,
-        namespace: &NamespaceName,
+        namespace: &str,
         joined_ms: i64,
     ) -> Result<(), StoreError>;
 
@@ -757,30 +804,23 @@ pub trait MembershipStore: Send + Sync {
     async fn clear_ns_membership(
         &self,
         account: &Account,
-        namespace: &NamespaceName,
+        namespace: &str,
     ) -> Result<(), StoreError>;
 
-    /// Is `account` a member of `namespace`?
-    async fn is_ns_member(
-        &self,
-        account: &Account,
-        namespace: &NamespaceName,
-    ) -> Result<bool, StoreError>;
+    /// Is `account` a member of `namespace` (by id)?
+    async fn is_ns_member(&self, account: &Account, namespace: &str) -> Result<bool, StoreError>;
 
-    /// Namespaces `account` belongs to — the auto-rejoin / skeleton base.
-    async fn ns_memberships(&self, account: &Account) -> Result<Vec<NamespaceName>, StoreError>;
+    /// Namespace **ids** `account` belongs to — the auto-rejoin / skeleton base.
+    async fn ns_memberships(&self, account: &Account) -> Result<Vec<String>, StoreError>;
 
-    /// Distinct accounts that are members of `namespace` — the derived-roster
-    /// base and the `members=` count source.
-    async fn ns_members(&self, namespace: &NamespaceName) -> Result<Vec<Account>, StoreError>;
+    /// Distinct accounts that are members of `namespace` (by id) — the derived-
+    /// roster base and the `members=` count source.
+    async fn ns_members(&self, namespace: &str) -> Result<Vec<Account>, StoreError>;
 
-    /// Members of `namespace` paired with their Unix-ms join time (`0` when
-    /// backfilled from the pre-v0.12 model). Powers the `NS INFO MEMBERS`
+    /// Members of `namespace` (by id) paired with their Unix-ms join time (`0`
+    /// when backfilled from the pre-v0.12 model). Powers the `NS INFO MEMBERS`
     /// moderator roster; ordered by join time ascending, then account.
-    async fn ns_members_joined(
-        &self,
-        namespace: &NamespaceName,
-    ) -> Result<Vec<(Account, i64)>, StoreError>;
+    async fn ns_members_joined(&self, namespace: &str) -> Result<Vec<(Account, i64)>, StoreError>;
 
     /// Set a per-channel hide override for `account` (a `PART <#ns/chan>`).
     /// Idempotent.
@@ -842,6 +882,17 @@ pub trait RoleStore: Send + Sync {
 
     /// All role definitions at a scope.
     async fn roles(&self, scope: &str) -> Result<Vec<RoleDef>, StoreError>;
+
+    /// The role's stable ULID id (v0.13) — minted + persisted on first access for
+    /// a pre-id role (like account/namespace ULIDs). `None` = no such role. ROLE
+    /// commands reference roles by this id; the store maps it back to the
+    /// `(scope, name)` it keys on via [`Self::role_by_id`].
+    async fn role_id(&self, scope: &str, name: &str) -> Result<Option<String>, StoreError>;
+
+    /// Reverse of [`Self::role_id`]: the `(scope, definition)` for a role id, so
+    /// the wire boundary can resolve an incoming `RoleId` to the role it names.
+    /// `None` = unknown id.
+    async fn role_by_id(&self, id: &str) -> Result<Option<(String, RoleDef)>, StoreError>;
 
     /// Record that `subject` (a local name or foreign `account@network`, §10.4)
     /// holds role `name` at `scope`. Idempotent.

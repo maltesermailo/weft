@@ -9,8 +9,8 @@ use ratatui::text::Line;
 use tokio::sync::mpsc;
 use weft_proto::{
     report_category_ok, Account, ChannelName, Command, ErrCode, Event, MemberAction, MsgId,
-    MsgMeta, NamespaceName, Reply, ReportScope, ReportStatus, Request, ResolveAction,
-    RetentionPolicy, Target, Visibility,
+    MsgMeta, NamespaceId, Reply, ReportScope, ReportStatus, Request, ResolveAction,
+    RetentionPolicy, Target, VanityName, Visibility,
 };
 
 use crate::net::NetEvent;
@@ -95,6 +95,10 @@ pub struct App {
     /// what `/ns transfer` and `/ns recovery-cancel` sign with (§2.4). Held
     /// only in memory; a real owner would persist the seed offline.
     ns_roots: std::collections::HashMap<String, weft_crypto::Keypair>,
+    /// namespace **id** → current vanity name, learned from `NS-META` (v0.13).
+    /// `/ns transfer` + `/ns recovery-cancel` address by id but sign over the
+    /// vanity (the server verifies over the current name), so we need the map.
+    ns_vanity: std::collections::HashMap<String, String>,
     /// An in-flight scroll-up backfill: entries with this label are
     /// spliced in at `insert_at` (the top) instead of appended.
     backfill: Option<Backfill>,
@@ -133,6 +137,7 @@ impl App {
             picker: None,
             deleted: std::collections::HashSet::new(),
             ns_roots: std::collections::HashMap::new(),
+            ns_vanity: std::collections::HashMap::new(),
             backfill: None,
             viewport: 20,
             phase: Phase::Connecting,
@@ -678,9 +683,9 @@ impl App {
                         .map(str::to_string),
                 });
             }
-            "channels" => match args.trim().parse::<NamespaceName>() {
+            "channels" => match args.trim().parse::<NamespaceId>() {
                 Ok(namespace) => self.issue(Command::Channels { namespace }),
-                Err(_) => self.note("usage: /channels <namespace>"),
+                Err(_) => self.note("usage: /channels <namespace-id>"),
             },
             // ---- M4c: moderation (§6.7) ----
             "report" => self.report(args),
@@ -824,8 +829,8 @@ impl App {
         match sub {
             "create" => {
                 let mut it = rest.split_whitespace();
-                let Some(Ok(name)) = it.next().map(str::parse::<NamespaceName>) else {
-                    return self.note("usage: /ns create <name> [public|unlisted|private]");
+                let Some(Ok(vanity)) = it.next().map(str::parse::<VanityName>) else {
+                    return self.note("usage: /ns create <vanity> [public|unlisted|private]");
                 };
                 let visibility = match it.next() {
                     Some(tier) => match tier.parse::<Visibility>() {
@@ -835,14 +840,16 @@ impl App {
                     None => Visibility::Unlisted,
                 };
                 // Generate + retain the root key; a real owner persists the seed.
+                // Keyed by the vanity — NS-META maps id → vanity so /ns transfer
+                // and recovery-cancel can find it (they sign over the vanity).
                 let root = weft_crypto::Keypair::generate();
                 let root_key = root.public().to_b64();
-                self.ns_roots.insert(name.to_string(), root);
+                self.ns_roots.insert(vanity.to_string(), root);
                 self.note(&format!(
-                    "minted root key for '{name}' (in-memory — /ns transfer & recovery-cancel can sign)"
+                    "minted root key for '{vanity}' (in-memory — /ns transfer & recovery-cancel can sign)"
                 ));
                 self.send_command(Command::NsCreate {
-                    name,
+                    vanity,
                     visibility,
                     root_key,
                 });
@@ -850,107 +857,109 @@ impl App {
             "meta" => {
                 let mut it = rest.splitn(3, ' ');
                 match (it.next(), it.next(), it.next()) {
-                    (Some(name), Some(key), Some(value)) if !value.is_empty() => {
-                        match name.parse::<NamespaceName>() {
-                            Ok(name) => self.issue(Command::NsMeta {
-                                name,
+                    (Some(id), Some(key), Some(value)) if !value.is_empty() => {
+                        match id.parse::<NamespaceId>() {
+                            Ok(ns) => self.issue(Command::NsMeta {
+                                ns,
                                 key: key.to_string(),
                                 value: value.to_string(),
                             }),
-                            Err(_) => self.note("invalid namespace name"),
+                            Err(_) => self.note("invalid namespace id"),
                         }
                     }
-                    _ => self.note("usage: /ns meta <name> <title|description|icon> <value>"),
+                    _ => self.note("usage: /ns meta <id> <title|description|icon|vanity> <value>"),
                 }
             }
             "visibility" => {
                 let mut it = rest.split_whitespace();
                 match (it.next().map(str::parse), it.next().map(str::parse)) {
-                    (Some(Ok(name)), Some(Ok(visibility))) => {
-                        self.send_command(Command::NsVisibility { name, visibility });
+                    (Some(Ok(ns)), Some(Ok(visibility))) => {
+                        self.send_command(Command::NsVisibility { ns, visibility });
                     }
-                    _ => self.note("usage: /ns visibility <name> <public|unlisted|private>"),
+                    _ => self.note("usage: /ns visibility <id> <public|unlisted|private>"),
                 }
             }
             "delegate" => match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
-                [name, subject, caps] => match name.parse::<NamespaceName>() {
-                    Ok(name) => self.issue(Command::NsDelegate {
-                        name,
+                [id, subject, caps] => match id.parse::<NamespaceId>() {
+                    Ok(ns) => self.issue(Command::NsDelegate {
+                        ns,
                         subject: subject.to_string(),
                         caps: caps.to_string(),
                     }),
-                    Err(_) => self.note("invalid namespace name"),
+                    Err(_) => self.note("invalid namespace id"),
                 },
-                _ => self.note("usage: /ns delegate <name> <account|pubkey> <cap,cap,…>"),
+                _ => self.note("usage: /ns delegate <id> <account|pubkey> <cap,cap,…>"),
             },
-            "delete" => match rest.trim().parse::<NamespaceName>() {
-                // Confirmed by repetition (§6.2) — echo the name.
-                Ok(name) => self.issue(Command::NsDelete {
-                    confirm: name.clone(),
-                    name,
-                }),
-                Err(_) => self.note("usage: /ns delete <name>"),
+            "delete" => match rest.trim().parse::<NamespaceId>() {
+                // Confirmed by repetition (§6.2) — echo the id.
+                Ok(ns) => self.issue(Command::NsDelete { confirm: ns, ns }),
+                Err(_) => self.note("usage: /ns delete <id>"),
             },
             "transfer" => {
                 let mut it = rest.split_whitespace();
-                let (Some(name), Some(owner)) = (it.next(), it.next()) else {
-                    return self.note("usage: /ns transfer <name> <new-owner>");
+                let (Some(id), Some(owner)) = (it.next(), it.next()) else {
+                    return self.note("usage: /ns transfer <id> <new-owner>");
                 };
-                let (Ok(name), Ok(new_owner)) =
-                    (name.parse::<NamespaceName>(), owner.parse::<Account>())
+                let (Ok(ns), Ok(new_owner)) =
+                    (id.parse::<NamespaceId>(), owner.parse::<Account>())
                 else {
-                    return self.note("usage: /ns transfer <name> <new-owner>");
+                    return self.note("usage: /ns transfer <id> <new-owner>");
                 };
-                let Some(root) = self.ns_roots.get(name.as_str()) else {
+                // The signature covers the current vanity (server verifies over
+                // the name); resolve it from the id learned via NS-META.
+                let Some(vanity) = self.ns_vanity.get(&ns.to_string()).cloned() else {
+                    return self.note("unknown namespace id — run /discover or NS INFO first");
+                };
+                let Some(root) = self.ns_roots.get(&vanity) else {
                     return self.note(
                         "no root key for that namespace here — create it in this session, or /raw with your own @sig=",
                     );
                 };
-                let signature =
-                    weft_crypto::signature_to_b64(&weft_crypto::sign_transfer(
-                        root,
-                        name.as_str(),
-                        new_owner.as_str(),
-                    ));
+                let signature = weft_crypto::signature_to_b64(&weft_crypto::sign_transfer(
+                    root,
+                    &vanity,
+                    new_owner.as_str(),
+                ));
                 self.send_command(Command::NsTransfer {
-                    name,
+                    ns,
                     new_owner,
                     signature,
                 });
             }
             "recovery-set" => match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
-                [name, m, keys] => match (name.parse::<NamespaceName>(), m.parse::<u32>()) {
-                    (Ok(name), Ok(m)) => self.issue(Command::NsRecoverySet {
-                        name,
+                [id, m, keys] => match (id.parse::<NamespaceId>(), m.parse::<u32>()) {
+                    (Ok(ns), Ok(m)) => self.issue(Command::NsRecoverySet {
+                        ns,
                         m,
                         keys: keys.to_string(),
                     }),
-                    _ => self.note("usage: /ns recovery-set <name> <m> <key1,key2,…>"),
+                    _ => self.note("usage: /ns recovery-set <id> <m> <key1,key2,…>"),
                 },
-                _ => self.note("usage: /ns recovery-set <name> <m> <key1,key2,…>"),
+                _ => self.note("usage: /ns recovery-set <id> <m> <key1,key2,…>"),
             },
             "recover" => {
                 let mut it = rest.split_whitespace();
                 match (it.next().map(str::parse), it.next()) {
-                    (Some(Ok(name)), Some(rotation)) => self.issue(Command::NsRecover {
-                        name,
+                    (Some(Ok(ns)), Some(rotation)) => self.issue(Command::NsRecover {
+                        ns,
                         rotation: rotation.to_string(),
                     }),
-                    _ => self.note("usage: /ns recover <name> <b64-rotation-record>"),
+                    _ => self.note("usage: /ns recover <id> <b64-rotation-record>"),
                 }
             }
-            "recovery-cancel" => match rest.trim().parse::<NamespaceName>() {
-                Ok(name) => {
-                    let Some(root) = self.ns_roots.get(name.as_str()) else {
+            "recovery-cancel" => match rest.trim().parse::<NamespaceId>() {
+                Ok(ns) => {
+                    let Some(vanity) = self.ns_vanity.get(&ns.to_string()).cloned() else {
+                        return self.note("unknown namespace id — run /discover or NS INFO first");
+                    };
+                    let Some(root) = self.ns_roots.get(&vanity) else {
                         return self.note("no root key for that namespace here (see /ns transfer)");
                     };
-                    let signature = weft_crypto::signature_to_b64(&weft_crypto::sign_cancel(
-                        root,
-                        name.as_str(),
-                    ));
-                    self.send_command(Command::NsRecoveryCancel { name, signature });
+                    let signature =
+                        weft_crypto::signature_to_b64(&weft_crypto::sign_cancel(root, &vanity));
+                    self.send_command(Command::NsRecoveryCancel { ns, signature });
                 }
-                Err(_) => self.note("usage: /ns recovery-cancel <name>"),
+                Err(_) => self.note("usage: /ns recovery-cancel <id>"),
             },
             _ => self.note(
                 "/ns create|meta|visibility|delegate|delete|transfer|recovery-set|recover|recovery-cancel",
@@ -1154,6 +1163,11 @@ impl App {
         if let Event::Deleted { msgid, .. } = &reply.event {
             self.deleted.insert(msgid.to_string());
         }
+        // Track ns id → vanity so owner recovery commands (which sign over the
+        // vanity name) can resolve it from the id the user addresses with.
+        if let Event::NsMeta { id, vanity, .. } = &reply.event {
+            self.ns_vanity.insert(id.to_string(), vanity.to_string());
+        }
         // Scroll-up backfill: splice this batch in at the top so history
         // reads continuously; old messages must not clobber the
         // newest-message tracking below.
@@ -1340,6 +1354,8 @@ mod tests {
     }
 
     const MSGID: &str = "test.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    /// A canonical namespace id (lowercase ULID, v0.13) for the ns tests.
+    const NS_ID: &str = "01arz3ndektsv4rrffq69g5fav";
 
     /// Prime the app with a joined channel, draining the auto-history line.
     fn joined_app() -> (App, mpsc::UnboundedReceiver<String>) {
@@ -1702,40 +1718,48 @@ mod tests {
         let (mut app, mut out) = harness();
         type_line(&mut app, "/ns create gaming public");
         let Command::NsCreate {
-            name,
+            vanity,
             visibility,
             root_key,
         } = sent(&mut out)
         else {
             panic!("expected NS CREATE");
         };
-        assert_eq!(name.as_str(), "gaming");
+        assert_eq!(vanity.as_str(), "gaming");
         assert_eq!(visibility, Visibility::Public);
         // The generated pubkey round-trips through the crypto layer.
         assert!(weft_crypto::PublicKey::from_b64(&root_key).is_ok());
 
+        // The server assigns the id and echoes NS-META (id + vanity); the client
+        // learns the mapping so it can address transfer by id but sign the vanity.
+        feed(&mut app, &format!("@vanity=gaming NS-META {NS_ID} public"));
+
         // /ns transfer signs with the retained root key; the server would
         // verify it against the pubkey submitted at create.
-        type_line(&mut app, "/ns transfer gaming bob");
+        type_line(&mut app, &format!("/ns transfer {NS_ID} bob"));
         let Command::NsTransfer {
+            ns,
             new_owner,
             signature,
-            ..
         } = sent(&mut out)
         else {
             panic!("expected NS TRANSFER");
         };
+        assert_eq!(ns.to_string(), NS_ID);
         assert_eq!(new_owner.as_str(), "bob");
         let sig = weft_crypto::signature_from_b64(&signature).unwrap();
         let pubkey = weft_crypto::PublicKey::from_b64(&root_key).unwrap();
+        // The signature covers the current vanity name (server verifies over it).
         assert!(weft_crypto::verify_transfer(&pubkey, "gaming", "bob", &sig));
     }
 
     #[test]
     fn ns_transfer_without_local_root_key_refuses() {
         let (mut app, mut out) = harness();
-        // No /ns create here → no key to sign with; nothing goes on the wire.
-        type_line(&mut app, "/ns transfer unknown bob");
+        // The id is known (NS-META) but there's no /ns create → no key to sign
+        // with; nothing goes on the wire.
+        feed(&mut app, &format!("@vanity=other NS-META {NS_ID} public"));
+        type_line(&mut app, &format!("/ns transfer {NS_ID} bob"));
         assert!(out.try_recv().is_err());
         assert!(app.log.iter().any(|e| e.raw.contains("no root key")));
     }
@@ -1743,23 +1767,26 @@ mod tests {
     #[test]
     fn ns_meta_visibility_delegate_delete() {
         let (mut app, mut out) = harness();
-        type_line(&mut app, "/ns meta gaming title The Lounge");
+        type_line(&mut app, &format!("/ns meta {NS_ID} title The Lounge"));
         assert_eq!(
             out.try_recv().unwrap(),
-            "@label=t1 NS META gaming title :The Lounge"
+            format!("@label=t1 NS META {NS_ID} title :The Lounge")
         );
-        type_line(&mut app, "/ns visibility gaming private");
+        type_line(&mut app, &format!("/ns visibility {NS_ID} private"));
         assert_eq!(
             out.try_recv().unwrap(),
-            "@label=t2 NS VISIBILITY gaming private"
+            format!("@label=t2 NS VISIBILITY {NS_ID} private")
         );
-        type_line(&mut app, "/ns delegate gaming ada ban,kick");
+        type_line(&mut app, &format!("/ns delegate {NS_ID} ada ban,kick"));
         assert_eq!(
             out.try_recv().unwrap(),
-            "@label=t3 NS DELEGATE gaming ada ban,kick"
+            format!("@label=t3 NS DELEGATE {NS_ID} ada ban,kick")
         );
-        type_line(&mut app, "/ns delete gaming");
-        assert_eq!(out.try_recv().unwrap(), "@label=t4 NS DELETE gaming gaming");
+        type_line(&mut app, &format!("/ns delete {NS_ID}"));
+        assert_eq!(
+            out.try_recv().unwrap(),
+            format!("@label=t4 NS DELETE {NS_ID} {NS_ID}")
+        );
     }
 
     #[test]
@@ -1769,8 +1796,11 @@ mod tests {
         assert_eq!(out.try_recv().unwrap(), "@label=t1 DISCOVER");
         type_line(&mut app, "/discover cur-9");
         assert_eq!(out.try_recv().unwrap(), "@label=t2 DISCOVER cur-9");
-        type_line(&mut app, "/channels gaming");
-        assert_eq!(out.try_recv().unwrap(), "@label=t3 CHANNELS gaming");
+        type_line(&mut app, &format!("/channels {NS_ID}"));
+        assert_eq!(
+            out.try_recv().unwrap(),
+            format!("@label=t3 CHANNELS {NS_ID}")
+        );
     }
 
     #[test]

@@ -364,7 +364,9 @@ pub(crate) struct GroupCallLeave {
 #[derive(Debug, Clone)]
 pub struct AutoBridgeRequest {
     pub network: NetworkName,
-    pub namespace: NamespaceName,
+    /// The foreign namespace's human **vanity** name (the user typed
+    /// `network/vanity`); the peer resolves it to its own id (v0.13).
+    pub namespace: weft_proto::VanityName,
     /// A foreign-namespace invite the user holds (§11.10) — unlocks a
     /// non-public but `federation`-open namespace; `None` for a public one.
     pub invite: Option<String>,
@@ -1151,8 +1153,8 @@ impl ServerCtx {
             {
                 return Ok(true);
             }
-            if let Some(ns_name) = scope_namespace(scope) {
-                if let Some(ns) = self.namespaces.namespace(&ns_name).await? {
+            if let Some(ns_id) = scope_namespace(scope) {
+                if let Some(ns) = self.namespaces.namespace_by_id(&ns_id).await? {
                     if ns.owner == *account {
                         return Ok(true);
                     }
@@ -1504,13 +1506,15 @@ pub(crate) fn channel_namespace(channel: &ChannelName) -> Option<NamespaceName> 
 /// never assigned or deleted; its caps are resolved live in `actor_has_cap`.
 pub(crate) const EVERYONE_ROLE: &str = "everyone";
 
-/// The namespace a scope belongs to, if any: `ns:<n>` → n; `#n/chan` → n
-/// (a channel names its namespace in its first segment, §2.1).
-fn scope_namespace(scope: &TokenScope) -> Option<NamespaceName> {
-    let name = match scope {
+/// The namespace **id** a scope belongs to, if any: `ns:<id>` → id;
+/// `#<ns-id>/chan` → the ns-id (a channel names its namespace id in its first
+/// segment, §2.1 / v0.13). Validated as a well-formed [`NamespaceId`].
+fn scope_namespace(scope: &TokenScope) -> Option<String> {
+    let id = match scope {
         TokenScope::Namespace(n) => n.clone(),
         TokenScope::Channel(c) => c.strip_prefix('#')?.split_once('/')?.0.to_string(),
         TokenScope::Wildcard => return None,
     };
-    name.parse().ok()
+    id.parse::<weft_proto::NamespaceId>().ok()?;
+    Some(id)
 }

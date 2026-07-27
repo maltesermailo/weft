@@ -127,24 +127,29 @@ impl<S: ControlStream> Session<S> {
         self.on_roles_list(label, scope).await
     }
 
-    /// §6.5 ROLE RENAME (scope admin only) → updated `ROLES` batch.
-    ///
-    /// Roles are keyed by name, so this is a store migration that carries the
-    /// definition *and* every assignment. Issued grants need no migration: a
-    /// role's authority is its capability bundle, and that is unchanged.
-    pub(super) async fn on_role_rename(
+    /// §6.5 ROLE UPDATE (scope admin only, v0.13) — edit an existing role by its
+    /// stable id: replace color/caps/hoist/pingable/position, and if the label
+    /// changed, carry the definition **and every assignment** to the new name
+    /// (subsumes the old ROLE RENAME; the id is stable so issued grants — keyed
+    /// by the role's caps, not its name — need no migration).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn on_role_update(
         &mut self,
         label: Option<String>,
         scope: String,
-        old: String,
-        new: String,
+        role: weft_proto::RoleId,
+        color: String,
+        caps: String,
+        hoist: bool,
+        pingable: bool,
+        position: i32,
+        name: String,
         account: Account,
     ) -> io::Result<Flow> {
         let Some(token_scope) = TokenScope::parse(&scope) else {
             return self.bad_scope(label).await;
         };
-        // Invariant 4: the cap check precedes any mutation — and precedes the
-        // existence probes below, so they can't be used to enumerate roles.
+        // Invariant 4: the cap check precedes any mutation (and the id probe).
         match self
             .ctx
             .account_has_cap(&account, &Capability::NsAdmin, &token_scope, unix_now())
@@ -154,29 +159,65 @@ impl<S: ControlStream> Session<S> {
             Ok(false) => return self.cap_required(label, "ns-admin").await,
             Err(e) => return self.internal(label, &e).await,
         }
-        if old == new {
-            return self.on_roles_list(label, scope).await;
-        }
-        let roles = match self.ctx.roles.roles(&scope).await {
-            Ok(roles) => roles,
-            Err(e) => return self.internal(label, &e).await,
-        };
-        if !roles.iter().any(|r| r.name == old) {
+        // Resolve the id → the role's current name.
+        let Some((_, old_def)) = self
+            .ctx
+            .roles
+            .role_by_id(&role.to_string())
+            .await
+            .ok()
+            .flatten()
+        else {
             return self.no_such_target(label).await;
+        };
+        let old = old_def.name;
+        // A label change carries the definition + assignments to the new name.
+        if old != name {
+            let roles = match self.ctx.roles.roles(&scope).await {
+                Ok(roles) => roles,
+                Err(e) => return self.internal(label, &e).await,
+            };
+            if roles.iter().any(|r| r.name == name) {
+                self.send_err(
+                    label,
+                    ErrCode::Policy,
+                    None,
+                    "a role with that name already exists",
+                )
+                .await?;
+                return Ok(Flow::Continue);
+            }
+            if let Err(e) = self.ctx.roles.rename_role(&scope, &old, &name).await {
+                return self.internal(label, &e).await;
+            }
         }
-        // Renaming onto a live role would merge two bundles — refuse.
-        if roles.iter().any(|r| r.name == new) {
-            self.send_err(
-                label,
-                ErrCode::Policy,
-                None,
-                "a role with that name already exists",
-            )
-            .await?;
+        // Replace the definition's fields on the (possibly renamed) role.
+        let Some(parsed) = parse_caps(&caps) else {
+            self.send_err(label, ErrCode::Malformed, None, "unknown capability")
+                .await?;
             return Ok(Flow::Continue);
-        }
-        if let Err(e) = self.ctx.roles.rename_role(&scope, &old, &new).await {
+        };
+        let cap_strings: Vec<String> = parsed.iter().map(Capability::to_string).collect();
+        if let Err(e) = self
+            .ctx
+            .roles
+            .set_role(
+                &scope,
+                &name,
+                &color,
+                &cap_strings,
+                hoist,
+                pingable,
+                position,
+            )
+            .await
+        {
             return self.internal(label, &e).await;
+        }
+        // §6.5 always-propagate a channel role-permission edit to holders.
+        if let Some((ns, _)) = scope.strip_prefix('#').and_then(|s| s.split_once('/')) {
+            self.propagate_channel_role(ns, &scope, &name, &cap_strings, &account)
+                .await?;
         }
         self.on_roles_list(label, scope).await
     }
@@ -371,10 +412,18 @@ impl<S: ControlStream> Session<S> {
         self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
             .await?;
         for role in roles {
+            // The stable role id (v0.13) — lazily minted, keyed by (scope, name).
+            let Ok(Some(rid)) = self.ctx.roles.role_id(&scope, &role.name).await else {
+                continue;
+            };
+            let Ok(role_id) = rid.parse::<weft_proto::RoleId>() else {
+                continue;
+            };
             self.send_event(
                 None,
                 Event::Role {
                     scope: scope.clone(),
+                    role: role_id,
                     color: role.color,
                     caps: role.caps.join(","),
                     hoist: role.hoist,
@@ -440,7 +489,7 @@ impl<S: ControlStream> Session<S> {
 
         let mut overrides: Vec<(Account, String)> = Vec::new();
         if let Some(ns) = ns {
-            if let Ok(ns_name) = ns.parse::<NamespaceName>() {
+            if ns.parse::<weft_proto::NamespaceId>().is_ok() {
                 let ns_scope = format!("ns:{ns}");
                 // Members who hold a channel-mapped role already get its caps by
                 // propagation — skip them so the list is genuine overrides.
@@ -457,7 +506,7 @@ impl<S: ControlStream> Session<S> {
                         }
                     }
                 }
-                if let Ok(members) = self.ctx.memberships.ns_members(&ns_name).await {
+                if let Ok(members) = self.ctx.memberships.ns_members(&ns).await {
                     for member in members {
                         if role_covered.contains(member.as_str()) {
                             continue;

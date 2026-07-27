@@ -282,10 +282,11 @@ pub fn from_weft(reply: &Reply, st: &mut St) -> Out {
             &[&st.target_to_irc(target)],
             &format!("* reacted {emoji}"),
         )),
-        // DISCOVER → LIST (§17): each public namespace is a list entry.
-        Event::NsMeta { name, title, .. } if st.listing => out.irc.push(st.numeric(
+        // DISCOVER → LIST (§17): each public namespace is a list entry. IRC
+        // addresses namespaces by their vanity name (`#vanity/chan`), v0.13.
+        Event::NsMeta { vanity, title, .. } if st.listing => out.irc.push(st.numeric(
             rpl::LIST,
-            &[&format!("#{name}"), "0"],
+            &[&format!("#{vanity}"), "0"],
             title.as_deref().unwrap_or(""),
         )),
         Event::More { .. } if st.listing => {
@@ -509,7 +510,12 @@ mod tests {
         let mut st = ready("weft.example");
         let out = from_irc(&irc("LIST"), &mut st);
         assert_eq!(out.weft, vec!["DISCOVER"]);
-        let entry = from_weft(&weft("@title=The\\sLounge NS-META gaming public"), &mut st);
+        // v0.13: NS-META carries the ns id + a `vanity=` tag; LIST shows the
+        // vanity as `#<vanity>` (what IRC addresses by).
+        let entry = from_weft(
+            &weft("@vanity=gaming;title=The\\sLounge NS-META 01arz3ndektsv4rrffq69g5fav public"),
+            &mut st,
+        );
         assert!(
             entry.irc[0].contains(" 322 ada #gaming 0 :The Lounge"),
             "{:?}",

@@ -475,7 +475,10 @@ const screens = {
         list.map((c) => ({ action: "channel", id: c.name, cells: [`<span class="mono">${esc(c.name)}</span>`, pill(c.policy, "neutral"), act(`<button class="btn small" data-action="browseChan" data-id="${esc(c.name)}">messages</button>`)] })), true));
   },
   async namespaces() {
-    const list = await api("/namespaces");
+    const [list, locks] = await Promise.all([
+      api("/namespaces"),
+      can("admin.moderate") ? api("/vanity-locks").catch(() => []) : Promise.resolve([]),
+    ]);
     // WC7 full freeze is a whole-community action, so it sits behind
     // `admin.destroy` — and only the owner can speak through it.
     const act2 = (n) => can("admin.destroy")
@@ -484,6 +487,17 @@ const screens = {
         : `<button class="btn small danger" data-action="freezeNs" data-id="${esc(n.name)}">full freeze</button>`)
       : "";
     ALL_NS = list;
+    // §2.3 reserved vanity names, incl. reservations whose namespace is gone.
+    const liveNames = new Set(list.map((n) => n.name));
+    const reserved = locks.length
+      ? rowListCard("Reserved vanity names", locks.map((name) => ({
+          name: `<span class="mono">${esc(name)}</span>`,
+          sub: liveNames.has(name) ? "in use by a live namespace" : "free — held out of circulation",
+          type: liveNames.has(name) ? "" : "free",
+          actions: can("admin.moderate") ? `<button class="btn small" data-action="releaseVanity" data-id="${esc(name)}">release</button>` : "",
+        })), locks.length) +
+        note("§2.3 A reserved name can't be registered via NS CREATE without an operator releasing it. A <b>free</b> reservation has no namespace — it's held out of circulation. Reserve or release a live namespace's name from its Settings tab.")
+      : "";
     set(hrow("Namespaces", `${list.length} public`) +
       note("Open one for its channels, roles, members and controls. A <b>full freeze</b> locks every channel — only the owner and network operators can post, not delegated ns-admins.") +
       searchBar("Filter namespaces…") +
@@ -495,7 +509,8 @@ const screens = {
           n.frozen ? pill("frozen", "bad") : "",
           esc(n.title || ""),
           act2(n),
-        ] })), true));
+        ] })), true) +
+      reserved);
   },
   messages() {
     if (!can("admin.messages")) { set(hrow("Messages") + noPerm("admin.messages")); return; }
@@ -1032,7 +1047,7 @@ async function openNs(name) {
   refresh = () => openNs(name);
   const n = await api("/namespaces/" + encodeURIComponent(name) + "/detail");
   // Visibility is a value (always shown); frozen/federation are flags shown ✓/✕.
-  const state = pill(n.visibility, "neutral") + flagChip("frozen", n.frozen, "bad") + flagChip("federation", n.federation, "");
+  const state = pill(n.visibility, "neutral") + flagChip("frozen", n.frozen, "bad") + flagChip("federation", n.federation, "") + flagChip("name locked", n.vanity_locked, "");
 
   detailPage({
     key: "ns",
@@ -1075,6 +1090,7 @@ async function openNs(name) {
             <label class="flag ${n.federation ? "on" : ""}"><span class="box"></span>FEDERATION_OPEN</label>
             <label class="flag ${n.visibility === "public" ? "on" : ""}"><span class="box"></span>PUBLIC</label>
             <label class="flag ${n.recovery_set ? "on" : ""}"><span class="box"></span>RECOVERY_SET</label>
+            <label class="flag ${n.vanity_locked ? "on" : ""}"><span class="box"></span>VANITY_LOCKED</label>
           </div>`);
       }
       if (tab === "channels") {
@@ -1118,7 +1134,9 @@ async function openNs(name) {
             `<select id="nsVis">${visOpts}</select>
              <div class="btns"><button class="btn primary" data-action="nsVis" data-id="${esc(n.name)}">Update visibility</button></div>`) +
           actionCard("Auto-federation", `§11.10 reachability. When open <b>and</b> public, a bridge request for this namespace is answered with a signed manifest. Currently <b>${n.federation ? "open" : "closed"}</b>.`,
-            `<div class="btns"><button class="btn" data-action="nsFed" data-id="${esc(n.name)}" data-x="${n.federation ? "closed" : "open"}">${n.federation ? "Close federation" : "Open federation"}</button></div>`);
+            `<div class="btns"><button class="btn" data-action="nsFed" data-id="${esc(n.name)}" data-x="${n.federation ? "closed" : "open"}">${n.federation ? "Close federation" : "Open federation"}</button></div>`) +
+          actionCard("Vanity name reservation", `§2.3 lock the vanity name <b>${esc(n.name)}</b> so it can't be re-registered without operator action. The reservation survives deletion of this namespace. Currently <b>${n.vanity_locked ? "reserved" : "not reserved"}</b>.`,
+            `<div class="btns"><button class="btn" data-action="nsVanityLock" data-id="${esc(n.name)}" data-x="${n.vanity_locked ? "false" : "true"}">${n.vanity_locked ? "Release name" : "Reserve name"}</button></div>`);
       }
       if (tab === "moderation") {
         if (!can("admin.destroy")) return noPerm("admin.destroy");
@@ -1386,6 +1404,15 @@ const clicks = {
   },
   nsFed: async (el) => {
     try { await api(`/namespaces/${encodeURIComponent(el.dataset.id)}/federation`, { method: "POST", body: JSON.stringify({ mode: el.dataset.x }) }); refresh(); }
+    catch (e) { alert(e.message); }
+  },
+  nsVanityLock: async (el) => {
+    try { await api(`/namespaces/${encodeURIComponent(el.dataset.id)}/vanity-lock`, { method: "POST", body: JSON.stringify({ locked: el.dataset.x === "true" }) }); refresh(); }
+    catch (e) { alert(e.message); }
+  },
+  releaseVanity: async (el) => {
+    if (!confirm(`Release the reserved name "${el.dataset.id}"? It becomes registrable again.`)) return;
+    try { await api(`/vanity-locks`, { method: "POST", body: JSON.stringify({ name: el.dataset.id, locked: false }) }); go("namespaces"); }
     catch (e) { alert(e.message); }
   },
   nsTakeover: async (el) => {

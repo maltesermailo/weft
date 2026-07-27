@@ -28,25 +28,25 @@ impl<S: ControlStream> Session<S> {
                 // A non-viewable channel never reaches here (join_one → Hidden →
                 // NO-SUCH-TARGET), so a private namespace can't be auto-joined.
                 // Written only after the join succeeds — no stray row on failure.
-                if let Some(ns) = channel.namespace() {
-                    if let Ok(ns) = ns.parse::<NamespaceName>() {
+                if let Some(ns_str) = channel.namespace() {
+                    if let Ok(ns_id) = ns_str.parse::<weft_proto::NamespaceId>() {
                         // A new ns membership (not a re-join) fires the welcome.
                         let first_join = !self
                             .ctx
                             .memberships
-                            .is_ns_member(&account, &ns)
+                            .is_ns_member(&account, ns_str)
                             .await
                             .unwrap_or(false);
                         if let Err(e) = self
                             .ctx
                             .memberships
-                            .set_ns_membership(&account, &ns, unix_now() as i64)
+                            .set_ns_membership(&account, ns_str, unix_now() as i64)
                             .await
                         {
                             error!("ns membership on join failed: {e}");
                         }
                         if first_join {
-                            self.post_ns_welcome(&ns, &account).await;
+                            self.post_ns_welcome(&ns_id, &account).await;
                         }
                     }
                     if let Err(e) = self.ctx.memberships.clear_hidden(&account, &channel).await {

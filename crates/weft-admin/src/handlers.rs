@@ -81,6 +81,14 @@ pub fn routes() -> Router<AdminState> {
             post(unfreeze_namespace),
         )
         .route("/api/v1/namespaces/:name/roles", post(assign_ns_role))
+        .route(
+            "/api/v1/namespaces/:name/vanity-lock",
+            post(set_ns_vanity_lock),
+        )
+        .route(
+            "/api/v1/vanity-locks",
+            get(list_vanity_locks).post(set_vanity_lock),
+        )
         .route("/api/v1/grants", get(list_grants))
         .route("/api/v1/moderation", get(list_moderation).post(moderate))
         .route("/api/v1/peers", get(list_peers))
@@ -246,8 +254,10 @@ async fn report_with_context(
         .and_then(|s| s.split_once('/'))
         .map(|(ns, _)| ns.to_string());
     let mut emoji = std::collections::BTreeMap::new();
-    if let Some(ns) = ns_name.and_then(|n| n.parse::<weft_proto::NamespaceName>().ok()) {
-        for (name, hash) in st.emoji.list_emoji(&ns).await? {
+    // The channel's first segment is the namespace **id** (v0.13); emoji are
+    // keyed by that id.
+    if let Some(ns_id) = ns_name.filter(|n| n.parse::<weft_proto::NamespaceId>().is_ok()) {
+        for (name, hash) in st.emoji.list_emoji(&ns_id).await? {
             emoji.insert(name, hash);
         }
     }
@@ -1120,7 +1130,14 @@ async fn assign_ns_role(
     let Ok(ns) = name.parse::<weft_proto::NamespaceName>() else {
         return (StatusCode::BAD_REQUEST, "bad namespace").into_response();
     };
-    let scope = format!("ns:{ns}");
+    // Scopes are keyed by the immutable id (v0.13); the route `:name` is the
+    // current vanity. Resolve it so grants match core's enforcement scopes.
+    let ns_id = match st.namespaces.namespace_id(&ns).await {
+        Ok(Some(id)) => id,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such namespace").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let scope = format!("ns:{ns_id}");
 
     let result = async {
         // The role must exist in the namespace.
@@ -1142,7 +1159,7 @@ async fn assign_ns_role(
                 .unwrap_or_else(|| req.account.clone()),
             Err(_) => req.account.clone(),
         };
-        let chan_caps = channel_role_caps(&st, ns.as_str(), &req.role).await;
+        let chan_caps = channel_role_caps(&st, &ns_id, &req.role).await;
 
         if req.assign {
             st.roles
@@ -1374,8 +1391,11 @@ async fn namespace_detail(State(st): State<AdminState>, Path(name): Path<String>
         let Some(record) = st.namespaces.namespace(&ns).await? else {
             return Ok(None);
         };
-        // A namespace's channels are the ones prefixed `#<ns>/`.
-        let prefix = format!("#{ns}/");
+        // Channels + ns-membership + ns-scope roles are keyed by the immutable
+        // id (v0.13); the path `:name` is the current vanity we resolved above.
+        let ns_id = record.id.clone();
+        // A namespace's channels are the ones prefixed `#<ns-id>/`.
+        let prefix = format!("#{ns_id}/");
         let mut channels = Vec::new();
         for (chan, _) in st.channels.list_channels().await? {
             if !chan.as_str().starts_with(&prefix) {
@@ -1402,8 +1422,8 @@ async fn namespace_detail(State(st): State<AdminState>, Path(name): Path<String>
         // v0.12 membership is namespace-level (channel membership is derived),
         // so the roster comes from the ns membership row, not per-channel. Each
         // member carries the roles they hold so the panel can (un)assign them.
-        let ns_scope = format!("ns:{ns}");
-        let mut roster: Vec<Account> = st.memberships.ns_members(&ns).await?;
+        let ns_scope = format!("ns:{ns_id}");
+        let mut roster: Vec<Account> = st.memberships.ns_members(&ns_id).await?;
         roster.sort();
         roster.dedup();
         let mut members = Vec::with_capacity(roster.len());
@@ -1417,7 +1437,7 @@ async fn namespace_detail(State(st): State<AdminState>, Path(name): Path<String>
 
         let roles = st
             .roles
-            .roles(&format!("ns:{ns}"))
+            .roles(&ns_scope)
             .await?
             .into_iter()
             .map(|r| dto::Role {
@@ -1429,8 +1449,11 @@ async fn namespace_detail(State(st): State<AdminState>, Path(name): Path<String>
             })
             .collect();
 
+        let vanity_locked = st.namespaces.vanity_locked(&ns).await?;
         Ok::<_, StoreError>(Some(dto::NamespaceDetail {
+            id: record.id.clone(),
             name: record.name.to_string(),
+            vanity_locked,
             owner: record.owner.to_string(),
             visibility: record.visibility,
             title: record.title,
@@ -1571,6 +1594,92 @@ async fn set_ns_federation(
         "namespace.federation",
         ns.as_str(),
         &json!({ "namespace": ns.to_string(), "mode": req.mode }),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct VanityLockReq {
+    /// `true` reserves the vanity, `false` releases it (§2.3).
+    locked: bool,
+}
+
+/// `POST /namespaces/:name/vanity-lock` — reserve or release a namespace's
+/// vanity name (§2.3). While reserved, the name can't be (re-)registered via
+/// NS CREATE, and the reservation survives the namespace's deletion.
+async fn set_ns_vanity_lock(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(name): Path<String>,
+    Json(req): Json<VanityLockReq>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Ok(ns) = name.parse::<weft_proto::NamespaceName>() else {
+        return (StatusCode::BAD_REQUEST, "bad namespace name").into_response();
+    };
+    if let Err(e) = st.namespaces.set_vanity_locked(&ns, req.locked).await {
+        return internal(e);
+    }
+    audit(
+        &st,
+        &who,
+        "namespace.vanity_lock",
+        ns.as_str(),
+        &json!({ "vanity": ns.to_string(), "locked": req.locked }),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct VanityLockNameReq {
+    /// The vanity name to reserve/release — may be a name with no namespace.
+    name: String,
+    locked: bool,
+}
+
+/// `GET /vanity-locks` — every reserved vanity name (§2.3), including
+/// reservations whose namespace no longer exists.
+async fn list_vanity_locks(
+    State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    match st.namespaces.vanity_locks().await {
+        Ok(names) => Json(names).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// `POST /vanity-locks` — reserve or release a vanity **by name**, so an
+/// operator can lift (or pre-reserve) a name that has no namespace (§2.3).
+async fn set_vanity_lock(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Json(req): Json<VanityLockNameReq>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Ok(ns) = req.name.parse::<weft_proto::NamespaceName>() else {
+        return (StatusCode::BAD_REQUEST, "bad vanity name").into_response();
+    };
+    if let Err(e) = st.namespaces.set_vanity_locked(&ns, req.locked).await {
+        return internal(e);
+    }
+    audit(
+        &st,
+        &who,
+        "namespace.vanity_lock",
+        ns.as_str(),
+        &json!({ "vanity": ns.to_string(), "locked": req.locked }),
     )
     .await;
     StatusCode::NO_CONTENT.into_response()

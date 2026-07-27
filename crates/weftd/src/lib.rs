@@ -771,8 +771,11 @@ where
         + 'static,
 {
     for (name, policy, kind) in seed {
+        // A config-seeded channel's vanity is its local segment (the human name).
+        let body = &name.as_str()[1..];
+        let vanity = body.rsplit_once('/').map(|(_, c)| c).unwrap_or(body);
         store
-            .upsert_channel(name, *policy, *kind)
+            .upsert_channel(name, vanity, *policy, *kind)
             .await
             .map_err(|e| anyhow::anyhow!("seeding channel {name}: {e}"))?;
     }

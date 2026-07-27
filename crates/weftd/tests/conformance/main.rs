@@ -1367,16 +1367,22 @@ async fn namespace_transfer_signed_over_quic() {
         root.public().to_b64()
     ))
     .await;
-    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    // v0.13: the namespace is addressed by its minted id; the signature still
+    // covers the vanity name (the server verifies over `record.name`).
+    let ns_id = match ada.recv().await.event {
+        Event::NsMeta { id, .. } => id.to_string(),
+        other => panic!("expected NS-META, got {other:?}"),
+    };
 
     // A forged transfer signature is FORBIDDEN.
-    ada.send("@sig=Zm9yZ2Vk NS TRANSFER gaming bob").await;
+    ada.send(&format!("@sig=Zm9yZ2Vk NS TRANSFER {ns_id} bob"))
+        .await;
     assert!(matches!(&ada.recv().await.event, Event::Err(e) if e.code == ErrCode::Forbidden));
 
-    // A real root signature over (namespace, new_owner) transfers ownership.
+    // A real root signature over (vanity, new_owner) transfers ownership.
     let sig = weft_crypto::sign_transfer(&root, "gaming", "bob");
     ada.send(&format!(
-        "@sig={} NS TRANSFER gaming bob",
+        "@sig={} NS TRANSFER {ns_id} bob",
         weft_crypto::signature_to_b64(&sig)
     ))
     .await;
@@ -1389,9 +1395,9 @@ async fn namespace_transfer_signed_over_quic() {
     // bob now administers; ada does not.
     let mut bob = QuicClient::connect(server.quic_addr).await;
     bob.ready("bob").await;
-    bob.send("NS VISIBILITY gaming unlisted").await;
+    bob.send(&format!("NS VISIBILITY {ns_id} unlisted")).await;
     assert!(matches!(bob.recv().await.event, Event::NsMeta { .. }));
-    ada.send("NS VISIBILITY gaming public").await;
+    ada.send(&format!("NS VISIBILITY {ns_id} public")).await;
     assert!(matches!(&ada.recv().await.event, Event::Err(e) if e.code == ErrCode::CapRequired));
 
     server.shutdown().await;
@@ -1719,12 +1725,14 @@ async fn auto_bridge_requests_reachable_namespace() {
     let key_path = std::env::temp_dir().join("weft-p3-home.key");
     std::fs::write(&key_path, home_key.seed_b64()).unwrap();
 
-    // F hosts #gaming/general and accepts bridge peers.
-    let f = start_with(&["#gaming/general"], |c| c.federation.accept_any = true).await;
+    // F accepts bridge peers; its namespace + channel are created dynamically so
+    // the wire name is the v0.13 canonical `#<ns-id>/<chan-id>`.
+    let f = start_with(&[], |c| c.federation.accept_any = true).await;
     let f_net: weft_proto::NetworkName = "test.example".parse().unwrap();
     let f_key = f.ctx().network_public();
 
-    // Make `gaming` auto-federation-reachable: public + federation open.
+    // Make `gaming` auto-federation-reachable: public + federation open. Capture
+    // the minted ns id (BRIDGE REQUEST still addresses it by the vanity name).
     let ns_root = weft_core::Keypair::generate();
     let mut ada = QuicClient::connect(f.quic_addr).await;
     ada.ready("ada").await;
@@ -1733,19 +1741,31 @@ async fn auto_bridge_requests_reachable_namespace() {
         ns_root.public().to_b64()
     ))
     .await;
+    let ns_id = match ada.recv().await.event {
+        Event::NsMeta { id, .. } => id.to_string(),
+        other => panic!("expected NS-META, got {other:?}"),
+    };
+    ada.send(&format!("NS META {ns_id} federation :open")).await;
     assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
-    ada.send("NS META gaming federation :open").await;
-    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    // Create the namespace's channel; the canonical `#<ns-id>/<chan-id>` is what
+    // the manifest carries and both sides address by.
+    ada.send(&format!("CHANNEL CREATE #{ns_id}/general")).await;
+    let chan = match ada.recv().await.event {
+        Event::Policy { channel, .. } => channel.to_string(),
+        other => panic!("expected POLICY, got {other:?}"),
+    };
 
     // A member of the namespace channel on F, with some pre-bridge history.
     let mut bob = QuicClient::connect(f.quic_addr).await;
     bob.ready("bob").await;
-    bob.join("#gaming/general").await;
-    bob.send("MSG #gaming/general :pre-bridge history").await;
+    bob.join(&chan).await;
+    bob.send(&format!("MSG {chan} :pre-bridge history")).await;
     assert!(matches!(bob.recv().await.event, Event::Message(_)));
 
-    // H: a different network that dials + requests `gaming`.
-    let h = start_with(&["#gaming/general"], |c| {
+    // H: a different network that dials + requests `gaming`. It's seeded with the
+    // canonical channel (known now that F minted it) so a local member can be
+    // present as the bridge comes up — mirrors the ingested-channel identity.
+    let h = start_with(&[chan.as_str()], |c| {
         c.network = "home.example".to_string();
         c.identity.key_file = Some(key_path.clone());
     })
@@ -1755,7 +1775,7 @@ async fn auto_bridge_requests_reachable_namespace() {
     // A member on H, present as the auto-bridge comes up.
     let mut ada = QuicClient::connect(h.quic_addr).await;
     ada.ready("ada").await;
-    ada.join("#gaming/general").await;
+    ada.join(&chan).await;
 
     let endpoint = weft_transport::insecure::client_endpoint(weft_transport::ALPN).unwrap();
     let ctx = h.ctx().clone();
@@ -1791,7 +1811,7 @@ async fn auto_bridge_requests_reachable_namespace() {
     // F's *pre-bridge* scrollback, so bob's earlier message lands on H.
     ada.recv_until(|r| matches!(r.event, Event::Manifest { .. }))
         .await;
-    ada.send("HISTORY #gaming/general limit=500").await;
+    ada.send(&format!("HISTORY {chan} limit=500")).await;
     let seen = ada
         .recv_until(|r| {
             matches!(&r.event, Event::Message(m)

@@ -513,7 +513,11 @@ pub struct AdminEntry {
 /// backing data for its detail page's sub-tabs.
 #[derive(Serialize)]
 pub struct NamespaceDetail {
+    /// The namespace's immutable ULID id (v0.13); scopes/channels pin this.
+    pub id: String,
     pub name: String,
+    /// §2.3 whether the vanity name is admin-reserved (can't be re-registered).
+    pub vanity_locked: bool,
     pub owner: String,
     pub visibility: String,
     pub title: Option<String>,

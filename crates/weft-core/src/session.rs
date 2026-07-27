@@ -153,7 +153,7 @@ enum OutboundStart {
     /// Ask the peer to offer a manifest for its namespace `ns` and auto-accept
     /// the offer — the §11.10 requester side. The optional invite unlocks a
     /// non-public federating namespace.
-    Request(NamespaceName, Option<String>),
+    Request(weft_proto::VanityName, Option<String>),
 }
 
 /// Run an **outbound** bridge session over a `stream` the dialer already
@@ -227,7 +227,7 @@ pub async fn run_bridge_requester<S: ControlStream>(
     ctx: Arc<ServerCtx>,
     peer: NetworkName,
     key: PublicKey,
-    ns: NamespaceName,
+    ns: weft_proto::VanityName,
     invite: Option<String>,
 ) {
     run_outbound_bridge(stream, ctx, peer, key, OutboundStart::Request(ns, invite)).await
@@ -953,28 +953,78 @@ impl<S: ControlStream> Session<S> {
                 .await
             }
             Command::RolesReorder { scope, order } => {
-                self.on_roles_reorder(label, scope, order, account).await
+                // Resolve role ids → names for the name-keyed reorder (unknown
+                // ids are skipped — the reorder is best-effort per §6.5).
+                let mut names = Vec::with_capacity(order.len());
+                for role in &order {
+                    if let Ok(Some((_, def))) = self.ctx.roles.role_by_id(&role.to_string()).await {
+                        names.push(def.name);
+                    }
+                }
+                self.on_roles_reorder(label, scope, names, account).await
             }
-            Command::RoleDelete { scope, name } => {
-                self.on_role_delete(label, scope, name, account).await
+            Command::RoleUpdate {
+                scope,
+                role,
+                color,
+                caps,
+                hoist,
+                pingable,
+                position,
+                name,
+            } => {
+                self.on_role_update(
+                    label, scope, role, color, caps, hoist, pingable, position, name, account,
+                )
+                .await
             }
-            Command::RoleRename { scope, old, new } => {
-                self.on_role_rename(label, scope, old, new, account).await
+            Command::RoleDelete { scope, role } => {
+                let Some((_, def)) = self
+                    .ctx
+                    .roles
+                    .role_by_id(&role.to_string())
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return self.no_such_target(label).await;
+                };
+                self.on_role_delete(label, scope, def.name, account).await
             }
             Command::RoleAssign {
                 scope,
                 account: subject,
-                name,
+                role,
             } => {
-                self.on_role_assign(label, scope, subject, name, Actor::Local(account))
+                let Some((_, def)) = self
+                    .ctx
+                    .roles
+                    .role_by_id(&role.to_string())
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return self.no_such_target(label).await;
+                };
+                self.on_role_assign(label, scope, subject, def.name, Actor::Local(account))
                     .await
             }
             Command::RoleUnassign {
                 scope,
                 account: subject,
-                name,
+                role,
             } => {
-                self.on_role_unassign(label, scope, subject, name, Actor::Local(account))
+                let Some((_, def)) = self
+                    .ctx
+                    .roles
+                    .role_by_id(&role.to_string())
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return self.no_such_target(label).await;
+                };
+                self.on_role_unassign(label, scope, subject, def.name, Actor::Local(account))
                     .await
             }
             Command::RolesList { scope } => self.on_roles_list(label, scope).await,
@@ -1038,43 +1088,39 @@ impl<S: ControlStream> Session<S> {
             }
             // §6.2 namespace verbs.
             Command::NsCreate {
-                name,
+                vanity,
                 visibility,
                 root_key,
             } => {
-                self.on_ns_create(label, name, visibility, root_key, account)
+                self.on_ns_create(label, vanity, visibility, root_key, account)
                     .await
             }
-            Command::NsMeta { name, key, value } => {
-                self.on_ns_meta(label, name, key, value, Actor::Local(account))
+            Command::NsMeta { ns, key, value } => {
+                self.on_ns_meta(label, ns, key, value, Actor::Local(account))
                     .await
             }
-            Command::NsVisibility { name, visibility } => {
-                self.on_ns_visibility(label, name, visibility, Actor::Local(account))
+            Command::NsVisibility { ns, visibility } => {
+                self.on_ns_visibility(label, ns, visibility, Actor::Local(account))
                     .await
             }
-            Command::NsDelegate {
-                name,
-                subject,
-                caps,
-            } => {
-                // Sugar for GRANT at ns: scope (§6.2).
+            Command::NsDelegate { ns, subject, caps } => {
+                // Sugar for GRANT at the id-keyed ns: scope (§6.2, v0.13).
                 self.on_grant(
                     label,
                     subject,
-                    format!("ns:{name}"),
+                    format!("ns:{ns}"),
                     caps,
                     None,
                     Actor::Local(account),
                 )
                 .await
             }
-            Command::NsDelete { name, confirm } => {
-                self.on_ns_delete(label, name, confirm, Actor::Local(account))
+            Command::NsDelete { ns, confirm } => {
+                self.on_ns_delete(label, ns, confirm, Actor::Local(account))
                     .await
             }
-            Command::NsJoin { name } => self.on_ns_join(label, name, account).await,
-            Command::NsLeave { name } => self.on_ns_leave(label, name, account).await,
+            Command::NsJoin { ns } => self.on_ns_join(label, ns, account).await,
+            Command::NsLeave { ns } => self.on_ns_leave(label, ns, account).await,
             Command::Sync { since, preview } => self.on_sync(label, since, preview, account).await,
             Command::Discover { cursor } => self.on_discover(label, cursor).await,
             Command::Channels { namespace } => self.on_channels(label, namespace).await,
@@ -1088,24 +1134,22 @@ impl<S: ControlStream> Session<S> {
             }
             // §2.4 succession + recovery ladder.
             Command::NsTransfer {
-                name,
+                ns,
                 new_owner,
                 signature,
             } => {
-                self.on_ns_transfer(label, name, new_owner, signature, account)
+                self.on_ns_transfer(label, ns, new_owner, signature, account)
                     .await
             }
-            Command::NsRecoverySet { name, m, keys } => {
-                self.on_ns_recovery_set(label, name, m, keys, account).await
+            Command::NsRecoverySet { ns, m, keys } => {
+                self.on_ns_recovery_set(label, ns, m, keys, account).await
             }
-            Command::NsRecover { name, rotation } => {
-                self.on_ns_recover(label, name, rotation).await
+            Command::NsRecover { ns, rotation } => self.on_ns_recover(label, ns, rotation).await,
+            Command::NsRecoveryCancel { ns, signature } => {
+                self.on_ns_recovery_cancel(label, ns, signature).await
             }
-            Command::NsRecoveryCancel { name, signature } => {
-                self.on_ns_recovery_cancel(label, name, signature).await
-            }
-            Command::NsInfo { name, detail } => match detail {
-                NsInfoKind::Members => self.on_ns_info_members(label, name, account).await,
+            Command::NsInfo { ns, detail } => match detail {
+                NsInfoKind::Members => self.on_ns_info_members(label, ns, account).await,
             },
             // §6.7 moderation & reporting.
             Command::Report {
@@ -1451,13 +1495,13 @@ impl<S: ControlStream> Session<S> {
     async fn is_member(&self, account: &Account, channel: &ChannelName) -> bool {
         match channel.namespace() {
             Some(ns) => {
-                let Ok(ns) = ns.parse::<NamespaceName>() else {
+                if ns.parse::<weft_proto::NamespaceId>().is_err() {
                     return false;
-                };
+                }
                 let is_ns = self
                     .ctx
                     .memberships
-                    .is_ns_member(account, &ns)
+                    .is_ns_member(account, ns)
                     .await
                     .unwrap_or(false);
                 if !is_ns {
@@ -1548,10 +1592,10 @@ impl<S: ControlStream> Session<S> {
         let Some(ns) = channel.namespace() else {
             return self.ctx.memberships.members(channel).await;
         };
-        let Ok(ns) = ns.parse::<NamespaceName>() else {
+        if ns.parse::<weft_proto::NamespaceId>().is_err() {
             return Ok(Vec::new());
-        };
-        let members = self.ctx.memberships.ns_members(&ns).await?;
+        }
+        let members = self.ctx.memberships.ns_members(ns).await?;
         let hiders: std::collections::HashSet<Account> = self
             .ctx
             .memberships

@@ -38,7 +38,10 @@ pub use line::{
     MAX_EMOJI_BYTES, MAX_HISTORY_LIMIT, MAX_LABEL_BYTES, MAX_LINE_BYTES, MAX_PARAMS, MAX_TAGS,
     MAX_TAG_KEY_BYTES, MAX_TAG_VALUE_BYTES,
 };
-pub use name::{Account, ChannelName, GroupId, NamespaceName, NetworkName, Target, UserRef};
+pub use name::{
+    Account, ChannelId, ChannelName, GroupId, NamespaceId, NamespaceName, NetworkName, RoleId,
+    Target, UserRef, VanityName,
+};
 pub use policy::{RetainedFor, RetentionPolicy, RetentionUnit};
 pub use types::{
     report_category_ok, BridgeState, CallState, ChannelKind, ContentState, FriendState,

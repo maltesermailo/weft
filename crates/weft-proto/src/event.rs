@@ -5,7 +5,7 @@ use crate::errcode::ErrCode;
 use crate::error::{ParseError, SerializeError};
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
-use crate::name::{Account, ChannelName, GroupId, NamespaceName, NetworkName, Target, UserRef};
+use crate::name::{Account, ChannelName, GroupId, NetworkName, Target, UserRef};
 use crate::policy::RetentionPolicy;
 use crate::types::{
     BridgeState, CallState, ChannelKind, ContentState, FriendState, HistoryMode, MediaMode,
@@ -146,13 +146,13 @@ pub enum Event {
     /// `EMOJI <ns> <name> <media>` — a namespace custom emoji (§9.4); one per
     /// emoji in the `EMOJI LIST` batch, and broadcast on add.
     Emoji {
-        namespace: NamespaceName,
+        namespace: crate::NamespaceId,
         name: String,
         media: String,
     },
-    /// `EMOJI-REMOVED <ns> <name>` — a namespace emoji was removed (§9.4).
+    /// `EMOJI-REMOVED <ns-id> <name>` — a namespace emoji was removed (§9.4).
     EmojiRemoved {
-        namespace: NamespaceName,
+        namespace: crate::NamespaceId,
         name: String,
     },
     /// `PINNED <#chan> <msgid>` with optional `by=` — a message was pinned (§7).
@@ -204,6 +204,9 @@ pub enum Event {
     /// and broadcast on create.
     Role {
         scope: String,
+        /// Stable role id (ULID, v0.13). The identity clients address; `name` is
+        /// a mutable display label.
+        role: crate::RoleId,
         color: String,
         caps: String,
         /// Display the role's members separately in the member list (§6.5).
@@ -214,8 +217,9 @@ pub enum Event {
         position: i32,
         name: String,
     },
-    /// `ROLE-MEMBER <scope> <account> :<roles>` — the roles an account is
-    /// explicitly assigned at a scope, comma-separated (§6.5). Empty = none.
+    /// `ROLE-MEMBER <scope> <account> :<role-ids>` — the roles an account is
+    /// explicitly assigned at a scope, comma-separated **role ULID ids** (§6.5,
+    /// v0.13). Empty = none. Clients map ids → labels via the `ROLE` events.
     RoleMember {
         scope: String,
         /// Local name or foreign `account@network` — a role holder can be a
@@ -287,19 +291,19 @@ pub enum Event {
     /// clients expand it across the namespace's visible channels. `count=` is
     /// the distinct-account ns member count after the change.
     NsMember {
-        namespace: NamespaceName,
+        namespace: crate::NamespaceId,
         user: UserRef,
         action: MemberAction,
         display: Option<String>,
         count: Option<u64>,
     },
-    /// `NS-MEMBER-INFO <ns> <user@net> <joined-ms>` with an optional `roles=`
-    /// tag (comma-separated role names) — one row per member inside an `NS INFO
-    /// MEMBERS` batch (§7.4, moderator view). `joined-ms` is the Unix-ms join
-    /// time, or `0` when unknown (membership backfilled from the pre-v0.12
-    /// model). `roles=` is omitted when the member holds no assigned roles.
+    /// `NS-MEMBER-INFO <ns-id> <user@net> <joined-ms>` with an optional `roles=`
+    /// tag (comma-separated **role ids**, v0.13) — one row per member inside an
+    /// `NS INFO MEMBERS` batch (§7.4, moderator view). `joined-ms` is the Unix-ms
+    /// join time, or `0` when unknown (backfilled from the pre-v0.12 model).
+    /// `roles=` is omitted when the member holds no assigned roles.
     NsMemberInfo {
-        namespace: NamespaceName,
+        namespace: crate::NamespaceId,
         user: UserRef,
         joined_ms: u64,
         roles: Vec<String>,
@@ -381,12 +385,15 @@ pub enum Event {
         key: String,
         value: String,
     },
-    /// `NS-META <ns> <visibility>` with optional `owner=`/`title=`/
-    /// `description=`/`icon=` tags, and the §2.4 recovery announcement
-    /// fields: `recovery-set=yes` (a quorum exists), `recovery=pending`
-    /// with `recovery-eta=<unix-ms>` + `recovery-rung=2|3` during a window.
+    /// `NS-META <ns-id> <visibility>` with a `vanity=<name>` tag (the mutable
+    /// display label, v0.13) and optional `owner=`/`title=`/`description=`/`icon=`
+    /// tags, plus the §2.4 recovery announcement fields: `recovery-set=yes`
+    /// (a quorum exists), `recovery=pending` with `recovery-eta=<unix-ms>` +
+    /// `recovery-rung=2|3` during a window.
     NsMeta {
-        name: NamespaceName,
+        id: crate::NamespaceId,
+        /// The mutable per-network-unique vanity name (`vanity=` tag).
+        vanity: crate::VanityName,
         visibility: Visibility,
         owner: Option<String>,
         title: Option<String>,
@@ -409,14 +416,19 @@ pub enum Event {
     More {
         cursor: String,
     },
-    /// `CHANNEL-LAYOUT <#chan> <position>` with optional `category=`/`kind=` —
-    /// one per channel in a namespace's layout (spec extension). `kind=voice`
-    /// marks a WEFT-RT voice channel (§16); `text` is the default and omitted.
+    /// `CHANNEL-LAYOUT <#chan> <position>` with optional `category=`/`kind=`/
+    /// `vanity=` — one per channel in a namespace's layout (spec extension).
+    /// `kind=voice` marks a WEFT-RT voice channel (§16); `text` is the default
+    /// and omitted. `vanity=` is the channel's human display name (v0.13), since
+    /// the `#<ns-id>/<chan-id>` wire name is opaque ids.
     ChannelLayout {
         channel: ChannelName,
         category: Option<String>,
         position: i64,
         kind: crate::ChannelKind,
+        /// Human display name for the channel (v0.13). Empty for a legacy /
+        /// top-level channel with no separate vanity.
+        vanity: String,
     },
     /// `CHANNEL-RENAMED <#old> <#new>` — a channel changed identity (§6.3);
     /// announced to members so clients re-key their local channel state.
@@ -814,6 +826,12 @@ impl Event {
             "ROLE" => {
                 let mut args = Args::new(line, "ROLE");
                 let scope = args.req("scope")?.to_string();
+                let role_raw = args.req("role-id")?;
+                let role = role_raw.parse().map_err(|_| ParseError::BadParam {
+                    verb: "ROLE",
+                    what: "role-id",
+                    value: role_raw.to_string(),
+                })?;
                 let color = args.req("color")?.to_string();
                 let caps = args.req("caps")?.to_string();
                 let mut hoist = false;
@@ -834,6 +852,7 @@ impl Event {
                 }
                 Ok(Event::Role {
                     scope,
+                    role,
                     color,
                     caps,
                     hoist,
@@ -1156,7 +1175,13 @@ impl Event {
                         None
                     };
                 Ok(Event::NsMeta {
-                    name: args.req("name")?.parse()?,
+                    id: args.req("ns")?.parse()?,
+                    vanity: tag("vanity")
+                        .ok_or(ParseError::MissingParam {
+                            verb: "NS-META",
+                            what: "vanity tag",
+                        })?
+                        .parse()?,
                     visibility: args.req("visibility")?.parse()?,
                     owner: tag("owner"),
                     title: tag("title"),
@@ -1202,6 +1227,7 @@ impl Event {
                         .get("kind")
                         .and_then(|k| k.parse().ok())
                         .unwrap_or(ChannelKind::Text),
+                    vanity: line.tags.get("vanity").cloned().unwrap_or_default(),
                 })
             }
             "CHANNEL-RENAMED" => {
@@ -1752,6 +1778,7 @@ impl Event {
             ),
             Event::Role {
                 scope,
+                role,
                 color,
                 caps,
                 hoist,
@@ -1762,6 +1789,7 @@ impl Event {
                 "ROLE",
                 vec![
                     scope.clone(),
+                    role.to_string(),
                     color.clone(),
                     caps.clone(),
                     format!("hoist={}", if *hoist { 1 } else { 0 }),
@@ -1921,7 +1949,8 @@ impl Event {
                 Some(value.clone()),
             ),
             Event::NsMeta {
-                name,
+                id,
+                vanity,
                 visibility,
                 owner,
                 title,
@@ -1933,6 +1962,7 @@ impl Event {
                 federation,
                 welcome,
             } => {
+                tags.insert("vanity".to_string(), vanity.to_string());
                 for (k, v) in [
                     ("owner", owner),
                     ("title", title),
@@ -1960,7 +1990,7 @@ impl Event {
                 }
                 (
                     "NS-META",
-                    vec![name.to_string(), visibility.to_string()],
+                    vec![id.to_string(), visibility.to_string()],
                     None,
                 )
             }
@@ -1970,12 +2000,16 @@ impl Event {
                 category,
                 position,
                 kind,
+                vanity,
             } => {
                 if let Some(category) = category {
                     tags.insert("category".to_string(), category.clone());
                 }
                 if *kind != ChannelKind::Text {
                     tags.insert("kind".to_string(), kind.to_string());
+                }
+                if !vanity.is_empty() {
+                    tags.insert("vanity".to_string(), vanity.clone());
                 }
                 (
                     "CHANNEL-LAYOUT",
@@ -2530,14 +2564,14 @@ mod tests {
         }));
         round_trip(&Reply::with_label(
             Event::Emoji {
-                namespace: "gaming".parse().unwrap(),
+                namespace: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
                 name: "partyblob".into(),
                 media: "weft-media://hda.example/abc".into(),
             },
             "e1",
         ));
         round_trip(&Reply::new(Event::EmojiRemoved {
-            namespace: "gaming".parse().unwrap(),
+            namespace: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
             name: "partyblob".into(),
         }));
         round_trip(&Reply::new(Event::Thread {
@@ -2615,6 +2649,7 @@ mod tests {
         }));
         round_trip(&Reply::new(Event::Role {
             scope: "ns:gaming".to_string(),
+            role: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
             color: "#e8b93d".to_string(),
             caps: "mute,ban,kick,pin".to_string(),
             hoist: true,
@@ -2625,7 +2660,7 @@ mod tests {
         round_trip(&Reply::new(Event::RoleMember {
             scope: "ns:gaming".to_string(),
             account: "bob".to_string(),
-            roles: "Head Moderator,Speaker".to_string(),
+            roles: "01ARZ3NDEKTSV4RRFFQ69G5FAV,01BX5ZZKBKACTAV9WEVGEMMVRZ".to_string(),
         }));
         round_trip(&Reply::new(Event::Presence {
             user: "ada@hda.example".parse().unwrap(),
@@ -2865,9 +2900,10 @@ mod tests {
 
     #[test]
     fn ns_member_round_trip() {
+        let ns = "01arz3ndektsv4rrffq69g5fav";
         let join = Reply::with_label(
             Event::NsMember {
-                namespace: "gaming".parse().unwrap(),
+                namespace: ns.parse().unwrap(),
                 user: "ada@test.example".parse().unwrap(),
                 action: MemberAction::Join,
                 display: Some("Ada".into()),
@@ -2878,11 +2914,11 @@ mod tests {
         let wire = join.serialize().unwrap();
         assert!(wire.contains("count=42"));
         assert!(wire.contains("display=Ada"));
-        assert!(wire.contains("NS-MEMBER gaming ada@test.example join"));
+        assert!(wire.contains(&format!("NS-MEMBER {ns} ada@test.example join")));
         round_trip(&join);
 
         round_trip(&Reply::new(Event::NsMember {
-            namespace: "gaming".parse().unwrap(),
+            namespace: ns.parse().unwrap(),
             user: "bob@test.example".parse().unwrap(),
             action: MemberAction::Part,
             display: None,
@@ -2893,23 +2929,29 @@ mod tests {
     #[test]
     fn ns_member_info_round_trip() {
         // A member with roles + a real join time.
+        let ns = "01arz3ndektsv4rrffq69g5fav";
+        // Roles are role ULID ids now (v0.13), comma-joined in the `roles=` tag.
+        let r1 = "01BX5ZZKBKACTAV9WEVGEMMVRZ";
+        let r2 = "01F8MECHZX3TBDSZ7XRADM79XV";
         let info = Reply::with_label(
             Event::NsMemberInfo {
-                namespace: "gaming".parse().unwrap(),
+                namespace: ns.parse().unwrap(),
                 user: "ada@test.example".parse().unwrap(),
                 joined_ms: 1_700_000_000_000,
-                roles: vec!["Moderator".into(), "VIP".into()],
+                roles: vec![r1.into(), r2.into()],
             },
             "m1",
         );
         let wire = info.serialize().unwrap();
-        assert!(wire.contains("roles=Moderator,VIP"));
-        assert!(wire.contains("NS-MEMBER-INFO gaming ada@test.example 1700000000000"));
+        assert!(wire.contains(&format!("roles={r1},{r2}")));
+        assert!(wire.contains(&format!(
+            "NS-MEMBER-INFO {ns} ada@test.example 1700000000000"
+        )));
         round_trip(&info);
 
         // No roles, unknown join time (backfilled) → `roles=` omitted, `0` join.
         let bare = Reply::new(Event::NsMemberInfo {
-            namespace: "gaming".parse().unwrap(),
+            namespace: ns.parse().unwrap(),
             user: "bob@test.example".parse().unwrap(),
             joined_ms: 0,
             roles: vec![],
@@ -3011,15 +3053,17 @@ mod tests {
                 category: Some("text".into()),
                 position: 3,
                 kind: ChannelKind::Text,
+                vanity: "general".into(),
             },
             "c1",
         ));
-        // Uncategorized.
+        // Uncategorized, no vanity.
         round_trip(&Reply::new(Event::ChannelLayout {
             channel: "#gaming/lobby".parse().unwrap(),
             category: None,
             position: 0,
             kind: ChannelKind::Text,
+            vanity: String::new(),
         }));
         // A voice channel advertises `kind=voice`.
         let voice = Reply::new(Event::ChannelLayout {
@@ -3027,6 +3071,7 @@ mod tests {
             category: Some("Voice".into()),
             position: 1,
             kind: ChannelKind::Voice,
+            vanity: "lounge".into(),
         });
         assert!(voice.serialize().unwrap().contains("kind=voice"));
         round_trip(&voice);
@@ -3047,7 +3092,8 @@ mod tests {
     fn ns_meta_and_more_round_trip() {
         round_trip(&Reply::with_label(
             Event::NsMeta {
-                name: "gaming".parse().unwrap(),
+                id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+                vanity: "gaming".parse().unwrap(),
                 visibility: crate::types::Visibility::Public,
                 owner: Some("ada".into()),
                 title: Some("The Lounge".into()),
@@ -3061,9 +3107,10 @@ mod tests {
             },
             "n1",
         ));
-        // Minimal: just name + visibility.
+        // Minimal: just id + vanity + visibility.
         round_trip(&Reply::new(Event::NsMeta {
-            name: "quiet".parse().unwrap(),
+            id: "01BX5ZZKBKACTAV9WEVGEMMVRZ".parse().unwrap(),
+            vanity: "quiet".parse().unwrap(),
             visibility: crate::types::Visibility::Unlisted,
             owner: None,
             title: None,

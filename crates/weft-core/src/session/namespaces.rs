@@ -13,13 +13,13 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_ns_join(
         &mut self,
         label: Option<String>,
-        name: NamespaceName,
+        ns: weft_proto::NamespaceId,
         account: Account,
     ) -> io::Result<Flow> {
         let channels = match self
             .ctx
             .channel_store
-            .channels_in_namespace(name.as_str())
+            .channels_in_namespace(&ns.to_string())
             .await
         {
             Ok(list) => list,
@@ -47,7 +47,7 @@ impl<S: ControlStream> Session<S> {
         let first_join = !self
             .ctx
             .memberships
-            .is_ns_member(&account, &name)
+            .is_ns_member(&account, &ns.to_string())
             .await
             .unwrap_or(false);
 
@@ -57,13 +57,13 @@ impl<S: ControlStream> Session<S> {
         if let Err(e) = self
             .ctx
             .memberships
-            .set_ns_membership(&account, &name, unix_now() as i64)
+            .set_ns_membership(&account, &ns.to_string(), unix_now() as i64)
             .await
         {
             return self.internal(label, &e).await;
         }
         if first_join {
-            self.post_ns_welcome(&name, &account).await;
+            self.post_ns_welcome(&ns, &account).await;
         }
         for channel in visible {
             // A channel the caller previously hid stays hidden — NS JOIN never
@@ -87,7 +87,7 @@ impl<S: ControlStream> Session<S> {
         let count = self
             .ctx
             .memberships
-            .ns_members(&name)
+            .ns_members(&ns.to_string())
             .await
             .map(|m| m.len() as u64)
             .ok();
@@ -95,7 +95,7 @@ impl<S: ControlStream> Session<S> {
         self.send_event(
             label,
             Event::NsMember {
-                namespace: name,
+                namespace: ns,
                 user: me,
                 action: MemberAction::Join,
                 display: None,
@@ -109,8 +109,12 @@ impl<S: ControlStream> Session<S> {
     /// §6.2 post the namespace's welcome line to its designated channel, if any.
     /// Called on a *new* namespace membership (first join, any path). No-op when
     /// no welcome channel is configured or it isn't a live registered channel.
-    pub(super) async fn post_ns_welcome(&mut self, ns: &NamespaceName, account: &Account) {
-        let Ok(Some(record)) = self.ctx.namespaces.namespace(ns).await else {
+    pub(super) async fn post_ns_welcome(
+        &mut self,
+        ns: &weft_proto::NamespaceId,
+        account: &Account,
+    ) {
+        let Ok(Some(record)) = self.ctx.namespaces.namespace_by_id(&ns.to_string()).await else {
             return;
         };
         let Some(welcome) = record.welcome_channel else {
@@ -134,13 +138,14 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_ns_leave(
         &mut self,
         label: Option<String>,
-        name: NamespaceName,
+        ns: weft_proto::NamespaceId,
         account: Account,
     ) -> io::Result<Flow> {
+        let ns_str = ns.to_string();
         if !self
             .ctx
             .memberships
-            .is_ns_member(&account, &name)
+            .is_ns_member(&account, &ns_str)
             .await
             .unwrap_or(false)
         {
@@ -149,7 +154,7 @@ impl<S: ControlStream> Session<S> {
 
         // The owner can't abandon their own namespace — leaving would orphan it.
         // They must TRANSFER ownership (§2.4 rung 1) or DELETE the namespace.
-        if let Ok(Some(rec)) = self.ctx.namespaces.namespace(&name).await {
+        if let Ok(Some(rec)) = self.ctx.namespaces.namespace_by_id(&ns_str).await {
             if rec.owner == account {
                 self.send_err(
                     label,
@@ -164,10 +169,11 @@ impl<S: ControlStream> Session<S> {
 
         // Unsubscribe from every joined channel in this namespace (runtime).
         // Silent part — an ns-level leave doesn't post per-channel "left" lines.
+        // Channels embed the ns id as their first segment (v0.13).
         let leaving: Vec<ChannelName> = self
             .joined
             .keys()
-            .filter(|c| c.namespace() == Some(name.as_str()))
+            .filter(|c| c.namespace() == Some(ns_str.as_str()))
             .cloned()
             .collect();
         for channel in leaving {
@@ -181,13 +187,13 @@ impl<S: ControlStream> Session<S> {
         if let Err(e) = self
             .ctx
             .memberships
-            .clear_ns_membership(&account, &name)
+            .clear_ns_membership(&account, &ns_str)
             .await
         {
             return self.internal(label, &e).await;
         }
         // Clear ns-scoped role assignments (the store leaves these to us).
-        let scope = format!("ns:{name}");
+        let scope = format!("ns:{ns}");
         let subject = account.to_string();
         if let Ok(roles) = self.ctx.roles.roles_of(&scope, &subject).await {
             for role in roles {
@@ -201,7 +207,7 @@ impl<S: ControlStream> Session<S> {
         self.send_event(
             label,
             Event::NsMember {
-                namespace: name,
+                namespace: ns,
                 user: me,
                 action: MemberAction::Part,
                 display: None,
@@ -221,16 +227,19 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_ns_info_members(
         &mut self,
         label: Option<String>,
-        name: NamespaceName,
+        ns: weft_proto::NamespaceId,
         account: Account,
     ) -> io::Result<Flow> {
-        if !self.namespace_exists(name.as_str()).await {
+        if !matches!(
+            self.ctx.namespaces.namespace_by_id(&ns.to_string()).await,
+            Ok(Some(_))
+        ) {
             return self.no_such_target(label).await;
         }
 
-        // Any moderation cap at ns:<name> unlocks the roster. Owner passes via
-        // the implicit ns-admin it holds at its own scope.
-        let scope = TokenScope::Namespace(name.to_string());
+        // Any moderation cap at ns:<id> unlocks the roster. Owner passes via the
+        // implicit ns-admin it holds at its own scope.
+        let scope = TokenScope::Namespace(ns.to_string());
         let now = unix_now();
         let mut authorized = false;
         for cap in [
@@ -253,11 +262,16 @@ impl<S: ControlStream> Session<S> {
             return self.cap_required(label, "ns-admin").await;
         }
 
-        let members = match self.ctx.memberships.ns_members_joined(&name).await {
+        let members = match self
+            .ctx
+            .memberships
+            .ns_members_joined(&ns.to_string())
+            .await
+        {
             Ok(m) => m,
             Err(e) => return self.internal(label, &e).await,
         };
-        let scope_str = format!("ns:{name}");
+        let scope_str = format!("ns:{ns}");
 
         self.batches += 1;
         let id = format!("ni{}", self.batches);
@@ -274,7 +288,7 @@ impl<S: ControlStream> Session<S> {
             self.send_event(
                 None,
                 Event::NsMemberInfo {
-                    namespace: name.clone(),
+                    namespace: ns,
                     user,
                     joined_ms: joined_ms.max(0) as u64,
                     roles,
@@ -293,18 +307,27 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
-    pub(super) async fn namespace_exists(&self, name: &str) -> bool {
-        let Ok(name) = name.parse::<weft_proto::NamespaceName>() else {
-            return false;
-        };
-        matches!(self.ctx.namespaces.namespace(&name).await, Ok(Some(_)))
+    /// Does a namespace with this **id** exist? (v0.13 — scopes are id-keyed, so
+    /// callers pass the ns id extracted from an `ns:<id>` / `#<ns-id>/…` scope.)
+    pub(super) async fn namespace_exists(&self, id: &str) -> bool {
+        matches!(self.ctx.namespaces.namespace_by_id(id).await, Ok(Some(_)))
     }
 
     /// Build the NS-META reply for a namespace record, including the §2.4
     /// recovery announcement fields.
     pub(super) fn ns_meta_event(record: &weft_store::NamespaceRecord) -> Event {
         Event::NsMeta {
-            name: record.name.clone(),
+            // Records always carry a valid id post-migration (0047 backfills legacy
+            // rows; new namespaces mint at create).
+            id: record
+                .id
+                .parse()
+                .expect("namespace record carries a valid ULID id"),
+            vanity: record
+                .name
+                .as_str()
+                .parse()
+                .expect("namespace name is a valid vanity label"),
             visibility: record.visibility.parse().unwrap_or(Visibility::Unlisted),
             owner: Some(record.owner.to_string()),
             title: record.title.clone(),
@@ -321,11 +344,18 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_ns_create(
         &mut self,
         label: Option<String>,
-        name: weft_proto::NamespaceName,
+        vanity: weft_proto::VanityName,
         visibility: Visibility,
         root_key: String,
         account: Account,
     ) -> io::Result<Flow> {
+        // The vanity is the mutable display label; identity is a freshly minted
+        // ULID that scopes/channels/federation pin (§2.3, v0.13).
+        let name: weft_proto::NamespaceName = vanity
+            .as_str()
+            .parse()
+            .expect("a valid vanity is a valid namespace name");
+        let ns_id = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
         // The submitted root key must be a real Ed25519 pubkey (§2.1).
         if weft_crypto::PublicKey::from_b64(&root_key).is_err() {
             self.send_err(
@@ -336,6 +366,22 @@ impl<S: ControlStream> Session<S> {
             )
             .await?;
             return Ok(Flow::Continue);
+        }
+        // §2.3 an admin-reserved vanity can't be (re-)registered until an
+        // operator lifts the lock in the web admin panel — uniform Conflict.
+        match self.ctx.namespaces.vanity_locked(&name).await {
+            Ok(true) => {
+                self.send_err(
+                    label,
+                    ErrCode::Conflict,
+                    None,
+                    "that name is reserved by the operator",
+                )
+                .await?;
+                return Ok(Flow::Continue);
+            }
+            Ok(false) => {}
+            Err(e) => return self.internal(label, &e).await,
         }
         // §2.2 creation policy: gated needs `ns-create`; open enforces a
         // per-account quota.
@@ -363,6 +409,7 @@ impl<S: ControlStream> Session<S> {
             }
         }
         let record = weft_store::NamespaceRecord {
+            id: ns_id.clone(),
             name: name.clone(),
             owner: account.clone(),
             root_key,
@@ -379,11 +426,11 @@ impl<S: ControlStream> Session<S> {
         };
         match self.ctx.namespaces.create_namespace(record.clone()).await {
             Ok(true) => {
-                debug!(%name, %account, "namespace created");
+                debug!(%ns_id, %account, "namespace created");
                 // §6.5 baseline: seed the implicit @everyone role with the caps
                 // every member is expected to hold out of the box — post
                 // messages + mint invites. Editable afterward like any role.
-                let ns_scope = format!("ns:{name}");
+                let ns_scope = format!("ns:{ns_id}");
                 if let Err(e) = self
                     .ctx
                     .roles
@@ -417,10 +464,10 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn ns_admin_gate(
         &mut self,
         label: Option<String>,
-        name: &weft_proto::NamespaceName,
+        ns: &weft_proto::NamespaceId,
         actor: &Actor,
     ) -> io::Result<Option<weft_store::NamespaceRecord>> {
-        let record = match self.ctx.namespaces.namespace(name).await {
+        let record = match self.ctx.namespaces.namespace_by_id(&ns.to_string()).await {
             Ok(Some(record)) => record,
             Ok(None) => {
                 self.no_such_target(label).await?;
@@ -431,7 +478,7 @@ impl<S: ControlStream> Session<S> {
                 return Ok(None);
             }
         };
-        let scope = TokenScope::Namespace(name.to_string());
+        let scope = TokenScope::Namespace(ns.to_string());
         match self
             .ctx
             .actor_has_cap(actor, &Capability::NsAdmin, &scope, unix_now())
@@ -454,7 +501,7 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_emoji_add(
         &mut self,
         label: Option<String>,
-        namespace: weft_proto::NamespaceName,
+        namespace: weft_proto::NamespaceId,
         name: String,
         media: String,
         actor: Actor,
@@ -476,7 +523,12 @@ impl<S: ControlStream> Session<S> {
         {
             return Ok(Flow::Continue);
         }
-        if let Err(e) = self.ctx.emoji.set_emoji(&namespace, &name, &media).await {
+        if let Err(e) = self
+            .ctx
+            .emoji
+            .set_emoji(&namespace.to_string(), &name, &media)
+            .await
+        {
             return self.internal(label, &e).await;
         }
         self.send_event(
@@ -495,7 +547,7 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_emoji_remove(
         &mut self,
         label: Option<String>,
-        namespace: weft_proto::NamespaceName,
+        namespace: weft_proto::NamespaceId,
         name: String,
         actor: Actor,
     ) -> io::Result<Flow> {
@@ -506,7 +558,12 @@ impl<S: ControlStream> Session<S> {
         {
             return Ok(Flow::Continue);
         }
-        if let Err(e) = self.ctx.emoji.remove_emoji(&namespace, &name).await {
+        if let Err(e) = self
+            .ctx
+            .emoji
+            .remove_emoji(&namespace.to_string(), &name)
+            .await
+        {
             return self.internal(label, &e).await;
         }
         self.send_event(label, Event::EmojiRemoved { namespace, name })
@@ -519,9 +576,9 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_emoji_list(
         &mut self,
         label: Option<String>,
-        namespace: weft_proto::NamespaceName,
+        namespace: weft_proto::NamespaceId,
     ) -> io::Result<Flow> {
-        let emoji = match self.ctx.emoji.list_emoji(&namespace).await {
+        let emoji = match self.ctx.emoji.list_emoji(&namespace.to_string()).await {
             Ok(emoji) => emoji,
             Err(e) => return self.internal(label, &e).await,
         };
@@ -533,7 +590,7 @@ impl<S: ControlStream> Session<S> {
             self.send_event(
                 None,
                 Event::Emoji {
-                    namespace: namespace.clone(),
+                    namespace,
                     name,
                     media,
                 },
@@ -554,7 +611,7 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_ns_meta(
         &mut self,
         label: Option<String>,
-        name: weft_proto::NamespaceName,
+        ns: weft_proto::NamespaceId,
         key: String,
         value: String,
         actor: Actor,
@@ -572,9 +629,12 @@ impl<S: ControlStream> Session<S> {
             .await?;
             return Ok(Flow::Continue);
         }
-        let Some(mut record) = self.ns_admin_gate(label.clone(), &name, &actor).await? else {
+        let Some(mut record) = self.ns_admin_gate(label.clone(), &ns, &actor).await? else {
             return Ok(Flow::Continue);
         };
+        // The namespace table is keyed by the (mutable) vanity name; the record
+        // found by id carries the current one for these name-keyed mutations.
+        let name = record.name.clone();
         // §6.2 welcome channel lives on its own column. Empty clears it; a value
         // must be a real channel *in this namespace* (else the message would go
         // nowhere) — validated leniently: we store what's given, and the join
@@ -640,17 +700,17 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_ns_visibility(
         &mut self,
         label: Option<String>,
-        name: weft_proto::NamespaceName,
+        ns: weft_proto::NamespaceId,
         visibility: Visibility,
         actor: Actor,
     ) -> io::Result<Flow> {
-        let Some(mut record) = self.ns_admin_gate(label.clone(), &name, &actor).await? else {
+        let Some(mut record) = self.ns_admin_gate(label.clone(), &ns, &actor).await? else {
             return Ok(Flow::Continue);
         };
         if let Err(e) = self
             .ctx
             .namespaces
-            .set_namespace_visibility(&name, &visibility.to_string())
+            .set_namespace_visibility(&record.name, &visibility.to_string())
             .await
         {
             return self.internal(label, &e).await;
@@ -663,41 +723,37 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_ns_delete(
         &mut self,
         label: Option<String>,
-        name: weft_proto::NamespaceName,
-        confirm: weft_proto::NamespaceName,
+        ns: weft_proto::NamespaceId,
+        confirm: weft_proto::NamespaceId,
         actor: Actor,
     ) -> io::Result<Flow> {
-        if name != confirm {
+        if ns != confirm {
             self.send_err(
                 label,
                 ErrCode::Policy,
                 None,
-                "DELETE must repeat the namespace name",
+                "DELETE must repeat the namespace id",
             )
             .await?;
             return Ok(Flow::Continue);
         }
         // Owner or operator (§6.2). ns_admin_gate covers both (owner holds
-        // ns-admin, operators hold everything).
-        if self
-            .ns_admin_gate(label.clone(), &name, &actor)
-            .await?
-            .is_none()
-        {
+        // ns-admin, operators hold everything). The record carries the current
+        // vanity for the name-keyed cascade ops below.
+        let Some(record) = self.ns_admin_gate(label.clone(), &ns, &actor).await? else {
             return Ok(Flow::Continue);
-        }
+        };
+        let name = record.name.clone();
+        // Channels + ns-membership are keyed by the immutable id (v0.13); the
+        // record carries the current vanity only for name-keyed table ops.
+        let ns_str = ns.to_string();
         // Cascade: a namespace owns its channels, memberships, roles and pending
         // invites. Deleting only the record orphans them — the channels stay live
         // and in the store, so clients auto-rejoin and keep posting, DISCOVER and
         // the admin panel still surface them, and a namespace later recreated
         // under the same name would inherit ghost members/roles. Tear the whole
         // subtree down first, then drop the record.
-        let channels = match self
-            .ctx
-            .channel_store
-            .channels_in_namespace(name.as_str())
-            .await
-        {
+        let channels = match self.ctx.channel_store.channels_in_namespace(&ns_str).await {
             Ok(channels) => channels,
             Err(e) => return self.internal(label, &e).await,
         };
@@ -718,16 +774,17 @@ impl<S: ControlStream> Session<S> {
         // Clear namespace memberships (also drops hide overrides) so a same-name
         // namespace can't auto-rejoin ghost members, then the ns-scope roles and
         // any pending invites.
-        if let Ok(members) = self.ctx.memberships.ns_members(&name).await {
+        if let Ok(members) = self.ctx.memberships.ns_members(&ns_str).await {
             for member in members {
                 let _ = self
                     .ctx
                     .memberships
-                    .clear_ns_membership(&member, &name)
+                    .clear_ns_membership(&member, &ns_str)
                     .await;
             }
         }
-        let ns_scope = format!("ns:{name}");
+        // ns-scope roles are keyed by the id (matches on_ns_create's id-scope).
+        let ns_scope = format!("ns:{ns}");
         if let Ok(roles) = self.ctx.roles.roles(&ns_scope).await {
             for role in roles {
                 let _ = self.ctx.roles.delete_role(&ns_scope, &role.name).await;
@@ -756,7 +813,11 @@ impl<S: ControlStream> Session<S> {
         self.send_event(
             label,
             Event::NsMeta {
-                name,
+                id: ns,
+                vanity: name
+                    .as_str()
+                    .parse()
+                    .expect("namespace name is a valid vanity label"),
                 visibility: Visibility::Private,
                 owner: None,
                 title: None,
@@ -807,9 +868,9 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn ns_or_absent(
         &mut self,
         label: Option<String>,
-        name: &weft_proto::NamespaceName,
+        ns: &weft_proto::NamespaceId,
     ) -> io::Result<Option<weft_store::NamespaceRecord>> {
-        match self.ctx.namespaces.namespace(name).await {
+        match self.ctx.namespaces.namespace_by_id(&ns.to_string()).await {
             Ok(Some(record)) => Ok(Some(record)),
             Ok(None) => {
                 self.no_such_target(label).await?;
@@ -827,12 +888,12 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_ns_transfer(
         &mut self,
         label: Option<String>,
-        name: weft_proto::NamespaceName,
+        ns: weft_proto::NamespaceId,
         new_owner: Account,
         signature: String,
         _account: Account,
     ) -> io::Result<Flow> {
-        let Some(record) = self.ns_or_absent(label.clone(), &name).await? else {
+        let Some(record) = self.ns_or_absent(label.clone(), &ns).await? else {
             return Ok(Flow::Continue);
         };
         let (Ok(root_key), Ok(sig)) = (
@@ -841,9 +902,11 @@ impl<S: ControlStream> Session<S> {
         ) else {
             return self.forbidden_sig(label).await;
         };
-        // Authority is the root *key*, not the account — this is the one
-        // place same-network namespaces are cryptographically enforced.
-        if !weft_crypto::verify_transfer(&root_key, name.as_str(), new_owner.as_str(), &sig) {
+        // Authority is the root *key*, not the account — this is the one place
+        // same-network namespaces are cryptographically enforced. The signature
+        // still covers the current vanity name (transfer is a live-root op).
+        if !weft_crypto::verify_transfer(&root_key, record.name.as_str(), new_owner.as_str(), &sig)
+        {
             return self.forbidden_sig(label).await;
         }
         // Succession keeps the root key, changes the owner.
@@ -851,7 +914,7 @@ impl<S: ControlStream> Session<S> {
             .ctx
             .namespaces
             .rotate_root(
-                &name,
+                &record.name,
                 new_owner.as_str(),
                 &record.root_key,
                 false,
@@ -861,8 +924,14 @@ impl<S: ControlStream> Session<S> {
         {
             return self.internal(label, &e).await;
         }
-        debug!(%name, %new_owner, "namespace transferred (rung 1)");
-        let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
+        debug!(%ns, %new_owner, "namespace transferred (rung 1)");
+        let updated = self
+            .ctx
+            .namespaces
+            .namespace_by_id(&ns.to_string())
+            .await
+            .ok()
+            .flatten();
         let event = updated
             .as_ref()
             .map(Self::ns_meta_event)
@@ -875,12 +944,12 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_ns_recovery_set(
         &mut self,
         label: Option<String>,
-        name: weft_proto::NamespaceName,
+        ns: weft_proto::NamespaceId,
         m: u32,
         keys: String,
         account: Account,
     ) -> io::Result<Flow> {
-        let Some(record) = self.ns_or_absent(label.clone(), &name).await? else {
+        let Some(record) = self.ns_or_absent(label.clone(), &ns).await? else {
             return Ok(Flow::Continue);
         };
         if record.owner != account {
@@ -910,12 +979,18 @@ impl<S: ControlStream> Session<S> {
         if let Err(e) = self
             .ctx
             .namespaces
-            .set_recovery_set(&name, m, &key_list)
+            .set_recovery_set(&record.name, m, &key_list)
             .await
         {
             return self.internal(label, &e).await;
         }
-        let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
+        let updated = self
+            .ctx
+            .namespaces
+            .namespace_by_id(&ns.to_string())
+            .await
+            .ok()
+            .flatten();
         let event = updated
             .as_ref()
             .map(Self::ns_meta_event)
@@ -944,12 +1019,16 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_ns_recover(
         &mut self,
         label: Option<String>,
-        name: weft_proto::NamespaceName,
+        ns: weft_proto::NamespaceId,
         rotation: String,
     ) -> io::Result<Flow> {
-        let Some(record) = self.ns_or_absent(label.clone(), &name).await? else {
+        let Some(record) = self.ns_or_absent(label.clone(), &ns).await? else {
             return Ok(Flow::Continue);
         };
+        // The current vanity name for the name-keyed record ops + the rotation
+        // record's namespace check (transitional — the record still names the
+        // vanity; id-signing is a later crypto refinement).
+        let name = record.name.clone();
         if record.pending_recovery.is_some() {
             self.send_err(
                 label,
@@ -1054,12 +1133,13 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_ns_recovery_cancel(
         &mut self,
         label: Option<String>,
-        name: weft_proto::NamespaceName,
+        ns: weft_proto::NamespaceId,
         signature: String,
     ) -> io::Result<Flow> {
-        let Some(record) = self.ns_or_absent(label.clone(), &name).await? else {
+        let Some(record) = self.ns_or_absent(label.clone(), &ns).await? else {
             return Ok(Flow::Continue);
         };
+        let name = record.name.clone();
         let (Ok(root_key), Ok(sig)) = (
             weft_crypto::PublicKey::from_b64(&record.root_key),
             weft_crypto::signature_from_b64(&signature),
@@ -1122,11 +1202,10 @@ impl<S: ControlStream> Session<S> {
             for op in self.ctx.operator_accounts().await {
                 self.ctx.directory.notify(op, event.clone()).await;
             }
-        } else if let Some(name) = queue.strip_prefix("ns:") {
-            if let Ok(ns_name) = name.parse() {
-                if let Ok(Some(ns)) = self.ctx.namespaces.namespace(&ns_name).await {
-                    self.ctx.directory.notify(ns.owner, event).await;
-                }
+        } else if let Some(id) = queue.strip_prefix("ns:") {
+            // ns-scope queues are keyed by the immutable id (v0.13).
+            if let Ok(Some(ns)) = self.ctx.namespaces.namespace_by_id(id).await {
+                self.ctx.directory.notify(ns.owner, event).await;
             }
         }
     }
@@ -1136,9 +1215,10 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_channels(
         &mut self,
         label: Option<String>,
-        namespace: weft_proto::NamespaceName,
+        namespace: weft_proto::NamespaceId,
     ) -> io::Result<Flow> {
-        let record = match self.ctx.namespaces.namespace(&namespace).await {
+        let ns_str = namespace.to_string();
+        let record = match self.ctx.namespaces.namespace_by_id(&ns_str).await {
             Ok(Some(record)) => record,
             Ok(None) => return self.no_such_target(label).await,
             Err(e) => return self.internal(label, &e).await,
@@ -1148,7 +1228,7 @@ impl<S: ControlStream> Session<S> {
         };
         // Private namespaces are invisible unless you belong (view cap).
         if record.visibility == "private" {
-            let scope = TokenScope::Namespace(namespace.to_string());
+            let scope = TokenScope::Namespace(ns_str.clone());
             let member = self
                 .ctx
                 .account_has_cap(&account, &Capability::View, &scope, unix_now())
@@ -1162,12 +1242,7 @@ impl<S: ControlStream> Session<S> {
         // …) so the client renders category groups purely from server state.
         self.send_event(label.clone(), Self::ns_meta_event(&record))
             .await?;
-        let channels = match self
-            .ctx
-            .channel_store
-            .channels_in_namespace(namespace.as_str())
-            .await
-        {
+        let channels = match self.ctx.channel_store.channels_in_namespace(&ns_str).await {
             Ok(channels) => channels,
             Err(e) => return self.internal(label, &e).await,
         };
@@ -1180,6 +1255,7 @@ impl<S: ControlStream> Session<S> {
                     category: record.category,
                     position: record.position,
                     kind,
+                    vanity: record.vanity,
                 },
             )
             .await?;

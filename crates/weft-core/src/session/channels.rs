@@ -11,8 +11,11 @@ impl<S: ControlStream> Session<S> {
         kind: ChannelKind,
         actor: Actor,
     ) -> io::Result<Flow> {
-        // A namespaced channel (#ns/chan) needs its namespace to exist;
-        // the owner (or an ns-admin/chan-create holder) may create it.
+        // v0.13: the incoming name carries the namespace **id** + a desired local
+        // (vanity) name — `#<ns-id>/<local>` (or `#<local>` top-level). The
+        // namespace must exist (by id), and the owner / ns-admin / chan-create
+        // holder may create it. The server mints the channel's own ULID; the
+        // canonical wire name is `#<ns-id>/<chan-id>` (or `#<chan-id>`).
         if let Some(ns) = channel.namespace() {
             if !self.namespace_exists(ns).await {
                 return self.no_such_target(label).await;
@@ -22,6 +25,8 @@ impl<S: ControlStream> Session<S> {
         if policy == RetentionPolicy::E2ee {
             return self.unsupported(label, "e2ee channels land in M6").await;
         }
+        // Authority is checked at the incoming scope — `context.rs` derives the
+        // ns from its first segment (the ns id), so this is an ns-level check.
         let scope = TokenScope::Channel(channel.to_string());
         match self
             .ctx
@@ -32,64 +37,98 @@ impl<S: ControlStream> Session<S> {
             Ok(false) => return self.cap_required(label, "chan-create").await,
             Err(e) => return self.internal(label, &e).await,
         }
-        match self.ctx.registry.create(channel.clone(), policy) {
-            None => {
-                self.send_err(label, ErrCode::Conflict, None, "channel already exists")
-                    .await?;
-                Ok(Flow::Continue)
-            }
-            Some(_) => {
-                if let Err(e) = self
-                    .ctx
-                    .channel_store
-                    .upsert_channel(&channel, policy, kind)
-                    .await
-                {
-                    return self.internal(label, &e).await;
-                }
-                debug!(%channel, ?kind, "channel created");
-                // v0.12: a channel created in a namespace is in every ns
-                // member's derived set immediately (no membership writes). Push
-                // its layout + policy live so it appears in members' sidebars
-                // without a reconnect (acceptance #1). Live subscription still
-                // needs the member's own JOIN/SYNC, so posting isn't zero-join
-                // yet — that's a follow-up (session auto-subscribe).
-                if let Some(ns) = channel
-                    .namespace()
-                    .and_then(|n| n.parse::<NamespaceName>().ok())
-                {
-                    if let Ok(members) = self.ctx.memberships.ns_members(&ns).await {
-                        for member in members {
-                            self.ctx
-                                .directory
-                                .notify(
-                                    member.clone(),
-                                    Event::ChannelLayout {
-                                        channel: channel.clone(),
-                                        category: None,
-                                        position: 0,
-                                        kind,
-                                    },
-                                )
-                                .await;
-                            self.ctx
-                                .directory
-                                .notify(
-                                    member,
-                                    Event::Policy {
-                                        channel: channel.clone(),
-                                        policy,
-                                    },
-                                )
-                                .await;
-                        }
-                    }
-                }
-                self.send_event(label, Event::Policy { channel, policy })
-                    .await?;
-                Ok(Flow::Continue)
+        // The incoming local segment is the desired human vanity ("general").
+        let body = &channel.as_str()[1..];
+        let vanity = body
+            .rsplit_once('/')
+            .map(|(_, c)| c)
+            .unwrap_or(body)
+            .to_string();
+        // Reject a duplicate vanity within the namespace ("multiple channel names
+        // are not allowed") — uniform NO-SUCH-style Conflict, not enumeration.
+        if let Some(ns) = channel.namespace() {
+            if matches!(
+                self.ctx.channel_store.channel_by_vanity(ns, &vanity).await,
+                Ok(Some(_))
+            ) {
+                self.send_err(
+                    label,
+                    ErrCode::Conflict,
+                    None,
+                    "channel name already in use",
+                )
+                .await?;
+                return Ok(Flow::Continue);
             }
         }
+        // Mint the canonical id-name. A fresh ULID never collides, so the registry
+        // create always succeeds.
+        let chan_id = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+        let canonical: ChannelName = match channel.namespace() {
+            Some(ns) => format!("#{ns}/{chan_id}"),
+            None => format!("#{chan_id}"),
+        }
+        .parse()
+        .expect("a minted canonical channel name is valid");
+        if self
+            .ctx
+            .registry
+            .create(canonical.clone(), policy)
+            .is_none()
+        {
+            self.send_err(label, ErrCode::Conflict, None, "channel already exists")
+                .await?;
+            return Ok(Flow::Continue);
+        }
+        if let Err(e) = self
+            .ctx
+            .channel_store
+            .upsert_channel(&canonical, &vanity, policy, kind)
+            .await
+        {
+            return self.internal(label, &e).await;
+        }
+        debug!(%canonical, ?kind, "channel created");
+        // v0.12: a namespaced channel is in every ns member's derived set at once;
+        // push its layout + policy live so it appears without a reconnect.
+        if let Some(ns) = canonical.namespace() {
+            if let Ok(members) = self.ctx.memberships.ns_members(ns).await {
+                for member in members {
+                    self.ctx
+                        .directory
+                        .notify(
+                            member.clone(),
+                            Event::ChannelLayout {
+                                channel: canonical.clone(),
+                                category: None,
+                                position: 0,
+                                kind,
+                                vanity: vanity.clone(),
+                            },
+                        )
+                        .await;
+                    self.ctx
+                        .directory
+                        .notify(
+                            member,
+                            Event::Policy {
+                                channel: canonical.clone(),
+                                policy,
+                            },
+                        )
+                        .await;
+                }
+            }
+        }
+        self.send_event(
+            label,
+            Event::Policy {
+                channel: canonical,
+                policy,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
     }
 
     pub(super) async fn on_channel_policy(
@@ -120,8 +159,8 @@ impl<S: ControlStream> Session<S> {
             .ctx
             .channel_store
             // Kind is immutable after creation; `upsert` only updates the policy
-            // for an existing channel, so the passed kind is inert here.
-            .upsert_channel(&channel, policy, ChannelKind::Text)
+            // for an existing channel, so the passed kind + vanity are inert here.
+            .upsert_channel(&channel, "", policy, ChannelKind::Text)
             .await
         {
             return self.internal(label, &e).await;
@@ -241,6 +280,7 @@ impl<S: ControlStream> Session<S> {
                         category: rec.category,
                         position: rec.position,
                         kind: rec.kind,
+                        vanity: rec.vanity,
                     })
                     .await;
             }

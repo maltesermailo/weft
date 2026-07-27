@@ -198,8 +198,8 @@ impl<S: ControlStream> Session<S> {
                 Ok(channel) => self.on_join(label, channel, None, account).await,
                 Err(_) => self.no_such_target(label).await,
             },
-            Some(TokenScope::Namespace(ns)) => match ns.parse::<weft_proto::NamespaceName>() {
-                Ok(name) => match self.ctx.namespaces.namespace(&name).await {
+            Some(TokenScope::Namespace(ns)) => match ns.parse::<weft_proto::NamespaceId>() {
+                Ok(ns_id) => match self.ctx.namespaces.namespace_by_id(&ns).await {
                     Ok(Some(record)) => {
                         // v0.12: redeeming an ns invite creates the `(account,
                         // ns)` membership row; the caps granted above unlock any
@@ -207,19 +207,19 @@ impl<S: ControlStream> Session<S> {
                         let first_join = !self
                             .ctx
                             .memberships
-                            .is_ns_member(&account, &name)
+                            .is_ns_member(&account, &ns)
                             .await
                             .unwrap_or(false);
                         if let Err(e) = self
                             .ctx
                             .memberships
-                            .set_ns_membership(&account, &name, unix_now() as i64)
+                            .set_ns_membership(&account, &ns, unix_now() as i64)
                             .await
                         {
                             return self.internal(label, &e).await;
                         }
                         if first_join {
-                            self.post_ns_welcome(&name, &account).await;
+                            self.post_ns_welcome(&ns_id, &account).await;
                         }
                         self.send_event(label, Self::ns_meta_event(&record)).await?;
                         // Subscribe to the channels the redeemer can now see so
@@ -227,7 +227,7 @@ impl<S: ControlStream> Session<S> {
                         let channels = self
                             .ctx
                             .channel_store
-                            .channels_in_namespace(name.as_str())
+                            .channels_in_namespace(&ns)
                             .await
                             .unwrap_or_default();
                         for (channel, _record) in channels {

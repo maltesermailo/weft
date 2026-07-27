@@ -317,10 +317,19 @@ impl WeftClient {
                     .map(str::to_string)
                     .collect::<Vec<_>>(),
             )?,
-            "role_delete" => build_role_delete(&arg("scope"), &arg("name"))?,
-            "role_rename" => build_role_rename(&arg("scope"), &arg("old"), &arg("new"))?,
-            "role_assign" => build_role_assign(&arg("scope"), &arg("account"), &arg("name"))?,
-            "role_unassign" => build_role_unassign(&arg("scope"), &arg("account"), &arg("name"))?,
+            "role_delete" => build_role_delete(&arg("scope"), &arg("role"))?,
+            "role_update" => build_role_update(
+                &arg("scope"),
+                &arg("role"),
+                &arg("color"),
+                &arg("caps"),
+                flag("hoist"),
+                flag("pingable"),
+                num("position") as i32,
+                &arg("name"),
+            )?,
+            "role_assign" => build_role_assign(&arg("scope"), &arg("account"), &arg("role"))?,
+            "role_unassign" => build_role_unassign(&arg("scope"), &arg("account"), &arg("role"))?,
             "roles_of" => build_roles_of(&arg("scope"), &arg("account"))?,
             // ---- channels ----
             "channel_create" => build_channel_create(

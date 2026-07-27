@@ -165,9 +165,25 @@ impl ChannelName {
         &self.0
     }
 
-    /// Namespace segment, if the channel lives inside one.
+    /// Namespace segment, if the channel lives inside one. Under v0.13 this is
+    /// the namespace ULID (as lowercased text); use [`Self::namespace_id`] to
+    /// parse it. Kept as a string accessor for scope coverage + SQL extraction.
     pub fn namespace(&self) -> Option<&str> {
         self.0[1..].split_once('/').map(|(ns, _)| ns)
+    }
+
+    /// The namespace's ULID id, if this is a namespaced channel (`#<ns-ulid>/…`).
+    pub fn namespace_id(&self) -> Option<NamespaceId> {
+        self.namespace().and_then(|ns| ns.parse().ok())
+    }
+
+    /// This channel's own ULID id — the last segment (`…/<chan-ulid>` or a bare
+    /// top-level `#<chan-ulid>`). `None` if the segment isn't a valid ULID (a
+    /// legacy vanity-named channel, tolerated until migration).
+    pub fn channel_id(&self) -> Option<ChannelId> {
+        let body = &self.0[1..];
+        let last = body.rsplit_once('/').map(|(_, c)| c).unwrap_or(body);
+        last.parse().ok()
     }
 }
 
@@ -233,6 +249,94 @@ impl fmt::Display for GroupId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Canonical group reference: `&<ULID>` (uppercase Crockford base32).
         write!(f, "&{}", self.0)
+    }
+}
+
+/// Stable identity of a namespace (v0.13): a server-minted ULID, immutable for
+/// the namespace's life. The former single-segment name becomes a mutable
+/// [`VanityName`]. Rendered as bare uppercase Crockford base32 (no sigil).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NamespaceId(Ulid);
+
+/// Stable identity of a role (v0.13): a server-minted ULID. The role's name is a
+/// mutable display label; ROLE commands address the role by this id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RoleId(Ulid);
+
+/// Stable identity of a channel (v0.13): a server-minted ULID. It is the second
+/// segment of a namespaced channel's wire name (`#<ns-ulid>/<chan-ulid>`) or the
+/// only segment of a top-level channel (`#<chan-ulid>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ChannelId(Ulid);
+
+/// A mutable, human-facing label (§2.3): namespace or channel "vanity" name, one
+/// segment `[a-z0-9-_]{1,64}`, per-network (namespaces) or per-namespace
+/// (channels) unique. Resolves to a stable ULID id at the wire boundary; the raw
+/// WEFT wire carries the ULID, the IRC gateway + clients address by this.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VanityName(String);
+
+macro_rules! ulid_id {
+    ($ty:ident, $what:literal) => {
+        impl $ty {
+            pub fn new(ulid: Ulid) -> Self {
+                Self(ulid)
+            }
+            pub fn ulid(&self) -> Ulid {
+                self.0
+            }
+        }
+        impl FromStr for $ty {
+            type Err = ParseError;
+            fn from_str(s: &str) -> Result<Self, ParseError> {
+                // Crockford base32 is case-insensitive; the wire form may arrive
+                // lowercased (channel segments case-fold), so normalize up first.
+                Ulid::from_string(&s.to_ascii_uppercase())
+                    .map(Self)
+                    .map_err(|_| invalid($what, s))
+            }
+        }
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                // v0.13 ids render **lowercase** — they appear inside channel
+                // names (`#<ns-id>/<chan-id>`), which case-fold to lowercase, so
+                // the id must match that form everywhere (scopes, store keys).
+                write!(f, "{}", self.0.to_string().to_ascii_lowercase())
+            }
+        }
+    };
+}
+
+ulid_id!(NamespaceId, "namespace id");
+ulid_id!(RoleId, "role id");
+ulid_id!(ChannelId, "channel id");
+
+impl VanityName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for VanityName {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, ParseError> {
+        let folded = s.to_ascii_lowercase();
+        let ok = (1..=64).contains(&folded.len())
+            && folded
+                .bytes()
+                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'));
+        if ok {
+            Ok(VanityName(folded))
+        } else {
+            Err(invalid("vanity name", s))
+        }
+    }
+}
+
+impl fmt::Display for VanityName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -314,6 +418,54 @@ mod tests {
         assert!(format!("#{}", "x".repeat(200))
             .parse::<ChannelName>()
             .is_err());
+    }
+
+    #[test]
+    fn ulid_ids_round_trip() {
+        let u = Ulid::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        // Renders lowercase (v0.13, to match channel-name folding); parse is
+        // case-insensitive so either case round-trips to the same id.
+        let ns = NamespaceId::new(u);
+        assert_eq!(ns.to_string(), "01arz3ndektsv4rrffq69g5fav");
+        assert_eq!(ns.to_string().parse::<NamespaceId>().unwrap(), ns);
+        assert_eq!(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse::<NamespaceId>().unwrap(),
+            ns
+        );
+        assert_eq!(u, RoleId::new(u).ulid());
+        assert!("not-a-ulid".parse::<RoleId>().is_err());
+    }
+
+    #[test]
+    fn vanity_names() {
+        assert_eq!(
+            "My-Server_1".parse::<VanityName>().unwrap().as_str(),
+            "my-server_1"
+        );
+        assert!("".parse::<VanityName>().is_err());
+        assert!("has space".parse::<VanityName>().is_err());
+        assert!("x".repeat(65).parse::<VanityName>().is_err());
+    }
+
+    #[test]
+    fn channel_ulid_segments() {
+        // v0.13 wire form: `#<ns-ulid>/<chan-ulid>` (case-folded to lowercase).
+        let ns = Ulid::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let ch = Ulid::from_string("01BX5ZZKBKACTAV9WEVGEMMVRZ").unwrap();
+        let wire = format!("#{ns}/{ch}");
+        let name: ChannelName = wire.parse().unwrap();
+        assert_eq!(name.namespace_id(), Some(NamespaceId::new(ns)));
+        assert_eq!(name.channel_id(), Some(ChannelId::new(ch)));
+
+        // Top-level channel: only segment is the channel ULID, no namespace.
+        let top: ChannelName = format!("#{ch}").parse().unwrap();
+        assert_eq!(top.namespace_id(), None);
+        assert_eq!(top.channel_id(), Some(ChannelId::new(ch)));
+
+        // A legacy vanity-named channel still parses as a ChannelName but has no
+        // ULID id (tolerated until migration rewrites it).
+        let legacy: ChannelName = "#gaming/general".parse().unwrap();
+        assert_eq!(legacy.channel_id(), None);
     }
 
     #[test]

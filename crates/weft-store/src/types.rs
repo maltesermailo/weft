@@ -137,6 +137,11 @@ pub struct Verification {
 /// (category, position, name).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelRecord {
+    /// v0.13 human display name (the "general" in `#<ns-id>/<chan-id>`), unique
+    /// within its namespace. The wire name embeds the immutable `<chan-id>`; this
+    /// vanity is what clients render and what the IRC gateway addresses by. Empty
+    /// for a legacy/top-level channel with no separate display name.
+    pub vanity: String,
     pub policy: RetentionPolicy,
     pub topic: Option<String>,
     pub view_gated: bool,
@@ -232,6 +237,10 @@ pub struct InviteRecord {
 /// for TRANSFER/recovery/federation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceRecord {
+    /// Immutable ULID identity (v0.13). Scopes, channels, and federation pin this;
+    /// `name` is the mutable vanity label. Set at creation; empty only for a record
+    /// built before the id existed (backfilled lazily by [`NamespaceStore::namespace_id`]).
+    pub id: String,
     pub name: NamespaceName,
     pub owner: Account,
     /// Base64 Ed25519 root pubkey (§2.1).

@@ -1073,17 +1073,20 @@ impl ChannelStore for PgStore {
     async fn upsert_channel(
         &self,
         name: &ChannelName,
+        vanity: &str,
         policy: RetentionPolicy,
         kind: weft_proto::ChannelKind,
     ) -> Result<(), StoreError> {
         // §16 kind is set on insert only; a later upsert changes policy, not kind.
+        // The vanity (v0.13 display name) is set on insert and left intact.
         sqlx::query(
             r#"
-            INSERT INTO weft_channels (name, policy, kind) VALUES ($1, $2, $3)
+            INSERT INTO weft_channels (name, vanity, policy, kind) VALUES ($1, $2, $3, $4)
             ON CONFLICT (name) DO UPDATE SET policy = EXCLUDED.policy
             "#,
         )
         .bind(name.as_str())
+        .bind(vanity)
         .bind(policy.to_string())
         .bind(kind.to_string())
         .execute(&self.pool)
@@ -1117,6 +1120,65 @@ impl ChannelStore for PgStore {
             .await
             .map_err(backend_err)?;
         row.map(|row| channel_from_row(&row)).transpose()
+    }
+
+    async fn channel_id(&self, name: &ChannelName) -> Result<Option<String>, StoreError> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT chan_id FROM weft_channels WHERE name = $1")
+                .bind(name.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        match row {
+            None => Ok(None),                  // unknown channel
+            Some((Some(id),)) => Ok(Some(id)), // already assigned
+            Some((None,)) => {
+                // Pre-id channel (0049 added the column NULL): backfill, race-safe.
+                let fresh = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+                let updated: Option<(String,)> = sqlx::query_as(
+                    "UPDATE weft_channels SET chan_id = $2 WHERE name = $1 AND chan_id IS NULL RETURNING chan_id",
+                )
+                .bind(name.as_str())
+                .bind(&fresh)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+                match updated {
+                    Some((id,)) => Ok(Some(id)),
+                    None => {
+                        let (id,): (String,) =
+                            sqlx::query_as("SELECT chan_id FROM weft_channels WHERE name = $1")
+                                .bind(name.as_str())
+                                .fetch_one(&self.pool)
+                                .await
+                                .map_err(backend_err)?;
+                        Ok(Some(id))
+                    }
+                }
+            }
+        }
+    }
+
+    async fn channel_by_vanity(
+        &self,
+        ns_id: &str,
+        vanity: &str,
+    ) -> Result<Option<ChannelName>, StoreError> {
+        // Channels in `ns_id` are the ones whose name starts `#<ns-id>/`.
+        let prefix = format!("#{ns_id}/%");
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT name FROM weft_channels WHERE name LIKE $1 AND vanity = $2 LIMIT 1",
+        )
+        .bind(prefix)
+        .bind(vanity)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        row.map(|(name,)| {
+            name.parse()
+                .map_err(|_| StoreError::Backend("bad channel name".into()))
+        })
+        .transpose()
     }
 
     async fn set_channel_topic(&self, name: &ChannelName, topic: &str) -> Result<(), StoreError> {
@@ -1227,6 +1289,17 @@ impl ChannelStore for PgStore {
                 .map_err(backend_err)?;
         }
 
+        // The vanity follows the new local segment so the per-namespace
+        // (ns, vanity) uniqueness stays consistent (v0.13).
+        let body = &nk[1..];
+        let new_vanity = body.rsplit_once('/').map(|(_, c)| c).unwrap_or(body);
+        sqlx::query("UPDATE weft_channels SET vanity = $2 WHERE name = $1")
+            .bind(nk)
+            .bind(new_vanity)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend_err)?;
+
         tx.commit().await.map_err(backend_err)?;
         Ok(true)
     }
@@ -1296,6 +1369,8 @@ impl ChannelStore for PgStore {
 
 fn channel_from_row(row: &sqlx::postgres::PgRow) -> Result<ChannelRecord, StoreError> {
     Ok(ChannelRecord {
+        // Pre-v0.13 rows predate the column; treat a missing value as "".
+        vanity: row.try_get("vanity").unwrap_or_default(),
         policy: row
             .get::<&str, _>("policy")
             .parse()
@@ -1584,8 +1659,8 @@ impl NamespaceStore for PgStore {
     async fn create_namespace(&self, record: NamespaceRecord) -> Result<bool, StoreError> {
         let result = sqlx::query(
             r#"
-            INSERT INTO weft_namespaces (name, owner, root_key, visibility, title, description, icon, federation)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            INSERT INTO weft_namespaces (name, owner, root_key, visibility, title, description, icon, federation, id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
             ON CONFLICT (name) DO NOTHING
             "#,
         )
@@ -1597,6 +1672,8 @@ impl NamespaceStore for PgStore {
         .bind(&record.description)
         .bind(&record.icon)
         .bind(record.federation)
+        // Empty id → NULL (lazy backfill); new namespaces arrive with a minted id.
+        .bind(Some(record.id.as_str()).filter(|s| !s.is_empty()))
         .execute(&self.pool)
         .await
         .map_err(backend_err)?;
@@ -1610,6 +1687,95 @@ impl NamespaceStore for PgStore {
             .await
             .map_err(backend_err)?;
         row.map(|row| namespace_from_row(&row)).transpose()
+    }
+
+    async fn namespace_id(&self, name: &NamespaceName) -> Result<Option<String>, StoreError> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT id FROM weft_namespaces WHERE name = $1")
+                .bind(name.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        match row {
+            None => Ok(None),                  // unknown namespace
+            Some((Some(id),)) => Ok(Some(id)), // already assigned
+            Some((None,)) => {
+                // Pre-id namespace (0045 added the column NULL): backfill lazily,
+                // race-safe — whoever's UPDATE lands first wins; the loser re-reads.
+                let fresh = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+                let updated: Option<(String,)> = sqlx::query_as(
+                    "UPDATE weft_namespaces SET id = $2 WHERE name = $1 AND id IS NULL RETURNING id",
+                )
+                .bind(name.as_str())
+                .bind(&fresh)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+                match updated {
+                    Some((id,)) => Ok(Some(id)),
+                    None => {
+                        let (id,): (String,) =
+                            sqlx::query_as("SELECT id FROM weft_namespaces WHERE name = $1")
+                                .bind(name.as_str())
+                                .fetch_one(&self.pool)
+                                .await
+                                .map_err(backend_err)?;
+                        Ok(Some(id))
+                    }
+                }
+            }
+        }
+    }
+
+    async fn namespace_by_id(&self, id: &str) -> Result<Option<NamespaceRecord>, StoreError> {
+        let row = sqlx::query("SELECT * FROM weft_namespaces WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        row.map(|row| namespace_from_row(&row)).transpose()
+    }
+
+    async fn vanity_locked(&self, name: &NamespaceName) -> Result<bool, StoreError> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT name FROM weft_vanity_locks WHERE name = $1")
+                .bind(name.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        Ok(row.is_some())
+    }
+
+    async fn set_vanity_locked(
+        &self,
+        name: &NamespaceName,
+        locked: bool,
+    ) -> Result<bool, StoreError> {
+        // A reservation independent of any namespace (§2.3): it may name a free
+        // vanity and it survives the namespace's deletion. Always Ok(true).
+        if locked {
+            sqlx::query("INSERT INTO weft_vanity_locks (name) VALUES ($1) ON CONFLICT DO NOTHING")
+                .bind(name.as_str())
+                .execute(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        } else {
+            sqlx::query("DELETE FROM weft_vanity_locks WHERE name = $1")
+                .bind(name.as_str())
+                .execute(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        }
+        Ok(true)
+    }
+
+    async fn vanity_locks(&self) -> Result<Vec<String>, StoreError> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM weft_vanity_locks ORDER BY name")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        Ok(rows.into_iter().map(|(n,)| n).collect())
     }
 
     async fn namespaces_owned(&self, owner: &str) -> Result<u64, StoreError> {
@@ -1917,6 +2083,12 @@ fn namespace_from_row(row: &sqlx::postgres::PgRow) -> Result<NamespaceRecord, St
             rung: row.get::<Option<i16>, _>("pending_rung").unwrap_or(0) as u8,
         });
     Ok(NamespaceRecord {
+        // Empty for a pre-0045 row not yet backfilled (namespace_id fills it lazily).
+        id: row
+            .try_get::<Option<String>, _>("id")
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
         name: row.get::<&str, _>("name").parse().map_err(|_| corrupt())?,
         owner: row.get::<&str, _>("owner").parse().map_err(|_| corrupt())?,
         root_key: row.get("root_key"),
@@ -2976,17 +3148,12 @@ impl GroupStore for PgStore {
 
 #[async_trait]
 impl EmojiStore for PgStore {
-    async fn set_emoji(
-        &self,
-        namespace: &NamespaceName,
-        name: &str,
-        media: &str,
-    ) -> Result<(), StoreError> {
+    async fn set_emoji(&self, namespace: &str, name: &str, media: &str) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO weft_emoji (namespace, name, media) VALUES ($1, $2, $3) \
              ON CONFLICT (namespace, name) DO UPDATE SET media = EXCLUDED.media",
         )
-        .bind(namespace.as_str())
+        .bind(namespace)
         .bind(name)
         .bind(media)
         .execute(&self.pool)
@@ -2995,13 +3162,9 @@ impl EmojiStore for PgStore {
         Ok(())
     }
 
-    async fn remove_emoji(
-        &self,
-        namespace: &NamespaceName,
-        name: &str,
-    ) -> Result<bool, StoreError> {
+    async fn remove_emoji(&self, namespace: &str, name: &str) -> Result<bool, StoreError> {
         let result = sqlx::query("DELETE FROM weft_emoji WHERE namespace = $1 AND name = $2")
-            .bind(namespace.as_str())
+            .bind(namespace)
             .bind(name)
             .execute(&self.pool)
             .await
@@ -3009,13 +3172,10 @@ impl EmojiStore for PgStore {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn list_emoji(
-        &self,
-        namespace: &NamespaceName,
-    ) -> Result<Vec<(String, String)>, StoreError> {
+    async fn list_emoji(&self, namespace: &str) -> Result<Vec<(String, String)>, StoreError> {
         let rows =
             sqlx::query("SELECT name, media FROM weft_emoji WHERE namespace = $1 ORDER BY name")
-                .bind(namespace.as_str())
+                .bind(namespace)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(backend_err)?;
@@ -3099,7 +3259,7 @@ impl MembershipStore for PgStore {
     async fn set_ns_membership(
         &self,
         account: &Account,
-        namespace: &NamespaceName,
+        namespace: &str,
         joined_ms: i64,
     ) -> Result<(), StoreError> {
         // Idempotent: a repeat join keeps the original join time.
@@ -3108,7 +3268,7 @@ impl MembershipStore for PgStore {
              ON CONFLICT (account, namespace) DO NOTHING",
         )
         .bind(account.as_str())
-        .bind(namespace.as_str())
+        .bind(namespace)
         .bind(joined_ms)
         .execute(&self.pool)
         .await
@@ -3119,22 +3279,23 @@ impl MembershipStore for PgStore {
     async fn clear_ns_membership(
         &self,
         account: &Account,
-        namespace: &NamespaceName,
+        namespace: &str,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await.map_err(backend_err)?;
         sqlx::query("DELETE FROM weft_ns_membership WHERE account = $1 AND namespace = $2")
             .bind(account.as_str())
-            .bind(namespace.as_str())
+            .bind(namespace)
             .execute(&mut *tx)
             .await
             .map_err(backend_err)?;
-        // Drop every hide override for channels in this namespace (`#ns/...`).
+        // Drop every hide override for channels in this namespace. The channel's
+        // first segment is the ns id (v0.13), so this matches the id key.
         sqlx::query(
             "DELETE FROM weft_channel_hide \
              WHERE account = $1 AND substring(channel from '#([^/]+)/') = $2",
         )
         .bind(account.as_str())
-        .bind(namespace.as_str())
+        .bind(namespace)
         .execute(&mut *tx)
         .await
         .map_err(backend_err)?;
@@ -3142,39 +3303,32 @@ impl MembershipStore for PgStore {
         Ok(())
     }
 
-    async fn is_ns_member(
-        &self,
-        account: &Account,
-        namespace: &NamespaceName,
-    ) -> Result<bool, StoreError> {
+    async fn is_ns_member(&self, account: &Account, namespace: &str) -> Result<bool, StoreError> {
         let row =
             sqlx::query("SELECT 1 FROM weft_ns_membership WHERE account = $1 AND namespace = $2")
                 .bind(account.as_str())
-                .bind(namespace.as_str())
+                .bind(namespace)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(backend_err)?;
         Ok(row.is_some())
     }
 
-    async fn ns_memberships(&self, account: &Account) -> Result<Vec<NamespaceName>, StoreError> {
+    async fn ns_memberships(&self, account: &Account) -> Result<Vec<String>, StoreError> {
         let rows = sqlx::query("SELECT namespace FROM weft_ns_membership WHERE account = $1")
             .bind(account.as_str())
             .fetch_all(&self.pool)
             .await
             .map_err(backend_err)?;
-        rows.iter()
-            .map(|r| {
-                r.get::<&str, _>("namespace")
-                    .parse()
-                    .map_err(|_| StoreError::Backend("corrupt ns membership namespace".to_string()))
-            })
-            .collect()
+        Ok(rows
+            .iter()
+            .map(|r| r.get::<String, _>("namespace"))
+            .collect())
     }
 
-    async fn ns_members(&self, namespace: &NamespaceName) -> Result<Vec<Account>, StoreError> {
+    async fn ns_members(&self, namespace: &str) -> Result<Vec<Account>, StoreError> {
         let rows = sqlx::query("SELECT account FROM weft_ns_membership WHERE namespace = $1")
-            .bind(namespace.as_str())
+            .bind(namespace)
             .fetch_all(&self.pool)
             .await
             .map_err(backend_err)?;
@@ -3187,15 +3341,12 @@ impl MembershipStore for PgStore {
             .collect()
     }
 
-    async fn ns_members_joined(
-        &self,
-        namespace: &NamespaceName,
-    ) -> Result<Vec<(Account, i64)>, StoreError> {
+    async fn ns_members_joined(&self, namespace: &str) -> Result<Vec<(Account, i64)>, StoreError> {
         let rows = sqlx::query(
             "SELECT account, joined_ms FROM weft_ns_membership WHERE namespace = $1 \
              ORDER BY joined_ms ASC, account ASC",
         )
-        .bind(namespace.as_str())
+        .bind(namespace)
         .fetch_all(&self.pool)
         .await
         .map_err(backend_err)?;
@@ -3401,6 +3552,73 @@ impl RoleStore for PgStore {
                 }
             })
             .collect())
+    }
+
+    async fn role_id(&self, scope: &str, name: &str) -> Result<Option<String>, StoreError> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT id FROM weft_roles WHERE scope = $1 AND name = $2")
+                .bind(scope)
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        match row {
+            None => Ok(None),                  // no such role
+            Some((Some(id),)) => Ok(Some(id)), // already assigned
+            Some((None,)) => {
+                // Pre-id role (0046 added the column NULL): backfill lazily, race-safe.
+                let fresh = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+                let updated: Option<(String,)> = sqlx::query_as(
+                    "UPDATE weft_roles SET id = $3 WHERE scope = $1 AND name = $2 AND id IS NULL RETURNING id",
+                )
+                .bind(scope)
+                .bind(name)
+                .bind(&fresh)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?;
+                match updated {
+                    Some((id,)) => Ok(Some(id)),
+                    None => {
+                        let (id,): (String,) = sqlx::query_as(
+                            "SELECT id FROM weft_roles WHERE scope = $1 AND name = $2",
+                        )
+                        .bind(scope)
+                        .bind(name)
+                        .fetch_one(&self.pool)
+                        .await
+                        .map_err(backend_err)?;
+                        Ok(Some(id))
+                    }
+                }
+            }
+        }
+    }
+
+    async fn role_by_id(&self, id: &str) -> Result<Option<(String, RoleDef)>, StoreError> {
+        let row = sqlx::query(
+            "SELECT scope, name, color, caps, hoist, pingable, position FROM weft_roles WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(row.map(|r| {
+            let caps: &str = r.get("caps");
+            let def = RoleDef {
+                name: r.get::<&str, _>("name").to_string(),
+                color: r.get::<&str, _>("color").to_string(),
+                caps: caps
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                hoist: r.get::<bool, _>("hoist"),
+                pingable: r.get::<bool, _>("pingable"),
+                position: r.get::<i32, _>("position"),
+            };
+            (r.get::<&str, _>("scope").to_string(), def)
+        }))
     }
 
     async fn assign_role(&self, scope: &str, name: &str, subject: &str) -> Result<(), StoreError> {

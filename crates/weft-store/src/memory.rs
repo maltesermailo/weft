@@ -119,14 +119,18 @@ struct Inner {
     watermarks: HashMap<String, u64>,
     accounts: HashMap<Account, AccountRecord>,
     channels: HashMap<ChannelName, ChannelRecord>,
+    /// channel name → stable ULID id (v0.13), minted lazily on first access.
+    chan_ids: HashMap<ChannelName, String>,
     /// (subject, scope) → grant.
     grants: HashMap<(String, String), GrantRecord>,
     /// scope → revocation epoch.
     epochs: HashMap<String, u64>,
     /// invite id → record.
     invites: HashMap<String, InviteRecord>,
-    /// namespace name → record.
+    /// namespace name → record (the record carries its stable `id`, v0.13).
     namespaces: HashMap<NamespaceName, NamespaceRecord>,
+    /// admin-locked vanity names (§2.3) — can't be renamed/re-registered.
+    ns_vanity_locked: std::collections::HashSet<NamespaceName>,
     /// namespace name → append-only root rotation audit (§2.4).
     root_history: HashMap<NamespaceName, Vec<RootHistoryEntry>>,
     /// report id → record (§6.7).
@@ -154,18 +158,21 @@ struct Inner {
     friends: HashMap<(UserRef, UserRef), FriendRow>,
     /// Group DMs: id → identity + member set.
     groups: HashMap<GroupId, GroupRow>,
-    /// §9.4 custom emoji: namespace → (name → media ref), name-sorted.
-    emoji: HashMap<NamespaceName, std::collections::BTreeMap<String, String>>,
+    /// §9.4 custom emoji: namespace **id** → (name → media ref), name-sorted.
+    emoji: HashMap<String, std::collections::BTreeMap<String, String>>,
     /// account → channels it's a member of (§6.3 persistent membership).
     /// Top-level channels only under v0.12; namespaced access is derived.
     memberships: HashMap<Account, std::collections::HashSet<ChannelName>>,
     /// account → namespace → join time (ms) (v0.12 ns-level membership).
-    ns_memberships: HashMap<Account, std::collections::HashMap<NamespaceName, i64>>,
+    ns_memberships: HashMap<Account, std::collections::HashMap<String, i64>>,
     /// account → channels it hides while still an ns member (v0.12 override).
     channel_hides: HashMap<Account, std::collections::HashSet<ChannelName>>,
     /// scope → role name → (color, caps) (§6.5 role definitions).
     // scope → name → (color, caps, hoist, position)
     roles: HashMap<String, std::collections::BTreeMap<String, RoleEntry>>,
+    /// (scope, role name) → stable ULID id (v0.13), minted lazily on first access
+    /// and carried across renames.
+    role_ids: HashMap<(String, String), String>,
     /// Explicit role membership: (scope, role name, account).
     /// (scope, role name, subject) — subject is a local name or `account@network`.
     role_assignments: HashSet<(String, String, String)>,
@@ -886,6 +893,7 @@ impl ChannelStore for MemoryStore {
     async fn upsert_channel(
         &self,
         name: &ChannelName,
+        vanity: &str,
         policy: RetentionPolicy,
         kind: weft_proto::ChannelKind,
     ) -> Result<(), StoreError> {
@@ -893,9 +901,11 @@ impl ChannelStore for MemoryStore {
         inner
             .channels
             .entry(name.clone())
-            // §16 kind is immutable after creation — only `policy` updates.
+            // §16 kind is immutable after creation — only `policy` updates. The
+            // vanity is set on insert and left intact (rename re-keys it).
             .and_modify(|record| record.policy = policy)
             .or_insert(ChannelRecord {
+                vanity: vanity.to_string(),
                 policy,
                 topic: None,
                 view_gated: false,
@@ -923,6 +933,32 @@ impl ChannelStore for MemoryStore {
     async fn channel(&self, name: &ChannelName) -> Result<Option<ChannelRecord>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner.channels.get(name).cloned())
+    }
+
+    async fn channel_id(&self, name: &ChannelName) -> Result<Option<String>, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if !inner.channels.contains_key(name) {
+            return Ok(None); // unknown channel
+        }
+        let id = inner
+            .chan_ids
+            .entry(name.clone())
+            .or_insert_with(|| weft_proto::Ulid::new().to_string().to_ascii_lowercase())
+            .clone();
+        Ok(Some(id))
+    }
+
+    async fn channel_by_vanity(
+        &self,
+        ns_id: &str,
+        vanity: &str,
+    ) -> Result<Option<ChannelName>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .channels
+            .iter()
+            .find(|(name, rec)| name.namespace() == Some(ns_id) && rec.vanity == vanity)
+            .map(|(name, _)| name.clone()))
     }
 
     async fn set_channel_topic(&self, name: &ChannelName, topic: &str) -> Result<(), StoreError> {
@@ -971,6 +1007,7 @@ impl ChannelStore for MemoryStore {
 
     async fn delete_channel(&self, name: &ChannelName) -> Result<bool, StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
+        inner.chan_ids.remove(name);
         Ok(inner.channels.remove(name).is_some())
     }
 
@@ -987,8 +1024,15 @@ impl ChannelStore for MemoryStore {
         let ok = old.to_string();
         let nk = new.to_string();
 
-        // 1. channel record (the name is the map key only; no inner field).
-        if let Some(rec) = inner.channels.remove(old) {
+        // 1. channel record. The vanity follows the new local segment so the
+        //    per-namespace (ns, vanity) uniqueness stays consistent (v0.13).
+        if let Some(mut rec) = inner.channels.remove(old) {
+            let body = &nk[1..];
+            rec.vanity = body
+                .rsplit_once('/')
+                .map(|(_, c)| c)
+                .unwrap_or(body)
+                .to_string();
             inner.channels.insert(new.clone(), rec);
         }
         inner.channel_seq.remove(old);
@@ -1333,6 +1377,54 @@ impl NamespaceStore for MemoryStore {
         Ok(inner.namespaces.get(name).cloned())
     }
 
+    async fn namespace_id(&self, name: &NamespaceName) -> Result<Option<String>, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let Some(record) = inner.namespaces.get_mut(name) else {
+            return Ok(None); // unknown namespace
+        };
+        // Lazily mint the id for a legacy record with none (like account ULIDs).
+        if record.id.is_empty() {
+            record.id = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+        }
+        Ok(Some(record.id.clone()))
+    }
+
+    async fn namespace_by_id(&self, id: &str) -> Result<Option<NamespaceRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner.namespaces.values().find(|r| r.id == id).cloned())
+    }
+
+    async fn vanity_locked(&self, name: &NamespaceName) -> Result<bool, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner.ns_vanity_locked.contains(name))
+    }
+
+    async fn set_vanity_locked(
+        &self,
+        name: &NamespaceName,
+        locked: bool,
+    ) -> Result<bool, StoreError> {
+        // A standalone reservation (§2.3): independent of any namespace record.
+        let mut inner = self.inner.lock().expect("store lock");
+        if locked {
+            inner.ns_vanity_locked.insert(name.clone());
+        } else {
+            inner.ns_vanity_locked.remove(name);
+        }
+        Ok(true)
+    }
+
+    async fn vanity_locks(&self) -> Result<Vec<String>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut names: Vec<String> = inner
+            .ns_vanity_locked
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
     async fn namespaces_owned(&self, owner: &str) -> Result<u64, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner
@@ -1457,6 +1549,8 @@ impl NamespaceStore for MemoryStore {
 
     async fn delete_namespace(&self, name: &NamespaceName) -> Result<bool, StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
+        // §2.3: a vanity **reservation** deliberately survives deletion — an
+        // operator holds the name out of circulation until they lift the lock.
         Ok(inner.namespaces.remove(name).is_some())
     }
 
@@ -1787,26 +1881,17 @@ impl PinStore for MemoryStore {
 
 #[async_trait]
 impl EmojiStore for MemoryStore {
-    async fn set_emoji(
-        &self,
-        namespace: &NamespaceName,
-        name: &str,
-        media: &str,
-    ) -> Result<(), StoreError> {
+    async fn set_emoji(&self, namespace: &str, name: &str, media: &str) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         inner
             .emoji
-            .entry(namespace.clone())
+            .entry(namespace.to_string())
             .or_default()
             .insert(name.to_string(), media.to_string());
         Ok(())
     }
 
-    async fn remove_emoji(
-        &self,
-        namespace: &NamespaceName,
-        name: &str,
-    ) -> Result<bool, StoreError> {
+    async fn remove_emoji(&self, namespace: &str, name: &str) -> Result<bool, StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         Ok(inner
             .emoji
@@ -1815,10 +1900,7 @@ impl EmojiStore for MemoryStore {
             .unwrap_or(false))
     }
 
-    async fn list_emoji(
-        &self,
-        namespace: &NamespaceName,
-    ) -> Result<Vec<(String, String)>, StoreError> {
+    async fn list_emoji(&self, namespace: &str) -> Result<Vec<(String, String)>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner
             .emoji
@@ -1887,7 +1969,7 @@ impl MembershipStore for MemoryStore {
     async fn set_ns_membership(
         &self,
         account: &Account,
-        namespace: &NamespaceName,
+        namespace: &str,
         joined_ms: i64,
     ) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
@@ -1896,7 +1978,7 @@ impl MembershipStore for MemoryStore {
             .ns_memberships
             .entry(account.clone())
             .or_default()
-            .entry(namespace.clone())
+            .entry(namespace.to_string())
             .or_insert(joined_ms);
         Ok(())
     }
@@ -1904,24 +1986,21 @@ impl MembershipStore for MemoryStore {
     async fn clear_ns_membership(
         &self,
         account: &Account,
-        namespace: &NamespaceName,
+        namespace: &str,
     ) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         if let Some(map) = inner.ns_memberships.get_mut(account) {
             map.remove(namespace);
         }
-        // Drop every hide override for channels in this namespace.
+        // Drop every hide override for channels in this namespace — the channel's
+        // first segment is the ns id (v0.13), so this matches the id key.
         if let Some(set) = inner.channel_hides.get_mut(account) {
-            set.retain(|chan| chan.namespace() != Some(namespace.as_str()));
+            set.retain(|chan| chan.namespace() != Some(namespace));
         }
         Ok(())
     }
 
-    async fn is_ns_member(
-        &self,
-        account: &Account,
-        namespace: &NamespaceName,
-    ) -> Result<bool, StoreError> {
+    async fn is_ns_member(&self, account: &Account, namespace: &str) -> Result<bool, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner
             .ns_memberships
@@ -1929,7 +2008,7 @@ impl MembershipStore for MemoryStore {
             .is_some_and(|map| map.contains_key(namespace)))
     }
 
-    async fn ns_memberships(&self, account: &Account) -> Result<Vec<NamespaceName>, StoreError> {
+    async fn ns_memberships(&self, account: &Account) -> Result<Vec<String>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner
             .ns_memberships
@@ -1938,7 +2017,7 @@ impl MembershipStore for MemoryStore {
             .unwrap_or_default())
     }
 
-    async fn ns_members(&self, namespace: &NamespaceName) -> Result<Vec<Account>, StoreError> {
+    async fn ns_members(&self, namespace: &str) -> Result<Vec<Account>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner
             .ns_memberships
@@ -1948,10 +2027,7 @@ impl MembershipStore for MemoryStore {
             .collect())
     }
 
-    async fn ns_members_joined(
-        &self,
-        namespace: &NamespaceName,
-    ) -> Result<Vec<(Account, i64)>, StoreError> {
+    async fn ns_members_joined(&self, namespace: &str) -> Result<Vec<(Account, i64)>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         let mut out: Vec<(Account, i64)> = inner
             .ns_memberships
@@ -2055,6 +2131,9 @@ impl RoleStore for MemoryStore {
             defs.remove(name);
         }
         inner
+            .role_ids
+            .remove(&(scope.to_string(), name.to_string()));
+        inner
             .role_assignments
             .retain(|(s, n, _)| !(s == scope && n == name));
         Ok(())
@@ -2076,6 +2155,13 @@ impl RoleStore for MemoryStore {
             .entry(scope.to_string())
             .or_default()
             .insert(new.to_string(), def);
+
+        // Carry the stable id across — identity survives a rename (v0.13).
+        if let Some(id) = inner.role_ids.remove(&(scope.to_string(), old.to_string())) {
+            inner
+                .role_ids
+                .insert((scope.to_string(), new.to_string()), id);
+        }
 
         // Carry membership across, so nobody loses a role to a rename.
         let moved: Vec<String> = inner
@@ -2116,6 +2202,44 @@ impl RoleStore for MemoryStore {
                 out
             })
             .unwrap_or_default())
+    }
+
+    async fn role_id(&self, scope: &str, name: &str) -> Result<Option<String>, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        let exists = inner
+            .roles
+            .get(scope)
+            .is_some_and(|defs| defs.contains_key(name));
+        if !exists {
+            return Ok(None);
+        }
+        let id = inner
+            .role_ids
+            .entry((scope.to_string(), name.to_string()))
+            .or_insert_with(|| weft_proto::Ulid::new().to_string().to_ascii_lowercase())
+            .clone();
+        Ok(Some(id))
+    }
+
+    async fn role_by_id(&self, id: &str) -> Result<Option<(String, RoleDef)>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let Some(((scope, name), _)) = inner.role_ids.iter().find(|(_, v)| v.as_str() == id) else {
+            return Ok(None);
+        };
+        let Some((color, caps, hoist, pingable, position)) =
+            inner.roles.get(scope).and_then(|d| d.get(name))
+        else {
+            return Ok(None);
+        };
+        let def = RoleDef {
+            name: name.clone(),
+            color: color.clone(),
+            caps: caps.clone(),
+            hoist: *hoist,
+            pingable: *pingable,
+            position: *position,
+        };
+        Ok(Some((scope.clone(), def)))
     }
 
     async fn assign_role(&self, scope: &str, name: &str, subject: &str) -> Result<(), StoreError> {
