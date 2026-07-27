@@ -32,9 +32,9 @@ daemon + an adapter-binding doc, with **no further core change**.
 |---|---|---|
 | 1 | Foreign identity | **Native, never remapped.** Foreign entities keep their own coordinates (`matrix.org`, an MXID, a Discord snowflake) and are addressed by a `<scheme>://<realm>/<path>` URI. No sanitization into WEFT network/account grammar. Supersedes `matrix.md` §5. |
 | 2 | Protocol logic location | **Per-app adapter daemons only.** weftd core knows the generic contract + scheme routing; it never parses a foreign protocol. Restores the `matrix.md` §17 module boundary at the framework level. |
-| 3 | Trust / connection | **One connection per realm**, entering the `State::ForeignBridge` context — pinned-key authed and bound to a single `(scheme, realm)` at connect via a `REALM ASSERT` handshake. **Multiple adapters may connect concurrently** (Matrix + Discord, or sharded per-realm instances of one adapter). Per-realm binding makes cross-realm spoofing structurally impossible and gives per-realm failure/NETBLOCK domains; the scope URI (`matrix://matrix.org/…`) and account (`@a:matrix.org`) are self-describing, so assertions carry no separate realm tag. |
+| 3 | Trust / connection | **Two planes** (§3): a realm-agnostic **control link** per adapter (scheme registration + weftd→adapter provisioning pushes, §3.3) and **one data connection per realm** — pinned-key authed, bound to a single `(scheme, realm)` at connect via a `REALM ASSERT` handshake. **Multiple adapters may connect concurrently** (Matrix + Discord, or sharded per-realm instances). Per-realm binding of the data connection makes cross-realm spoofing structurally impossible and gives per-realm failure/NETBLOCK domains; the scope URI (`matrix://matrix.org/…`) and account (`@a:matrix.org`) are self-describing, so assertions carry no separate realm tag. |
 | 4 | Home authority (inbound) | **Home-authoritative replica.** weftd mints the WEFT-side ULIDs for the foreign replica; the foreign system remains the true social home. Order-divergence is an honest limit. |
-| 5 | Consent | **Per-direction, per-namespace opt-in.** Outbound (advertise a WEFT ns into a realm) requires an explicit `NS META <ns> bridge:<scheme> :open` flag. Inbound (consume a foreign space) is an explicit user `FOREIGN JOIN`. Never automatic. |
+| 5 | Consent | **Per-direction, per-namespace opt-in.** Outbound (advertise a WEFT ns into a realm) requires an explicit `NS META <ns> bridge:<scheme> :open` flag. Inbound (consume a foreign space) is an explicit user `NS JOIN <uri>`. Never automatic. |
 | 6 | E2EE | **Never bridged.** A foreign encrypted space is refused on join (`NO-SUCH-TARGET`) and a space that becomes encrypted after join is withdrawn + tombstoned WEFT-side. Invariant 8, per adapter. |
 | 7 | NETBLOCK | **Realm-keyed.** `NETBLOCK REALM <scheme>://<realm>` severs one foreign server; §11.6's four effects map per realm. |
 
@@ -62,11 +62,18 @@ discord://123456789/general           a Discord guild+channel  (adapter-defined 
 
 ## 3. The `State::ForeignBridge` session context (new)
 
-A connection an adapter holds to weftd, **one per foreign realm** it serves. Entered after a
-**pinned adapter-key auth** (config: `[[foreign_bridge]] scheme=…, pubkey=…`; **multiple entries
-allowed** — several adapters, or sharded per-realm instances, connect concurrently) and **bound to
-a single `(scheme, realm)`** by a `REALM ASSERT` handshake at connect. Distinct from `State::Bridge`
-(WEFT↔WEFT peer) because it is a **trusted local component** that may:
+An adapter holds **two kinds of link** to weftd, both `State::ForeignBridge`, both pinned-key
+authed (config: `[[foreign_bridge]] scheme=…, pubkey=…`; **multiple entries allowed** — several
+adapters, or sharded per-realm instances, connect concurrently):
+
+- a **control link** (one per adapter, realm-agnostic) — registers the scheme(s) the adapter
+  handles and carries **provisioning** requests weftd pushes for realms without a live data
+  connection (§3.3). It never carries realm-bound content.
+- a **data connection per realm** — **bound to a single `(scheme, realm)`** by a `REALM ASSERT`
+  handshake, carrying all of that realm's traffic both ways. This is the connection meant in
+  "one connection per realm."
+
+The **data connection** is the trusted component that may:
 
 - **assert foreign namespaces/channels/membership/events** for its bound realm into weftd (weftd
   mints the replica ULIDs — home-authoritative replica); the scope URI and `@as=<foreign-account>`
@@ -79,7 +86,7 @@ even under the same adapter key, so spoofing is structurally impossible. A NETBL
 connection is refused at the `REALM ASSERT` handshake. Stronger than a multiplexed connection, and
 it yields per-realm failure domains.
 
-### 3.1 Contract verbs — adapter → weftd (valid only in `State::ForeignBridge`)
+### 3.1 Contract verbs — adapter → weftd (data connection)
 
 The adapter asserts foreign structure and events through **existing** weftd surfaces; the only
 bridge-specific verbs are the realm bind/teardown handshake.
@@ -101,38 +108,85 @@ bridge-specific verbs are the realm bind/teardown handshake.
   adapter never mints WEFT ULIDs; weftd does (invariant 2 — origin authority = the realm-bound
   trusted connection).
 
-### 3.2 Contract verbs — weftd → adapter (relayed local actions)
+### 3.2 Contract verbs — weftd → adapter (data connection: relayed local actions)
 
 weftd forwards a local user's action on a foreign URI to the adapter as a relay envelope
-(join/part, post/edit/delete/react, moderation). The adapter translates it into the foreign
-protocol (e.g. puppet-post into a Matrix room). Modeled on the existing bridge relay path.
+(join/part, post/edit/delete/react, moderation) over the realm's data connection. The adapter
+translates it into the foreign protocol (e.g. puppet-post into a Matrix room). Modeled on the
+existing bridge relay path.
+
+### 3.3 Provisioning flow — how `NS JOIN <uri>` reaches the adapter
+
+First contact with a space needs weftd to reach an adapter for a realm it may not yet be connected
+to — that is the control link's one job. The user surface is unchanged (`NS JOIN <uri>`, §4); the
+async completion reuses the same **label-correlated pending-request** machinery as auto-federation
+(`FEDERATE` → `run_bridge_requester` → the user's request completes when the peer's manifest
+arrives — here the control link stands in for the remote peer, and `NS-META`/`CHANNEL-LAYOUT`
+assertions stand in for the manifest).
+
+```
+1. C → weftd            @label=j1 NS JOIN matrix://matrix.org/gaming
+2. weftd                store lookup on the URI:
+   ├─ known locally  →  ordinary join: add membership, relay the user-join to the realm data
+   │                    connection (adapter puppet-joins them), echo @label=j1 (roster + POLICY).
+   │                    [no provisioning — the steady-state path]
+   └─ unknown + has scheme → park the NS JOIN pending, keyed by a provisioning job; go to 3.
+3. weftd → adapter      (CONTROL link)  PROVISION matrix://matrix.org/gaming :job=j1
+4. adapter              resolve #gaming:matrix.org → join via companion HS (S2S) → enumerate rooms.
+5a. not found / unjoinable / encrypted:
+    adapter → weftd     (CONTROL)  PROVISION-ERR :job=j1
+    weftd → C           @label=j1 ERR NO-SUCH-TARGET          (uniform, invariant 1)
+5b. ok — adapter opens/uses the matrix.org DATA connection:
+    REALM ASSERT        matrix://matrix.org                   (binds the connection)
+    NS-META             matrix://matrix.org/gaming :Gaming
+    CHANNEL-LAYOUT      matrix://matrix.org/gaming/general 0
+    POLICY              matrix://matrix.org/gaming/general retained:90d
+    …                   (weftd mints replica ULIDs — home-authoritative)
+    adapter → weftd     (CONTROL)  PROVISION-OK :job=j1
+6. weftd                namespace now exists → add the requester as a member, relay the user-join to
+                        the data connection (adapter puppet-joins the remote room), complete the
+                        parked request:
+   weftd → C            @label=j1 …roster + POLICY…            (identical shape to a native NS JOIN)
+```
+
+- **Provisioning fires once per space, ever.** After step 5b the namespace is materialized and in
+  `DISCOVER`; every later joiner takes branch 2-known — a local join + a relay puppet-join, no
+  control-link traffic, no remote lookup.
+- **Control-link contract:** `REGISTER <scheme>` (adapter startup) · `PROVISION <uri> :job`
+  (weftd→adapter) · `PROVISION-OK`/`PROVISION-ERR :job` (adapter→weftd). Realm-agnostic; no content.
+- **Failure = `NO-SUCH-TARGET`**, uniform in code + timing with a nonexistent local namespace
+  (invariant 1) — a private/encrypted/absent remote space is indistinguishable from "no such thing."
 
 ## 4. User-facing verbs (generic — weftd core)
 
-Exactly **one** new user verb; everything else reuses the v0.12 namespace surface.
+**Zero new user verbs.** The entire user surface is the existing v0.12 namespace verbs, now
+accepting a `<scheme>://…` URI target. Foreignness is a property of the *target*, not the *verb*.
 
-- `FOREIGN JOIN <uri>` — e.g. `FOREIGN JOIN matrix://matrix.org/gaming`. The irreducible new verb:
-  a **provisioning trigger**. weftd routes by scheme to a registered adapter, which opens (or
-  reuses) the per-realm connection, resolves + joins the remote space, enumerates it, and asserts
-  it back via `NS-META`/`CHANNEL-LAYOUT`; the user becomes
-  a member (ns-membership model, on a foreign-addressed ns). Ordinary `NS JOIN`/`JOIN` can't stand
-  in — they require the target to already exist (`NO-SUCH-TARGET` otherwise, invariant 1), whereas
-  here the join is what *creates* the local foreign ns, via an async remote round-trip.
-- **Leaving reuses `NS LEAVE` / `PART`** on the foreign URI — same membership + hide-override
-  mechanics as any namespace. weftd signals the adapter when the *last* local member leaves so it
-  can drop the upstream join. (Retires the earlier `FOREIGN PART`.)
+- **`NS JOIN <uri>`** absorbs provisioning. `NS JOIN matrix://matrix.org/gaming`: if the target is
+  already known locally, it is an ordinary join; if it is **unknown and carries a scheme**, weftd
+  routes to a registered adapter, which opens (or reuses) the per-realm connection, resolves + joins
+  the remote space, enumerates it, and asserts it back via `NS-META`/`CHANNEL-LAYOUT` — then the
+  caller becomes a member. (An unknown target with **no** scheme is still `NO-SUCH-TARGET`,
+  invariant 1.) This is the only place where a join may block on an async remote round-trip and
+  return network-shaped errors — a documented property of URI targets, not a new verb. **Retires
+  the earlier `FOREIGN JOIN`.**
+- **Leaving reuses `NS LEAVE` / `PART`** on the URI — same membership + hide-override mechanics as
+  any namespace. weftd signals the adapter when the *last* local member leaves so it can drop the
+  upstream join.
 - **Listing reuses `SYNC`** — joined foreign namespaces are memberships, so they already appear in
-  the v0.12 SYNC skeleton like native ones. (Retires `FOREIGN LIST`.)
-- *(optional, deferrable)* a resolve/preview before joining is not needed for correctness — drop it
-  or push to v2. (Retires `FOREIGN RESOLVE` from v1.)
+  the v0.12 SYNC skeleton like native ones.
+- **Discovery reuses `DISCOVER`** — a provisioned foreign namespace is listed (badged), so everyone
+  after the first joiner needs nothing special (§6).
 
-Scheme-agnostic: `matrix` is the first scheme handled; `discord` is a config + adapter away, with
-no new verb.
+Provisioning fires **once per remote space, ever** (first contact); every join afterward is an
+ordinary local `NS JOIN`. Scheme-agnostic: `matrix` is the first scheme handled; `discord` is a
+config + adapter away, with no new verb.
 
 ## 5. Directionality — every adapter fills both halves
 
-- **Inbound (consume):** foreign realm → WEFT namespace. A user `FOREIGN JOIN`s; the adapter
-  asserts the foreign-addressed replica. This is the owner's "join spaces/rooms as namespaces."
+- **Inbound (consume):** foreign realm → WEFT namespace. A user `NS JOIN <uri>`s an as-yet-unknown
+  space; weftd provisions via the adapter, which asserts the foreign-addressed replica. This is the
+  owner's "join spaces/rooms as namespaces."
 - **Outbound (advertise/project):** WEFT namespace → foreign realm. Opt-in via
   `NS META <ns> bridge:<scheme> :open`; the adapter projects the namespace into the foreign
   system (Matrix: Spaces on the companion HS; Discord: a managed bot in a guild). Publication
@@ -142,15 +196,15 @@ no new verb.
 
 - **Membership** reuses the ns-membership + hide-override model (`matrix.md` §8), foreign-
   addressed: first space/room join → join the foreign ns + hide the rest; per-channel join clears
-  a hide; leaving the last → `FOREIGN PART`. Applies uniformly to remote foreign users **and** our
-  own users who `FOREIGN JOIN`ed.
+  a hide; leaving the last → `NS LEAVE`. Applies uniformly to remote foreign users **and** our own
+  users who `NS JOIN <uri>`ed.
 - **Retention:** a foreign channel is a **bounded replica** — policy `retained:<config>`; deeper
   history via on-demand adapter backfill → WEFT `HISTORY`. **Never `permanent`** (we can't promise
   a remote space's permanence) and **never `e2ee`** (decision 6).
 - **Visibility:** foreign namespaces **appear in `DISCOVER`**, subject to the foreign space's own
   visibility (public → listed; private/unjoinable → absent, invariant 1), and are always
   **client-badged** with their scheme + realm so users see they are external. Also reachable by a
-  direct `FOREIGN JOIN <uri>`.
+  direct `NS JOIN <uri>`.
 
 ## 7. Authority (honest limit, framework-level)
 
@@ -182,10 +236,14 @@ home and authoritative; see `matrix.md` §10.)
 
 1. `State::ForeignBridge` session state + pinned-adapter auth (`[[foreign_bridge]]` config, multiple
    entries) with one connection per realm, bound at the `REALM ASSERT` handshake.
-2. `@scheme` / `@realm` routing tags; `<scheme>://` scope + foreign-account identity types
-   (opaque path/account, `(scheme, realm)` origin) in `weft-proto` — **round-trip tested first**.
-3. `FOREIGN JOIN` verb + scheme→adapter routing registry; `REALM WITHDRAW` (+ optional
-   `REALM ASSERT`). Leaving/listing reuse `NS LEAVE`/`PART`/`SYNC` — no new verbs.
+2. `<scheme>://` scope grammar + foreign-account identity types (opaque path/account,
+   `(scheme, realm)` origin) in `weft-proto` — **round-trip tested first**. No per-assertion realm
+   tag: the per-realm connection + self-describing URI/account carry it.
+3. `NS JOIN` accepting a `<scheme>://` URI (the provisioning path, §3.3) + a scheme→adapter routing
+   registry + label-correlated pending-request tracking (reuse the auto-federation machinery). On
+   the bridge context: the control-link contract (`REGISTER`/`PROVISION`/`PROVISION-OK|ERR`) and the
+   data-connection `REALM ASSERT` (binding handshake) + `REALM WITHDRAW` (teardown). Leaving/listing/
+   discovery reuse `NS LEAVE`/`PART`/`SYNC`/`DISCOVER` — **no new user verbs**.
 4. Foreign structure via reused `NS-META`/`CHANNEL-LAYOUT` assertions; foreign-scoped event
    ingestion (reusing `Cmd::Ingest`-style paths); home-authoritative replica minting.
 5. Store: foreign realms / namespaces / channels / membership tables (mem + PG, shared contract).
@@ -242,9 +300,10 @@ daemon + a config stanza + an adapter-binding doc.
   visibility, invariant 1) and always badged foreign (§6).
 - **Core footprint:** the §9 footprint is accepted as a real (non-"near-zero") addition, justified
   by generality across future adapters.
+- **User verb surface:** **zero new user verbs** — `NS JOIN <uri>` absorbs provisioning (the whole
+  user surface is existing v0.12 verbs accepting `<scheme>://` URIs; foreignness is a target
+  property, not a verb). Retires the earlier `FOREIGN JOIN`/`FOREIGN` family. The only new verbs are
+  the adapter-side `REALM ASSERT`/`REALM WITHDRAW` handshake on the trusted bridge context (§3.1).
 
-**Still open:**
-1. A single generic `FOREIGN JOIN <scheme>://…` provisioning verb (the rest of the surface —
-   leave/list/structure — reused from the v0.12 namespace + SYNC verbs) vs. per-app
-   `MATRIX`/`DISCORD` verb families. Chosen so weftd core stays protocol-agnostic and Discord needs
-   no new core verb. **Confirm the `FOREIGN` naming.**
+**Still open:** none — the design is fully specified. Next step is implementation (§12) or the
+Discord adapter binding to pressure-test the abstraction.
