@@ -285,6 +285,17 @@ pub enum Event {
         display: Option<String>,
         count: Option<u64>,
     },
+    /// `NS-MEMBER-INFO <ns> <user@net> <joined-ms>` with an optional `roles=`
+    /// tag (comma-separated role names) — one row per member inside an `NS INFO
+    /// MEMBERS` batch (§7.4, moderator view). `joined-ms` is the Unix-ms join
+    /// time, or `0` when unknown (membership backfilled from the pre-v0.12
+    /// model). `roles=` is omitted when the member holds no assigned roles.
+    NsMemberInfo {
+        namespace: NamespaceName,
+        user: UserRef,
+        joined_ms: u64,
+        roles: Vec<String>,
+    },
     /// `CHANSYNC <#chan>` (§7.9) — the per-channel header inside a `SYNC` body
     /// or delta. `expired-before=<msgid>` is the retention watermark (the client
     /// evicts anything older); the valueless `reset` flag means the server can't
@@ -1187,6 +1198,29 @@ impl Event {
                     count: u64_tag(line, "count", "NS-MEMBER")?,
                 })
             }
+            "NS-MEMBER-INFO" => {
+                let mut args = Args::new(line, "NS-MEMBER-INFO");
+                let namespace = args.req("namespace")?.parse()?;
+                let user = args.req("user")?.parse()?;
+                let joined = args.req("joined-ms")?;
+                let joined_ms = joined.parse().map_err(|_| ParseError::BadParam {
+                    verb: "NS-MEMBER-INFO",
+                    what: "joined-ms",
+                    value: joined.to_string(),
+                })?;
+                let roles = line
+                    .tags
+                    .get("roles")
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.split(',').map(str::to_string).collect())
+                    .unwrap_or_default();
+                Ok(Event::NsMemberInfo {
+                    namespace,
+                    user,
+                    joined_ms,
+                    roles,
+                })
+            }
             "CHANSYNC" => {
                 let mut args = Args::new(line, "CHANSYNC");
                 Ok(Event::ChanSync {
@@ -1935,6 +1969,25 @@ impl Event {
                 (
                     "NS-MEMBER",
                     vec![namespace.to_string(), user.to_string(), action.to_string()],
+                    None,
+                )
+            }
+            Event::NsMemberInfo {
+                namespace,
+                user,
+                joined_ms,
+                roles,
+            } => {
+                if !roles.is_empty() {
+                    tags.insert("roles".to_string(), roles.join(","));
+                }
+                (
+                    "NS-MEMBER-INFO",
+                    vec![
+                        namespace.to_string(),
+                        user.to_string(),
+                        joined_ms.to_string(),
+                    ],
                     None,
                 )
             }
@@ -2786,6 +2839,34 @@ mod tests {
             display: None,
             count: None,
         }));
+    }
+
+    #[test]
+    fn ns_member_info_round_trip() {
+        // A member with roles + a real join time.
+        let info = Reply::with_label(
+            Event::NsMemberInfo {
+                namespace: "gaming".parse().unwrap(),
+                user: "ada@test.example".parse().unwrap(),
+                joined_ms: 1_700_000_000_000,
+                roles: vec!["Moderator".into(), "VIP".into()],
+            },
+            "m1",
+        );
+        let wire = info.serialize().unwrap();
+        assert!(wire.contains("roles=Moderator,VIP"));
+        assert!(wire.contains("NS-MEMBER-INFO gaming ada@test.example 1700000000000"));
+        round_trip(&info);
+
+        // No roles, unknown join time (backfilled) → `roles=` omitted, `0` join.
+        let bare = Reply::new(Event::NsMemberInfo {
+            namespace: "gaming".parse().unwrap(),
+            user: "bob@test.example".parse().unwrap(),
+            joined_ms: 0,
+            roles: vec![],
+        });
+        assert!(!bare.serialize().unwrap().contains("roles="));
+        round_trip(&bare);
     }
 
     #[test]

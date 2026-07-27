@@ -78,6 +78,32 @@ export type CtxItem =
   | { header: string; mod?: boolean }
   | { divider: true };
 
+/// One @-mention autocomplete suggestion (a row in the composer's selection
+/// pop). Members carry an avatar (resolved from `name`) + a resolved display
+/// name + their canonical `account@network` identity; `@everyone`/`@here` and
+/// pingable roles are the other kinds.
+export type MentionOpt = {
+  /// The token inserted into the composer (`@name`).
+  name: string;
+  kind: "special" | "role" | "member";
+  /// The label shown — a member's display name, or the word for everyone/here.
+  display: string;
+  /// A member's canonical `account@network` handle, shown at the right edge.
+  identity?: string;
+  /// A pingable role's display color.
+  color?: string;
+};
+
+/// One row of the `NS INFO MEMBERS` moderator roster (§6.2): a namespace
+/// member with their canonical handle, Unix-ms join time (`0` = unknown), and
+/// the ns-scoped roles they've been assigned.
+export type MemberInfoC = {
+  account: string;
+  network: string;
+  joinedMs: number;
+  roles: string[];
+};
+
 /// A namespace-scoped role definition (name + color + caps + hoist + pingable + position).
 export type RoleDefC = {
   name: string;

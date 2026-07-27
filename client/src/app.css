@@ -1611,6 +1611,54 @@ button:disabled {
 .mention-sigil {
   color: var(--accent, #7aa2f7);
 }
+/* Rich @-mention suggestion rows: [avatar] display-name … identity@network. */
+.mention-avatar {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  font-weight: 600;
+  background: var(--bg-hover, #2a2e3a);
+  color: var(--text-secondary);
+}
+.mention-avatar .avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.mention-role-dot {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-muted, #99aab5);
+}
+.mention-role-dot.special {
+  background: var(--accent, #7aa2f7);
+}
+.mention-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: inherit;
+}
+.mention-identity {
+  flex: 0 1 auto;
+  margin-left: auto;
+  padding-left: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
 
 /* unread channels + per-item retention dot (Phase 6) */
 .channel-item .ci-name {
@@ -2239,41 +2287,74 @@ button:disabled {
   inset: 0;
   z-index: 120;
   display: grid;
-  grid-template-columns: minmax(200px, 1fr) minmax(0, 2.6fr);
+  grid-template-columns: 232px minmax(0, 1fr) 76px;
   background: var(--bg-void);
 }
 .so-nav {
   background: var(--bg-panel, #131314);
   overflow-y: auto;
-  padding: 52px 8px 24px 0;
+  padding: 24px 10px 16px;
   display: flex;
   justify-content: flex-end;
 }
 .so-nav-inner {
   width: 100%;
-  max-width: 210px;
-  padding-left: 14px;
+  max-width: 212px;
+}
+/* Server identity header at the top of the nav rail. */
+.so-server-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  margin-bottom: 12px;
+  border-radius: 6px;
+}
+.so-server-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent, #5865f2), #8b5cf6);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.so-server-meta {
+  min-width: 0;
+}
+.so-server-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.so-server-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
 }
 .so-heading {
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-muted);
   padding: 16px 10px 6px;
-}
-.so-heading:first-child {
-  padding-top: 0;
-  font-size: 15px;
-  text-transform: none;
-  color: var(--text-primary);
 }
 .so-navitem {
   display: block;
   width: 100%;
   text-align: left;
   padding: 7px 10px;
-  margin-bottom: 2px;
+  margin-bottom: 1px;
   border: none;
   border-radius: 4px;
   background: none;
@@ -2281,13 +2362,14 @@ button:disabled {
   cursor: pointer;
   font: inherit;
   font-size: 15px;
+  font-weight: 500;
 }
 .so-navitem:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
 .so-navitem.active {
-  background: var(--bg-panel-raised);
+  background: var(--bg-hover);
   color: var(--text-primary);
 }
 .so-navitem.danger {
@@ -2296,11 +2378,15 @@ button:disabled {
 .so-main {
   position: relative;
   overflow-y: auto;
-  padding: 52px 40px 60px;
+  padding: 40px 40px 60px;
 }
 .so-content {
-  max-width: 620px;
+  max-width: 740px;
   margin-inline: auto;
+}
+/* The Roles two-pane editor needs more room than the standard reading column. */
+.so-content.wide {
+  max-width: 960px;
 }
 .so-content h1 {
   font-size: 20px;
@@ -2313,30 +2399,39 @@ button:disabled {
   margin: 0 0 24px;
   line-height: 1.4;
 }
-.so-close {
-  position: absolute;
-  top: 24px;
-  right: 32px;
+/* Exit rail — a dedicated far-right column with the circular close control. */
+.so-exit {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  padding: 24px 16px 0;
+}
+.so-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 40px;
-  padding: 6px;
-  border: 1px solid var(--border-hair-strong);
+  height: 40px;
+  border: 2px solid var(--border-hair-strong);
   border-radius: 50%;
   background: none;
   color: var(--text-muted);
   cursor: pointer;
-  font-size: 15px;
-}
-.so-close span {
-  font-size: 9px;
-  font-weight: 700;
+  font-size: 17px;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
 }
 .so-close:hover {
   color: var(--text-primary);
   border-color: var(--text-secondary);
+}
+.so-close-label {
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
 }
 .field-label {
   font-size: 12px;
@@ -2369,6 +2464,412 @@ button:disabled {
   background: color-mix(in srgb, var(--border-hair-strong) 55%, transparent);
   margin: 22px 0;
 }
+
+/* ── Overview panel: identity card + live stat strip ── */
+.ov-card {
+  padding: 24px;
+  margin-bottom: 24px;
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
+}
+.ov-identity {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border-hair);
+}
+.ov-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent, #5865f2), #8b5cf6);
+  color: #fff;
+  font-size: 22px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.ov-identity-name {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.ov-identity-sub {
+  margin-top: 3px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.ov-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+.ov-desc {
+  resize: vertical;
+  min-height: 76px;
+  line-height: 1.5;
+}
+.ov-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.ov-stat {
+  padding: 18px 20px;
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
+}
+.ov-stat-num {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ov-stat-label {
+  margin-top: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* ── Emoji panel: header, capacity gauge, search, tile grid ── */
+.em-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.em-upload {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.em-add {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 20px;
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border-hair);
+}
+.em-add-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  padding: 4px;
+  border: 1px solid var(--border-hair-strong);
+  border-radius: 8px;
+  background: var(--bg-void);
+  cursor: pointer;
+}
+.em-add-thumb .custom-emoji {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.em-add-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.em-add-name .text-input {
+  flex: 1;
+}
+.em-gauge {
+  padding: 20px 22px;
+  margin-bottom: 20px;
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
+}
+.em-gauge-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.em-gauge-count {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.em-gauge-bar {
+  height: 10px;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--bg-void);
+}
+.em-gauge-fill {
+  height: 100%;
+  border-radius: 5px;
+  background: var(--accent, #5865f2);
+  transition: width 0.3s;
+}
+.em-gauge-fill.full {
+  background: var(--danger, #d9685f);
+}
+.em-gauge-sub {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.em-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  border-radius: 4px;
+  background: var(--bg-void);
+  color: var(--text-muted);
+}
+.em-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+.em-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 12px;
+}
+.em-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 12px 14px;
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
+  border: 1px solid transparent;
+  transition: border-color 0.1s;
+}
+.em-tile:hover {
+  border-color: var(--border-hair-strong);
+}
+.em-tile-img {
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+}
+.em-tile-name {
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.em-tile-x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.em-tile:hover .em-tile-x {
+  opacity: 0.7;
+}
+.em-tile-x:hover {
+  opacity: 1;
+}
+.em-empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 48px 0;
+  color: var(--text-muted);
+}
+.em-empty-icon {
+  font-size: 34px;
+  opacity: 0.35;
+  margin-bottom: 10px;
+}
+@media (max-width: 560px) {
+  .ov-grid,
+  .ov-stats {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* ── Members directory (NS INFO MEMBERS): assign control + roster table ── */
+.mem-assign {
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
+}
+.mem-assign .role-pick {
+  margin-top: 12px;
+}
+.mem-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border-radius: 4px;
+  background: var(--bg-void);
+  color: var(--text-muted);
+}
+.mem-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+.mem-refresh {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 15px;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.mem-refresh:hover {
+  color: var(--text-primary);
+}
+.mem-count {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.mem-thead,
+.mem-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.6fr) 120px;
+  gap: 16px;
+  align-items: center;
+}
+.mem-thead {
+  padding: 0 12px 8px;
+  border-bottom: 1px solid var(--border-hair);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.mem-row {
+  padding: 10px 12px;
+  border-radius: 6px;
+}
+.mem-row:hover {
+  background: var(--bg-panel-raised);
+}
+.mem-id {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.mem-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--accent, #5865f2);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.mem-avatar :global(.avatar-img) {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.mem-id-meta {
+  min-width: 0;
+}
+.mem-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mem-handle {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mem-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.mem-norole {
+  color: var(--text-faint);
+}
+.mem-joined {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.mem-empty {
+  padding: 32px 12px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+@media (max-width: 560px) {
+  .mem-thead {
+    display: none;
+  }
+  .mem-row {
+    grid-template-columns: 1fr auto;
+  }
+  .mem-roles {
+    grid-column: 1 / -1;
+  }
+}
+
 /* role management */
 .role-list {
   display: flex;
@@ -3389,13 +3890,16 @@ button:disabled {
    nav doesn't crowd out the content, and trim heavy paddings. */
 @media (max-width: 560px) {
   .settings-overlay {
-    grid-template-columns: minmax(120px, 0.9fr) minmax(0, 2fr);
+    grid-template-columns: minmax(120px, 0.9fr) minmax(0, 2fr) 52px;
   }
   .so-main {
-    padding: 44px 18px 40px;
+    padding: 24px 18px 40px;
   }
   .so-nav {
-    padding-top: 44px;
+    padding-top: 16px;
+  }
+  .so-exit {
+    padding: 16px 6px 0;
   }
   .modal {
     padding: 14px;

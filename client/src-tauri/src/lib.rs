@@ -684,6 +684,12 @@ fn roles(conn: State<'_, Conn>, scope: String) -> Result<(), String> {
     conn.send(weft::build_roles(&scope)?)
 }
 
+/// §6.2 moderator roster: members + join times + assigned roles.
+#[tauri::command]
+fn ns_info_members(conn: State<'_, Conn>, namespace: String) -> Result<(), String> {
+    conn.send(weft::build_ns_info_members(&namespace)?)
+}
+
 #[tauri::command]
 fn role_create(
     conn: State<'_, Conn>,
@@ -989,6 +995,7 @@ pub fn run() {
             recovery_cosign,
             ns_recover,
             roles,
+            ns_info_members,
             role_create,
             roles_reorder,
             role_delete,

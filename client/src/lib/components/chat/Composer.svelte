@@ -2,7 +2,14 @@
   import { getApp } from "$lib/context";
   import { highlightComposer } from "$lib/mdhighlight";
   import EmojiPicker from "./EmojiPicker.svelte";
+  import Avatar from "../Avatar.svelte";
   const app = getApp();
+
+  // Keep the arrow-key-highlighted autocomplete row scrolled into view.
+  function keepInView(node: HTMLElement, active: boolean) {
+    if (active) node.scrollIntoView({ block: "nearest" });
+    return { update: (a: boolean) => a && node.scrollIntoView({ block: "nearest" }) };
+  }
 
   let emojiOpen = $state(false);
   function insertEmoji(value: string) {
@@ -79,16 +86,40 @@
   {/if}
   {#if app.mentionQuery !== null && app.mentionMatches.length}
     <div class="mention-pop">
-      {#each app.mentionMatches as name, i (name)}
-        <button class="mention-opt" class:first={i === 0} onclick={() => app.pickMention(name)}>
-          <span class="mention-sigil">@</span>{name}
+      {#each app.mentionMatches as opt, i (opt.kind + ":" + opt.name)}
+        <button
+          class="mention-opt"
+          class:first={i === app.mentionIndex}
+          use:keepInView={i === app.mentionIndex}
+          onmouseenter={() => (app.mentionIndex = i)}
+          onclick={() => app.pickMention(opt.name)}
+        >
+          {#if opt.kind === "member"}
+            <span class="mention-avatar"><Avatar account={opt.name} /></span>
+            <span class="mention-name">{opt.display}</span>
+            <span class="mention-identity">{opt.identity}</span>
+          {:else if opt.kind === "role"}
+            <span class="mention-role-dot" style="background:{opt.color}"></span>
+            <span class="mention-name"><span class="mention-sigil">@</span>{opt.display}</span>
+            <span class="mention-identity">role</span>
+          {:else}
+            <span class="mention-role-dot special"></span>
+            <span class="mention-name"><span class="mention-sigil">@</span>{opt.display}</span>
+            <span class="mention-identity">{opt.name === "here" ? "online members" : "everyone here"}</span>
+          {/if}
         </button>
       {/each}
     </div>
   {:else if app.emojiQuery !== null && app.emojiSuggestions.length}
     <div class="mention-pop">
       {#each app.emojiSuggestions as em, i (em.name)}
-        <button class="mention-opt" class:first={i === 0} onclick={() => app.pickEmojiSuggestion(em.name)}>
+        <button
+          class="mention-opt"
+          class:first={i === app.emojiIndex}
+          use:keepInView={i === app.emojiIndex}
+          onmouseenter={() => (app.emojiIndex = i)}
+          onclick={() => app.pickEmojiSuggestion(em.name)}
+        >
           {#if em.url}<img class="custom-emoji" src={em.url} alt="" />{:else}<span class="emoji-glyph">{em.char}</span>{/if}
           :{em.name}:
         </button>

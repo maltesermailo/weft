@@ -2,7 +2,7 @@
   import { onMount, tick, untrack } from "svelte";
   import * as weft from "$lib/weft";
   import { EVERYONE_ROLE } from "$lib/constants";
-  import type { Msg, Channel, CtxItem, RoleDefC, ThreadInfo } from "$lib/types";
+  import type { Msg, Channel, CtxItem, RoleDefC, ThreadInfo, MentionOpt, MemberInfoC } from "$lib/types";
   import { provideApp } from "$lib/context";
   import { highlightCode } from "$lib/highlight";
   import { shortcodeToChar, searchUnicode } from "$lib/shortcodes";
@@ -568,6 +568,24 @@
     if (!scope) return;
     roleFetchQueue.push(scope);
     weft.roles(scope).catch(() => roleFetchQueue.pop());
+  }
+
+  // ---- §6.2 NS INFO MEMBERS: the moderator roster (members + join + roles) ----
+  // Arrives as an `ni…`-id BATCH of `ns-member-info` events. `loadingNsMembers`
+  // records which namespace is in flight so an empty roster still flushes.
+  let nsMembersByNs = $state<Record<string, MemberInfoC[]>>({});
+  let nsMemberBuf: MemberInfoC[] = [];
+  let loadingNsMembers: string | null = null;
+  let nsMembersLoading = $state(false);
+  function fetchNsMembers(ns: string) {
+    if (!ns) return;
+    loadingNsMembers = ns;
+    nsMembersLoading = true;
+    weft.nsInfoMembers(ns).catch((e) => {
+      nsMembersLoading = false;
+      loadingNsMembers = null;
+      toast(String(e), "error");
+    });
   }
   function createRoleAt(
     scope: string,
@@ -1787,6 +1805,14 @@
         memberRoles[`${e.account}|${e.scope}`] = e.roles ? e.roles.split(",") : [];
         confirmSuccess(`roles:${e.account}|${e.scope}`);
         break;
+      case "ns-member-info":
+        nsMemberBuf.push({
+          account: e.user,
+          network: e.network,
+          joinedMs: e.joined_ms,
+          roles: e.roles ?? [],
+        });
+        break;
       case "channel-layout": {
         const ch = ensureChannel(e.channel);
         ch.category = e.category ?? undefined;
@@ -1908,6 +1934,17 @@
         // and the real page would be discarded. (Checked after `mod`, which also
         // starts with "m".)
         if (currentBatchId.startsWith("m")) {
+          currentBatchId = "";
+          break;
+        }
+        // NS INFO MEMBERS roster (`ni…`). Checked before the `r…` role branch
+        // since neither prefix overlaps, and flushed by the requested namespace
+        // so an empty roster still lands.
+        if (currentBatchId.startsWith("ni")) {
+          if (loadingNsMembers) nsMembersByNs[loadingNsMembers] = nsMemberBuf;
+          nsMemberBuf = [];
+          loadingNsMembers = null;
+          nsMembersLoading = false;
           currentBatchId = "";
           break;
         }
@@ -2270,11 +2307,20 @@
   }
 
   function composerKey(e: KeyboardEvent) {
-    // Mention autocomplete captures Enter/Tab/Escape while open.
+    // Mention autocomplete captures navigation/accept/dismiss keys while open.
     if (mentionQuery !== null && mentionMatches.length) {
-      if (e.key === "Enter" || e.key === "Tab") {
+      const n = mentionMatches.length;
+      if (e.key === "ArrowDown") {
         e.preventDefault();
-        pickMention(mentionMatches[0]);
+        mentionIndex = (mentionIndex + 1) % n;
+        return;
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        mentionIndex = (mentionIndex - 1 + n) % n;
+        return;
+      } else if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        pickMention(mentionMatches[Math.min(mentionIndex, n - 1)].name);
         return;
       } else if (e.key === "Escape") {
         e.preventDefault();
@@ -2284,9 +2330,18 @@
     }
     // :emoji: autocomplete captures the same keys while open.
     if (emojiQuery !== null && emojiSuggestions.length) {
-      if (e.key === "Enter" || e.key === "Tab") {
+      const n = emojiSuggestions.length;
+      if (e.key === "ArrowDown") {
         e.preventDefault();
-        pickEmojiSuggestion(emojiSuggestions[0].name);
+        emojiIndex = (emojiIndex + 1) % n;
+        return;
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        emojiIndex = (emojiIndex - 1 + n) % n;
+        return;
+      } else if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        pickEmojiSuggestion(emojiSuggestions[Math.min(emojiIndex, n - 1)].name);
         return;
       } else if (e.key === "Escape") {
         e.preventDefault();
@@ -2653,27 +2708,40 @@
 
   // ---- @-mention autocomplete ----
   let mentionQuery = $state<string | null>(null);
-  let mentionMatches = $derived.by(() => {
+  let mentionMatches = $derived.by<MentionOpt[]>(() => {
     if (mentionQuery === null) return [];
     const q = mentionQuery.toLowerCase();
-    const names: string[] = [];
-    if ("everyone".startsWith(q)) names.push("everyone");
-    if ("here".startsWith(q)) names.push("here");
+    const opts: MentionOpt[] = [];
+    if ("everyone".startsWith(q)) opts.push({ name: "everyone", kind: "special", display: "everyone" });
+    if ("here".startsWith(q)) opts.push({ name: "here", kind: "special", display: "here" });
     // Pingable roles at this server (single-word names — the token can't hold
     // spaces), so members can @-mention them from the composer.
     for (const r of rolesByScope[`ns:${activeServer}`] ?? [])
-      if (r.pingable && !/\s/.test(r.name) && r.name.toLowerCase().startsWith(q)) names.push(r.name);
-    for (const m of activeChannel?.members ?? [])
-      if (m.name !== account && m.name.toLowerCase().startsWith(q)) names.push(m.name);
-    return names.slice(0, 8);
+      if (r.pingable && !/\s/.test(r.name) && r.name.toLowerCase().startsWith(q))
+        opts.push({ name: r.name, kind: "role", display: r.name, color: r.color });
+    // Members: match the account token OR the resolved display name, and carry
+    // the avatar (via `name`), display name, and canonical account@network.
+    for (const m of activeChannel?.members ?? []) {
+      if (m.name === account) continue;
+      const disp = displayName(m.name);
+      if (!m.name.toLowerCase().startsWith(q) && !disp.toLowerCase().startsWith(q)) continue;
+      const identity = m.name.includes("@") ? m.name : `${m.name}@${network}`;
+      opts.push({ name: m.name, kind: "member", display: disp, identity });
+    }
+    return opts.slice(0, 8);
   });
+  // The highlighted row (arrow-key navigable). Reset whenever the query moves,
+  // and always clamped to the live match count on read.
+  let mentionIndex = $state(0);
   function updateMention() {
     const m = composer.match(/@([a-z0-9._-]*)$/i);
     mentionQuery = m ? m[1] : null;
+    mentionIndex = 0;
   }
   function pickMention(name: string) {
     composer = composer.replace(/@[a-z0-9._-]*$/i, `@${name} `);
     mentionQuery = null;
+    mentionIndex = 0;
   }
 
   // ---- :emoji: autocomplete (custom emoji only — unicode has no names) ----
@@ -2695,11 +2763,13 @@
       .map((u) => ({ name: u.name, url: null, char: u.char }));
     return [...custom, ...unicode].slice(0, 10);
   });
+  let emojiIndex = $state(0);
   function updateEmojiSuggest() {
     // A `:word` at a token boundary — not `http://`, not `12:30`. `+`/`-` allow
     // shortcodes like `:+1:` / `:e-mail:`.
     const m = composer.match(/(?:^|\s):([a-zA-Z0-9_+-]+)$/);
     emojiQuery = m ? m[1] : null;
+    emojiIndex = 0;
   }
   function pickEmojiSuggestion(name: string) {
     // Unicode shortcodes insert the character (universal); custom emoji keep the
@@ -2708,6 +2778,7 @@
     const insert = s?.char ?? `:${name}:`;
     composer = composer.replace(/:[a-zA-Z0-9_+-]*$/, `${insert} `);
     emojiQuery = null;
+    emojiIndex = 0;
   }
   function stopTyping() {
     clearTimeout(typingStop);
@@ -3552,6 +3623,8 @@
     pickMention,
     get emojiQuery() { return emojiQuery; },
     get emojiSuggestions() { return emojiSuggestions; },
+    get emojiIndex() { return emojiIndex; },
+    set emojiIndex(v: number) { emojiIndex = v; },
     pickEmojiSuggestion,
     get pendingAttachments() { return pendingAttachments; },
     attachFile,
@@ -3561,12 +3634,17 @@
     mediaUrl: weft.mediaUrl,
     get mentionQuery() { return mentionQuery; },
     get mentionMatches() { return mentionMatches; },
+    get mentionIndex() { return mentionIndex; },
+    set mentionIndex(v: number) { mentionIndex = v; },
     get typingLabel() { return typingLabel; },
     // roles (ProfileCard)
     get rolesByScope() { return rolesByScope; },
     rolesOf,
     ensureMemberRoles,
     ensureRoles,
+    get nsMembersByNs() { return nsMembersByNs; },
+    get nsMembersLoading() { return nsMembersLoading; },
+    fetchNsMembers,
     roleScopeOf,
     isOwnerAt,
     assignRoleTo,

@@ -10,7 +10,7 @@
 // provides everything components consume).
 
 import { getContext, setContext } from "svelte";
-import type { Channel, Msg, Member, CtxItem, RoleDefC, ThreadInfo } from "./types";
+import type { Channel, Msg, Member, CtxItem, RoleDefC, ThreadInfo, MentionOpt, MemberInfoC } from "./types";
 
 export type RetentionMeta = { cls: string; label: string; icon: string };
 /** One live invite in the Discord-style invites menu (§6.5). */
@@ -323,10 +323,14 @@ export interface AppCtx {
   /** Resolve a `weft-media://…` reference to a fetchable URL. */
   mediaUrl(ref: string): string;
   readonly mentionQuery: string | null;
-  readonly mentionMatches: string[];
+  readonly mentionMatches: MentionOpt[];
+  /** The highlighted mention row (arrow-key/hover navigable). */
+  mentionIndex: number;
   /** `:emoji:` autocomplete: the current `:query`, or null. */
   readonly emojiQuery: string | null;
   readonly emojiSuggestions: { name: string; url: string | null; char?: string }[];
+  /** The highlighted emoji row (arrow-key/hover navigable). */
+  emojiIndex: number;
   pickEmojiSuggestion(name: string): void;
   readonly typingLabel: string;
 
@@ -339,6 +343,12 @@ export interface AppCtx {
   isOwnerAt(account: string, scope: string): boolean;
   assignRoleTo(acct: string, role: RoleDefC): void;
   unassignRoleFrom(acct: string, role: RoleDefC): void;
+  /** §6.2 NS INFO MEMBERS: the moderator roster per namespace (once fetched). */
+  readonly nsMembersByNs: Record<string, MemberInfoC[]>;
+  /** A roster fetch is in flight. */
+  readonly nsMembersLoading: boolean;
+  /** Fetch the moderator roster for a namespace (cap-gated server-side). */
+  fetchNsMembers(ns: string): void;
 
   // ---- channel permissions (ChannelSettings modal — role-based only) ----
   chanNsScope(): string;
@@ -440,4 +450,4 @@ export function getApp(): AppCtx {
 }
 
 // Re-export commonly used types for component convenience.
-export type { Channel, Msg, Member, CtxItem, RoleDefC, ThreadInfo };
+export type { Channel, Msg, Member, CtxItem, RoleDefC, ThreadInfo, MentionOpt };

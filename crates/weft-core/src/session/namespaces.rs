@@ -165,6 +165,87 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    /// §6.2 `NS INFO MEMBERS <name>` — the moderator roster: every ns member
+    /// with their join time and assigned ns-scoped roles, as a `BATCH` of
+    /// `NS-MEMBER-INFO`. Cap-gated — the caller must hold a moderation
+    /// capability at `ns:<name>` (`ns-admin`, which the owner holds implicitly,
+    /// or `ban` / `kick` / `mute` / `reports`). Unknown namespace ⇒
+    /// `NO-SUCH-TARGET` (invariant 1: no hidden-vs-absent branch before it).
+    pub(super) async fn on_ns_info_members(
+        &mut self,
+        label: Option<String>,
+        name: NamespaceName,
+        account: Account,
+    ) -> io::Result<Flow> {
+        if !self.namespace_exists(name.as_str()).await {
+            return self.no_such_target(label).await;
+        }
+
+        // Any moderation cap at ns:<name> unlocks the roster. Owner passes via
+        // the implicit ns-admin it holds at its own scope.
+        let scope = TokenScope::Namespace(name.to_string());
+        let now = unix_now();
+        let mut authorized = false;
+        for cap in [
+            Capability::NsAdmin,
+            Capability::Ban,
+            Capability::Kick,
+            Capability::Mute,
+            Capability::Reports,
+        ] {
+            match self.ctx.account_has_cap(&account, &cap, &scope, now).await {
+                Ok(true) => {
+                    authorized = true;
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => return self.internal(label, &e).await,
+            }
+        }
+        if !authorized {
+            return self.cap_required(label, "ns-admin").await;
+        }
+
+        let members = match self.ctx.memberships.ns_members_joined(&name).await {
+            Ok(m) => m,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        let scope_str = format!("ns:{name}");
+
+        self.batches += 1;
+        let id = format!("ni{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for (member, joined_ms) in members {
+            let roles = self
+                .ctx
+                .roles
+                .roles_of(&scope_str, member.as_str())
+                .await
+                .unwrap_or_default();
+            let user = UserRef::new(member, self.ctx.info.network.clone());
+            self.send_event(
+                None,
+                Event::NsMemberInfo {
+                    namespace: name.clone(),
+                    user,
+                    joined_ms: joined_ms.max(0) as u64,
+                    roles,
+                },
+            )
+            .await?;
+        }
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
     pub(super) async fn namespace_exists(&self, name: &str) -> bool {
         let Ok(name) = name.parse::<weft_proto::NamespaceName>() else {
             return false;

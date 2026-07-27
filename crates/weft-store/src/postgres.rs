@@ -3138,6 +3138,28 @@ impl MembershipStore for PgStore {
             .collect()
     }
 
+    async fn ns_members_joined(
+        &self,
+        namespace: &NamespaceName,
+    ) -> Result<Vec<(Account, i64)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT account, joined_ms FROM weft_ns_membership WHERE namespace = $1 \
+             ORDER BY joined_ms ASC, account ASC",
+        )
+        .bind(namespace.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.iter()
+            .map(|r| {
+                let account = r.get::<&str, _>("account").parse().map_err(|_| {
+                    StoreError::Backend("corrupt ns membership account".to_string())
+                })?;
+                Ok((account, r.get::<i64, _>("joined_ms")))
+            })
+            .collect()
+    }
+
     async fn set_hidden(&self, account: &Account, channel: &ChannelName) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO weft_channel_hide (account, channel) VALUES ($1,$2) \

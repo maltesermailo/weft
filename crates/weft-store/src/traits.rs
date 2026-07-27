@@ -752,6 +752,14 @@ pub trait MembershipStore: Send + Sync {
     /// base and the `members=` count source.
     async fn ns_members(&self, namespace: &NamespaceName) -> Result<Vec<Account>, StoreError>;
 
+    /// Members of `namespace` paired with their Unix-ms join time (`0` when
+    /// backfilled from the pre-v0.12 model). Powers the `NS INFO MEMBERS`
+    /// moderator roster; ordered by join time ascending, then account.
+    async fn ns_members_joined(
+        &self,
+        namespace: &NamespaceName,
+    ) -> Result<Vec<(Account, i64)>, StoreError>;
+
     /// Set a per-channel hide override for `account` (a `PART <#ns/chan>`).
     /// Idempotent.
     async fn set_hidden(&self, account: &Account, channel: &ChannelName) -> Result<(), StoreError>;

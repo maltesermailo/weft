@@ -112,6 +112,7 @@ export type WeftEvent =
   | { kind: "sync-end"; cursor: string }
   | { kind: "chan-sync"; channel: string; expired_before: string | null; reset: boolean }
   | { kind: "ns-member"; namespace: string; user: string; network: string; action: string; count: number | null }
+  | { kind: "ns-member-info"; namespace: string; user: string; network: string; joined_ms: number; roles: string[] }
   | { kind: "emoji"; namespace: string; name: string; media: string }
   | { kind: "emoji-removed"; namespace: string; name: string }
   | { kind: "pinned"; channel: string; msgid: string; by: string | null }
@@ -726,6 +727,12 @@ export function revoke(subject: string, scope: string, caps: string) {
 /// §6.6 named roles (capability-token bundles).
 export function roles(scope: string) {
   return invoke("roles", { scope });
+}
+
+/// §6.2 moderator roster: a namespace's members with join times + assigned
+/// roles, streamed back as a batch of `ns-member-info` events.
+export function nsInfoMembers(namespace: string) {
+  return invoke("ns_info_members", { namespace });
 }
 export function roleCreate(
   scope: string,

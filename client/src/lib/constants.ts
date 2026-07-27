@@ -39,6 +39,7 @@ export const CAP_META: Record<string, { label: string; desc: string }> = {
   "invite": { label: "Create invites", desc: "Mint invite links to this scope." },
   "nick": { label: "Change own nickname", desc: "Set their own display name on this server." },
   "manage-nicks": { label: "Manage nicknames", desc: "Change any member's display name on this server." },
+  "ping-everyone": { label: "Mention @everyone, @here", desc: "Fire an @everyone / @here ping that notifies the whole scope." },
   "mute": { label: "Mute members", desc: "Stop members from posting." },
   "ban": { label: "Ban members", desc: "Block members from joining and posting." },
   "kick": { label: "Kick members", desc: "Remove members from a channel." },
@@ -48,6 +49,15 @@ export const CAP_META: Record<string, { label: string; desc: string }> = {
   "reports": { label: "Handle reports", desc: "Review and resolve reported content." },
   "ns-admin": { label: "Administer namespace", desc: "Full control over this namespace." },
 };
+
+/// Capabilities grouped into labeled sections for the role permissions editor
+/// (Discord-style). Every entry in CAPS appears in exactly one group.
+export const CAP_GROUPS: { label: string; caps: string[] }[] = [
+  { label: "General Server Permissions", caps: ["view", "chan-create", "policy", "ns-admin"] },
+  { label: "Membership Permissions", caps: ["invite", "nick", "manage-nicks", "kick", "ban", "mute"] },
+  { label: "Message Permissions", caps: ["send", "react", "attach", "pin", "edit-own", "delete-own", "delete-any", "ping-everyone"] },
+  { label: "Moderation Permissions", caps: ["reports"] },
+];
 
 /// Preset role colors.
 export const ROLE_COLORS = ["#e0679a", "#e8b93d", "#5865f2", "#3ba55d", "#4fb0a5", "#9d6fc4", "#e8654f", "#87898c"];

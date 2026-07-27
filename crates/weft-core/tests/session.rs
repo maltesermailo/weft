@@ -6104,6 +6104,101 @@ async fn assigning_a_namespace_role_grants_its_channel_permissions() {
     );
 }
 
+/// Collect an `NS INFO MEMBERS` batch: skip to BATCH START, gather each
+/// `NS-MEMBER-INFO` as `(account, joined_ms, roles)`, stop at BATCH END.
+async fn ns_member_info(client: &mut Client) -> Vec<(String, u64, Vec<String>)> {
+    loop {
+        if matches!(client.recv().await.event, Event::BatchStart { .. }) {
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    loop {
+        match client.recv().await.event {
+            Event::NsMemberInfo {
+                user,
+                joined_ms,
+                roles,
+                ..
+            } => out.push((user.account.as_str().to_string(), joined_ms, roles)),
+            Event::BatchEnd { .. } => break,
+            other => panic!("unexpected in NS INFO MEMBERS batch: {other:?}"),
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn ns_info_members_lists_the_roster_with_roles_and_join_times() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let root = root_key_b64();
+
+    // Ada owns gaming (holds ns-admin implicitly) and joins it. NS JOIN needs a
+    // visible channel to land on, so give it one first.
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
+    drain_until_label(&mut ada, "n").await;
+    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    drain_until_label(&mut ada, "c").await;
+    ada.send("@label=j NS JOIN gaming");
+    drain_until_label(&mut ada, "j").await;
+
+    // Bob joins as a plain member.
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("@label=jb NS JOIN gaming");
+    drain_until_label(&mut bob, "jb").await;
+
+    // A moderator role, assigned to bob.
+    ada.send("@label=r ROLE CREATE ns:gaming #e8654f mute,kick :Moderator");
+    drain_until_label(&mut ada, "r").await;
+    ada.send("@label=a ROLE ASSIGN ns:gaming bob :Moderator");
+    drain_until_label(&mut ada, "a").await;
+
+    // Owner queries the roster.
+    ada.send("@label=i NS INFO MEMBERS gaming");
+    let roster = ns_member_info(&mut ada).await;
+
+    let ada_row = roster
+        .iter()
+        .find(|(n, ..)| n == "ada")
+        .expect("ada present");
+    let bob_row = roster
+        .iter()
+        .find(|(n, ..)| n == "bob")
+        .expect("bob present");
+    // Join times were stamped on NS JOIN (non-zero unix-ms).
+    assert!(ada_row.1 > 0 && bob_row.1 > 0, "join times recorded");
+    // Assigned roles are reported; the owner holds caps implicitly, not via an
+    // assignment, so it lists no roles.
+    assert_eq!(bob_row.2, vec!["Moderator".to_string()]);
+    assert!(ada_row.2.is_empty(), "owner has no *assigned* roles");
+}
+
+#[tokio::test]
+async fn ns_info_members_requires_a_moderation_cap() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let root = root_key_b64();
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
+    drain_until_label(&mut ada, "n").await;
+    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    drain_until_label(&mut ada, "c").await;
+
+    // A plain member (no moderation cap) is refused the roster.
+    let mut carol = ready(&ctx, "carol").await;
+    carol.send("@label=jc NS JOIN gaming");
+    drain_until_label(&mut carol, "jc").await;
+    carol.send("@label=i NS INFO MEMBERS gaming");
+    assert_eq!(
+        carol
+            .expect_err(ErrCode::CapRequired)
+            .await
+            .label
+            .as_deref(),
+        Some("i")
+    );
+}
+
 #[tokio::test]
 async fn adding_a_channel_permission_propagates_to_existing_holders() {
     let ctx = ctx(&[]);

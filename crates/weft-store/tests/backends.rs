@@ -1780,6 +1780,12 @@ where
     let mut ns_mem = store.ns_members(&ns).await.unwrap();
     ns_mem.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     assert_eq!(ns_mem, vec![nm_a.clone(), nm_b.clone()]);
+    // Join times ride along, ordered ascending — and the idempotent re-join
+    // kept nm_a's original 100 (not 999).
+    assert_eq!(
+        store.ns_members_joined(&ns).await.unwrap(),
+        vec![(nm_a.clone(), 100), (nm_b.clone(), 200)]
+    );
 
     // Hide overrides: a PART of one channel while staying in the server.
     assert!(!store.is_hidden(&nm_a, &ns_gen).await.unwrap());

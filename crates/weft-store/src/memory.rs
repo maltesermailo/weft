@@ -1907,6 +1907,20 @@ impl MembershipStore for MemoryStore {
             .collect())
     }
 
+    async fn ns_members_joined(
+        &self,
+        namespace: &NamespaceName,
+    ) -> Result<Vec<(Account, i64)>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut out: Vec<(Account, i64)> = inner
+            .ns_memberships
+            .iter()
+            .filter_map(|(account, map)| map.get(namespace).map(|ms| (account.clone(), *ms)))
+            .collect();
+        out.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(out)
+    }
+
     async fn set_hidden(&self, account: &Account, channel: &ChannelName) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         inner

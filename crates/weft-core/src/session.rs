@@ -20,9 +20,9 @@ use weft_crypto::{Capability, PublicKey, SignedManifest, TokenScope};
 use weft_proto::{
     Account, BridgeState, ChannelKind, ChannelName, Command, ContentState, ErrCode, ErrEvent,
     Event, GroupId, HistoryMode, Line, MediaMode, MemberAction, MessageEvent, ModAction, MsgId,
-    MsgMeta, NamespaceName, NetworkName, ParseError, Reply, ReportScope, ReportStatus, Request,
-    ResolveAction, RetentionPolicy, StreamMode, Target, Ulid, UserRef, VerifyState, Visibility,
-    MAX_LABEL_BYTES,
+    MsgMeta, NamespaceName, NetworkName, NsInfoKind, ParseError, Reply, ReportScope, ReportStatus,
+    Request, ResolveAction, RetentionPolicy, StreamMode, Target, Ulid, UserRef, VerifyState,
+    Visibility, MAX_LABEL_BYTES,
 };
 
 use weft_store::{
@@ -1096,6 +1096,9 @@ impl<S: ControlStream> Session<S> {
             Command::NsRecoveryCancel { name, signature } => {
                 self.on_ns_recovery_cancel(label, name, signature).await
             }
+            Command::NsInfo { name, detail } => match detail {
+                NsInfoKind::Members => self.on_ns_info_members(label, name, account).await,
+            },
             // §6.7 moderation & reporting.
             Command::Report {
                 msgid,

@@ -71,6 +71,23 @@ pub struct CallMediaGrant {
     pub endpoint: Option<String>,
 }
 
+/// The `detail` selector of an `NS INFO` query (§6.2). New moderator views are
+/// added here as subcommands; unknown selectors are a typed parse error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NsInfoKind {
+    /// `MEMBERS` — the namespace roster with per-member join time + roles.
+    Members,
+}
+
+impl NsInfoKind {
+    /// The uppercase wire token (strict-out).
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            NsInfoKind::Members => "MEMBERS",
+        }
+    }
+}
+
 /// M0 verb set. Extra params or an unexpected trailing are ignored
 /// (lenient-in); missing or malformed required parts are typed errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,6 +399,14 @@ pub enum Command {
     NsRecoveryCancel {
         name: NamespaceName,
         signature: String,
+    },
+    /// `NS INFO <detail> <name>` — moderator-only fetch of server-relevant
+    /// namespace details (§6.2). `detail` selects the query; the response is a
+    /// `BATCH`. Cap-gated to holders of a moderation capability at
+    /// `ns:<name>` (owner / ns-admin / ban / kick / mute / reports).
+    NsInfo {
+        name: NamespaceName,
+        detail: NsInfoKind,
     },
     /// `DISCOVER [cursor]` — public namespace directory (§6.2).
     Discover { cursor: Option<String> },
@@ -1314,6 +1339,21 @@ impl Command {
                         name: args.req("name")?.parse()?,
                         rotation: args.req("rotation-record")?.to_string(),
                     }),
+                    "INFO" => {
+                        let detail = args.req("detail")?.to_ascii_uppercase();
+                        let name = args.req("name")?.parse()?;
+                        let detail = match detail.as_str() {
+                            "MEMBERS" => NsInfoKind::Members,
+                            _ => {
+                                return Err(ParseError::BadParam {
+                                    verb: "NS",
+                                    what: "info detail",
+                                    value: detail,
+                                })
+                            }
+                        };
+                        Ok(Command::NsInfo { name, detail })
+                    }
                     // Three-word: NS RECOVERY SET | NS RECOVERY CANCEL.
                     "RECOVERY" => {
                         let action = args.req("action")?.to_ascii_uppercase();
@@ -2270,6 +2310,15 @@ impl Command {
             Command::NsRecover { name, rotation } => (
                 "NS",
                 vec!["RECOVER".to_string(), name.to_string(), rotation.clone()],
+                None,
+            ),
+            Command::NsInfo { name, detail } => (
+                "NS",
+                vec![
+                    "INFO".to_string(),
+                    detail.as_wire().to_string(),
+                    name.to_string(),
+                ],
                 None,
             ),
             Command::NsRecoveryCancel { name, signature } => {
@@ -3287,6 +3336,30 @@ mod tests {
             "NS LEAVE gaming"
         );
         assert!(Request::parse("NS FROB x").is_err());
+    }
+
+    #[test]
+    fn ns_info_round_trip() {
+        let req = Request::with_label(
+            Command::NsInfo {
+                name: "gaming".parse().unwrap(),
+                detail: NsInfoKind::Members,
+            },
+            "i1",
+        );
+        assert_eq!(req.serialize().unwrap(), "@label=i1 NS INFO MEMBERS gaming");
+        round_trip(&req);
+
+        // Detail selector is case-insensitive (lenient-in).
+        assert_eq!(
+            Request::parse("NS INFO members gaming"),
+            Ok(Request::new(Command::NsInfo {
+                name: "gaming".parse().unwrap(),
+                detail: NsInfoKind::Members,
+            }))
+        );
+        // Unknown detail is a typed error, not a silent Unknown.
+        assert!(Request::parse("NS INFO FROB gaming").is_err());
     }
 
     #[test]

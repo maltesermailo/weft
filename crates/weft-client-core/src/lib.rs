@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 use weft_crypto::{sign_challenge, signature_to_b64, Keypair};
-use weft_proto::{Command, Event, MsgId, Reply, Request, Target};
+use weft_proto::{Command, Event, MsgId, NsInfoKind, Reply, Request, Target};
 
 /// How a binding delivers a parsed event to its UI — Tauri `emit`, a JS
 /// callback in wasm, a channel in tests.
@@ -347,6 +347,16 @@ pub enum ClientEvent {
         action: String,
         count: Option<u64>,
     },
+    /// `NS-MEMBER-INFO <ns> <user@net> <joined-ms> [roles=…]` — one row of the
+    /// `NS INFO MEMBERS` moderator roster: a member with their join time (ms,
+    /// `0` when unknown) and assigned ns-scoped role names.
+    NsMemberInfo {
+        namespace: String,
+        user: String,
+        network: String,
+        joined_ms: u64,
+        roles: Vec<String>,
+    },
     Member {
         channel: String,
         user: String,
@@ -604,6 +614,18 @@ pub fn on_line<E: EventSink>(
             network: user.network.to_string(),
             action: action.to_string(),
             count,
+        }),
+        Event::NsMemberInfo {
+            namespace,
+            user,
+            joined_ms,
+            roles,
+        } => sink.emit(ClientEvent::NsMemberInfo {
+            namespace: namespace.to_string(),
+            user: user.account.to_string(),
+            network: user.network.to_string(),
+            joined_ms,
+            roles,
         }),
         Event::MediaToken { token } => sink.emit(ClientEvent::MediaToken { token }),
         // §6/§13 a HISTORY over the stream threshold — pull it off the data plane.
@@ -1406,6 +1428,19 @@ pub fn build_caps(account: &str, scope: &str) -> Result<String, String> {
 pub fn build_roles(scope: &str) -> Result<String, String> {
     Request::new(Command::RolesList {
         scope: scope.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `NS INFO MEMBERS <ns>` — the moderator roster (members + join times +
+/// assigned roles) as a `BATCH` of `NS-MEMBER-INFO`.
+pub fn build_ns_info_members(namespace: &str) -> Result<String, String> {
+    let name: weft_proto::NamespaceName =
+        namespace.parse().map_err(|_| "bad namespace".to_string())?;
+    Request::new(Command::NsInfo {
+        name,
+        detail: NsInfoKind::Members,
     })
     .serialize()
     .map_err(|e| e.to_string())
