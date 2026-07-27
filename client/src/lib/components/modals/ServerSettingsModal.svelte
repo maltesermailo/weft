@@ -43,9 +43,13 @@
         m.account.toLowerCase().includes(memberSearch.toLowerCase()),
     ),
   );
-  // A namespace-scoped role's color, for the member's role pills.
-  function roleColor(name: string): string {
-    return (app.rolesByScope[`ns:${app.activeServer}`] ?? []).find((r) => r.name === name)?.color ?? "#99aab5";
+  // A member's role pill is keyed by role **id** (v0.13); resolve its color +
+  // display name through the scope's definitions.
+  function roleColor(id: string): string {
+    return app.roleById(`ns:${app.activeServer}`, id)?.color ?? "#99aab5";
+  }
+  function roleName(id: string): string {
+    return app.roleById(`ns:${app.activeServer}`, id)?.name ?? id;
   }
   // Join date: "0" means the server had no recorded join time (pre-v0.12 backfill).
   function fmtJoined(ms: number): string {
@@ -60,7 +64,7 @@
   let addRoleFor = $state<string | null>(null);
   // Roles a member doesn't already hold — the options for their add-role menu.
   function unheldRoles(held: string[]) {
-    return nsRoles.filter((r) => !held.includes(r.name));
+    return nsRoles.filter((r) => !held.includes(r.id));
   }
 
   // Options for the segmented (button-group) inputs — the fancy replacements
@@ -314,8 +318,8 @@
               <div class="mem-roles">
                 {#each m.roles as r (r)}
                   <span class="role-pill editable" style="--role:{roleColor(r)}">
-                    <span class="role-dot"></span>{r}
-                    <button class="role-x" title="Remove role" aria-label={`Remove ${r}`} onclick={() => app.unassignNsRole(m.account, r)}>✕</button>
+                    <span class="role-dot"></span>{roleName(r)}
+                    <button class="role-x" title="Remove role" aria-label={`Remove ${roleName(r)}`} onclick={() => app.unassignNsRole(m.account, r)}>✕</button>
                   </span>
                 {/each}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -331,7 +335,7 @@
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div class="role-add-menu" role="menu">
                       {#each unheldRoles(m.roles) as r (r.name)}
-                        <button class="role-add-opt" onclick={() => { app.assignNsRole(m.account, r.name); addRoleFor = null; }}>
+                        <button class="role-add-opt" onclick={() => { app.assignNsRole(m.account, r.id); addRoleFor = null; }}>
                           <span class="role-dot" style="--role:{r.color}"></span>{r.name}
                         </button>
                       {:else}

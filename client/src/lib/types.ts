@@ -102,11 +102,16 @@ export type MemberInfoC = {
   account: string;
   network: string;
   joinedMs: number;
+  /// Assigned role **ids** (v0.13 NS-MEMBER-INFO) — map through `roleById` for
+  /// the display name/color; names aren't unique.
   roles: string[];
 };
 
 /// A namespace-scoped role definition (name + color + caps + hoist + pingable + position).
 export type RoleDefC = {
+  /// Stable role ULID id (v0.13) — what mutations (assign/unassign/delete/
+  /// reorder/update) address. `name` is a mutable display label.
+  id: string;
   name: string;
   color: string;
   caps: string[];

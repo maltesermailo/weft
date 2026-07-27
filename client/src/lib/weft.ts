@@ -129,7 +129,7 @@ export type WeftEvent =
   | { kind: "call-media"; room: string; mode: string; token: string; endpoint: string | null }
   | { kind: "caps"; account: string; scope: string; caps: string }
   | { kind: "grant-info"; scope: string; subject: string; caps: string }
-  | { kind: "role"; scope: string; color: string; caps: string; hoist: boolean; pingable: boolean; position: number; name: string }
+  | { kind: "role"; scope: string; role: string; color: string; caps: string; hoist: boolean; pingable: boolean; position: number; name: string }
   | { kind: "role-member"; scope: string; account: string; roles: string }
   | { kind: "chanmeta"; channel: string; key: string; value: string }
   | {
@@ -758,22 +758,34 @@ export function roleCreate(
 ) {
   return invoke("role_create", { scope, color, caps, hoist, pingable, position, name });
 }
-/// Reorder roles: positions are set from the order of `names` (§6.5).
-export function rolesReorder(scope: string, names: string[]) {
-  return invoke("roles_reorder", { scope, order: names.join(",") });
+/// Reorder roles: positions are set from the order of the role **ids** (§6.5, v0.13).
+export function rolesReorder(scope: string, roleIds: string[]) {
+  return invoke("roles_reorder", { scope, order: roleIds.join(",") });
 }
-export function roleDelete(scope: string, name: string) {
-  return invoke("role_delete", { scope, name });
+/// Delete a role by its stable id (v0.13).
+export function roleDelete(scope: string, role: string) {
+  return invoke("role_delete", { scope, name: role });
 }
-/// Rename a role in place — its members and granted caps come with it (§6.5).
-export function roleRename(scope: string, old: string, name: string) {
-  return invoke("role_rename", { scope, old, new: name });
+/// Edit a role in place by its id — replaces color/caps/flags and, if `name`
+/// differs, renames it (members + granted caps come with it, §6.5, v0.13).
+export function roleUpdate(
+  scope: string,
+  role: string,
+  color: string,
+  caps: string,
+  hoist: boolean,
+  pingable: boolean,
+  position: number,
+  name: string,
+) {
+  return invoke("role_update", { scope, role, color, caps, hoist, pingable, position, name });
 }
-export function roleAssign(scope: string, account: string, name: string) {
-  return invoke("role_assign", { scope, account, name });
+/// Assign/unassign a role to an account by the role's id (v0.13).
+export function roleAssign(scope: string, account: string, role: string) {
+  return invoke("role_assign", { scope, account, name: role });
 }
-export function roleUnassign(scope: string, account: string, name: string) {
-  return invoke("role_unassign", { scope, account, name });
+export function roleUnassign(scope: string, account: string, role: string) {
+  return invoke("role_unassign", { scope, account, name: role });
 }
 /// Query an account's explicitly-assigned roles at a scope → a `role-member` event.
 export function rolesOfAccount(scope: string, account: string) {

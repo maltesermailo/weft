@@ -25,11 +25,11 @@
   // Hoisted roles, already in position order (top = highest).
   const hoisted = $derived((app.rolesByScope[roleScope] ?? []).filter((r) => r.hoist));
 
-  // A member's primary hoisted role = the highest (first in order) hoisted role
-  // they hold, or undefined.
+  // A member's primary hoisted role **id** = the highest (first in order)
+  // hoisted role they hold, or undefined (id-keyed — names aren't unique, v0.13).
   function primaryHoist(name: string): string | undefined {
-    const held = new Set(app.rolesOf(name, roleScope).map((r) => r.name));
-    return hoisted.find((r) => held.has(r.name))?.name;
+    const held = new Set(app.rolesOf(name, roleScope).map((r) => r.id));
+    return hoisted.find((r) => held.has(r.id))?.id;
   }
 
   // Discord grouping: each hoisted role's ONLINE members, then everyone else
@@ -41,10 +41,10 @@
     const out: Group[] = [];
     const claimed = new Set<string>();
     for (const role of hoisted) {
-      const inRole = online.filter((m) => !claimed.has(m.name) && primaryHoist(m.name) === role.name);
+      const inRole = online.filter((m) => !claimed.has(m.name) && primaryHoist(m.name) === role.id);
       inRole.forEach((m) => claimed.add(m.name));
       if (inRole.length) {
-        out.push({ key: `role:${role.name}`, label: role.name, color: role.color, members: inRole });
+        out.push({ key: `role:${role.id}`, label: role.name, color: role.color, members: inRole });
       }
     }
     const restOnline = online.filter((m) => !claimed.has(m.name));

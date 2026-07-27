@@ -54,7 +54,7 @@
   let draft = $state({ name: "", color: "", caps: [] as string[], hoist: false, pingable: false });
   const editing = $derived(
     selected && selected !== EVERYONE_ROLE && selected !== "__new__"
-      ? (roles.find((r) => r.name === selected) ?? null)
+      ? (roles.find((r) => r.id === selected) ?? null)
       : null,
   );
 
@@ -63,17 +63,17 @@
     editing
       ? nsMembers.filter(
           (n) =>
-            app.rolesOf(n, scope).some((r) => r.name === editing!.name) &&
+            app.rolesOf(n, scope).some((r) => r.id === editing!.id) &&
             (app.displayName(n).toLowerCase().includes(memberSearch.toLowerCase()) ||
               n.toLowerCase().includes(memberSearch.toLowerCase())),
         )
       : [],
   );
 
-  function pick(name: string) {
-    selected = name;
+  function pick(id: string) {
+    selected = id;
     tab = "display";
-    const r = roles.find((x) => x.name === name);
+    const r = roles.find((x) => x.id === id);
     if (r) draft = { name: r.name, color: r.color, caps: [...r.caps], hoist: r.hoist, pingable: r.pingable };
   }
   function pickEveryone() {
@@ -109,9 +109,9 @@
     });
     selected = null; // the refreshed ROLES batch is the confirmation
   }
-  function remove(name: string) {
-    if (selected === name) selected = null;
-    app.deleteRole(name);
+  function remove(id: string) {
+    if (selected === id) selected = null;
+    app.deleteRole(id);
   }
   function create() {
     app.createRole();
@@ -133,7 +133,7 @@
   const saveDisabled = $derived(selected !== EVERYONE_ROLE && (!draft.name.trim() || draft.caps.length === 0));
   function revertSelection() {
     if (selected === EVERYONE_ROLE) everyoneDraft = [...app.everyoneCaps()];
-    else if (editing) pick(editing.name);
+    else if (editing) pick(editing.id);
   }
   function saveSelection() {
     if (selected === EVERYONE_ROLE) app.setEveryoneCaps(everyoneDraft);
@@ -149,7 +149,7 @@
   };
   function onDragStart(e: DragEvent, i: number) {
     dragFrom = i;
-    e.dataTransfer?.setData("text/plain", filtered[i].name);
+    e.dataTransfer?.setData("text/plain", filtered[i].id);
     if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
   }
   function onDragOver(e: DragEvent, i: number) {
@@ -163,7 +163,7 @@
     const from = dragFrom;
     resetDrag();
     if (from === null || from === to) return;
-    const list = filtered.map((r) => r.name);
+    const list = filtered.map((r) => r.id);
     const [moved] = list.splice(from, 1);
     list.splice(to, 0, moved);
     app.reorderRoles(list);
@@ -171,7 +171,7 @@
   function onRowKey(e: KeyboardEvent, r: RoleDefC) {
     if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
     e.preventDefault();
-    app.moveRole(r.name, e.key === "ArrowUp" ? -1 : 1);
+    app.moveRole(r.id, e.key === "ArrowUp" ? -1 : 1);
   }
 
   // Currently-selected role's live color, for the editor header preview.
@@ -190,10 +190,10 @@
     </div>
     <div class="rl-side-label">Roles — {roles.length}</div>
     <div class="rl-list">
-      {#each filtered as r, i (r.name)}
+      {#each filtered as r, i (r.id)}
         <div
           class="rl-row"
-          class:active={selected === r.name}
+          class:active={selected === r.id}
           class:dragging={dragFrom === i}
           class:drop-before={dragOver === i && dragFrom !== null && dragFrom > i}
           class:drop-after={dragOver === i && dragFrom !== null && dragFrom < i}
@@ -204,9 +204,9 @@
           ondragover={(e) => onDragOver(e, i)}
           ondrop={(e) => onDrop(e, i)}
           ondragend={resetDrag}
-          onclick={() => pick(r.name)}
+          onclick={() => pick(r.id)}
           onkeydown={(e) => {
-            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(r.name); }
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(r.id); }
             else onRowKey(e, r);
           }}
           title="Edit {r.name} — Alt+↑/↓ to reorder"
@@ -282,7 +282,7 @@
           <span>{draft.name.trim() || editing.name}</span>
           {#if draft.caps.includes("ns-admin")}<span class="rl-badge admin">Administrator</span>{/if}
         </div>
-        <button class="rl-delete" onclick={() => remove(editing.name)}>🗑 Delete</button>
+        <button class="rl-delete" onclick={() => remove(editing.id)}>🗑 Delete</button>
       </div>
       <div class="rl-tabs">
         <button class:active={tab === "display"} onclick={() => (tab = "display")}>Display</button>

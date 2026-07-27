@@ -733,10 +733,15 @@
     roleFetchQueue.push(scope);
     return weft.roleCreate(scope, color, caps, hoist, pingable, position, name);
   }
-  function deleteRoleAt(scope: string, name: string) {
+  function deleteRoleAt(scope: string, roleId: string) {
     roleFetchQueue.push(scope);
-    return weft.roleDelete(scope, name);
+    return weft.roleDelete(scope, roleId);
   }
+  /// v0.13: role identity is the id (names aren't unique) — resolve an id to its
+  /// definition at a scope for display (name/color). ROLE-MEMBER / NS-MEMBER-INFO
+  /// carry ids, so member rosters map through this to render.
+  const roleById = (scope: string, id: string): RoleDefC | undefined =>
+    (rolesByScope[scope] ?? []).find((r) => r.id === id);
   /// Is this account the owner/operator at the scope (implicit all-caps)?
   const isOwnerAt = (account: string, scope: string) =>
     capsFor[`${account}|${scope}`]?.owner ?? false;
@@ -781,8 +786,9 @@
   }
   /// The role definitions an account is assigned at a scope.
   function rolesOf(account: string, scope: string): RoleDefC[] {
-    const names = new Set(memberRoles[`${account}|${scope}`] ?? []);
-    return (rolesByScope[scope] ?? []).filter((r) => names.has(r.name));
+    // memberRoles holds role **ids** (v0.13 ROLE-MEMBER); match by id.
+    const ids = new Set(memberRoles[`${account}|${scope}`] ?? []);
+    return (rolesByScope[scope] ?? []).filter((r) => ids.has(r.id));
   }
   // The color to tint an account's name with — their highest assigned role at
   // the active namespace (Discord-style), excluding the implicit @everyone.
@@ -875,7 +881,7 @@
     // `expectSuccess`); a missing-cap failure never confirms and its ERR toasts.
     expectSuccess(`roles:${acct}|${scope}`, `Roles updated for ${acct}`);
     weft
-      .roleAssign(scope, acct, role.name)
+      .roleAssign(scope, acct, role.id)
       .then(() => fetchMemberRoles(acct, scope)) // ROLES-OF queues after ASSIGN → fresh list
       .catch((e) => toast(String(e), "error"));
   }
@@ -883,7 +889,7 @@
     const scope = roleScopeOf(active);
     expectSuccess(`roles:${acct}|${scope}`, `Roles updated for ${acct}`);
     weft
-      .roleUnassign(scope, acct, role.name)
+      .roleUnassign(scope, acct, role.id)
       .then(() => fetchMemberRoles(acct, scope))
       .catch((e) => toast(String(e), "error"));
   }
@@ -957,30 +963,41 @@
   // baseline). It's never assigned or hoisted.
   function setEveryoneCaps(caps: string[]) {
     const scope = nsRoleScope();
-    const p = caps.length
-      ? createRoleAt(scope, EVERYONE_ROLE, "#99aab5", caps.join(","), false, false, 0)
-      : deleteRoleAt(scope, EVERYONE_ROLE);
-    p.catch((e) => toast(String(e), "error"));
+    // Non-empty upserts the @everyone role by name (ROLE CREATE matches it by
+    // name); empty deletes it — deletion addresses the role by its id (v0.13).
+    if (caps.length) {
+      createRoleAt(scope, EVERYONE_ROLE, "#99aab5", caps.join(","), false, false, 0).catch((e) =>
+        toast(String(e), "error"),
+      );
+      return;
+    }
+    // @everyone is the one reserved, per-scope-unique role — safe to resolve by
+    // name; delete addresses it by its id.
+    const everyone = (rolesByScope[scope] ?? []).find((r) => r.name === EVERYONE_ROLE);
+    if (everyone) deleteRoleAt(scope, everyone.id).catch((e) => toast(String(e), "error"));
   }
   // Move a role up/down in the ordered list, then persist the new order (§6.5).
-  function moveRole(name: string, dir: -1 | 1) {
+  // Addressed by the role id (names aren't unique, v0.13).
+  function moveRole(roleId: string, dir: -1 | 1) {
     const scope = nsRoleScope();
     const list = [...(rolesByScope[scope] ?? [])];
-    const i = list.findIndex((r) => r.name === name);
+    const i = list.findIndex((r) => r.id === roleId);
     const j = i + dir;
     if (i < 0 || j < 0 || j >= list.length) return;
     [list[i], list[j]] = [list[j], list[i]];
     roleFetchQueue.push(scope);
-    weft.rolesReorder(scope, list.map((r) => r.name)).catch((e) => toast(String(e), "error"));
+    weft.rolesReorder(scope, list.map((r) => r.id)).catch((e) => toast(String(e), "error"));
   }
-  // Persist an arbitrary order (drag-and-drop) — positions follow the list.
-  function reorderRoles(names: string[]) {
+  // Persist an arbitrary order (drag-and-drop) — positions follow the list of
+  // role ids (v0.13).
+  function reorderRoles(ids: string[]) {
     const scope = nsRoleScope();
     roleFetchQueue.push(scope);
-    weft.rolesReorder(scope, names).catch((e) => toast(String(e), "error"));
+    weft.rolesReorder(scope, ids).catch((e) => toast(String(e), "error"));
   }
-  // Apply a role edit. A changed name goes through ROLE RENAME so the role keeps
-  // its members and issued caps; the rest rides the ordinary upsert (§6.5).
+  // Apply a role edit. v0.13: a single ROLE UPDATE addressed by the role's id
+  // replaces every field and carries a name change (keeping members + issued
+  // caps) — no separate RENAME + upsert (§6.5).
   function saveRole(
     role: RoleDefC,
     patch: { name: string; color: string; caps: string[]; hoist: boolean; pingable: boolean },
@@ -991,23 +1008,24 @@
       toast("A role needs at least one permission", "error");
       return;
     }
-    const upsert = () =>
-      createRoleAt(scope, name, patch.color, patch.caps.join(","), patch.hoist, patch.pingable, role.position);
-
-    if (name !== role.name) {
-      roleFetchQueue.push(scope);
-      weft
-        .roleRename(scope, role.name, name)
-        .then(upsert)
-        .catch((e) => toast(String(e), "error"));
-    } else {
-      upsert().catch((e) => toast(String(e), "error"));
-    }
+    roleFetchQueue.push(scope);
+    weft
+      .roleUpdate(
+        scope,
+        role.id,
+        patch.color,
+        patch.caps.join(","),
+        patch.hoist,
+        patch.pingable,
+        role.position,
+        name,
+      )
+      .catch((e) => toast(String(e), "error"));
   }
-  function deleteRole(name: string) {
-    deleteRoleAt(nsRoleScope(), name).catch((e) => toast(String(e), "error"));
+  function deleteRole(roleId: string) {
+    deleteRoleAt(nsRoleScope(), roleId).catch((e) => toast(String(e), "error"));
   }
-  function assignRole(name: string) {
+  function assignRole(roleId: string) {
     const who = nsDelegSubject.trim();
     if (!who) {
       toast("Enter an account first", "error");
@@ -1015,7 +1033,7 @@
     }
     // Confirmed by the ROLE-MEMBER event; a cap failure never confirms.
     expectSuccess(`roles:${who}|${nsRoleScope()}`, `Roles updated for ${who}`);
-    weft.roleAssign(nsRoleScope(), who, name).catch((e) => toast(String(e), "error"));
+    weft.roleAssign(nsRoleScope(), who, roleId).catch((e) => toast(String(e), "error"));
   }
 
   // In-line role editing for the Members directory. Both mutate the roster
@@ -1030,28 +1048,30 @@
   function memberRow(ns: string, account: string): MemberInfoC | undefined {
     return (nsMembersByNs[ns] ?? []).find((m) => m.account === account);
   }
-  function assignNsRole(account: string, name: string) {
+  // v0.13: addressed by the role id. The roster's `m.roles` is a list of ids
+  // (NS-MEMBER-INFO), so the optimistic update adds/removes the same id.
+  function assignNsRole(account: string, roleId: string) {
     const scope = nsRoleScope();
     const ns = activeServer;
     const m = memberRow(ns, account);
-    if (m && !m.roles.includes(name)) m.roles = [...m.roles, name];
+    if (m && !m.roles.includes(roleId)) m.roles = [...m.roles, roleId];
     expectSuccess(`roles:${account}|${scope}`, `Roles updated for ${account}`);
     weft
-      .roleAssign(scope, account, name)
+      .roleAssign(scope, account, roleId)
       .then(() => reconcileRoster(ns))
       .catch((e) => {
         toast(String(e), "error");
         fetchNsMembers(ns);
       });
   }
-  function unassignNsRole(account: string, name: string) {
+  function unassignNsRole(account: string, roleId: string) {
     const scope = nsRoleScope();
     const ns = activeServer;
     const m = memberRow(ns, account);
-    if (m) m.roles = m.roles.filter((r) => r !== name);
+    if (m) m.roles = m.roles.filter((r) => r !== roleId);
     expectSuccess(`roles:${account}|${scope}`, `Roles updated for ${account}`);
     weft
-      .roleUnassign(scope, account, name)
+      .roleUnassign(scope, account, roleId)
       .then(() => reconcileRoster(ns))
       .catch((e) => {
         toast(String(e), "error");
@@ -2062,6 +2082,7 @@
       }
       case "role":
         roleBuf.push({
+          id: e.role,
           name: e.name,
           color: e.color,
           caps: e.caps ? e.caps.split(",") : [],
@@ -2787,7 +2808,7 @@
     // @mentions → pills; a mention of me / @everyone / @here / a pingable role
     // I hold highlights. Role pills carry the role's color.
     const pingable = (rolesByScope[`ns:${activeServer}`] ?? []).filter((r) => r.pingable);
-    const myRoles = new Set(memberRoles[`${account}|ns:${activeServer}`] ?? []);
+    const myRoleIds = new Set(memberRoles[`${account}|ns:${activeServer}`] ?? []);
     s = s.replace(/@(everyone|here|[a-z0-9][a-z0-9._-]*)/gi, (_full, name: string) => {
       const lower = name.toLowerCase();
       const role = pingable.find((r) => r.name.toLowerCase() === lower);
@@ -2795,7 +2816,7 @@
         name === account ||
         lower === "everyone" ||
         lower === "here" ||
-        (!!role && myRoles.has(role.name));
+        (!!role && myRoleIds.has(role.id));
       // Colors ride the wire, so only emit ones matching a strict hex pattern —
       // never interpolate arbitrary text into a style attribute.
       const style = role && /^#[0-9a-fA-F]{3,8}$/.test(role.color) ? ` style="color:${role.color}"` : "";
@@ -2934,14 +2955,14 @@
     if (!account) return false;
     if (new RegExp(`@${account}\\b`, "i").test(body) || /@(everyone|here)\b/i.test(body)) return true;
     const scope = ns ? `ns:${ns}` : "*";
-    const mine = memberRoles[`${account}|${scope}`] ?? [];
-    const pingable = new Set(
-      (rolesByScope[scope] ?? []).filter((r) => r.pingable).map((r) => r.name.toLowerCase()),
-    );
-    return mine.some(
+    // memberRoles holds role ids; a role pings me if it's pingable and its
+    // display name appears as an @mention in the body (v0.13).
+    const mineIds = new Set(memberRoles[`${account}|${scope}`] ?? []);
+    return (rolesByScope[scope] ?? []).some(
       (r) =>
-        pingable.has(r.toLowerCase()) &&
-        new RegExp(`@${r.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(body),
+        r.pingable &&
+        mineIds.has(r.id) &&
+        new RegExp(`@${r.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(body),
     );
   };
 
@@ -3995,6 +4016,7 @@
     // roles (ProfileCard)
     get rolesByScope() { return rolesByScope; },
     rolesOf,
+    roleById,
     ensureMemberRoles,
     ensureRoles,
     get nsMembersByNs() { return nsMembersByNs; },

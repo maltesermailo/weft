@@ -278,12 +278,9 @@ impl<S: ControlStream> Session<S> {
         self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
             .await?;
         for (member, joined_ms) in members {
-            let roles = self
-                .ctx
-                .roles
-                .roles_of(&scope_str, member.as_str())
-                .await
-                .unwrap_or_default();
+            // v0.13: the roster carries role **ids** so the client addresses them
+            // unambiguously (names aren't unique).
+            let roles = self.assigned_role_ids(&scope_str, member.as_str()).await;
             let user = UserRef::new(member, self.ctx.info.network.clone());
             self.send_event(
                 None,

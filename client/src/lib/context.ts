@@ -349,6 +349,9 @@ export interface AppCtx {
   // ---- roles (ProfileCard) ----
   readonly rolesByScope: Record<string, RoleDefC[]>;
   rolesOf(account: string, scope: string): RoleDefC[];
+  /// Resolve a role **id** to its definition at a scope (v0.13) — member rosters
+  /// carry ids, so display maps through this for the name + color.
+  roleById(scope: string, id: string): RoleDefC | undefined;
   ensureMemberRoles(account: string): void;
   ensureRoles(scope: string): void;
   roleScopeOf(channel: string): string;
@@ -468,18 +471,21 @@ export interface AppCtx {
   /** §6.2 set (or clear, "") the namespace's welcome channel. */
   nsSetWelcome(channel: string): void;
   createRole(): void;
-  moveRole(name: string, dir: -1 | 1): void;
-  /// Persist an arbitrary role order (drag-and-drop) — positions follow the list.
-  reorderRoles(names: string[]): void;
-  /// Apply an edit to an existing role. A changed `name` renames in place, so
-  /// the role keeps its members and issued caps (§6.5).
+  /// Move a role up/down by its **id** (v0.13 — names aren't unique).
+  moveRole(roleId: string, dir: -1 | 1): void;
+  /// Persist an arbitrary role order (drag-and-drop) — a list of role **ids**.
+  reorderRoles(ids: string[]): void;
+  /// Apply an edit to an existing role (by id). A changed `name` renames in
+  /// place, so the role keeps its members and issued caps (§6.5).
   saveRole(role: RoleDefC, patch: { name: string; color: string; caps: string[]; hoist: boolean; pingable: boolean }): void;
-  deleteRole(name: string): void;
+  /// Delete a role by its id.
+  deleteRole(roleId: string): void;
   /** The implicit @everyone role's current caps at the active server. */
   everyoneCaps(): string[];
   /** Set the @everyone baseline caps ([] clears it). */
   setEveryoneCaps(caps: string[]): void;
-  assignRole(name: string): void;
+  /// Assign the role with this id to the typed delegation subject.
+  assignRole(roleId: string): void;
   showRecoveryKey(): void;
   startRecovery(): void;
   cosignRecovery(): void;

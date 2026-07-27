@@ -734,14 +734,25 @@ fn role_delete(conn: State<'_, Conn>, scope: String, name: String) -> Result<(),
     conn.send(weft::build_role_delete(&scope, &name)?)
 }
 
+// v0.13: ROLE RENAME folded into ROLE UPDATE — edit a role in place by its
+// stable id (a rename is just a new trailing name). The caller supplies the
+// full definition so the update is idempotent.
 #[tauri::command]
-fn role_rename(
+#[allow(clippy::too_many_arguments)]
+fn role_update(
     conn: State<'_, Conn>,
     scope: String,
-    old: String,
-    new: String,
+    role: String,
+    color: String,
+    caps: String,
+    hoist: bool,
+    pingable: bool,
+    position: i32,
+    name: String,
 ) -> Result<(), String> {
-    conn.send(weft::build_role_rename(&scope, &old, &new)?)
+    conn.send(weft::build_role_update(
+        &scope, &role, &color, &caps, hoist, pingable, position, &name,
+    )?)
 }
 
 #[tauri::command]
@@ -1014,7 +1025,7 @@ pub fn run() {
             role_create,
             roles_reorder,
             role_delete,
-            role_rename,
+            role_update,
             role_assign,
             role_unassign,
             roles_of,

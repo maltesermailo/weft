@@ -38,7 +38,7 @@
   // purely cosmetic, since the owner already holds every capability.
   const canAssignRoles = $derived(allRoles.length > 0 && (!isSelf || iAmOwner));
   // Roles this account doesn't hold yet — the "+" dropdown's options.
-  const unheldRoles = $derived(allRoles.filter((r) => !myRoles.some((h) => h.name === r.name)));
+  const unheldRoles = $derived(allRoles.filter((r) => !myRoles.some((h) => h.id === r.id)));
   let roleMenuOpen = $state(false);
 
   // §10.3 moderator nickname edit (server enforces `manage-nicks`).
@@ -108,7 +108,7 @@
         <div class="profile-section-label">Roles</div>
         <div class="role-pills">
           <!-- Discord-style: show only the roles this member holds; the "+" adds. -->
-          {#each myRoles as r (r.name)}
+          {#each myRoles as r (r.id)}
             <span class="role-pill" style="--role: {r.color}">
               <span class="role-dot"></span>{r.name}
               {#if canAssignRoles}<button class="pill-x" title="Remove {r.name}" aria-label="Remove {r.name}" onclick={() => app.unassignRoleFrom(target, r)}>×</button>{/if}
@@ -120,7 +120,7 @@
               {#if roleMenuOpen}
                 <button class="role-add-backdrop" aria-label="Close" onclick={() => (roleMenuOpen = false)}></button>
                 <div class="role-add-menu">
-                  {#each unheldRoles as r (r.name)}
+                  {#each unheldRoles as r (r.id)}
                     <button class="role-add-item" onclick={() => { app.assignRoleTo(target, r); roleMenuOpen = false; }}>
                       <span class="role-dot" style="--role: {r.color}"></span>{r.name}
                     </button>

@@ -6308,7 +6308,8 @@ async fn role_assigns_to_a_foreign_user() {
         panic!("expected ROLE-MEMBER, got {reply:?}");
     };
     assert_eq!(account, "alice@peer.example");
-    assert_eq!(roles, "Moderator");
+    // v0.13: ROLE-MEMBER carries the role **id** (names aren't unique).
+    assert_eq!(roles, &role_id);
 }
 
 #[tokio::test]
@@ -6342,7 +6343,8 @@ async fn renaming_a_role_keeps_its_members_and_caps() {
     let Event::RoleMember { roles, .. } = &ev.event else {
         panic!("expected ROLE-MEMBER, got {ev:?}");
     };
-    assert_eq!(roles, "Head Moderator");
+    // The id is stable across a rename, so membership still reports it.
+    assert_eq!(roles, &role_id);
 
     // ...and the granted bundle is untouched (authority is caps, not the name).
     root.send("@label=q CAPS bob *");
@@ -6547,9 +6549,9 @@ async fn ns_info_members_lists_the_roster_with_roles_and_join_times() {
         .expect("bob present");
     // Join times were stamped on NS JOIN (non-zero unix-ms).
     assert!(ada_row.1 > 0 && bob_row.1 > 0, "join times recorded");
-    // Assigned roles are reported; the owner holds caps implicitly, not via an
-    // assignment, so it lists no roles.
-    assert_eq!(bob_row.2, vec!["Moderator".to_string()]);
+    // Assigned roles are reported by **id** (v0.13); the owner holds caps
+    // implicitly, not via an assignment, so it lists no roles.
+    assert_eq!(bob_row.2, vec![mod_id.clone()]);
     assert!(ada_row.2.is_empty(), "owner has no *assigned* roles");
 }
 
@@ -6946,7 +6948,7 @@ async fn roles_are_explicit_membership_not_derived() {
     root.send("@label=q2 ROLES-OF * bob");
     let ev = drain_until_label(&mut root, "q2").await;
     assert!(
-        matches!(&ev.event, Event::RoleMember { roles, .. } if roles == "Mod"),
+        matches!(&ev.event, Event::RoleMember { roles, .. } if roles == &mod_id),
         "got {ev:?}"
     );
 

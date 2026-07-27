@@ -347,24 +347,39 @@ impl<S: ControlStream> Session<S> {
     }
 
     /// §6.5 ROLES-OF: the roles an account is explicitly assigned at a scope.
+    /// Resolve an account's assigned role **names** at a scope to their stable
+    /// role **ids** (v0.13) — the wire form of `ROLE-MEMBER`/`NS-MEMBER-INFO`, so
+    /// clients address roles unambiguously (names aren't unique). A name with no
+    /// id (a race with a delete) is dropped.
+    pub(super) async fn assigned_role_ids(&self, scope: &str, account: &str) -> Vec<String> {
+        let names = self
+            .ctx
+            .roles
+            .roles_of(scope, account)
+            .await
+            .unwrap_or_default();
+        let mut ids = Vec::with_capacity(names.len());
+        for name in names {
+            if let Ok(Some(id)) = self.ctx.roles.role_id(scope, &name).await {
+                ids.push(id);
+            }
+        }
+        ids
+    }
+
     pub(super) async fn on_roles_of(
         &mut self,
         label: Option<String>,
         scope: String,
         account: String,
     ) -> io::Result<Flow> {
-        let names = self
-            .ctx
-            .roles
-            .roles_of(&scope, &account)
-            .await
-            .unwrap_or_default();
+        let roles = self.assigned_role_ids(&scope, &account).await;
         self.send_event(
             label,
             Event::RoleMember {
                 scope,
                 account,
-                roles: names.join(","),
+                roles: roles.join(","),
             },
         )
         .await?;
