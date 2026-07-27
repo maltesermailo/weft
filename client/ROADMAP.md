@@ -4,8 +4,9 @@
 > This file is the detailed **client** roadmap it links to.
 
 Gap analysis of the Tauri/SvelteKit client against a Discord-class experience,
-mapped to WEFT protocol verbs. `[ ]` = not started · `[~]` = partial.
-Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
+mapped to WEFT protocol verbs. `[x]` = shipped · `[~]` = partial · `[ ]` = not started.
+Refreshed 2026-07-27 — **Tier 1 and Tier 2 are complete**; remaining work is
+Tier 3 polish + the WEFT-specific federation surfacing.
 
 ## Where it is today (implemented)
 
@@ -33,27 +34,23 @@ Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
 
 ---
 
-## Tier 1 — first-hour gaps (users hit these immediately)
+## Tier 1 — first-hour gaps (users hit these immediately) — ✅ complete
 
-> **Sprints A + B shipped ✅ (2026-07-21)** — fenced code blocks, spoilers,
-> paste/drag-drop upload, NEW/day dividers, audio player + image lightbox,
-> unread counts, and per-channel/server notification prefs all landed
-> (client-only, build + typecheck clean). **Only link previews/embeds remain
-> in Tier 1** — and that one needs a server-side unfurl proxy (below).
+> **Shipped ✅** — fenced code blocks, spoilers, paste/drag-drop upload,
+> NEW/day dividers, audio player + image lightbox, unread counts, per-namespace
+> notification prefs, and **link previews/embeds** (server-side unfurl proxy)
+> all landed. Every Tier 1 item is done.
 
 ### Messaging rendering
 - [x] **Fenced code blocks** — ` ``` `/`~~~` blocks with a language label,
   content rendered verbatim (escape-first, XSS-safe), inner markdown left
   untouched. **Syntax highlighting** still pending (needs a highlighter dep;
   deferred). Headings/lists/blockquotes still not rendered.
-- [ ] **Link previews / embeds** — URLs render as bare links; no
-  OpenGraph unfurl, no inline embed of pasted image/video URLs. **The only
-  Tier 1 item left**, and it needs a **server-side unfurl proxy** — a new
-  weftd axum endpoint (`GET /unfurl?url=`) reusing `dialer::is_dialable`
-  (invariant 13, SSRF), fetching OpenGraph/Twitter-card tags + image
-  dimensions, with a cache. Client-side fetch is a non-starter (leaks the
-  user's IP to arbitrary hosts, hits CORS). Needs Jannik's sign-off on the
-  new HTTP surface before building.
+- [x] **Link previews / embeds** — shipped. A **server-side unfurl proxy**
+  (`weftd::unfurl`, `GET /unfurl?url=`) reuses `dialer::is_dialable`
+  (invariant 13, SSRF-guarded), fetches OpenGraph/Twitter-card tags + image
+  dimensions with a cache; the client renders `LinkPreview.svelte` cards under
+  messages (no user-IP leak, no CORS). Pasted image/video URLs embed inline.
 - [x] **Paste & drag-drop upload** — Ctrl+V clipboard files and drop-onto-
   composer both feed the shared upload path (`addFiles`), with a "Drop files
   to attach" overlay; still capped at 10/message.
@@ -82,7 +79,7 @@ Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
   badging). Set per namespace (not per channel). Cross-device sync of prefs
   still wants a small server store later; per-`@everyone` suppression not yet.
 
-## Tier 2 — the features people name when comparing to Discord
+## Tier 2 — the features people name when comparing to Discord — ✅ complete
 
 - [x] **Server-controlled unread counts** — shipped (2026-07-21). New
   `UNREAD [<#chan>]` verb → `UNREAD-COUNTS <#chan> <unread> <mentions>`
@@ -125,15 +122,22 @@ Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
   `:name:` in a bridged message renders as literal text on the receiving
   network (needs origin-namespace resolution + cross-bridge `EMOJI LIST` +
   §11.8 media mirroring).
-- [~] **Voice depth** — today: join/leave/mute/**deafen**/speaking rings.
-  Missing: **screen share, video, per-user volume, device selection,
-  push-to-talk**. LiveKit (M-lk-1/2/3) gives screenshare/video nearly free —
-  cheapest "wow" gap to close.
-- [ ] **Group DMs** — DMs are strictly 1:1. Needs protocol design (spec §18
-  territory) — flag, don't build.
-- [ ] **Custom status text · per-server nicknames · bios** — profile has one
-  global display name + avatar + presence enum. Nickname-per-namespace and
-  bio need small server/store additions.
+- [x] **Voice depth** — shipped via the LiveKit pivot: join/leave/mute/deafen/
+  speaking rings plus **screen share** (`ScreenPicker`/`ScreenShareMenu`),
+  **camera/video** (`CameraPicker`, `startCamera`), and **device selection**
+  (`deviceId` on camera/mic start). *Remaining niceties* (push-to-talk,
+  per-user volume sliders) are Tier 3 settings-depth polish, not blockers.
+- [x] **Group DMs** — shipped (social layer). `GroupId` = `&<ulid>` target +
+  `Scope::Group`; `GroupStore` (mem+PG) + `groups.rs` handlers
+  (create/add/remove/leave/name, directory fan-out); client `groups` state +
+  create/open/leave in the DM list. *Deferred:* cross-network group membership.
+- [x] **Custom status · per-server nicknames · bios** — all shipped.
+  Per-namespace nicknames via the `NICK`/`NICKS` verbs (`nick`/`manage-nicks`
+  caps); free-text **bio** (`PROFILE SET @about=`) and **custom status**
+  (`PROFILE SET @status=`) on the profile record, shown on the profile
+  card/modal and — for custom status — inline in the member list, set via the
+  shortcut modal over the user footer. *Deferred:* both are home-network-only
+  (not in the signed profile blob yet, M-prof-5).
 
 ## Tier 3 — polish & platform
 
@@ -161,23 +165,28 @@ Refreshed 2026-07-21 after phases 0–8 of [`PLAN.md`](./PLAN.md) shipped.
 
 ---
 
-## Suggested order
+## Suggested order (delivered — kept for history)
 
-1. **Client sprint A**: paste/drag-drop upload · code blocks · NEW/day
-   dividers · spoilers — transforms daily feel, zero server work.
-2. **Client sprint B**: notification muting · unread counts · slash
-   autocomplete · collapsible categories.
-3. **Search** — server verb first, then UI. The headline feature gap.
-4. **LiveKit M-lk-1/2/3** — screenshare/video/deafen/devices ride in.
-5. Park **threads, group DMs, custom emoji** as spec-design items (§18) —
-   all three touch the wire protocol.
+Tiers 1 and 2 followed this plan and are now complete. The remaining open work
+is Tier 3 polish (collapsible categories, slash-command autocomplete,
+accessibility, settings depth, responsive layout, credential hardening,
+jump-to-date) and the federation surfacing below.
 
-## Protocol gaps (need server/proto work *before* the client can use them)
+1. ✅ **Client sprint A**: paste/drag-drop upload · code blocks · NEW/day
+   dividers · spoilers.
+2. ✅ **Client sprint B**: notification muting · unread counts.
+3. ✅ **Search** — server verb + UI.
+4. ✅ **LiveKit M-lk-1/3** — screenshare/video/deafen/devices.
+5. ✅ **Threads, group DMs, custom emoji** — all shipped (each touched the wire
+   protocol; specs §9.4/§6.4/§9.4 amended).
 
-- [ ] **Search verb** — no wire command; HISTORY scan or a new command.
-- [ ] **Threads** — no wire model (M6+).
-- [ ] **Emoji registry** — no verb for custom-emoji upload/list.
-- [ ] **Group DMs** — no multi-party DM target (§18).
-- [ ] **Notification-pref sync** — optional small store for cross-device
-  mute state.
-- [ ] **Nickname-per-namespace / bio fields** — profile store additions.
+## Protocol gaps (server/proto work the client needs)
+
+- [x] **Search verb** — `SEARCH <#chan> :<query>` → `BATCH` (mem+PG contract).
+- [x] **Threads** — `HISTORY thread=<root>` + `THREAD`/`THREADS` wire model.
+- [x] **Emoji registry** — `EMOJI ADD/REMOVE/LIST` + `EmojiStore`.
+- [x] **Group DMs** — `&<ulid>` multi-party target + `GroupStore` + `groups.rs`.
+- [x] **Nickname-per-namespace / bio / custom-status fields** — `NICK`/`NICKS`
+  verbs + `@about=`/`@status=` on the profile record.
+- [ ] **Notification-pref sync** — still client-only (localStorage); an optional
+  small server store for cross-device mute state remains.

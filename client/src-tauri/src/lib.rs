@@ -147,8 +147,8 @@ fn ns_meta(conn: State<'_, Conn>, name: String, key: String, value: String) -> R
 }
 
 #[tauri::command]
-fn federate(conn: State<'_, Conn>, target: String) -> Result<(), String> {
-    conn.send(weft::build_federate(&target)?)
+fn federate(conn: State<'_, Conn>, target: String, invite: Option<String>) -> Result<(), String> {
+    conn.send(weft::build_federate(&target, invite.as_deref())?)
 }
 
 #[tauri::command]

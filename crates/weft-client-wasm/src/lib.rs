@@ -379,7 +379,9 @@ impl WeftClient {
                 build_ns_recovery_set(&arg("name"), num("m") as u32, &arg("keys"))?
             }
             "ns_recover" => build_ns_recover(&arg("name"), &arg("rotation"))?,
-            "federate" => build_federate(&arg("target"))?,
+            "federate" => {
+                build_federate(&arg("target"), args.get("invite").and_then(|v| v.as_str()))?
+            }
             // ---- invites ----
             "invite_mint" => build_invite_mint(
                 &arg("scope"),

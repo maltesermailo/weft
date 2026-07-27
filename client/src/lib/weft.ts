@@ -365,8 +365,8 @@ export function nsCreate(network: string, name: string, visibility: string) {
 
 // ---- auto-federation (§11.10) ----
 /** Request an on-demand bridge to a foreign namespace (`network/namespace`). */
-export function federate(target: string) {
-  return invoke("federate", { target });
+export function federate(target: string, invite?: string) {
+  return invoke("federate", { target, invite: invite ?? null });
 }
 
 // ---- namespace admin (§6.2 / §2.4) ----

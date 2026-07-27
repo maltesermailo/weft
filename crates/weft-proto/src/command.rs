@@ -467,15 +467,23 @@ pub enum Command {
     },
     /// `BRIDGE SEVER <peer>` — unilateral teardown (§6.6).
     BridgeSever { peer: NetworkName },
-    /// `BRIDGE REQUEST <ns>` (§11.10) — ask the peer to offer a manifest for one
-    /// of *its* namespaces. Bridge-session-only; the peer answers with
-    /// `BRIDGE PROPOSE` iff the namespace is auto-federation-reachable.
-    BridgeRequest { ns: NamespaceName },
-    /// `FEDERATE <network>/<namespace>` (§11.10) — a local user asks their home
-    /// network to auto-establish a bridge to a foreign namespace on demand.
+    /// `BRIDGE REQUEST <ns>` with an optional `@invite=<token>` (§11.10) — ask
+    /// the peer to offer a manifest for one of *its* namespaces. Bridge-session-
+    /// only; the peer answers with `BRIDGE PROPOSE` iff the namespace is
+    /// auto-federation-reachable — `public`, or (with a valid `invite`) an
+    /// `unlisted`/`private` namespace that has `federation` open.
+    BridgeRequest {
+        ns: NamespaceName,
+        invite: Option<String>,
+    },
+    /// `FEDERATE <network>/<namespace>` with an optional `@invite=<token>`
+    /// (§11.10) — a local user asks their home network to auto-establish a
+    /// bridge to a foreign namespace on demand. The `invite` (a foreign-ns
+    /// invite the user holds) unlocks non-public namespaces.
     Federate {
         network: NetworkName,
         namespace: NamespaceName,
+        invite: Option<String>,
     },
     /// `NETBLOCK ADD <network> [:reason]` (§6.6, §11.6). Cap `netblock` at `*`.
     NetblockAdd {
@@ -1410,6 +1418,7 @@ impl Command {
                 Ok(Command::Federate {
                     network: network.parse()?,
                     namespace: namespace.parse()?,
+                    invite: line.tags.get("invite").filter(|v| !v.is_empty()).cloned(),
                 })
             }
             "REPORT" => {
@@ -1527,6 +1536,7 @@ impl Command {
                     }),
                     "REQUEST" => Ok(Command::BridgeRequest {
                         ns: args.req("ns")?.parse()?,
+                        invite: line.tags.get("invite").filter(|v| !v.is_empty()).cloned(),
                     }),
                     _ => Err(ParseError::BadParam {
                         verb: "BRIDGE",
@@ -2338,7 +2348,14 @@ impl Command {
                 )
             }
             Command::Discover { cursor } => ("DISCOVER", cursor.iter().cloned().collect(), None),
-            Command::Federate { network, namespace } => {
+            Command::Federate {
+                network,
+                namespace,
+                invite,
+            } => {
+                if let Some(invite) = invite {
+                    tags.insert("invite".to_string(), invite.clone());
+                }
                 ("FEDERATE", vec![format!("{network}/{namespace}")], None)
             }
             Command::Channels { namespace } => ("CHANNELS", vec![namespace.to_string()], None),
@@ -2435,7 +2452,10 @@ impl Command {
             Command::BridgeSever { peer } => {
                 ("BRIDGE", vec!["SEVER".to_string(), peer.to_string()], None)
             }
-            Command::BridgeRequest { ns } => {
+            Command::BridgeRequest { ns, invite } => {
+                if let Some(invite) = invite {
+                    tags.insert("invite".to_string(), invite.clone());
+                }
                 ("BRIDGE", vec!["REQUEST".to_string(), ns.to_string()], None)
             }
             Command::NetblockAdd { network, reason } => (
@@ -3607,11 +3627,27 @@ mod tests {
         }));
         round_trip(&Request::new(Command::BridgeRequest {
             ns: "gaming".parse().unwrap(),
+            invite: None,
         }));
+        // With an invite (unlocks a non-public federating namespace).
+        let br = Request::new(Command::BridgeRequest {
+            ns: "gaming".parse().unwrap(),
+            invite: Some("inv_abc123".into()),
+        });
+        assert!(br.serialize().unwrap().contains("invite=inv_abc123"));
+        round_trip(&br);
         round_trip(&Request::new(Command::Federate {
             network: "hda.example".parse().unwrap(),
             namespace: "gaming".parse().unwrap(),
+            invite: None,
         }));
+        let fed = Request::new(Command::Federate {
+            network: "hda.example".parse().unwrap(),
+            namespace: "gaming".parse().unwrap(),
+            invite: Some("inv_abc123".into()),
+        });
+        assert!(fed.serialize().unwrap().contains("invite=inv_abc123"));
+        round_trip(&fed);
         assert!(Request::parse("FEDERATE nonslash").is_err());
         assert!(Request::parse("BRIDGE FROB peer.example").is_err());
         assert!(Request::parse("BRIDGE ACCEPT peer.example notanumber").is_err());

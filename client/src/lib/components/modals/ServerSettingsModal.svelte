@@ -344,18 +344,19 @@
         <p class="so-sub">Bridge <b>{app.activeServer}</b>'s channels to a peer network. You control this as the namespace owner — bridges are scoped to <code>ns:{app.activeServer}</code>, non-transitive, and every change notifies members.</p>
 
         <div class="field-label">Auto-federation</div>
-        <p class="so-sub">When open, another network can reach this namespace on demand — a user there references <code>{app.network}/{app.activeServer}</code> and their server auto-establishes the bridge. Requires <b>public</b> visibility.</p>
+        <p class="so-sub">When open, another network can reach this namespace on demand — a user there references <code>{app.network}/{app.activeServer}</code> and their server auto-establishes the bridge. Off by default; enabling it is an explicit opt-in.</p>
         <label class="fed-check" style="margin-bottom:14px">
           <input
             type="checkbox"
             checked={app.activeNsMeta?.federation ?? false}
-            disabled={(app.activeNsMeta?.visibility ?? "") !== "public"}
             onchange={(e) => app.nsSetFederation(e.currentTarget.checked)}
           />
           Open <b>{app.activeServer}</b> to auto-federation
         </label>
-        {#if (app.activeNsMeta?.visibility ?? "") !== "public"}
-          <p class="so-sub" style="color:var(--amber)">Make this namespace public (Overview → Visibility) to enable auto-federation.</p>
+        {#if (app.activeNsMeta?.visibility ?? "") === "public"}
+          <p class="so-sub">Public — reachable by <b>anyone</b> once open.</p>
+        {:else}
+          <p class="so-sub">{(app.activeNsMeta?.visibility ?? "unlisted") === "private" ? "Private" : "Unlisted"} — reachable only to someone who holds an <b>invite</b> to this namespace (mint one in the Invites tab). The invite is the access control.</p>
         {/if}
         <div class="section-sep"></div>
 

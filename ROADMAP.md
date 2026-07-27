@@ -59,27 +59,27 @@ detail + test counts in [`CLAUDE.md`](./CLAUDE.md) (§ Milestones).
 
 ---
 
-## Tier 1 — Client first-hour gaps
+## Tier 1 — Client first-hour gaps ✅
 
-Discord-parity essentials; full detail in [client/ROADMAP.md](./client/ROADMAP.md#tier-1--first-hour-gaps-users-hit-these-immediately).
+Discord-parity essentials — **all shipped**; full detail in [client/ROADMAP.md](./client/ROADMAP.md#tier-1--first-hour-gaps-users-hit-these-immediately).
 
 - ✅ **Fenced code blocks** — ` ``` `/`~~~` with a language label (syntax highlighting still ⬜)
 - ✅ **Paste & drag-drop upload** · ✅ **Spoilers** (`||text||`) · ✅ **Audio player + image lightbox**
 - ✅ **NEW-messages divider + day separators** · ✅ **Unread counts** (server-authoritative, see Tier 2)
 - ✅ **Per-namespace notification prefs** (modal: All / @mentions / Nothing)
-- ⬜ **Link previews / embeds** — needs a **server-side unfurl proxy** (`GET /unfurl?url=`, SSRF-guarded, cached); client-side fetch leaks IPs — *the only Tier 1 item left, needs sign-off*
+- ✅ **Link previews / embeds** — server-side unfurl proxy (`weftd::unfurl`, `GET /unfurl?url=`, SSRF-guarded + cached) → `LinkPreview.svelte` cards; no client-side fetch, no IP leak
 
-## Tier 2 — Client Discord-parity features
+## Tier 2 — Client Discord-parity features ✅
 
-Detail in [client/ROADMAP.md](./client/ROADMAP.md#tier-2--the-features-people-name-when-comparing-to-discord).
+**All shipped**; detail in [client/ROADMAP.md](./client/ROADMAP.md#tier-2--the-features-people-name-when-comparing-to-discord).
 
-- ✅ **Server-controlled unread counts** — `UNREAD` verb → `UNREAD-COUNTS` (mem+PG), pushed on login + cross-device MARK *(this session)*
-- ✅ **Message search** — `SEARCH <#chan> :<query>` → BATCH; `EventStore::search` (substring; `tsvector` ⬜) *(this session)*
-- ✅ **Threads** — `HISTORY thread=<root>` filter + `EventStore::thread_roots`, thread side panel, "N replies", replies hidden from timeline *(this session)*
-- ✅ **Custom / per-namespace emoji** — `EMOJI ADD/REMOVE/LIST` + `EmojiStore` (mem+PG), unified picker, `:name:` render, settings upload tab *(this session; federation ⬜)*
-- ◑ **Voice depth** — join/leave/mute/deafen/speaking today; screen share, video, per-user volume, device selection, push-to-talk ride LiveKit → see Tier 4
-- 🚫 **Group DMs** — needs multi-party DM protocol design (spec §18) — flag, don't build
-- ⬜ **Custom status text · per-server nicknames · bios** — small profile store/proto additions
+- ✅ **Server-controlled unread counts** — `UNREAD` verb → `UNREAD-COUNTS` (mem+PG), pushed on login + cross-device MARK
+- ✅ **Message search** — `SEARCH <#chan> :<query>` → BATCH; `EventStore::search` (substring; `tsvector` ⬜)
+- ✅ **Threads** — `HISTORY thread=<root>` filter + `EventStore::thread_roots`, thread side panel, "N replies", replies hidden from timeline
+- ✅ **Custom / per-namespace emoji** — `EMOJI ADD/REMOVE/LIST` + `EmojiStore` (mem+PG), unified picker, `:name:` render, settings upload tab *(federation ⬜)*
+- ✅ **Voice depth** — join/leave/mute/deafen/speaking + **screen share**, **camera/video**, and **device selection** via the LiveKit pivot (per-user volume + push-to-talk are Tier 3 settings polish)
+- ✅ **Group DMs** — `&<ulid>` multi-party target + `Scope::Group` + `GroupStore` (mem+PG) + `groups.rs` (create/add/remove/leave/name); client `groups` state + DM-list create/open/leave *(cross-network membership ⬜)*
+- ✅ **Custom status · per-server nicknames · bios** — `NICK`/`NICKS` verbs; `PROFILE SET @about=`/`@status=` on the profile record, shown on the profile card/modal + inline in the member list, set via the user-footer shortcut modal *(home-network-only, M-prof-5)*
 
 ## Tier 3 — Client polish & platform
 
@@ -96,12 +96,11 @@ Detail in [client/ROADMAP.md](./client/ROADMAP.md#tier-3--polish--platform).
 
 Larger efforts, each with its own plan doc. None started unless noted.
 
-- ◑ **Voice — LiveKit M-lk-1/2/3** — media plane pivoted weft-rt SFU → LiveKit; **M-lk-0 shipped**, M-lk-1 (rooms/tokens), M-lk-2 (server mute/kick), M-lk-3 (screenshare/video) remain → [voice-livekit-plan.md](docs/code/voice-livekit-plan.md)
+- ◑ **Voice — LiveKit M-lk-1/2/3** — media plane pivoted weft-rt SFU → LiveKit; **M-lk-0/1/3 shipped** (rooms/tokens + screenshare/video/camera), M-lk-2 (server mute/kick over LiveKit) remains → [voice-livekit-plan.md](docs/code/voice-livekit-plan.md)
 - ⬜ **E2EE via OpenMLS** (§5.2, §14) — `e2ee` retention mode, server as blind DS, always-on engine → [e2ee-mls-plan.md](docs/code/e2ee-mls-plan.md)
 - ⬜ **Modular monolith & scaling** — one binary, opt-in `roles = [...]` to split hot paths; no wire change → [modular-monolith-plan.md](docs/code/modular-monolith-plan.md)
 - ⬜ **Full federated-role authority** — bridge-tunneled federation session under homeserver authority (trust F) → [identity-caps-federated-roles-plan.md](docs/code/identity-caps-federated-roles-plan.md)
 - ⬜ **Emoji federation** — origin-namespace `:name:` resolution + cross-bridge `EMOJI LIST` + §11.8 media mirroring (home-network-only today)
-- ⬜ **Link-preview unfurl proxy** — the Tier 1 blocker; server HTTP surface decision
 - ⬜ **M6+ media polish** — threads-filter UI refinements, WEFT-RT voice-video, retention-hold surfacing
 
 ## Componentization (client, in progress)

@@ -506,20 +506,13 @@ impl<S: ControlStream> Session<S> {
         let Some(mut record) = self.ns_admin_gate(label.clone(), &name, &actor).await? else {
             return Ok(Flow::Continue);
         };
-        // §11.10 auto-federation reachability lives on its own column, and
-        // `open` requires `public` visibility (else it could never be offered).
+        // §11.10 auto-federation reachability lives on its own column. It is off
+        // by default and is an explicit opt-in for *any* visibility: a `public`
+        // namespace is then reachable to anyone, while an `unlisted`/`private`
+        // one is reachable only to a peer presenting a valid invite (the invite,
+        // not the visibility, is the access control — see `on_bridge_request_in`).
         if key == "federation" {
             let open = value == "open";
-            if open && record.visibility != "public" {
-                self.send_err(
-                    label,
-                    ErrCode::Forbidden,
-                    None,
-                    "federation open requires public visibility",
-                )
-                .await?;
-                return Ok(Flow::Continue);
-            }
             if let Err(e) = self
                 .ctx
                 .namespaces

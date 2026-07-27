@@ -119,6 +119,7 @@ pub async fn auto_bridge(
     peer: &NetworkName,
     peer_key: PublicKey,
     ns: NamespaceName,
+    invite: Option<String>,
     identity: &Keypair,
     our_network: &NetworkName,
     ctx: Arc<ServerCtx>,
@@ -133,6 +134,7 @@ pub async fn auto_bridge(
         peer,
         peer_key,
         ns,
+        invite,
         identity,
         our_network,
         ctx,
@@ -151,6 +153,7 @@ pub async fn run_peer_requester(
     peer: &NetworkName,
     peer_key: PublicKey,
     ns: NamespaceName,
+    invite: Option<String>,
     identity: &Keypair,
     our_network: &NetworkName,
     ctx: Arc<ServerCtx>,
@@ -163,7 +166,9 @@ pub async fn run_peer_requester(
         identity,
         our_network,
         links,
-        move |lines| weft_core::run_bridge_requester(lines, ctx, peer.clone(), peer_key, ns),
+        move |lines| {
+            weft_core::run_bridge_requester(lines, ctx, peer.clone(), peer_key, ns, invite)
+        },
     )
     .await
 }
@@ -284,7 +289,11 @@ pub fn spawn_auto_bridge_consumer(
                 r = rx.recv() => match r { Some(r) => r, None => break },
                 _ = ctx.shutdown.cancelled() => break,
             };
-            let weft_core::AutoBridgeRequest { network, namespace } = req;
+            let weft_core::AutoBridgeRequest {
+                network,
+                namespace,
+                invite,
+            } = req;
             // Resolve the peer's key + dial address: a `[[peers]]` pin, else the
             // §10.2 well-known key fetch (arbitrary public domains).
             let resolved = match pinned.get(&network) {
@@ -309,6 +318,7 @@ pub fn spawn_auto_bridge_consumer(
                 &network,
                 key,
                 namespace,
+                invite,
                 &identity,
                 &our_network,
                 Arc::clone(&ctx),

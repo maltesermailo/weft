@@ -4034,7 +4034,7 @@ async fn propose(bridge: &mut Client, key: &Keypair, channels: &[&str]) {
 // §11.10 auto-federation: NS META federation flag + BRIDGE REQUEST offer.
 
 #[tokio::test]
-async fn ns_meta_federation_requires_public() {
+async fn ns_meta_federation_opt_in_on_any_visibility() {
     let ctx = ctx(&[]);
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!(
@@ -4043,15 +4043,24 @@ async fn ns_meta_federation_requires_public() {
     ));
     ada.recv().await;
 
-    // Opening federation on a non-public namespace is refused (§11.10).
+    // §11.10: federation is an explicit opt-in for *any* visibility (an invite,
+    // not public visibility, gates reachability for a non-public namespace).
+    // It is off by default, so opening it flips the flag and re-emits NS-META.
     ada.send("NS META gaming federation :open");
-    ada.expect_err(ErrCode::Forbidden).await;
-
-    // Public first, then it's allowed.
-    ada.send("NS VISIBILITY gaming public");
-    ada.recv().await;
-    ada.send("NS META gaming federation :open");
-    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    let ev = ada.recv().await;
+    let Event::NsMeta {
+        federation,
+        visibility,
+        ..
+    } = &ev.event
+    else {
+        panic!("expected NS-META, got {ev:?}");
+    };
+    assert!(
+        *federation,
+        "federation is now open on an unlisted namespace"
+    );
+    assert_eq!(visibility.as_str(), "unlisted");
 }
 
 #[tokio::test]
@@ -4087,6 +4096,47 @@ async fn bridge_request_offers_only_reachable_namespaces() {
         miss.contains("NO-SUCH-TARGET"),
         "expected NO-SUCH-TARGET, got {miss}"
     );
+
+    // §11.10 invite path: an *unlisted* namespace with federation open is
+    // reachable only to a peer presenting a valid invite for it.
+    ada.send(&format!(
+        "@root={} NS CREATE secret unlisted",
+        root_key_b64()
+    ));
+    ada.recv().await;
+    ada.send("NS META secret federation :open");
+    ada.recv().await;
+    ada.send("INVITE MINT ns:secret");
+    let Event::Invited { invite_id, .. } = ada.recv().await.event else {
+        panic!("expected INVITED");
+    };
+
+    // No invite → indistinguishable from absent (NO-SUCH-TARGET, invariant 1).
+    peer.send("BRIDGE REQUEST secret");
+    assert!(peer.recv_raw().await.contains("NO-SUCH-TARGET"));
+
+    // A bogus invite → same uniform refusal.
+    peer.send("@invite=inv_bogus BRIDGE REQUEST secret");
+    assert!(peer.recv_raw().await.contains("NO-SUCH-TARGET"));
+
+    // A valid invite for this namespace → the peer gets the signed offer.
+    peer.send(&format!("@invite={invite_id} BRIDGE REQUEST secret"));
+    let offer = peer.recv_raw().await;
+    assert!(
+        offer.contains("BRIDGE PROPOSE") && offer.contains("manifest="),
+        "a valid invite unlocks the non-public namespace, got {offer}"
+    );
+
+    // An invite for a *different* namespace must not unlock `secret`.
+    ada.send("INVITE MINT ns:gaming");
+    let Event::Invited {
+        invite_id: other, ..
+    } = ada.recv().await.event
+    else {
+        panic!("expected INVITED");
+    };
+    peer.send(&format!("@invite={other} BRIDGE REQUEST secret"));
+    assert!(peer.recv_raw().await.contains("NO-SUCH-TARGET"));
 }
 
 #[tokio::test]
@@ -4096,14 +4146,16 @@ async fn federate_hands_request_to_the_dialer() {
     ctx.set_auto_bridge_sink(tx);
     let mut ada = ready(&ctx, "ada").await;
 
-    // A valid foreign target is handed to the dialer (async — no client ack).
-    ada.send("FEDERATE hda.example/gaming");
+    // A valid foreign target is handed to the dialer (async — no client ack);
+    // an `@invite=` is threaded through verbatim for the non-public path.
+    ada.send("@invite=inv_xyz FEDERATE hda.example/gaming");
     let req = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
         .expect("timed out waiting for the dialer request")
         .expect("sink closed");
     assert_eq!(req.network.as_str(), "hda.example");
     assert_eq!(req.namespace.to_string(), "gaming");
+    assert_eq!(req.invite.as_deref(), Some("inv_xyz"));
 
     // A second request immediately after is throttled (per-account cooldown).
     ada.send("FEDERATE hda.example/other");

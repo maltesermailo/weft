@@ -1770,6 +1770,7 @@ async fn auto_bridge_requests_reachable_namespace() {
             &f_net,
             f_key,
             "gaming".parse().unwrap(),
+            None, // public namespace — no invite needed
             &home_key,
             &h_net,
             ctx,

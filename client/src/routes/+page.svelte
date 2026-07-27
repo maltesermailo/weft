@@ -3302,7 +3302,7 @@
   // channels arrive (best-effort), else the banner clears after a grace window.
   let federating = $state<{ target: string; ns: string } | null>(null);
   let federatingTimer: ReturnType<typeof setTimeout> | null = null;
-  function federate(target: string) {
+  function federate(target: string, invite?: string) {
     const t = target.trim();
     const slash = t.indexOf("/");
     if (slash < 1) {
@@ -3311,7 +3311,7 @@
     }
     const ns = t.slice(slash + 1);
     weft
-      .federate(t)
+      .federate(t, invite?.trim() || undefined)
       .then(() => {
         federating = { target: t, ns };
         if (federatingTimer) clearTimeout(federatingTimer);

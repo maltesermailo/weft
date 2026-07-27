@@ -365,6 +365,9 @@ pub(crate) struct GroupCallLeave {
 pub struct AutoBridgeRequest {
     pub network: NetworkName,
     pub namespace: NamespaceName,
+    /// A foreign-namespace invite the user holds (§11.10) — unlocks a
+    /// non-public but `federation`-open namespace; `None` for a public one.
+    pub invite: Option<String>,
 }
 
 /// Deliver a control line to a **peer network** (§11.14). Preferred path: the

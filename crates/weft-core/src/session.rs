@@ -151,8 +151,9 @@ enum OutboundStart {
     /// Transmit our operator's stored proposal for the peer (P1).
     Propose,
     /// Ask the peer to offer a manifest for its namespace `ns` and auto-accept
-    /// the offer — the §11.10 requester side.
-    Request(NamespaceName),
+    /// the offer — the §11.10 requester side. The optional invite unlocks a
+    /// non-public federating namespace.
+    Request(NamespaceName, Option<String>),
 }
 
 /// Run an **outbound** bridge session over a `stream` the dialer already
@@ -189,11 +190,11 @@ async fn run_outbound_bridge<S: ControlStream>(
             .register_bridge_out(peer.clone(), session.fed_out_tx.clone());
         match start {
             OutboundStart::Propose => session.begin_outbound_bridge(&peer).await,
-            OutboundStart::Request(ns) => {
+            OutboundStart::Request(ns, invite) => {
                 // We asked for this bridge, so accept the offer regardless of the
                 // inbound auto-accept config.
                 session.request_accept = true;
-                session.begin_outbound_request(&ns).await;
+                session.begin_outbound_request(&ns, invite.as_deref()).await;
             }
         }
         match session.run().await {
@@ -227,8 +228,9 @@ pub async fn run_bridge_requester<S: ControlStream>(
     peer: NetworkName,
     key: PublicKey,
     ns: NamespaceName,
+    invite: Option<String>,
 ) {
-    run_outbound_bridge(stream, ctx, peer, key, OutboundStart::Request(ns)).await
+    run_outbound_bridge(stream, ctx, peer, key, OutboundStart::Request(ns, invite)).await
 }
 
 /// AUTH KEY / AUTH BRIDGE state between CHALLENGE and PROOF (§6.1, §11.2).
@@ -1075,8 +1077,13 @@ impl<S: ControlStream> Session<S> {
             Command::Sync { since, preview } => self.on_sync(label, since, preview, account).await,
             Command::Discover { cursor } => self.on_discover(label, cursor).await,
             Command::Channels { namespace } => self.on_channels(label, namespace).await,
-            Command::Federate { network, namespace } => {
-                self.on_federate(label, network, namespace, account).await
+            Command::Federate {
+                network,
+                namespace,
+                invite,
+            } => {
+                self.on_federate(label, network, namespace, invite, account)
+                    .await
             }
             // §2.4 succession + recovery ladder.
             Command::NsTransfer {

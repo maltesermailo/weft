@@ -2011,9 +2011,11 @@ pub fn build_ns_meta(name: &str, key: &str, value: &str) -> Result<String, Strin
     .map_err(|e| e.to_string())
 }
 
-/// `FEDERATE <network>/<namespace>` (§11.10) — request an on-demand bridge to a
-/// foreign namespace. Accepts `network/namespace` or a `weft://<net>/<ns>` link.
-pub fn build_federate(target: &str) -> Result<String, String> {
+/// `FEDERATE <network>/<namespace>` with an optional `@invite=` (§11.10) —
+/// request an on-demand bridge to a foreign namespace. Accepts
+/// `network/namespace` or a `weft://<net>/<ns>` link. A non-empty `invite`
+/// unlocks a non-public but federation-open foreign namespace.
+pub fn build_federate(target: &str, invite: Option<&str>) -> Result<String, String> {
     let t = target
         .trim()
         .strip_prefix("weft://")
@@ -2022,6 +2024,10 @@ pub fn build_federate(target: &str) -> Result<String, String> {
     Request::new(Command::Federate {
         network: net.parse().map_err(|_| "bad network".to_string())?,
         namespace: ns.parse().map_err(|_| "bad namespace".to_string())?,
+        invite: invite
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     })
     .serialize()
     .map_err(|e| e.to_string())

@@ -175,7 +175,9 @@ impl<S: ControlStream> Session<S> {
             }
             Command::BridgeAccept { version, .. } => self.on_bridge_accept_in(peer, version).await,
             Command::BridgeSever { .. } => self.on_bridge_sever_in(peer).await,
-            Command::BridgeRequest { ns } => self.on_bridge_request_in(peer, label, ns).await,
+            Command::BridgeRequest { ns, invite } => {
+                self.on_bridge_request_in(peer, label, ns, invite).await
+            }
             Command::VoiceRequest { scope, channel } => {
                 self.on_voice_request_in(peer, label, scope, channel).await
             }
@@ -307,17 +309,30 @@ impl<S: ControlStream> Session<S> {
 
     /// §11.10 A peer asked us to offer a manifest for one of *our* namespaces.
     /// We offer (a signed `BRIDGE PROPOSE`) iff it is auto-federation-reachable
-    /// (`public` + `federation` open) and the peer isn't netblocked; otherwise
-    /// `NO-SUCH-TARGET` — uniform with private/absent (anti-enumeration,
-    /// invariant 1). The peer verifies + auto-accepts on its side.
+    /// and the peer isn't netblocked; otherwise `NO-SUCH-TARGET` — uniform with
+    /// private/absent (anti-enumeration, invariant 1). The peer verifies +
+    /// auto-accepts on its side.
+    ///
+    /// Reachable ⇔ `federation` is open **and** either the namespace is
+    /// `public` **or** a valid `invite` for `ns:<ns>` was presented. The
+    /// `federation` flag is required in both cases — an invite never bypasses
+    /// it — and it is off by default (including for non-public namespaces), so
+    /// federation is always an explicit opt-in by the namespace owner. A
+    /// missing/wrong/expired/exhausted invite is indistinguishable from "no
+    /// such namespace" (invariant 1): both yield `NO-SUCH-TARGET`.
     pub(super) async fn on_bridge_request_in(
         &mut self,
         peer: NetworkName,
         label: Option<String>,
         ns: NamespaceName,
+        invite: Option<String>,
     ) -> io::Result<Flow> {
         let reachable = match self.ctx.namespaces.namespace(&ns).await {
-            Ok(Some(rec)) => rec.visibility == "public" && rec.federation,
+            Ok(Some(rec)) => {
+                rec.federation
+                    && (rec.visibility == "public"
+                        || self.invite_authorizes_ns(invite.as_deref(), &ns).await)
+            }
             Ok(None) => false,
             Err(e) => return self.internal(label, &e).await,
         };
@@ -370,6 +385,27 @@ impl<S: ControlStream> Session<S> {
             self.stream.send_line(&line).await?;
         }
         Ok(Flow::Continue)
+    }
+
+    /// Does `invite` authorize federating the namespace `ns`? True iff it names
+    /// a live invite scoped to `ns:<ns>` that is unexpired and not exhausted.
+    /// **Non-consuming** (peek): a bridge is a network-level authorization that
+    /// survives reconnects, so it doesn't burn a redemption. A revoked invite
+    /// is already gone from the store, so it fails here like an absent one —
+    /// keeping the outcome uniform with "no such namespace" (invariant 1).
+    async fn invite_authorizes_ns(&self, invite: Option<&str>, ns: &NamespaceName) -> bool {
+        let Some(id) = invite else {
+            return false;
+        };
+        let now = unix_now();
+        match self.ctx.invites.invite(id).await {
+            Ok(Some(rec)) => {
+                rec.scope == format!("ns:{ns}")
+                    && rec.expiry.map_or(true, |e| now < e)
+                    && rec.uses_left.map_or(true, |u| u > 0)
+            }
+            _ => false,
+        }
     }
 
     /// §16 a peer asks us to relay one of *our* voice channels (`VOICE REQUEST`).
@@ -721,8 +757,15 @@ impl<S: ControlStream> Session<S> {
     /// §11.10 requester startup: ask the peer to offer a manifest for its
     /// namespace `ns`. The peer answers `BRIDGE PROPOSE` (if reachable), handled
     /// by the ordinary bridge loop and auto-accepted (`request_accept`).
-    pub(super) async fn begin_outbound_request(&mut self, ns: &NamespaceName) {
-        let cmd = Command::BridgeRequest { ns: ns.clone() };
+    pub(super) async fn begin_outbound_request(
+        &mut self,
+        ns: &NamespaceName,
+        invite: Option<&str>,
+    ) {
+        let cmd = Command::BridgeRequest {
+            ns: ns.clone(),
+            invite: invite.map(str::to_string),
+        };
         if let Ok(line) = Request::new(cmd).serialize() {
             let _ = self.stream.send_line(&line).await;
         }
@@ -824,6 +867,7 @@ impl<S: ControlStream> Session<S> {
         label: Option<String>,
         network: NetworkName,
         namespace: NamespaceName,
+        invite: Option<String>,
         account: Account,
     ) -> io::Result<Flow> {
         if network.as_str() == self.ctx.network_name() {
@@ -852,7 +896,11 @@ impl<S: ControlStream> Session<S> {
             .await?;
             return Ok(Flow::Continue);
         }
-        let req = crate::context::AutoBridgeRequest { network, namespace };
+        let req = crate::context::AutoBridgeRequest {
+            network,
+            namespace,
+            invite,
+        };
         if !self.ctx.request_auto_bridge(req) {
             return self
                 .unsupported(label, "auto-federation is off on this network")

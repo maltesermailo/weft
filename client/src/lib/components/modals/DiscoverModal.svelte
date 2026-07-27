@@ -16,6 +16,8 @@
 
   let query = $state("");
   let redeemInput = $state("");
+  // Optional invite id/link for reaching a non-public foreign namespace (§11.10).
+  let foreignInvite = $state("");
   let redeemError = $state("");
   let createName = $state("");
   let createVis = $state("public");
@@ -61,7 +63,10 @@
   }
   function connectForeign() {
     if (!foreign) return;
-    app.federate(foreign);
+    // Accept either a raw invite id or a full weft://…/i/<id> link.
+    const inv = foreignInvite.trim();
+    const id = inv.match(/\/i\/(.+)$/)?.[1] ?? inv;
+    app.federate(foreign, id || undefined);
     onclose();
   }
 
@@ -70,14 +75,16 @@
     const t = redeemInput.trim();
     if (!t) return;
     // A foreign invite link (weft://<net>/<ns>/i/<id>) routes into federation —
-    // your server auto-bridges to the namespace it points at (§11.10).
-    const m = t.match(/^weft:\/\/([^/]+)\/(?:([^/]+)\/)?i\/.+$/);
+    // your server auto-bridges to the namespace it points at (§11.10). The
+    // invite id is passed through so a non-public but federation-open namespace
+    // is reachable (the invite is its access control).
+    const m = t.match(/^weft:\/\/([^/]+)\/(?:([^/]+)\/)?i\/(.+)$/);
     if (m && m[1] !== app.network) {
       if (!m[2]) {
         redeemError = "This invite is for another network but names no namespace.";
         return;
       }
-      app.federate(`${m[1]}/${m[2]}`);
+      app.federate(`${m[1]}/${m[2]}`, m[3]);
     } else {
       weft.inviteRedeem(t).catch((e) => app.toast(String(e), "error"));
     }
@@ -219,6 +226,12 @@
             <div class="ns-info">
               <div class="ns-name mono">{foreign}</div>
               <div class="ns-sub">On another network — your server will bridge to it.</div>
+              <input
+                class="foreign-invite"
+                bind:value={foreignInvite}
+                placeholder="Invite (optional — required for unlisted/private)"
+                onkeydown={(e) => e.key === "Enter" && connectForeign()}
+              />
             </div>
             <button class="go-btn" onclick={connectForeign}>Connect</button>
           </div>
@@ -709,6 +722,21 @@
   }
   .ns-item.foreign .ns-badge {
     color: var(--invite);
+  }
+  .foreign-invite {
+    width: 100%;
+    margin-top: 8px;
+    padding: 7px 10px;
+    border: 1px solid var(--border-hair-strong);
+    border-radius: 6px;
+    background: var(--bg-void);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+    outline: none;
+  }
+  .foreign-invite:focus {
+    border-color: var(--accent, #5865f2);
   }
   .ns-info {
     flex: 1;

@@ -96,7 +96,7 @@ export interface AppCtx {
   open(name: string): void; // set active + mark read
   openVoice(name: string): void; // open a voice channel's stage + join the call
   openDiscover(): void;
-  federate(target: string): void; // §11.10 join a foreign namespace on demand
+  federate(target: string, invite?: string): void; // §11.10 join a foreign namespace on demand (invite unlocks non-public)
 
   // ---- data ----
   readonly channels: Record<string, Channel>;
