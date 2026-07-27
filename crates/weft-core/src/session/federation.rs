@@ -1923,7 +1923,8 @@ impl ServerCtx {
             weft_store::ProfileRecord {
                 display: display.clone(),
                 avatar: avatar.clone(),
-                about: None, // §10.3 bios aren't in the signed profile yet (M-prof-5)
+                about: None,  // §10.3 bios aren't in the signed profile yet (M-prof-5)
+                status: None, // custom status is local-only, never bridged
                 updated: signed.profile.updated,
             },
         )

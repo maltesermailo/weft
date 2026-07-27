@@ -13,6 +13,7 @@ impl<S: ControlStream> Session<S> {
         display: Option<String>,
         avatar: Option<String>,
         about: Option<String>,
+        status: Option<String>,
         account: Account,
     ) -> io::Result<Flow> {
         let current = self
@@ -35,6 +36,10 @@ impl<S: ControlStream> Session<S> {
             Some(a) => (!a.is_empty()).then_some(a),
             None => current.about,
         };
+        let status = match status {
+            Some(s) => (!s.is_empty()).then_some(s),
+            None => current.status,
+        };
         // §2.3 display names ≤128 B.
         if display.as_ref().is_some_and(|d| d.len() > 128) {
             self.send_err(
@@ -52,11 +57,18 @@ impl<S: ControlStream> Session<S> {
                 .await?;
             return Ok(Flow::Continue);
         }
+        // Custom status is a short one-liner (≤128 B).
+        if status.as_ref().is_some_and(|s| s.len() > 128) {
+            self.send_err(label, ErrCode::Malformed, None, "status too long (≤128 B)")
+                .await?;
+            return Ok(Flow::Continue);
+        }
 
         let record = weft_store::ProfileRecord {
             display: display.clone(),
             avatar: avatar.clone(),
             about: about.clone(),
+            status: status.clone(),
             updated: unix_now_ms(),
         };
         if let Err(e) = self
@@ -73,6 +85,7 @@ impl<S: ControlStream> Session<S> {
             display,
             avatar,
             about,
+            status,
         };
         // Labeled ack to the setter; broadcast to co-members in every channel
         // they're in (attributed to this session so the setter's own copy is
@@ -115,6 +128,7 @@ impl<S: ControlStream> Session<S> {
                     display: record.display,
                     avatar: record.avatar,
                     about: record.about,
+                    status: record.status,
                 },
             )
             .await?;

@@ -864,7 +864,7 @@ Well-known document (JSON):
 
 [[s10-3]]
 === 10.3 Display identity
-Signed profile blob (nick, avatar) travels with the user; remotes MAY override display, MUST show canonical `user@network`. A profile also carries an optional free-text *bio* (`PROFILE SET @about=`, ≤512 B, shown on the full profile view); like the display name it is set by its owner and broadcast to co-members via `PROFILE @about=`. The bio is **not** part of the signed profile blob yet (M-prof-5), so it is stored and shown on its home network only — a bridged profile drops it.
+Signed profile blob (nick, avatar) travels with the user; remotes MAY override display, MUST show canonical `user@network`. A profile also carries two optional free-text fields set by its owner and broadcast to co-members: a *bio* (`PROFILE SET @about=`, ≤512 B, shown on the full profile view) and a *custom status* (`PROFILE SET @status=`, ≤128 B, a short one-liner shown inline in member lists and on the profile card). Both use the same partial-update rule as the display name — a present tag sets (empty value clears), an absent tag leaves the field unchanged. Neither is part of the signed profile blob yet (M-prof-5), so both are stored and shown on their home network only — a bridged profile drops them.
 
 *Server nicknames.* A member MAY carry a *per-namespace* display name (`NICK <scope> <account> :<nick>`, ≤128 B, empty clears), which overrides the global display name for that member within that namespace only. Setting your OWN requires the `nick` capability at the scope; setting another member's requires `manage-nicks` (moderator). Changes broadcast as `NICK` events; a client pulls the current set with `NICKS <scope>`. Home-network only for now (nicknames aren't in the signed blob).
 

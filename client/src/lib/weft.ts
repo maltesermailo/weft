@@ -216,6 +216,7 @@ export type WeftEvent =
       display: string | null;
       avatar: string | null;
       about: string | null;
+      status: string | null;
     }
   | { kind: "nick"; scope: string; account: string; network: string; nick: string }
   | { kind: "verified"; claim_kind: string; subject: string; state: string }
@@ -306,7 +307,7 @@ export function join(channel: string) {
 
 // §10.3 display profiles. `profileSet` omits a key to leave that field
 // unchanged, sends "" to clear it, or a value to set it (avatar = a blob hash).
-export function profileSet(opts: { display?: string; avatar?: string; about?: string }) {
+export function profileSet(opts: { display?: string; avatar?: string; about?: string; status?: string }) {
   return invoke("profile_set", opts);
 }
 // §10.3 per-namespace display name (server nickname). Empty `nick` clears it.

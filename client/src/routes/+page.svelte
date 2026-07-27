@@ -420,7 +420,7 @@
   let presence = $state<Record<string, string>>({}); // account → status
   // §10.3 account → display profile (nick + avatar hash). Filled from PROFILE
   // events (broadcast on change) + on-demand PROFILES queries.
-  let profiles = $state<Record<string, { display?: string; avatar?: string; about?: string }>>({});
+  let profiles = $state<Record<string, { display?: string; avatar?: string; about?: string; status?: string }>>({});
   // §10.3 per-namespace display names (server nicknames), keyed "scope|account".
   let nicks = $state<Record<string, string>>({});
   const nickKey = (scope: string, account: string) => `${scope}|${account}`;
@@ -661,6 +661,7 @@
       profilePos = null;
     }
     const scope = roleScopeOf(active);
+    queryProfile(target); // §10.3 nick / avatar / bio / custom status
     ensureCaps(target, active); // channel-scope owner/mod badges
     ensureCapsAt(target, scope); // for the owner check
     fetchRoles(scope); // role definitions (names + colors)
@@ -1119,6 +1120,12 @@
     (activeServer ? nicks[nickKey(`ns:${activeServer}`, peerOf(acct))] : "") ?? "";
   /** An account's free-text bio (§10.3), or "" if unset. */
   const bioOf = (acct: string): string => profiles[peerOf(acct)]?.about ?? "";
+  /** An account's custom status (§10.3), or "" if unset. */
+  const statusOf = (acct: string): string => profiles[peerOf(acct)]?.status ?? "";
+  /** Set (or clear, with "") my own custom status. */
+  function setCustomStatus(text: string) {
+    weft.profileSet({ status: text }).catch((e) => toast(String(e), "error"));
+  }
   /** Fetch a profile we don't have yet (deduped; own + co-members). */
   function queryProfile(acct: string) {
     const a = peerOf(acct);
@@ -1600,6 +1607,7 @@
           display: e.display ?? undefined,
           avatar: e.avatar ?? undefined,
           about: e.about ?? undefined,
+          status: e.status ?? undefined,
         };
         break;
       }
@@ -3487,6 +3495,9 @@
     avatarUrl,
     displayName,
     bioOf,
+    statusOf,
+    setCustomStatus,
+    queryProfile,
     nickOf,
     setNick,
     chanShort,

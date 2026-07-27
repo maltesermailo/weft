@@ -416,6 +416,8 @@ pub enum ClientEvent {
         avatar: Option<String>,
         /// §10.3 free-text bio.
         about: Option<String>,
+        /// §10.3 free-text custom status (shown inline in member lists).
+        status: Option<String>,
     },
     /// §10.3 a per-namespace display name (server nickname) change.
     Nick {
@@ -976,12 +978,14 @@ pub fn on_line<E: EventSink>(
             display,
             avatar,
             about,
+            status,
         } => sink.emit(ClientEvent::Profile {
             account: user.account.to_string(),
             network: user.network.to_string(),
             display,
             avatar,
             about,
+            status,
         }),
         // §10.3 per-namespace server nicknames.
         Event::Nick { scope, user, nick } => sink.emit(ClientEvent::Nick {
@@ -2118,11 +2122,13 @@ pub fn build_profile_set(
     display: Option<&str>,
     avatar: Option<&str>,
     about: Option<&str>,
+    status: Option<&str>,
 ) -> Result<String, String> {
     Request::new(Command::ProfileSet {
         display: display.map(String::from),
         avatar: avatar.map(String::from),
         about: about.map(String::from),
+        status: status.map(String::from),
     })
     .serialize()
     .map_err(|e| e.to_string())

@@ -577,6 +577,9 @@ pub enum Command {
         avatar: Option<String>,
         /// `@about=` free-text bio; present sets (empty clears), absent leaves as-is.
         about: Option<String>,
+        /// `@status=` free-text custom status (§10.3); present sets (empty
+        /// clears), absent leaves as-is. Same partial-update rule as the others.
+        status: Option<String>,
     },
     /// `PROFILES <account> [account...]` (§10.3) — query display profiles; the
     /// server answers a `PROFILE` event per known account.
@@ -1676,6 +1679,7 @@ impl Command {
                         display: line.tags.get("display").cloned(),
                         avatar: line.tags.get("avatar").cloned(),
                         about: line.tags.get("about").cloned(),
+                        status: line.tags.get("status").cloned(),
                     }),
                     _ => Err(ParseError::BadParam {
                         verb: "PROFILE",
@@ -2543,6 +2547,7 @@ impl Command {
                 display,
                 avatar,
                 about,
+                status,
             } => {
                 if let Some(display) = display {
                     tags.insert("display".to_string(), display.clone());
@@ -2552,6 +2557,9 @@ impl Command {
                 }
                 if let Some(about) = about {
                     tags.insert("about".to_string(), about.clone());
+                }
+                if let Some(status) = status {
+                    tags.insert("status".to_string(), status.clone());
                 }
                 ("PROFILE", vec!["SET".to_string()], None)
             }
@@ -3788,6 +3796,7 @@ mod tests {
                 display: Some("Ada L.".into()),
                 avatar: Some("b3-abc".into()),
                 about: Some("Cryptographer & poet.".into()),
+                status: Some("🎧 in the zone".into()),
             },
             "p1",
         );
@@ -3795,19 +3804,22 @@ mod tests {
         assert!(wire.contains("display=Ada\\sL."), "{wire}");
         assert!(wire.contains("avatar=b3-abc"), "{wire}");
         assert!(wire.contains("about="), "{wire}");
+        assert!(wire.contains("status="), "{wire}");
         round_trip(&set);
 
-        // Partial update: avatar only (display + about left unchanged → absent tags).
+        // Partial update: avatar only (display + about + status left unchanged → absent tags).
         round_trip(&Request::new(Command::ProfileSet {
             display: None,
             avatar: Some("b3-xyz".into()),
             about: None,
+            status: None,
         }));
-        // Clear display + about: a present-but-empty tag distinguishes clear from absent.
+        // Clear fields: a present-but-empty tag distinguishes clear from absent.
         round_trip(&Request::new(Command::ProfileSet {
             display: Some(String::new()),
             avatar: None,
             about: Some(String::new()),
+            status: Some(String::new()),
         }));
 
         round_trip(&Request::with_label(

@@ -169,6 +169,8 @@ pub struct ProfileRecord {
     pub avatar: Option<String>,
     /// §10.3 free-text bio, shown on the full profile view.
     pub about: Option<String>,
+    /// §10.3 free-text custom status, shown inline in member lists.
+    pub status: Option<String>,
     pub updated: u64,
 }
 

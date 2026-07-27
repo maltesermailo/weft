@@ -64,6 +64,16 @@
       </div>
       <div class="profile-handle">{target.includes("@") ? target : `${target}@${app.network}`} · <span class="pres-{pr}">{pr}</span></div>
 
+      {#if app.statusOf(target)}
+        <div class="profile-custom-status">{app.statusOf(target)}</div>
+      {/if}
+
+      {#if app.bioOf(target)}
+        <div class="profile-divider"></div>
+        <div class="profile-section-label">About me</div>
+        <p class="profile-bio">{app.bioOf(target)}</p>
+      {/if}
+
       {#if inServer && (myRoles.length || canAssignRoles || targetIsOwner)}
         <div class="profile-divider"></div>
         <div class="profile-section-label">Roles</div>

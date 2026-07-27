@@ -74,6 +74,7 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
         </button>
         <div class="pm-statusline"><span class="pm-sdot {status}" class:on={online}></span>{STATUS_LABEL[status] ?? "Offline"}</div>
+        {#if app.statusOf(target)}<div class="pm-custom-status">{app.statusOf(target)}</div>{/if}
 
         {#if !isSelf}
           <div class="pm-actions">
@@ -301,6 +302,12 @@
     margin-top: 8px;
     font-size: 12px;
     color: var(--text-secondary);
+  }
+  .pm-custom-status {
+    margin-top: 8px;
+    font-size: 14px;
+    color: var(--text-primary);
+    word-break: break-word;
   }
   .pm-sdot {
     width: 9px;

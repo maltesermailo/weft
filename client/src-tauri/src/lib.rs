@@ -326,11 +326,13 @@ fn profile_set(
     display: Option<String>,
     avatar: Option<String>,
     about: Option<String>,
+    status: Option<String>,
 ) -> Result<(), String> {
     conn.send(weft::build_profile_set(
         display.as_deref(),
         avatar.as_deref(),
         about.as_deref(),
+        status.as_deref(),
     )?)
 }
 

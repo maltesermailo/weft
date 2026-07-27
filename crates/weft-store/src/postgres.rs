@@ -3536,12 +3536,13 @@ impl ProfileStore for PgStore {
     async fn set_profile(&self, account: &str, profile: ProfileRecord) -> Result<(), StoreError> {
         sqlx::query(
             r#"
-            INSERT INTO weft_profiles (account, display, avatar, about, updated_ms)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO weft_profiles (account, display, avatar, about, status, updated_ms)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (account) DO UPDATE
               SET display = EXCLUDED.display,
                   avatar = EXCLUDED.avatar,
                   about = EXCLUDED.about,
+                  status = EXCLUDED.status,
                   updated_ms = EXCLUDED.updated_ms
             "#,
         )
@@ -3549,6 +3550,7 @@ impl ProfileStore for PgStore {
         .bind(profile.display.as_deref())
         .bind(profile.avatar.as_deref())
         .bind(profile.about.as_deref())
+        .bind(profile.status.as_deref())
         .bind(profile.updated as i64)
         .execute(&self.pool)
         .await
@@ -3645,6 +3647,7 @@ fn profile_from_row(row: &sqlx::postgres::PgRow) -> ProfileRecord {
         display: row.get("display"),
         avatar: row.get("avatar"),
         about: row.get("about"),
+        status: row.get("status"),
         updated: row.get::<i64, _>("updated_ms") as u64,
     }
 }

@@ -26,6 +26,22 @@
     if (!ms) return "—";
     return new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
   }
+
+  // Options for the segmented (button-group) inputs — the fancy replacements
+  // for the plain <select> boxes.
+  const VIS_OPTIONS: { value: string; label: string; desc: string }[] = [
+    { value: "public", label: "Public", desc: "Listed in Discover" },
+    { value: "unlisted", label: "Unlisted", desc: "Invite only" },
+    { value: "private", label: "Private", desc: "Hidden" },
+  ];
+  const BR_HISTORY: { value: string; label: string }[] = [
+    { value: "from-epoch", label: "From epoch" },
+    { value: "full", label: "Full history" },
+  ];
+  const BR_MEDIA: { value: string; label: string }[] = [
+    { value: "none", label: "No media" },
+    { value: "mirror", label: "Mirror" },
+  ];
   let { onclose }: { onclose: () => void } = $props();
 
   // Federation: bridges are proposed at this namespace's scope (§11) — the
@@ -133,20 +149,26 @@
               <div class="ov-identity-sub">Namespace on {app.network}</div>
             </div>
           </div>
-          <div class="ov-grid">
-            <div>
-              <div class="field-label">Display name</div>
-              <input class="text-input" bind:value={app.nsTitle} placeholder={app.activeServer} />
-            </div>
-            <div>
-              <div class="field-label">Visibility</div>
-              <select class="text-input" bind:value={app.nsVis}>
-                <option value="public">Public — listed in Discover</option>
-                <option value="unlisted">Unlisted — invite only</option>
-                <option value="private">Private — hidden</option>
-              </select>
-            </div>
+          <div class="field-label">Display name</div>
+          <input class="text-input" bind:value={app.nsTitle} placeholder={app.activeServer} />
+          <div class="ov-gap"></div>
+          <div class="field-label">Visibility</div>
+          <div class="segmented" role="radiogroup" aria-label="Visibility">
+            {#each VIS_OPTIONS as o (o.value)}
+              <button
+                type="button"
+                class="seg"
+                class:on={app.nsVis === o.value}
+                role="radio"
+                aria-checked={app.nsVis === o.value}
+                onclick={() => (app.nsVis = o.value)}
+              >
+                <span class="seg-label">{o.label}</span>
+                <span class="seg-desc">{o.desc}</span>
+              </button>
+            {/each}
           </div>
+          <div class="ov-gap"></div>
           <div class="field-label">Description</div>
           <textarea class="text-input ov-desc" rows="3" bind:value={app.nsDesc} placeholder="what's this namespace about"></textarea>
         </div>
@@ -359,15 +381,27 @@
         <p class="so-sub">Snapshot this namespace's channels to <code>&lt;peer&gt;</code> and offer a bridge. Live on mutual accept.</p>
         <input class="text-input" bind:value={brPeer} placeholder="peer network (e.g. hda.example)" onkeydown={(e) => e.key === "Enter" && proposeBridge()} />
         <div class="fed-propose">
-          <select bind:value={brHistory}>
-            <option value="from-epoch">history: from-epoch</option>
-            <option value="full">history: full</option>
-          </select>
-          <select bind:value={brMedia}>
-            <option value="none">media: none</option>
-            <option value="mirror">media: mirror</option>
-          </select>
-          <label class="fed-check"><input type="checkbox" bind:checked={brTyping} /> typing</label>
+          <div class="fed-field">
+            <div class="field-label">History</div>
+            <div class="segmented compact">
+              {#each BR_HISTORY as o (o.value)}
+                <button type="button" class="seg" class:on={brHistory === o.value} role="radio" aria-checked={brHistory === o.value} onclick={() => (brHistory = o.value)}>
+                  <span class="seg-label">{o.label}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+          <div class="fed-field">
+            <div class="field-label">Media</div>
+            <div class="segmented compact">
+              {#each BR_MEDIA as o (o.value)}
+                <button type="button" class="seg" class:on={brMedia === o.value} role="radio" aria-checked={brMedia === o.value} onclick={() => (brMedia = o.value)}>
+                  <span class="seg-label">{o.label}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+          <label class="fed-check"><input type="checkbox" bind:checked={brTyping} /> Relay typing</label>
           <button class="ok-btn" onclick={proposeBridge}>Propose</button>
         </div>
         <p class="so-sub" style="margin-top:14px">Outbound bridge transmission needs the M5d dialer; inbound peering, accept, and sever work today. Network-wide defederation (blocking a peer network entirely) is a network-operator action.</p>

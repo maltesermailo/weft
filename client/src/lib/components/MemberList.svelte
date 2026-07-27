@@ -16,7 +16,10 @@
   const roleScope = $derived(app.nsRoleScope());
   $effect(() => {
     app.ensureRoles(roleScope);
-    for (const m of members) app.ensureMemberRoles(m.name);
+    for (const m of members) {
+      app.ensureMemberRoles(m.name);
+      app.queryProfile(m.name); // so avatars + custom status show without opening a profile
+    }
   });
 
   // Hoisted roles, already in position order (top = highest).
@@ -55,10 +58,15 @@
   <div class="member-row" class:member-offline={!isOnline(m.name)} role="listitem" oncontextmenu={(e) => app.userCtx(e, m.name)}>
     <button class="member-id" onclick={(e) => app.openProfile(m.name, e)}>
       <div class="avatar"><Avatar account={m.name} /><span class="dot {statusOf(m.name)} corner"></span></div>
-      <span class="mname">{app.displayName(m.name)}</span>
-      {#if app.badgeFor(m.name, app.active)?.owner}<span class="cap-badge owner">owner</span>
-      {:else if app.badgeFor(m.name, app.active)?.mod}<span class="cap-badge mod">mod</span>{/if}
-      {#if m.origin === "federated"}<span class="cap-badge bridged">br</span>{/if}
+      <span class="member-text">
+        <span class="member-name-line">
+          <span class="mname">{app.displayName(m.name)}</span>
+          {#if app.badgeFor(m.name, app.active)?.owner}<span class="cap-badge owner">owner</span>
+          {:else if app.badgeFor(m.name, app.active)?.mod}<span class="cap-badge mod">mod</span>{/if}
+          {#if m.origin === "federated"}<span class="cap-badge bridged">br</span>{/if}
+        </span>
+        {#if app.statusOf(m.name)}<span class="mstatus" title={app.statusOf(m.name)}>{app.statusOf(m.name)}</span>{/if}
+      </span>
     </button>
     {#if m.name !== app.account}
       <div class="member-actions">

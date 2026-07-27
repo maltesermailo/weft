@@ -519,6 +519,9 @@ pub enum Event {
         avatar: Option<String>,
         /// `@about=` free-text bio (§10.3); a missing tag = unset.
         about: Option<String>,
+        /// `@status=` free-text custom status (§10.3); a missing tag = unset.
+        /// Local-only like `about` — stripped at the federation boundary.
+        status: Option<String>,
     },
     /// `NICK <scope> <user@network> :<nick>` (§10.3) — a per-namespace display
     /// name (server nickname) change, broadcast to the namespace; also each
@@ -1392,6 +1395,7 @@ impl Event {
                     display: line.tags.get("display").cloned(),
                     avatar: line.tags.get("avatar").cloned(),
                     about: line.tags.get("about").cloned(),
+                    status: line.tags.get("status").cloned(),
                 })
             }
             "NICK" => {
@@ -2198,6 +2202,7 @@ impl Event {
                 display,
                 avatar,
                 about,
+                status,
             } => {
                 if let Some(display) = display {
                     tags.insert("display".to_string(), display.clone());
@@ -2207,6 +2212,9 @@ impl Event {
                 }
                 if let Some(about) = about {
                     tags.insert("about".to_string(), about.clone());
+                }
+                if let Some(status) = status {
+                    tags.insert("status".to_string(), status.clone());
                 }
                 ("PROFILE", vec![user.to_string()], None)
             }
@@ -3192,12 +3200,14 @@ mod tests {
                 display: Some("Ada L.".into()),
                 avatar: Some("b3-abc".into()),
                 about: Some("Cryptographer & poet.".into()),
+                status: Some("🎧 in the zone".into()),
             },
             "p1",
         );
         let wire = full.serialize().unwrap();
         assert!(wire.contains("avatar=b3-abc"));
         assert!(wire.contains("about="));
+        assert!(wire.contains("status="));
         round_trip(&full);
         // Avatar-only, no display; a federated user's fully-qualified handle.
         round_trip(&Reply::new(Event::Profile {
@@ -3205,6 +3215,7 @@ mod tests {
             display: None,
             avatar: Some("b3-xyz".into()),
             about: None,
+            status: None,
         }));
         // Bare (all unset) — a cleared profile.
         let bare = Reply::new(Event::Profile {
@@ -3212,6 +3223,7 @@ mod tests {
             display: None,
             avatar: None,
             about: None,
+            status: None,
         });
         assert_eq!(bare.serialize().unwrap(), "PROFILE eve@hda.example");
         round_trip(&bare);

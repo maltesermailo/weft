@@ -342,6 +342,7 @@ impl WeftClient {
                     args.get("display").and_then(|v| v.as_str()),
                     args.get("avatar").and_then(|v| v.as_str()),
                     args.get("about").and_then(|v| v.as_str()),
+                    args.get("status").and_then(|v| v.as_str()),
                 )?
             }
             "profiles_query" => {

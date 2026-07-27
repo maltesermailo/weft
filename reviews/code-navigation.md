@@ -203,7 +203,14 @@ Chain 8: boot with Postgres — `weftd::start` → backend match →
 ## M-prof addendum — §10.3 display profiles (nick + avatar)
 
 A profile = display name + avatar (the avatar's BLAKE3 hash → a `weft-media://`
-blob). New load-bearing pieces:
+blob) + two local-only free-text fields, **bio** (`@about=`, ≤512 B) and
+**custom status** (`@status=`, ≤128 B). Both ride the `PROFILE` line unsigned and
+are stripped at the federation boundary (the `..` in `federation.rs`'s
+`Event::Profile` destructure); each follows the same present-sets/absent-leaves
+partial-update rule as display/avatar. Custom status shows inline in the member
+list (`MemberList.svelte` `.mstatus`) and on the profile card/modal; set it via
+the shortcut modal layered over the user footer (`UserFooter.svelte` +
+`app.setCustomStatus`/`statusOf`). New load-bearing pieces:
 - `weft-crypto/src/profile.rs` — `SignedProfile` (home-network-key-signed CBOR,
   avatar-hash-bound; models `manifest.rs`). Used at federation (M-prof-5).
 - `weft-store` — `ProfileStore` + `ProfileRecord` (`kind`-less per-account row),

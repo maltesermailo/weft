@@ -2229,6 +2229,7 @@ where
                 display: Some("Ada".into()),
                 avatar: Some("b3-ada".into()),
                 about: Some("Cryptographer & poet.".into()),
+                status: Some("🎧 in the zone".into()),
                 updated: 100,
             },
         )
@@ -2241,6 +2242,7 @@ where
                 display: None,
                 avatar: Some("b3-bob".into()),
                 about: None,
+                status: None,
                 updated: 100,
             },
         )
@@ -2250,6 +2252,7 @@ where
     assert_eq!(got.display.as_deref(), Some("Ada"));
     assert_eq!(got.avatar.as_deref(), Some("b3-ada"));
     assert_eq!(got.about.as_deref(), Some("Cryptographer & poet."));
+    assert_eq!(got.status.as_deref(), Some("🎧 in the zone"));
     // Replace (last-writer-wins) — a new avatar, display cleared.
     store
         .set_profile(
@@ -2258,6 +2261,7 @@ where
                 display: None,
                 avatar: Some("b3-ada2".into()),
                 about: None,
+                status: None,
                 updated: 200,
             },
         )

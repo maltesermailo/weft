@@ -151,6 +151,12 @@ export interface AppCtx {
   displayName(account: string): string;
   /** §10.3 an account's free-text bio, or "" if unset. */
   bioOf(account: string): string;
+  /** §10.3 an account's custom status, or "" if unset. */
+  statusOf(account: string): string;
+  /** Set (or clear, with "") my own custom status (§10.3). */
+  setCustomStatus(text: string): void;
+  /** Fetch an account's profile if not already cached (deduped). */
+  queryProfile(account: string): void;
   /** §10.3 an account's server nickname at the active server, or "" if unset. */
   nickOf(account: string): string;
   /** Set a per-namespace nickname (empty clears). Own → `nick`, other → `manage-nicks`. */

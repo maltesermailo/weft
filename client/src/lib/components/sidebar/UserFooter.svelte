@@ -9,7 +9,37 @@
     { value: "dnd", label: "Do Not Disturb" },
     { value: "invisible", label: "Invisible" },
   ];
+
+  // Custom-status modal, layered on top of the user menu.
+  let statusModal = $state(false);
+  let statusDraft = $state("");
+  const myCustom = $derived(app.statusOf(app.account));
+  function openStatusModal() {
+    statusDraft = myCustom;
+    statusModal = true;
+  }
+  function saveStatus() {
+    app.setCustomStatus(statusDraft.trim());
+    statusModal = false;
+    app.userMenu = false;
+  }
+  function clearStatus() {
+    app.setCustomStatus("");
+    statusDraft = "";
+    statusModal = false;
+    app.userMenu = false;
+  }
+  function focusInput(node: HTMLInputElement) {
+    node.focus();
+    node.select();
+  }
 </script>
+
+<svelte:window
+  onkeydown={(e) => {
+    if (statusModal && e.key === "Escape") statusModal = false;
+  }}
+/>
 
 <div class="sidebar-user-wrap">
   {#if app.userMenu}
@@ -22,7 +52,7 @@
         </span>
         <span class="who">
           <span class="name">{app.account}</span>
-          <span class="key">{app.network}</span>
+          <span class="key">{myCustom || app.network}</span>
         </span>
       </div>
       <div class="sm-sep"></div>
@@ -32,6 +62,14 @@
           {#if app.myStatus === s.value}<span class="um-check">✓</span>{/if}
         </button>
       {/each}
+      <div class="sm-sep"></div>
+      <button class="sm-item" onclick={openStatusModal}>
+        <span class="um-status">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><path d="M9 9h.01M15 9h.01" /></svg>
+          {myCustom ? "Edit custom status" : "Set a custom status"}
+        </span>
+        {#if myCustom}<span class="um-clear" role="button" tabindex="0" title="Clear status" onclick={(e) => { e.stopPropagation(); clearStatus(); }} onkeydown={(e) => e.key === "Enter" && (e.stopPropagation(), clearStatus())}>✕</span>{/if}
+      </button>
       <div class="sm-sep"></div>
       <button class="sm-item" onclick={app.openSettings}>
         User Settings
@@ -51,8 +89,31 @@
     </span>
     <span class="who">
       <span class="name">{app.account}</span>
-      <span class="key">{app.myStatus}</span>
+      <span class="key">{myCustom || app.myStatus}</span>
     </span>
     <svg class="user-gear" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
   </button>
+
+  {#if statusModal}
+    <div class="status-modal-overlay" role="dialog" aria-modal="true" aria-label="Set custom status">
+      <button class="status-modal-backdrop" aria-label="Cancel" onclick={() => (statusModal = false)}></button>
+      <div class="status-modal">
+        <div class="status-modal-title">Set a custom status</div>
+        <input
+          class="text-input"
+          use:focusInput
+          bind:value={statusDraft}
+          maxlength="128"
+          placeholder="What's happening?"
+          onkeydown={(e) => e.key === "Enter" && saveStatus()}
+        />
+        <div class="status-modal-actions">
+          {#if myCustom}<button class="linkish" onclick={clearStatus}>Clear</button>{/if}
+          <span class="status-modal-spacer"></span>
+          <button class="linkish" onclick={() => (statusModal = false)}>Cancel</button>
+          <button class="ok-btn" onclick={saveStatus}>Save</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>

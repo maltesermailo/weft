@@ -1265,8 +1265,9 @@ impl<S: ControlStream> Session<S> {
                 display,
                 avatar,
                 about,
+                status,
             } => {
-                self.on_profile_set(label, display, avatar, about, account)
+                self.on_profile_set(label, display, avatar, about, status, account)
                     .await
             }
             Command::ProfilesQuery { accounts } => self.on_profiles_query(label, accounts).await,
