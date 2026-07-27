@@ -1,8 +1,11 @@
-# WEFT-Matrix — concept: projecting WEFT namespaces as Matrix Spaces
+# WEFT-Matrix — the Matrix adapter (bridge adapter #1)
 
-**Status:** design concept for a new, separate module (working name `weft-matrix`), companion to weftd — the Matrix analog of the §17 IRC gateway, but full-fidelity rather than degraded.
-**Depends on:** the ns-membership + SYNC redesign (`weft-sync-membership-redesign.md`) — the hide-override mechanism is used by membership mapping (§8 below).
-**Wire impact on core WEFT:** near-zero; one small weftd config addition (§17). Everything else lives in the bridge daemon.
+**Status:** design concept for a separate module (working name `weft-matrix`) — **adapter #1 of the [Foreign-Realm Bridging Framework](foreign-bridge-framework.md)**. The framework doc owns the generic model (foreign-realm addressing, the `State::ForeignBridge` context, the single `FOREIGN JOIN` provisioning verb + reused `NS-META`/`CHANNEL-LAYOUT` structure assertions, realm-keyed NETBLOCK); this doc is the Matrix *binding* — the full-fidelity Matrix analog of the §17 IRC gateway. **Bidirectional:** §3–§16 are the *outbound* half (WEFT namespaces projected as Matrix Spaces, WEFT-homed). The *inbound* half — a remote Matrix **Space → foreign namespace, room → foreign channel** (the §6 mapping, **unchanged**), consumed through the framework's first-class foreign namespace/channel API and keeping native identity (`matrix.org` stays `matrix.org`; users stay `@alice:matrix.org`) — is §20 (this adapter's binding of the framework).
+
+> **§5 is superseded** (owner directive 2026-07-27) by the framework's native-identity model: remote homeservers are **not** laundered into virtual WEFT networks (`matrix-org.mx.test.example`). They keep native Matrix coordinates and are surfaced as first-class *foreign* objects. §5's per-network keys / wildcard DNS+cert / per-network `AUTH BRIDGE` sessions are replaced by per-realm `State::ForeignBridge` connections (one per homeserver, pinned-key authed and realm-bound; framework §3).
+
+**Depends on:** the ns-membership + SYNC redesign (`namespace-membership-sync-v0.12.md`, **shipped**) — hide overrides drive membership mapping (§8); the home-authoritative replica model (`home-authoritative-channels.md`) is reused for the inbound replica.
+**Wire impact on core WEFT:** outbound is near-zero (one `bridge:matrix :open` NS-META flag). Inbound rides the framework's core footprint (framework §9) — generic, **not** Matrix-specific.
 
 ## 0. Locked decisions (from design review — do not reopen without owner)
 
@@ -15,7 +18,8 @@
 | 5 | Inbound identity | **Per-homeserver virtual networks.** Each remote Matrix homeserver appears to weftd as a distinct WEFT peer network, so NETBLOCK/attestation-rejection/media-refusal work per Matrix homeserver. |
 | 6 | Moderation | **Matrix mods have real power.** Matrix-side moderator actions are translated into `@as` WEFT commands and enforced against WEFT's grant store; WEFT caps project to power levels. Details §10. |
 | 7 | E2EE | **Hard-excluded, non-negotiable.** `e2ee` channels get no room (the IRC-gateway `NO-SUCH-TARGET` treatment); a bridge that decrypts breaks invariant 8. |
-| 8 | Ephemera & scope | Typing bridged under manifest `typing=yes`. Read receipts **never** bridged. Presence never (locked in core). **Channels only** in v1 — DMs, double-puppeting, voice, report-forwarding: v2 (§20). |
+| 8 | Ephemera & scope | Typing bridged under manifest `typing=yes`. Read receipts **never** bridged. Presence never (locked in core). **Channels only** in v1 — DMs, double-puppeting, voice, report-forwarding: v2 (§21). |
+| 9 | Framework & foreign identity | Inbound is the Matrix binding of the **[Foreign-Realm Bridging Framework](foreign-bridge-framework.md)** — foreign realms keep native identity (`matrix.org`, MXIDs, `matrix://` URIs), **not** virtual WEFT networks. **Supersedes decision 5 / §5.** The Space→namespace + room→channel mapping (§6) is unchanged. Owner directive 2026-07-27. |
 
 ## 1. Terminology & the mapping
 
@@ -70,6 +74,13 @@ Projected Spaces of public namespaces are published to the companion HS's public
 - Puppet room membership: **activity-based by default** (`roster = active`): puppets join a room on first message/reaction and on moderator-cap grant; a `roster = full` config mode joins every ns member's puppet for exact rosters (heavy on big namespaces). Honest limit either way, documented.
 
 ## 5. Inbound identity (Matrix → WEFT): per-homeserver virtual networks
+
+> **⚠️ SUPERSEDED (2026-07-27).** This section's virtual-network scheme (`matrix.org` →
+> `matrix-org.mx.test.example`, per-network derived keys, wildcard DNS+cert, per-network
+> `AUTH BRIDGE`) is replaced by the [Foreign-Realm Bridging Framework](foreign-bridge-framework.md):
+> Matrix keeps native identity (`@alice:matrix.org`), and each homeserver gets its own
+> pinned, realm-bound `State::ForeignBridge` connection (one per realm; framework §3). Retained
+> below only as the rationale trail — read §20 + the framework doc for the live design.
 
 - Remote Matrix homeserver `matrix.org` ⇒ virtual WEFT network **`matrix-org.mx.test.example`**; its user `@alice:matrix.org` ⇒ `alice@matrix-org.mx.test.example`.
 - **Sanitization (deterministic):** lowercase; `.` → `-`; strip chars outside `[a-z0-9-]`; if the result collides with an already-mapped distinct server name, append `-` + first 6 chars of base32(BLAKE3(server_name)). Mapping table persisted; a name once assigned never changes.
@@ -189,9 +200,11 @@ Typing: bridged both ways when the (bridge-internal) manifest says `typing=yes` 
 
 ## 17. Changes required in weftd core (keep this list minimal — it's the module boundary)
 
-1. **Pinned-suffix bridge trust** (small config addition): `[bridge] pinned_suffix = { suffix = "mx.test.example", root_key = <pubkey> }` — one pinned root key authenticates `AUTH BRIDGE` for any network name under the suffix (per-name keys derived from it). Avoids per-homeserver pin churn and avoids opening accept-any. This is the only auth change.
-2. **`NS META <ns> matrix :open|closed`** — new NS-META key (echoed as `matrix=` tag), `open` requires `public` visibility. weftd stores/broadcasts it; only the bridge interprets it.
-3. Nothing else: identity (§10.4 foreign subjects), `@as` authority (§11.11), NETBLOCK, manifests, media, and the membership verbs are all existing surfaces.
+**Matrix-adapter-specific core changes are now just the outbound projection flag** — everything the *inbound* direction needs is the generic [Foreign-Realm Bridging Framework](foreign-bridge-framework.md) §9 footprint (`State::ForeignBridge`, `@scheme`/`@realm` tags + `<scheme>://` scopes, `FOREIGN`/`REALM`/`FNS`/`FCHAN` verbs, realm-keyed NETBLOCK, foreign-object store tables), which is shared by every future adapter and contains no Matrix code.
+
+1. **Outbound projection consent flag:** `NS META <ns> bridge:matrix :open|closed` (the generalized form of the framework's `bridge:<scheme>` opt-in, framework §5) — echoed as a `bridge=matrix:open` tag, `open` requires `public` visibility. weftd stores/broadcasts it; only the adapter interprets it.
+2. ~~Pinned-suffix bridge trust~~ **(removed — superseded by §5's supersede note):** no `[bridge] pinned_suffix`, no virtual-suffix keys, no wildcard DNS/cert. Replaced by the framework's `[[foreign_bridge]] scheme, pubkey` pinned adapter connection (framework §3/§9.1).
+3. Everything else — identity, `@as`/`@realm` authority, NETBLOCK, media, membership verbs — is either an existing surface or lands once in the framework, not per adapter.
 
 ## 18. Implementation plan (phases)
 
@@ -216,11 +229,23 @@ Typing: bridged both ways when the (bridge-internal) manifest says `typing=yes` 
 9. Duplicate appservice txn replay + duplicate WEFT event delivery → no double posts (dedup both directions).
 10. Kill the bridge for an hour under traffic on both sides → on restart, txn replay + `@as HISTORY` catch-up converge both rooms with no loss and no duplicates.
 
-## 20. Deferred (v2+)
+## 20. Inbound binding — Matrix Spaces/rooms as foreign namespaces
+
+The Matrix binding of the [Foreign-Realm Bridging Framework](foreign-bridge-framework.md) (framework §5/§10). The framework owns the generic mechanics; here is how Matrix fills the slots. **Nothing about the Space/room → namespace/channel mapping changes** — §6 stands; these objects are simply handled first-class as *foreign* namespaces/channels rather than disguised as a virtual network.
+
+- **Mapping (unchanged, §6):** Matrix Space → foreign namespace; child room → foreign channel; category → sub-space/category; a standalone (non-Space) room → a foreign namespace with a single channel. Addressed `matrix://<hs>/<space>[/<room>]` (e.g. `matrix://matrix.org/gaming/general`).
+- **Identity (native):** foreign accounts keep their MXIDs (`@alice:matrix.org`); the foreign namespace's origin is `(matrix, matrix.org)`. Our users appear inside the remote room as their companion-HS puppet `@<account>:test.example` (federated out via Matrix S2S) — §4's outward puppeting, now into a *remote* room the companion HS has joined.
+- **Join** (`FOREIGN JOIN matrix://matrix.org/gaming`): the adapter resolves the alias, joins the Space/room via the companion HS (Matrix S2S), enumerates children, and asserts the tree via `NS-META`/`CHANNEL-LAYOUT` with `@scheme`/`@realm` tags (framework §3.1). Encrypted or unjoinable → `NO-SUCH-TARGET` (invariant 1; e2ee §13). Leaving is `NS LEAVE`/`PART` on the URI; the joined set appears via `SYNC` — no Matrix-specific verbs.
+- **Events:** the §7 table runs in the inbound sense — remote events arrive as `@scheme=matrix;realm=matrix.org;as=@bob:matrix.org …` assertions (weftd mints the replica ULIDs); our users' posts/edits/reactions are relayed out and puppet-applied in the remote room.
+- **Membership:** the §8 mapping, foreign-addressed — remote users *and* our own `FOREIGN JOIN`ed users share one derived roster (framework §6).
+- **Retention/visibility:** bounded replica `retained:<config>`, never `permanent`/`e2ee`; listed in `DISCOVER` (subject to the Space's own visibility) and client-badged "Matrix · matrix.org" (framework §6).
+- **Authority (honest limit):** matrix.org is the social home of a *consumed* Space — WEFT caps govern only our replica + our users' relay; `NETBLOCK REALM matrix://matrix.org` is the escape hatch (framework §7). (For *projected* WEFT namespaces, §10 still applies — WEFT is authoritative.)
+
+## 21. Deferred (v2+)
 
 Double-puppeting (link accounts on both sides); DMs (Matrix DM ↔ two-member WEFT group); voice (MatrixRTC ↔ LiveKit); `REPORT-FORWARD` into virtual networks; image custom-emoji packs; direct S2S federation in weftd (retiring the companion HS).
 
-## 21. Confirm with owner (calls I made without an explicit answer)
+## 22. Confirm with owner (calls I made without an explicit answer)
 
 1. Projection is **opt-in per namespace** via `NS META matrix :open` rather than automatic for every public ns — chosen for §1's explicit-consent goal. Confirm.
 2. Lazy per-homeserver `AUTH BRIDGE` sessions + the pinned-suffix root key (§5/§17.1) as the trust mechanism. Confirm.

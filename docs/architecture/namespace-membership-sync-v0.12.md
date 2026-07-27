@@ -1,9 +1,12 @@
 # Namespace membership + SYNC (v0.11 → v0.12) — change plan
 
-> **Status:** awaiting owner confirmation on the four open questions (see Decision
-> log). Source: owner change spec, 2026-07-25. This is a **wire-behavior change**,
-> not an editorial pass. Once the four questions are locked, the §-edits move into
-> `docs/protocol/weft-spec-v0.11.adoc` (Part 6 checklist) and code follows Part 7.
+> **Status:** COMPLETE. The four open questions are resolved (see Decision log) and
+> Tasks 14–21 have shipped — proto + store + membership + SYNC + BATCH cleanup + client
+> + spec, all tested and PG-16-validated; the §-edits are folded into
+> `docs/protocol/weft-spec-v0.11.adoc`. Source: owner change spec, 2026-07-25. Only
+> milestone-scale follow-ups remain (body stream + previews, full `ModSeq` in-flight
+> wiring, session auto-subscribe for zero-join posting, full client cache model) — each
+> is functional-gap-free today and tracked in the Progress log below.
 
 ## Decision log
 
