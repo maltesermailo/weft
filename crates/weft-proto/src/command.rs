@@ -379,10 +379,12 @@ pub enum Command {
         ns: crate::NamespaceId,
         confirm: crate::NamespaceId,
     },
-    /// `NS JOIN <ns-id>` — become a member of the namespace (§6.2); one
+    /// `NS JOIN <ns-id|vanity>` — become a member of the namespace (§6.2); one
     /// `(account, ns)` row, channel access derived. View-gated channels the
-    /// caller cannot see stay hidden.
-    NsJoin { ns: crate::NamespaceId },
+    /// caller cannot see stay hidden. Accepts the id or the vanity name so an
+    /// *unlisted* namespace stays joinable by exact name (§2.2); the server
+    /// resolves either form to the id.
+    NsJoin { ns: crate::NamespaceRef },
     /// `NS LEAVE <ns-id>` (§6.2) — drop namespace membership + all hide
     /// overrides + ns-scoped role assignments. Also reachable as the
     /// `PART ns:<id>` alias (lenient-in; strict-out is always `NS LEAVE`).
@@ -3430,6 +3432,10 @@ mod tests {
         }));
         round_trip(&Request::new(Command::NsJoin {
             ns: ns.parse().unwrap(),
+        }));
+        // NS JOIN also accepts a vanity name (§2.2 unlisted-by-name).
+        round_trip(&Request::new(Command::NsJoin {
+            ns: "my-server".parse().unwrap(),
         }));
         round_trip(&Request::new(Command::NsLeave {
             ns: ns.parse().unwrap(),

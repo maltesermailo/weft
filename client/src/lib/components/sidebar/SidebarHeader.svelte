@@ -9,7 +9,7 @@
   {:else}
     <button class="comm-name-btn" class:open={app.serverMenu} onclick={() => (app.serverMenu = !app.serverMenu)}>
       <span class="comm-head">
-        <span class="comm-name">{app.activeNsMeta?.title || app.activeServer || app.network}</span>
+        <span class="comm-name">{app.activeNsMeta?.title || app.activeNsMeta?.name || app.network}</span>
         <span class="comm-origin">
           <span class="origin-dot"></span>
           <span>{app.activeServer ? `namespace · ${app.network}` : `${app.network} · connected`}</span>

@@ -507,7 +507,7 @@
   let notifSettingsOpen = $state(false);
   // The scope the modal edits = the active server (namespace, or the network).
   const notifScopeKey = () => (activeServer ? `ns:${activeServer}` : "net");
-  const notifScopeLabel = () => activeServer || network;
+  const notifScopeLabel = () => (activeServer ? serverName(activeServer) : network);
   function openNotifSettings() {
     notifSettingsOpen = true;
     serverMenu = false;
@@ -582,6 +582,9 @@
   let discoverOpen = $state(false);
   let discovered = $state<Record<string, Extract<weft.WeftEvent, { kind: "ns-meta" }>>>({});
   let discoverCursor = $state<string | null>(null);
+  // Namespace ids we've auto-joined on creation, so the reactive auto-join fires
+  // once per freshly-created server (see the `ns-meta` handler).
+  const autoJoinedNs = new Set<string>();
   // ---- roles / invites / reports (Phase 7) ----
   const RESOLVE_ACTIONS = ["dismissed", "content-removed", "user-actioned", "escalated"];
   let reportTarget = $state<Msg | null>(null); // message being reported (ReportModal)
@@ -1116,6 +1119,10 @@
   let myRecoveryKey = $state("");
   let recoveryDoc = $state("");
   let activeNsMeta = $derived(activeServer ? discovered[activeServer] : undefined);
+  // v0.13: a namespace's rail tile / header key is its **id**; its display name
+  // is the vanity from NS-META (fall back to the id only if we haven't seen it).
+  const serverName = (nsId: string): string =>
+    discovered[nsId]?.title || discovered[nsId]?.name || nsId;
   function showRecoveryKey() {
     weft
       .recoveryPubkey(network, activeServer)
@@ -2145,19 +2152,33 @@
         break;
       }
       case "ns-meta":
+        // v0.13: namespaces are keyed by their immutable **id** everywhere the
+        // client addresses them (channels `#<id>/…`, scopes `ns:<id>`, the rail
+        // tile is `nsOf(channel)` = the id). The vanity `e.name` is display only.
         // §6.2 deletion marker (owner cleared + description "deleted"): drop the
         // namespace from every local view instead of storing a tombstone —
         // otherwise a deleted server would linger in the rail/channel list.
         if (e.owner === null && e.description === "deleted") {
-          delete discovered[e.name];
+          delete discovered[e.id];
           for (const name of Object.keys(channels)) {
-            if (name.startsWith("#") && nsOf(name) === e.name) delete channels[name];
+            if (name.startsWith("#") && nsOf(name) === e.id) delete channels[name];
           }
-          if (activeServer === e.name) goHome();
+          if (activeServer === e.id) goHome();
           break;
         }
-        discovered[e.name] = e;
-        cacheNsCats(e.name, e.categories ?? []);
+        discovered[e.id] = e;
+        cacheNsCats(e.id, e.categories ?? []);
+        // A namespace I own but hold no channels in is one I just created (the
+        // server seeds its `#general`): auto-join so it appears in the rail and
+        // I'm subscribed — no client-side channel creation needed.
+        if (
+          e.owner === account &&
+          !autoJoinedNs.has(e.id) &&
+          !Object.values(channels).some((c) => c.name.startsWith("#") && nsOf(c.name) === e.id)
+        ) {
+          autoJoinedNs.add(e.id);
+          weft.nsJoin(e.id).catch(() => {});
+        }
         break;
       case "more":
         discoverCursor = e.cursor;
@@ -3777,6 +3798,7 @@
     get activeIsDm() { return activeIsDm; },
     get activeIsGroup() { return activeIsGroup; },
     get serverNamespaces() { return serverNamespaces; },
+    serverName,
     get channelGroups() { return channelGroups; },
     get dmList() { return dmList; },
     get activeNsMeta() { return activeNsMeta; },

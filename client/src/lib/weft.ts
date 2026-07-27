@@ -134,6 +134,9 @@ export type WeftEvent =
   | { kind: "chanmeta"; channel: string; key: string; value: string }
   | {
       kind: "ns-meta";
+      /// Immutable namespace ULID id (v0.13) — the key the client addresses by.
+      id: string;
+      /// Mutable per-network-unique vanity name (display + IRC).
       name: string;
       visibility: string;
       owner: string | null;

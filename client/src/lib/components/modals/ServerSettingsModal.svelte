@@ -150,9 +150,9 @@
   <nav class="so-nav">
     <div class="so-nav-inner">
       <div class="so-server-head">
-        <span class="so-server-avatar">{app.initials(app.activeServer)}</span>
+        <span class="so-server-avatar">{app.initials(app.activeNsMeta?.name || app.activeServer)}</span>
         <div class="so-server-meta">
-          <div class="so-server-name">{app.activeServer}</div>
+          <div class="so-server-name">{app.activeNsMeta?.name || app.activeServer}</div>
           <div class="so-server-sub">Server Settings</div>
         </div>
       </div>
@@ -213,9 +213,9 @@
 
         <div class="ov-card">
           <div class="ov-identity">
-            <span class="ov-avatar">{app.initials(app.nsTitle.trim() || app.activeServer)}</span>
+            <span class="ov-avatar">{app.initials(app.nsTitle.trim() || app.activeNsMeta?.name || app.activeServer)}</span>
             <div class="ov-identity-meta">
-              <div class="ov-identity-name">{app.nsTitle.trim() || app.activeServer}</div>
+              <div class="ov-identity-name">{app.nsTitle.trim() || app.activeNsMeta?.name || app.activeServer}</div>
               <div class="ov-identity-sub">Namespace on {app.network}</div>
             </div>
           </div>

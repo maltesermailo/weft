@@ -4,6 +4,22 @@
 use super::*;
 
 impl<S: ControlStream> Session<S> {
+    /// Resolve a §2.2 namespace ref (the immutable id **or** the vanity name) to
+    /// its record: a stored id first, else the vanity via the name column.
+    /// `Ok(None)` = no such namespace (the caller maps that to NO-SUCH-TARGET).
+    pub(super) async fn resolve_ns_ref(
+        &self,
+        ns: &weft_proto::NamespaceRef,
+    ) -> Result<Option<weft_store::NamespaceRecord>, weft_store::StoreError> {
+        if let Some(record) = self.ctx.namespaces.namespace_by_id(ns.as_str()).await? {
+            return Ok(Some(record));
+        }
+        let Ok(name) = ns.as_str().parse::<weft_proto::NamespaceName>() else {
+            return Ok(None);
+        };
+        self.ctx.namespaces.namespace(&name).await
+    }
+
     /// §6.2 `NS JOIN <name>` (v0.12): become a member of the namespace — one
     /// `(account, ns)` row; channel access is derived (Part 1.2). The caller
     /// subscribes to every channel it can see (view-gated ones stay hidden), and
@@ -13,20 +29,47 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_ns_join(
         &mut self,
         label: Option<String>,
-        ns: weft_proto::NamespaceId,
+        ns: weft_proto::NamespaceRef,
         account: Account,
     ) -> io::Result<Flow> {
-        let channels = match self
-            .ctx
-            .channel_store
-            .channels_in_namespace(&ns.to_string())
-            .await
-        {
+        // §2.2: the ref may be the id or the vanity name (unlisted-by-name) —
+        // resolve either to the namespace record. Anti-enumeration (invariant 1):
+        // an unresolvable ref, and a `private` namespace you don't belong to,
+        // both collapse to NO-SUCH-TARGET. An existing, viewable namespace is
+        // joinable even with **zero** channels (an empty server is real).
+        let record = match self.resolve_ns_ref(&ns).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return self.no_such_target(label).await,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        // From here on the immutable id is authoritative (scopes/channels).
+        let ns_str = record.id.clone();
+        let ns: weft_proto::NamespaceId = match ns_str.parse() {
+            Ok(id) => id,
+            Err(_) => return self.no_such_target(label).await,
+        };
+        if record.visibility == "private" {
+            let already = self
+                .ctx
+                .memberships
+                .is_ns_member(&account, &ns_str)
+                .await
+                .unwrap_or(false);
+            let scope = TokenScope::Namespace(ns_str.clone());
+            let viewer = self
+                .ctx
+                .account_has_cap(&account, &Capability::View, &scope, unix_now())
+                .await
+                .unwrap_or(false);
+            if !already && !viewer {
+                return self.no_such_target(label).await;
+            }
+        }
+        let channels = match self.ctx.channel_store.channels_in_namespace(&ns_str).await {
             Ok(list) => list,
             Err(e) => return self.internal(label, &e).await,
         };
-        // The channels the caller can actually see (anti-enum: none visible ⇒
-        // NO-SUCH-TARGET, exactly as before). Voice channels are entered
+        // The channels the caller can actually see. Voice channels are entered
         // separately (§16) and never text-subscribed here.
         let mut visible = Vec::new();
         for (channel, _record) in channels {
@@ -37,9 +80,6 @@ impl<S: ControlStream> Session<S> {
                 continue;
             }
             visible.push(channel);
-        }
-        if visible.is_empty() {
-            return self.no_such_target(label).await;
         }
 
         // A *new* member (not an auto-rejoin) triggers the welcome message —
@@ -352,6 +392,20 @@ impl<S: ControlStream> Session<S> {
             .as_str()
             .parse()
             .expect("a valid vanity is a valid namespace name");
+        // §2.3 keep the id-space and vanity-space provably disjoint: a vanity that
+        // is itself a well-formed ULID could never be *reached* by name (NS JOIN
+        // resolves ids first), and would let a namespace masquerade as another's
+        // id in links/UI. Reject it — real vanities are human labels, never ULIDs.
+        if vanity.as_str().parse::<weft_proto::NamespaceId>().is_ok() {
+            self.send_err(
+                label,
+                ErrCode::Policy,
+                None,
+                "vanity name can't be a ULID (reserved for ids)",
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
         let ns_id = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
         // The submitted root key must be a real Ed25519 pubkey (§2.1).
         if weft_crypto::PublicKey::from_b64(&root_key).is_err() {
@@ -443,6 +497,24 @@ impl<S: ControlStream> Session<S> {
                     .await
                 {
                     error!("seed @everyone role failed: {e}");
+                }
+                // §6.2 seed a default `#<ns-id>/general` channel so a brand-new
+                // namespace is immediately usable — the server owns this, not the
+                // client (every namespace has somewhere to talk out of the box).
+                let chan_id = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+                if let Ok(canonical) =
+                    format!("#{ns_id}/{chan_id}").parse::<weft_proto::ChannelName>()
+                {
+                    let policy = "retained:90d".parse().expect("valid default policy");
+                    self.ctx.registry.create(canonical.clone(), policy);
+                    if let Err(e) = self
+                        .ctx
+                        .channel_store
+                        .upsert_channel(&canonical, "general", policy, ChannelKind::Text)
+                        .await
+                    {
+                        error!("seed default channel failed: {e}");
+                    }
                 }
                 self.send_event(label, Self::ns_meta_event(&record)).await?;
                 Ok(Flow::Continue)

@@ -276,6 +276,40 @@ pub struct ChannelId(Ulid);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VanityName(String);
 
+/// A namespace reference a client may express as **either** the immutable
+/// [`NamespaceId`] **or** a mutable [`VanityName`] (§2.2, v0.13). Used by
+/// `NS JOIN`, where a user may type the human name of an *unlisted* namespace
+/// (which DISCOVER never surfaced, so the client holds no id for it). The server
+/// resolves it to the id at the wire boundary — a stored id first, else the
+/// vanity. A lowercase ULID satisfies the vanity charset, so one lenient parse
+/// covers both forms; the value is always case-folded to lowercase.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamespaceRef(String);
+
+impl NamespaceRef {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for NamespaceRef {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, ParseError> {
+        // The vanity charset (lowercase `[a-z0-9-_]{1,64}`) is a superset of a
+        // lowercased ULID id, so this accepts both an id and a vanity.
+        s.parse::<VanityName>()
+            .map(|v| NamespaceRef(v.as_str().to_string()))
+            .map_err(|_| invalid("namespace ref", s))
+    }
+}
+
+impl fmt::Display for NamespaceRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 macro_rules! ulid_id {
     ($ty:ident, $what:literal) => {
         impl $ty {

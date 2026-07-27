@@ -1747,9 +1747,10 @@ async fn auto_bridge_requests_reachable_namespace() {
     };
     ada.send(&format!("NS META {ns_id} federation :open")).await;
     assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
-    // Create the namespace's channel; the canonical `#<ns-id>/<chan-id>` is what
-    // the manifest carries and both sides address by.
-    ada.send(&format!("CHANNEL CREATE #{ns_id}/general")).await;
+    // Create a second channel (the namespace already has an auto-seeded
+    // `general`); the canonical `#<ns-id>/<chan-id>` is what the manifest carries
+    // and both sides address by.
+    ada.send(&format!("CHANNEL CREATE #{ns_id}/chat")).await;
     let chan = match ada.recv().await.event {
         Event::Policy { channel, .. } => channel.to_string(),
         other => panic!("expected POLICY, got {other:?}"),

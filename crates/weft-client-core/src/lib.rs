@@ -2176,9 +2176,10 @@ pub fn build_ns_recovery_cancel(ns: &str, signature: &str) -> Result<String, Str
     .map_err(|e| e.to_string())
 }
 
-/// `NS JOIN <ns-id>` — auto-join every visible channel in the namespace (§6.2).
+/// `NS JOIN <ns-id|vanity>` — auto-join every visible channel in the namespace
+/// (§6.2). Accepts the id or the vanity name (§2.2 unlisted-by-name).
 pub fn build_ns_join(ns: &str) -> Result<String, String> {
-    let ns: weft_proto::NamespaceId = ns.parse().map_err(|_| "bad namespace id".to_string())?;
+    let ns: weft_proto::NamespaceRef = ns.parse().map_err(|_| "bad namespace".to_string())?;
     weft_proto::Request::new(weft_proto::Command::NsJoin { ns })
         .serialize()
         .map_err(|e| e.to_string())

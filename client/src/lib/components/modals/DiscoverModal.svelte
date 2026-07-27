@@ -56,9 +56,11 @@
     return n;
   });
 
-  function joinNamespace(name: string) {
-    weft.nsJoin(name).catch(() => {});
-    weft.channels(name).catch(() => {}); // fetch its category layout
+  // v0.13: namespaces are joined by their immutable **id** (from DISCOVER), not
+  // the vanity name. Display uses the vanity; the wire uses the id.
+  function joinNamespace(id: string) {
+    weft.nsJoin(id).catch(() => {});
+    weft.channels(id).catch(() => {}); // fetch its category layout
     onclose();
   }
   function connectForeign() {
@@ -99,10 +101,11 @@
     if (!name) return;
     createName = "";
     try {
-      // Root keypair is generated + stored on-device; then a default channel.
+      // Root keypair is generated + stored on-device. The server mints the ns
+      // id, seeds a default `#general`, and returns NS-META; the app then
+      // auto-joins it (owner + no local channels) so it appears in the rail —
+      // no client-side channel creation needed (v0.13).
       await weft.nsCreate(app.network, name, createVis);
-      await weft.channelCreate(`#${name}/general`);
-      await weft.join(`#${name}/general`);
       onclose();
     } catch (e) {
       app.toast(String(e), "error");
@@ -248,7 +251,7 @@
           </div>
         {/if}
 
-        {#each matches as ns (ns.name)}
+        {#each matches as ns (ns.id)}
           <div class="ns-item">
             <div class="ns-badge">{initials(ns.title || ns.name)}</div>
             <div class="ns-info">
@@ -257,7 +260,7 @@
                 {ns.description || `@${ns.name}`} · {ns.visibility}{ns.owner ? ` · ${ns.owner}` : ""}
               </div>
             </div>
-            <button class="go-btn" onclick={() => joinNamespace(ns.name)}>Join</button>
+            <button class="go-btn" onclick={() => joinNamespace(ns.id)}>Join</button>
           </div>
         {:else}
           {#if !foreign && !directName}

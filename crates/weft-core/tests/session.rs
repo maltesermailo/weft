@@ -147,6 +147,29 @@ impl Client {
             other => panic!("expected POLICY creating {vanity}, got {other:?}"),
         }
     }
+
+    /// v0.13 helper: resolve a channel by its display `vanity` within namespace
+    /// `ns_id` to its canonical `#<ns-id>/<chan-id>` wire name, by reading the
+    /// `CHANNELS` layout. Used to grab the auto-seeded `general` channel that
+    /// `NS CREATE` now provisions (rather than minting a second one, which would
+    /// collide on the vanity). Call it while `general` is the only channel so the
+    /// labeled layout response leaves nothing unread.
+    async fn channel_by_vanity(&mut self, ns_id: &str, vanity: &str) -> ChannelName {
+        self.send(&format!("@label=cbv CHANNELS {ns_id}"));
+        loop {
+            let reply = self.recv().await;
+            if reply.label.as_deref() != Some("cbv") {
+                continue;
+            }
+            match reply.event {
+                Event::ChannelLayout {
+                    channel, vanity: v, ..
+                } if v == vanity => return channel,
+                Event::ChannelLayout { .. } | Event::NsMeta { .. } => {}
+                other => panic!("expected CHANNEL-LAYOUT for {vanity}, got {other:?}"),
+            }
+        }
+    }
 }
 
 const PASSWORD: &str = "test-password-123";
@@ -3319,8 +3342,9 @@ async fn any_user_can_create_a_namespace_and_owns_it() {
 
     // As owner, ada holds every cap in her namespace — she can create a
     // namespaced channel (deferred in M4a, unlocked by ownership). The wire name
-    // is the minted `#<ns-id>/<chan-id>`; she sent the desired vanity "general".
-    ada.send(&format!("@label=c1 CHANNEL CREATE #{ns_id}/general"));
+    // is the minted `#<ns-id>/<chan-id>`; she sent the desired vanity "chat"
+    // ("general" is already taken by the channel NS CREATE auto-seeds).
+    ada.send(&format!("@label=c1 CHANNEL CREATE #{ns_id}/chat"));
     let reply = ada.recv().await;
     assert!(
         matches!(&reply.event, Event::Policy { channel, .. } if channel.namespace() == Some(ns_id.as_str())),
@@ -3359,6 +3383,27 @@ async fn ns_create_is_blocked_by_an_admin_vanity_lock() {
 }
 
 #[tokio::test]
+async fn ns_create_rejects_a_ulid_shaped_vanity() {
+    // §2.3: a vanity can't masquerade as an id. NS JOIN resolves ids first, so a
+    // ULID-shaped vanity could never be reached by name AND could impersonate
+    // another server's id in a link/UI — refuse it at creation. This keeps the
+    // id-space and vanity-space provably disjoint.
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let root = root_key_b64();
+    // A well-formed lowercase ULID as the vanity is refused…
+    ada.send(&format!(
+        "@root={root} NS CREATE 01arz3ndektsv4rrffq69g5fav public"
+    ));
+    ada.expect_err(ErrCode::Policy).await;
+    // …while an ordinary human vanity of the same length is fine (not a ULID).
+    ada.send(&format!(
+        "@root={root} NS CREATE my-cool-gaming-server-name public"
+    ));
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+}
+
+#[tokio::test]
 async fn ns_delete_cascades_channels() {
     let ctx = ctx(&[]);
     let mut ada = ready(&ctx, "ada").await;
@@ -3368,7 +3413,7 @@ async fn ns_delete_cascades_channels() {
         panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    ada.send(&format!("@label=c1 CHANNEL CREATE #{ns_id}/general"));
+    ada.send(&format!("@label=c1 CHANNEL CREATE #{ns_id}/chat"));
     let Event::Policy { channel, .. } = ada.recv().await.event else {
         panic!("expected POLICY");
     };
@@ -3552,8 +3597,10 @@ async fn channel_categories_and_ordering() {
         panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    // Each CHANNEL CREATE mints a canonical `#<ns-id>/<chan-id>`; keep the handles.
-    let general = ada.create_channel(&ns_id, "general").await;
+    // `general` is auto-seeded by NS CREATE; grab its canonical handle rather than
+    // minting a second one. Each CHANNEL CREATE mints a canonical
+    // `#<ns-id>/<chan-id>`; keep the handles.
+    let general = ada.channel_by_vanity(&ns_id, "general").await;
     let random = ada.create_channel(&ns_id, "random").await;
     let voice = ada.create_channel(&ns_id, "voice").await;
     // Categorize + order: general/random under "text", voice uncategorized.
@@ -5277,7 +5324,7 @@ async fn ns_scope_mute_covers_a_namespaced_channel() {
         panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/chat"));
     let Event::Policy { channel: chan, .. } = drain_until_label(&mut ada, "c").await.event else {
         panic!("expected POLICY");
     };
@@ -5491,8 +5538,9 @@ async fn ns_join_auto_joins_visible_channels_only() {
         panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    // Owner creates three channels; one is view-gated (hidden by permissions).
-    let general = ada.create_channel(&ns_id, "general").await;
+    // `general` is auto-seeded by NS CREATE (grab its handle); the owner adds two
+    // more, one of them view-gated (hidden by permissions).
+    let general = ada.channel_by_vanity(&ns_id, "general").await;
     let lounge = ada.create_channel(&ns_id, "lounge").await;
     let secret = ada.create_channel(&ns_id, "secret").await;
     ada.send(&format!("CHANNEL META {secret} view-gated :yes"));
@@ -5529,7 +5577,7 @@ async fn part_hides_a_namespaced_channel_and_ns_leave_drops_membership() {
         panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    let general = ada.create_channel(&ns_id, "general").await;
+    let general = ada.create_channel(&ns_id, "chat").await;
     let clips = ada.create_channel(&ns_id, "clips").await;
     // Ada joins her own namespace so she can query rosters.
     ada.send(&format!("NS JOIN {ns_id}"));
@@ -5587,6 +5635,44 @@ async fn part_hides_a_namespaced_channel_and_ns_leave_drops_membership() {
 }
 
 #[tokio::test]
+async fn ns_join_accepts_a_vanity_name() {
+    // §2.2: NS JOIN takes the id *or* the vanity name (so an unlisted namespace
+    // stays joinable by exact name); the server resolves either to the id.
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    // `unlisted` — not surfaced by DISCOVER, so a joiner only has the name.
+    let root = root_key_b64();
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming unlisted"));
+    let Event::NsMeta { id, .. } = drain_until_label(&mut ada, "n").await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+
+    // Bob joins by the vanity name; the NS-MEMBER echo carries the resolved id.
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("@label=j NS JOIN gaming");
+    loop {
+        let reply = bob.recv().await;
+        match reply.event {
+            Event::Member { .. } | Event::Policy { .. } => {}
+            Event::NsMember {
+                namespace, action, ..
+            } => {
+                assert_eq!(action, MemberAction::Join);
+                assert_eq!(namespace.to_string(), ns_id, "vanity resolved to the id");
+                assert_eq!(reply.label.as_deref(), Some("j"));
+                break;
+            }
+            other => panic!("unexpected before NS-MEMBER: {other:?}"),
+        }
+    }
+
+    // A bogus vanity is NO-SUCH-TARGET, exactly like a bogus id (anti-enum).
+    bob.send("@label=x NS JOIN not-a-real-server");
+    bob.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
 async fn owner_cannot_leave_their_namespace() {
     let ctx = ctx(&[]);
     let mut ada = ready(&ctx, "ada").await;
@@ -5596,7 +5682,7 @@ async fn owner_cannot_leave_their_namespace() {
         panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/chat"));
     let Event::Policy { channel: chan, .. } = drain_until_label(&mut ada, "c").await.event else {
         panic!("expected POLICY");
     };
@@ -5668,7 +5754,7 @@ async fn sync_fresh_skeleton_then_delta_catches_up() {
         panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    let general = ada.create_channel(&ns_id, "general").await;
+    let general = ada.create_channel(&ns_id, "chat").await;
     ada.send(&format!("NS JOIN {ns_id}"));
     drain_until_ns_member(&mut ada).await;
 
@@ -5815,7 +5901,7 @@ async fn channel_create_pushes_layout_to_online_ns_members() {
         panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    ada.send(&format!("CHANNEL CREATE #{ns_id}/general"));
+    ada.send(&format!("CHANNEL CREATE #{ns_id}/chat"));
     assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
 
     // Bob joins the namespace (an online member).
@@ -5854,7 +5940,7 @@ async fn sync_delta_catches_a_channel_metadata_change() {
         panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    let general = ada.create_channel(&ns_id, "general").await;
+    let general = ada.create_channel(&ns_id, "chat").await;
     ada.send(&format!("NS JOIN {ns_id}"));
     drain_until_ns_member(&mut ada).await;
 
@@ -6696,7 +6782,7 @@ async fn channel_everyone_role_grants_a_per_channel_baseline() {
         panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/chat"));
     let Event::Policy {
         channel: general, ..
     } = drain_until_label(&mut ada, "c").await.event
@@ -6758,7 +6844,7 @@ async fn grants_lists_member_overrides_but_not_role_holders() {
         panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/chat"));
     let Event::Policy {
         channel: general, ..
     } = drain_until_label(&mut ada, "c").await.event
@@ -6823,7 +6909,7 @@ async fn delete_any_lets_a_moderator_remove_another_members_message() {
         panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/general"));
+    ada.send(&format!("@label=c CHANNEL CREATE #{ns_id}/chat"));
     let Event::Policy {
         channel: general, ..
     } = drain_until_label(&mut ada, "c").await.event

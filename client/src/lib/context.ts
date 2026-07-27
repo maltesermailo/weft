@@ -38,10 +38,16 @@ export interface AppCtx {
   readonly activeIsDm: boolean;
   readonly activeIsGroup: boolean;
   readonly serverNamespaces: string[];
+  /// A namespace id's display name (its vanity / title, v0.13) — rail tiles and
+  /// headers key by id but show this.
+  serverName(nsId: string): string;
   readonly channelGroups: { category: string; list: Channel[] }[];
   readonly dmList: Channel[];
   readonly activeNsMeta:
     | {
+        id?: string;
+        /// The active namespace's vanity display name (v0.13).
+        name?: string;
         title?: string | null;
         owner?: string | null;
         recovery_eta?: number | null;
@@ -125,6 +131,9 @@ export interface AppCtx {
   readonly discovered: Record<
     string,
     {
+      /// Immutable namespace id (v0.13) — the map is keyed by it; join/address
+      /// by this, display by `name`.
+      id: string;
       name: string;
       title?: string | null;
       description?: string | null;

@@ -6,7 +6,7 @@
   let { onclose }: { onclose: () => void } = $props();
 
   const scope = `ns:${app.activeServer}`;
-  const serverName = $derived(app.activeNsMeta?.title || app.activeServer);
+  const serverName = $derived(app.activeNsMeta?.title || app.activeNsMeta?.name || app.activeServer);
   const current = $derived(app.nickOf(app.account));
   let draft = $state(untrack(() => app.nickOf(app.account)));
   const dirty = $derived(draft.trim() !== current);

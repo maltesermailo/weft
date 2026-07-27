@@ -123,8 +123,8 @@
           <div class="pm-list">
             {#each servers as ns (ns)}
               <button class="pm-server" onclick={() => jumpServer(ns)}>
-                <span class="pm-server-icon">{app.initials(ns)}</span>
-                <span class="pm-server-name">{ns}</span>
+                <span class="pm-server-icon">{app.initials(app.serverName(ns))}</span>
+                <span class="pm-server-name">{app.serverName(ns)}</span>
                 <svg class="pm-chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6" /></svg>
               </button>
             {/each}
