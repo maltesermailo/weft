@@ -64,6 +64,7 @@ export type Channel = {
   /// Channel management + layout.
   topic?: string;
   restricted?: boolean; // §6.7 posting requires the `send` cap
+  viewGated?: boolean; // §6.3 visibility requires the `view` cap
   lastRead?: string; // newest msgid we've marked read
   category?: string; // CHANNEL-LAYOUT grouping
   position?: number;

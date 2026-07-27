@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fade, scale } from "svelte/transition";
+  import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
@@ -96,7 +96,7 @@
 
 <div class="ic-wrap" transition:fade|global={{ duration: 190 }}>
   <button class="ic-backdrop" aria-label="Close" onclick={onclose}></button>
-  <div class="ic-modal" role="dialog" aria-modal="true" transition:scale|global={{ duration: 190, start: 0.97 }}>
+  <div class="ic-modal" role="dialog" aria-modal="true">
     <!-- Header -->
     <div class="ic-head">
       <div class="ic-server">

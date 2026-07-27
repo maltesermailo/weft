@@ -5,6 +5,7 @@
   import * as weft from "$lib/weft";
   import { CHAN_CAPS, CAP_META, EVERYONE_ROLE, RETENTION_OPTIONS } from "$lib/constants";
   import Avatar from "$lib/components/Avatar.svelte";
+  import SaveBar from "$lib/components/SaveBar.svelte";
   const app = getApp();
   let { channel, onclose }: { channel: string; onclose: () => void } = $props();
 
@@ -63,15 +64,33 @@
       .sort((a, b) => a.localeCompare(b));
   });
 
-  const selCaps = $derived.by(() => {
+  // Draft-and-commit editing (the profile-editor pattern): toggles mutate a
+  // local draft, and a Revert/Save bar commits it — never per-click.
+  const sameCaps = (a: string[], b: string[]) =>
+    a.length === b.length && [...a].sort().join() === [...b].sort().join();
+  const persistedCaps = () => {
     if (selected.kind === "everyone") return app.chanRoleCaps(EVERYONE_ROLE);
     if (selected.kind === "role") return app.chanRoleCaps(selected.name);
     return app.chanMemberCaps(selected.account);
+  };
+  let draft = $state<string[]>([]);
+  // Re-seed the draft whenever the selected target changes (untracked reads so
+  // an unrelated ROLES/GRANTS refresh doesn't clobber an in-progress edit).
+  $effect(() => {
+    selected;
+    untrack(() => (draft = [...persistedCaps()]));
   });
+  const permDirty = $derived(!sameCaps(draft, persistedCaps()));
   function toggleCap(cap: string) {
-    if (selected.kind === "everyone") app.toggleChanRoleCap(EVERYONE_ROLE, "#99aab5", cap);
-    else if (selected.kind === "role") app.toggleChanRoleCap(selected.name, selected.color, cap);
-    else app.toggleChanMemberCap(selected.account, cap);
+    draft = draft.includes(cap) ? draft.filter((c) => c !== cap) : [...draft, cap];
+  }
+  function revertPerms() {
+    draft = [...persistedCaps()];
+  }
+  function savePerms() {
+    if (selected.kind === "everyone") app.setChanRoleCaps(EVERYONE_ROLE, "#99aab5", draft);
+    else if (selected.kind === "role") app.setChanRoleCaps(selected.name, selected.color, draft);
+    else app.setChanMemberCaps(selected.account, draft);
   }
   function addRole(r: { name: string; color: string }) {
     if (!pendingRoles.includes(r.name)) pendingRoles = [...pendingRoles, r.name];
@@ -183,9 +202,16 @@
           <span>Everyone reads (<code>view</code>), only members with <code>send</code> may post</span>
           <button class="chip-btn" class:on={rec?.restricted} onclick={app.toggleRestricted}>{rec?.restricted ? "On" : "Off"}</button>
         </div>
+
+        <div class="section-sep"></div>
+        <div class="field-label">Private channel</div>
+        <div class="set-row">
+          <span>Hide this channel from anyone without the <code>view</code> capability. Grant <code>view</code> to roles or members in <b>Permissions</b> to let them in.</span>
+          <button class="chip-btn" class:on={rec?.viewGated} onclick={app.toggleViewGated}>{rec?.viewGated ? "On" : "Off"}</button>
+        </div>
       {:else if tab === "permissions"}
         <h1>Permissions</h1>
-        <p class="so-sub">Pick who a permission set applies to — the <b>@everyone</b> baseline, a role, or an individual member — then toggle their capabilities in this channel. Roles apply to everyone who holds them; a member override is a direct grant.</p>
+        <p class="so-sub">Pick who a permission set applies to — the <b>@everyone</b> baseline, a role, or an individual member — then toggle their capabilities in this channel. Roles apply to everyone who holds them; a member override is a direct grant.{#if rec?.viewGated} This channel is <b>private</b> — only targets with <b>View channel</b> can see it.{/if}</p>
 
         <div class="cp-wrap">
           <!-- ─── target list ─── -->
@@ -301,9 +327,9 @@
                   </div>
                   <button
                     class="cp-toggle"
-                    class:on={selCaps.includes(cap)}
+                    class:on={draft.includes(cap)}
                     role="switch"
-                    aria-checked={selCaps.includes(cap)}
+                    aria-checked={draft.includes(cap)}
                     aria-label={CAP_META[cap]?.label ?? cap}
                     onclick={() => toggleCap(cap)}
                   ><span class="cp-knob"></span></button>
@@ -319,4 +345,12 @@
       {/if}
     </div>
   </main>
+  <div class="so-exit">
+    <button class="so-close" aria-label="Close settings" onclick={onclose}>✕</button>
+    <span class="so-close-label">ESC</span>
+  </div>
 </div>
+
+{#if tab === "permissions" && permDirty}
+  <SaveBar onrevert={revertPerms} onsave={savePerms} />
+{/if}

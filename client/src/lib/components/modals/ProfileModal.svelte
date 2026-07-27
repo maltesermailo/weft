@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fade, scale } from "svelte/transition";
+  import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
@@ -48,7 +48,7 @@
 
 <div class="pm-wrap" transition:fade|global={{ duration: 150 }}>
   <button class="pm-backdrop" aria-label="Close" onclick={onclose}></button>
-  <div class="pm-modal" role="dialog" aria-modal="true" transition:scale|global={{ duration: 170, start: 0.97 }}>
+  <div class="pm-modal" role="dialog" aria-modal="true">
     <button class="pm-close" aria-label="Close" onclick={onclose}>
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
     </button>
@@ -222,9 +222,16 @@
     height: 104px;
     border-radius: 50%;
     border: 6px solid var(--bg-panel, #1a1b1e);
-    background: var(--bg-panel);
+    /* Centered initials fallback when there's no uploaded picture. */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent, #5865f2);
+    color: #fff;
+    font-size: 40px;
+    font-weight: 600;
+    text-transform: uppercase;
   }
-  .pm-av :global(.avatar),
   .pm-av :global(img) {
     width: 100%;
     height: 100%;

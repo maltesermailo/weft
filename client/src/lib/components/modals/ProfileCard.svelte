@@ -43,6 +43,10 @@
   let modReason = $state("");
 </script>
 
+<!-- An anchored popover is pinned to fixed coordinates computed at open time;
+     a resize invalidates them, so close (Discord-style) rather than strand it. -->
+<svelte:window onresize={() => pos && onclose()} />
+
 <div class="modal-wrap" class:anchored={pos} transition:fade|global={{ duration: 190 }}>
   <button class="modal-backdrop" aria-label="Close" onclick={onclose}></button>
   <div

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fade, scale } from "svelte/transition";
+  import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
@@ -71,6 +71,14 @@
         </span>
         {#if myCustom}<span class="um-clear" role="button" tabindex="0" title="Clear status" onclick={(e) => { e.stopPropagation(); clearStatus(); }} onkeydown={(e) => e.key === "Enter" && (e.stopPropagation(), clearStatus())}>✕</span>{/if}
       </button>
+      {#if app.activeServer}
+        <button class="sm-item" onclick={() => { app.userMenu = false; app.openNickDialog(app.account); }}>
+          <span class="um-status">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 21v-2a4 4 0 0 1 4-4h4" /><circle cx="10" cy="7" r="4" /><path d="M16 19l2 2 4-4" /></svg>
+            Set nickname on {app.activeServer}
+          </span>
+        </button>
+      {/if}
       <div class="sm-sep"></div>
       <button class="sm-item" onclick={app.openSettings}>
         User Settings
@@ -98,7 +106,7 @@
   {#if statusModal}
     <div class="status-modal-overlay" role="dialog" aria-modal="true" aria-label="Set custom status" transition:fade|global={{ duration: 160 }}>
       <button class="status-modal-backdrop" aria-label="Cancel" onclick={() => (statusModal = false)}></button>
-      <div class="status-modal" transition:scale|global={{ duration: 190, start: 0.97 }}>
+      <div class="status-modal">
         <div class="status-modal-title">Set a custom status</div>
         <input
           class="text-input"

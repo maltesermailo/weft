@@ -211,6 +211,8 @@ export interface AppCtx {
   openProfile(name: string, e?: MouseEvent): void;
   /** Open the full-profile modal (bio, status, mutual servers, actions). */
   openFullProfile(name: string): void;
+  /** §10.3 open the quick "Set nickname" dialog for a member (own or other). */
+  openNickDialog(name: string): void;
   /** Namespaces I share with `target` (from visible memberships). */
   mutualServers(target: string): string[];
   /** My friendship state with `name` (bare or qualified handle). */
@@ -366,17 +368,19 @@ export interface AppCtx {
   chanNsScope(): string;
   /** A channel role / @everyone target's caps (by role name). */
   chanRoleCaps(name: string): string[];
-  /** Toggle a cap on a channel role / @everyone target (upsert or delete). */
-  toggleChanRoleCap(name: string, color: string, cap: string): void;
+  /** Commit a channel role / @everyone target's full cap set (upsert/delete). */
+  setChanRoleCaps(name: string, color: string, caps: string[]): void;
   /** Individual-member overrides at the channel scope (direct grants). */
   chanMemberGrants(): { subject: string; caps: string[] }[];
   chanMemberCaps(account: string): string[];
-  /** Toggle a cap on a member override (grant/revoke). */
-  toggleChanMemberCap(account: string, cap: string): void;
+  /** Commit a member override's full cap set (grant/revoke). */
+  setChanMemberCaps(account: string, caps: string[]): void;
   /** Remove a whole override target (delete channel role / revoke member). */
   removeChanRole(name: string): void;
   removeChanMember(account: string): void;
   toggleRestricted(): void;
+  /** §6.3 toggle view-gating: hide the channel from anyone without `view`. */
+  toggleViewGated(): void;
 
   // ---- federation (§11, operator) ----
   readonly isOperator: boolean;

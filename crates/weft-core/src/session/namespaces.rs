@@ -331,6 +331,26 @@ impl<S: ControlStream> Session<S> {
         match self.ctx.namespaces.create_namespace(record.clone()).await {
             Ok(true) => {
                 debug!(%name, %account, "namespace created");
+                // §6.5 baseline: seed the implicit @everyone role with the caps
+                // every member is expected to hold out of the box — post
+                // messages + mint invites. Editable afterward like any role.
+                let ns_scope = format!("ns:{name}");
+                if let Err(e) = self
+                    .ctx
+                    .roles
+                    .set_role(
+                        &ns_scope,
+                        crate::context::EVERYONE_ROLE,
+                        "#99aab5",
+                        &["send".to_string(), "invite".to_string()],
+                        false,
+                        false,
+                        0,
+                    )
+                    .await
+                {
+                    error!("seed @everyone role failed: {e}");
+                }
                 self.send_event(label, Self::ns_meta_event(&record)).await?;
                 Ok(Flow::Continue)
             }

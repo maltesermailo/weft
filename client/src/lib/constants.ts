@@ -24,7 +24,11 @@ export const CAPS = [
 ];
 
 /// Channel-relevant capabilities for per-channel permission editing.
-export const CHAN_CAPS = ["send", "react", "attach", "pin", "edit-own", "delete-own", "delete-any"];
+// `view` leads: on a view-gated channel it is the access gate (no `view` ⇒ the
+// channel is invisible, §2.2/§6.3), so it's the first thing you grant a target.
+// `edit-own`/`delete-own` are intentionally absent: acting on your *own*
+// message is always allowed (authorship-gated server-side), never a permission.
+export const CHAN_CAPS = ["view", "send", "react", "attach", "pin", "delete-any"];
 
 /// Human labels + one-line descriptions for each capability, shown in the
 /// role permission checklist (Discord-style).
@@ -44,7 +48,7 @@ export const CAP_META: Record<string, { label: string; desc: string }> = {
   "ban": { label: "Ban members", desc: "Block members from joining and posting." },
   "kick": { label: "Kick members", desc: "Remove members from a channel." },
   "policy": { label: "Manage policy", desc: "Change channel retention and settings." },
-  "view": { label: "View channels", desc: "See view-gated channels." },
+  "view": { label: "View channel", desc: "See and open view-gated (private) channels." },
   "chan-create": { label: "Manage channels", desc: "Create and delete channels." },
   "reports": { label: "Handle reports", desc: "Review and resolve reported content." },
   "ns-admin": { label: "Administer namespace", desc: "Full control over this namespace." },
@@ -53,9 +57,11 @@ export const CAP_META: Record<string, { label: string; desc: string }> = {
 /// Capabilities grouped into labeled sections for the role permissions editor
 /// (Discord-style). Every entry in CAPS appears in exactly one group.
 export const CAP_GROUPS: { label: string; caps: string[] }[] = [
-  { label: "General Server Permissions", caps: ["view", "chan-create", "policy", "ns-admin"] },
+  // `view` is deliberately absent: view-gating is a per-channel concern, so it
+  // lives only in the channel-permission editor's CHAN_CAPS, not server roles.
+  { label: "General Server Permissions", caps: ["chan-create", "policy", "ns-admin"] },
   { label: "Membership Permissions", caps: ["invite", "nick", "manage-nicks", "kick", "ban", "mute"] },
-  { label: "Message Permissions", caps: ["send", "react", "attach", "pin", "edit-own", "delete-own", "delete-any", "ping-everyone"] },
+  { label: "Message Permissions", caps: ["send", "react", "attach", "pin", "delete-any", "ping-everyone"] },
   { label: "Moderation Permissions", caps: ["reports"] },
 ];
 

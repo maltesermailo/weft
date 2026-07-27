@@ -301,12 +301,21 @@
     width: 40px;
     height: 40px;
     display: flex;
+    /* Centered initials fallback when there's no uploaded picture. */
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--accent, #5865f2);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    text-transform: uppercase;
   }
-  .fv-av :global(.avatar),
   .fv-av :global(img) {
     width: 40px;
     height: 40px;
     border-radius: 50%;
+    object-fit: cover;
   }
   .fv-dot {
     position: absolute;

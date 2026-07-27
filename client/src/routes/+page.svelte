@@ -54,6 +54,7 @@
   import ChannelSettings from "$lib/components/modals/ChannelSettings.svelte";
   import ProfileCard from "$lib/components/modals/ProfileCard.svelte";
   import ProfileModal from "$lib/components/modals/ProfileModal.svelte";
+  import NicknameModal from "$lib/components/modals/NicknameModal.svelte";
   import UserSettingsModal from "$lib/components/modals/UserSettingsModal.svelte";
   import FederationPanel from "$lib/components/modals/FederationPanel.svelte";
   import ServerSettingsModal from "$lib/components/modals/ServerSettingsModal.svelte";
@@ -135,8 +136,31 @@
     e.stopPropagation(); // don't let a channel/category menu bubble to the list background
     ctxMenu = { x: Math.min(e.clientX, window.innerWidth - 220), y: e.clientY, items };
   }
+  // Can I moderate-delete another member's message in the active channel?
+  // `delete-any` at the channel or its namespace, or owner/operator. Kicks off
+  // a fetch of my own caps so the answer resolves on a subsequent open.
+  function canModDelete(): boolean {
+    if (!active.startsWith("#")) return false;
+    const nsScope = roleScopeOf(active);
+    ensureCapsAt(account, active);
+    ensureCapsAt(account, nsScope);
+    const has = (scope: string) => {
+      const c = capsFor[`${account}|${scope}`];
+      return !!c && (c.owner || c.list.includes("delete-any"));
+    };
+    return isOperator || has(active) || has(nsScope);
+  }
   function msgCtx(e: MouseEvent, m: Msg) {
-    if (m.system || !m.msgid) return;
+    if (!m.msgid) return; // nothing actionable without a real msgid
+    const mod = canModDelete();
+    // System (join/part) lines carry a msgid and are deletable — by the person
+    // they're about (its author) or a moderator with delete-any. No other
+    // actions apply, so offer just Delete.
+    if (m.system) {
+      if (m.own || mod)
+        openCtx(e, [{ label: "Delete", icon: "delete", danger: true, run: () => doDelete(m) }]);
+      return;
+    }
     const items: CtxItem[] = [{ label: "Reply", run: () => (replyTo = m) }];
     if (active.startsWith("#")) {
       items.push({ label: "Reply in thread", run: () => openThread(m) });
@@ -159,6 +183,8 @@
       items.push({ label: "Edit", run: () => startEdit(m) });
       items.push({ label: "Delete", danger: true, run: () => doDelete(m) });
     } else {
+      // A moderator can delete anyone's message (delete-any, server-enforced).
+      if (mod) items.push({ label: "Delete", icon: "delete", danger: true, run: () => doDelete(m) });
       items.push({ label: "Report", run: () => openReport(m) });
     }
     openCtx(e, items);
@@ -194,17 +220,21 @@
   function userCtx(e: MouseEvent, name: string) {
     if (peerOf(name) === account) return; // no menu on yourself
     const ref = qualify(name);
+    const rel = friends[ref];
     const items: CtxItem[] = [
-      { label: "Open profile", icon: "profile", run: () => openProfile(name) },
-      dmOpen(name)
+      { label: "Open profile", icon: "profile", run: () => openFullProfile(name) },
+      active === dmKeyFor(name)
         ? { label: "Close DM", icon: "close", run: () => closeDm(name) }
         : { label: "Message", icon: "message", run: () => openDm(name) },
-      { label: "Call", icon: "call", run: () => callUser(ref) },
     ];
+    // Calling is a friends-only action (§ social layer) — only offer it to a
+    // confirmed friend.
+    if (rel === "friends") items.push({ label: "Call", icon: "call", run: () => callUser(ref) });
+    // §10.3 per-namespace nickname — only meaningful inside a server.
+    if (activeServer) items.push({ label: "Set nickname", icon: "nick", run: () => openNickDialog(name) });
 
     // Friendship: Add when unrelated, Remove when friends, and the sensible
     // action for a pending request either way.
-    const rel = friends[ref];
     if (rel === "friends")
       items.push({ label: "Remove friend", icon: "removefriend", danger: true, run: () => removeFriend(ref) });
     else if (rel === "incoming")
@@ -224,9 +254,12 @@
       items.push({ divider: true });
       items.push({ label: "Invite to server", icon: "invite", run: inviteToServer });
       items.push({ header: "Mod Menu", mod: true });
-      items.push({ label: "Mute", icon: "mute", run: () => moderate("mute", name) });
+      // Mute/ban at the *namespace* scope so they're server-wide and show up in
+      // Server Settings → Bans (banScope() = ns:<server>). Kick is inherently
+      // per-channel (it force-parts the active channel).
+      items.push({ label: "Mute", icon: "mute", run: () => moderate("mute", name, banScope()) });
       items.push({ label: "Kick", icon: "kick", run: () => moderate("kick", name) });
-      items.push({ label: "Ban", icon: "ban", danger: true, run: () => moderate("ban", name) });
+      items.push({ label: "Ban", icon: "ban", danger: true, run: () => moderate("ban", name, banScope()) });
     }
 
     openCtx(e, items);
@@ -691,6 +724,18 @@
     queryProfile(target); // make sure we have their nick / avatar / bio
     ensureCaps(target, active);
   }
+
+  // §10.3 quick "Set nickname" dialog, opened from a user's context menu (own
+  // or another member's). Per-namespace, so it targets the active server.
+  let nickTarget = $state<string | null>(null);
+  function openNickDialog(handle: string) {
+    const at = handle.lastIndexOf("@");
+    const target = at > 0 && handle.slice(at + 1) === network ? handle.slice(0, at) : handle;
+    // Nicks for the active server are already fetched (effect on activeServer),
+    // so nickOf(target) is populated for the dialog's prefill.
+    nickTarget = target;
+  }
+
   // Servers (namespaces) I share with `target`, derived from the memberships I
   // can already see — a channel of that namespace listing them as a member.
   function mutualServers(target: string): string[] {
@@ -1414,6 +1459,12 @@
   // ---- friend calls (1:1) ----
   function callUser(user: string) {
     if (activeCall) return; // already in a call
+    // Calls are a friends-only feature — block any non-friend target (the
+    // single gate behind every call entry point: context menu, topbar, profile).
+    if (friends[qualify(user)] !== "friends") {
+      toast("You can only call friends", "error");
+      return;
+    }
     weft.call(user).catch((e) => toast(String(e), "error"));
   }
   function acceptCall() {
@@ -1764,6 +1815,7 @@
         const c = ensureChannel(e.channel);
         if (e.key === "topic") c.topic = e.value;
         else if (e.key === "posting") c.restricted = e.value === "restricted";
+        else if (e.key === "view-gated") c.viewGated = e.value === "true";
         else if (e.key === "category") c.category = e.value || undefined;
         else if (e.key === "position") c.position = parseInt(e.value, 10) || 0;
         if (e.key === "category" || e.key === "position") cacheChanLayout(e.channel, c.category, c.position ?? 0);
@@ -1959,7 +2011,9 @@
         netblocks[e.network] = e.reason;
         break;
       case "token":
-        sys(`✓ permissions updated for ${e.subject} @ ${e.scope}`);
+        // A permission change is confirmed with a transient toast, never a
+        // channel system line (those are for people, not admin bookkeeping).
+        toast(`Permissions updated for ${e.subject}`, "info");
         break;
       case "invited":
         if (e.max_uses === 0) {
@@ -2157,16 +2211,9 @@
               (r) => !(r.account === e.account && r.kind === kind),
             );
         }
-        // A list response shouldn't also post system lines in the timeline.
-        if (currentBatchId.startsWith("mod")) break;
-        // Surface the action as a system line in the affected channel. A
-        // federated moderator (§11.11 homeserver authority) is attributed with
-        // their @network and flagged — the "acting on H via F" affordance.
-        const ch = e.scope.startsWith("#") ? ensureChannel(e.scope) : activeChannel;
-        const fed = e.by && e.by.includes("@") && e.by.split("@")[1] !== network;
-        const who = e.by ? ` by ${e.by}${fed ? " (via federation)" : ""}` : "";
-        const why = e.reason ? ` (${e.reason})` : "";
-        ch?.messages.push(mkMsg({ author: "", body: `${e.account} ${e.action}d${who} — ${e.scope}${why}`, time: clock(), ts: Date.now(), own: false, system: true }));
+        // Moderation is reflected in Server Settings (the deny-list above) and
+        // by the target losing access — never as a channel system line, which
+        // would be timeline noise broadcast to every member.
         break;
       }
       case "error":
@@ -3193,15 +3240,14 @@
   // after ns roles; `everyone` is the per-channel baseline).
   const chanRoleCaps = (name: string) =>
     (rolesByScope[chanPermsCh ?? ""] ?? []).find((r) => r.name === name)?.caps ?? [];
-  // Toggle a cap on a channel role / @everyone target. Applied immediately: a
-  // non-empty set upserts the channel role, an empty set deletes it. The ROLES
-  // refetch inside createRoleAt/deleteRoleAt reconciles the view.
-  function toggleChanRoleCap(name: string, color: string, cap: string) {
+  // Apply a channel role / @everyone target's full cap set (the editor commits
+  // a draft, not per-toggle): a non-empty set upserts the channel role, an
+  // empty set deletes it. The ROLES refetch inside createRoleAt/deleteRoleAt
+  // reconciles the view.
+  function setChanRoleCaps(name: string, color: string, caps: string[]) {
     if (!chanPermsCh) return;
-    const cur = chanRoleCaps(name);
-    const next = cur.includes(cap) ? cur.filter((c) => c !== cap) : [...cur, cap];
-    (next.length
-      ? createRoleAt(chanPermsCh, name, color, next.join(","))
+    (caps.length
+      ? createRoleAt(chanPermsCh, name, color, caps.join(","))
       : deleteRoleAt(chanPermsCh, name)
     ).catch((e) => toast(String(e), "error"));
   }
@@ -3210,24 +3256,23 @@
   const chanMemberGrants = () => grantsByScope[chanPermsCh ?? ""] ?? [];
   const chanMemberCaps = (account: string) =>
     chanMemberGrants().find((g) => g.subject === account)?.caps ?? [];
-  // Toggle a cap on a member override. record_grant replaces, so we GRANT the
-  // new full set (or REVOKE the old set when it empties). Optimistic locally.
-  function toggleChanMemberCap(account: string, cap: string) {
+  // Apply a member override's full cap set. record_grant replaces, so we GRANT
+  // the new set (or REVOKE the old one when it empties). Optimistic locally.
+  function setChanMemberCaps(account: string, caps: string[]) {
     if (!chanPermsCh) return;
     const scope = chanPermsCh;
-    const cur = chanMemberCaps(account);
-    const next = cur.includes(cap) ? cur.filter((c) => c !== cap) : [...cur, cap];
+    const prev = chanMemberCaps(account);
 
     const list = grantsByScope[scope] ?? [];
     const idx = list.findIndex((g) => g.subject === account);
-    if (next.length) {
-      if (idx >= 0) list[idx].caps = next;
-      else grantsByScope[scope] = [...list, { subject: account, caps: next }];
+    if (caps.length) {
+      if (idx >= 0) list[idx].caps = caps;
+      else grantsByScope[scope] = [...list, { subject: account, caps }];
     } else if (idx >= 0) {
       grantsByScope[scope] = list.filter((g) => g.subject !== account);
     }
 
-    (next.length ? weft.grant(account, scope, next.join(",")) : weft.revoke(account, scope, cur.join(",")))
+    (caps.length ? weft.grant(account, scope, caps.join(",")) : weft.revoke(account, scope, prev.join(",")))
       .catch((e) => {
         toast(String(e), "error");
         fetchGrants(scope);
@@ -3260,6 +3305,18 @@
     weft
       .channelMeta(chanPermsCh, "posting", next ? "restricted" : "open")
       .then(() => (ch.restricted = next))
+      .catch((e) => toast(String(e), "error"));
+  }
+  // §6.3 view-gate: when on, the channel is hidden from anyone without the
+  // `view` cap (invariant 1 anti-enumeration). Grant `view` per target in the
+  // permissions editor to let specific roles/members in.
+  function toggleViewGated() {
+    const ch = chanPermsCh ? channels[chanPermsCh] : undefined;
+    if (!ch || !chanPermsCh) return;
+    const next = !ch.viewGated;
+    weft
+      .channelMeta(chanPermsCh, "view-gated", next ? "true" : "false")
+      .then(() => (ch.viewGated = next))
       .catch((e) => toast(String(e), "error"));
   }
 
@@ -3687,6 +3744,7 @@
     newCat: openCreateCategory,
     openProfile,
     openFullProfile,
+    openNickDialog,
     mutualServers,
     friendState,
     friendAction,
@@ -3807,13 +3865,14 @@
     // channel permissions (per-target: @everyone / role / member)
     chanNsScope,
     chanRoleCaps,
-    toggleChanRoleCap,
+    setChanRoleCaps,
     chanMemberGrants,
     chanMemberCaps,
-    toggleChanMemberCap,
+    setChanMemberCaps,
     removeChanRole,
     removeChanMember,
     toggleRestricted,
+    toggleViewGated,
     // federation (operator)
     get isOperator() { return isOperator; },
     get netblocks() { return netblocks; },
@@ -4056,6 +4115,10 @@
 
     {#if profileTarget}
       <ProfileCard target={profileTarget} pos={profilePos} onclose={() => (profileTarget = null)} />
+    {/if}
+
+    {#if nickTarget}
+      <NicknameModal target={nickTarget} onclose={() => (nickTarget = null)} />
     {/if}
 
     {#if profileModalTarget}

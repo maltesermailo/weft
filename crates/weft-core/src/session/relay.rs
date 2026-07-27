@@ -135,6 +135,35 @@ impl<S: ControlStream> Session<S> {
             },
         )
         .await?;
+        // Reflect the channel's current gating flags so a client's settings UI
+        // opens with accurate state — `CHANMETA` is otherwise change-only and
+        // never pushed on join. Label-less (informational, not part of the join
+        // ack) and emitted only when a flag is set, so a plain channel adds
+        // nothing to the join sequence.
+        if let Ok(Some(rec)) = self.ctx.channel_store.channel(channel).await {
+            if rec.view_gated {
+                self.send_event(
+                    None,
+                    Event::Chanmeta {
+                        channel: channel.clone(),
+                        key: "view-gated".to_string(),
+                        value: "true".to_string(),
+                    },
+                )
+                .await?;
+            }
+            if rec.restricted {
+                self.send_event(
+                    None,
+                    Event::Chanmeta {
+                        channel: channel.clone(),
+                        key: "posting".to_string(),
+                        value: "restricted".to_string(),
+                    },
+                )
+                .await?;
+            }
+        }
         // §6.3 persist membership for auto-rejoin — **top-level channels only**.
         // A namespaced channel's membership is derived from its namespace row +
         // hide override (Part 1.1); the caller (NS JOIN / JOIN / redeem) writes
@@ -455,6 +484,10 @@ impl<S: ControlStream> Session<S> {
         account: &Account,
         cap: &'static str,
         must_be_author: bool,
+        // A channel capability that lets a non-author act anyway (moderation).
+        // `Some(DeleteAny)` for DELETE; `None` for EDIT (no edit-any). Only
+        // honored in the channel branch — DMs/groups stay authorship-only.
+        author_override: Option<Capability>,
     ) -> io::Result<Option<MessageRoute>> {
         let root = match self.ctx.events.find_root(msgid.ulid()).await {
             Err(e) => {
@@ -503,9 +536,22 @@ impl<S: ControlStream> Session<S> {
                     return Ok(None);
                 };
                 if must_be_author && root.sender.account != *account {
-                    self.send_err(label, ErrCode::CapRequired, Some(cap), "not your message")
-                        .await?;
-                    return Ok(None);
+                    // A moderator holding the override cap (delete-any) may act
+                    // on another member's message; otherwise it isn't theirs.
+                    let overridden = if let Some(over) = &author_override {
+                        let scope = TokenScope::Channel(channel.to_string());
+                        self.ctx
+                            .account_has_cap(account, over, &scope, unix_now())
+                            .await
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if !overridden {
+                        self.send_err(label, ErrCode::CapRequired, Some(cap), "not your message")
+                            .await?;
+                        return Ok(None);
+                    }
                 }
                 // §11.13 the channel's **home** is the sole writer. If we're the
                 // home (or a non-federated channel), apply locally — the msgid is
@@ -613,7 +659,7 @@ impl<S: ControlStream> Session<S> {
             return Ok(Flow::Continue);
         }
         match self
-            .resolve_message(label.clone(), &msgid, &account, "edit-own", true)
+            .resolve_message(label.clone(), &msgid, &account, "edit-own", true, None)
             .await?
         {
             None => {}
@@ -663,7 +709,14 @@ impl<S: ControlStream> Session<S> {
         account: Account,
     ) -> io::Result<Flow> {
         match self
-            .resolve_message(label.clone(), &msgid, &account, "delete-own", true)
+            .resolve_message(
+                label.clone(),
+                &msgid,
+                &account,
+                "delete-own",
+                true,
+                Some(Capability::DeleteAny),
+            )
             .await?
         {
             None => {}
@@ -713,7 +766,7 @@ impl<S: ControlStream> Session<S> {
         account: Account,
     ) -> io::Result<Flow> {
         match self
-            .resolve_message(label.clone(), &msgid, &account, "react", false)
+            .resolve_message(label.clone(), &msgid, &account, "react", false, None)
             .await?
         {
             None => {}

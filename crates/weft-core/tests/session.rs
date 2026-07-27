@@ -5181,6 +5181,7 @@ async fn restricted_channel_gates_posting_on_send_cap() {
 
     // A normal member (no send grant) can't post in a restricted channel.
     let mut bob = joined(&ctx, "bob", "#locked").await;
+    bob.recv().await; // join-time CHANMETA posting:restricted (initial-state push)
     op.recv().await; // bob's MEMBER join broadcast
     bob.send("MSG #locked :hello");
     let Event::Err(e) = bob.expect_err(ErrCode::CapRequired).await.event else {
@@ -6314,12 +6315,16 @@ async fn everyone_role_grants_baseline_caps_to_members() {
     drain_until_label(&mut ada, "n").await;
     ada.send("@label=c CHANNEL CREATE #gaming/general");
     drain_until_label(&mut ada, "c").await;
+    // A fresh namespace seeds @everyone with `send,invite`; narrow it to just
+    // `send` so we can exercise the baseline gate on `invite`.
+    ada.send("@label=r0 ROLE CREATE ns:gaming #99aab5 send :everyone");
+    drain_until_label(&mut ada, "r0").await;
 
     // bob joins the namespace → becomes a member (implicitly holds @everyone).
     bob.send("@label=j NS JOIN gaming");
     drain_until_label(&mut bob, "j").await;
 
-    // No @everyone caps yet → bob can't mint an invite (needs `invite`).
+    // @everyone lacks `invite` → bob can't mint an invite.
     bob.send("@label=e1 INVITE MINT ns:gaming");
     let e1 = drain_until_label(&mut bob, "e1").await;
     assert!(
@@ -6328,7 +6333,7 @@ async fn everyone_role_grants_baseline_caps_to_members() {
     );
 
     // Owner sets the implicit @everyone role's caps to include `invite`.
-    ada.send("@label=r ROLE CREATE ns:gaming #99aab5 invite :everyone");
+    ada.send("@label=r ROLE CREATE ns:gaming #99aab5 send,invite :everyone");
     drain_until_label(&mut ada, "r").await;
 
     // Now bob — a member, with no role *assignment* — gains the baseline cap.
@@ -6365,6 +6370,10 @@ async fn channel_everyone_role_grants_a_per_channel_baseline() {
     drain_until_label(&mut ada, "c").await;
     ada.send("@label=r CHANNEL META #gaming/general posting :restricted");
     drain_until_label(&mut ada, "r").await;
+    // A fresh namespace seeds @everyone with `send`; strip it so the restricted
+    // channel actually gates and we can isolate the *channel*-level baseline.
+    ada.send("@label=r0 ROLE CREATE ns:gaming #99aab5 invite :everyone");
+    drain_until_label(&mut ada, "r0").await;
 
     bob.send("@label=j NS JOIN gaming");
     drain_until_label(&mut bob, "j").await;
@@ -6446,6 +6455,62 @@ async fn grants_lists_member_overrides_but_not_role_holders() {
     assert!(
         matches!(&deny.event, Event::Err(err) if err.code == ErrCode::CapRequired),
         "grants roster is ns-admin gated, got {deny:?}"
+    );
+}
+
+#[tokio::test]
+async fn delete_any_lets_a_moderator_remove_another_members_message() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+    let root = root_key_b64();
+
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
+    drain_until_label(&mut ada, "n").await;
+    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    drain_until_label(&mut ada, "c").await;
+    ada.send("@label=ja JOIN #gaming/general");
+    drain_until_label(&mut ada, "ja").await;
+
+    bob.send("@label=j NS JOIN gaming");
+    drain_until_label(&mut bob, "j").await;
+    bob.send("@label=jc JOIN #gaming/general");
+    drain_until_label(&mut bob, "jc").await;
+
+    // bob posts; his own echo carries the msgid.
+    bob.send("@label=m MSG #gaming/general :hi");
+    let echo = drain_until_label(&mut bob, "m").await;
+    let Event::Message(m) = echo.event else {
+        panic!("expected message echo, got {echo:?}");
+    };
+    let msgid = m.msgid.to_string();
+
+    // The owner holds every cap (incl. delete-any) → removes bob's message.
+    ada.send(&format!("@label=d DELETE {msgid}"));
+    let d = drain_until_label(&mut ada, "d").await;
+    assert!(
+        matches!(d.event, Event::Deleted { .. }),
+        "owner deletes another member's message via delete-any, got {d:?}"
+    );
+
+    // A plain member (no delete-any) cannot delete someone else's message.
+    bob.send("@label=m2 MSG #gaming/general :hi again");
+    let echo2 = drain_until_label(&mut bob, "m2").await;
+    let Event::Message(m2) = echo2.event else {
+        panic!("expected message echo, got {echo2:?}");
+    };
+    let mid2 = m2.msgid.to_string();
+
+    let mut carol = ready(&ctx, "carol").await;
+    carol.send("@label=jn NS JOIN gaming");
+    drain_until_label(&mut carol, "jn").await;
+    carol.send("@label=jcc JOIN #gaming/general");
+    drain_until_label(&mut carol, "jcc").await;
+    carol.send(&format!("@label=dn DELETE {mid2}"));
+    let dn = drain_until_label(&mut carol, "dn").await;
+    assert!(
+        matches!(&dn.event, Event::Err(err) if err.code == ErrCode::CapRequired),
+        "a member without delete-any is denied, got {dn:?}"
     );
 }
 

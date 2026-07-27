@@ -8,6 +8,7 @@
   import type { RoleDefC } from "$lib/types";
   import { CAP_GROUPS, CAP_META, ROLE_COLORS, EVERYONE_ROLE } from "$lib/constants";
   import Avatar from "$lib/components/Avatar.svelte";
+  import SaveBar from "$lib/components/SaveBar.svelte";
 
   const app = getApp();
   const scope = $derived(app.nsRoleScope());
@@ -124,6 +125,20 @@
     (everyoneDraft = everyoneDraft.includes(c)
       ? everyoneDraft.filter((x) => x !== c)
       : [...everyoneDraft, c]);
+
+  // ---- shared Revert/Save bar (the profile-editor pattern) ----
+  // Shown while the current selection has unsaved changes; only one selection
+  // is editable at a time so a single bar covers both role + @everyone.
+  const showSaveBar = $derived((selected === EVERYONE_ROLE && everyoneDirty) || (!!editing && dirty));
+  const saveDisabled = $derived(selected !== EVERYONE_ROLE && (!draft.name.trim() || draft.caps.length === 0));
+  function revertSelection() {
+    if (selected === EVERYONE_ROLE) everyoneDraft = [...app.everyoneCaps()];
+    else if (editing) pick(editing.name);
+  }
+  function saveSelection() {
+    if (selected === EVERYONE_ROLE) app.setEveryoneCaps(everyoneDraft);
+    else if (editing) save();
+  }
 
   // ---- drag-and-drop reordering ----
   let dragFrom = $state<number | null>(null);
@@ -259,9 +274,6 @@
       <div class="rl-body">
         <p class="so-sub">Every member holds these implicitly. Grant a permission here and it applies to the whole namespace.</p>
         {@render permGroups(everyoneDraft, toggleEveryoneCap)}
-        <div class="rl-actions">
-          <button class="ok-btn" disabled={!everyoneDirty} onclick={() => app.setEveryoneCaps(everyoneDraft)}>Save changes</button>
-        </div>
       </div>
     {:else if editing}
       <div class="rl-head">
@@ -293,16 +305,8 @@
           {#if draft.name.trim() && draft.name.trim() !== editing.name}
             <p class="rename-note">Renaming keeps every member and granted permission — the role is renamed in place.</p>
           {/if}
-          <div class="rl-actions">
-            <button class="ok-btn" disabled={!dirty || !draft.name.trim() || !draft.caps.length} onclick={save}>Save changes</button>
-            <button class="linkish" onclick={() => pick(editing.name)}>Reset</button>
-          </div>
         {:else if tab === "permissions"}
           {@render permGroups(draft.caps, toggleDraftCap)}
-          <div class="rl-actions">
-            <button class="ok-btn" disabled={!dirty || !draft.caps.length} onclick={save}>Save changes</button>
-            <button class="linkish" onclick={() => pick(editing.name)}>Reset</button>
-          </div>
         {:else}
           <div class="rl-member-search">
             <span aria-hidden="true">⌕</span>
@@ -339,6 +343,10 @@
     {/if}
   </section>
 </div>
+
+{#if showSaveBar}
+  <SaveBar {saveDisabled} onrevert={revertSelection} onsave={saveSelection} />
+{/if}
 
 <!-- ─── Reusable editor fragments ─── -->
 {#snippet colorField(color: string, setColor: (c: string) => void, name: string)}
