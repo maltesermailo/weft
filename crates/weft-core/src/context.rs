@@ -1180,21 +1180,29 @@ impl ServerCtx {
         // local members (never a federated actor, who holds exactly what this
         // network granted `account@F`, §11.11). Resolved live here rather than
         // materialized, so shrinking @everyone's caps takes effect immediately.
+        // A channel additionally honors its own `@everyone` role: the
+        // per-channel baseline set from the channel-permission editor.
         if let Actor::Local(account) = actor {
             if let Some(ns_name) = scope_namespace(scope) {
                 if self.memberships.is_ns_member(account, &ns_name).await? {
-                    let ns_scope = format!("ns:{ns_name}");
-                    for role in self.roles.roles(&ns_scope).await? {
-                        if role.name != EVERYONE_ROLE {
-                            continue;
-                        }
-                        if role
-                            .caps
-                            .iter()
-                            .filter_map(|c| c.parse::<Capability>().ok())
-                            .any(|c| &c == cap)
-                        {
-                            return Ok(true);
+                    // Widest first (`ns:`), then the channel's own baseline.
+                    let mut baseline_scopes = vec![format!("ns:{ns_name}")];
+                    if let TokenScope::Channel(chan) = scope {
+                        baseline_scopes.push(chan.clone());
+                    }
+                    for base_scope in baseline_scopes {
+                        for role in self.roles.roles(&base_scope).await? {
+                            if role.name != EVERYONE_ROLE {
+                                continue;
+                            }
+                            if role
+                                .caps
+                                .iter()
+                                .filter_map(|c| c.parse::<Capability>().ok())
+                                .any(|c| &c == cap)
+                            {
+                                return Ok(true);
+                            }
                         }
                     }
                 }

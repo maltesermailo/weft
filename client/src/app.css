@@ -1974,6 +1974,314 @@ button:disabled {
 .role-perm-block + .role-perm-block {
   border-top: 1px solid color-mix(in srgb, var(--border-hair-strong) 40%, transparent);
 }
+
+/* ── channel permissions: two-pane per-target editor (§6.5) ── */
+.cp-wrap {
+  display: flex;
+  min-height: 440px;
+  border: 1px solid var(--border-hair);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-panel);
+}
+.cp-side {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 8px;
+  border-right: 1px solid var(--border-hair);
+  overflow-y: auto;
+}
+.cp-label {
+  padding: 12px 10px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.cp-row-wrap {
+  display: flex;
+  align-items: center;
+}
+.cp-row {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.cp-row:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.cp-row.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.cp-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cp-dot {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border-radius: 50%;
+}
+.cp-dot.lg {
+  width: 20px;
+  height: 20px;
+}
+.cp-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: var(--bg-void);
+  color: var(--text-muted);
+}
+.cp-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--accent, #5865f2);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.cp-avatar.sm {
+  width: 20px;
+  height: 20px;
+}
+.cp-avatar.lg {
+  width: 26px;
+  height: 26px;
+  font-size: 12px;
+}
+.cp-avatar :global(.avatar-img) {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.cp-x {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  opacity: 0;
+}
+.cp-row-wrap:hover .cp-x {
+  opacity: 0.8;
+}
+.cp-x:hover {
+  color: #fff;
+  background: color-mix(in srgb, var(--danger, #d83c3e) 80%, transparent);
+}
+.cp-empty {
+  padding: 6px 10px 8px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.cp-add-wrap {
+  position: relative;
+  margin-top: auto;
+  padding-top: 10px;
+}
+.cp-add {
+  width: 100%;
+  padding: 8px 0;
+  border: 1px dashed var(--border-hair-strong);
+  border-radius: 4px;
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.cp-add:hover {
+  color: var(--text-primary);
+  border-color: var(--accent, #5865f2);
+}
+.cp-picker {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 8px;
+  background: var(--bg-panel-raised, #2b2d31);
+  border: 1px solid var(--border-hair);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.cp-picker-label {
+  padding: 6px 8px 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.cp-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.cp-pick:hover {
+  background: var(--accent, #5865f2);
+  color: #fff;
+}
+.cp-pick-empty {
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.cp-search {
+  width: 100%;
+  margin: 4px 0 6px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-hair);
+  border-radius: 5px;
+  background: var(--bg-void);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.cp-editor {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 24px 24px;
+  background: var(--bg-void);
+  overflow-y: auto;
+}
+.cp-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.cp-head-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cp-sub {
+  margin: 8px 0 20px;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+.cp-perm {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 14px 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-hair) 60%, transparent);
+}
+.cp-perm:last-child {
+  border-bottom: none;
+}
+.cp-perm-text {
+  flex: 1;
+  min-width: 0;
+}
+.cp-perm-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+}
+.cp-perm-sub {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+.cp-toggle {
+  position: relative;
+  flex-shrink: 0;
+  width: 44px;
+  height: 24px;
+  border: none;
+  border-radius: 12px;
+  background: var(--border-hair-strong);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s;
+}
+.cp-toggle.on {
+  background: var(--signal-teal, #23a55a);
+}
+.cp-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: left 0.15s;
+}
+.cp-toggle.on .cp-knob {
+  left: 22px;
+}
+@media (max-width: 720px) {
+  .cp-wrap {
+    flex-direction: column;
+  }
+  .cp-side {
+    width: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border-hair);
+  }
+}
 .check-row {
   display: flex;
   align-items: flex-start;
@@ -2872,14 +3180,6 @@ input[type="radio"] {
 }
 
 /* ── Members directory (NS INFO MEMBERS): assign control + roster table ── */
-.mem-assign {
-  padding: 16px;
-  border-radius: 8px;
-  background: var(--bg-panel-raised);
-}
-.mem-assign .role-pick {
-  margin-top: 12px;
-}
 .mem-search {
   display: flex;
   align-items: center;
@@ -3000,6 +3300,118 @@ input[type="radio"] {
   font-size: 13px;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+}
+.mem-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mem-owner {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #f0b232;
+  background: color-mix(in srgb, #f0b232 16%, transparent);
+  border: 1px solid color-mix(in srgb, #f0b232 45%, transparent);
+}
+/* In-line editable role pills carry a hover-revealed remove button. */
+.role-pill.editable {
+  padding-right: 4px;
+}
+.role-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  font-size: 9px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text-muted);
+  background: transparent;
+  opacity: 0;
+  transition: opacity 0.1s, background 0.1s, color 0.1s;
+}
+.role-pill.editable:hover .role-x,
+.role-x:focus-visible {
+  opacity: 1;
+}
+.role-x:hover {
+  color: #fff;
+  background: color-mix(in srgb, var(--danger, #d83c3e) 85%, transparent);
+}
+.role-add-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.role-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px dashed var(--border-normal, color-mix(in srgb, var(--text-muted) 45%, transparent));
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.1s, border-color 0.1s, background 0.1s;
+}
+.role-add:hover {
+  color: var(--text-primary);
+  border-color: var(--accent, #5865f2);
+  background: color-mix(in srgb, var(--accent, #5865f2) 12%, transparent);
+}
+.role-add-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  min-width: 160px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: 8px;
+  background: var(--bg-panel-raised, #2b2d31);
+  border: 1px solid var(--border-hair);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.role-add-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.role-add-opt:hover {
+  background: var(--accent, #5865f2);
+  color: #fff;
+}
+.role-add-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 .mem-empty {
   padding: 32px 12px;

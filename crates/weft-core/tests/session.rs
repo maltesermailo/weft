@@ -254,6 +254,26 @@ async fn roster_names(client: &mut Client) -> std::collections::HashSet<String> 
     names
 }
 
+/// Send-and-collect a `GRANTS` batch → the `(subject, caps)` member overrides.
+async fn grant_infos(client: &mut Client) -> Vec<(String, String)> {
+    loop {
+        if matches!(client.recv().await.event, Event::BatchStart { .. }) {
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    loop {
+        match client.recv().await.event {
+            Event::GrantInfo { subject, caps, .. } => {
+                out.push((subject.as_str().to_string(), caps))
+            }
+            Event::BatchEnd { .. } => break,
+            other => panic!("unexpected in grants batch: {other:?}"),
+        }
+    }
+    out
+}
+
 #[tokio::test]
 async fn hello_gets_welcome_with_motd_and_label() {
     let ctx = ctx(&[]);
@@ -6326,6 +6346,106 @@ async fn everyone_role_grants_baseline_caps_to_members() {
     assert!(
         matches!(&e3.event, Event::Err(err) if err.code == ErrCode::CapRequired),
         "a non-member is unaffected by @everyone, got {e3:?}"
+    );
+}
+
+#[tokio::test]
+async fn channel_everyone_role_grants_a_per_channel_baseline() {
+    // The channel-permission editor's @everyone target: a channel-scoped
+    // `everyone` role is honored as a per-channel baseline, distinct from the
+    // namespace-wide @everyone.
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+    let root = root_key_b64();
+
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
+    drain_until_label(&mut ada, "n").await;
+    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    drain_until_label(&mut ada, "c").await;
+    ada.send("@label=r CHANNEL META #gaming/general posting :restricted");
+    drain_until_label(&mut ada, "r").await;
+
+    bob.send("@label=j NS JOIN gaming");
+    drain_until_label(&mut bob, "j").await;
+    bob.send("@label=jc JOIN #gaming/general");
+    drain_until_label(&mut bob, "jc").await;
+
+    // Restricted + no send anywhere → posting is denied.
+    bob.send("@label=m1 MSG #gaming/general :hello");
+    let m1 = drain_until_label(&mut bob, "m1").await;
+    assert!(
+        matches!(&m1.event, Event::Err(err) if err.code == ErrCode::CapRequired),
+        "member without a channel baseline is denied, got {m1:?}"
+    );
+
+    // Owner sets the *channel's* @everyone role to include `send`.
+    ada.send("@label=e ROLE CREATE #gaming/general #99aab5 send :everyone");
+    drain_until_label(&mut ada, "e").await;
+
+    // Now bob — a member with no assignment or grant — can post, purely from
+    // the channel-scoped baseline.
+    bob.send("MSG #gaming/general :now i can");
+    loop {
+        if matches!(bob.recv().await.event, Event::Message(ref m) if m.body == "now i can") {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn grants_lists_member_overrides_but_not_role_holders() {
+    // The channel-permission editor's member list: GRANTS surfaces individual
+    // overrides, filtering out members whose channel caps come from a role.
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+    let mut carol = ready(&ctx, "carol").await;
+    let root = root_key_b64();
+
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
+    drain_until_label(&mut ada, "n").await;
+    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    drain_until_label(&mut ada, "c").await;
+
+    bob.send("@label=jb NS JOIN gaming");
+    drain_until_label(&mut bob, "jb").await;
+    carol.send("@label=jc NS JOIN gaming");
+    drain_until_label(&mut carol, "jc").await;
+
+    // carol holds an ns role that then gets a channel override → she's covered
+    // by the role (propagation), not a genuine individual override.
+    ada.send("@label=r1 ROLE CREATE ns:gaming #e8b93d send :speaker");
+    drain_until_label(&mut ada, "r1").await;
+    ada.send("@label=a ROLE ASSIGN ns:gaming carol :speaker");
+    drain_until_label(&mut ada, "a").await;
+    ada.send("@label=r2 ROLE CREATE #gaming/general #e8b93d send :speaker");
+    drain_until_label(&mut ada, "r2").await;
+
+    // bob gets an individual channel override (holds no role).
+    ada.send("@label=g GRANT bob #gaming/general send");
+    drain_until_label(&mut ada, "g").await;
+
+    // GRANTS lists bob (genuine override) but not carol (role-covered).
+    ada.send("@label=q GRANTS #gaming/general");
+    let list = grant_infos(&mut ada).await;
+    assert_eq!(
+        list.len(),
+        1,
+        "only bob is a genuine override, got {list:?}"
+    );
+    assert_eq!(list[0].0, "bob");
+    assert!(
+        list[0].1.contains("send"),
+        "bob's override caps, got {list:?}"
+    );
+
+    // The roster is ns-admin gated — a normal member can't enumerate it.
+    bob.send("@label=deny GRANTS #gaming/general");
+    let deny = drain_until_label(&mut bob, "deny").await;
+    assert!(
+        matches!(&deny.event, Event::Err(err) if err.code == ErrCode::CapRequired),
+        "grants roster is ns-admin gated, got {deny:?}"
     );
 }
 

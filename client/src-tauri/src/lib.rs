@@ -686,6 +686,12 @@ fn roles(conn: State<'_, Conn>, scope: String) -> Result<(), String> {
     conn.send(weft::build_roles(&scope)?)
 }
 
+/// §6.5 per-subject grants at a scope (channel-permission member overrides).
+#[tauri::command]
+fn grants_at(conn: State<'_, Conn>, scope: String) -> Result<(), String> {
+    conn.send(weft::build_grants_at(&scope)?)
+}
+
 /// §6.2 moderator roster: members + join times + assigned roles.
 #[tauri::command]
 fn ns_info_members(conn: State<'_, Conn>, namespace: String) -> Result<(), String> {
@@ -998,6 +1004,7 @@ pub fn run() {
             ns_recover,
             roles,
             ns_info_members,
+            grants_at,
             role_create,
             roles_reorder,
             role_delete,

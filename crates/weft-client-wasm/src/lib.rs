@@ -298,6 +298,7 @@ impl WeftClient {
             "grant" => build_grant(&arg("subject"), &arg("scope"), &arg("caps"))?,
             "revoke" => build_revoke(&arg("subject"), &arg("scope"), &arg("caps"))?,
             "roles" => build_roles(&arg("scope"))?,
+            "grants_at" => build_grants_at(&arg("scope"))?,
             "ns_info_members" => build_ns_info_members(&arg("namespace"))?,
             "role_create" => build_role_create(
                 &arg("scope"),

@@ -43,6 +43,7 @@ export interface AppCtx {
   readonly activeNsMeta:
     | {
         title?: string | null;
+        owner?: string | null;
         recovery_eta?: number | null;
         recovery_rung?: number | null;
         visibility?: string;
@@ -355,11 +356,26 @@ export interface AppCtx {
   readonly nsMembersLoading: boolean;
   /** Fetch the moderator roster for a namespace (cap-gated server-side). */
   fetchNsMembers(ns: string): void;
+  /** Assign / unassign a namespace-scoped role in-line from the roster. */
+  assignNsRole(account: string, role: string): void;
+  unassignNsRole(account: string, role: string): void;
+  /** Right-click a roster row → namespace-scoped moderation menu. */
+  nsMemberCtx(e: MouseEvent, account: string): void;
 
-  // ---- channel permissions (ChannelSettings modal — role-based only) ----
+  // ---- channel permissions (ChannelSettings modal — per-target overrides) ----
   chanNsScope(): string;
+  /** A channel role / @everyone target's caps (by role name). */
   chanRoleCaps(name: string): string[];
-  toggleChanRoleCap(role: RoleDefC, cap: string): void;
+  /** Toggle a cap on a channel role / @everyone target (upsert or delete). */
+  toggleChanRoleCap(name: string, color: string, cap: string): void;
+  /** Individual-member overrides at the channel scope (direct grants). */
+  chanMemberGrants(): { subject: string; caps: string[] }[];
+  chanMemberCaps(account: string): string[];
+  /** Toggle a cap on a member override (grant/revoke). */
+  toggleChanMemberCap(account: string, cap: string): void;
+  /** Remove a whole override target (delete channel role / revoke member). */
+  removeChanRole(name: string): void;
+  removeChanMember(account: string): void;
   toggleRestricted(): void;
 
   // ---- federation (§11, operator) ----

@@ -128,6 +128,7 @@ export type WeftEvent =
   | { kind: "call-state"; user: string; state: string }
   | { kind: "call-media"; room: string; mode: string; token: string; endpoint: string | null }
   | { kind: "caps"; account: string; scope: string; caps: string }
+  | { kind: "grant-info"; scope: string; subject: string; caps: string }
   | { kind: "role"; scope: string; color: string; caps: string; hoist: boolean; pingable: boolean; position: number; name: string }
   | { kind: "role-member"; scope: string; account: string; roles: string }
   | { kind: "chanmeta"; channel: string; key: string; value: string }
@@ -728,6 +729,12 @@ export function revoke(subject: string, scope: string, caps: string) {
 /// §6.6 named roles (capability-token bundles).
 export function roles(scope: string) {
   return invoke("roles", { scope });
+}
+
+/// §6.5 per-subject grants at a scope — the channel-permission editor's
+/// individual-member overrides, streamed back as `grant-info` events.
+export function grantsAt(scope: string) {
+  return invoke("grants_at", { scope });
 }
 
 /// §6.2 moderator roster: a namespace's members with join times + assigned

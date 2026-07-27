@@ -136,7 +136,6 @@
     </div>
   </nav>
   <main class="so-main">
-    <button class="so-close" aria-label="Close settings" onclick={onclose}>✕<span>ESC</span></button>
     <div class="so-content">
       {#if app.userTab === "account"}
         <h1>Edit Profile</h1>
@@ -300,6 +299,10 @@
       </div>
     {/if}
   </main>
+  <div class="so-exit">
+    <button class="so-close" aria-label="Close settings" onclick={onclose}>✕</button>
+    <span class="so-close-label">ESC</span>
+  </div>
 </div>
 
 <style>

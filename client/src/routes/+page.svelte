@@ -570,6 +570,18 @@
     weft.roles(scope).catch(() => roleFetchQueue.pop());
   }
 
+  // ---- §6.5 per-subject grants at a scope (channel-permission member
+  // overrides), keyed by scope. Arrive in `gr…`-id BATCHes with a scope queue,
+  // mirroring the roles path. ----
+  let grantsByScope = $state<Record<string, { subject: string; caps: string[] }[]>>({});
+  let grantBuf: { subject: string; caps: string[] }[] = [];
+  let grantFetchQueue: string[] = [];
+  function fetchGrants(scope: string) {
+    if (!scope) return;
+    grantFetchQueue.push(scope);
+    weft.grantsAt(scope).catch(() => grantFetchQueue.pop());
+  }
+
   // ---- §6.2 NS INFO MEMBERS: the moderator roster (members + join + roles) ----
   // Arrives as an `ni…`-id BATCH of `ns-member-info` events. `loadingNsMembers`
   // records which namespace is in flight so an empty roster still flushes.
@@ -846,6 +858,75 @@
     // Confirmed by the ROLE-MEMBER event; a cap failure never confirms.
     expectSuccess(`roles:${who}|${nsRoleScope()}`, `Roles updated for ${who}`);
     weft.roleAssign(nsRoleScope(), who, name).catch((e) => toast(String(e), "error"));
+  }
+
+  // In-line role editing for the Members directory. Both mutate the roster
+  // optimistically (so the pill appears/disappears at once) and reconcile
+  // against the server truth shortly after — a rejected change (missing cap)
+  // simply snaps back on the refetch, and its ERR toasts.
+  function reconcileRoster(ns: string) {
+    setTimeout(() => {
+      if (nsSettingsOpen && nsTab === "members") fetchNsMembers(ns);
+    }, 500);
+  }
+  function memberRow(ns: string, account: string): MemberInfoC | undefined {
+    return (nsMembersByNs[ns] ?? []).find((m) => m.account === account);
+  }
+  function assignNsRole(account: string, name: string) {
+    const scope = nsRoleScope();
+    const ns = activeServer;
+    const m = memberRow(ns, account);
+    if (m && !m.roles.includes(name)) m.roles = [...m.roles, name];
+    expectSuccess(`roles:${account}|${scope}`, `Roles updated for ${account}`);
+    weft
+      .roleAssign(scope, account, name)
+      .then(() => reconcileRoster(ns))
+      .catch((e) => {
+        toast(String(e), "error");
+        fetchNsMembers(ns);
+      });
+  }
+  function unassignNsRole(account: string, name: string) {
+    const scope = nsRoleScope();
+    const ns = activeServer;
+    const m = memberRow(ns, account);
+    if (m) m.roles = m.roles.filter((r) => r !== name);
+    expectSuccess(`roles:${account}|${scope}`, `Roles updated for ${account}`);
+    weft
+      .roleUnassign(scope, account, name)
+      .then(() => reconcileRoster(ns))
+      .catch((e) => {
+        toast(String(e), "error");
+        fetchNsMembers(ns);
+      });
+  }
+  // Right-click a member row in the directory → namespace-scoped moderation.
+  // Mute/ban (and their lifts) key on `ns:<server>` in the deny-list; kick is
+  // channel-scoped and so has no place on a server-wide roster.
+  function nsMemberCtx(e: MouseEvent, target: string) {
+    e.preventDefault();
+    const scope = banScope();
+    const deny = denyList();
+    const muted = deny.some((d) => d.account === target && d.kind === "mute");
+    const banned = deny.some((d) => d.account === target && d.kind === "ban");
+    const items: CtxItem[] = [{ label: "Open profile", icon: "profile", run: () => openProfile(target) }];
+
+    if (target !== account) {
+      items.push({ divider: true });
+      items.push({ header: "Moderation", mod: true });
+      items.push(
+        muted
+          ? { label: "Unmute", icon: "mute", run: () => liftMod("mute", target) }
+          : { label: "Mute", icon: "mute", run: () => moderate("mute", target, scope) },
+      );
+      items.push(
+        banned
+          ? { label: "Unban", icon: "ban", run: () => liftMod("ban", target) }
+          : { label: "Ban", icon: "ban", danger: true, run: () => moderate("ban", target, scope) },
+      );
+    }
+
+    openCtx(e, items);
   }
   let nsTitle = $state("");
   let nsDesc = $state("");
@@ -1821,6 +1902,9 @@
           roles: e.roles ?? [],
         });
         break;
+      case "grant-info":
+        grantBuf.push({ subject: e.subject, caps: e.caps ? e.caps.split(",") : [] });
+        break;
       case "channel-layout": {
         const ch = ensureChannel(e.channel);
         ch.category = e.category ?? undefined;
@@ -1953,6 +2037,15 @@
           nsMemberBuf = [];
           loadingNsMembers = null;
           nsMembersLoading = false;
+          currentBatchId = "";
+          break;
+        }
+        // GRANTS batch (`gr…`) — channel-permission member overrides. Checked
+        // before the `r…` role branch (neither prefix overlaps: "gr" ≠ "r").
+        if (currentBatchId.startsWith("gr")) {
+          const scope = grantFetchQueue.shift();
+          if (scope) grantsByScope[scope] = grantBuf;
+          grantBuf = [];
           currentBatchId = "";
           break;
         }
@@ -3096,21 +3189,69 @@
     const ns = nsOf(chanPermsCh ?? "");
     return ns ? `ns:${ns}` : "*";
   }
+  // A channel-scoped role/@everyone override's caps (channel roles are named
+  // after ns roles; `everyone` is the per-channel baseline).
   const chanRoleCaps = (name: string) =>
     (rolesByScope[chanPermsCh ?? ""] ?? []).find((r) => r.name === name)?.caps ?? [];
-  function toggleChanRoleCap(role: RoleDefC, cap: string) {
+  // Toggle a cap on a channel role / @everyone target. Applied immediately: a
+  // non-empty set upserts the channel role, an empty set deletes it. The ROLES
+  // refetch inside createRoleAt/deleteRoleAt reconciles the view.
+  function toggleChanRoleCap(name: string, color: string, cap: string) {
     if (!chanPermsCh) return;
-    const cur = chanRoleCaps(role.name);
+    const cur = chanRoleCaps(name);
     const next = cur.includes(cap) ? cur.filter((c) => c !== cap) : [...cur, cap];
     (next.length
-      ? createRoleAt(chanPermsCh, role.name, role.color, next.join(","))
-      : deleteRoleAt(chanPermsCh, role.name)
+      ? createRoleAt(chanPermsCh, name, color, next.join(","))
+      : deleteRoleAt(chanPermsCh, name)
     ).catch((e) => toast(String(e), "error"));
+  }
+
+  // Individual-member overrides at the channel scope (direct GRANTs).
+  const chanMemberGrants = () => grantsByScope[chanPermsCh ?? ""] ?? [];
+  const chanMemberCaps = (account: string) =>
+    chanMemberGrants().find((g) => g.subject === account)?.caps ?? [];
+  // Toggle a cap on a member override. record_grant replaces, so we GRANT the
+  // new full set (or REVOKE the old set when it empties). Optimistic locally.
+  function toggleChanMemberCap(account: string, cap: string) {
+    if (!chanPermsCh) return;
+    const scope = chanPermsCh;
+    const cur = chanMemberCaps(account);
+    const next = cur.includes(cap) ? cur.filter((c) => c !== cap) : [...cur, cap];
+
+    const list = grantsByScope[scope] ?? [];
+    const idx = list.findIndex((g) => g.subject === account);
+    if (next.length) {
+      if (idx >= 0) list[idx].caps = next;
+      else grantsByScope[scope] = [...list, { subject: account, caps: next }];
+    } else if (idx >= 0) {
+      grantsByScope[scope] = list.filter((g) => g.subject !== account);
+    }
+
+    (next.length ? weft.grant(account, scope, next.join(",")) : weft.revoke(account, scope, cur.join(",")))
+      .catch((e) => {
+        toast(String(e), "error");
+        fetchGrants(scope);
+      });
+  }
+
+  // Remove a whole channel override target. A role override deletes the
+  // channel-scoped role; a member override revokes all their channel caps.
+  function removeChanRole(name: string) {
+    if (!chanPermsCh) return;
+    deleteRoleAt(chanPermsCh, name).catch((e) => toast(String(e), "error"));
+  }
+  function removeChanMember(account: string) {
+    if (!chanPermsCh) return;
+    const scope = chanPermsCh;
+    const cur = chanMemberCaps(account);
+    grantsByScope[scope] = (grantsByScope[scope] ?? []).filter((g) => g.subject !== account);
+    if (cur.length) weft.revoke(account, scope, cur.join(",")).catch((e) => toast(String(e), "error"));
   }
   function openChanPerms(channel: string) {
     chanPermsCh = channel;
-    fetchRoles(chanNsScope()); // the namespace's roles
-    fetchRoles(channel); // this channel's role-permissions
+    fetchRoles(chanNsScope()); // the namespace's roles (the role picker source)
+    fetchRoles(channel); // this channel's role + @everyone overrides
+    fetchGrants(channel); // this channel's individual-member overrides
   }
   function toggleRestricted() {
     const ch = chanPermsCh ? channels[chanPermsCh] : undefined;
@@ -3656,14 +3797,22 @@
     get nsMembersByNs() { return nsMembersByNs; },
     get nsMembersLoading() { return nsMembersLoading; },
     fetchNsMembers,
+    assignNsRole,
+    unassignNsRole,
+    nsMemberCtx,
     roleScopeOf,
     isOwnerAt,
     assignRoleTo,
     unassignRoleFrom,
-    // channel permissions (role-based only)
+    // channel permissions (per-target: @everyone / role / member)
     chanNsScope,
     chanRoleCaps,
     toggleChanRoleCap,
+    chanMemberGrants,
+    chanMemberCaps,
+    toggleChanMemberCap,
+    removeChanRole,
+    removeChanMember,
     toggleRestricted,
     // federation (operator)
     get isOperator() { return isOperator; },

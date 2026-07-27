@@ -5,7 +5,7 @@
   // The design's three options cover the app's four actions by folding federation
   // into search: a query containing "/" is read as `network/namespace` and routes
   // through FEDERATE (§11.10) instead of a local join.
-  import { fade } from "svelte/transition";
+  import { fade, scale } from "svelte/transition";
   import { getApp } from "$lib/context";
   import * as weft from "$lib/weft";
   const app = getApp();
@@ -118,7 +118,7 @@
 
 <div class="ns-wrap" transition:fade|global={{ duration: 190 }}>
   <button class="ns-backdrop" aria-label="Close" onclick={onclose}></button>
-  <div class="ns-portal" role="dialog" aria-modal="true">
+  <div class="ns-portal" role="dialog" aria-modal="true" transition:scale|global={{ duration: 190, start: 0.97 }}>
     <button class="ns-x" aria-label="Close" onclick={onclose}>✕</button>
 
     {#if step === "choose"}

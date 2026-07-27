@@ -982,6 +982,7 @@ impl<S: ControlStream> Session<S> {
                 scope,
                 account: subject,
             } => self.on_roles_of(label, scope, subject).await,
+            Command::GrantsAt { scope } => self.on_grants_at(label, scope, account).await,
             Command::ChannelCreate {
                 channel,
                 policy,

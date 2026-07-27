@@ -396,6 +396,111 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    /// §6.5 GRANTS — list a scope's per-subject grants so the channel-permission
+    /// editor can surface individual-member overrides. ns-admin gated (the
+    /// roster is sensitive). Role-propagated grants are filtered out: a member
+    /// whose channel caps come from a channel role is covered by that role, not
+    /// a genuine override, so only members *not* holding a channel-mapped role
+    /// appear. Foreign / device-key grants are omitted — overrides target local
+    /// accounts. Emits a `gr…` BATCH of `GRANT-INFO`.
+    pub(super) async fn on_grants_at(
+        &mut self,
+        label: Option<String>,
+        scope: String,
+        account: Account,
+    ) -> io::Result<Flow> {
+        let Some(token_scope) = TokenScope::parse(&scope) else {
+            return self.bad_scope(label).await;
+        };
+        let now = unix_now();
+        match self
+            .ctx
+            .account_has_cap(&account, &Capability::NsAdmin, &token_scope, now)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return self.cap_required(label, "ns-admin").await,
+            Err(e) => return self.internal(label, &e).await,
+        }
+
+        // Grants at this scope, keyed by resolved store-key (ULID for a local
+        // account) → caps.
+        let grant_caps: std::collections::HashMap<String, Vec<String>> =
+            match self.ctx.caps.grants_at_scope(&scope).await {
+                Ok(grants) => grants.into_iter().map(|g| (g.subject, g.caps)).collect(),
+                Err(e) => return self.internal(label, &e).await,
+            };
+
+        // Only a channel scope carries a namespace + member roster to resolve
+        // against; a bare `#chan` or `ns:`/`*` scope yields an empty roster.
+        let ns = scope
+            .strip_prefix('#')
+            .and_then(|s| s.split_once('/'))
+            .map(|(ns, _)| ns.to_string());
+
+        let mut overrides: Vec<(Account, String)> = Vec::new();
+        if let Some(ns) = ns {
+            if let Ok(ns_name) = ns.parse::<NamespaceName>() {
+                let ns_scope = format!("ns:{ns}");
+                // Members who hold a channel-mapped role already get its caps by
+                // propagation — skip them so the list is genuine overrides.
+                let mut role_covered = std::collections::HashSet::<String>::new();
+                if let Ok(roles) = self.ctx.roles.roles(&scope).await {
+                    for role in roles {
+                        if role.name == crate::context::EVERYONE_ROLE {
+                            continue;
+                        }
+                        if let Ok(members) =
+                            self.ctx.roles.role_members(&ns_scope, &role.name).await
+                        {
+                            role_covered.extend(members);
+                        }
+                    }
+                }
+                if let Ok(members) = self.ctx.memberships.ns_members(&ns_name).await {
+                    for member in members {
+                        if role_covered.contains(member.as_str()) {
+                            continue;
+                        }
+                        let Ok(Some(ulid)) = self.ctx.accounts.account_ulid(&member).await else {
+                            continue;
+                        };
+                        if let Some(caps) = grant_caps.get(&ulid) {
+                            if !caps.is_empty() {
+                                overrides.push((member, caps.join(",")));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.batches += 1;
+        let id = format!("gr{}", self.batches);
+        self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
+            .await?;
+        for (subject, caps) in overrides {
+            self.send_event(
+                None,
+                Event::GrantInfo {
+                    scope: scope.clone(),
+                    subject,
+                    caps,
+                },
+            )
+            .await?;
+        }
+        self.send_event(
+            label,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
     /// §6.5 ROLE REORDER (scope admin only) → sets positions, re-emits `ROLES`.
     pub(super) async fn on_roles_reorder(
         &mut self,

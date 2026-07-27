@@ -202,6 +202,13 @@ pub enum ClientEvent {
         scope: String,
         caps: String,
     },
+    /// `GRANT-INFO <scope> <subject> :<caps>` — one per-subject grant at a
+    /// scope, in the `GRANTS` batch (§6.5).
+    GrantInfo {
+        scope: String,
+        subject: String,
+        caps: String,
+    },
     /// `ROLE <scope> <color> <caps> :<name>` — a role definition (§6.5).
     Role {
         scope: String,
@@ -787,6 +794,15 @@ pub fn on_line<E: EventSink>(
         } => sink.emit(ClientEvent::Caps {
             account: account.to_string(),
             scope,
+            caps,
+        }),
+        Event::GrantInfo {
+            scope,
+            subject,
+            caps,
+        } => sink.emit(ClientEvent::GrantInfo {
+            scope,
+            subject: subject.to_string(),
             caps,
         }),
         Event::Role {
@@ -1431,6 +1447,16 @@ pub fn build_caps(account: &str, scope: &str) -> Result<String, String> {
 /// §6.5 named roles (capability-token bundles).
 pub fn build_roles(scope: &str) -> Result<String, String> {
     Request::new(Command::RolesList {
+        scope: scope.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `GRANTS <scope>` — per-subject grants at a scope (the channel-permission
+/// editor's individual-member overrides) as a `BATCH` of `GRANT-INFO` (§6.5).
+pub fn build_grants_at(scope: &str) -> Result<String, String> {
+    Request::new(Command::GrantsAt {
         scope: scope.to_string(),
     })
     .serialize()

@@ -272,6 +272,10 @@ pub enum Command {
     /// `ROLES-OF <scope> <account>` — the roles an account is assigned at a
     /// scope (§6.5) → a `ROLE-MEMBER` event.
     RolesOf { scope: String, account: String },
+    /// `GRANTS <scope>` — list the per-subject capability grants at a scope
+    /// (§6.5), so the channel-permission editor can surface individual-member
+    /// overrides → a BATCH of `GRANT-INFO` events. Cap-gated to scope admins.
+    GrantsAt { scope: String },
     /// `CHANNEL CREATE <#chan> [policy] [text|voice]` — default `retained:90d`,
     /// `text` (§6.3). A `voice` channel is a WEFT-RT voice room (§16, voice-only).
     ChannelCreate {
@@ -1145,6 +1149,12 @@ impl Command {
                 Ok(Command::RolesOf {
                     scope: args.req("scope")?.to_string(),
                     account: args.req("account")?.to_string(),
+                })
+            }
+            "GRANTS" => {
+                let mut args = Args::new(line, "GRANTS");
+                Ok(Command::GrantsAt {
+                    scope: args.req("scope")?.to_string(),
                 })
             }
             "CHANNEL" => {
@@ -2132,6 +2142,7 @@ impl Command {
             Command::RolesOf { scope, account } => {
                 ("ROLES-OF", vec![scope.clone(), account.to_string()], None)
             }
+            Command::GrantsAt { scope } => ("GRANTS", vec![scope.clone()], None),
             Command::ChannelCreate {
                 channel,
                 policy,
@@ -2922,6 +2933,15 @@ mod tests {
             scope: "ns:gaming".to_string(),
             account: "bob".parse().unwrap(),
         }));
+        round_trip(&Request::new(Command::GrantsAt {
+            scope: "#gaming/general".to_string(),
+        }));
+        assert_eq!(
+            Request::parse("GRANTS #gaming/general"),
+            Ok(Request::new(Command::GrantsAt {
+                scope: "#gaming/general".to_string(),
+            }))
+        );
         assert_eq!(
             Request::parse("JOIN"),
             Err(ParseError::MissingParam {

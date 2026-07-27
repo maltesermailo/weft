@@ -3,12 +3,101 @@
   import { untrack } from "svelte";
   import { getApp } from "$lib/context";
   import * as weft from "$lib/weft";
-  import { CHAN_CAPS, RETENTION_OPTIONS } from "$lib/constants";
-  import CapChecklist from "$lib/components/CapChecklist.svelte";
+  import { CHAN_CAPS, CAP_META, EVERYONE_ROLE, RETENTION_OPTIONS } from "$lib/constants";
+  import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   let { channel, onclose }: { channel: string; onclose: () => void } = $props();
 
   let tab = $state<"overview" | "permissions" | "danger">("overview");
+
+  // ---- §6.5 permission editor (per-target: @everyone / role / member) ----
+  type Target =
+    | { kind: "everyone" }
+    | { kind: "role"; name: string; color: string }
+    | { kind: "member"; account: string };
+  let selected = $state<Target>({ kind: "everyone" });
+  let addOpen = $state(false);
+  let memberQuery = $state("");
+  // Targets the admin just added but hasn't granted a cap to yet — kept locally
+  // so an empty override still shows in the list until its first cap lands.
+  let pendingRoles = $state<string[]>([]);
+  let pendingMembers = $state<string[]>([]);
+
+  // The namespace's roles = the override picker's role source (@everyone aside).
+  const nsRoles = $derived(
+    (app.rolesByScope[app.chanNsScope()] ?? []).filter((r) => r.name !== EVERYONE_ROLE),
+  );
+  // Role overrides live as channel-scoped roles; merge with just-added ones.
+  const roleTargets = $derived.by(() => {
+    const present = (app.rolesByScope[channel] ?? [])
+      .filter((r) => r.name !== EVERYONE_ROLE)
+      .map((r) => r.name);
+    return [...new Set([...present, ...pendingRoles])].map(
+      (n) => nsRoles.find((r) => r.name === n) ?? { name: n, color: "#99aab5" },
+    );
+  });
+  const memberTargets = $derived.by(() => {
+    const present = app.chanMemberGrants().map((g) => g.subject);
+    return [...new Set([...present, ...pendingMembers])];
+  });
+  const addableRoles = $derived(nsRoles.filter((r) => !roleTargets.some((t) => t.name === r.name)));
+  // The member picker: every server member we know of, minus those already a
+  // target, filtered by the search box.
+  const memberChoices = $derived.by(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const g of app.channelGroups)
+      for (const c of g.list)
+        for (const m of c.members)
+          if (!seen.has(m.name)) {
+            seen.add(m.name);
+            out.push(m.name);
+          }
+    const q = memberQuery.toLowerCase();
+    return out
+      .filter(
+        (n) =>
+          !memberTargets.includes(n) &&
+          (app.displayName(n).toLowerCase().includes(q) || n.toLowerCase().includes(q)),
+      )
+      .sort((a, b) => a.localeCompare(b));
+  });
+
+  const selCaps = $derived.by(() => {
+    if (selected.kind === "everyone") return app.chanRoleCaps(EVERYONE_ROLE);
+    if (selected.kind === "role") return app.chanRoleCaps(selected.name);
+    return app.chanMemberCaps(selected.account);
+  });
+  function toggleCap(cap: string) {
+    if (selected.kind === "everyone") app.toggleChanRoleCap(EVERYONE_ROLE, "#99aab5", cap);
+    else if (selected.kind === "role") app.toggleChanRoleCap(selected.name, selected.color, cap);
+    else app.toggleChanMemberCap(selected.account, cap);
+  }
+  function addRole(r: { name: string; color: string }) {
+    if (!pendingRoles.includes(r.name)) pendingRoles = [...pendingRoles, r.name];
+    selected = { kind: "role", name: r.name, color: r.color };
+    addOpen = false;
+  }
+  function addMember(account: string) {
+    const a = account.trim();
+    if (!a) return;
+    if (!pendingMembers.includes(a)) pendingMembers = [...pendingMembers, a];
+    selected = { kind: "member", account: a };
+    addOpen = false;
+    memberQuery = "";
+  }
+  function removeRoleTarget(name: string) {
+    pendingRoles = pendingRoles.filter((n) => n !== name);
+    app.removeChanRole(name);
+    if (selected.kind === "role" && selected.name === name) selected = { kind: "everyone" };
+  }
+  function removeMemberTarget(account: string) {
+    pendingMembers = pendingMembers.filter((n) => n !== account);
+    app.removeChanMember(account);
+    if (selected.kind === "member" && selected.account === account) selected = { kind: "everyone" };
+  }
+  const roleColor = (name: string) =>
+    (app.rolesByScope[app.chanNsScope()] ?? []).find((r) => r.name === name)?.color ?? "#99aab5";
 
   const rec = $derived(app.channels[channel]);
   const ns = $derived(app.nsOf(channel)); // "" for a top-level channel
@@ -48,6 +137,8 @@
   }
 </script>
 
+<svelte:window onclick={() => (addOpen = false)} />
+
 <div class="settings-overlay" role="dialog" aria-modal="true" transition:fade|global={{ duration: 150 }}>
   <nav class="so-nav">
     <div class="so-nav-inner">
@@ -59,8 +150,7 @@
     </div>
   </nav>
   <main class="so-main">
-    <button class="so-close" aria-label="Close settings" onclick={onclose}>✕<span>ESC</span></button>
-    <div class="so-content">
+    <div class="so-content" class:wide={tab === "permissions"}>
       {#if tab === "overview"}
         <h1>Overview</h1>
         <p class="so-sub">The channel's address — members are moved automatically on rename.</p>
@@ -95,17 +185,133 @@
         </div>
       {:else if tab === "permissions"}
         <h1>Permissions</h1>
-        <div class="field-label">Role permissions</div>
-        <p class="so-sub">Give a namespace role extra capabilities in this channel. Assigning the role applies them to the member.</p>
-        {#each app.rolesByScope[app.chanNsScope()] ?? [] as role (role.name)}
-          <div class="role-perm-block">
-            <span class="role-pill" style="--role:{role.color}"><span class="role-dot"></span>{role.name}</span>
-            <CapChecklist caps={CHAN_CAPS} selected={app.chanRoleCaps(role.name)} onToggle={(c) => app.toggleChanRoleCap(role, c)} />
-          </div>
-        {:else}
-          <div class="empty-hint">No namespace roles yet — create some in Server Settings → Roles.</div>
-        {/each}
-        <p class="so-sub">Capabilities are granted only through roles — assign a member a role to give them these permissions.</p>
+        <p class="so-sub">Pick who a permission set applies to — the <b>@everyone</b> baseline, a role, or an individual member — then toggle their capabilities in this channel. Roles apply to everyone who holds them; a member override is a direct grant.</p>
+
+        <div class="cp-wrap">
+          <!-- ─── target list ─── -->
+          <aside class="cp-side">
+            <button
+              class="cp-row"
+              class:active={selected.kind === "everyone"}
+              onclick={() => (selected = { kind: "everyone" })}
+            >
+              <span class="cp-dot" style="background:#99aab5"></span>
+              <span class="cp-name">@everyone</span>
+              <span class="cp-tag">Baseline</span>
+            </button>
+
+            <div class="cp-label">Roles</div>
+            {#each roleTargets as r (r.name)}
+              <div class="cp-row-wrap">
+                <button
+                  class="cp-row"
+                  class:active={selected.kind === "role" && selected.name === r.name}
+                  onclick={() => (selected = { kind: "role", name: r.name, color: r.color })}
+                >
+                  <span class="cp-dot" style="background:{r.color}"></span>
+                  <span class="cp-name">{r.name}</span>
+                </button>
+                <button class="cp-x" title="Remove role override" aria-label={`Remove ${r.name} override`} onclick={() => removeRoleTarget(r.name)}>✕</button>
+              </div>
+            {:else}
+              <div class="cp-empty">No role overrides.</div>
+            {/each}
+
+            <div class="cp-label">Members</div>
+            {#each memberTargets as m (m)}
+              <div class="cp-row-wrap">
+                <button
+                  class="cp-row"
+                  class:active={selected.kind === "member" && selected.account === m}
+                  onclick={() => (selected = { kind: "member", account: m })}
+                >
+                  <span class="cp-avatar"><Avatar account={m} /></span>
+                  <span class="cp-name">{app.displayName(m)}</span>
+                </button>
+                <button class="cp-x" title="Remove member override" aria-label={`Remove ${m} override`} onclick={() => removeMemberTarget(m)}>✕</button>
+              </div>
+            {:else}
+              <div class="cp-empty">No member overrides.</div>
+            {/each}
+
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <div class="cp-add-wrap" onclick={(e) => e.stopPropagation()}>
+              <button class="cp-add" onclick={() => (addOpen = !addOpen)}>+ Add role or member</button>
+              {#if addOpen}
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <div class="cp-picker" onclick={(e) => e.stopPropagation()}>
+                  <div class="cp-picker-label">Roles</div>
+                  {#each addableRoles as r (r.name)}
+                    <button class="cp-pick" onclick={() => addRole(r)}>
+                      <span class="cp-dot" style="background:{r.color}"></span>{r.name}
+                    </button>
+                  {:else}
+                    <div class="cp-pick-empty">All roles added.</div>
+                  {/each}
+                  <div class="cp-picker-label">Members</div>
+                  <input class="cp-search" bind:value={memberQuery} placeholder="Search or type a name…" />
+                  {#each memberChoices.slice(0, 8) as m (m)}
+                    <button class="cp-pick" onclick={() => addMember(m)}>
+                      <span class="cp-avatar sm"><Avatar account={m} /></span>{app.displayName(m)}
+                    </button>
+                  {/each}
+                  {#if memberQuery.trim() && !memberChoices.includes(memberQuery.trim())}
+                    <button class="cp-pick" onclick={() => addMember(memberQuery)}>Add “{memberQuery.trim()}”</button>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          </aside>
+
+          <!-- ─── capability editor ─── -->
+          <section class="cp-editor">
+            <div class="cp-head">
+              {#if selected.kind === "everyone"}
+                <span class="cp-dot lg" style="background:#99aab5"></span>
+                <span class="cp-head-name">@everyone</span>
+                <span class="cp-tag">Baseline</span>
+              {:else if selected.kind === "role"}
+                <span class="cp-dot lg" style="background:{roleColor(selected.name)}"></span>
+                <span class="cp-head-name">{selected.name}</span>
+                <span class="cp-tag">Role</span>
+              {:else}
+                <span class="cp-avatar lg"><Avatar account={selected.account} /></span>
+                <span class="cp-head-name">{app.displayName(selected.account)}</span>
+                <span class="cp-tag">Member</span>
+              {/if}
+            </div>
+            <p class="cp-sub">
+              {#if selected.kind === "everyone"}
+                Every member of this channel holds these implicitly.
+              {:else if selected.kind === "role"}
+                Granted to everyone who holds <b>{selected.name}</b>, in this channel only.
+              {:else}
+                A direct grant to <b>{app.displayName(selected.account)}</b>, in this channel only.
+              {/if}
+            </p>
+
+            <div class="cp-perms">
+              {#each CHAN_CAPS as cap (cap)}
+                <div class="cp-perm">
+                  <div class="cp-perm-text">
+                    <div class="cp-perm-label">{CAP_META[cap]?.label ?? cap}</div>
+                    <div class="cp-perm-sub">{CAP_META[cap]?.desc ?? ""}</div>
+                  </div>
+                  <button
+                    class="cp-toggle"
+                    class:on={selCaps.includes(cap)}
+                    role="switch"
+                    aria-checked={selCaps.includes(cap)}
+                    aria-label={CAP_META[cap]?.label ?? cap}
+                    onclick={() => toggleCap(cap)}
+                  ><span class="cp-knob"></span></button>
+                </div>
+              {/each}
+            </div>
+          </section>
+        </div>
       {:else if tab === "danger"}
         <h1>Delete channel</h1>
         <p class="so-sub">Removes the channel and its history. This cannot be undone.</p>

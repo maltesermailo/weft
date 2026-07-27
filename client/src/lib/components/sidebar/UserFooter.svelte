@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fade, scale } from "svelte/transition";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
@@ -95,9 +96,9 @@
   </button>
 
   {#if statusModal}
-    <div class="status-modal-overlay" role="dialog" aria-modal="true" aria-label="Set custom status">
+    <div class="status-modal-overlay" role="dialog" aria-modal="true" aria-label="Set custom status" transition:fade|global={{ duration: 160 }}>
       <button class="status-modal-backdrop" aria-label="Cancel" onclick={() => (statusModal = false)}></button>
-      <div class="status-modal">
+      <div class="status-modal" transition:scale|global={{ duration: 190, start: 0.97 }}>
         <div class="status-modal-title">Set a custom status</div>
         <input
           class="text-input"

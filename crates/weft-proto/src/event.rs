@@ -191,6 +191,14 @@ pub enum Event {
         scope: String,
         caps: String,
     },
+    /// `GRANT-INFO <scope> <subject> :<caps>` — one per-subject direct grant at
+    /// a scope, comma-separated (§7). Sent in the `GRANTS` BATCH so the
+    /// channel-permission editor can list individual-member overrides.
+    GrantInfo {
+        scope: String,
+        subject: Account,
+        caps: String,
+    },
     /// `ROLE <scope> <color> <caps> :<name>` — a role definition: a named,
     /// colored capability-token bundle (§6.5, §7). Sent in the `ROLES` batch
     /// and broadcast on create.
@@ -789,6 +797,14 @@ impl Event {
                 Ok(Event::Caps {
                     account: args.req("account")?.parse()?,
                     scope: args.req("scope")?.to_string(),
+                    caps: line.trailing.clone().unwrap_or_default(),
+                })
+            }
+            "GRANT-INFO" => {
+                let mut args = Args::new(line, "GRANT-INFO");
+                Ok(Event::GrantInfo {
+                    scope: args.req("scope")?.to_string(),
+                    subject: args.req("subject")?.parse()?,
                     caps: line.trailing.clone().unwrap_or_default(),
                 })
             }
@@ -1721,6 +1737,15 @@ impl Event {
                 vec![account.to_string(), scope.clone()],
                 Some(caps.clone()),
             ),
+            Event::GrantInfo {
+                scope,
+                subject,
+                caps,
+            } => (
+                "GRANT-INFO",
+                vec![scope.clone(), subject.to_string()],
+                Some(caps.clone()),
+            ),
             Event::Role {
                 scope,
                 color,
@@ -2570,6 +2595,16 @@ mod tests {
         round_trip(&Reply::new(Event::Caps {
             account: "ada".parse().unwrap(),
             scope: "#general".to_string(),
+            caps: String::new(),
+        }));
+        round_trip(&Reply::new(Event::GrantInfo {
+            scope: "#gaming/general".to_string(),
+            subject: "bob".parse().unwrap(),
+            caps: "send,pin".to_string(),
+        }));
+        round_trip(&Reply::new(Event::GrantInfo {
+            scope: "#gaming/general".to_string(),
+            subject: "bob".parse().unwrap(),
             caps: String::new(),
         }));
         round_trip(&Reply::new(Event::Role {

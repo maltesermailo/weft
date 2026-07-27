@@ -26,6 +26,16 @@
     if (!ms) return "—";
     return new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
   }
+  // All namespace-scoped roles, for the in-line "add role" picker.
+  const nsRoles = $derived(app.rolesByScope[app.nsRoleScope()] ?? []);
+  // The namespace owner (implicit all-caps holder), surfaced with a crown.
+  const ownerAccount = $derived(app.activeNsMeta?.owner ?? null);
+  // Which member's add-role popover is open (keyed by `account@network`).
+  let addRoleFor = $state<string | null>(null);
+  // Roles a member doesn't already hold — the options for their add-role menu.
+  function unheldRoles(held: string[]) {
+    return nsRoles.filter((r) => !held.includes(r.name));
+  }
 
   // Options for the segmented (button-group) inputs — the fancy replacements
   // for the plain <select> boxes.
@@ -100,6 +110,8 @@
   );
 </script>
 
+<svelte:window onclick={() => (addRoleFor = null)} />
+
 <div class="settings-overlay" role="dialog" aria-modal="true" transition:fade|global={{ duration: 150 }}>
   <nav class="so-nav">
     <div class="so-nav-inner">
@@ -113,7 +125,7 @@
       <div class="so-heading">Server Settings</div>
       <button class="so-navitem" class:active={app.nsTab === "overview"} onclick={() => (app.nsTab = "overview")}>Overview</button>
       <button class="so-navitem" class:active={app.nsTab === "roles"} onclick={() => (app.nsTab = "roles")}>Roles</button>
-      <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => { app.nsTab = "members"; app.fetchNsMembers(app.activeServer); }}>Members</button>
+      <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => { app.nsTab = "members"; app.fetchNsMembers(app.activeServer); app.refreshBans(); }}>Members</button>
       <button class="so-navitem" class:active={app.nsTab === "emoji"} onclick={() => (app.nsTab = "emoji")}>Emoji</button>
       <div class="so-heading">Community</div>
       <button class="so-navitem" class:active={app.nsTab === "invites"} onclick={() => { app.nsTab = "invites"; app.loadNsInvites(); }}>Invites</button>
@@ -206,25 +218,12 @@
         <RolesTab />
       {:else if app.nsTab === "members"}
         <h1>Members</h1>
-        <p class="so-sub">Everyone in <b>{app.activeServer}</b>, when they joined, and the roles they hold. Assign a role to an account below — roles are the only way to grant capabilities.</p>
-
-        <div class="mem-assign">
-          <input class="text-input" bind:value={app.nsDelegSubject} placeholder="account or account@network (federated)" />
-          <div class="role-pick">
-            {#each app.rolesByScope[app.nsRoleScope()] ?? [] as r (r.name)}
-              <button class="role-pill clickable" style="--role:{r.color}" onclick={() => app.assignRole(r.name)}><span class="role-dot"></span>{r.name}</button>
-            {:else}
-              <div class="empty-hint">No roles defined — create some in the Roles tab.</div>
-            {/each}
-          </div>
-        </div>
-
-        <div class="section-sep"></div>
+        <p class="so-sub">Everyone in <b>{app.activeServer}</b>, when they joined, and the roles they hold. Click a role's <b>✕</b> to remove it, <b>+</b> to add one — roles are the only way to grant capabilities. Right-click a member for moderation.</p>
 
         <div class="mem-search">
           <span aria-hidden="true">⌕</span>
           <input bind:value={memberSearch} placeholder="Search members" />
-          <button class="mem-refresh" title="Refresh" aria-label="Refresh roster" onclick={() => app.fetchNsMembers(app.activeServer)}>↻</button>
+          <button class="mem-refresh" title="Refresh" aria-label="Refresh roster" onclick={() => { app.fetchNsMembers(app.activeServer); app.refreshBans(); }}>↻</button>
         </div>
         <div class="mem-count">{shownMembers.length} {shownMembers.length === 1 ? "member" : "members"}</div>
 
@@ -235,20 +234,49 @@
             <span>Joined</span>
           </div>
           {#each shownMembers as m (m.account + "@" + m.network)}
-            <div class="mem-row">
+            {@const handle = m.account + "@" + m.network}
+            {@const isOwner = ownerAccount === m.account}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="mem-row" oncontextmenu={(e) => app.nsMemberCtx(e, m.account)}>
               <div class="mem-id">
                 <span class="mem-avatar"><Avatar account={m.account} /></span>
                 <div class="mem-id-meta">
-                  <div class="mem-name">{app.displayName(m.account)}</div>
+                  <div class="mem-name">
+                    {app.displayName(m.account)}
+                    {#if isOwner}<span class="mem-owner" title="Server owner">👑 Owner</span>{/if}
+                  </div>
                   <div class="mem-handle">{m.account}{m.network !== app.network ? `@${m.network}` : ""}</div>
                 </div>
               </div>
               <div class="mem-roles">
                 {#each m.roles as r (r)}
-                  <span class="role-pill" style="--role:{roleColor(r)}"><span class="role-dot"></span>{r}</span>
-                {:else}
-                  <span class="mem-norole">—</span>
+                  <span class="role-pill editable" style="--role:{roleColor(r)}">
+                    <span class="role-dot"></span>{r}
+                    <button class="role-x" title="Remove role" aria-label={`Remove ${r}`} onclick={() => app.unassignNsRole(m.account, r)}>✕</button>
+                  </span>
                 {/each}
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <div class="role-add-wrap" onclick={(e) => e.stopPropagation()}>
+                  <button
+                    class="role-add"
+                    title="Add role"
+                    aria-label={`Add a role to ${app.displayName(m.account)}`}
+                    onclick={() => (addRoleFor = addRoleFor === handle ? null : handle)}
+                  >+</button>
+                  {#if addRoleFor === handle}
+                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                    <div class="role-add-menu" role="menu">
+                      {#each unheldRoles(m.roles) as r (r.name)}
+                        <button class="role-add-opt" onclick={() => { app.assignNsRole(m.account, r.name); addRoleFor = null; }}>
+                          <span class="role-dot" style="--role:{r.color}"></span>{r.name}
+                        </button>
+                      {:else}
+                        <div class="role-add-empty">{nsRoles.length ? "All roles assigned" : "No roles defined yet"}</div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
               </div>
               <div class="mem-joined">{fmtJoined(m.joinedMs)}</div>
             </div>
