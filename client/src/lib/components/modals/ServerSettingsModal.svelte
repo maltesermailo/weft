@@ -7,6 +7,32 @@
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
 
+  // ---- Per-capability tab visibility (§6.5) ----
+  // A moderator sees only the tabs they can act on; owner / ns-admin sees all.
+  // Each maps to the concrete WEFT capability that governs that surface.
+  const isAdmin = $derived(app.isNsOwner(app.account) || app.serverCap("ns-admin"));
+  const tabPerm = $derived({
+    overview: isAdmin,
+    roles: isAdmin || app.serverCanGrant(),
+    members: isAdmin || app.serverCanGrant() || ["ban", "mute", "kick", "reports"].some((c) => app.serverCap(c)),
+    emoji: isAdmin,
+    invites: isAdmin || app.serverCap("invite"),
+    federation: isAdmin,
+    bans: isAdmin || app.serverCap("ban") || app.serverCap("mute"),
+    recovery: app.isNsOwner(app.account),
+    danger: app.isNsOwner(app.account),
+  } as Record<string, boolean>);
+  const visibleTabs = $derived(
+    (["overview", "roles", "members", "emoji", "invites", "federation", "bans", "recovery", "danger"] as const).filter(
+      (t) => tabPerm[t],
+    ),
+  );
+  // Keep the active tab on something the user can actually see — a mod opening on
+  // the default (admin-only) tab lands on their first real one instead.
+  $effect(() => {
+    if (visibleTabs.length && !visibleTabs.includes(app.nsTab)) app.nsTab = visibleTabs[0];
+  });
+
   // ---- Members directory (NS INFO MEMBERS) ----
   let memberSearch = $state("");
   const roster = $derived(app.nsMembersByNs[app.activeServer] ?? []);
@@ -126,19 +152,43 @@
           <div class="so-server-sub">Server Settings</div>
         </div>
       </div>
-      <div class="so-heading">Server Settings</div>
-      <button class="so-navitem" class:active={app.nsTab === "overview"} onclick={() => (app.nsTab = "overview")}>Overview</button>
-      <button class="so-navitem" class:active={app.nsTab === "roles"} onclick={() => (app.nsTab = "roles")}>Roles</button>
-      <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => { app.nsTab = "members"; app.fetchNsMembers(app.activeServer); app.refreshBans(); }}>Members</button>
-      <button class="so-navitem" class:active={app.nsTab === "emoji"} onclick={() => (app.nsTab = "emoji")}>Emoji</button>
-      <div class="so-heading">Community</div>
-      <button class="so-navitem" class:active={app.nsTab === "invites"} onclick={() => { app.nsTab = "invites"; app.loadNsInvites(); }}>Invites</button>
-      <button class="so-navitem" class:active={app.nsTab === "federation"} onclick={() => (app.nsTab = "federation")}>Federation</button>
-      <div class="so-heading">Moderation</div>
-      <button class="so-navitem" class:active={app.nsTab === "bans"} onclick={() => { app.nsTab = "bans"; app.refreshBans(); }}>Bans &amp; mutes</button>
-      <div class="so-heading">Security</div>
-      <button class="so-navitem" class:active={app.nsTab === "recovery"} onclick={() => (app.nsTab = "recovery")}>Recovery</button>
-      <button class="so-navitem danger" class:active={app.nsTab === "danger"} onclick={() => (app.nsTab = "danger")}>Danger zone</button>
+      {#if tabPerm.overview || tabPerm.roles || tabPerm.members || tabPerm.emoji}
+        <div class="so-heading">Server Settings</div>
+      {/if}
+      {#if tabPerm.overview}
+        <button class="so-navitem" class:active={app.nsTab === "overview"} onclick={() => (app.nsTab = "overview")}>Overview</button>
+      {/if}
+      {#if tabPerm.roles}
+        <button class="so-navitem" class:active={app.nsTab === "roles"} onclick={() => (app.nsTab = "roles")}>Roles</button>
+      {/if}
+      {#if tabPerm.members}
+        <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => { app.nsTab = "members"; app.fetchNsMembers(app.activeServer); app.refreshBans(); }}>Members</button>
+      {/if}
+      {#if tabPerm.emoji}
+        <button class="so-navitem" class:active={app.nsTab === "emoji"} onclick={() => (app.nsTab = "emoji")}>Emoji</button>
+      {/if}
+      {#if tabPerm.invites || tabPerm.federation}
+        <div class="so-heading">Community</div>
+      {/if}
+      {#if tabPerm.invites}
+        <button class="so-navitem" class:active={app.nsTab === "invites"} onclick={() => { app.nsTab = "invites"; app.loadNsInvites(); }}>Invites</button>
+      {/if}
+      {#if tabPerm.federation}
+        <button class="so-navitem" class:active={app.nsTab === "federation"} onclick={() => (app.nsTab = "federation")}>Federation</button>
+      {/if}
+      {#if tabPerm.bans}
+        <div class="so-heading">Moderation</div>
+        <button class="so-navitem" class:active={app.nsTab === "bans"} onclick={() => { app.nsTab = "bans"; app.refreshBans(); }}>Bans &amp; mutes</button>
+      {/if}
+      {#if tabPerm.recovery || tabPerm.danger}
+        <div class="so-heading">Security</div>
+      {/if}
+      {#if tabPerm.recovery}
+        <button class="so-navitem" class:active={app.nsTab === "recovery"} onclick={() => (app.nsTab = "recovery")}>Recovery</button>
+      {/if}
+      {#if tabPerm.danger}
+        <button class="so-navitem danger" class:active={app.nsTab === "danger"} onclick={() => (app.nsTab = "danger")}>Danger zone</button>
+      {/if}
     </div>
   </nav>
   <main class="so-main">

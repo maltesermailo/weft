@@ -96,7 +96,11 @@ button {
 /* Tactile press — a subtle squish on every enabled button. Excludes the
    full-screen backdrop/overlay buttons (scaling those shrinks the whole shade)
    and the large container buttons (a scale distorts their layout). */
-button:active:not(:disabled):not(.channel-item):not(.sidebar-user):not(.comm-name-btn):not(.modal-backdrop):not(.ctx-backdrop):not(.modal-wrap) {
+/* Full-screen dismiss backdrops are `<button>`s but must never get the press
+   squish — scaling a fixed inset:0 overlay 4% mid-dismiss reads as a "jumpy"
+   fade-out. Exclude every `*-backdrop` (and the modal wrap) in one shot so new
+   modals inherit the fix automatically. */
+button:active:not(:disabled):not(.channel-item):not(.sidebar-user):not(.comm-name-btn):not([class*="backdrop"]):not(.modal-wrap) {
   transform: scale(0.96);
 }
 button:disabled {

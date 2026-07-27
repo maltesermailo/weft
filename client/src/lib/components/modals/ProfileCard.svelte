@@ -149,7 +149,7 @@
               </div>
             </div>
           {/if}
-          {#if inServer}
+          {#if inServer && app.canModerate(app.active)}
             <div class="pf-mod">
               <div class="profile-section-label">Moderation</div>
               <div class="pf-mod-inputs">

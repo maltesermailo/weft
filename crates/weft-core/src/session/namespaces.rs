@@ -686,10 +686,63 @@ impl<S: ControlStream> Session<S> {
         {
             return Ok(Flow::Continue);
         }
+        // Cascade: a namespace owns its channels, memberships, roles and pending
+        // invites. Deleting only the record orphans them — the channels stay live
+        // and in the store, so clients auto-rejoin and keep posting, DISCOVER and
+        // the admin panel still surface them, and a namespace later recreated
+        // under the same name would inherit ghost members/roles. Tear the whole
+        // subtree down first, then drop the record.
+        let channels = match self
+            .ctx
+            .channel_store
+            .channels_in_namespace(name.as_str())
+            .await
+        {
+            Ok(channels) => channels,
+            Err(e) => return self.internal(label, &e).await,
+        };
+        for (channel, _) in &channels {
+            self.ctx.registry.remove(channel); // stop the live actor
+            if let Err(e) = self.ctx.channel_store.delete_channel(channel).await {
+                return self.internal(label, &e).await;
+            }
+            // A channel's own roles live at its channel scope — drop them too.
+            let chan_scope = channel.to_string();
+            if let Ok(roles) = self.ctx.roles.roles(&chan_scope).await {
+                for role in roles {
+                    let _ = self.ctx.roles.delete_role(&chan_scope, &role.name).await;
+                }
+            }
+        }
+
+        // Clear namespace memberships (also drops hide overrides) so a same-name
+        // namespace can't auto-rejoin ghost members, then the ns-scope roles and
+        // any pending invites.
+        if let Ok(members) = self.ctx.memberships.ns_members(&name).await {
+            for member in members {
+                let _ = self
+                    .ctx
+                    .memberships
+                    .clear_ns_membership(&member, &name)
+                    .await;
+            }
+        }
+        let ns_scope = format!("ns:{name}");
+        if let Ok(roles) = self.ctx.roles.roles(&ns_scope).await {
+            for role in roles {
+                let _ = self.ctx.roles.delete_role(&ns_scope, &role.name).await;
+            }
+        }
+        let _ = self
+            .ctx
+            .invites
+            .revoke_invites_for_namespace(name.as_str())
+            .await;
+
         if let Err(e) = self.ctx.namespaces.delete_namespace(&name).await {
             return self.internal(label, &e).await;
         }
-        debug!(%name, "namespace deleted");
+        debug!(%name, channels = channels.len(), "namespace deleted (cascade)");
         // Reflect deletion as an NS-META marker (private + no owner).
         self.send_event(
             label,

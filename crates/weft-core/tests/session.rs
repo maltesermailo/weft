@@ -3293,6 +3293,41 @@ async fn any_user_can_create_a_namespace_and_owns_it() {
 }
 
 #[tokio::test]
+async fn ns_delete_cascades_channels() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let root = root_key_b64();
+    ada.send(&format!("@root={root} NS CREATE gaming public"));
+    assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+    ada.send("@label=c1 CHANNEL CREATE #gaming/general");
+    assert!(matches!(
+        &ada.recv().await.event,
+        Event::Policy { channel, .. } if channel.as_str() == "#gaming/general"
+    ));
+
+    let channel: weft_proto::ChannelName = "#gaming/general".parse().unwrap();
+    assert!(
+        ctx.registry.exists(&channel),
+        "channel should be live after create"
+    );
+
+    // Deleting the namespace must tear its channels down with it. Leaving the
+    // actor + store row orphaned is the bug: the channel stays live (writable)
+    // and advertised, and a same-name namespace later inherits the ghost.
+    ada.send("@label=del NS DELETE gaming gaming");
+    let reply = ada.recv().await;
+    assert!(
+        matches!(&reply.event, Event::NsMeta { description, .. } if description.as_deref() == Some("deleted")),
+        "expected NS-META deleted, got {reply:?}"
+    );
+
+    assert!(
+        !ctx.registry.exists(&channel),
+        "NS DELETE must cascade-remove its channels (actor still live = still writable)"
+    );
+}
+
+#[tokio::test]
 async fn grant_accepts_a_foreign_subject() {
     let ctx = ctx_ops(&["#general"], &["boss"]);
     let mut boss = ready_op(&ctx, "boss").await;

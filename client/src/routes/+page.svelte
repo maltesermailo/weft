@@ -140,8 +140,14 @@
     ctxMenu = { x: e.clientX, y: e.clientY, items };
   }
   // Can I moderate-delete another member's message in the active channel?
-  // `delete-any` at the channel or its namespace, or owner/operator. Kicks off
-  // a fetch of my own caps so the answer resolves on a subsequent open.
+  // `delete-any` at the channel or its namespace. Kicks off a fetch of my own
+  // caps so the answer resolves on a subsequent open.
+  //
+  // NOTE: operator (`*`) status is deliberately NOT consulted for namespaced
+  // channels — mirrors the server (context.rs): a network operator's god-mode is
+  // web-admin authority, never day-to-day power on someone else's server. At the
+  // network level (top-level channels) `nsScope` *is* `*`, so operator power
+  // still applies there naturally.
   function canModDelete(): boolean {
     if (!active.startsWith("#")) return false;
     const nsScope = roleScopeOf(active);
@@ -151,7 +157,54 @@
       const c = capsFor[`${account}|${scope}`];
       return !!c && (c.owner || c.list.includes("delete-any"));
     };
-    return isOperator || has(active) || has(nsScope);
+    return has(active) || has(nsScope);
+  }
+  // Do I hold moderation power (mute/ban/kick, or owner) in a channel's server?
+  // Same scope rule as `canModDelete`: namespaced channels never consult `*`, so
+  // an operator sees no moderation tools on another person's server; top-level
+  // channels honor operator caps because their scope *is* `*`. Gates every
+  // moderation surface (member list, profile card, context menus).
+  function canModerate(channel: string): boolean {
+    if (!channel.startsWith("#")) return false;
+    const nsScope = roleScopeOf(channel);
+    ensureCapsAt(account, channel);
+    ensureCapsAt(account, nsScope);
+    const ok = (scope: string) => {
+      const c = capsFor[`${account}|${scope}`];
+      return !!c && (c.owner || c.mod);
+    };
+    return ok(channel) || ok(nsScope);
+  }
+  // Do I hold a *specific* capability at the active server's scope (`ns:<server>`,
+  // or `*` at network level)? Owner/ns-admin (the `owner` flag) implies every cap;
+  // operator (`*`) counts only at network level, never inside someone else's
+  // namespace. This is the per-permission gate — each server surface checks the
+  // exact cap it needs (Create Channel → chan-create, Create Invite → invite, …).
+  function serverCap(cap: string): boolean {
+    const scope = activeServer ? `ns:${activeServer}` : "*";
+    ensureCapsAt(account, scope);
+    const c = capsFor[`${account}|${scope}`];
+    return !!c && (c.owner || c.list.includes(cap));
+  }
+  // Do I hold any `grant:*` delegation cap at the server scope? Gates the Roles
+  // tab — creating/assigning roles is capability delegation.
+  function serverCanGrant(): boolean {
+    const scope = activeServer ? `ns:${activeServer}` : "*";
+    ensureCapsAt(account, scope);
+    const c = capsFor[`${account}|${scope}`];
+    return !!c && (c.owner || c.list.some((x) => x.startsWith("grant:")));
+  }
+  // Server Settings is reachable with any moderation/administration capability —
+  // not plain member caps (send/invite). Each tab then gates itself, so a mod
+  // sees only the tabs they can act on.
+  function canOpenServerSettings(): boolean {
+    return (
+      isNsOwner(account) ||
+      serverCanGrant() ||
+      ["ns-admin", "ban", "mute", "kick", "reports", "chan-create", "policy", "manage-nicks"].some(
+        serverCap,
+      )
+    );
   }
   function msgCtx(e: MouseEvent, m: Msg) {
     if (!m.msgid) return; // nothing actionable without a real msgid
@@ -194,7 +247,7 @@
   }
   function chanCtx(e: MouseEvent, ch: Channel) {
     const muted = isMuted(ch.name);
-    openCtx(e, [
+    const items: CtxItem[] = [
       { header: ch.name },
       { label: "Mark as read", icon: "markread", run: () => markRead(ch.name) },
       {
@@ -204,17 +257,26 @@
       },
       { label: "Copy name", icon: "copy", run: () => navigator.clipboard?.writeText(ch.name) },
       { label: "Create invite", icon: "invite", run: () => openInviteCreate(scopesFor()[0]) },
-      { divider: true },
-      { header: "Mod Menu", mod: true },
-      { label: "Edit permissions", icon: "permissions", run: () => openChanPerms(ch.name) },
-      { divider: true },
-      {
-        label: "Delete channel",
-        icon: "delete",
-        danger: true,
-        run: () => weft.channelDelete(ch.name).catch((err) => toast(String(err), "error")),
-      },
-    ]);
+    ];
+    // Channel administration (edit permissions / delete) is a moderator surface —
+    // hidden from non-moderators (server-enforced regardless). Same scope rule as
+    // everywhere: no power on another person's server ⇒ no Mod Menu.
+    if (canModerate(ch.name)) {
+      items.push(
+        { divider: true },
+        { header: "Mod Menu", mod: true },
+        { label: "Edit permissions", icon: "permissions", run: () => openChanPerms(ch.name) },
+        { divider: true },
+        {
+          label: "Delete channel",
+          icon: "delete",
+          danger: true,
+          run: () => weft.channelDelete(ch.name).catch((err) => toast(String(err), "error")),
+        },
+      );
+    }
+
+    openCtx(e, items);
   }
   // The right-click menu for any user, anywhere (member list, friends, DMs).
   // Items adapt to context: a DM shows Close DM (else Message), a channel adds
@@ -256,13 +318,18 @@
     if (active.startsWith("#")) {
       items.push({ divider: true });
       items.push({ label: "Invite to server", icon: "invite", run: inviteToServer });
-      items.push({ header: "Mod Menu", mod: true });
-      // Mute/ban at the *namespace* scope so they're server-wide and show up in
-      // Server Settings → Bans (banScope() = ns:<server>). Kick is inherently
-      // per-channel (it force-parts the active channel).
-      items.push({ label: "Mute", icon: "mute", run: () => moderate("mute", name, banScope()) });
-      items.push({ label: "Kick", icon: "kick", run: () => moderate("kick", name) });
-      items.push({ label: "Ban", icon: "ban", danger: true, run: () => moderate("ban", name, banScope()) });
+      // Moderation controls are shown only to actual moderators of *this* server
+      // (server-enforced too; hiding them keeps the UI honest — an operator on
+      // another person's server has no power here, so no tools).
+      if (canModerate(active)) {
+        items.push({ header: "Mod Menu", mod: true });
+        // Mute/ban at the *namespace* scope so they're server-wide and show up in
+        // Server Settings → Bans (banScope() = ns:<server>). Kick is inherently
+        // per-channel (it force-parts the active channel).
+        items.push({ label: "Mute", icon: "mute", run: () => moderate("mute", name, banScope()) });
+        items.push({ label: "Kick", icon: "kick", run: () => moderate("kick", name) });
+        items.push({ label: "Ban", icon: "ban", danger: true, run: () => moderate("ban", name, banScope()) });
+      }
     }
 
     openCtx(e, items);
@@ -3940,6 +4007,10 @@
     isOwnerAt,
     isNsOwner,
     isStaff,
+    canModerate,
+    serverCap,
+    serverCanGrant,
+    canOpenServerSettings,
     nameColor,
     assignRoleTo,
     unassignRoleFrom,

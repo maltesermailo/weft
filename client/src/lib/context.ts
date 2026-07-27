@@ -357,6 +357,19 @@ export interface AppCtx {
   isNsOwner(account: string): boolean;
   /** Network staff (operator) — surfaced as a "Staff" badge, never ownership. */
   isStaff(account: string): boolean;
+  /** Do I hold moderation power (mute/ban/kick or owner) in this channel's
+   * server? Namespaced channels never consult operator (`*`) caps — mirrors the
+   * server, so an operator sees no mod tools on someone else's namespace. */
+  canModerate(channel: string): boolean;
+  /** Do I hold a specific capability at the active server's scope? Owner/ns-admin
+   * implies all; operator (`*`) counts only at network level. The per-permission
+   * gate for server-menu actions and Server Settings tabs. */
+  serverCap(cap: string): boolean;
+  /** Do I hold any `grant:*` delegation cap at the server scope? Gates Roles. */
+  serverCanGrant(): boolean;
+  /** Is Server Settings reachable — do I hold any moderation/admin cap (not just
+   * plain member caps)? Individual tabs gate themselves. */
+  canOpenServerSettings(): boolean;
   /** An account's highest-role color at the active namespace, or "" (default). */
   nameColor(account: string): string;
   assignRoleTo(acct: string, role: RoleDefC): void;
