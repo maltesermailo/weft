@@ -60,9 +60,8 @@
       <div class="avatar"><Avatar account={m.name} /><span class="dot {statusOf(m.name)} corner"></span></div>
       <span class="member-text">
         <span class="member-name-line">
-          <span class="mname">{app.displayName(m.name)}</span>
-          {#if app.badgeFor(m.name, app.active)?.owner}<span class="cap-badge owner">owner</span>
-          {:else if app.badgeFor(m.name, app.active)?.mod}<span class="cap-badge mod">mod</span>{/if}
+          <span class="mname" style={app.nameColor(m.name) ? `color:${app.nameColor(m.name)}` : ""}>{app.displayName(m.name)}</span>
+          {#if app.isStaff(m.name)}<span class="cap-badge staff">staff</span>{/if}
           {#if m.origin === "federated"}<span class="cap-badge bridged">br</span>{/if}
         </span>
         {#if app.statusOf(m.name)}<span class="mstatus" title={app.statusOf(m.name)}>{app.statusOf(m.name)}</span>{/if}

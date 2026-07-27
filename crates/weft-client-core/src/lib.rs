@@ -2093,6 +2093,14 @@ pub fn build_ns_delete(name: &str) -> Result<String, String> {
     .map_err(|e| e.to_string())
 }
 
+/// `NS LEAVE <name>` — drop your own membership in a namespace (§6.2).
+pub fn build_ns_leave(name: &str) -> Result<String, String> {
+    let name: weft_proto::NamespaceName = name.parse().map_err(|_| "bad namespace".to_string())?;
+    Request::new(Command::NsLeave { name })
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
 /// `NS TRANSFER <name> <account>` with `@sig=` — root-signed succession (§2.4).
 /// The signature is produced from the stored root key by the caller.
 pub fn build_ns_transfer(name: &str, new_owner: &str, signature: &str) -> Result<String, String> {

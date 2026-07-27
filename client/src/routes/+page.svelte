@@ -55,6 +55,7 @@
   import ProfileCard from "$lib/components/modals/ProfileCard.svelte";
   import ProfileModal from "$lib/components/modals/ProfileModal.svelte";
   import NicknameModal from "$lib/components/modals/NicknameModal.svelte";
+  import ConfirmModal from "$lib/components/modals/ConfirmModal.svelte";
   import UserSettingsModal from "$lib/components/modals/UserSettingsModal.svelte";
   import FederationPanel from "$lib/components/modals/FederationPanel.svelte";
   import ServerSettingsModal from "$lib/components/modals/ServerSettingsModal.svelte";
@@ -134,7 +135,9 @@
   function openCtx(e: MouseEvent, items: CtxItem[]) {
     e.preventDefault();
     e.stopPropagation(); // don't let a channel/category menu bubble to the list background
-    ctxMenu = { x: Math.min(e.clientX, window.innerWidth - 220), y: e.clientY, items };
+    // Raw click point; ContextMenu clamps both axes to the viewport once it can
+    // measure itself (so a tall menu near the bottom edge doesn't overflow).
+    ctxMenu = { x: e.clientX, y: e.clientY, items };
   }
   // Can I moderate-delete another member's message in the active channel?
   // `delete-any` at the channel or its namespace, or owner/operator. Kicks off
@@ -287,6 +290,17 @@
     const id = toastSeq++;
     toasts = [...toasts, { id, text, kind }];
     setTimeout(() => (toasts = toasts.filter((t) => t.id !== id)), 4500);
+  }
+
+  // In-app confirmation (the Tauri webview blocks native window.confirm, so
+  // destructive actions must not rely on it). Resolves true/false.
+  let confirmState = $state<{ message: string; label: string; resolve: (v: boolean) => void } | null>(null);
+  function appConfirm(message: string, label = "Confirm"): Promise<boolean> {
+    return new Promise((resolve) => (confirmState = { message, label, resolve }));
+  }
+  function resolveConfirm(ok: boolean) {
+    confirmState?.resolve(ok);
+    confirmState = null;
   }
 
   // ---- server-confirmed success toasts ----
@@ -450,6 +464,14 @@
   const chanShort = (name: string) => name.replace(/^#[^/]+\//, "").replace(/^#/, "");
   // ---- DMs + presence (Phase 5) ----
   let homeView = $state(true); // sidebar shows DMs; namespaces are the only servers
+  // The DM / group / Friends home view has no active server. Keep `activeServer`
+  // from going stale there — it scopes per-namespace nicknames (else a peer's
+  // server nickname leaks into DMs) and gates the "Set nickname" action, which
+  // only makes sense inside a server. selectServer sets homeView=false first, so
+  // this never fights a real server selection.
+  $effect(() => {
+    if (homeView) activeServer = "";
+  });
   let presence = $state<Record<string, string>>({}); // account → status
   // §10.3 account → display profile (nick + avatar hash). Filled from PROFILE
   // events (broadcast on change) + on-demand PROFILES queries.
@@ -651,6 +673,18 @@
   /// Is this account the owner/operator at the scope (implicit all-caps)?
   const isOwnerAt = (account: string, scope: string) =>
     capsFor[`${account}|${scope}`]?.owner ?? false;
+  /// The *real* owner of the active namespace — the record's owner, NOT anyone
+  /// who merely holds ns-admin caps (a network operator holds them everywhere,
+  /// but that's web-admin authority, not ownership of this server).
+  const isNsOwner = (account: string): boolean =>
+    !!activeServer && peerOf(account) === (activeNsMeta?.owner ?? "");
+  /// Network staff (operator): holds `*`-scope authority. Detected from caps at
+  /// `*` (the `netblock`/`ns-admin`-at-`*` powers only operators have). Fetched
+  /// lazily. Surfaced as a "Staff" badge — never as server ownership.
+  const isStaff = (account: string): boolean => {
+    ensureCapsAt(peerOf(account), "*");
+    return capsFor[`${peerOf(account)}|*`]?.owner ?? false;
+  };
   // Explicit role membership (§6.5) keyed `account|scope`, from ROLE-MEMBER —
   // a role is worn because it was assigned, never inferred from caps.
   let memberRoles = $state<Record<string, string[]>>({});
@@ -682,6 +716,18 @@
   function rolesOf(account: string, scope: string): RoleDefC[] {
     const names = new Set(memberRoles[`${account}|${scope}`] ?? []);
     return (rolesByScope[scope] ?? []).filter((r) => names.has(r.name));
+  }
+  // The color to tint an account's name with — their highest assigned role at
+  // the active namespace (Discord-style), excluding the implicit @everyone.
+  // "" ⇒ no colored role, render in the default text color. Fetches the
+  // member's roles + the scope's role defs lazily so it resolves on next paint.
+  function nameColor(account: string): string {
+    const scope = roleScopeOf(active);
+    if (!scope.startsWith("ns:")) return "";
+    ensureMemberRoles(account);
+    ensureRoles(scope);
+    const top = rolesOf(account, scope).find((r) => r.name !== EVERYONE_ROLE);
+    return top?.color ?? "";
   }
 
   let profilePos = $state<{ left: number; top: number } | null>(null);
@@ -1177,6 +1223,19 @@
   function openServerMenu(ns: string) {
     selectServer(ns);
     serverMenu = true;
+  }
+  // §6.2 leave a namespace: drop membership, navigate home, and forget its
+  // channels locally so the rail updates without a reload.
+  function nsLeave() {
+    const ns = activeServer;
+    if (!ns) return;
+    serverMenu = false;
+    weft.nsLeave(ns).catch((e) => toast(String(e), "error"));
+    for (const name of Object.keys(channels)) {
+      if (name.startsWith("#") && nsOf(name) === ns) delete channels[name];
+    }
+    delete discovered[ns];
+    goHome();
   }
   // Fetch a namespace's layout + categories from the server whenever it
   // becomes active (covers reload — the client keeps no category state).
@@ -1996,6 +2055,17 @@
         break;
       }
       case "ns-meta":
+        // §6.2 deletion marker (owner cleared + description "deleted"): drop the
+        // namespace from every local view instead of storing a tombstone —
+        // otherwise a deleted server would linger in the rail/channel list.
+        if (e.owner === null && e.description === "deleted") {
+          delete discovered[e.name];
+          for (const name of Object.keys(channels)) {
+            if (name.startsWith("#") && nsOf(name) === e.name) delete channels[name];
+          }
+          if (activeServer === e.name) goHome();
+          break;
+        }
         discovered[e.name] = e;
         cacheNsCats(e.name, e.categories ?? []);
         break;
@@ -3530,22 +3600,22 @@
       selectServer(f.ns);
     }
   });
-  function doTransfer() {
+  async function doTransfer() {
     const o = nsNewOwner.trim();
-    if (o && confirm(`Transfer ownership of ${activeServer} to ${o}? This is signed by your root key and cannot be undone.`))
+    if (o && (await appConfirm(`Transfer ownership of ${activeServer} to ${o}? This is signed by your root key and cannot be undone.`, "Transfer")))
       weft.nsTransfer(network, activeServer, o).catch((e) => (authError = String(e)));
   }
-  function deleteNamespace() {
-    if (confirm(`Delete namespace ${activeServer}? This removes all its channels.`)) {
-      weft.nsDelete(activeServer).catch(() => {});
+  async function deleteNamespace() {
+    if (await appConfirm(`Delete namespace ${activeServer}? This removes all its channels.`, "Delete")) {
+      weft.nsDelete(activeServer).catch((e) => toast(String(e), "error"));
       nsSettingsOpen = false;
     }
   }
 
   // Revoke every outstanding invite for the active namespace (ns-admin, §6.5).
-  function revokeAllInvites() {
+  async function revokeAllInvites() {
     if (!activeServer) return;
-    if (!confirm(`Revoke ALL invites for ${activeServer}? Every existing invite link stops working.`)) return;
+    if (!(await appConfirm(`Revoke ALL invites for ${activeServer}? Every existing invite link stops working.`, "Revoke all"))) return;
     weft.inviteRevokeAll(`ns:${activeServer}`).catch(() => {});
     invitesList = []; // optimistic — the list is now empty
     toast(`Revoked all invites for ${activeServer}`, "info");
@@ -3656,6 +3726,7 @@
     goHome,
     selectServer,
     openServerMenu,
+    nsLeave,
     open: (name: string) => { active = name; markRead(name); },
     // Open a voice channel's stage (switch the main view) and join the call if
     // we're not already in it. Voice channels have no message timeline, so we
@@ -3860,6 +3931,9 @@
     nsMemberCtx,
     roleScopeOf,
     isOwnerAt,
+    isNsOwner,
+    isStaff,
+    nameColor,
     assignRoleTo,
     unassignRoleFrom,
     // channel permissions (per-target: @everyone / role / member)
@@ -4119,6 +4193,10 @@
 
     {#if nickTarget}
       <NicknameModal target={nickTarget} onclose={() => (nickTarget = null)} />
+    {/if}
+
+    {#if confirmState}
+      <ConfirmModal message={confirmState.message} confirmLabel={confirmState.label} onresult={resolveConfirm} />
     {/if}
 
     {#if profileModalTarget}

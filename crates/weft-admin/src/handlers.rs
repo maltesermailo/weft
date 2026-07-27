@@ -144,7 +144,7 @@ async fn stats(State(st): State<AdminState>) -> Response {
         Ok::<_, StoreError>(dto::Stats {
             accounts: st.accounts.list_accounts().await?.len(),
             channels: st.channels.list_channels().await?.len(),
-            namespaces: st.namespaces.list_public(None, 10_000).await?.len(),
+            namespaces: st.namespaces.list_all(None, 10_000).await?.len(),
             open_reports: st
                 .reports
                 .list_reports("*", Some(weft_proto::ReportStatus::Open), None, 10_000)
@@ -1229,7 +1229,6 @@ async fn namespace_detail(State(st): State<AdminState>, Path(name): Path<String>
         // A namespace's channels are the ones prefixed `#<ns>/`.
         let prefix = format!("#{ns}/");
         let mut channels = Vec::new();
-        let mut members: Vec<String> = Vec::new();
         for (chan, _) in st.channels.list_channels().await? {
             if !chan.as_str().starts_with(&prefix) {
                 continue;
@@ -1245,9 +1244,6 @@ async fn namespace_detail(State(st): State<AdminState>, Path(name): Path<String>
                     restricted: c.restricted,
                 });
             }
-            for m in st.memberships.members(&chan).await? {
-                members.push(m.to_string());
-            }
         }
         channels.sort_by(|a, b| {
             a.category
@@ -1255,6 +1251,15 @@ async fn namespace_detail(State(st): State<AdminState>, Path(name): Path<String>
                 .then(a.position.cmp(&b.position))
                 .then(a.name.cmp(&b.name))
         });
+        // v0.12 membership is namespace-level (channel membership is derived),
+        // so the roster comes from the ns membership row, not per-channel.
+        let mut members: Vec<String> = st
+            .memberships
+            .ns_members(&ns)
+            .await?
+            .into_iter()
+            .map(|a| a.to_string())
+            .collect();
         members.sort();
         members.dedup();
 
@@ -1608,7 +1613,9 @@ async fn delete_channel(
 }
 
 async fn list_namespaces(State(st): State<AdminState>) -> Response {
-    match st.namespaces.list_public(None, 500).await {
+    // Operator view: every namespace regardless of visibility (a public-only
+    // list hid the operator's own unlisted/private servers).
+    match st.namespaces.list_all(None, 500).await {
         Ok(list) => Json(
             list.into_iter()
                 .map(dto::Namespace::from)

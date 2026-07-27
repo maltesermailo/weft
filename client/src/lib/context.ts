@@ -94,6 +94,8 @@ export interface AppCtx {
   selectServer(ns: string): void;
   /** Select a server tile and open its header menu (rail right-click). */
   openServerMenu(ns: string): void;
+  /** §6.2 leave the active namespace (drop membership). */
+  nsLeave(): void;
   open(name: string): void; // set active + mark read
   openVoice(name: string): void; // open a voice channel's stage + join the call
   openDiscover(): void;
@@ -350,6 +352,12 @@ export interface AppCtx {
   ensureRoles(scope: string): void;
   roleScopeOf(channel: string): string;
   isOwnerAt(account: string, scope: string): boolean;
+  /** The real owner of the active namespace (not merely an ns-admin holder). */
+  isNsOwner(account: string): boolean;
+  /** Network staff (operator) — surfaced as a "Staff" badge, never ownership. */
+  isStaff(account: string): boolean;
+  /** An account's highest-role color at the active namespace, or "" (default). */
+  nameColor(account: string): string;
   assignRoleTo(acct: string, role: RoleDefC): void;
   unassignRoleFrom(acct: string, role: RoleDefC): void;
   /** §6.2 NS INFO MEMBERS: the moderator roster per namespace (once fetched). */

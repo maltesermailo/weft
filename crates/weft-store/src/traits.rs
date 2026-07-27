@@ -418,6 +418,15 @@ pub trait NamespaceStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<NamespaceRecord>, StoreError>;
 
+    /// **Every** namespace regardless of visibility, sorted by name — the
+    /// operator admin surface (never a wire path: the protocol never enumerates
+    /// unlisted/private namespaces, §2.2). `after` is the exclusive cursor.
+    async fn list_all(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<NamespaceRecord>, StoreError>;
+
     /// NS META (title/description/icon) — `key` is one of those.
     async fn set_namespace_meta(
         &self,

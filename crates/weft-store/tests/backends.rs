@@ -1227,6 +1227,21 @@ where
     let page = store.list_public(None, 100).await.unwrap();
     assert!(!page.iter().any(|n| n.name == ns));
 
+    // …but the operator admin surface (`list_all`) sees every visibility.
+    let all = store.list_all(None, 100).await.unwrap();
+    assert!(
+        all.iter().any(|n| n.name == ns),
+        "list_all includes a private namespace"
+    );
+    let after_all = store
+        .list_all(Some(&format!("gaming{tag}")), 100)
+        .await
+        .unwrap();
+    assert!(
+        !after_all.iter().any(|n| n.name == ns),
+        "list_all cursor is exclusive"
+    );
+
     assert!(store.delete_namespace(&ns).await.unwrap());
     assert!(store.namespace(&ns).await.unwrap().is_none());
 

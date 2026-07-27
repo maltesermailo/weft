@@ -1137,9 +1137,18 @@ impl ServerCtx {
         now: u64,
     ) -> Result<bool, StoreError> {
         if let Actor::Local(account) = actor {
-            // Operator authority: the config `[operators]` seed set OR the
-            // DB-backed flag (managed via `weftd admin`, §10.4).
-            if self.operators.contains(account) || self.accounts.is_operator(account).await? {
+            // Operator authority is **network-level only**: `*` (netblock,
+            // network-wide moderation, `*`-scope grants) and top-level network
+            // channels the operator runs. It is deliberately NOT extended into a
+            // user's namespace (`ns:<name>` / `#ns/chan`) — there an operator is
+            // an ordinary member, never the implicit admin of someone else's
+            // server. Cross-namespace intervention is an out-of-band act through
+            // the web admin panel (store-direct), and recovery rung 3 is
+            // network-key-signed, so neither depends on this. (§10.4; decision:
+            // operator ≠ day-to-day control of user servers.)
+            if scope_namespace(scope).is_none()
+                && (self.operators.contains(account) || self.accounts.is_operator(account).await?)
+            {
                 return Ok(true);
             }
             if let Some(ns_name) = scope_namespace(scope) {

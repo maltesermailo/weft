@@ -42,10 +42,13 @@
             <span class="role-pill" style="--role:{r.color}"><span class="role-dot"></span>{r.name}</span>
           {/each}
         {:else}
-          <button class="author author-btn" onclick={(e) => app.openProfile(m.author, e)}>{app.displayName(m.author)}</button>
+          <button
+            class="author author-btn"
+            style={app.nameColor(m.author) ? `color:${app.nameColor(m.author)}` : ""}
+            onclick={(e) => app.openProfile(m.author, e)}
+          >{app.displayName(m.author)}</button>
         {/if}
-        {#if !m.net && app.badgeFor(m.author, app.active)?.owner}<span class="cap-badge owner">owner</span>
-        {:else if !m.net && app.badgeFor(m.author, app.active)?.mod}<span class="cap-badge mod">mod</span>{/if}
+        {#if !m.net && app.isStaff(m.author)}<span class="cap-badge staff">staff</span>{/if}
         {#if m.own}<span class="cap-badge owner">you</span>{/if}
         <span class="time">{m.time}</span>
       </div>

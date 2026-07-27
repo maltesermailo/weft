@@ -1227,6 +1227,11 @@ button:disabled {
   color: var(--signal-teal);
   border-color: var(--signal-teal-dim);
 }
+/* Network staff (operator) — a distinct accent from owner/mod. */
+.cap-badge.staff {
+  color: #b48ce6;
+  border-color: color-mix(in srgb, #b48ce6 45%, transparent);
+}
 .cap-badge.bridged {
   color: var(--text-faint);
   border-color: var(--border-hair-strong);

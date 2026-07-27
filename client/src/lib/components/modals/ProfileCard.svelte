@@ -25,8 +25,13 @@
   // Exclude the implicit @everyone role — it's baseline, never assigned.
   const allRoles = $derived((app.rolesByScope[scope] ?? []).filter((r) => r.name !== EVERYONE_ROLE));
   const isSelf = $derived(target === app.account);
-  const iAmOwner = $derived(app.isOwnerAt(app.account, scope));
-  const targetIsOwner = $derived(app.isOwnerAt(target, scope));
+  // "Owner/admin" for controls means the real namespace owner or an explicitly
+  // delegated ns-admin — NOT a network operator (their god-mode caps are
+  // web-admin authority, surfaced as a Staff badge, not server control here).
+  const iAmOwner = $derived(
+    app.isNsOwner(app.account) || (app.isOwnerAt(app.account, scope) && !app.isStaff(app.account)),
+  );
+  const targetIsOwner = $derived(app.isNsOwner(target));
   // Roles are the only capability source, so assigning one is a privileged act:
   // offer it for other accounts (the server enforces the caller's authority),
   // and for yourself only when you own the scope — there wearing a role is
@@ -62,9 +67,8 @@
     </div>
     <div class="profile-body">
       <div class="profile-name-lg">
-        {target}
-        {#if b?.owner}<span class="cap-badge owner">owner</span>
-        {:else if b?.mod}<span class="cap-badge mod">mod</span>{/if}
+        <span style={app.nameColor(target) ? `color:${app.nameColor(target)}` : ""}>{target}</span>
+        {#if app.isStaff(target)}<span class="cap-badge staff">staff</span>{/if}
       </div>
       <div class="profile-handle">{target.includes("@") ? target : `${target}@${app.network}`} · <span class="pres-{pr}">{pr}</span></div>
 

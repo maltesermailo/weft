@@ -57,6 +57,14 @@ pub struct Server {
 /// How long graceful shutdown waits for connections to drain before giving up.
 const GRACE_SECS: u64 = 10;
 
+/// How long the stateless HTTP/HTTPS listeners wait for in-flight requests
+/// before force-closing connections on shutdown. These serve request/response
+/// endpoints (well-known, media, admin API) with no long-lived streams, so a
+/// short bound is plenty — without it, an idle client **keep-alive** (a browser
+/// tab or a reverse proxy) keeps the connection open and the drain runs out the
+/// full `GRACE_SECS`, which is why shutdown was always ~10 s.
+const HTTP_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl Server {
     /// The server context — the stores + registry + network identity. Exposed
     /// for the outbound dialer and integration tests.
@@ -536,12 +544,24 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
             let http_addr = listener.local_addr()?;
             let app = app.clone();
             let shutdown = ctx.shutdown.clone();
+            let deadline = ctx.shutdown.clone();
             tasks.push(tokio::spawn(async move {
-                let result = axum::serve(listener, app)
-                    .with_graceful_shutdown(async move { shutdown.cancelled().await })
-                    .await;
-                if let Err(e) = result {
-                    tracing::error!("HTTP server failed: {e}");
+                let serve = axum::serve(listener, app)
+                    .with_graceful_shutdown(async move { shutdown.cancelled().await });
+                // `axum::serve` has no force-close timeout: after the signal it
+                // waits for every connection — including idle keep-alives — to
+                // close on its own. Bound that: once shutting down, give
+                // in-flight requests `HTTP_DRAIN`, then drop `serve` (closing the
+                // remaining connections) rather than stall the whole shutdown.
+                tokio::select! {
+                    result = serve => {
+                        if let Err(e) = result {
+                            tracing::error!("HTTP server failed: {e}");
+                        }
+                    }
+                    _ = async move { deadline.cancelled().await; tokio::time::sleep(HTTP_DRAIN).await; } => {
+                        tracing::debug!("HTTP drain deadline reached; closing idle connections");
+                    }
                 }
             }));
             Some(http_addr)
@@ -560,7 +580,10 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
             let shutdown = ctx.shutdown.clone();
             tokio::spawn(async move {
                 shutdown.cancelled().await;
-                watcher.graceful_shutdown(Some(std::time::Duration::from_secs(GRACE_SECS)));
+                // Force-close after a short in-flight-request window, not the
+                // full grace — otherwise a persistent client keep-alive (reverse
+                // proxy / browser) holds the drain open for `GRACE_SECS`.
+                watcher.graceful_shutdown(Some(HTTP_DRAIN));
             });
             tasks.push(tokio::spawn(async move {
                 let config = axum_server::tls_rustls::RustlsConfig::from_config(tls);

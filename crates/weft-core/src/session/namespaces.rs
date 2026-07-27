@@ -115,6 +115,21 @@ impl<S: ControlStream> Session<S> {
             return self.no_such_target(label).await;
         }
 
+        // The owner can't abandon their own namespace — leaving would orphan it.
+        // They must TRANSFER ownership (§2.4 rung 1) or DELETE the namespace.
+        if let Ok(Some(rec)) = self.ctx.namespaces.namespace(&name).await {
+            if rec.owner == account {
+                self.send_err(
+                    label,
+                    ErrCode::Policy,
+                    None,
+                    "the owner can't leave; transfer or delete the namespace",
+                )
+                .await?;
+                return Ok(Flow::Continue);
+            }
+        }
+
         // Unsubscribe from every joined channel in this namespace (runtime).
         // Silent part — an ns-level leave doesn't post per-channel "left" lines.
         let leaving: Vec<ChannelName> = self

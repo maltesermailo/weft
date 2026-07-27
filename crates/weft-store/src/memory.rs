@@ -1349,6 +1349,23 @@ impl NamespaceStore for MemoryStore {
         Ok(public)
     }
 
+    async fn list_all(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<NamespaceRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        let mut all: Vec<NamespaceRecord> = inner
+            .namespaces
+            .values()
+            .filter(|ns| after.map_or(true, |cursor| ns.name.as_str() > cursor))
+            .cloned()
+            .collect();
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        all.truncate(limit);
+        Ok(all)
+    }
+
     async fn set_namespace_meta(
         &self,
         name: &NamespaceName,

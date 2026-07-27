@@ -65,9 +65,8 @@
 
       <div class="pm-card-body">
         <div class="pm-nameline">
-          <span class="pm-name">{app.displayName(target)}</span>
-          {#if badge?.owner}<span class="cap-badge owner">owner</span>
-          {:else if badge?.mod}<span class="cap-badge mod">mod</span>{/if}
+          <span class="pm-name" style={app.nameColor(target) ? `color:${app.nameColor(target)}` : ""}>{app.displayName(target)}</span>
+          {#if app.isStaff(target)}<span class="cap-badge staff">staff</span>{/if}
         </div>
         <button class="pm-handle" title="Copy handle" onclick={copyId}>
           {handle}

@@ -376,6 +376,7 @@ impl WeftClient {
             "ns_visibility" => build_ns_visibility(&arg("name"), &arg("visibility"))?,
             "ns_delegate" => build_ns_delegate(&arg("name"), &arg("subject"), &arg("caps"))?,
             "ns_delete" => build_ns_delete(&arg("name"))?,
+            "ns_leave" => build_ns_leave(&arg("name"))?,
             "ns_recovery_set" => {
                 build_ns_recovery_set(&arg("name"), num("m") as u32, &arg("keys"))?
             }

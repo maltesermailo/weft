@@ -5117,12 +5117,25 @@ async fn modlist_returns_the_deny_list() {
 
 #[tokio::test]
 async fn ns_scope_mute_covers_a_namespaced_channel() {
-    let ctx = ctx_ops(&["#gaming/general"], &["mod"]);
-    let mut bob = joined(&ctx, "bob", "#gaming/general").await;
-    let mut op = ready(&ctx, "mod").await;
-    // A namespace-wide mute (a namespace moderator) covers the channel.
-    op.send("MUTE ns:gaming bob");
-    op.recv().await;
+    // The namespace *owner* is its moderator (operators no longer hold implicit
+    // per-namespace authority). A namespace-wide mute covers every channel.
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+    let root = root_key_b64();
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
+    drain_until_label(&mut ada, "n").await;
+    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    drain_until_label(&mut ada, "c").await;
+
+    bob.send("@label=j NS JOIN gaming");
+    drain_until_label(&mut bob, "j").await;
+    bob.send("@label=jc JOIN #gaming/general");
+    drain_until_label(&mut bob, "jc").await;
+
+    ada.send("@label=m MUTE ns:gaming bob");
+    drain_until_label(&mut ada, "m").await;
+
     bob.send("MSG #gaming/general :hi");
     let Event::Err(e) = bob.expect_err(ErrCode::Forbidden).await.event else {
         panic!()
@@ -5397,6 +5410,27 @@ async fn part_hides_a_namespaced_channel_and_ns_leave_drops_membership() {
     assert!(
         !roster_names(&mut ada).await.contains("bob"),
         "NS LEAVE removes the account from all derived rosters"
+    );
+}
+
+#[tokio::test]
+async fn owner_cannot_leave_their_namespace() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let root = root_key_b64();
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
+    drain_until_label(&mut ada, "n").await;
+    ada.send("@label=c CHANNEL CREATE #gaming/general");
+    drain_until_label(&mut ada, "c").await;
+    // Join makes the owner a namespace member; leaving would then orphan it.
+    ada.send("@label=j JOIN #gaming/general");
+    drain_until_label(&mut ada, "j").await;
+
+    ada.send("@label=l NS LEAVE gaming");
+    let reply = drain_until_label(&mut ada, "l").await;
+    assert!(
+        matches!(&reply.event, Event::Err(err) if err.code == ErrCode::Policy),
+        "the owner can't leave their own namespace, got {reply:?}"
     );
 }
 

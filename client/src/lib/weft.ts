@@ -383,6 +383,10 @@ export function nsDelegate(name: string, subject: string, caps: string) {
 export function nsDelete(name: string) {
   return invoke("ns_delete", { name });
 }
+/// §6.2 leave a namespace — drop your own membership.
+export function nsLeave(name: string) {
+  return invoke("ns_leave", { name });
+}
 export function nsRecoverySet(name: string, m: number, keys: string) {
   return invoke("ns_recovery_set", { name, m, keys });
 }

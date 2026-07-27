@@ -1630,6 +1630,27 @@ impl NamespaceStore for PgStore {
         rows.iter().map(namespace_from_row).collect()
     }
 
+    async fn list_all(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<NamespaceRecord>, StoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM weft_namespaces
+            WHERE ($1::text IS NULL OR name > $1)
+            ORDER BY name
+            LIMIT $2
+            "#,
+        )
+        .bind(after)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.iter().map(namespace_from_row).collect()
+    }
+
     async fn set_namespace_meta(
         &self,
         name: &NamespaceName,

@@ -172,6 +172,11 @@ fn ns_delete(conn: State<'_, Conn>, name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn ns_leave(conn: State<'_, Conn>, name: String) -> Result<(), String> {
+    conn.send(weft::build_ns_leave(&name)?)
+}
+
+#[tauri::command]
 fn ns_recovery_set(
     conn: State<'_, Conn>,
     name: String,
@@ -995,6 +1000,7 @@ pub fn run() {
             ns_visibility,
             ns_delegate,
             ns_delete,
+            ns_leave,
             ns_recovery_set,
             ns_transfer,
             ns_recovery_cancel,

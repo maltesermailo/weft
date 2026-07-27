@@ -9,6 +9,24 @@
     onclose: () => void;
   } = $props();
 
+  // Keep the menu fully on-screen: place it at the click point, then once it's
+  // measured, shift it back inside the viewport (flipping up/left when it would
+  // overflow the bottom/right edge) so no row is ever unreachable.
+  let el = $state<HTMLElement>();
+  let pos = $state({ x: 0, y: 0 });
+  $effect(() => {
+    if (!menu) return;
+    const PAD = 8;
+    let x = menu.x;
+    let y = menu.y;
+    if (el) {
+      const r = el.getBoundingClientRect();
+      if (x + r.width > window.innerWidth - PAD) x = window.innerWidth - r.width - PAD;
+      if (y + r.height > window.innerHeight - PAD) y = window.innerHeight - r.height - PAD;
+    }
+    pos = { x: Math.max(PAD, x), y: Math.max(PAD, y) };
+  });
+
   // Icon set (keyed by `icon` on a CtxItem). Each value is the inner markup of a
   // 24×24 stroke icon; it uses currentColor so it tints with the row — muted
   // normally, white on the accent hover, red on a danger row.
@@ -41,7 +59,7 @@
 
 {#if menu}
   <button class="ctx-backdrop" aria-label="Close menu" onclick={onclose}></button>
-  <div class="ctx-menu" style="left:{menu.x}px; top:{menu.y}px">
+  <div bind:this={el} class="ctx-menu" style="left:{pos.x}px; top:{pos.y}px">
     {#each menu.items as it, i (i)}
       {#if "divider" in it}
         <div class="ctx-divider"></div>
