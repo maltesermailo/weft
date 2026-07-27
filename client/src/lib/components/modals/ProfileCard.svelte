@@ -46,6 +46,26 @@
   // §6.7 moderation controls: scope (channel/namespace/network) + optional reason.
   let modScope = $state(app.scopesFor()[0]);
   let modReason = $state("");
+
+  // Keep the anchored card fully on-screen: the open-time coordinates are an
+  // estimate, so once the card is measured, clamp it back inside the viewport
+  // (same fix as the context menu — no row/button lands off the edge).
+  let cardEl = $state<HTMLElement>();
+  let clamped = $state<{ left: number; top: number } | null>(null);
+  $effect(() => {
+    if (!pos) {
+      clamped = null;
+      return;
+    }
+    const PAD = 8;
+    let { left, top } = pos;
+    if (cardEl) {
+      const r = cardEl.getBoundingClientRect();
+      if (left + r.width > window.innerWidth - PAD) left = window.innerWidth - r.width - PAD;
+      if (top + r.height > window.innerHeight - PAD) top = window.innerHeight - r.height - PAD;
+    }
+    clamped = { left: Math.max(PAD, left), top: Math.max(PAD, top) };
+  });
 </script>
 
 <!-- An anchored popover is pinned to fixed coordinates computed at open time;
@@ -55,10 +75,11 @@
 <div class="modal-wrap" class:anchored={pos} transition:fade|global={{ duration: 190 }}>
   <button class="modal-backdrop" aria-label="Close" onclick={onclose}></button>
   <div
+    bind:this={cardEl}
     class="profile-pop"
     role="dialog"
     aria-modal="true"
-    style={pos ? `position:fixed; left:${pos.left}px; top:${pos.top}px` : ""}>
+    style={clamped ? `position:fixed; left:${clamped.left}px; top:${clamped.top}px` : ""}>
     <div class="profile-banner" style="--pf-accent: {myRoles[0]?.color ?? 'var(--accent, #5865f2)'}"></div>
     <div class="profile-avwrap">
       <div class="avatar xl" style="--pf-ring: {myRoles[0]?.color ?? 'var(--accent, #5865f2)'}">

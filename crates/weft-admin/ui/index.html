@@ -87,6 +87,8 @@ h1{font-size:22px;font-weight:700;letter-spacing:-.01em}
 .ok{color:var(--teal)} .warn{color:var(--amber)} .bad{color:var(--madder)}
 
 .search-row{display:flex;gap:10px;margin-bottom:18px}
+.lsearch{margin-bottom:12px}
+.lsearch .lfilter{max-width:340px}
 input[type=text],input[type=search],input[type=email],input[type=password],input[type=number],select,textarea{flex:1;background:var(--warp-1);border:1px solid var(--line);border-radius:6px;color:var(--linen);font-family:var(--mono);font-size:13px;padding:10px 13px;width:100%}
 input::placeholder,textarea::placeholder{color:var(--flax-dim)}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--thread)}
@@ -216,11 +218,19 @@ td.actions{text-align:right;white-space:nowrap}
 .stat .n{font-size:26px;font-weight:700;line-height:1.05}
 .stat .l{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--flax-dim);margin-top:5px}
 .chips{display:flex;flex-wrap:wrap;gap:5px 0}
+.rrole{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:2px 8px;margin:0 4px 4px 0;border:1px solid var(--line);border-radius:11px}
+.rrole-x{border:none;background:none;color:var(--flax-dim);cursor:pointer;padding:0;font-size:10px;line-height:1}
+.rrole-x:hover{color:var(--madder)}
 .msg{background:var(--warp-1);border:1px solid var(--line-soft);border-radius:8px;padding:10px 13px;margin-bottom:8px}
 .msg.reported{border-color:var(--thread-dim)}
 .msg .h{font-family:var(--mono);font-size:11px;color:var(--flax);margin-bottom:4px}
 .msg .del{color:var(--madder);font-style:italic}
-.msg .react{margin-top:5px;font-size:11px;color:var(--flax-dim)}
+.msg .react{margin-top:5px;font-size:11px;color:var(--flax-dim);display:flex;flex-wrap:wrap;gap:5px}
+.msg .rchip{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:10px;padding:1px 7px}
+.emoji{width:1.25em;height:1.25em;vertical-align:-0.25em;object-fit:contain}
+.msg-imgs{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.msg-img{max-width:260px;max-height:200px;border-radius:6px;border:1px solid var(--line-soft);cursor:pointer;display:block}
+.msg-file{color:var(--teal);font-size:12px}
 .sub-note{color:var(--flax);font-size:12.5px;margin-bottom:18px;max-width:640px}
 .hint{font-family:var(--mono);font-size:11px;color:var(--flax-dim)}
 .btn-row{display:flex;gap:10px;flex-wrap:wrap}
@@ -273,6 +283,15 @@ const API = "/admin/api/v1";
 const $ = (sel, root = document) => root.querySelector(sel);
 const main = () => $("#main");
 const set = (html) => { main().innerHTML = html; main().classList.remove("view-enter"); void main().offsetWidth; main().classList.add("view-enter"); };
+/** A client-side filter box for a list screen; `filterList` hides non-matching
+ *  rows (table rows + rowlist entries) by their text. */
+const searchBar = (ph) => `<div class="lsearch"><input class="lfilter" type="search" placeholder="${esc(ph || "Filter…")}" oninput="filterList(this)" aria-label="Filter list" autocomplete="off" /></div>`;
+function filterList(input) {
+  const q = input.value.trim().toLowerCase();
+  const root = main();
+  const rows = [...root.querySelectorAll("tbody tr"), ...root.querySelectorAll(".rowlist > div")];
+  for (const row of rows) row.style.display = !q || row.textContent.toLowerCase().includes(q) ? "" : "none";
+}
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const when = (ms) => (ms ? new Date(ms).toLocaleString() : "—");
 const short = (s) => { s = String(s ?? ""); return s.length > 14 ? s.slice(0, 10) + "…" : s; };
@@ -383,10 +402,25 @@ const rowListCard = (title, rows, count) =>
 const noPerm = (scope) => `<div class="placeholder">Read-only — you don't hold <span class="mono">${scope}</span>.</div>`;
 
 const delBtn = (msgid) => can("admin.destroy") ? `<button class="btn small danger" data-action="delMsg" data-id="${esc(msgid)}" style="float:right">delete</button>` : "";
-function msgCard(m, reported = false) {
+/** A single custom emoji `:name:` → an <img>, else the raw (unicode) text. */
+const emojiImg = (name, map) => map[name]
+  ? `<img class="emoji" src="/media/${esc(map[name])}" alt=":${esc(name)}:" title=":${esc(name)}:">`
+  : `:${esc(name)}:`;
+/** Render a message body: escape, then swap `:name:` custom emoji for images. */
+function renderBody(body, map = {}) {
+  return esc(body).replace(/:([a-zA-Z0-9_+-]+):/g, (_, n) => emojiImg(n, map));
+}
+/** Render a reaction key: a custom emoji (bare or `:name:`) as an image, else as-is. */
+function renderReact(e, map = {}) {
+  const name = e.replace(/^:|:$/g, "");
+  return map[name] ? emojiImg(name, map) : esc(e);
+}
+function msgCard(m, reported = false, emoji = {}) {
   if (m.deleted) return `<div class="msg"><span class="del">deleted by ${esc(m.by)}</span></div>`;
-  const reacts = (m.reactions || []).map((r) => `${esc(r.emoji)} ${r.count}`).join("   ");
-  return `<div class="msg ${reported ? "reported" : ""}"><div class="h">${esc(m.sender)} · ${when(m.at_ms)}${m.edited ? " · edited" : ""}${delBtn(m.msgid)}</div>${esc(m.body)}${reacts ? `<div class="react">${reacts}</div>` : ""}</div>`;
+  const reacts = (m.reactions || []).map((r) => `<span class="rchip">${renderReact(r.emoji, emoji)}&nbsp;${r.count}</span>`).join(" ");
+  const imgs = (m.attachments || []).map((h) =>
+    `<a href="/media/${esc(h)}" target="_blank" rel="noopener"><img class="msg-img" src="/media/${esc(h)}" alt="attachment" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('a'),{href:this.src,textContent:'📎 attachment',className:'msg-file',target:'_blank'}))"></a>`).join("");
+  return `<div class="msg ${reported ? "reported" : ""}"><div class="h">${esc(m.sender)} · ${when(m.at_ms)}${m.edited ? " · edited" : ""}${delBtn(m.msgid)}</div>${renderBody(m.body, emoji)}${imgs ? `<div class="msg-imgs">${imgs}</div>` : ""}${reacts ? `<div class="react">${reacts}</div>` : ""}</div>`;
 }
 const placeholder = (title, milestone, what) =>
   set(hrow(esc(title)) + `<div class="placeholder">${esc(what)}<br><br>Ships in <b>${esc(milestone)}</b> — this screen is part of the planned WEFT Console but its server surface isn't built yet.</div>`);
@@ -410,6 +444,7 @@ const screens = {
     const scopeChips = (s) => `<div class="chips">${s.map((x) => pill(x.replace("admin.", ""), "gold")).join("")}</div>`;
     set(hrow("Permissions", `${list.length} with access`) +
       note("Who can use this panel, and what they may do. Operators hold every scope and are the only accounts that can change permissions — open a user to edit theirs.") +
+      searchBar("Filter admins…") +
       cardTable("Admins", list.length, ["Account", "Role", "Scopes", "Expires"],
         list.map((a) => ({
           action: "user", id: a.account,
@@ -435,6 +470,7 @@ const screens = {
   async channels() {
     const list = await api("/channels");
     set(hrow("Channels", `${list.length} channels`) + note("Every channel in the store — config seeds plus runtime-created.") +
+      searchBar("Filter channels…") +
       cardTable("Channels", list.length, ["Channel", "Retention"],
         list.map((c) => ({ action: "channel", id: c.name, cells: [`<span class="mono">${esc(c.name)}</span>`, pill(c.policy, "neutral"), act(`<button class="btn small" data-action="browseChan" data-id="${esc(c.name)}">messages</button>`)] })), true));
   },
@@ -450,6 +486,7 @@ const screens = {
     ALL_NS = list;
     set(hrow("Namespaces", `${list.length} public`) +
       note("Open one for its channels, roles, members and controls. A <b>full freeze</b> locks every channel — only the owner and network operators can post, not delegated ns-admins.") +
+      searchBar("Filter namespaces…") +
       cardTable("Namespaces", list.length, ["Namespace", "Owner", "Visibility", "State", "Title"],
         list.map((n) => ({ action: "ns", id: n.name, cells: [
           `<span class="mono">${esc(n.name)}</span>`,
@@ -476,6 +513,7 @@ const screens = {
   async peers() {
     const peers = await api("/peers");
     set(hrow("Peers", `${peers.length} known`) + note("Bridge peers (§11) and their manifest state.") +
+      searchBar("Filter peers…") +
       cardTable("Bridge peers", peers.length, ["Peer", "Scope", "State", "Ver", "Updated"],
         peers.map((p) => ({
           action: "peer", id: p.peer,
@@ -492,6 +530,7 @@ const screens = {
       : readonlyNote("admin.federation");
     set(hrow("Netblocks", `${blocks.length} blocked`) + note("Network-wide blocklist (§11.6). Name-keyed — key rotation can't evade it.") +
       form +
+      searchBar("Filter blocked networks…") +
       cardTable("Blocked networks", blocks.length, ["Network", "Reason", "By", "Added"],
         blocks.map((b) => ({ cells: [`<span class="mono">${esc(b.network)}</span>`, esc(b.reason || ""), esc(b.actor), `<span class="mono">${when(b.added_ms)}</span>`, fed ? act(`<button class="btn small" data-action="rmNetblock" data-id="${esc(b.network)}">unblock</button>`) : ""] })), true));
   },
@@ -503,6 +542,7 @@ const screens = {
     const list = await api("/grants?scope=" + encodeURIComponent(scope));
     set(hrow("Grants", `scope ${esc(scope)}`) + note("Capability grants recorded at a scope. Subjects are account ULIDs or device keys (§10.4).") +
       `<div class="form-row"><input type="text" id="gScope" value="${esc(scope)}" placeholder="scope (#chan / ns:x / *)" class="grow" /><button class="btn primary" data-action="grantScope">Load</button></div>` +
+      searchBar("Filter grants…") +
       cardTable("Grants", list.length, ["Subject", "Scope", "Caps", "Epoch", "Expiry"],
         list.map((g) => ({ cells: [`<span class="fp">${esc(short(g.subject))}</span>`, `<span class="mono">${esc(g.scope)}</span>`, capChips(g.caps), g.epoch, g.expiry ? when(g.expiry * 1000) : "—"] }))));
     $("#gScope").addEventListener("keydown", (e) => { if (e.key === "Enter") screens.grants($("#gScope").value.trim() || "*"); });
@@ -550,6 +590,7 @@ const screens = {
       : "";
     set(hrow("Reports", `${list.length} filed · ${open.length} open`) +
       note("Queue across all scopes. Open one for the reported message and its held context.") + bulk +
+      searchBar("Filter reports…") +
       cardTable("Report queue", list.length, ["", "Category", "State", "Status", "Reporter", "Filed"],
         list.map((r) => ({ action: "report", id: r.id, cells: [tick(r), esc(r.category), pill(r.state, "neutral"), pill(r.status, r.status === "open" ? "warn" : "neutral"), esc(r.reporter), `<span class="mono">${when(r.filed_at_ms)}</span>`] }))));
   },
@@ -567,6 +608,7 @@ const screens = {
       : readonlyNote("admin.moderate");
     set(hrow("Moderation") + note("Deny-list at any scope (#chan / ns:x / *). Kick and channel-scope ban force-part live sessions.") +
       form +
+      searchBar("Filter deny-list…") +
       cardTable("Active at scope *", list.length, ["Kind", "Account", "Scope", "By", "Reason", "When"],
         list.map((r) => ({ cells: [pill(r.kind, r.kind === "ban" ? "bad" : "warn"), esc(r.account), `<span class="mono">${esc(r.scope)}</span>`, esc(r.actor), esc(r.reason || ""), `<span class="mono">${when(r.at_ms)}</span>`] }))));
   },
@@ -579,6 +621,7 @@ const screens = {
     set(hrow("Media Blocklist", `${list.length} blocked`) +
       note("Blocked BLAKE3 hashes (§13). A blocked hash is dead on arrival — re-upload, fetch, and mirror are rejected.") +
       form +
+      searchBar("Filter blocked media…") +
       cardTable("Blocked media", list.length, ["Hash", "Reason", "By", "Added"],
         list.map((b) => ({ cells: [`<span class="fp">${esc(short(b.hash))}</span>`, esc(b.reason || ""), esc(b.actor), `<span class="mono">${when(b.added_ms)}</span>`, mod_ ? act(`<button class="btn small" data-action="unblockMedia" data-id="${esc(b.hash)}">unblock</button>`) : ""] })), true));
   },
@@ -592,6 +635,7 @@ const screens = {
     const list = await api("/audit?limit=300");
     set(hrow("Audit Log", `${list.length} events`) +
       note("Every operator write action, hash-chained (each event links to the previous — a broken chain means tampering). Payloads are digested, never stored raw.") +
+      searchBar("Filter audit log…") +
       cardTable("Actions", list.length, ["#", "Operator", "Action", "Target", "When", "Hash"],
         list.map((r) => ({ cells: [`<span class="mono">${r.seq}</span>`, esc(r.operator), pill(r.action, "neutral"), `<span class="mono">${esc(short(r.target))}</span>`, `<span class="mono">${when(r.at_ms)}</span>`, `<span class="fp">${esc((r.hash || "").slice(0, 12))}</span>`] }))));
   },
@@ -640,17 +684,33 @@ async function openReport(id) {
   refresh = () => openReport(id);
   const d = await api("/reports/" + encodeURIComponent(id));
   const r = d.report;
-  const ctx = (d.context || []).map((m) => msgCard(m, m.msgid === d.reported_msgid)).join("")
+  const emoji = d.emoji || {};
+  const ctx = (d.context || []).map((m) => msgCard(m, m.msgid === d.reported_msgid, emoji)).join("")
     || `<div class="placeholder">Content unavailable — expired, purged, or e2ee (never reconstructed).</div>`;
   const btns = ["dismissed", "content-removed", "user-actioned", "escalated"]
     .map((a) => `<button class="btn" data-action="resolve" data-id="${esc(id)}" data-x="${a}">${a}</button>`).join("");
   const resolve = can("admin.moderate")
     ? card("Resolve", `<div class="btn-row">${btns}</div>`)
     : card("Resolve", readonlyNote("admin.moderate"));
+  // Message-level actions: remove the reported message, and mute/ban/kick its
+  // author — the moderator acts without leaving the report.
+  const isChan = r.scope.startsWith("#");
+  const actions = can("admin.moderate") && d.author
+    ? actionCard("Act on this report",
+        `Moderate the author <b>${esc(d.author)}</b> at <span class="mono">${esc(r.scope)}</span>, or remove the reported message.`,
+        `<input type="text" id="repReason" placeholder="reason (optional)" />
+         <div class="btns">
+           ${can("admin.destroy") ? `<button class="btn danger" data-action="delMsg" data-id="${esc(d.reported_msgid)}">Delete message</button>` : ""}
+           <button class="btn" data-action="modReport" data-id="${esc(d.author)}" data-scope="${esc(r.scope)}" data-x="mute">Mute author</button>
+           <button class="btn danger" data-action="modReport" data-id="${esc(d.author)}" data-scope="${esc(r.scope)}" data-x="ban">Ban author</button>
+           ${isChan ? `<button class="btn" data-action="modReport" data-id="${esc(d.author)}" data-scope="${esc(r.scope)}" data-x="kick">Kick author</button>` : ""}
+         </div>`)
+    : "";
   set(`<a class="crumb" data-action="back" data-x="reports">← back to Reports</a>` +
     hrow(`${esc(r.category)} ${pill(r.status, "neutral")}`, esc(r.scope)) +
     note(`Reported by ${esc(r.reporter)} · ${when(r.filed_at_ms)}${r.note ? " · " + esc(r.note) : ""}`) +
     card("Reported message + context", ctx) +
+    actions +
     resolve);
 }
 
@@ -1035,11 +1095,21 @@ async function openNs(name) {
         note("Roles are capability bundles (§6.5). Edit them in the client — the panel shows the effective set.");
       }
       if (tab === "members") {
-        return rowListCard("Members", n.members.map((m) => ({
-          name: esc(m),
-          actions: `<button class="btn small" data-action="user" data-id="${esc(m)}">open</button>`,
+        const mod = can("admin.moderate");
+        const assignable = n.roles.filter((r) => r.name !== "everyone");
+        const assign = mod && assignable.length && n.members.length
+          ? actionCard("Assign a role", "Give a member one of this namespace's roles — this grants its capabilities (§6.5).",
+              `<select id="roleAcct">${n.members.map((m) => `<option>${esc(m.account)}</option>`).join("")}</select>
+               <select id="roleName">${assignable.map((r) => `<option>${esc(r.name)}</option>`).join("")}</select>
+               <div class="btns"><button class="btn primary" data-action="assignRole" data-id="${esc(n.name)}">Assign</button></div>`)
+          : "";
+        return assign + rowListCard("Members", n.members.map((m) => ({
+          name: esc(m.account),
+          sub: (m.roles || []).filter((r) => r !== "everyone").map((r) =>
+            `<span class="rrole">${esc(r)}${mod ? ` <button class="rrole-x" data-action="unassignRole" data-id="${esc(n.name)}" data-x="${esc(m.account)}" data-role="${esc(r)}" title="Unassign">✕</button>` : ""}</span>`).join("") || '<span class="dim">no roles</span>',
+          actions: `<button class="btn small" data-action="user" data-id="${esc(m.account)}">open</button>`,
         })), n.members.length) +
-        note("Distinct accounts holding membership in any channel of this namespace.");
+        note("Assign roles to grant capabilities — roles are the only way a member gains permissions (§6.5).");
       }
       if (tab === "settings") {
         if (!can("admin.moderate")) return noPerm("admin.moderate");
@@ -1297,8 +1367,21 @@ const clicks = {
   modUser: (el) => applyMod(el.dataset.x, "*", el.dataset.id, $("#uModReason")),
   modChan: (el) => applyMod(el.dataset.x, el.dataset.id, ($("#cModAcct")?.value || "").trim(), $("#cModReason")),
   modNs: (el) => applyMod(el.dataset.x, "ns:" + el.dataset.id, ($("#nsModAcct")?.value || "").trim(), $("#nsModReason")),
+  // From a report: verb + author (data-id) + the report's own scope (data-scope).
+  modReport: (el) => applyMod(el.dataset.x, el.dataset.scope, el.dataset.id, $("#repReason")),
   nsVis: async (el) => {
     try { await api(`/namespaces/${encodeURIComponent(el.dataset.id)}/visibility`, { method: "POST", body: JSON.stringify({ visibility: $("#nsVis").value }) }); refresh(); }
+    catch (e) { alert(e.message); }
+  },
+  assignRole: async (el) => {
+    const account = ($("#roleAcct")?.value || "").trim();
+    const role = ($("#roleName")?.value || "").trim();
+    if (!account || !role) return;
+    try { await api(`/namespaces/${encodeURIComponent(el.dataset.id)}/roles`, { method: "POST", body: JSON.stringify({ account, role, assign: true }) }); refresh(); }
+    catch (e) { alert(e.message); }
+  },
+  unassignRole: async (el) => {
+    try { await api(`/namespaces/${encodeURIComponent(el.dataset.id)}/roles`, { method: "POST", body: JSON.stringify({ account: el.dataset.x, role: el.dataset.role, assign: false }) }); refresh(); }
     catch (e) { alert(e.message); }
   },
   nsFed: async (el) => {

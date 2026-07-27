@@ -1718,6 +1718,20 @@ impl NamespaceStore for PgStore {
         Ok(())
     }
 
+    async fn set_namespace_welcome(
+        &self,
+        name: &NamespaceName,
+        channel: Option<&str>,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE weft_namespaces SET welcome_channel = $2 WHERE name = $1")
+            .bind(name.as_str())
+            .bind(channel)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
     async fn delete_namespace(&self, name: &NamespaceName) -> Result<bool, StoreError> {
         let result = sqlx::query("DELETE FROM weft_namespaces WHERE name = $1")
             .bind(name.as_str())
@@ -1910,6 +1924,8 @@ fn namespace_from_row(row: &sqlx::postgres::PgRow) -> Result<NamespaceRecord, St
         federation: row.get("federation"),
         // Pre-0030 rows predate the column; missing means "not frozen".
         frozen: row.try_get("frozen").unwrap_or(false),
+        // Pre-0044 rows predate the column; missing means "no welcome channel".
+        welcome_channel: row.try_get("welcome_channel").unwrap_or(None),
     })
 }
 

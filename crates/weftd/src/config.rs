@@ -396,6 +396,12 @@ pub struct Listen {
     /// WEFT-IRC gateway (§17); `None` disables it. Conventionally :6667
     /// (plaintext) or :6697 (TLS — TLS termination is the operator's).
     pub irc: Option<SocketAddr>,
+    /// Dedicated **admin panel** listener (plaintext); `None` = the admin
+    /// merges into the shared `http`/`https` app. Set it to move the panel (and
+    /// the `/media` it renders) onto its own port so it can be firewalled off
+    /// the public HTTP surface — bind it to a private/VPN interface. Front it
+    /// with TLS yourself.
+    pub admin: Option<SocketAddr>,
     /// Serve the browser client (P3 web embed) + a same-origin `/ws` WebSocket
     /// on the existing `http`/`https` listener. The SPA itself is only present
     /// when built with `--features web-ui`; without it, only `/ws` mounts.
@@ -484,6 +490,7 @@ impl Default for Listen {
             http: None,
             https: None,
             irc: None,
+            admin: None,
             web: false,
         }
     }

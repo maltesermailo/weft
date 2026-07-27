@@ -458,6 +458,13 @@ pub trait NamespaceStore: Send + Sync {
         open: bool,
     ) -> Result<(), StoreError>;
 
+    /// §6.2 set (or clear, `None`) the namespace's welcome channel.
+    async fn set_namespace_welcome(
+        &self,
+        name: &NamespaceName,
+        channel: Option<&str>,
+    ) -> Result<(), StoreError>;
+
     /// NS DELETE. False = no such namespace.
     async fn delete_namespace(&self, name: &NamespaceName) -> Result<bool, StoreError>;
 

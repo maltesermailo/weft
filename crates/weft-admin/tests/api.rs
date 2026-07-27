@@ -1622,6 +1622,7 @@ async fn namespace_detail_and_operator_takeover() {
             categories: vec!["text".into()],
             federation: false,
             frozen: false,
+            welcome_channel: None,
         })
         .await
         .unwrap();
@@ -1732,6 +1733,138 @@ async fn namespace_detail_and_operator_takeover() {
     let history = store.root_history(&ns).await.unwrap();
     assert_eq!(history.len(), 1);
     assert!(history[0].operator_initiated);
+}
+
+#[tokio::test]
+async fn admin_assigns_and_unassigns_a_namespace_role() {
+    use weft_store::{
+        AccountStore, CapabilityStore, MembershipStore, NamespaceRecord, NamespaceStore, RoleStore,
+    };
+    let store = Arc::new(MemoryStore::default());
+    for name in ["admin", "owner", "bob"] {
+        store
+            .register(&name.parse().unwrap(), PasswordHash::new(PASSWORD).as_phc())
+            .await
+            .unwrap();
+    }
+    let ns: weft_proto::NamespaceName = "gaming".parse().unwrap();
+    store
+        .create_namespace(NamespaceRecord {
+            name: ns.clone(),
+            owner: "owner".parse().unwrap(),
+            root_key: "ROOT".into(),
+            visibility: "public".into(),
+            title: None,
+            description: None,
+            icon: None,
+            recovery_set: None,
+            pending_recovery: None,
+            categories: Vec::new(),
+            federation: false,
+            frozen: false,
+            welcome_channel: None,
+        })
+        .await
+        .unwrap();
+    // bob is a member; a "mod" role grants `ban`.
+    store
+        .set_ns_membership(&"bob".parse().unwrap(), &ns, 0)
+        .await
+        .unwrap();
+    store
+        .set_role(
+            "ns:gaming",
+            "mod",
+            "#e8b93d",
+            &["ban".to_string()],
+            false,
+            false,
+            0,
+        )
+        .await
+        .unwrap();
+
+    let auth = auth::config(
+        b"a-test-session-secret".to_vec(),
+        ["admin".parse().unwrap()],
+    );
+    let app = weft_admin::router(AdminState::from_store(
+        Arc::clone(&store),
+        auth,
+        "test.net".into(),
+    ));
+    let cookie = session(&app).await;
+
+    // Assign the role → membership recorded AND its caps granted (enforcement
+    // reads grant records). The grant keys by bob's ULID.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/gaming/roles",
+            &cookie,
+            r#"{"account":"bob","role":"mod","assign":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert!(store
+        .role_members("ns:gaming", "mod")
+        .await
+        .unwrap()
+        .contains(&"bob".to_string()));
+    let ulid = store
+        .account_ulid(&"bob".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .grants_at_scope("ns:gaming")
+            .await
+            .unwrap()
+            .iter()
+            .any(|g| g.subject == ulid && g.caps.contains(&"ban".to_string())),
+        "assigning the role granted its caps"
+    );
+
+    // The detail now shows bob with the role.
+    let detail = body_string(
+        app.clone()
+            .oneshot(get("/admin/api/v1/namespaces/gaming/detail", Some(&cookie)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        detail.contains("\"account\":\"bob\"") && detail.contains("\"mod\""),
+        "{detail}"
+    );
+
+    // Unassign → membership + grant both gone.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/gaming/roles",
+            &cookie,
+            r#"{"account":"bob","role":"mod","assign":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert!(store
+        .role_members("ns:gaming", "mod")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(
+        store
+            .grants_at_scope("ns:gaming")
+            .await
+            .unwrap()
+            .iter()
+            .all(|g| g.subject != ulid),
+        "unassigning revoked the grant"
+    );
 }
 
 #[tokio::test]

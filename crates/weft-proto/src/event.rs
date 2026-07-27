@@ -401,6 +401,9 @@ pub enum Event {
         /// §11.10 auto-federation reachable (`federation=yes`) — the owner has
         /// opened this namespace to on-demand bridging.
         federation: bool,
+        /// §6.2 welcome channel (`welcome=#ns/chan`), or `None` — the channel
+        /// that receives a system "welcome" line when a member joins the ns.
+        welcome: Option<String>,
     },
     /// `MORE <cursor>` — pagination continuation (DISCOVER, §6.2).
     More {
@@ -1172,6 +1175,7 @@ impl Event {
                         })
                         .unwrap_or_default(),
                     federation: line.tags.get("federation").map(String::as_str) == Some("yes"),
+                    welcome: tag("welcome"),
                 })
             }
             "MORE" => {
@@ -1927,12 +1931,14 @@ impl Event {
                 recovery_pending,
                 categories,
                 federation,
+                welcome,
             } => {
                 for (k, v) in [
                     ("owner", owner),
                     ("title", title),
                     ("description", description),
                     ("icon", icon),
+                    ("welcome", welcome),
                 ] {
                     if let Some(v) = v {
                         tags.insert(k.to_string(), v.clone());
@@ -3051,6 +3057,7 @@ mod tests {
                 recovery_pending: Some((1_700_000_000_000, 2)),
                 categories: vec!["Text".into(), "Voice".into()],
                 federation: true,
+                welcome: Some("#gaming/lobby".into()),
             },
             "n1",
         ));
@@ -3066,6 +3073,7 @@ mod tests {
             recovery_pending: None,
             categories: Vec::new(),
             federation: false,
+            welcome: None,
         }));
         round_trip(&Reply::new(Event::More {
             cursor: "next-page".into(),

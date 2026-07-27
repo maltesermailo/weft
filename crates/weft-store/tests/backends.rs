@@ -1121,6 +1121,7 @@ where
             categories: Vec::new(),
             federation: false,
             frozen: false,
+            welcome_channel: None,
         })
         .await
         .unwrap());
@@ -1139,6 +1140,7 @@ where
             categories: Vec::new(),
             federation: false,
             frozen: false,
+            welcome_channel: None,
         })
         .await
         .unwrap());
@@ -1198,6 +1200,22 @@ where
     store.set_namespace_federation(&ns, false).await.unwrap();
     assert!(!store.namespace(&ns).await.unwrap().unwrap().federation);
     store.set_namespace_federation(&ns, true).await.unwrap();
+
+    // §6.2 welcome channel: default None, set + clear persist.
+    assert_eq!(record.welcome_channel, None);
+    store
+        .set_namespace_welcome(&ns, Some(&format!("#gaming{tag}/welcome")))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.namespace(&ns).await.unwrap().unwrap().welcome_channel,
+        Some(format!("#gaming{tag}/welcome"))
+    );
+    store.set_namespace_welcome(&ns, None).await.unwrap();
+    assert_eq!(
+        store.namespace(&ns).await.unwrap().unwrap().welcome_channel,
+        None
+    );
 
     // WC7 full freeze toggles + persists, and is independent of `federation`.
     assert!(!record.frozen);
@@ -1296,6 +1314,7 @@ where
             categories: Vec::new(),
             federation: false,
             frozen: false,
+            welcome_channel: None,
         })
         .await
         .unwrap();

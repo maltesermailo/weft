@@ -204,6 +204,12 @@ impl<S: ControlStream> Session<S> {
                         // v0.12: redeeming an ns invite creates the `(account,
                         // ns)` membership row; the caps granted above unlock any
                         // view-gated channels, all visible by derivation (1.2).
+                        let first_join = !self
+                            .ctx
+                            .memberships
+                            .is_ns_member(&account, &name)
+                            .await
+                            .unwrap_or(false);
                         if let Err(e) = self
                             .ctx
                             .memberships
@@ -211,6 +217,9 @@ impl<S: ControlStream> Session<S> {
                             .await
                         {
                             return self.internal(label, &e).await;
+                        }
+                        if first_join {
+                            self.post_ns_welcome(&name, &account).await;
                         }
                         self.send_event(label, Self::ns_meta_event(&record)).await?;
                         // Subscribe to the channels the redeemer can now see so

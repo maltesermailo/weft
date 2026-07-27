@@ -42,6 +42,15 @@ impl<S: ControlStream> Session<S> {
             return self.no_such_target(label).await;
         }
 
+        // A *new* member (not an auto-rejoin) triggers the welcome message —
+        // checked before writing the membership row below.
+        let first_join = !self
+            .ctx
+            .memberships
+            .is_ns_member(&account, &name)
+            .await
+            .unwrap_or(false);
+
         // Write the single ns membership row FIRST, so the per-channel
         // subscriptions below read as auto-rejoin — quiet, no "joined" system
         // spam for an ns-level action (the NS-MEMBER event is the signal).
@@ -52,6 +61,9 @@ impl<S: ControlStream> Session<S> {
             .await
         {
             return self.internal(label, &e).await;
+        }
+        if first_join {
+            self.post_ns_welcome(&name, &account).await;
         }
         for channel in visible {
             // A channel the caller previously hid stays hidden — NS JOIN never
@@ -92,6 +104,26 @@ impl<S: ControlStream> Session<S> {
         )
         .await?;
         Ok(Flow::Continue)
+    }
+
+    /// §6.2 post the namespace's welcome line to its designated channel, if any.
+    /// Called on a *new* namespace membership (first join, any path). No-op when
+    /// no welcome channel is configured or it isn't a live registered channel.
+    pub(super) async fn post_ns_welcome(&mut self, ns: &NamespaceName, account: &Account) {
+        let Ok(Some(record)) = self.ctx.namespaces.namespace(ns).await else {
+            return;
+        };
+        let Some(welcome) = record.welcome_channel else {
+            return;
+        };
+        let Ok(channel) = welcome.parse::<ChannelName>() else {
+            return;
+        };
+        let Some(handle) = self.ctx.registry.get(&channel) else {
+            return;
+        };
+        let user = UserRef::new(account.clone(), self.ctx.info.network.clone());
+        handle.announce_welcome(user).await;
     }
 
     /// §6.2 `NS LEAVE <name>` (v0.12): drop namespace membership — the
@@ -282,6 +314,7 @@ impl<S: ControlStream> Session<S> {
             recovery_pending: record.pending_recovery.as_ref().map(|p| (p.eta_ms, p.rung)),
             categories: record.categories.clone(),
             federation: record.federation,
+            welcome: record.welcome_channel.clone(),
         }
     }
 
@@ -340,8 +373,9 @@ impl<S: ControlStream> Session<S> {
             recovery_set: None,
             pending_recovery: None,
             categories: Vec::new(),
-            federation: false, // §11.10 closed until the owner opts in
-            frozen: false,     // WC7 full freeze — an operator action, never default
+            federation: false,     // §11.10 closed until the owner opts in
+            frozen: false,         // WC7 full freeze — an operator action, never default
+            welcome_channel: None, // §6.2 set later via NS META welcome
         };
         match self.ctx.namespaces.create_namespace(record.clone()).await {
             Ok(true) => {
@@ -527,13 +561,13 @@ impl<S: ControlStream> Session<S> {
     ) -> io::Result<Flow> {
         if !matches!(
             key.as_str(),
-            "title" | "description" | "icon" | "categories" | "federation"
+            "title" | "description" | "icon" | "categories" | "federation" | "welcome"
         ) {
             self.send_err(
                 label,
                 ErrCode::Policy,
                 None,
-                "meta key must be title|description|icon|categories|federation",
+                "meta key must be title|description|icon|categories|federation|welcome",
             )
             .await?;
             return Ok(Flow::Continue);
@@ -541,6 +575,24 @@ impl<S: ControlStream> Session<S> {
         let Some(mut record) = self.ns_admin_gate(label.clone(), &name, &actor).await? else {
             return Ok(Flow::Continue);
         };
+        // §6.2 welcome channel lives on its own column. Empty clears it; a value
+        // must be a real channel *in this namespace* (else the message would go
+        // nowhere) — validated leniently: we store what's given, and the join
+        // path no-ops if the channel isn't registered.
+        if key == "welcome" {
+            let channel = (!value.is_empty()).then_some(value.as_str());
+            if let Err(e) = self
+                .ctx
+                .namespaces
+                .set_namespace_welcome(&name, channel)
+                .await
+            {
+                return self.internal(label, &e).await;
+            }
+            record.welcome_channel = channel.map(str::to_string);
+            self.send_event(label, Self::ns_meta_event(&record)).await?;
+            return Ok(Flow::Continue);
+        }
         // §11.10 auto-federation reachability lives on its own column. It is off
         // by default and is an explicit opt-in for *any* visibility: a `public`
         // namespace is then reachable to anyone, while an `unlisted`/`private`
@@ -652,6 +704,7 @@ impl<S: ControlStream> Session<S> {
                 recovery_pending: None,
                 categories: Vec::new(),
                 federation: false,
+                welcome: None,
             },
         )
         .await?;

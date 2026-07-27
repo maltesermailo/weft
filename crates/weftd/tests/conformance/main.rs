@@ -35,6 +35,7 @@ async fn start_with(channels: &[&str], tweak: impl FnOnce(&mut Config)) -> weftd
             http: Some("127.0.0.1:0".parse().unwrap()),
             https: None,
             irc: None,
+            admin: None,
             web: false,
         },
         identity: Identity { key_file: None }, // ephemeral key per test

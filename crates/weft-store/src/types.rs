@@ -259,6 +259,10 @@ pub struct NamespaceRecord {
     /// `ns-admin` cannot talk through it (or lift it). For "the whole community
     /// stops while we deal with this".
     pub frozen: bool,
+    /// §6.2 welcome channel: the channel (`#<ns>/<chan>`) that receives a
+    /// system "welcome" line when a new member joins the namespace. `None` = no
+    /// welcome message. Set via `NS META <name> welcome :<#chan>` (empty clears).
+    pub welcome_channel: Option<String>,
 }
 
 /// A recovery in flight: rotates to `new_root_key` + `new_owner` at `eta_ms`

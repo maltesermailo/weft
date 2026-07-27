@@ -144,6 +144,7 @@ export type WeftEvent =
       recovery_rung: number | null;
       categories: string[];
       federation: boolean;
+      welcome: string | null;
     }
   | {
       kind: "channel-layout";

@@ -101,6 +101,10 @@
   // Live counts for the Overview stat strip (real data — no placeholders).
   const nsChannelCount = $derived(app.channelGroups.reduce((n, g) => n + g.list.length, 0));
   const nsRoleCount = $derived((app.rolesByScope[app.nsRoleScope()] ?? []).length);
+  // §6.2 welcome-channel picker: this namespace's text channels + the current
+  // setting (from the ns-meta the server last pushed).
+  const nsTextChannels = $derived(app.channelGroups.flatMap((g) => g.list).filter((c) => !c.voice));
+  const currentWelcome = $derived(app.activeNsMeta?.welcome ?? "");
 
   // Custom-emoji capacity gauge.
   const EMOJI_SLOTS = 50;
@@ -183,6 +187,15 @@
           <div class="ov-gap"></div>
           <div class="field-label">Description</div>
           <textarea class="text-input ov-desc" rows="3" bind:value={app.nsDesc} placeholder="what's this namespace about"></textarea>
+          <div class="ov-gap"></div>
+          <div class="field-label">Welcome channel</div>
+          <p class="so-sub" style="margin:0 0 8px">Post a greeting here whenever someone new joins the server.</p>
+          <select class="text-input" value={currentWelcome} onchange={(e) => app.nsSetWelcome(e.currentTarget.value)}>
+            <option value="">No welcome message</option>
+            {#each nsTextChannels as c (c.name)}
+              <option value={c.name}>#{app.chanShort(c.name)}</option>
+            {/each}
+          </select>
         </div>
 
         <div class="ov-stats">

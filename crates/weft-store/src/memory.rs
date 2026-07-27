@@ -1431,6 +1431,19 @@ impl NamespaceStore for MemoryStore {
         Ok(())
     }
 
+    async fn set_namespace_welcome(
+        &self,
+        name: &NamespaceName,
+        channel: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(ns) = inner.namespaces.get_mut(name) {
+            ns.welcome_channel = channel.map(str::to_string);
+        }
+        inner.stamp_namespace(name);
+        Ok(())
+    }
+
     async fn delete_namespace(&self, name: &NamespaceName) -> Result<bool, StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         Ok(inner.namespaces.remove(name).is_some())

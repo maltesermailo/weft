@@ -48,6 +48,8 @@ pub struct Server {
     pub https_addr: Option<SocketAddr>,
     /// Actual WEFT-IRC gateway address (§17), if enabled.
     pub irc_addr: Option<SocketAddr>,
+    /// Actual dedicated admin-panel address, if `[listen] admin` is set.
+    pub admin_addr: Option<SocketAddr>,
     endpoint: quinn::Endpoint,
     tasks: Vec<JoinHandle<()>>,
     ctx: Arc<ServerCtx>,
@@ -317,7 +319,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
             Arc::new(weft_core::MemBlobStore::default())
         }
     };
-    let (ctx, channels, mut tasks, admin_router) = match config.storage.backend {
+    let (ctx, channels, mut tasks, mut admin_router) = match config.storage.backend {
         config::StorageBackend::Memory => {
             boot(
                 info,
@@ -511,6 +513,28 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         }
     };
 
+    // Dedicated admin listener: when `[listen] admin` is set, the panel (and the
+    // `/media` it renders) move to their own port so it can be firewalled off
+    // the public HTTP surface. Taking `admin_router` here means the shared app
+    // below won't also mount it.
+    let admin_addr = match (config.listen.admin, admin_router.take()) {
+        (Some(addr), Some(admin)) => {
+            let app = admin.merge(media::router(Arc::clone(&ctx)));
+            let listener = bind(addr, "admin").await?;
+            let admin_addr = listener.local_addr()?;
+            spawn_http(listener, app, &ctx, "admin", &mut tasks);
+            info!(%admin_addr, "admin panel on a dedicated listener at /admin (api at /admin/api)");
+            Some(admin_addr)
+        }
+        // No dedicated port (or admin disabled): fall through — the shared app
+        // below mounts the admin if `admin_router` is still `Some`.
+        (Some(_), None) => None,
+        (None, other) => {
+            admin_router = other;
+            None
+        }
+    };
+
     // One app (well-known + ACME challenge + admin), served plaintext on `http`
     // (needed for the ACME HTTP-01 challenge on :80) and/or TLS-terminated on
     // `https` (the secure way to reach the admin — same cert as QUIC).
@@ -542,28 +566,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         (Some(addr), Some(app)) => {
             let listener = bind(addr, "HTTP").await?;
             let http_addr = listener.local_addr()?;
-            let app = app.clone();
-            let shutdown = ctx.shutdown.clone();
-            let deadline = ctx.shutdown.clone();
-            tasks.push(tokio::spawn(async move {
-                let serve = axum::serve(listener, app)
-                    .with_graceful_shutdown(async move { shutdown.cancelled().await });
-                // `axum::serve` has no force-close timeout: after the signal it
-                // waits for every connection — including idle keep-alives — to
-                // close on its own. Bound that: once shutting down, give
-                // in-flight requests `HTTP_DRAIN`, then drop `serve` (closing the
-                // remaining connections) rather than stall the whole shutdown.
-                tokio::select! {
-                    result = serve => {
-                        if let Err(e) = result {
-                            tracing::error!("HTTP server failed: {e}");
-                        }
-                    }
-                    _ = async move { deadline.cancelled().await; tokio::time::sleep(HTTP_DRAIN).await; } => {
-                        tracing::debug!("HTTP drain deadline reached; closing idle connections");
-                    }
-                }
-            }));
+            spawn_http(listener, app.clone(), &ctx, "HTTP", &mut tasks);
             Some(http_addr)
         }
         _ => None,
@@ -621,6 +624,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         http_addr,
         https_addr,
         irc_addr,
+        admin_addr,
         endpoint,
         tasks,
         ctx,
@@ -632,6 +636,35 @@ async fn bind(addr: SocketAddr, what: &str) -> anyhow::Result<TcpListener> {
     TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {what} listener on {addr}"))
+}
+
+/// Spawn a plaintext axum server with weftd's shutdown-bounded drain: after the
+/// shutdown signal, in-flight requests get `HTTP_DRAIN`, then the server is
+/// dropped (closing idle keep-alives) so shutdown never stalls. Shared by the
+/// well-known/media HTTP surface and the dedicated admin listener.
+fn spawn_http(
+    listener: TcpListener,
+    app: axum::Router,
+    ctx: &Arc<ServerCtx>,
+    what: &'static str,
+    tasks: &mut Vec<JoinHandle<()>>,
+) {
+    let shutdown = ctx.shutdown.clone();
+    let deadline = ctx.shutdown.clone();
+    tasks.push(tokio::spawn(async move {
+        let serve = axum::serve(listener, app)
+            .with_graceful_shutdown(async move { shutdown.cancelled().await });
+        tokio::select! {
+            result = serve => {
+                if let Err(e) = result {
+                    tracing::error!("{what} server failed: {e}");
+                }
+            }
+            _ = async move { deadline.cancelled().await; tokio::time::sleep(HTTP_DRAIN).await; } => {
+                tracing::debug!("{what} drain deadline reached; closing idle connections");
+            }
+        }
+    }));
 }
 
 /// Load the signing-key seed, or mint one on first boot.

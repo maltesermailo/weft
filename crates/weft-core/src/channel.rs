@@ -68,6 +68,12 @@ enum Cmd {
         /// leave (PART clears membership), not on a disconnect.
         announce: bool,
     },
+    /// §6.2 post a persistent "welcome" system line — a new member joined the
+    /// namespace this channel belongs to (posted to the ns's welcome channel,
+    /// which need not be one the member joined). Broadcast to all members.
+    Welcome {
+        user: UserRef,
+    },
     /// §11: subscribe to the broadcast without joining as a member — a bridge
     /// session watches the channel to forward local events, but must not show
     /// up in the member list or count.
@@ -293,6 +299,11 @@ impl ChannelHandle {
         let _ = self.inbox.send(Cmd::SystemDelete { root, by }).await;
     }
 
+    /// §6.2 post a "welcome" system line announcing a new namespace member.
+    pub async fn announce_welcome(&self, user: UserRef) {
+        let _ = self.inbox.send(Cmd::Welcome { user }).await;
+    }
+
     pub async fn react(&self, session: SessionId, root: MsgId, emoji: String, add: bool) {
         let _ = self
             .inbox
@@ -472,6 +483,12 @@ impl Actor {
                     .cloned()
                     .collect();
                 let _ = reply.send(roster);
+            }
+            Cmd::Welcome { user } => {
+                // Server-originated (SENTINEL_ORIGIN) so it broadcasts to every
+                // member, including whoever triggered the join.
+                self.announce_membership(SENTINEL_ORIGIN, user, "welcome")
+                    .await;
             }
             Cmd::Part { session, announce } => {
                 if let Some(account) = self.members.remove(&session) {

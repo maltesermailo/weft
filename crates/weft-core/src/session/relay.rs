@@ -30,6 +30,13 @@ impl<S: ControlStream> Session<S> {
                 // Written only after the join succeeds — no stray row on failure.
                 if let Some(ns) = channel.namespace() {
                     if let Ok(ns) = ns.parse::<NamespaceName>() {
+                        // A new ns membership (not a re-join) fires the welcome.
+                        let first_join = !self
+                            .ctx
+                            .memberships
+                            .is_ns_member(&account, &ns)
+                            .await
+                            .unwrap_or(false);
                         if let Err(e) = self
                             .ctx
                             .memberships
@@ -37,6 +44,9 @@ impl<S: ControlStream> Session<S> {
                             .await
                         {
                             error!("ns membership on join failed: {e}");
+                        }
+                        if first_join {
+                            self.post_ns_welcome(&ns, &account).await;
                         }
                     }
                     if let Err(e) = self.ctx.memberships.clear_hidden(&account, &channel).await {

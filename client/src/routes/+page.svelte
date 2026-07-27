@@ -1679,7 +1679,9 @@
             ? `${who} joined`
             : e.system === "part"
               ? `${who} left`
-              : `${who} ${e.system}`
+              : e.system === "welcome"
+                ? `👋 Welcome, ${who}!`
+                : `${who} ${e.system}`
           : null;
         const msg = mkMsg({
           author: e.sender,
@@ -3565,6 +3567,11 @@
   function nsSetFederation(open: boolean) {
     weft.nsMeta(activeServer, "federation", open ? "open" : "closed").catch((e) => toast(String(e), "error"));
   }
+  // §6.2 set (or clear, "") the channel that greets new members.
+  function nsSetWelcome(channel: string) {
+    if (!activeServer) return;
+    weft.nsMeta(activeServer, "welcome", channel).catch((e) => toast(String(e), "error"));
+  }
   // §11.10 on-demand federation: live "connecting…" state for the trigger. The
   // bridge establishes asynchronously; we surface the namespace when its
   // channels arrive (best-effort), else the banner clears after a grace window.
@@ -4006,6 +4013,7 @@
     nsRoleScope,
     saveNsMeta,
     nsSetFederation,
+    nsSetWelcome,
     federate,
     createRole,
     moveRole,

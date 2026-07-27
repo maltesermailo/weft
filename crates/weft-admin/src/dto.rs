@@ -227,6 +227,9 @@ pub enum Msg {
         at_ms: u64,
         edited: Option<Edited>,
         reactions: Vec<Reaction>,
+        /// §13 media hashes attached to the message — the panel renders each as
+        /// `<img src="/media/<hash>">`.
+        attachments: Vec<String>,
     },
     Tombstone {
         msgid: String,
@@ -242,9 +245,9 @@ impl From<HistoryItem> for Msg {
                 msgid,
                 sender,
                 body,
+                meta,
                 edited,
                 reactions,
-                ..
             } => Msg::Message {
                 at_ms: msgid.timestamp_ms(),
                 msgid: msgid.to_string(),
@@ -252,6 +255,7 @@ impl From<HistoryItem> for Msg {
                 body,
                 edited: edited.map(|(count, at_ms)| Edited { count, at_ms }),
                 reactions: reactions.into_iter().map(Reaction::from).collect(),
+                attachments: meta.attachments,
             },
             HistoryItem::Tombstone { msgid, by } => Msg::Tombstone {
                 msgid: msgid.to_string(),
@@ -304,6 +308,13 @@ pub struct ReportDetail {
     pub report: Report,
     pub reported_msgid: String,
     pub context: Vec<Msg>,
+    /// The reported scope's namespace custom emoji (`name` → media hash) so the
+    /// panel can render `:name:` in bodies + reactions as images. Empty for a
+    /// non-namespaced scope.
+    pub emoji: std::collections::BTreeMap<String, String>,
+    /// The reported message's author — the target of the message-level
+    /// moderation actions (mute/ban/kick) the report detail offers.
+    pub author: Option<String>,
 }
 
 /// One row of `GET /peers`. `acked` = a mutually-acked manifest exists.
@@ -520,8 +531,16 @@ pub struct NamespaceDetail {
     pub root_key: String,
     pub channels: Vec<NamespaceChannel>,
     pub roles: Vec<Role>,
-    /// Distinct accounts holding membership in any of the namespace's channels.
-    pub members: Vec<String>,
+    /// Namespace members with the roles each holds — so the panel can assign and
+    /// unassign roles (§6.5) directly.
+    pub members: Vec<NamespaceMember>,
+}
+
+/// A namespace member + the roles they're assigned, for the admin roster.
+#[derive(Serialize)]
+pub struct NamespaceMember {
+    pub account: String,
+    pub roles: Vec<String>,
 }
 
 /// A channel row inside a namespace detail.

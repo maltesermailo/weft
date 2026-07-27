@@ -48,6 +48,7 @@ export interface AppCtx {
         recovery_rung?: number | null;
         visibility?: string;
         federation?: boolean;
+        welcome?: string | null;
       }
     | undefined;
   // ---- social layer: friends (federation-able; keys are account@network) ----
@@ -451,6 +452,8 @@ export interface AppCtx {
   nsRoleScope(): string;
   saveNsMeta(): void;
   nsSetFederation(open: boolean): void;
+  /** §6.2 set (or clear, "") the namespace's welcome channel. */
+  nsSetWelcome(channel: string): void;
   createRole(): void;
   moveRole(name: string, dir: -1 | 1): void;
   /// Persist an arbitrary role order (drag-and-drop) — positions follow the list.

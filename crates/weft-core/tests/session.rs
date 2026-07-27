@@ -5121,17 +5121,14 @@ async fn ns_scope_mute_covers_a_namespaced_channel() {
     // per-namespace authority). A namespace-wide mute covers every channel.
     let ctx = ctx(&[]);
     let mut ada = ready(&ctx, "ada").await;
-    let mut bob = ready(&ctx, "bob").await;
     let root = root_key_b64();
     ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
     drain_until_label(&mut ada, "n").await;
     ada.send("@label=c CHANNEL CREATE #gaming/general");
     drain_until_label(&mut ada, "c").await;
 
-    bob.send("@label=j NS JOIN gaming");
-    drain_until_label(&mut bob, "j").await;
-    bob.send("@label=jc JOIN #gaming/general");
-    drain_until_label(&mut bob, "jc").await;
+    // Joining the namespaced channel makes bob an ns member (drains MEMBER+POLICY).
+    let mut bob = joined(&ctx, "bob", "#gaming/general").await;
 
     ada.send("@label=m MUTE ns:gaming bob");
     drain_until_label(&mut ada, "m").await;
@@ -5432,6 +5429,45 @@ async fn owner_cannot_leave_their_namespace() {
         matches!(&reply.event, Event::Err(err) if err.code == ErrCode::Policy),
         "the owner can't leave their own namespace, got {reply:?}"
     );
+}
+
+#[tokio::test]
+async fn ns_welcome_channel_greets_new_members() {
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let bob = ready(&ctx, "bob").await;
+    let root = root_key_b64();
+    ada.send(&format!("@label=n;root={root} NS CREATE gaming public"));
+    drain_until_label(&mut ada, "n").await;
+    ada.send("@label=c1 CHANNEL CREATE #gaming/general");
+    drain_until_label(&mut ada, "c1").await;
+    ada.send("@label=c2 CHANNEL CREATE #gaming/welcome");
+    drain_until_label(&mut ada, "c2").await;
+    ada.send("@label=w NS META gaming welcome :#gaming/welcome");
+    drain_until_label(&mut ada, "w").await;
+    // ada watches the welcome channel so she receives the greeting broadcast.
+    ada.send("@label=jw JOIN #gaming/welcome");
+    drain_until_label(&mut ada, "jw").await;
+
+    // bob joins the namespace → a "welcome" system line lands in #gaming/welcome.
+    bob.send("@label=j NS JOIN gaming");
+
+    // recv() skips system messages, so read raw and match bob's welcome line
+    // (ada's own first join fired one too — that's expected).
+    loop {
+        let raw = ada.recv_raw().await;
+        let reply = Reply::parse(&raw).expect("parseable");
+        if let Event::Message(m) = &reply.event {
+            if m.meta.system.as_deref() == Some("welcome") && m.sender.account.as_str() == "bob" {
+                assert!(
+                    matches!(&m.target, weft_proto::Target::Channel(c) if c.as_str() == "#gaming/welcome"),
+                    "welcome posts to the designated channel, got {:?}",
+                    m.target
+                );
+                break;
+            }
+        }
+    }
 }
 
 #[tokio::test]

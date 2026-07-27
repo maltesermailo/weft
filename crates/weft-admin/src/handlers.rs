@@ -80,6 +80,7 @@ pub fn routes() -> Router<AdminState> {
             "/api/v1/namespaces/:name/unfreeze",
             post(unfreeze_namespace),
         )
+        .route("/api/v1/namespaces/:name/roles", post(assign_ns_role))
         .route("/api/v1/grants", get(list_grants))
         .route("/api/v1/moderation", get(list_moderation).post(moderate))
         .route("/api/v1/peers", get(list_peers))
@@ -228,6 +229,29 @@ async fn report_with_context(
         }
     }
     let children = st.events.children(&scope, &root_ulids).await?;
+
+    // The reported message's author — the target of message-level moderation.
+    let reported_ulid = report.msgid.ulid();
+    let author = roots
+        .iter()
+        .find(|r| r.msgid.ulid() == reported_ulid)
+        .map(|r| r.sender.account.to_string());
+
+    // The scope's namespace custom emoji, so `:name:` in bodies + reactions
+    // render as images. A `#ns/chan` or `ns:name` scope has one; `*` / a
+    // top-level `#chan` does not.
+    let scope_str = scope.as_key();
+    let ns_name = scope_str
+        .strip_prefix('#')
+        .and_then(|s| s.split_once('/'))
+        .map(|(ns, _)| ns.to_string());
+    let mut emoji = std::collections::BTreeMap::new();
+    if let Some(ns) = ns_name.and_then(|n| n.parse::<weft_proto::NamespaceName>().ok()) {
+        for (name, hash) in st.emoji.list_emoji(&ns).await? {
+            emoji.insert(name, hash);
+        }
+    }
+
     let context = materialize(roots, children)
         .into_iter()
         .map(dto::Msg::from)
@@ -237,6 +261,8 @@ async fn report_with_context(
         report: dto::Report::from(report),
         reported_msgid,
         context,
+        emoji,
+        author,
     }))
 }
 
@@ -1046,6 +1072,128 @@ async fn moderate(
     StatusCode::NO_CONTENT.into_response()
 }
 
+// ---- role assignment (§6.5) ----
+
+#[derive(Deserialize)]
+struct RoleAssignReq {
+    account: String,
+    role: String,
+    /// true = assign, false = unassign.
+    assign: bool,
+}
+
+/// Same-named channel roles' caps in a namespace — assigning a namespace role
+/// also confers these on each channel (mirrors `Session::channel_role_caps`).
+async fn channel_role_caps(st: &AdminState, ns: &str, name: &str) -> Vec<(String, Vec<String>)> {
+    let prefix = format!("#{ns}/");
+    let channels = st.channels.list_channels().await.unwrap_or_default();
+    let mut out = Vec::new();
+    for (chan, _) in channels {
+        if !chan.as_str().starts_with(&prefix) {
+            continue;
+        }
+        let cscope = chan.to_string();
+        let croles = st.roles.roles(&cscope).await.unwrap_or_default();
+        if let Some(crole) = croles.into_iter().find(|r| r.name == name) {
+            if !crole.caps.is_empty() {
+                out.push((cscope, crole.caps));
+            }
+        }
+    }
+    out
+}
+
+/// `POST /namespaces/:name/roles` — assign or unassign a namespace role to a
+/// member. Store-direct parity with the client's `ROLE ASSIGN`/`UNASSIGN`:
+/// records the membership *and* the cap grant (enforcement reads grant records,
+/// not tokens), including same-named channel-role caps.
+async fn assign_ns_role(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(name): Path<String>,
+    Json(req): Json<RoleAssignReq>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Ok(ns) = name.parse::<weft_proto::NamespaceName>() else {
+        return (StatusCode::BAD_REQUEST, "bad namespace").into_response();
+    };
+    let scope = format!("ns:{ns}");
+
+    let result = async {
+        // The role must exist in the namespace.
+        let Some(role) = st
+            .roles
+            .roles(&scope)
+            .await?
+            .into_iter()
+            .find(|r| r.name == req.role)
+        else {
+            return Ok(false);
+        };
+        // The grant key: a local account's ULID, else the handle as-is (foreign).
+        let key = match req.account.parse::<Account>() {
+            Ok(acct) => st
+                .accounts
+                .account_ulid(&acct)
+                .await?
+                .unwrap_or_else(|| req.account.clone()),
+            Err(_) => req.account.clone(),
+        };
+        let chan_caps = channel_role_caps(&st, ns.as_str(), &req.role).await;
+
+        if req.assign {
+            st.roles
+                .assign_role(&scope, &req.role, &req.account)
+                .await?;
+            let epoch = st.caps.scope_epoch(&scope).await?;
+            st.caps
+                .record_grant(&key, &scope, &role.caps, epoch, None)
+                .await?;
+            for (cscope, caps) in chan_caps {
+                let cepoch = st.caps.scope_epoch(&cscope).await?;
+                st.caps
+                    .record_grant(&key, &cscope, &caps, cepoch, None)
+                    .await?;
+            }
+        } else {
+            st.roles
+                .unassign_role(&scope, &req.role, &req.account)
+                .await?;
+            st.caps
+                .revoke_grants(&key, &scope, Some(&role.caps))
+                .await?;
+            for (cscope, caps) in chan_caps {
+                st.caps.revoke_grants(&key, &cscope, Some(&caps)).await?;
+            }
+        }
+        Ok::<bool, StoreError>(true)
+    }
+    .await;
+
+    match result {
+        Ok(true) => {
+            audit(
+                &st,
+                &who,
+                if req.assign {
+                    "role.assign"
+                } else {
+                    "role.unassign"
+                },
+                &format!("{scope}/{}", req.account),
+                &json!({ "role": req.role, "account": req.account, "assign": req.assign }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, "no such role in this namespace").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
 #[derive(Deserialize)]
 struct ResolveReq {
     /// dismissed | content-removed | user-actioned | escalated
@@ -1252,16 +1400,20 @@ async fn namespace_detail(State(st): State<AdminState>, Path(name): Path<String>
                 .then(a.name.cmp(&b.name))
         });
         // v0.12 membership is namespace-level (channel membership is derived),
-        // so the roster comes from the ns membership row, not per-channel.
-        let mut members: Vec<String> = st
-            .memberships
-            .ns_members(&ns)
-            .await?
-            .into_iter()
-            .map(|a| a.to_string())
-            .collect();
-        members.sort();
-        members.dedup();
+        // so the roster comes from the ns membership row, not per-channel. Each
+        // member carries the roles they hold so the panel can (un)assign them.
+        let ns_scope = format!("ns:{ns}");
+        let mut roster: Vec<Account> = st.memberships.ns_members(&ns).await?;
+        roster.sort();
+        roster.dedup();
+        let mut members = Vec::with_capacity(roster.len());
+        for account in roster {
+            let roles = st.roles.roles_of(&ns_scope, account.as_str()).await?;
+            members.push(dto::NamespaceMember {
+                account: account.to_string(),
+                roles,
+            });
+        }
 
         let roles = st
             .roles
