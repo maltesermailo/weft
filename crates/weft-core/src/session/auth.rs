@@ -31,6 +31,12 @@ impl<S: ControlStream> Session<S> {
             .await?;
             return Ok(Flow::Continue);
         }
+        // §6.7 banned-word filter: refuse a username containing a barred word.
+        if self.ctx.name_is_banned(account.as_str()) {
+            self.send_err(label, ErrCode::Policy, None, "that name isn't allowed")
+                .await?;
+            return Ok(Flow::Continue);
+        }
         match self.ctx.accounts.register(&account, password).await {
             Ok(crate::accounts::RegisterOutcome::Exists) => {
                 self.send_err(label, ErrCode::Conflict, None, "account name is taken")

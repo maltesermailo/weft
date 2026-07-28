@@ -195,6 +195,45 @@ fn build_voice_sfu(_cfg: &config::Voice) -> Option<Arc<dyn weft_core::VoiceBacke
     None
 }
 
+/// The `banned-words.toml` schema: `words = ["...", "..."]`.
+#[derive(serde::Deserialize)]
+struct BannedWordsFile {
+    #[serde(default)]
+    words: Vec<String>,
+}
+
+/// §6.7 load the banned-word list from `banned_words_file`, if configured. A
+/// missing/unreadable/malformed file degrades to no filter (with a warning)
+/// rather than aborting boot — the filter is best-effort moderation, not a
+/// security control.
+fn load_banned_words(path: Option<&str>) -> Vec<String> {
+    let Some(path) = path else {
+        return Vec::new();
+    };
+    match fs::read_to_string(path) {
+        Ok(raw) => match toml::from_str::<BannedWordsFile>(&raw) {
+            Ok(f) => {
+                info!(count = f.words.len(), path, "loaded banned-words filter");
+                f.words
+            }
+            Err(e) => {
+                warn!(
+                    path,
+                    "banned-words file failed to parse; filter disabled: {e}"
+                );
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            warn!(
+                path,
+                "banned-words file could not be read; filter disabled: {e}"
+            );
+            Vec::new()
+        }
+    }
+}
+
 /// Validate config, load identity + TLS, spawn actors and accept loops.
 pub async fn start(config: Config) -> anyhow::Result<Server> {
     let network: weft_proto::NetworkName = config
@@ -319,6 +358,8 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
             Arc::new(weft_core::MemBlobStore::default())
         }
     };
+    // §6.7 banned-word filter for new usernames + namespace vanities.
+    let banned_words = load_banned_words(config.banned_words_file.as_deref());
     let (ctx, channels, mut tasks, mut admin_router) = match config.storage.backend {
         config::StorageBackend::Memory => {
             boot(
@@ -337,6 +378,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 config.admin.enabled,
                 config.admin.delete_grace_days,
                 config.support_account.clone(),
+                banned_words.clone(),
             )
             .await?
         }
@@ -366,6 +408,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 config.admin.enabled,
                 config.admin.delete_grace_days,
                 config.support_account.clone(),
+                banned_words.clone(),
             )
             .await?
         }
@@ -747,6 +790,7 @@ async fn boot<S>(
     admin_enabled: bool,
     admin_delete_grace_days: u64,
     support_account: Option<String>,
+    banned_words: Vec<String>,
 ) -> anyhow::Result<(
     Arc<ServerCtx>,
     Vec<(weft_proto::ChannelName, weft_proto::RetentionPolicy)>,
@@ -827,20 +871,23 @@ where
         }
     }
 
-    let ctx = Arc::new(ServerCtx::new(
-        info,
-        channels.iter().cloned(),
-        identity,
-        registration_open,
-        Arc::clone(&store),
-        Arc::clone(&blobs),
-        dm_policy,
-        operators,
-        ns_creation_open,
-        ns_quota,
-        // §11 inbound bridge policy; peer *pinning* + the outbound dialer are M5d.
-        federation,
-    ));
+    let ctx = Arc::new(
+        ServerCtx::new(
+            info,
+            channels.iter().cloned(),
+            identity,
+            registration_open,
+            Arc::clone(&store),
+            Arc::clone(&blobs),
+            dm_policy,
+            operators,
+            ns_creation_open,
+            ns_quota,
+            // §11 inbound bridge policy; peer *pinning* + the outbound dialer are M5d.
+            federation,
+        )
+        .with_banned_words(banned_words),
+    );
     let admin_router = admin_ingredients.map(|(secret, ops, network)| {
         let auth = weft_admin::auth::config(secret, ops);
         let live: Arc<dyn weft_admin::Live> = Arc::new(LiveRegistry {

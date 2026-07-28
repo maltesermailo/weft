@@ -34,6 +34,20 @@ registration = "open"
 # operators (a compat seed) but you should migrate off it.
 operators = []
 
+# §6.7 moderation "support" account. When set, weftd provisions this account at
+# boot as REGISTERED but SUSPENDED — it can never log in — and the web admin
+# panel gains a "Seize to support" action that hands a namespace's ownership to
+# it (transferring a community out of an abusive owner's control for moderation,
+# without giving anyone else login access). The account is fully protected: no
+# admin can edit, delete, suspend/unsuspend, or promote it. Unset = feature off.
+# support_account = "support"
+
+# §6.7 banned-word filter for new usernames (REGISTER) and namespace vanities
+# (NS CREATE). Point this at a TOML file with `words = ["...", ...]`; each entry
+# is a case-insensitive SUBSTRING match. A relative path resolves against the
+# process working directory. Unset = no filter. See the shipped banned-words.toml.
+# banned_words_file = "banned-words.toml"
+
 # ── channels ─────────────────────────────────────────────────────────────────
 # The seed channel set. Channels also get created at runtime (CHANNEL CREATE),
 # so this is just what exists at first boot. A bare string uses the default

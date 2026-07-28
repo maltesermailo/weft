@@ -1,0 +1,19 @@
+# banned-words.toml — the username + namespace-vanity word filter (§6.7).
+#
+# Point weftd at this file with `banned_words_file = "banned-words.toml"` in
+# weftd.toml. Each entry is matched **case-insensitively** as a **substring**:
+# an entry "admin" rejects "admin", "ADMIN", "netadmin", and "admins".
+#
+# Applies to NEW usernames (REGISTER) and NEW namespace vanities (NS CREATE).
+# Existing names are unaffected. Keep in mind the "Scunthorpe problem" —
+# substring matching can catch innocent names, so prefer specific words.
+words = [
+  # Reserved-looking identities you don't want impersonated:
+  "admin",
+  "operator",
+  "moderator",
+  "support",
+  "official",
+  "system",
+  # Add your own community's disallowed terms below.
+]

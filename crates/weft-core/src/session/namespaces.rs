@@ -406,6 +406,12 @@ impl<S: ControlStream> Session<S> {
             .await?;
             return Ok(Flow::Continue);
         }
+        // §6.7 banned-word filter: refuse a namespace vanity with a barred word.
+        if self.ctx.name_is_banned(vanity.as_str()) {
+            self.send_err(label, ErrCode::Policy, None, "that name isn't allowed")
+                .await?;
+            return Ok(Flow::Continue);
+        }
         let ns_id = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
         // The submitted root key must be a real Ed25519 pubkey (§2.1).
         if weft_crypto::PublicKey::from_b64(&root_key).is_err() {

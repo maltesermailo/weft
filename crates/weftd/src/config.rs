@@ -72,6 +72,12 @@ pub struct Config {
     /// `None` disables the feature. Example: `support_account = "support"`.
     #[serde(default)]
     pub support_account: Option<String>,
+    /// §6.7 path to a `banned-words.toml` (`words = ["...", ...]`) whose entries
+    /// are refused (case-insensitive substring) in new **usernames** and
+    /// **namespace vanities**. Relative paths resolve against the weftd.toml dir.
+    /// `None` = no filter. Default file name: `banned-words.toml`.
+    #[serde(default)]
+    pub banned_words_file: Option<String>,
 }
 
 fn default_max_connections() -> usize {
@@ -485,6 +491,7 @@ impl Default for Config {
             max_connections: default_max_connections(),
             unfurl: Unfurl::default(),
             support_account: None,
+            banned_words_file: None,
         }
     }
 }

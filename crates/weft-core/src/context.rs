@@ -175,6 +175,9 @@ pub struct ServerCtx {
     /// gated (needs the `ns-create` cap).
     pub(crate) ns_creation_open: bool,
     pub(crate) ns_quota: u64,
+    /// §6.7 moderation: lowercased substrings barred from new **usernames** and
+    /// **namespace vanities** (REGISTER + NS CREATE). Empty = no filter.
+    pub(crate) banned_words: Vec<String>,
     /// Operator accounts: they hold the network key's authority — every
     /// capability at `*` (§11.3). This is how the first admin exists;
     /// everyone else's caps chain from a GRANT.
@@ -488,6 +491,7 @@ impl ServerCtx {
             reports,
             ns_creation_open,
             ns_quota,
+            banned_words: Vec::new(),
             peers,
             netblocks,
             moderation,
@@ -750,6 +754,27 @@ impl ServerCtx {
     /// weftd installs the auto-federation dialer sink (enables `FEDERATE`).
     pub fn set_auto_bridge_sink(&self, tx: tokio::sync::mpsc::UnboundedSender<AutoBridgeRequest>) {
         let _ = self.auto_bridge_tx.set(tx);
+    }
+
+    /// §6.7 configure the banned-word filter for new usernames + namespace
+    /// vanities. Words are case-folded; matching is a case-insensitive substring.
+    pub fn with_banned_words(mut self, words: Vec<String>) -> Self {
+        self.banned_words = words
+            .into_iter()
+            .map(|w| w.trim().to_ascii_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect();
+        self
+    }
+
+    /// True if `name` contains a banned word (case-insensitive substring). Used
+    /// to reject REGISTER usernames + NS CREATE vanities (§6.7).
+    pub(crate) fn name_is_banned(&self, name: &str) -> bool {
+        if self.banned_words.is_empty() {
+            return false;
+        }
+        let lower = name.to_ascii_lowercase();
+        self.banned_words.iter().any(|w| lower.contains(w.as_str()))
     }
 
     /// §11.10 hand a `FEDERATE` request to the dialer. `false` if auto-bridging

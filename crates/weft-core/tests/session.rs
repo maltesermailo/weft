@@ -231,6 +231,32 @@ fn ctx_full_store(
     (ctx, store)
 }
 
+/// A context with a §6.7 banned-word filter, for the register/ns-create tests.
+fn ctx_banned(words: &[&str]) -> Arc<ServerCtx> {
+    let store = Arc::new(MemoryStore::default());
+    let info = ServerInfo {
+        network: "test.example".parse().unwrap(),
+        motd: None,
+        features: Vec::new(),
+    };
+    Arc::new(
+        ServerCtx::new(
+            info,
+            std::iter::empty::<(weft_proto::ChannelName, RetentionPolicy)>(),
+            Keypair::generate(),
+            true,
+            store,
+            Arc::new(weft_core::MemBlobStore::default()),
+            "permanent".parse().unwrap(),
+            std::iter::empty::<weft_proto::Account>(),
+            true,
+            10,
+            weft_core::FederationConfig::default(),
+        )
+        .with_banned_words(words.iter().map(|w| w.to_string()).collect()),
+    )
+}
+
 fn connect(ctx: &Arc<ServerCtx>) -> Client {
     let (to_server, from_client) = mpsc::unbounded_channel();
     let (to_client, from_server) = mpsc::unbounded_channel();
@@ -3401,6 +3427,29 @@ async fn ns_create_rejects_a_ulid_shaped_vanity() {
         "@root={root} NS CREATE my-cool-gaming-server-name public"
     ));
     assert!(matches!(ada.recv().await.event, Event::NsMeta { .. }));
+}
+
+#[tokio::test]
+async fn banned_words_block_usernames_and_ns_vanities() {
+    // §6.7 a configured banned word (case-insensitive substring) is refused in a
+    // new username and a new namespace vanity; clean names pass.
+    let ctx = ctx_banned(&["forbidden", "admin"]);
+
+    // REGISTER: "superadmin" contains "admin" → refused; "alice" is fine.
+    let mut c = connect(&ctx);
+    c.send("HELLO weft/1");
+    assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+    c.send(&format!("@label=r REGISTER superADMIN :{PASSWORD}"));
+    c.expect_err(ErrCode::Policy).await;
+    c.send(&format!("REGISTER alice :{PASSWORD}"));
+    assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+
+    // NS CREATE: a banned vanity is refused; a clean one succeeds.
+    let root = root_key_b64();
+    c.send(&format!("@root={root} NS CREATE forbiddenLand public"));
+    c.expect_err(ErrCode::Policy).await;
+    c.send(&format!("@root={root} NS CREATE friendly-place public"));
+    assert!(matches!(c.recv().await.event, Event::NsMeta { .. }));
 }
 
 #[tokio::test]
