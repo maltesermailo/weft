@@ -55,6 +55,23 @@ impl<S: ControlStream> Session<S> {
                 self.send_event(label.clone(), Self::ns_meta_event(&record))
                     .await?;
             }
+            // Convey the membership itself (not just the ns-meta) so the client
+            // shows a server I belong to even when it has **zero** channels — the
+            // channel layout below can't carry that. Mirrors the live NS-MEMBER.
+            if let Ok(id) = ns.parse::<weft_proto::NamespaceId>() {
+                let me = UserRef::new(account.clone(), self.ctx.info.network.clone());
+                self.send_event(
+                    label.clone(),
+                    Event::NsMember {
+                        namespace: id,
+                        user: me,
+                        action: MemberAction::Join,
+                        display: None,
+                        count: None,
+                    },
+                )
+                .await?;
+            }
             let channels = self
                 .ctx
                 .channel_store
