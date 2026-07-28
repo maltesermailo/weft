@@ -11,6 +11,9 @@
   // A moderator sees only the tabs they can act on; owner / ns-admin sees all.
   // Each maps to the concrete WEFT capability that governs that surface.
   const isAdmin = $derived(app.isNsOwner(app.account) || app.serverCap("ns-admin"));
+  // The active namespace's display name (v0.13) — `activeServer` is its id, used
+  // for scopes/commands; anywhere a *name* is shown to the user, use this.
+  const serverVanity = $derived(app.activeNsMeta?.name || app.activeServer);
   const tabPerm = $derived({
     overview: isAdmin,
     roles: isAdmin || app.serverCanGrant(),
@@ -220,7 +223,7 @@
             </div>
           </div>
           <div class="field-label">Display name</div>
-          <input class="text-input" bind:value={app.nsTitle} placeholder={app.activeServer} />
+          <input class="text-input" bind:value={app.nsTitle} placeholder={serverVanity} />
           <div class="ov-gap"></div>
           <div class="field-label">Visibility</div>
           <div class="segmented" role="radiogroup" aria-label="Visibility">
@@ -274,7 +277,7 @@
         <div class="modal-actions"><button class="ok-btn" onclick={app.saveNsMeta}>Save changes</button></div>
       {:else if app.nsTab === "invites"}
         <h1>Invites</h1>
-        <p class="so-sub">Every active invite for <b>{app.activeServer}</b> — who created it, how many times it's been used, its remaining uses and expiry. Revoke one, or close them all at once.</p>
+        <p class="so-sub">Every active invite for <b>{serverVanity}</b> — who created it, how many times it's been used, its remaining uses and expiry. Revoke one, or close them all at once.</p>
         <div class="modal-actions">
           <button class="ok-btn" onclick={app.createInvite}>Create invite</button>
           <button class="danger-btn" onclick={app.revokeAllInvites}>Revoke all</button>
@@ -285,7 +288,7 @@
         <RolesTab />
       {:else if app.nsTab === "members"}
         <h1>Members</h1>
-        <p class="so-sub">Everyone in <b>{app.activeServer}</b>, when they joined, and the roles they hold. Click a role's <b>✕</b> to remove it, <b>+</b> to add one — roles are the only way to grant capabilities. Right-click a member for moderation.</p>
+        <p class="so-sub">Everyone in <b>{app.activeNsMeta?.name || app.activeServer}</b>, when they joined, and the roles they hold. Click a role's <b>✕</b> to remove it, <b>+</b> to add one — roles are the only way to grant capabilities. Right-click a member for moderation.</p>
 
         <div class="mem-search">
           <span aria-hidden="true">⌕</span>
@@ -436,17 +439,17 @@
         <div class="modal-actions"><button class="set-btn" onclick={app.refreshBans}>Refresh</button></div>
       {:else if app.nsTab === "federation"}
         <h1>Federation</h1>
-        <p class="so-sub">Bridge <b>{app.activeServer}</b>'s channels to a peer network. You control this as the namespace owner — bridges are scoped to <code>ns:{app.activeServer}</code>, non-transitive, and every change notifies members.</p>
+        <p class="so-sub">Bridge <b>{serverVanity}</b>'s channels to a peer network. You control this as the namespace owner — bridges are scoped to <code>ns:{app.activeServer}</code>, non-transitive, and every change notifies members.</p>
 
         <div class="field-label">Auto-federation</div>
-        <p class="so-sub">When open, another network can reach this namespace on demand — a user there references <code>{app.network}/{app.activeServer}</code> and their server auto-establishes the bridge. Off by default; enabling it is an explicit opt-in.</p>
+        <p class="so-sub">When open, another network can reach this namespace on demand — a user there references <code>{app.network}/{serverVanity}</code> and their server auto-establishes the bridge. Off by default; enabling it is an explicit opt-in.</p>
         <label class="fed-check" style="margin-bottom:14px">
           <input
             type="checkbox"
             checked={app.activeNsMeta?.federation ?? false}
             onchange={(e) => app.nsSetFederation(e.currentTarget.checked)}
           />
-          Open <b>{app.activeServer}</b> to auto-federation
+          Open <b>{serverVanity}</b> to auto-federation
         </label>
         {#if (app.activeNsMeta?.visibility ?? "") === "public"}
           <p class="so-sub">Public — reachable by <b>anyone</b> once open.</p>

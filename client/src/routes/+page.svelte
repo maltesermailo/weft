@@ -420,6 +420,8 @@
     activeServer = "";
     homeView = true;
     discovered = {};
+    memberNs = {};
+    nsMetaFetched.clear();
     presence = {};
     reportQueue = {};
     status = "connect";
@@ -528,7 +530,19 @@
   // "#gaming/general" → "gaming"; top-level "#general" → "".
   const nsOf = (name: string) => name.match(/^#([^/]+)\//)?.[1] ?? "";
   // Short channel label under a server tile: "#gaming/general" → "general".
-  const chanShort = (name: string) => name.replace(/^#[^/]+\//, "").replace(/^#/, "");
+  // v0.13: the wire name's local segment is an opaque chan-id, so display the
+  // channel's vanity (from CHANNEL-LAYOUT); fall back to the raw segment only
+  // before the layout has arrived.
+  const chanShort = (name: string) =>
+    channels[name]?.vanity || name.replace(/^#[^/]+\//, "").replace(/^#/, "");
+  // A user-facing label for any target: `#vanity` for a channel, the peer's
+  // display name for a DM, the group label for a group DM.
+  const titleOf = (name: string): string => {
+    if (name.startsWith("#")) return `#${chanShort(name)}`;
+    if (name.startsWith("&")) return groupLabel(name);
+    if (name.startsWith("@")) return displayName(peerOf(name));
+    return name;
+  };
   // ---- DMs + presence (Phase 5) ----
   let homeView = $state(true); // sidebar shows DMs; namespaces are the only servers
   // The DM / group / Friends home view has no active server. Keep `activeServer`
@@ -585,6 +599,19 @@
   // Namespace ids we've auto-joined on creation, so the reactive auto-join fires
   // once per freshly-created server (see the `ns-meta` handler).
   const autoJoinedNs = new Set<string>();
+  // Channel creations awaiting their server-minted id. CHANNEL CREATE returns the
+  // canonical `#<ns-id>/<chan-id>` asynchronously (as CHANNEL-LAYOUT); until then
+  // we can't address the channel, so stash the follow-up actions keyed by
+  // `<ns-id>|<slug>` and apply them when the matching layout arrives.
+  let pendingChanCreate: Record<string, { cat: string; announce: boolean; voice: boolean }> = {};
+  // Namespace ids I'm a member of (from NS-MEMBER). A namespace with **no**
+  // channels wouldn't otherwise surface (the rail is derived from channels), so
+  // this keeps a just-joined empty server visible + selectable.
+  let memberNs = $state<Record<string, boolean>>({});
+  // True while an initial/reconnect SYNC is streaming. SYNC replays my namespace
+  // memberships as NS-MEMBER events; during that replay we populate the rail but
+  // must NOT auto-navigate (that's only for a *live* join, e.g. creating a server).
+  let syncing = false;
   // ---- roles / invites / reports (Phase 7) ----
   const RESOLVE_ACTIONS = ["dismissed", "content-removed", "user-actioned", "escalated"];
   let reportTarget = $state<Msg | null>(null); // message being reported (ReportModal)
@@ -938,7 +965,8 @@
     (newRoleCaps = newRoleCaps.includes(c) ? newRoleCaps.filter((x) => x !== c) : [...newRoleCaps, c]);
   const nsRoleScope = () => (activeServer ? `ns:${activeServer}` : "*");
   function createRole() {
-    if (!newRoleName.trim() || !newRoleCaps.length) return;
+    // A role may hold zero permissions (granted later); only a name is required.
+    if (!newRoleName.trim()) return;
     // Append at the bottom of the ordered list.
     const position = rolesByScope[nsRoleScope()]?.length ?? 0;
     createRoleAt(
@@ -1007,10 +1035,7 @@
   ) {
     const scope = nsRoleScope();
     const name = patch.name.trim() || role.name;
-    if (!patch.caps.length) {
-      toast("A role needs at least one permission", "error");
-      return;
-    }
+    // Zero permissions is valid (a cosmetic/hoist role, or perms granted later).
     roleFetchQueue.push(scope);
     weft
       .roleUpdate(
@@ -1061,7 +1086,13 @@
     expectSuccess(`roles:${account}|${scope}`, `Roles updated for ${account}`);
     weft
       .roleAssign(scope, account, roleId)
-      .then(() => reconcileRoster(ns))
+      // Refresh BOTH rosters: the settings members tab AND `memberRoles` (which
+      // the member-list sidebar groups by hoisted role) — otherwise a hoisted
+      // assignment wouldn't regroup the sidebar until the next interaction.
+      .then(() => {
+        reconcileRoster(ns);
+        fetchMemberRoles(account, scope);
+      })
       .catch((e) => {
         toast(String(e), "error");
         fetchNsMembers(ns);
@@ -1075,7 +1106,10 @@
     expectSuccess(`roles:${account}|${scope}`, `Roles updated for ${account}`);
     weft
       .roleUnassign(scope, account, roleId)
-      .then(() => reconcileRoster(ns))
+      .then(() => {
+        reconcileRoster(ns);
+        fetchMemberRoles(account, scope); // regroup the member-list sidebar too
+      })
       .catch((e) => {
         toast(String(e), "error");
         fetchNsMembers(ns);
@@ -1249,17 +1283,31 @@
   const channelRecord = (name: string): Channel | undefined => channels[name];
   let activeIsDm = $derived(active.startsWith("@"));
   let activeIsGroup = $derived(active.startsWith("&"));
-  // Namespaces we hold channels in — each becomes a rail tile (flavor A).
+  // Namespaces we hold channels in OR are a member of (the latter keeps a
+  // channel-less server on the rail) — each becomes a rail tile (flavor A).
   let serverNamespaces = $derived(
     [
-      ...new Set(
-        Object.values(channels)
+      ...new Set([
+        ...Object.values(channels)
           .filter((c) => c.name.startsWith("#"))
           .map((c) => nsOf(c.name))
           .filter(Boolean),
-      ),
+        ...Object.keys(memberNs),
+      ]),
     ].sort(),
   );
+  // Proactively load NS-META (title/vanity + layout) for every server on the
+  // rail we haven't seen it for — so tiles show the right name/initials without
+  // waiting for a click. `channels(id)` replies with NS-META + CHANNEL-LAYOUTs.
+  const nsMetaFetched = new Set<string>();
+  $effect(() => {
+    for (const ns of serverNamespaces) {
+      if (!discovered[ns] && !nsMetaFetched.has(ns)) {
+        nsMetaFetched.add(ns);
+        weft.channels(ns).catch(() => {});
+      }
+    }
+  });
   // Server-tile unread/mention rollups (so unread in other servers is visible).
   const serverUnread = (ns: string) =>
     Object.keys(unreadMap).some((n) => unreadMap[n] && nsOf(n) === ns && n !== active);
@@ -1687,7 +1735,8 @@
         // delta of everything missed since our stored cursor on reconnect. The
         // materialized rows flow through the ordinary message/edit/reaction
         // handlers (upsert by msgid); `sync-end` gives the next cursor.
-        weft.sync(loadSyncCursor()).catch(() => {});
+        syncing = true;
+        weft.sync(loadSyncCursor()).catch(() => (syncing = false));
         break;
       case "media-token":
         weft.setMediaBearer(e.token); // §13 fetch bearer for /media URLs
@@ -1935,6 +1984,7 @@
         break;
       }
       case "sync-end": {
+        syncing = false;
         // §6.9 store the new cursor for this device's next reconnect delta.
         try {
           localStorage.setItem(syncCursorKey(), e.cursor);
@@ -1945,8 +1995,20 @@
       }
       case "ns-member": {
         // §7.4 namespace-level join/part. Rosters + the sidebar are driven by
-        // the per-channel MEMBER/LAYOUT events; this is the ns-level marker
-        // (the acting client's ack). No dedicated UI state to update yet.
+        // the per-channel MEMBER/LAYOUT events; this ns-level marker additionally
+        // tracks *my own* membership so a channel-less server still appears in the
+        // rail (and, on join, gets auto-selected below).
+        if (e.user === account) {
+          if (e.action === "join") {
+            memberNs[e.namespace] = true;
+            // React visibly to a *live* join (create/join a server) by landing on
+            // it. During SYNC we're just restoring the rail — don't hijack the
+            // view by jumping to the last-restored namespace.
+            if (!syncing && activeServer !== e.namespace) selectServer(e.namespace);
+          } else {
+            delete memberNs[e.namespace];
+          }
+        }
         break;
       }
       case "chan-sync":
@@ -2118,7 +2180,9 @@
         ch.category = e.category ?? undefined;
         ch.position = e.position;
         ch.voice = e.channel_kind === "voice"; // §16 render as a voice channel
+        if (e.vanity) ch.vanity = e.vanity; // v0.13 display name; wire name is ids
         cacheChanLayout(e.channel, ch.category, e.position);
+        reconcileChannelCreate(e.channel, e.vanity); // finish a pending create
         break;
       }
       case "channel-renamed": {
@@ -3194,6 +3258,8 @@
   function openDiscover() {
     discoverOpen = true;
     discovered = {};
+    memberNs = {};
+    nsMetaFetched.clear();
     discoverCursor = null;
     weft.discover().catch(() => {});
   }
@@ -3306,27 +3372,51 @@
   }
   function createChannel() {
     const slug = newChanName.trim().replace(/^#/, "").replace(/\s+/g, "-").toLowerCase();
-    if (!slug) return;
-    const full = activeServer ? `#${activeServer}/${slug}` : `#${slug}`;
-    const cat = newChanCategory.trim();
-    const voice = newChanVoice;
+    // v0.13: channels are `#<ns-id>/<chan-id>` — we send the *desired* vanity as
+    // the local segment and the server mints the id. We can't JOIN/META the
+    // channel by the name we sent (NO-SUCH-TARGET); instead stash the follow-ups
+    // and apply them when CHANNEL-LAYOUT echoes the canonical name (see
+    // `reconcileChannelCreate`). Channel creation is server-side only here.
+    if (!slug || !activeServer) {
+      newChanOpen = false;
+      return;
+    }
+    const full = `#${activeServer}/${slug}`;
+    const key = `${activeServer}|${slug}`;
+    pendingChanCreate[key] = {
+      cat: newChanCategory.trim(),
+      announce: newChanAnnounce,
+      voice: newChanVoice,
+    };
     weft
-      .channelCreate(full, voice ? undefined : newChanRet || undefined, voice ? "voice" : undefined)
-      // We just created it, so the server won't tell us its kind — record it
-      // locally so the sidebar shows a voice channel (joined via VOICE, not text).
-      .then(() => {
-        ensureChannel(full).voice = voice;
-      })
-      // Voice channels aren't text-joinable — don't JOIN (that's NO-SUCH-TARGET).
-      .then(() => (voice ? undefined : weft.join(full)))
-      .then(() => (cat ? weft.channelMeta(full, "category", cat) : undefined))
-      // Announcement channel: everyone can view, only members with the `send`
-      // capability may post (§6.7 restricted posting). N/A to voice.
-      .then(() =>
-        !voice && newChanAnnounce ? weft.channelMeta(full, "posting", "restricted") : undefined,
-      )
-      .then(() => (newChanOpen = false))
-      .catch((e) => toast(String(e), "error"));
+      .channelCreate(full, newChanVoice ? undefined : newChanRet || undefined, newChanVoice ? "voice" : undefined)
+      .catch((e) => {
+        delete pendingChanCreate[key];
+        toast(String(e), "error");
+      });
+    newChanOpen = false;
+  }
+  // Finish a channel-create once the server echoes the canonical name + vanity.
+  function reconcileChannelCreate(canonical: string, vanity: string) {
+    const ns = nsOf(canonical);
+    if (!ns || !vanity) return;
+    const key = `${ns}|${vanity}`;
+    const pending = pendingChanCreate[key];
+    if (!pending) return;
+    delete pendingChanCreate[key];
+
+    const ch = ensureChannel(canonical);
+    ch.voice = pending.voice;
+    // Subscribe (text) so live messages arrive; voice rooms are entered via VOICE.
+    if (!pending.voice) weft.join(canonical).catch(() => {});
+    if (pending.cat) weft.channelMeta(canonical, "category", pending.cat).catch((e) => toast(String(e), "error"));
+    // Announcement channel: view-open, post-restricted to `send` holders (§6.7).
+    if (!pending.voice && pending.announce)
+      weft.channelMeta(canonical, "posting", "restricted").catch((e) => toast(String(e), "error"));
+    // Jump to the new channel (a voice room is *entered* by clicking it, so just
+    // select it here rather than auto-joining the call).
+    if (pending.voice) active = canonical;
+    else open(canonical);
   }
 
   // ---- categories (Discord-style groupings) ----
@@ -3887,6 +3977,8 @@
     nickOf,
     setNick,
     chanShort,
+    titleOf,
+    isNsMember: (nsId: string) => !!memberNs[nsId],
     peerOf,
     dotClass,
     nsOf,

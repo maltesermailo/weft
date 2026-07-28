@@ -155,6 +155,8 @@ export type WeftEvent =
       category: string | null;
       position: number;
       channel_kind: string;
+      /// Human display name for the channel (v0.13); "" if none.
+      vanity: string;
     }
   | { kind: "channel-renamed"; old: string; new: string }
   | {

@@ -226,7 +226,7 @@
       {:else if ch.truncated}
         <div class="day-sep">older messages have expired</div>
       {:else if ch.historyLoaded && !ch.hasMore}
-        <div class="day-sep">beginning of {ch.name}</div>
+        <div class="day-sep">beginning of {app.titleOf(ch.name)}</div>
       {/if}
     {:else}
       <div class="empty-hint">Join a channel to start talking.</div>

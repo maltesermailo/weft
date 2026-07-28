@@ -47,7 +47,7 @@
       <span class="voice-live" class:connecting={voice.connecting} aria-hidden="true"></span>
       <span class="voice-status-text">
         <span class="voice-state">{voice.connecting ? "Connecting…" : "Voice Connected"}</span>
-        <span class="voice-chan">{voice.channel}</span>
+        <span class="voice-chan">{app.titleOf(voice.channel)}</span>
       </span>
     </button>
 

@@ -53,7 +53,12 @@ export type ThreadInfo = {
 };
 
 export type Channel = {
+  /// Canonical wire name `#<ns-id>/<chan-id>` (v0.13) — how the channel is
+  /// addressed. Display uses `vanity`.
   name: string;
+  /// Human display name (from CHANNEL-LAYOUT `vanity=`); the wire name is opaque
+  /// ids. Empty/undefined for a top-level channel or before the layout arrives.
+  vanity?: string;
   retention: string;
   messages: Msg[];
   members: Member[];

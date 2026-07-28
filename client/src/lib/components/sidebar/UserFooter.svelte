@@ -75,7 +75,7 @@
         <button class="sm-item" onclick={() => { app.userMenu = false; app.openNickDialog(app.account); }}>
           <span class="um-status">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 21v-2a4 4 0 0 1 4-4h4" /><circle cx="10" cy="7" r="4" /><path d="M16 19l2 2 4-4" /></svg>
-            Set nickname on {app.activeServer}
+            Set nickname on {app.serverName(app.activeServer)}
           </span>
         </button>
       {/if}

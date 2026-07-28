@@ -31,7 +31,7 @@
       <button class="linkish" aria-label="Close" onclick={onclose}>✕</button>
     </div>
     <p class="modal-sub">
-      Your display name on <b>{app.activeServer}</b>{isSelf ? "" : ` for ${target}`} — leave empty to clear it.
+      Your display name on <b>{app.serverName(app.activeServer)}</b>{isSelf ? "" : ` for ${target}`} — leave empty to clear it.
     </p>
     <label class="fld">Nickname
       <input

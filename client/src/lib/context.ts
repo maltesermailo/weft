@@ -175,6 +175,11 @@ export interface AppCtx {
   /** Set a per-namespace nickname (empty clears). Own → `nick`, other → `manage-nicks`. */
   setNick(scope: string, account: string, nick: string): void;
   chanShort(n: string): string;
+  /// User-facing label for any target — `#vanity` (channel), peer name (DM),
+  /// or group label (group DM). Use anywhere a target name is shown.
+  titleOf(n: string): string;
+  /// Am I a member of this namespace (by id)? Discover hides servers I'm in.
+  isNsMember(nsId: string): boolean;
   peerOf(n: string): string;
   dotClass(acct: string): string;
   nsOf(n: string): string;

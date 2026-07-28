@@ -163,7 +163,7 @@
         class="composer-ta"
         bind:this={ta}
         rows="1"
-        placeholder={app.active ? `Message ${app.active}…` : "Join a channel first"}
+        placeholder={app.active ? `Message ${app.titleOf(app.active)}…` : "Join a channel first"}
         disabled={!app.active}
         bind:value={app.composer}
         onkeydown={app.composerKey}

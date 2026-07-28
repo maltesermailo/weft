@@ -79,7 +79,7 @@
 <div class="stage">
   <header class="stage-head">
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M11 5 6 9H2v6h4l5 4V5z" /><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14" /></svg>
-    <span class="stage-title">{channel}</span>
+    <span class="stage-title">{app.titleOf(channel)}</span>
     <span class="stage-count">{tiles.length} in voice</span>
   </header>
 

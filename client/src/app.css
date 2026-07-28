@@ -2335,6 +2335,15 @@ button:disabled {
 .ok-btn {
   background: var(--accent, #5865f2);
 }
+/* A disabled primary/danger button must LOOK disabled — otherwise it reads as a
+   live blue button that mysteriously won't click. */
+.ok-btn:disabled,
+.danger-btn:disabled,
+.set-btn:disabled,
+.pf-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .danger-btn {
   background: #d83c3e;
 }

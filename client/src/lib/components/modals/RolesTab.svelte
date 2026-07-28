@@ -130,7 +130,9 @@
   // Shown while the current selection has unsaved changes; only one selection
   // is editable at a time so a single bar covers both role + @everyone.
   const showSaveBar = $derived((selected === EVERYONE_ROLE && everyoneDirty) || (!!editing && dirty));
-  const saveDisabled = $derived(selected !== EVERYONE_ROLE && (!draft.name.trim() || draft.caps.length === 0));
+  // A role may hold zero permissions (a cosmetic/hoist role, granted caps
+  // later) — only the name is required.
+  const saveDisabled = $derived(selected !== EVERYONE_ROLE && !draft.name.trim());
   function revertSelection() {
     if (selected === EVERYONE_ROLE) everyoneDraft = [...app.everyoneCaps()];
     else if (editing) pick(editing.id);
@@ -256,7 +258,7 @@
         {@render displayOptions(app.newRoleHoist, (v) => (app.newRoleHoist = v), app.newRolePingable, (v) => (app.newRolePingable = v), app.newRoleName)}
         {@render permGroups(app.newRoleCaps, app.toggleNewRoleCap)}
         <div class="rl-actions">
-          <button class="ok-btn" disabled={!app.newRoleName.trim() || !app.newRoleCaps.length} onclick={create}>Create role</button>
+          <button class="ok-btn" disabled={!app.newRoleName.trim()} onclick={create}>Create role</button>
           <button class="linkish" onclick={() => (selected = null)}>Cancel</button>
         </div>
       </div>
