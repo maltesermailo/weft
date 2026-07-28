@@ -757,7 +757,7 @@ impl App {
                             self.tried_register = true; // explicit creds: no auto-register
                             self.phase = Phase::AuthSent;
                             self.send_command(Command::AuthPassword {
-                                account: parsed,
+                                identifier: parsed.to_string(),
                                 password: password.to_string(),
                             });
                         }
@@ -1072,7 +1072,7 @@ impl App {
                 self.network = Some(network.to_string());
                 let account = self.account.clone();
                 self.send_command(Command::AuthPassword {
-                    account: account.parse().expect("validated in main"),
+                    identifier: account,
                     password: self.password.clone(),
                 });
                 self.phase = Phase::AuthSent;

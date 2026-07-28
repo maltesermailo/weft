@@ -82,8 +82,22 @@
   );
   let formAccount = $state("");
   let formPassword = $state("");
+  // §6.1 register email — shown/required only when the homeserver advertises it.
+  let formEmail = $state("");
   // client.toml: TLS mode (verified by default) + optional prefill host.
   let insecureMode = $state(false);
+
+  // ---- homeserver selection (§3.6) ----
+  // Two-step connect screen: pick the homeserver first ("server"), then log in
+  // or register ("auth"). The chosen server is remembered as the local config so
+  // it's the default next launch, changeable via a "Change" button. On web the
+  // network is always the page origin, so the picker step is skipped.
+  const HOMESERVER_KEY = "weft:homeserver";
+  let serverStep = $state<"server" | "auth">(weft.isWeb ? "auth" : "server");
+  // Whether THIS homeserver requires an email at REGISTER (from its WELCOME).
+  let emailRequired = $state(false);
+  // A probe (HELLO→WELCOME only) is in flight to learn the server's shape.
+  let probing = $state(false);
 
   // ---- session lifecycle (Phase 8) ----
   const SAVED_KEY = "weft:last-connect";
@@ -1723,6 +1737,9 @@
             SAVED_KEY,
             JSON.stringify({ host, account: formAccount.trim(), password: formPassword }),
           );
+          // Remember the homeserver as the local default (desktop) so the picker
+          // is pre-filled and skippable next launch. On web it's the origin.
+          if (!weft.isWeb) localStorage.setItem(HOMESERVER_KEY, host);
         } catch {
           /* storage unavailable */
         }
@@ -1738,6 +1755,11 @@
         syncing = true;
         weft.sync(loadSyncCursor()).catch(() => (syncing = false));
         break;
+      case "server-info":
+        // §3.6 the negotiation WELCOME, seen before auth — remember whether this
+        // homeserver requires a register email so the form can adapt.
+        emailRequired = e.email_required;
+        break;
       case "media-token":
         weft.setMediaBearer(e.token); // §13 fetch bearer for /media URLs
         break;
@@ -1749,6 +1771,9 @@
         authFailed = true;
         break;
       case "closed":
+        // A probe tears its own handshake-only connection down; that close is
+        // expected and must not touch the connect screen's state.
+        if (probing) break;
         if (manualLogout) {
           manualLogout = false;
           break;
@@ -1762,10 +1787,13 @@
         // Unexpected drop while online → keep the UI and auto-reconnect.
         if (lastCreds && (status === "online" || reconnecting)) {
           attemptReconnect();
-        } else {
+        } else if (status === "connecting") {
+          // A user-initiated attempt failed before authenticating.
           status = "connect";
           authError = e.reason;
         }
+        // Otherwise the socket was idle (e.g. a probe's own teardown) — a close
+        // there carries no user-facing meaning, so leave the screen untouched.
         break;
       case "policy":
         ensureChannel(e.channel).retention = retentionOf(e.policy);
@@ -2493,6 +2521,11 @@
 
   async function doConnect() {
     if (!formAccount.trim()) return;
+    // §6.1 a register email is required only when the homeserver asks for one.
+    if (mode === "register" && emailRequired && !formEmail.trim()) {
+      authError = "this server requires an email address to register";
+      return;
+    }
     authError = "";
     authFailed = false;
     status = "connecting";
@@ -2501,11 +2534,55 @@
     // Held in memory (never persisted) so a mid-session drop can reconnect.
     lastCreds = { host: host.trim(), account: formAccount.trim(), password: formPassword };
     try {
-      await weft.connect(host.trim(), formAccount.trim(), formPassword, mode);
+      await weft.connect(
+        host.trim(),
+        formAccount.trim(),
+        formPassword,
+        mode,
+        mode === "register" ? formEmail.trim() : undefined,
+      );
     } catch (err) {
       status = "connect";
       authError = String(err);
     }
+  }
+
+  /// §3.6 probe the current homeserver for its shape (does REGISTER need an
+  /// email?). Best-effort: a failure just leaves the email field optional — the
+  /// server still enforces its own policy at REGISTER.
+  async function probeServer() {
+    const h = host.trim();
+    if (!h) return;
+    probing = true;
+    try {
+      const info = await weft.probe(h);
+      emailRequired = info.emailRequired;
+    } catch {
+      emailRequired = false;
+    } finally {
+      probing = false;
+    }
+  }
+
+  /// Confirm the typed homeserver: persist it as the local default, move to the
+  /// login/register step, and probe it for its register-email requirement.
+  function chooseServer() {
+    const h = host.trim();
+    if (!h) return;
+    try {
+      localStorage.setItem(HOMESERVER_KEY, h);
+    } catch {
+      /* storage unavailable */
+    }
+    serverStep = "auth";
+    void probeServer();
+  }
+
+  /// "Change" on the login screen → back to the homeserver picker.
+  function changeServer() {
+    authError = "";
+    emailRequired = false;
+    serverStep = "server";
   }
 
   function joinNamespace(name: string) {
@@ -3846,25 +3923,48 @@
     const un = weft.onWeft(handle);
     // Confirm-before-navigate guard for links in rendered message markdown.
     const uninstallLinkGuard = installLinkGuard();
-    // Load client.toml: TLS verification mode + optional default host.
+    // Load client.toml: TLS verification mode + optional default host. The
+    // config host only prefills the picker when the user has no saved homeserver.
     weft
       .clientConfig()
       .then((c) => {
         insecureMode = c.allow_insecure;
-        if (c.default_host && host === "127.0.0.1:4433") host = c.default_host;
+        if (
+          c.default_host &&
+          !weft.isWeb &&
+          host === "127.0.0.1:4433" &&
+          !localStorage.getItem(HOMESERVER_KEY)
+        )
+          host = c.default_host;
       })
       .catch(() => {});
-    // Restore the last session and log straight back in (login mode — the
-    // account already exists).
+    // Restore the saved homeserver + last session. Desktop: a remembered
+    // homeserver skips the picker (→ auth step); a full session logs straight
+    // back in. Otherwise land on the picker (desktop) / auth (web).
     try {
+      if (!weft.isWeb) {
+        const savedHost = localStorage.getItem(HOMESERVER_KEY);
+        if (savedHost) {
+          host = savedHost;
+          serverStep = "auth";
+        }
+      }
+
       const saved = JSON.parse(localStorage.getItem(SAVED_KEY) ?? "null");
       // On web the network is always the page origin — don't restore a stale host.
       if (saved?.host && !weft.isWeb) host = saved.host;
       if (saved?.account) formAccount = saved.account;
+
       if (saved?.host && saved?.account && saved?.password) {
+        // A full session → log straight back in; no picker, no probe.
         formPassword = saved.password;
         mode = "login";
+        serverStep = "auth";
         doConnect();
+      } else if (serverStep === "auth") {
+        // Have a homeserver but nothing to auto-login with → probe it so the
+        // register form knows whether to require an email.
+        void probeServer();
       }
     } catch {
       /* ignore */
@@ -4248,12 +4348,19 @@
     bind:host
     bind:formAccount
     bind:formPassword
+    bind:formEmail
     {status}
     {authError}
     {deviceKeyAvailable}
     insecure={insecureMode}
+    serverStep={weft.isWeb ? "auth" : serverStep}
+    canChangeServer={!weft.isWeb}
+    {emailRequired}
+    {probing}
     onconnect={doConnect}
     onkeylogin={keyLogin}
+    onchooseserver={chooseServer}
+    onchangeserver={changeServer}
   />
 {:else}
   <!-- ================= MAIN APP ================= -->

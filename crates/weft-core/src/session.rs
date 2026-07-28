@@ -638,9 +638,15 @@ impl<S: ControlStream> Session<S> {
         match cmd {
             Command::Hello { version } if version == PROTOCOL_VERSION => {
                 let info = &self.ctx.info;
+                // §3.6: advertise `email-required` so a client can show (and
+                // require) the REGISTER email field before it ever submits.
+                let mut features = info.features.clone();
+                if self.ctx.require_email {
+                    features.push("email-required".to_string());
+                }
                 let welcome = Event::Welcome {
                     network: info.network.clone(),
-                    features: info.features.clone(),
+                    features,
                     attestation: None,
                     motd: info.motd.clone(),
                 };
@@ -688,17 +694,42 @@ impl<S: ControlStream> Session<S> {
                 code,
                 password,
             } => self.on_reset_confirm(label, email, code, &password).await,
-            Command::AuthPassword { account, password } => {
+            Command::AuthPassword {
+                identifier,
+                password,
+            } => {
+                // §6.1: the identifier is an account name *or* a registered email
+                // — resolve it to an account so a name can change later without
+                // breaking sign-in. An email that maps to nothing, or a malformed
+                // name, resolves to `None`, which the constant-time verify treats
+                // exactly like a wrong password (invariant 5).
+                let account = if verify::is_plausible_email(&identifier) {
+                    match self.ctx.accounts.account_by_email(&identifier).await {
+                        Ok(account) => account,
+                        Err(e) => return self.internal(label, &e).await,
+                    }
+                } else {
+                    identifier.parse::<Account>().ok()
+                };
+
                 // Constant-time verify, dummy-hash for unknown accounts —
                 // one code, one text, one timing envelope (invariant 5).
-                match self.ctx.accounts.verify_password(&account, &password).await {
+                match self
+                    .ctx
+                    .accounts
+                    .verify_password_opt(account.as_ref(), &password)
+                    .await
+                {
+                    // `Ok(true)` guarantees `account` is `Some` (the dummy path
+                    // always fails), so the resolved account is authenticated.
                     Ok(true) => {
+                        let account = account.expect("verified login resolves an account");
                         info!(%account, "authenticated (password)");
                         self.welcome_authed(label, account, None).await
                     }
                     Ok(false) => {
                         // Server-side only — the wire never distinguishes.
-                        debug!(%account, "password verification failed (unknown account or wrong password)");
+                        debug!(%identifier, "password verification failed (unknown identifier or wrong password)");
                         self.auth_failed(label).await
                     }
                     Err(e) => self.internal(label, &e).await,

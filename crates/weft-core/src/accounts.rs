@@ -120,11 +120,28 @@ impl Accounts {
         account: &Account,
         password: &str,
     ) -> Result<bool, StoreError> {
-        let stored = self
-            .store
-            .password_phc(account)
-            .await?
-            .and_then(|phc| PasswordHash::from_phc(&phc).ok());
+        self.verify_password_opt(Some(account), password).await
+    }
+
+    /// Like [`verify_password`], but the account may be `None` — the case where
+    /// an identifier (e.g. an email at login, §6.1) resolved to no account. A
+    /// `None` account still pays the full Argon2 cost against the dummy hash and
+    /// fails, so an unknown login is indistinguishable from a wrong password
+    /// (invariant 5). The extra email→account lookup lives in the caller; Argon2
+    /// dominates the timing envelope, so that lookup is not a meaningful oracle.
+    pub async fn verify_password_opt(
+        &self,
+        account: Option<&Account>,
+        password: &str,
+    ) -> Result<bool, StoreError> {
+        let stored = match account {
+            Some(account) => self
+                .store
+                .password_phc(account)
+                .await?
+                .and_then(|phc| PasswordHash::from_phc(&phc).ok()),
+            None => None,
+        };
         let known = stored.is_some();
         let hash = stored.unwrap_or_else(|| dummy_hash().clone());
         // Verify on the blocking pool for the same reason as register: every

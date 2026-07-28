@@ -103,8 +103,14 @@ pub enum Command {
         email: Option<String>,
         password: String,
     },
-    /// `AUTH PASSWORD <account> :<password>`.
-    AuthPassword { account: Account, password: String },
+    /// `AUTH PASSWORD <identifier> :<password>`. The identifier is either the
+    /// account name or a registered email (§6.1) — the server resolves it, so a
+    /// name can change later without breaking sign-in. Kept a free string (not an
+    /// `Account`) precisely because an email is not a valid account name.
+    AuthPassword {
+        identifier: String,
+        password: String,
+    },
     /// `AUTH KEY <account> <b64-ed25519-pubkey>` — starts challenge-response.
     AuthKey { account: Account, pubkey: String },
     /// `AUTH PROOF <b64-sig(nonce ‖ network-name)>` (§6.1: anti cross-network replay).
@@ -826,7 +832,7 @@ impl Command {
                 let sub = args.req("subcommand")?.to_ascii_uppercase();
                 match sub.as_str() {
                     "PASSWORD" => Ok(Command::AuthPassword {
-                        account: args.req("account")?.parse()?,
+                        identifier: args.req("identifier")?.to_string(),
                         password: args.trailing_req("password")?.to_string(),
                     }),
                     "KEY" => Ok(Command::AuthKey {
@@ -2004,9 +2010,12 @@ impl Command {
                 vec!["CONFIRM".to_string(), email.clone(), code.clone()],
                 Some(password.clone()),
             ),
-            Command::AuthPassword { account, password } => (
+            Command::AuthPassword {
+                identifier,
+                password,
+            } => (
                 "AUTH",
-                vec!["PASSWORD".to_string(), account.to_string()],
+                vec!["PASSWORD".to_string(), identifier.clone()],
                 Some(password.clone()),
             ),
             Command::AuthKey { account, pubkey } => (
@@ -2926,9 +2935,24 @@ mod tests {
     #[test]
     fn auth_password_round_trips() {
         round_trip(&Request::new(Command::AuthPassword {
-            account: "ada".parse().unwrap(),
+            identifier: "ada".into(),
             password: ":p4ss with space".into(),
         }));
+    }
+
+    #[test]
+    fn auth_password_accepts_an_email_identifier() {
+        // §6.1: login by email — the identifier is a free string, not an Account.
+        let request = Request::parse("AUTH PASSWORD ada@example.com :hunter2hunter2").unwrap();
+        let Command::AuthPassword {
+            identifier,
+            password,
+        } = request.command
+        else {
+            panic!("not AUTH PASSWORD: {:?}", request.command);
+        };
+        assert_eq!(identifier, "ada@example.com");
+        assert_eq!(password, "hunter2hunter2");
     }
 
     #[test]

@@ -8025,6 +8025,82 @@ async fn password_reset_unknown_email_is_uniform() {
     );
 }
 
+#[tokio::test]
+async fn login_accepts_email_or_account_name() {
+    // §6.1: AUTH PASSWORD resolves the identifier as an account name OR a
+    // registered email, so a name can change later without breaking sign-in.
+    let (ctx, _mailer) = ctx_require_email();
+
+    // Register ada with an email.
+    let mut ada = connect(&ctx);
+    ada.send("HELLO weft/1");
+    assert!(matches!(ada.recv().await.event, Event::Welcome { .. }));
+    ada.send(&format!(
+        "@label=r REGISTER ada ada@example.com :{PASSWORD}"
+    ));
+    assert!(matches!(
+        drain_until_label(&mut ada, "r").await.event,
+        Event::Welcome { .. }
+    ));
+    drop(ada);
+
+    // Log in by email → WELCOME.
+    let mut by_email = connect(&ctx);
+    by_email.send("HELLO weft/1");
+    assert!(matches!(by_email.recv().await.event, Event::Welcome { .. }));
+    by_email.send(&format!(
+        "@label=e AUTH PASSWORD ada@example.com :{PASSWORD}"
+    ));
+    assert!(
+        matches!(
+            drain_until_label(&mut by_email, "e").await.event,
+            Event::Welcome { .. }
+        ),
+        "email identifier authenticates"
+    );
+
+    // Log in by account name → WELCOME (unchanged behavior).
+    let mut by_name = connect(&ctx);
+    by_name.send("HELLO weft/1");
+    assert!(matches!(by_name.recv().await.event, Event::Welcome { .. }));
+    by_name.send(&format!("@label=n AUTH PASSWORD ada :{PASSWORD}"));
+    assert!(matches!(
+        drain_until_label(&mut by_name, "n").await.event,
+        Event::Welcome { .. }
+    ));
+
+    // An unregistered email → the uniform AUTH-FAILED (invariant 5): no oracle
+    // distinguishes "no such email" from "wrong password".
+    let mut ghost = connect(&ctx);
+    ghost.send("HELLO weft/1");
+    assert!(matches!(ghost.recv().await.event, Event::Welcome { .. }));
+    ghost.send(&format!(
+        "@label=g AUTH PASSWORD ghost@example.com :{PASSWORD}"
+    ));
+    let g = drain_until_label(&mut ghost, "g").await;
+    assert!(
+        matches!(&g.event, Event::Err(e) if e.code == ErrCode::AuthFailed),
+        "unknown email is a uniform AUTH-FAILED: {g:?}"
+    );
+}
+
+#[tokio::test]
+async fn welcome_advertises_email_required() {
+    // §3.6: a `require_email` network flags `features=email-required` in the
+    // negotiation WELCOME, so a client can shape its REGISTER form up front.
+    let (ctx, _mailer) = ctx_require_email();
+    let mut c = connect(&ctx);
+    c.send("HELLO weft/1");
+    let welcome = c.recv().await;
+    let Event::Welcome { features, .. } = &welcome.event else {
+        panic!("expected WELCOME, got {welcome:?}");
+    };
+    assert!(
+        features.iter().any(|f| f == "email-required"),
+        "features advertise email-required: {features:?}"
+    );
+}
+
 // ---- §16 M-lk-3b: the federated-voice relay lifecycle manager ----
 
 /// A stand-in relay driver: records start/stop (and the full spec) instead of

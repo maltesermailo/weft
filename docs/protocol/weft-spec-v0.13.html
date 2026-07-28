@@ -927,7 +927,10 @@ S: @features=media,backfill,voice,irc-gw WELCOME test.example :Willkommen</pre>
 </div>
 </div>
 <div class="paragraph">
-<p><code>features=</code>: <code>media</code>, <code>voice</code>, <code>e2ee</code>, <code>backfill</code>, <code>irc-gw</code>, <code>presence</code>. Unknown flags ignored. Version mismatch: <code>ERR UNSUPPORTED</code>, close.</p>
+<p><code>features=</code>: <code>media</code>, <code>voice</code>, <code>e2ee</code>, <code>backfill</code>, <code>irc-gw</code>, <code>presence</code>, <code>email-required</code>. Unknown flags ignored. Version mismatch: <code>ERR UNSUPPORTED</code>, close.</p>
+</div>
+<div class="paragraph">
+<p>The negotiation <code>WELCOME</code> is sent <strong>before</strong> auth, so its <code>features=</code> also let a client shape the login/register form up front: <code>email-required</code> (set iff the network runs <code>require_email</code>, <a href="#s6-1">§6.1</a>) tells the client to collect — and require — an email at <code>REGISTER</code>. A network advertises <code>email-required</code> only when it also has a mailer configured.</p>
 </div>
 <hr>
 </div>
@@ -1126,10 +1129,10 @@ appear in both references.</p>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>AUTH PASSWORD</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>AUTH PASSWORD &lt;account&gt; :&lt;password&gt;</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>AUTH PASSWORD &lt;identifier&gt; :&lt;password&gt;</code></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">—</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">→ <code>WELCOME</code> | <code>AUTH-FAILED</code> (constant-time, uniform).</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>@label=a1 AUTH PASSWORD ada :correct horse battery staple</code> → <code>@label=a1 WELCOME test.example</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">The <code>&lt;identifier&gt;</code> is the account name <strong>or</strong> a registered email (the server resolves it, so a vanity name can change later without breaking sign-in). An email that maps to no account, or a malformed name, fails identically to a wrong password — same code, same timing envelope. → <code>WELCOME</code> | <code>AUTH-FAILED</code> (constant-time, uniform).</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>@label=a1 AUTH PASSWORD <a href="mailto:ada@example.com">ada@example.com</a> :correct horse battery staple</code> → <code>@label=a1 WELCOME test.example</code></p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><code>AUTH KEY</code></p></td>
@@ -5026,7 +5029,7 @@ index; event shapes are normative in the cited section.</p>
 <div id="footer">
 <div id="footer-text">
 Version 0.13<br>
-Last updated 2026-07-28 23:39:51 +0200
+Last updated 2026-07-29 01:09:36 +0200
 </div>
 </div>
 </body>

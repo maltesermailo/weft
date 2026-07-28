@@ -162,7 +162,9 @@ Any command MAY carry `label=<opaque ≤64 B>`. Every *direct* response — succ
 C: HELLO weft/1
 S: @features=media,backfill,voice,irc-gw WELCOME test.example :Willkommen
 ----
-`features=`: `media`, `voice`, `e2ee`, `backfill`, `irc-gw`, `presence`. Unknown flags ignored. Version mismatch: `ERR UNSUPPORTED`, close.
+`features=`: `media`, `voice`, `e2ee`, `backfill`, `irc-gw`, `presence`, `email-required`. Unknown flags ignored. Version mismatch: `ERR UNSUPPORTED`, close.
+
+The negotiation `WELCOME` is sent *before* auth, so its `features=` also let a client shape the login/register form up front: `email-required` (set iff the network runs `require_email`, <<s6-1,§6.1>>) tells the client to collect — and require — an email at `REGISTER`. A network advertises `email-required` only when it also has a mailer configured.
 
 '''
 
@@ -251,7 +253,7 @@ Every command accepts a `label` tag (<<s3-5,§3.5>>); the direct response — in
 
 | `HELLO` | `HELLO <version>` | — | Negotiates the protocol (<<s3-6,§3.6>>). | `HELLO weft/1` → `@features=media,backfill WELCOME test.example :Willkommen`
 | `REGISTER` | `REGISTER <account> [<email>] :<password>` | config | Password ≥ 12 B; needs `registration: open` else `FORBIDDEN`. Registration doubles as auth. The optional `<email>` is recorded as a *pending* verification claim (<<s10-5,§10.5>> — verify-later: the account works at once, `VERIFY EMAIL` confirms whenever) and MUST be unique per account. A network with `require_email` set REQUIRES it from native clients — the WEFT-IRC gateway (<<s17,§17>>) is exempt. → `WELCOME` \| `CONFLICT` (name *or* email taken) \| `POLICY` (short password / email required) \| `MALFORMED` (bad email). | `@label=r1 REGISTER ada ada@example.com :correct horse battery staple` → `@label=r1 WELCOME test.example`
-| `AUTH PASSWORD` | `AUTH PASSWORD <account> :<password>` | — | → `WELCOME` \| `AUTH-FAILED` (constant-time, uniform). | `@label=a1 AUTH PASSWORD ada :correct horse battery staple` → `@label=a1 WELCOME test.example`
+| `AUTH PASSWORD` | `AUTH PASSWORD <identifier> :<password>` | — | The `<identifier>` is the account name *or* a registered email (the server resolves it, so a vanity name can change later without breaking sign-in). An email that maps to no account, or a malformed name, fails identically to a wrong password — same code, same timing envelope. → `WELCOME` \| `AUTH-FAILED` (constant-time, uniform). | `@label=a1 AUTH PASSWORD ada@example.com :correct horse battery staple` → `@label=a1 WELCOME test.example`
 | `AUTH KEY` | `AUTH KEY <account> <b64-ed25519-pubkey>` | — | Begins device-key challenge-response (flow below). → `CHALLENGE`. | `AUTH KEY ada <b64-pubkey>` → `CHALLENGE <b64-nonce-32B>`
 | `AUTH PROOF` | `AUTH PROOF <b64-sig>` | — | Answers the challenge, signing `nonce ‖ network-name`. → `@attestation=<b64> WELCOME` \| `AUTH-FAILED`. | `AUTH PROOF <b64-sig>` → `@attestation=<b64> WELCOME test.example`
 | `AUTH ENROLL` | `AUTH ENROLL <b64-pubkey>` | authed | Adds a device to the current account. → `@attestation=<b64> WELCOME`. | `AUTH ENROLL <b64-pubkey>` → `@attestation=<b64> WELCOME test.example`

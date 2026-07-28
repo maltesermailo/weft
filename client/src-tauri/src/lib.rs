@@ -39,14 +39,25 @@ async fn connect(
     host: String,
     account: String,
     password: String,
+    email: Option<String>,
     mode: String,
 ) -> Result<(), String> {
-    account
-        .parse::<weft_proto::Account>()
-        .map_err(|_| "invalid account name (a-z 0-9 - _ .)".to_string())?;
     let parsed_mode = weft::Mode::parse(&mode)?;
+
+    // Only REGISTER and device-key auth need a syntactically valid account name.
+    // A password LOGIN identifier may be a registered email (§6.1), and a probe
+    // (§3.6 handshake-only) may run before the user has typed anything — both are
+    // left to the server to resolve.
+    if matches!(parsed_mode, weft::Mode::Register | weft::Mode::Key) {
+        account
+            .parse::<weft_proto::Account>()
+            .map_err(|_| "invalid account name (a-z 0-9 - _ .)".to_string())?;
+    }
+
     let (addr, server_name) = weft::resolve(&host).await?;
     let password = weft::password_or_default(&password);
+    // An empty email means "not supplied" — the REGISTER line omits it.
+    let email = email.filter(|e| !e.trim().is_empty());
 
     // Device-key login loads the stored keypair up front (secret never leaves
     // the backend); a missing key fails clearly.
@@ -69,6 +80,7 @@ async fn connect(
         server_name,
         account,
         password,
+        email,
         parsed_mode,
         device,
         allow_insecure,

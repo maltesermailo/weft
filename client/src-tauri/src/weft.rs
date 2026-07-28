@@ -41,6 +41,7 @@ pub async fn run_connection(
     server_name: String,
     account: String,
     password: String,
+    email: Option<String>,
     mode: Mode,
     device: Option<Keypair>,
     allow_insecure: bool,
@@ -81,7 +82,7 @@ pub async fn run_connection(
             line = stream.recv_line() => match line {
                 Ok(Some(raw)) => {
                     let mut close = false;
-                    if let Some(out) = on_line(&sink, &account, &password, mode, device.as_ref(), &mut net_name, &mut phase, &mut in_batch, &mut close, &raw) {
+                    if let Some(out) = on_line(&sink, &account, &password, email.as_deref(), mode, device.as_ref(), &mut net_name, &mut phase, &mut in_batch, &mut close, &raw) {
                         if send(&mut stream, &sink, &out).await.is_err() { return; }
                     }
                     if close {

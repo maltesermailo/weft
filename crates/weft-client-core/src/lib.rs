@@ -25,6 +25,11 @@ pub enum Mode {
     Register,
     /// AUTH KEY/PROOF with an enrolled device key — passwordless.
     Key,
+    /// Handshake only: send HELLO, read the negotiation WELCOME to learn the
+    /// server's `features=` (notably `email-required`), emit `ServerInfo`, and
+    /// stop — never authenticate. The connect screen uses it to decide whether
+    /// to show the REGISTER email field before the user submits credentials.
+    Probe,
 }
 
 impl Mode {
@@ -33,6 +38,7 @@ impl Mode {
             "login" => Ok(Mode::Login),
             "register" => Ok(Mode::Register),
             "key" => Ok(Mode::Key),
+            "probe" => Ok(Mode::Probe),
             other => Err(format!("unknown mode {other:?}")),
         }
     }
@@ -45,6 +51,15 @@ pub enum ClientEvent {
     Connected {
         network: String,
         account: String,
+    },
+    /// The negotiation WELCOME, surfaced before auth. Carries what the connect
+    /// screen needs to shape the login/register form for this homeserver —
+    /// notably whether an email is required at REGISTER (`features=email-required`,
+    /// §3.6). Emitted on the first WELCOME of every connection, including a
+    /// `Mode::Probe` handshake that stops right here.
+    ServerInfo {
+        network: String,
+        email_required: bool,
     },
     /// Login/registration failed — the connect screen stays up with `reason`.
     AuthFailed {
@@ -511,6 +526,7 @@ pub fn on_line<E: EventSink>(
     sink: &E,
     account: &str,
     password: &str,
+    email: Option<&str>,
     mode: Mode,
     device: Option<&Keypair>,
     net_name: &mut String,
@@ -530,12 +546,33 @@ pub fn on_line<E: EventSink>(
     };
     // §3.3 handshake progression — the auth verb depends on the chosen mode.
     match (*phase, &reply.event) {
-        (Phase::HelloSent, Event::Welcome { network, .. }) => {
-            *phase = Phase::AuthSent;
+        (
+            Phase::HelloSent,
+            Event::Welcome {
+                network, features, ..
+            },
+        ) => {
             *net_name = network.to_string(); // needed to sign the key challenge
+                                             // Surface the server's shape before we authenticate (§3.6).
+            sink.emit(ClientEvent::ServerInfo {
+                network: network.to_string(),
+                email_required: features.iter().any(|f| f == "email-required"),
+            });
+            // A probe stops here — it only wanted the WELCOME. The binding tears
+            // the connection down once it has the `ServerInfo`.
+            if mode == Mode::Probe {
+                return None;
+            }
+            *phase = Phase::AuthSent;
             return Some(match mode {
                 Mode::Login => format!("AUTH PASSWORD {account} :{password}"),
-                Mode::Register => format!("REGISTER {account} :{password}"),
+                Mode::Register => match email {
+                    // §6.1: `REGISTER <account> [<email>] :<password>`.
+                    Some(email) if !email.is_empty() => {
+                        format!("REGISTER {account} {email} :{password}")
+                    }
+                    _ => format!("REGISTER {account} :{password}"),
+                },
                 Mode::Key => match device {
                     Some(kp) => format!("AUTH KEY {account} {}", kp.public().to_b64()),
                     None => {
@@ -546,6 +583,7 @@ pub fn on_line<E: EventSink>(
                         return None;
                     }
                 },
+                Mode::Probe => return None, // handled above, before auth
             });
         }
         // §6.1 device-key challenge → sign `nonce ‖ network` and prove.
@@ -2341,6 +2379,7 @@ mod tests {
             &sink,
             "ada",
             "",
+            None,
             Mode::Login,
             None,
             &mut net,

@@ -81,10 +81,11 @@ function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<any> {
   return ensureWasm().then((c) => c.invoke(cmd, args));
 }
 
-export type Mode = "login" | "register" | "key";
+export type Mode = "login" | "register" | "key" | "probe";
 
 export type WeftEvent =
   | { kind: "connected"; network: string; account: string }
+  | { kind: "server-info"; network: string; email_required: boolean }
   | { kind: "auth-failed"; reason: string }
   | { kind: "media-token"; token: string }
   | { kind: "backfill"; token: string }
@@ -250,7 +251,13 @@ export type WeftEvent =
   | { kind: "closed"; reason: string }
   | { kind: "raw"; line: string };
 
-export async function connect(host: string, account: string, password: string, mode: Mode) {
+export async function connect(
+  host: string,
+  account: string,
+  password: string,
+  mode: Mode,
+  email?: string,
+) {
   // The desktop page is served from the app bundle, not by the network, so the
   // §13 media endpoints need an explicit origin before any upload or fetch.
   // Doing it here means every call site gets it, connect and reconnect alike.
@@ -258,7 +265,47 @@ export async function connect(host: string, account: string, password: string, m
     const cfg = await clientConfig().catch(() => null);
     setMediaBase(host, cfg?.media_base ?? null);
   }
-  return invoke("connect", { host, account, password, mode });
+  return invoke("connect", { host, account, password, mode, email: email ?? null });
+}
+
+/// What a `probe` handshake learns about a homeserver before the user submits
+/// credentials — currently just whether REGISTER requires an email (§3.6).
+export type ServerInfo = { network: string; emailRequired: boolean };
+
+/// §3.6 probe a homeserver: run the HELLO→WELCOME handshake only (no auth) to
+/// read its advertised `features=`, then tear the connection down. Lets the
+/// connect screen show/require the REGISTER email field for this server. Rejects
+/// on connection failure or if no WELCOME arrives within the timeout.
+export function probe(host: string, timeoutMs = 8000): Promise<ServerInfo> {
+  return new Promise<ServerInfo>((resolve, reject) => {
+    let un: UnlistenFn | null = null;
+    let done = false;
+    const finish = (fn: () => void) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      un?.();
+      // A probe never authenticates; drop the handshake-only connection.
+      disconnect().catch(() => {});
+      fn();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(`no response from ${host}`))),
+      timeoutMs,
+    );
+    onWeft((e) => {
+      if (e.kind === "server-info")
+        finish(() => resolve({ network: e.network, emailRequired: e.email_required }));
+      else if (e.kind === "closed" || e.kind === "auth-failed")
+        finish(() => reject(new Error(e.reason)));
+    })
+      .then((fn) => {
+        un = fn;
+        if (done) fn(); // resolved synchronously before the listener attached
+        else connect(host, "", "", "probe").catch((err) => finish(() => reject(err)));
+      })
+      .catch(reject);
+  });
 }
 
 export type ClientConfig = {

@@ -68,6 +68,8 @@ struct Conn {
     net_name: String,
     account: String,
     password: String,
+    /// §6.1 optional REGISTER email (empty = none), when the server requires it.
+    email: String,
     mode: Mode,
     in_batch: bool,
     buffered: Vec<String>,
@@ -94,6 +96,7 @@ impl Conn {
             &self.sink,
             &self.account,
             &self.password,
+            Some(self.email.as_str()),
             self.mode,
             None, // device-key auth is P4 (browser key storage)
             &mut self.net_name,
@@ -182,7 +185,13 @@ impl WeftClient {
             // ---- lifecycle ----
             "connect" => {
                 return self
-                    .connect(&arg("host"), arg("account"), arg("password"), &arg("mode"))
+                    .connect(
+                        &arg("host"),
+                        arg("account"),
+                        arg("password"),
+                        opt("email").unwrap_or_default(),
+                        &arg("mode"),
+                    )
                     .map(|_| JsValue::UNDEFINED);
             }
             "disconnect" => {
@@ -447,6 +456,7 @@ impl WeftClient {
         host: &str,
         account: String,
         password: String,
+        email: String,
         mode: &str,
     ) -> Result<(), String> {
         let mode = Mode::parse(mode)?;
@@ -462,6 +472,7 @@ impl WeftClient {
             net_name: String::new(),
             account,
             password,
+            email,
             mode,
             in_batch: false,
             buffered: Vec::new(),
