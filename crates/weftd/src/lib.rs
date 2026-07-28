@@ -195,33 +195,42 @@ fn build_voice_sfu(_cfg: &config::Voice) -> Option<Arc<dyn weft_core::VoiceBacke
     None
 }
 
-/// The `banned-words.toml` schema: `words = ["...", "..."]`.
+/// The `banned-words.toml` schema — two optional categories:
+/// `words_substring = [...]` (case-insensitive substring) and
+/// `words_regex = [...]` (case-insensitive regex).
 #[derive(serde::Deserialize)]
 struct BannedWordsFile {
     #[serde(default)]
-    words: Vec<String>,
+    words_substring: Vec<String>,
+    #[serde(default)]
+    words_regex: Vec<String>,
 }
 
-/// §6.7 load the banned-word list from `banned_words_file`, if configured. A
-/// missing/unreadable/malformed file degrades to no filter (with a warning)
-/// rather than aborting boot — the filter is best-effort moderation, not a
-/// security control.
-fn load_banned_words(path: Option<&str>) -> Vec<String> {
+/// §6.7 load the banned-word lists from `banned_words_file`, if configured,
+/// returning `(substrings, regexes)`. A missing/unreadable/malformed file
+/// degrades to no filter (with a warning) rather than aborting boot — the filter
+/// is best-effort moderation, not a security control.
+fn load_banned_words(path: Option<&str>) -> (Vec<String>, Vec<String>) {
     let Some(path) = path else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     match fs::read_to_string(path) {
         Ok(raw) => match toml::from_str::<BannedWordsFile>(&raw) {
             Ok(f) => {
-                info!(count = f.words.len(), path, "loaded banned-words filter");
-                f.words
+                info!(
+                    substrings = f.words_substring.len(),
+                    regexes = f.words_regex.len(),
+                    path,
+                    "loaded banned-words filter"
+                );
+                (f.words_substring, f.words_regex)
             }
             Err(e) => {
                 warn!(
                     path,
                     "banned-words file failed to parse; filter disabled: {e}"
                 );
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         },
         Err(e) => {
@@ -229,7 +238,7 @@ fn load_banned_words(path: Option<&str>) -> Vec<String> {
                 path,
                 "banned-words file could not be read; filter disabled: {e}"
             );
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     }
 }
@@ -359,7 +368,8 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         }
     };
     // §6.7 banned-word filter for new usernames + namespace vanities.
-    let banned_words = load_banned_words(config.banned_words_file.as_deref());
+    let (banned_substrings, banned_regexes) =
+        load_banned_words(config.banned_words_file.as_deref());
     let (ctx, channels, mut tasks, mut admin_router) = match config.storage.backend {
         config::StorageBackend::Memory => {
             boot(
@@ -378,7 +388,8 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 config.admin.enabled,
                 config.admin.delete_grace_days,
                 config.support_account.clone(),
-                banned_words.clone(),
+                banned_substrings.clone(),
+                banned_regexes.clone(),
             )
             .await?
         }
@@ -408,7 +419,8 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 config.admin.enabled,
                 config.admin.delete_grace_days,
                 config.support_account.clone(),
-                banned_words.clone(),
+                banned_substrings.clone(),
+                banned_regexes.clone(),
             )
             .await?
         }
@@ -790,7 +802,8 @@ async fn boot<S>(
     admin_enabled: bool,
     admin_delete_grace_days: u64,
     support_account: Option<String>,
-    banned_words: Vec<String>,
+    banned_substrings: Vec<String>,
+    banned_regexes: Vec<String>,
 ) -> anyhow::Result<(
     Arc<ServerCtx>,
     Vec<(weft_proto::ChannelName, weft_proto::RetentionPolicy)>,
@@ -886,7 +899,7 @@ where
             // §11 inbound bridge policy; peer *pinning* + the outbound dialer are M5d.
             federation,
         )
-        .with_banned_words(banned_words),
+        .with_banned_words(banned_substrings, banned_regexes),
     );
     let admin_router = admin_ingredients.map(|(secret, ops, network)| {
         let auth = weft_admin::auth::config(secret, ops);

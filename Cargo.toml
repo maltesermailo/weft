@@ -32,6 +32,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 ciborium = "0.2"
 base64 = "0.22"
 rand = "0.8"
+regex = "1"
 sha2 = "0.10"
 blake3 = "1"
 argon2 = "0.5"

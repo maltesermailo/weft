@@ -1,19 +1,27 @@
-# banned-words.toml — the username + namespace-vanity word filter (§6.7).
+# banned-words.toml — the username + namespace-vanity filter (§6.7).
 #
 # Point weftd at this file with `banned_words_file = "banned-words.toml"` in
-# weftd.toml. Each entry is matched **case-insensitively** as a **substring**:
-# an entry "admin" rejects "admin", "ADMIN", "netadmin", and "admins".
-#
-# Applies to NEW usernames (REGISTER) and NEW namespace vanities (NS CREATE).
-# Existing names are unaffected. Keep in mind the "Scunthorpe problem" —
-# substring matching can catch innocent names, so prefer specific words.
-words = [
-  # Reserved-looking identities you don't want impersonated:
+# weftd.toml. Applies to NEW usernames (REGISTER) and NEW namespace vanities
+# (NS CREATE); existing names are unaffected. Two categories, both optional and
+# both matched CASE-INSENSITIVELY:
+
+# `words_substring` — matched as a substring anywhere in the name. "admin"
+# rejects "admin", "ADMIN", "netadmin", "admins". Simple; watch the "Scunthorpe
+# problem" (substrings can catch innocent names) — prefer specific words.
+words_substring = [
   "admin",
   "operator",
   "moderator",
   "support",
   "official",
   "system",
-  # Add your own community's disallowed terms below.
+]
+
+# `words_regex` — Rust `regex` patterns (https://docs.rs/regex), compiled
+# case-insensitively. Use anchors (^ $) for whole-name matches; leave them off
+# to match anywhere. An invalid pattern is skipped with a log warning, not fatal.
+words_regex = [
+  '^mod[-_]?\d+$',   # "mod7", "mod-7", "mod_42" — impersonating staff
+  'gr[i1]ef',        # "grief", "gr1ef" — leetspeak evasion
+  '\bn[i1]gg',       # slur stems (add your community's list)
 ]

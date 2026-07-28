@@ -43,8 +43,9 @@ operators = []
 # support_account = "support"
 
 # §6.7 banned-word filter for new usernames (REGISTER) and namespace vanities
-# (NS CREATE). Point this at a TOML file with `words = ["...", ...]`; each entry
-# is a case-insensitive SUBSTRING match. A relative path resolves against the
+# (NS CREATE). Point this at a TOML file with two optional, case-insensitive
+# categories: `words_substring = [...]` (substring match) and
+# `words_regex = [...]` (Rust regex). A relative path resolves against the
 # process working directory. Unset = no filter. See the shipped banned-words.toml.
 # banned_words_file = "banned-words.toml"
 

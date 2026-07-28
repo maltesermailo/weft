@@ -176,8 +176,11 @@ pub struct ServerCtx {
     pub(crate) ns_creation_open: bool,
     pub(crate) ns_quota: u64,
     /// §6.7 moderation: lowercased substrings barred from new **usernames** and
-    /// **namespace vanities** (REGISTER + NS CREATE). Empty = no filter.
-    pub(crate) banned_words: Vec<String>,
+    /// **namespace vanities** (REGISTER + NS CREATE). Empty = no substring filter.
+    pub(crate) banned_substrings: Vec<String>,
+    /// §6.7 case-insensitive regex patterns barred from the same names. Compiled
+    /// at boot; invalid patterns are dropped with a warning. Empty = no regex filter.
+    pub(crate) banned_regexes: Vec<regex::Regex>,
     /// Operator accounts: they hold the network key's authority — every
     /// capability at `*` (§11.3). This is how the first admin exists;
     /// everyone else's caps chain from a GRANT.
@@ -491,7 +494,8 @@ impl ServerCtx {
             reports,
             ns_creation_open,
             ns_quota,
-            banned_words: Vec::new(),
+            banned_substrings: Vec::new(),
+            banned_regexes: Vec::new(),
             peers,
             netblocks,
             moderation,
@@ -756,25 +760,39 @@ impl ServerCtx {
         let _ = self.auto_bridge_tx.set(tx);
     }
 
-    /// §6.7 configure the banned-word filter for new usernames + namespace
-    /// vanities. Words are case-folded; matching is a case-insensitive substring.
-    pub fn with_banned_words(mut self, words: Vec<String>) -> Self {
-        self.banned_words = words
+    /// §6.7 configure the banned-name filter for new usernames + namespace
+    /// vanities. `substrings` match case-insensitively as substrings; `regexes`
+    /// are compiled case-insensitively (an invalid pattern is dropped + warned,
+    /// never a hard failure — the filter is best-effort moderation).
+    pub fn with_banned_words(mut self, substrings: Vec<String>, regexes: Vec<String>) -> Self {
+        self.banned_substrings = substrings
             .into_iter()
             .map(|w| w.trim().to_ascii_lowercase())
             .filter(|w| !w.is_empty())
             .collect();
+        self.banned_regexes = regexes
+            .into_iter()
+            .filter_map(|p| {
+                regex::RegexBuilder::new(p.trim())
+                    .case_insensitive(true)
+                    .build()
+                    .map_err(
+                        |e| tracing::warn!(pattern = %p, "invalid banned-word regex, skipped: {e}"),
+                    )
+                    .ok()
+            })
+            .collect();
         self
     }
 
-    /// True if `name` contains a banned word (case-insensitive substring). Used
-    /// to reject REGISTER usernames + NS CREATE vanities (§6.7).
+    /// True if `name` matches any banned substring (case-insensitive) or regex.
+    /// Used to reject REGISTER usernames + NS CREATE vanities (§6.7).
     pub(crate) fn name_is_banned(&self, name: &str) -> bool {
-        if self.banned_words.is_empty() {
-            return false;
-        }
         let lower = name.to_ascii_lowercase();
-        self.banned_words.iter().any(|w| lower.contains(w.as_str()))
+        self.banned_substrings
+            .iter()
+            .any(|w| lower.contains(w.as_str()))
+            || self.banned_regexes.iter().any(|re| re.is_match(name))
     }
 
     /// §11.10 hand a `FEDERATE` request to the dialer. `false` if auto-bridging

@@ -232,7 +232,7 @@ fn ctx_full_store(
 }
 
 /// A context with a §6.7 banned-word filter, for the register/ns-create tests.
-fn ctx_banned(words: &[&str]) -> Arc<ServerCtx> {
+fn ctx_banned(substrings: &[&str], regexes: &[&str]) -> Arc<ServerCtx> {
     let store = Arc::new(MemoryStore::default());
     let info = ServerInfo {
         network: "test.example".parse().unwrap(),
@@ -253,7 +253,10 @@ fn ctx_banned(words: &[&str]) -> Arc<ServerCtx> {
             10,
             weft_core::FederationConfig::default(),
         )
-        .with_banned_words(words.iter().map(|w| w.to_string()).collect()),
+        .with_banned_words(
+            substrings.iter().map(|w| w.to_string()).collect(),
+            regexes.iter().map(|w| w.to_string()).collect(),
+        ),
     )
 }
 
@@ -3431,22 +3434,30 @@ async fn ns_create_rejects_a_ulid_shaped_vanity() {
 
 #[tokio::test]
 async fn banned_words_block_usernames_and_ns_vanities() {
-    // §6.7 a configured banned word (case-insensitive substring) is refused in a
-    // new username and a new namespace vanity; clean names pass.
-    let ctx = ctx_banned(&["forbidden", "admin"]);
+    // §6.7 both filter categories apply to new usernames + namespace vanities:
+    // `words_substring` (case-insensitive substring) and `words_regex` (case-
+    // insensitive regex). Clean names pass.
+    let ctx = ctx_banned(&["admin"], &[r"^mod[-_]?\d+$", r"gr[i1]ef"]);
 
-    // REGISTER: "superadmin" contains "admin" → refused; "alice" is fine.
     let mut c = connect(&ctx);
     c.send("HELLO weft/1");
     assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+    // Substring: "superADMIN" contains "admin".
     c.send(&format!("@label=r REGISTER superADMIN :{PASSWORD}"));
     c.expect_err(ErrCode::Policy).await;
+    // Regex: "mod-7" matches `^mod[-_]?\d+$`.
+    c.send(&format!("@label=r2 REGISTER mod-7 :{PASSWORD}"));
+    c.expect_err(ErrCode::Policy).await;
+    // Regex with leetspeak class: "gr1efer" matches `gr[i1]ef`.
+    c.send(&format!("@label=r3 REGISTER gr1efer :{PASSWORD}"));
+    c.expect_err(ErrCode::Policy).await;
+    // A clean name registers.
     c.send(&format!("REGISTER alice :{PASSWORD}"));
     assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
 
-    // NS CREATE: a banned vanity is refused; a clean one succeeds.
+    // NS CREATE honors the same filter.
     let root = root_key_b64();
-    c.send(&format!("@root={root} NS CREATE forbiddenLand public"));
+    c.send(&format!("@root={root} NS CREATE mod_42 public"));
     c.expect_err(ErrCode::Policy).await;
     c.send(&format!("@root={root} NS CREATE friendly-place public"));
     assert!(matches!(c.recv().await.event, Event::NsMeta { .. }));

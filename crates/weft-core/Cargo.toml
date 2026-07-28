@@ -14,6 +14,7 @@ weft-crypto = { path = "../weft-crypto" }
 weft-store = { path = "../weft-store" }
 async-trait = { workspace = true } # dyn VoiceBackend (§16) — boxed-future port
 rand = { workspace = true }
+regex = { workspace = true } # §6.7 banned-word filter (regex patterns)
 tokio = { workspace = true }
 tokio-util = { workspace = true } # CancellationToken for graceful shutdown
 tracing = { workspace = true }
