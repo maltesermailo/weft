@@ -632,6 +632,35 @@ impl AccountStore for MemoryStore {
             .map(|record| record.password_phc.clone()))
     }
 
+    async fn set_password(
+        &self,
+        account: &Account,
+        password_phc: &str,
+    ) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        match inner.accounts.get_mut(account) {
+            Some(record) => {
+                record.password_phc = password_phc.to_string();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn account_by_email(&self, email: &str) -> Result<Option<Account>, StoreError> {
+        let want = email.to_lowercase();
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .accounts
+            .iter()
+            .find(|(_, r)| {
+                r.verifications
+                    .get("email")
+                    .is_some_and(|(subject, _)| subject.to_lowercase() == want)
+            })
+            .map(|(a, _)| a.clone()))
+    }
+
     async fn list_accounts(&self) -> Result<Vec<Account>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         let mut names: Vec<Account> = inner.accounts.keys().cloned().collect();

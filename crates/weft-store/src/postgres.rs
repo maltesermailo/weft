@@ -755,6 +755,33 @@ impl AccountStore for PgStore {
             .map_err(backend_err)
     }
 
+    async fn set_password(
+        &self,
+        account: &Account,
+        password_phc: &str,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query("UPDATE weft_accounts SET password_phc = $2 WHERE name = $1")
+            .bind(account.as_str())
+            .bind(password_phc)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn account_by_email(&self, email: &str) -> Result<Option<Account>, StoreError> {
+        let name: Option<String> = sqlx::query_scalar(
+            "SELECT account FROM weft_verifications \
+             WHERE kind = 'email' AND lower(subject) = lower($1) \
+             ORDER BY account LIMIT 1",
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        Ok(name.and_then(|n| n.parse().ok()))
+    }
+
     async fn list_accounts(&self) -> Result<Vec<Account>, StoreError> {
         let names: Vec<String> = sqlx::query_scalar("SELECT name FROM weft_accounts ORDER BY name")
             .fetch_all(&self.pool)

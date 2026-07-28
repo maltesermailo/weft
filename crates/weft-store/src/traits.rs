@@ -147,6 +147,18 @@ pub trait AccountStore: Send + Sync {
 
     async fn password_phc(&self, account: &Account) -> Result<Option<String>, StoreError>;
 
+    /// Replace an account's password hash (§6.1 password reset / change). Takes
+    /// an already-derived PHC string (hashing happens above the store, off the
+    /// runtime). False iff the account is unknown.
+    async fn set_password(&self, account: &Account, password_phc: &str)
+        -> Result<bool, StoreError>;
+
+    /// The account holding an email verification claim exactly equal to `email`
+    /// (case-insensitive), or `None`. Used to resolve a `RESET REQUEST` and to
+    /// enforce email uniqueness at REGISTER. Both verified and pending claims
+    /// count (an email is "in use" the moment it's registered).
+    async fn account_by_email(&self, email: &str) -> Result<Option<Account>, StoreError>;
+
     /// The account's immutable **ULID** (minted at register) — the stable
     /// capability-subject key, independent of the mutable handle. `None` if the
     /// account is unknown. Backends backfill a ULID for any pre-existing

@@ -564,6 +564,19 @@ pub enum Event {
         subject: String,
         state: VerifyState,
     },
+    /// `RESET-SENT <email>` (§6.1) — uniform acknowledgement of `RESET REQUEST`.
+    /// A one-time code was mailed **iff** the email belongs to an account; the
+    /// response is identical either way (anti-enumeration §2.2/§8), so the client
+    /// always shows "check your email".
+    ResetSent {
+        email: String,
+    },
+    /// `RESET-DONE <email>` (§6.1) — `RESET CONFIRM` succeeded; the password was
+    /// changed. The session stays UNAUTHED — the client now `AUTH`s with the new
+    /// password.
+    ResetDone {
+        email: String,
+    },
     /// `FRIEND <user@net> <state>` (social layer) — a friendship's state, from
     /// the recipient's view. Sent per relationship for `FRIENDS`, and pushed
     /// live on any change (a new `incoming` request, an `outgoing` we sent, or
@@ -1465,6 +1478,18 @@ impl Event {
                         .unwrap_or(VerifyState::Pending),
                 })
             }
+            "RESET-SENT" => {
+                let mut args = Args::new(line, "RESET-SENT");
+                Ok(Event::ResetSent {
+                    email: args.req("email")?.to_string(),
+                })
+            }
+            "RESET-DONE" => {
+                let mut args = Args::new(line, "RESET-DONE");
+                Ok(Event::ResetDone {
+                    email: args.req("email")?.to_string(),
+                })
+            }
             "FRIEND" => {
                 let mut args = Args::new(line, "FRIEND");
                 Ok(Event::Friend {
@@ -2296,6 +2321,8 @@ impl Event {
                 tags.insert("state".to_string(), state.to_string());
                 ("VERIFIED", vec![kind.clone(), subject.clone()], None)
             }
+            Event::ResetSent { email } => ("RESET-SENT", vec![email.clone()], None),
+            Event::ResetDone { email } => ("RESET-DONE", vec![email.clone()], None),
             Event::Friend { user, state } => {
                 ("FRIEND", vec![user.to_string(), state.to_string()], None)
             }
@@ -2405,6 +2432,28 @@ mod tests {
     fn round_trip(reply: &Reply) {
         let wire = reply.serialize().unwrap();
         assert_eq!(&Reply::parse(&wire).unwrap(), reply, "wire: {wire}");
+    }
+
+    #[test]
+    fn reset_events_round_trip() {
+        let sent = Reply::new(Event::ResetSent {
+            email: "ada@example.com".into(),
+        });
+        assert_eq!(sent.serialize().unwrap(), "RESET-SENT ada@example.com");
+        round_trip(&sent);
+        // The request ack echoes its label (§3.5).
+        round_trip(&Reply::with_label(
+            Event::ResetSent {
+                email: "ada@example.com".into(),
+            },
+            "r1",
+        ));
+
+        let done = Reply::new(Event::ResetDone {
+            email: "ada@example.com".into(),
+        });
+        assert_eq!(done.serialize().unwrap(), "RESET-DONE ada@example.com");
+        round_trip(&done);
     }
 
     #[test]

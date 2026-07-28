@@ -324,6 +324,17 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
     // list_channels() — channels created at runtime (M4) or by an earlier
     // boot survive on Postgres.
     let registration_open = config.registration == config::Registration::Open;
+    // §6.1 require-email is only meaningful with a deliverable reset code: refuse
+    // to boot if it's on without SMTP (mirrors the mailer-enable condition below).
+    let smtp_configured = config.smtp.enabled && !config.smtp.host.is_empty();
+    let require_email = config.require_email;
+    if require_email && !smtp_configured {
+        anyhow::bail!(
+            "require_email = true needs a configured [smtp] block — a password-reset \
+             code must be deliverable. Set [smtp] enabled = true with host + from, or \
+             turn require_email off."
+        );
+    }
     let maintenance = MaintenanceConfig {
         interval: std::time::Duration::from_secs(config.storage.maintenance_interval_secs),
         compact_after: std::time::Duration::from_secs(config.storage.compact_after_hours * 3600),
@@ -376,6 +387,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 info,
                 identity,
                 registration_open,
+                require_email,
                 dm_policy,
                 maintenance,
                 Arc::new(MemoryStore::default()),
@@ -407,6 +419,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 info,
                 identity,
                 registration_open,
+                require_email,
                 dm_policy,
                 maintenance,
                 Arc::new(store),
@@ -786,6 +799,7 @@ async fn boot<S>(
     info: ServerInfo,
     identity: Keypair,
     registration_open: bool,
+    require_email: bool,
     dm_policy: weft_proto::RetentionPolicy,
     maintenance: MaintenanceConfig,
     store: Arc<S>,
@@ -899,7 +913,8 @@ where
             // §11 inbound bridge policy; peer *pinning* + the outbound dialer are M5d.
             federation,
         )
-        .with_banned_words(banned_substrings, banned_regexes),
+        .with_banned_words(banned_substrings, banned_regexes)
+        .with_require_email(require_email),
     );
     let admin_router = admin_ingredients.map(|(secret, ops, network)| {
         let auth = weft_admin::auth::config(secret, ops);

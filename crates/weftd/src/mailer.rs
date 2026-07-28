@@ -18,8 +18,8 @@ pub struct LogMailer;
 
 #[async_trait::async_trait]
 impl Mailer for LogMailer {
-    async fn send_code(&self, address: &str, code: &str) {
-        info!(%address, %code, "verification code (no SMTP configured — dev log only)");
+    async fn send_code(&self, address: &str, code: &str, purpose: &str) {
+        info!(%address, %code, %purpose, "one-time code (no SMTP configured — dev log only)");
     }
 }
 
@@ -60,25 +60,27 @@ impl SmtpMailer {
 
 #[async_trait::async_trait]
 impl Mailer for SmtpMailer {
-    async fn send_code(&self, address: &str, code: &str) {
+    async fn send_code(&self, address: &str, code: &str, purpose: &str) {
         let to: Mailbox = match address.parse() {
             Ok(mbox) => mbox,
             Err(e) => {
-                warn!(%address, "verification email recipient rejected: {e}");
+                warn!(%address, "code email recipient rejected: {e}");
                 return;
             }
         };
 
+        // `purpose` names the flow ("verification" / "password reset") so the
+        // subject + body read correctly for whichever code this is.
         let email = match Message::builder()
             .from(self.from.clone())
             .to(to)
-            .subject("Your verification code")
+            .subject(format!("Your {purpose} code"))
             .body(format!(
-                "Your verification code is: {code}\n\nIt expires in 15 minutes."
+                "Your {purpose} code is: {code}\n\nIt expires in 15 minutes."
             )) {
             Ok(email) => email,
             Err(e) => {
-                warn!("building verification email failed: {e}");
+                warn!("building {purpose} email failed: {e}");
                 return;
             }
         };

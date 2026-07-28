@@ -21,6 +21,17 @@ motd = "Welcome to weft.example.com"
 # `closed` — REGISTER is refused; provision accounts out of band.
 registration = "open"
 
+# §6.1 require a contact email at REGISTER (verify-later, §10.5): the account
+# works immediately, and `VERIFY EMAIL` confirms the address whenever the user
+# gets to it. Providing an email also enables **password reset** (a typed code
+# mailed via `RESET REQUEST` / `RESET CONFIRM`). Emails are unique per account.
+#
+# Turning this ON requires a working [smtp] block below — a reset code must be
+# deliverable — or weftd refuses to boot. The WEFT-IRC gateway is exempt: it
+# auto-registers emailless accounts, which simply can't password-reset.
+# Default false.
+# require_email = true
+
 # Operator accounts hold EVERY capability at `*` — the network-key authority
 # that bootstraps the whole grant chain (§11.3), and what unlocks the client's
 # Federation panel.

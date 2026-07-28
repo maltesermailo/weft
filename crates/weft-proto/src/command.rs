@@ -94,8 +94,15 @@ impl NsInfoKind {
 pub enum Command {
     /// `HELLO <version>` (§3.6).
     Hello { version: String },
-    /// `REGISTER <account> :<password>` (§6.1).
-    Register { account: Account, password: String },
+    /// `REGISTER <account> [<email>] :<password>` (§6.1). The optional middle
+    /// param is a contact email (verify-later, §10.5); a network with
+    /// `require_email` on refuses REGISTER without it (the WEFT-IRC gateway,
+    /// which auto-registers, is exempt).
+    Register {
+        account: Account,
+        email: Option<String>,
+        password: String,
+    },
     /// `AUTH PASSWORD <account> :<password>`.
     AuthPassword { account: Account, password: String },
     /// `AUTH KEY <account> <b64-ed25519-pubkey>` — starts challenge-response.
@@ -104,6 +111,17 @@ pub enum Command {
     AuthProof { signature: String },
     /// `AUTH ENROLL <b64-pubkey>` — add a device while authed.
     AuthEnroll { pubkey: String },
+    /// `RESET REQUEST <email>` (§6.1) — ask for a password-reset code, mailed to
+    /// `email` if it belongs to an account. Anti-enumeration: the response is
+    /// uniform whether or not the email is known. Valid only while UNAUTHED.
+    ResetRequest { email: String },
+    /// `RESET CONFIRM <email> <code> :<new-password>` (§6.1) — set a new password
+    /// with the one-time code from `RESET REQUEST`. Valid only while UNAUTHED.
+    ResetConfirm {
+        email: String,
+        code: String,
+        password: String,
+    },
     /// `QUIT [:reason]`.
     Quit { reason: Option<String> },
     /// `PING [token]` (§3.4).
@@ -774,10 +792,34 @@ impl Command {
             }
             "REGISTER" => {
                 let mut args = Args::new(line, "REGISTER");
+                // account is the first middle param; an optional second middle
+                // param is the contact email (`REGISTER <acct> [<email>] :<pw>`).
+                let account = args.req("account")?.parse()?;
+                let email = args.opt().map(str::to_string);
                 Ok(Command::Register {
-                    account: args.req("account")?.parse()?,
+                    account,
+                    email,
                     password: args.trailing_req("password")?.to_string(),
                 })
+            }
+            "RESET" => {
+                let mut args = Args::new(line, "RESET");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "REQUEST" => Ok(Command::ResetRequest {
+                        email: args.req("email")?.to_string(),
+                    }),
+                    "CONFIRM" => Ok(Command::ResetConfirm {
+                        email: args.req("email")?.to_string(),
+                        code: args.req("code")?.to_string(),
+                        password: args.trailing_req("password")?.to_string(),
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "RESET",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
             }
             "AUTH" => {
                 let mut args = Args::new(line, "AUTH");
@@ -1937,9 +1979,29 @@ impl Command {
         let mut tags = Tags::new();
         let (verb, params, trailing): (&str, Vec<String>, Option<String>) = match self {
             Command::Hello { version } => ("HELLO", vec![version.clone()], None),
-            Command::Register { account, password } => (
-                "REGISTER",
-                vec![account.to_string()],
+            Command::Register {
+                account,
+                email,
+                password,
+            } => {
+                // Emit the email only when present, keeping the bare
+                // `REGISTER <acct> :<pw>` form byte-for-byte round-trippable.
+                let mut params = vec![account.to_string()];
+                if let Some(email) = email {
+                    params.push(email.clone());
+                }
+                ("REGISTER", params, Some(password.clone()))
+            }
+            Command::ResetRequest { email } => {
+                ("RESET", vec!["REQUEST".to_string(), email.clone()], None)
+            }
+            Command::ResetConfirm {
+                email,
+                code,
+                password,
+            } => (
+                "RESET",
+                vec!["CONFIRM".to_string(), email.clone(), code.clone()],
                 Some(password.clone()),
             ),
             Command::AuthPassword { account, password } => (
@@ -2798,12 +2860,66 @@ mod tests {
     fn register_keeps_spaces_in_password() {
         let request = Request::new(Command::Register {
             account: "ada".parse().unwrap(),
+            email: None,
+            password: "correct horse battery".into(),
+        });
+        round_trip(&request);
+        // No email → the bare form, byte-for-byte.
+        assert_eq!(
+            request.serialize().unwrap(),
+            "REGISTER ada :correct horse battery"
+        );
+    }
+
+    #[test]
+    fn register_with_email_round_trips() {
+        let request = Request::new(Command::Register {
+            account: "ada".parse().unwrap(),
+            email: Some("ada@example.com".into()),
             password: "correct horse battery".into(),
         });
         round_trip(&request);
         assert_eq!(
             request.serialize().unwrap(),
-            "REGISTER ada :correct horse battery"
+            "REGISTER ada ada@example.com :correct horse battery"
+        );
+        // The email is the optional second middle param.
+        assert_eq!(
+            parse("REGISTER ada ada@example.com :hunter2hunter2"),
+            Command::Register {
+                account: "ada".parse().unwrap(),
+                email: Some("ada@example.com".into()),
+                password: "hunter2hunter2".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn reset_flow_round_trips() {
+        round_trip(&Request::new(Command::ResetRequest {
+            email: "ada@example.com".into(),
+        }));
+        let confirm = Request::new(Command::ResetConfirm {
+            email: "ada@example.com".into(),
+            code: "123456".into(),
+            password: "brand new passphrase".into(),
+        });
+        round_trip(&confirm);
+        assert_eq!(
+            confirm.serialize().unwrap(),
+            "RESET CONFIRM ada@example.com 123456 :brand new passphrase"
+        );
+    }
+
+    #[test]
+    fn bad_reset_subcommand_is_typed_error() {
+        assert_eq!(
+            Request::parse("RESET TELEPATHY ada@example.com"),
+            Err(ParseError::BadParam {
+                verb: "RESET",
+                what: "subcommand",
+                value: "TELEPATHY".into()
+            })
         );
     }
 

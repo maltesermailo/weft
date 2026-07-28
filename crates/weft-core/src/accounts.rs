@@ -57,6 +57,29 @@ impl Accounts {
         self.store.account_ulid(account).await
     }
 
+    /// §6.1 password reset: hash `password` (on the blocking pool, like
+    /// [`register`](Self::register)) and replace the stored hash. False iff the
+    /// account is unknown.
+    pub async fn set_password(
+        &self,
+        account: &Account,
+        password: &str,
+    ) -> Result<bool, StoreError> {
+        let password = password.to_owned();
+        let phc =
+            tokio::task::spawn_blocking(move || PasswordHash::new(&password).as_phc().to_owned())
+                .await
+                .map_err(|e| StoreError::Backend(format!("argon2 task: {e}")))?;
+
+        self.store.set_password(account, &phc).await
+    }
+
+    /// §6.1 the account holding email `email` (case-insensitive), or `None` —
+    /// resolves a `RESET REQUEST` and enforces REGISTER email uniqueness.
+    pub async fn account_by_email(&self, email: &str) -> Result<Option<Account>, StoreError> {
+        self.store.account_by_email(email).await
+    }
+
     /// WC7: whether the account is suspended (blocked from authenticating).
     pub async fn is_suspended(&self, account: &Account) -> Result<bool, StoreError> {
         self.store.is_suspended(account).await

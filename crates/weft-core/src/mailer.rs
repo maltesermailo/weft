@@ -13,6 +13,9 @@ use async_trait::async_trait;
 /// impl's to log — the pending claim stands and the user can re-request.
 #[async_trait]
 pub trait Mailer: Send + Sync {
-    /// Deliver the one-time `code` to `address` (a `VERIFY EMAIL` confirmation).
-    async fn send_code(&self, address: &str, code: &str);
+    /// Deliver the one-time `code` to `address`. `purpose` is a short human noun
+    /// naming the flow (e.g. `"verification"`, `"password reset"`) so the mail
+    /// subject/body read correctly for each — the same code plumbing serves both
+    /// `VERIFY EMAIL` (§10.5) and `RESET REQUEST` (§6.1).
+    async fn send_code(&self, address: &str, code: &str, purpose: &str);
 }

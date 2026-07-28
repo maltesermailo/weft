@@ -3,12 +3,16 @@
 use super::*;
 
 impl<S: ControlStream> Session<S> {
-    /// §6.1 REGISTER: gated on config, password ≥ 12 B, unique name.
-    /// Success is also authentication (→ WELCOME → READY).
+    /// §6.1 REGISTER: gated on config, password ≥ 12 B, unique name, and — when
+    /// the network sets `require_email` — a valid, unused contact email (stored
+    /// as a pending §10.5 claim: the account works immediately, verification is
+    /// a later step). The email also powers password reset, so it must be unique
+    /// whenever supplied. Success is also authentication (→ WELCOME → READY).
     pub(super) async fn on_register(
         &mut self,
         label: Option<String>,
         account: Account,
+        email: Option<&str>,
         password: &str,
     ) -> io::Result<Flow> {
         if !self.ctx.registration_open {
@@ -37,6 +41,46 @@ impl<S: ControlStream> Session<S> {
                 .await?;
             return Ok(Flow::Continue);
         }
+
+        // §6.1 email policy. Gateways (WEFT-IRC) auto-register emailless and are
+        // exempt; a native client on a `require_email` network must supply one.
+        match email {
+            Some(email) => {
+                if !crate::session::verify::is_plausible_email(email) {
+                    self.send_err(label, ErrCode::Malformed, None, "invalid email address")
+                        .await?;
+                    return Ok(Flow::Continue);
+                }
+                // Uniqueness: reset resolves an email → one account, so a reused
+                // address is a CONFLICT (same code as a taken name).
+                match self.ctx.accounts.account_by_email(email).await {
+                    Ok(Some(_)) => {
+                        self.send_err(
+                            label,
+                            ErrCode::Conflict,
+                            None,
+                            "that email is already registered",
+                        )
+                        .await?;
+                        return Ok(Flow::Continue);
+                    }
+                    Ok(None) => {}
+                    Err(e) => return self.internal(label, &e).await,
+                }
+            }
+            None if self.ctx.require_email && !self.gateway => {
+                self.send_err(
+                    label,
+                    ErrCode::Policy,
+                    None,
+                    "an email address is required to register on this network",
+                )
+                .await?;
+                return Ok(Flow::Continue);
+            }
+            None => {}
+        }
+
         match self.ctx.accounts.register(&account, password).await {
             Ok(crate::accounts::RegisterOutcome::Exists) => {
                 self.send_err(label, ErrCode::Conflict, None, "account name is taken")
@@ -44,6 +88,21 @@ impl<S: ControlStream> Session<S> {
                 Ok(Flow::Continue)
             }
             Ok(crate::accounts::RegisterOutcome::Created) => {
+                // Record the contact email as a pending claim (verify-later): the
+                // account is usable now; VERIFY EMAIL confirms it whenever.
+                if let Some(email) = email {
+                    if let Err(e) = self
+                        .ctx
+                        .accounts
+                        .upsert_verification(&account, "email", email)
+                        .await
+                    {
+                        // The account exists; a failed claim write shouldn't undo
+                        // it. Log and continue — the user can VERIFY EMAIL later.
+                        error!(%account, "recording register email claim failed: {e}");
+                    }
+                }
+
                 self.welcome_authed(label, account, None).await
             }
             Err(e) => self.internal(label, &e).await,

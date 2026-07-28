@@ -181,6 +181,11 @@ pub struct ServerCtx {
     /// §6.7 case-insensitive regex patterns barred from the same names. Compiled
     /// at boot; invalid patterns are dropped with a warning. Empty = no regex filter.
     pub(crate) banned_regexes: Vec<regex::Regex>,
+    /// §6.1 whether REGISTER must carry a contact email (verify-later, §10.5).
+    /// Off by default; weftd only turns it on when SMTP is configured (a reset
+    /// code has to be deliverable). The WEFT-IRC gateway is exempt — it
+    /// auto-registers emailless accounts, which simply can't password-reset.
+    pub(crate) require_email: bool,
     /// Operator accounts: they hold the network key's authority — every
     /// capability at `*` (§11.3). This is how the first admin exists;
     /// everyone else's caps chain from a GRANT.
@@ -495,6 +500,7 @@ impl ServerCtx {
             ns_creation_open,
             ns_quota,
             banned_substrings: Vec::new(),
+            require_email: false,
             banned_regexes: Vec::new(),
             peers,
             netblocks,
@@ -570,13 +576,14 @@ impl ServerCtx {
         address: &str,
         code: String,
         expiry_ms: u64,
+        purpose: &str,
     ) {
         self.verify_codes.lock().expect("verify lock").insert(
             (account.clone(), kind.to_string()),
             (code.clone(), expiry_ms),
         );
         if let Some(mailer) = self.mailer.get() {
-            mailer.send_code(address, &code).await;
+            mailer.send_code(address, &code, purpose).await;
         }
     }
 
@@ -782,6 +789,16 @@ impl ServerCtx {
                     .ok()
             })
             .collect();
+        self
+    }
+
+    /// §6.1 require a contact email at REGISTER (verify-later). weftd only turns
+    /// this on when SMTP is configured — see [`Session`](crate)'s register path
+    /// and the gateway exemption via [`ControlStream::is_gateway`].
+    ///
+    /// [`ControlStream::is_gateway`]: crate::ControlStream::is_gateway
+    pub fn with_require_email(mut self, on: bool) -> Self {
+        self.require_email = on;
         self
     }
 

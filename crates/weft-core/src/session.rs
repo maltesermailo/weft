@@ -51,6 +51,7 @@ mod moderation;
 mod namespaces;
 mod profile;
 mod relay;
+mod reset;
 mod roles;
 mod sync;
 mod verify;
@@ -418,6 +419,10 @@ struct Session<S> {
     voice_watches: HashMap<ChannelName, JoinHandle<()>>,
     malformed_strikes: Vec<Instant>,
     last_inbound: Instant,
+    /// §6.1 a protocol-gateway front-end (WEFT-IRC) that auto-registers emailless
+    /// accounts — exempt from the network's `require_email` policy. Cached from
+    /// [`ControlStream::is_gateway`] at construction.
+    gateway: bool,
 }
 
 #[allow(clippy::large_enum_variant)] // one per select iteration, stack-only
@@ -438,6 +443,7 @@ impl<S: ControlStream> Session<S> {
         let (direct_tx, direct_rx) = mpsc::channel(EVENT_QUEUE);
         let (fed_out_tx, fed_out_rx) = mpsc::channel(EVENT_QUEUE);
         let (backfill_demand_tx, backfill_demand_rx) = mpsc::unbounded_channel();
+        let gateway = stream.is_gateway();
         Self {
             id,
             stream,
@@ -464,6 +470,7 @@ impl<S: ControlStream> Session<S> {
             voice_watches: HashMap::new(),
             malformed_strikes: Vec::new(),
             last_inbound: Instant::now(),
+            gateway,
         }
     }
 
@@ -665,9 +672,22 @@ impl<S: ControlStream> Session<S> {
         challenge: Option<PendingChallenge>,
     ) -> io::Result<Flow> {
         match cmd {
-            Command::Register { account, password } => {
-                self.on_register(label, account, &password).await
+            Command::Register {
+                account,
+                email,
+                password,
+            } => {
+                self.on_register(label, account, email.as_deref(), &password)
+                    .await
             }
+            // §6.1 password reset — valid only while UNAUTHED (you forgot your
+            // password, so you can't be logged in).
+            Command::ResetRequest { email } => self.on_reset_request(label, email).await,
+            Command::ResetConfirm {
+                email,
+                code,
+                password,
+            } => self.on_reset_confirm(label, email, code, &password).await,
             Command::AuthPassword { account, password } => {
                 // Constant-time verify, dummy-hash for unknown accounts —
                 // one code, one text, one timing envelope (invariant 5).
@@ -1311,7 +1331,9 @@ impl<S: ControlStream> Session<S> {
             | Command::AuthPassword { .. }
             | Command::AuthKey { .. }
             | Command::AuthProof { .. }
-            | Command::Register { .. } => self.not_authed(label, "already authenticated").await,
+            | Command::Register { .. }
+            | Command::ResetRequest { .. }
+            | Command::ResetConfirm { .. } => self.not_authed(label, "already authenticated").await,
             // §10.3 display profiles.
             Command::ProfileSet {
                 display,

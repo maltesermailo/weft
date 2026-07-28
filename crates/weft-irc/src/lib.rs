@@ -101,6 +101,13 @@ impl ControlStream for IrcStream {
     async fn close(&mut self) -> io::Result<()> {
         self.writer.shutdown().await
     }
+
+    /// §6.1 the IRC gateway auto-registers accounts and can't supply an email, so
+    /// it is exempt from the network's `require_email` policy (those accounts
+    /// simply can't password-reset).
+    fn is_gateway(&self) -> bool {
+        true
+    }
 }
 
 /// Per-line byte cap for the IRC reader — matches the native transports' 8 KiB

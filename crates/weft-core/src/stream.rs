@@ -22,4 +22,12 @@ pub trait ControlStream: Send {
     fn close(&mut self) -> impl Future<Output = io::Result<()>> + Send {
         async { Ok(()) }
     }
+
+    /// Whether this is a protocol-gateway front-end (e.g. WEFT-IRC) that
+    /// auto-registers accounts and can't supply a contact email. Such sessions
+    /// are exempt from the network's `require_email` policy (§6.1); the default
+    /// is a native client, which is subject to it.
+    fn is_gateway(&self) -> bool {
+        false
+    }
 }

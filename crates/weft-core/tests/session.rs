@@ -7725,7 +7725,7 @@ struct MockMailer {
 
 #[async_trait::async_trait]
 impl Mailer for MockMailer {
-    async fn send_code(&self, address: &str, code: &str) {
+    async fn send_code(&self, address: &str, code: &str, _purpose: &str) {
         self.sent
             .lock()
             .unwrap()
@@ -7818,6 +7818,210 @@ async fn verify_email_code_flow_birthday_and_list() {
         ["email".to_string(), "birthday".to_string()]
             .into_iter()
             .collect()
+    );
+}
+
+// ---- §6.1 email-at-registration + password reset ----
+
+/// A context that requires an email at REGISTER, with a mock mailer installed.
+fn ctx_require_email() -> (Arc<ServerCtx>, Arc<MockMailer>) {
+    let store = Arc::new(MemoryStore::default());
+    let info = ServerInfo {
+        network: "test.example".parse().unwrap(),
+        motd: None,
+        features: Vec::new(),
+    };
+    let ctx = Arc::new(
+        ServerCtx::new(
+            info,
+            std::iter::empty::<(weft_proto::ChannelName, RetentionPolicy)>(),
+            Keypair::generate(),
+            true,
+            store,
+            Arc::new(weft_core::MemBlobStore::default()),
+            "permanent".parse().unwrap(),
+            std::iter::empty::<weft_proto::Account>(),
+            true,
+            10,
+            weft_core::FederationConfig::default(),
+        )
+        .with_require_email(true),
+    );
+    let mailer = Arc::new(MockMailer::default());
+    ctx.set_mailer(mailer.clone());
+    (ctx, mailer)
+}
+
+#[tokio::test]
+async fn register_requires_email_when_configured() {
+    let (ctx, _mailer) = ctx_require_email();
+    let mut ada = connect(&ctx);
+    ada.send("HELLO weft/1");
+    assert!(matches!(ada.recv().await.event, Event::Welcome { .. }));
+
+    // No email → POLICY (the network requires one).
+    ada.send(&format!("@label=n REGISTER ada :{PASSWORD}"));
+    let n = drain_until_label(&mut ada, "n").await;
+    assert!(
+        matches!(&n.event, Event::Err(e) if e.code == ErrCode::Policy),
+        "{n:?}"
+    );
+
+    // With an email → WELCOME, and the email is recorded as a pending claim.
+    ada.send(&format!(
+        "@label=r REGISTER ada ada@example.com :{PASSWORD}"
+    ));
+    assert!(matches!(
+        drain_until_label(&mut ada, "r").await.event,
+        Event::Welcome { .. }
+    ));
+    ada.send("@label=v VERIFY LIST");
+    let claim = drain_until_label(&mut ada, "v").await;
+    assert!(
+        matches!(&claim.event,
+            Event::Verified { kind, subject, state }
+                if kind == "email" && subject == "ada@example.com"
+                   && *state == weft_proto::VerifyState::Pending),
+        "email recorded pending (verify-later): {claim:?}"
+    );
+}
+
+#[tokio::test]
+async fn register_rejects_duplicate_and_malformed_email() {
+    let (ctx, _mailer) = ctx_require_email();
+    let mut ada = connect(&ctx);
+    ada.send("HELLO weft/1");
+    assert!(matches!(ada.recv().await.event, Event::Welcome { .. }));
+    ada.send(&format!(
+        "@label=a REGISTER ada ada@example.com :{PASSWORD}"
+    ));
+    assert!(matches!(
+        drain_until_label(&mut ada, "a").await.event,
+        Event::Welcome { .. }
+    ));
+
+    // A malformed email → MALFORMED.
+    let mut bob = connect(&ctx);
+    bob.send("HELLO weft/1");
+    assert!(matches!(bob.recv().await.event, Event::Welcome { .. }));
+    bob.send(&format!("@label=m REGISTER bob not-an-email :{PASSWORD}"));
+    let m = drain_until_label(&mut bob, "m").await;
+    assert!(
+        matches!(&m.event, Event::Err(e) if e.code == ErrCode::Malformed),
+        "{m:?}"
+    );
+
+    // A duplicate email (case-insensitive) → CONFLICT.
+    bob.send(&format!(
+        "@label=d REGISTER bob ADA@example.com :{PASSWORD}"
+    ));
+    let d = drain_until_label(&mut bob, "d").await;
+    assert!(
+        matches!(&d.event, Event::Err(e) if e.code == ErrCode::Conflict),
+        "{d:?}"
+    );
+}
+
+#[tokio::test]
+async fn password_reset_full_flow() {
+    let (ctx, mailer) = ctx_require_email();
+    // Register with an email.
+    let mut ada = connect(&ctx);
+    ada.send("HELLO weft/1");
+    assert!(matches!(ada.recv().await.event, Event::Welcome { .. }));
+    ada.send(&format!(
+        "@label=r REGISTER ada ada@example.com :{PASSWORD}"
+    ));
+    assert!(matches!(
+        drain_until_label(&mut ada, "r").await.event,
+        Event::Welcome { .. }
+    ));
+    drop(ada); // reset runs unauthed, on a fresh connection
+
+    // RESET REQUEST → uniform RESET-SENT + a mailed code.
+    let mut c = connect(&ctx);
+    c.send("HELLO weft/1");
+    assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+    c.send("@label=q RESET REQUEST ada@example.com");
+    assert!(matches!(
+        drain_until_label(&mut c, "q").await.event,
+        Event::ResetSent { .. }
+    ));
+    let (_addr, code) = mailer
+        .sent
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("a reset code was mailed");
+
+    // A wrong code → FORBIDDEN.
+    c.send("@label=w RESET CONFIRM ada@example.com 000000 :brand-new-password");
+    let w = drain_until_label(&mut c, "w").await;
+    assert!(
+        matches!(&w.event, Event::Err(e) if e.code == ErrCode::Forbidden),
+        "{w:?}"
+    );
+
+    // The right code sets the new password → RESET-DONE.
+    let new_password = "brand-new-password-9";
+    c.send(&format!(
+        "@label=d RESET CONFIRM ada@example.com {code} :{new_password}"
+    ));
+    assert!(matches!(
+        drain_until_label(&mut c, "d").await.event,
+        Event::ResetDone { .. }
+    ));
+
+    // Reset does NOT authenticate: the old password no longer works, the new one
+    // does. Verify by logging in fresh with each.
+    let mut old = connect(&ctx);
+    old.send("HELLO weft/1");
+    assert!(matches!(old.recv().await.event, Event::Welcome { .. }));
+    old.send(&format!("@label=o AUTH PASSWORD ada :{PASSWORD}"));
+    let o = drain_until_label(&mut old, "o").await;
+    assert!(
+        matches!(&o.event, Event::Err(e) if e.code == ErrCode::AuthFailed),
+        "old password rejected: {o:?}"
+    );
+
+    let mut fresh = connect(&ctx);
+    fresh.send("HELLO weft/1");
+    assert!(matches!(fresh.recv().await.event, Event::Welcome { .. }));
+    fresh.send(&format!("@label=f AUTH PASSWORD ada :{new_password}"));
+    assert!(
+        matches!(
+            drain_until_label(&mut fresh, "f").await.event,
+            Event::Welcome { .. }
+        ),
+        "new password authenticates"
+    );
+}
+
+#[tokio::test]
+async fn password_reset_unknown_email_is_uniform() {
+    let (ctx, mailer) = ctx_require_email();
+    let mut c = connect(&ctx);
+    c.send("HELLO weft/1");
+    assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+
+    // REQUEST for an unregistered email → the same RESET-SENT, no code mailed.
+    c.send("@label=q RESET REQUEST ghost@example.com");
+    assert!(matches!(
+        drain_until_label(&mut c, "q").await.event,
+        Event::ResetSent { .. }
+    ));
+    assert!(
+        mailer.sent.lock().unwrap().is_empty(),
+        "no code mailed for an unknown email"
+    );
+
+    // CONFIRM against an unknown email → the SAME bad-code error as a wrong code.
+    c.send("@label=x RESET CONFIRM ghost@example.com 123456 :some-new-password");
+    let x = drain_until_label(&mut c, "x").await;
+    assert!(
+        matches!(&x.event, Event::Err(e) if e.code == ErrCode::Forbidden),
+        "{x:?}"
     );
 }
 

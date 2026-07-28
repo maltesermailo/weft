@@ -41,7 +41,7 @@ impl<S: ControlStream> Session<S> {
         let code = format!("{:06}", rand::random::<u32>() % 1_000_000);
         let expiry = unix_now_ms() + VERIFY_CODE_TTL_MS;
         self.ctx
-            .verify_send_code(&account, "email", &address, code, expiry)
+            .verify_send_code(&account, "email", &address, code, expiry, "verification")
             .await;
 
         self.send_event(
@@ -197,7 +197,7 @@ impl<S: ControlStream> Session<S> {
 /// A lenient syntactic email check (`local@domain.tld`, no spaces, bounded). Not
 /// an RFC 5322 validator — the *real* proof is the mailed code round-trip; this
 /// only rejects the obviously-malformed before we bother mailing.
-fn is_plausible_email(address: &str) -> bool {
+pub(crate) fn is_plausible_email(address: &str) -> bool {
     if address.len() > 254 || address.chars().any(char::is_whitespace) {
         return false;
     }

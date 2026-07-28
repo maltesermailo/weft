@@ -1090,6 +1090,7 @@ impl App {
                 let account = self.account.clone();
                 self.send_command(Command::Register {
                     account: account.parse().expect("validated in main"),
+                    email: None,
                     password: self.password.clone(),
                 });
                 return; // don't log the probe's AUTH-FAILED

@@ -21,6 +21,13 @@ pub struct Config {
     pub channels: Vec<ChannelConfig>,
     /// §6.1: REGISTER works only when `open`.
     pub registration: Registration,
+    /// §6.1 require a contact email at REGISTER (verify-later, §10.5) — which
+    /// also enables password reset. Off by default. Turning it on **requires
+    /// `[smtp]` to be configured** (a reset code must be deliverable); weftd
+    /// refuses to boot otherwise. The WEFT-IRC gateway is exempt (it
+    /// auto-registers emailless accounts, which can't password-reset).
+    #[serde(default)]
+    pub require_email: bool,
     /// §11.3 **deprecated** — operator status now lives in Postgres, managed
     /// with `weftd admin` (create/grant/revoke/list). Any accounts still listed
     /// here are treated as operators (a compat seed), but prefer the CLI and
@@ -474,6 +481,7 @@ impl Default for Config {
             motd: None,
             channels: vec![ChannelConfig::Name("#general".to_string())],
             registration: Registration::Open,
+            require_email: false,
             operators: Vec::new(),
             namespaces: Namespaces::default(),
             federation: Federation::default(),

@@ -296,6 +296,13 @@ where
         Some("phc-string-ada")
     );
     assert_eq!(store.password_phc(&bob).await.unwrap(), None);
+    // set_password (§6.1 reset): replaces the hash; false for an unknown account.
+    assert!(store.set_password(&ada, "phc-string-ada-v2").await.unwrap());
+    assert_eq!(
+        store.password_phc(&ada).await.unwrap().as_deref(),
+        Some("phc-string-ada-v2")
+    );
+    assert!(!store.set_password(&bob, "phc-nope").await.unwrap());
     // list_accounts (admin surface) includes registered accounts, sorted.
     assert!(store.list_accounts().await.unwrap().contains(&ada));
 
@@ -891,6 +898,23 @@ where
         .await
         .unwrap();
     assert_eq!(related, vec![ada.clone(), eve.clone()]);
+
+    // account_by_email (§6.1 reset resolve + REGISTER uniqueness): exact,
+    // case-insensitive; unknown → None.
+    assert_eq!(
+        store
+            .account_by_email(&format!("ADA@{}", domain.to_uppercase()))
+            .await
+            .unwrap(),
+        Some(ada.clone())
+    );
+    assert_eq!(
+        store
+            .account_by_email(&format!("nobody@{domain}"))
+            .await
+            .unwrap(),
+        None
+    );
 
     // -- channels: seed + load (the boot path) --
     let name: weft_proto::ChannelName = format!("#chan-{tag}").parse().unwrap();
