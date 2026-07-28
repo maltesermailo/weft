@@ -859,20 +859,14 @@ impl<S: ControlStream> Session<S> {
                 let _ = self.ctx.roles.delete_role(&ns_scope, &role.name).await;
             }
         }
-        let _ = self
-            .ctx
-            .invites
-            .revoke_invites_for_namespace(name.as_str())
-            .await;
+        // v0.13: invites + grants are scoped by the **id** (`ns:<id>` /
+        // `#<id>/…`), so the cascade must pass the id, not the vanity.
+        let _ = self.ctx.invites.revoke_invites_for_namespace(&ns_str).await;
         // Grant records are the enforcement fast path (§10.4) and key by subject,
-        // not scope — so a role/direct grant at `ns:<name>` or `#<name>/<chan>`
+        // not scope — so a role/direct grant at `ns:<id>` or `#<id>/<chan>`
         // survives the role-definition delete above. Purge them by namespace so a
         // recreated same-name namespace can't resurrect a former admin's caps.
-        let _ = self
-            .ctx
-            .caps
-            .revoke_grants_for_namespace(name.as_str())
-            .await;
+        let _ = self.ctx.caps.revoke_grants_for_namespace(&ns_str).await;
 
         if let Err(e) = self.ctx.namespaces.delete_namespace(&name).await {
             return self.internal(label, &e).await;

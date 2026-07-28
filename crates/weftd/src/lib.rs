@@ -336,6 +336,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 federation.clone(),
                 config.admin.enabled,
                 config.admin.delete_grace_days,
+                config.support_account.clone(),
             )
             .await?
         }
@@ -364,6 +365,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 federation.clone(),
                 config.admin.enabled,
                 config.admin.delete_grace_days,
+                config.support_account.clone(),
             )
             .await?
         }
@@ -716,6 +718,10 @@ impl weft_admin::Live for LiveRegistry {
     async fn disconnect_account(&self, account: &weft_proto::Account) -> usize {
         self.ctx.disconnect_account(account).await
     }
+
+    async fn remove_channel(&self, channel: &weft_proto::ChannelName) {
+        self.ctx.registry.remove(channel);
+    }
 }
 
 /// Seed config channels into the store, load the full channel set back
@@ -740,6 +746,7 @@ async fn boot<S>(
     federation: weft_core::FederationConfig,
     admin_enabled: bool,
     admin_delete_grace_days: u64,
+    support_account: Option<String>,
 ) -> anyhow::Result<(
     Arc<ServerCtx>,
     Vec<(weft_proto::ChannelName, weft_proto::RetentionPolicy)>,
@@ -796,6 +803,30 @@ where
         )
     });
 
+    // §6.7 provision the network support account (config `support_account`): it
+    // exists so a "seize to support" takeover can hand it a namespace, but is
+    // suspended so it can never authenticate. Idempotent on every boot.
+    if let Some(support) = &support_account {
+        match support.parse::<weft_proto::Account>() {
+            Ok(acct) => {
+                if store.account_ulid(&acct).await.ok().flatten().is_none() {
+                    let pw = format!("{}{}", weft_proto::Ulid::new(), weft_proto::Ulid::new());
+                    let ph = weft_crypto::PasswordHash::new(&pw);
+                    if let Err(e) = store.register(&acct, ph.as_phc()).await {
+                        warn!(%support, "could not register support account: {e}");
+                    }
+                }
+                match store.set_suspended(&acct, true).await {
+                    Ok(_) => {
+                        info!(%support, "support account provisioned (suspended, moderation-only)")
+                    }
+                    Err(e) => warn!(%support, "could not suspend support account: {e}"),
+                }
+            }
+            Err(_) => warn!(%support, "invalid support_account handle — feature disabled"),
+        }
+    }
+
     let ctx = Arc::new(ServerCtx::new(
         info,
         channels.iter().cloned(),
@@ -820,6 +851,8 @@ where
                 .with_delete_grace_ms(admin_delete_grace_days * 24 * 60 * 60 * 1000)
                 .with_dm_policy(dm_policy)
                 .with_live(live)
+                .with_blobs(Arc::clone(&blobs))
+                .with_support_account(support_account.clone())
                 .with_live_connections(Arc::clone(&ctx.connections)),
         )
     });

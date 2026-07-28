@@ -5766,6 +5766,8 @@ async fn sync_fresh_skeleton_then_delta_catches_up() {
         let ev = ada.recv().await;
         match ev.event {
             Event::NsMeta { .. } => {}
+            // v0.13: SYNC now replays ns membership so channel-less servers show.
+            Event::NsMember { .. } => {}
             Event::ChannelLayout { channel, .. } => {
                 saw_layout |= channel.as_str() == general.as_str();
             }

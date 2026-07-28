@@ -402,9 +402,12 @@ const rowListCard = (title, rows, count) =>
 const noPerm = (scope) => `<div class="placeholder">Read-only — you don't hold <span class="mono">${scope}</span>.</div>`;
 
 const delBtn = (msgid) => can("admin.destroy") ? `<button class="btn small danger" data-action="delMsg" data-id="${esc(msgid)}" style="float:right">delete</button>` : "";
+/** Media served from the panel's own operator-authed route — the public
+ *  `/media` endpoint needs a query-string bearer an `<img>` can't carry. */
+const mediaUrl = (h) => `/admin/api/v1/media/${encodeURIComponent(h)}`;
 /** A single custom emoji `:name:` → an <img>, else the raw (unicode) text. */
 const emojiImg = (name, map) => map[name]
-  ? `<img class="emoji" src="/media/${esc(map[name])}" alt=":${esc(name)}:" title=":${esc(name)}:">`
+  ? `<img class="emoji" src="${mediaUrl(map[name])}" alt=":${esc(name)}:" title=":${esc(name)}:">`
   : `:${esc(name)}:`;
 /** Render a message body: escape, then swap `:name:` custom emoji for images. */
 function renderBody(body, map = {}) {
@@ -419,7 +422,7 @@ function msgCard(m, reported = false, emoji = {}) {
   if (m.deleted) return `<div class="msg"><span class="del">deleted by ${esc(m.by)}</span></div>`;
   const reacts = (m.reactions || []).map((r) => `<span class="rchip">${renderReact(r.emoji, emoji)}&nbsp;${r.count}</span>`).join(" ");
   const imgs = (m.attachments || []).map((h) =>
-    `<a href="/media/${esc(h)}" target="_blank" rel="noopener"><img class="msg-img" src="/media/${esc(h)}" alt="attachment" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('a'),{href:this.src,textContent:'📎 attachment',className:'msg-file',target:'_blank'}))"></a>`).join("");
+    `<a href="${mediaUrl(h)}" target="_blank" rel="noopener"><img class="msg-img" src="${mediaUrl(h)}" alt="attachment" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('a'),{href:this.src,textContent:'📎 attachment',className:'msg-file',target:'_blank'}))"></a>`).join("");
   return `<div class="msg ${reported ? "reported" : ""}"><div class="h">${esc(m.sender)} · ${when(m.at_ms)}${m.edited ? " · edited" : ""}${delBtn(m.msgid)}</div>${renderBody(m.body, emoji)}${imgs ? `<div class="msg-imgs">${imgs}</div>` : ""}${reacts ? `<div class="react">${reacts}</div>` : ""}</div>`;
 }
 const placeholder = (title, milestone, what) =>
@@ -472,7 +475,7 @@ const screens = {
     set(hrow("Channels", `${list.length} channels`) + note("Every channel in the store — config seeds plus runtime-created.") +
       searchBar("Filter channels…") +
       cardTable("Channels", list.length, ["Channel", "Retention"],
-        list.map((c) => ({ action: "channel", id: c.name, cells: [`<span class="mono">${esc(c.name)}</span>`, pill(c.policy, "neutral"), act(`<button class="btn small" data-action="browseChan" data-id="${esc(c.name)}">messages</button>`)] })), true));
+        list.map((c) => ({ action: "channel", id: c.name, cells: [`${c.vanity ? `#${esc(c.vanity)} <span class="mono dim">${esc(c.name)}</span>` : `<span class="mono">${esc(c.name)}</span>`}`, pill(c.policy, "neutral"), act(`<button class="btn small" data-action="browseChan" data-id="${esc(c.name)}">messages</button>`)] })), true));
   },
   async namespaces() {
     const [list, locks] = await Promise.all([
@@ -975,10 +978,10 @@ async function openChannel(name) {
     key: "channel",
     crumb: { label: "Back to Channels", view: "channels" },
     profile: {
-      avatar: initials(name.replace(/^#/, "").split("/").pop()),
+      avatar: initials(c.vanity || name.replace(/^#/, "").split("/").pop()),
       avatarClass: "g",
-      name: c.name,
-      sub: `${esc(c.policy)}<br>${ns ? `namespace: ${esc(ns)}` : "network channel"}`,
+      name: c.vanity ? `#${c.vanity}` : c.name,
+      sub: `<span class="mono">${esc(c.name)}</span><br>${esc(c.policy)}${ns ? ` · namespace ${esc(ns)}` : " · network channel"}`,
       aside: `<div class="k">Posting</div><div class="v">${
         c.frozen ? '<span class="bad">frozen — ns-admin only</span>'
         : c.restricted ? '<span class="warn">restricted — requires <span class="mono">send</span></span>'
@@ -995,7 +998,8 @@ async function openChannel(name) {
     panel: (tab) => {
       if (tab === "overview") {
         return card("Channel Information", `<div class="kv">
-          <div class="k">Channel</div><div class="v mono">${esc(c.name)}</div>
+          <div class="k">Name</div><div class="v">${c.vanity ? `#${esc(c.vanity)}` : '<span class="dim">—</span>'}</div>
+          <div class="k">Wire id</div><div class="v mono">${esc(c.name)}</div>
           <div class="k">Namespace</div><div class="v">${ns ? `<button class="btn small" data-action="ns" data-id="${esc(ns)}">${esc(ns)}</button>` : '<span class="dim">none (network channel)</span>'}</div>
           <div class="k">Retention</div><div class="v mono">${esc(c.policy)}</div>
           <div class="k">Posting</div><div class="v">${c.frozen ? '<span class="bad">frozen</span>' : c.restricted ? '<span class="warn">restricted</span>' : "open"}</div>
@@ -1095,8 +1099,8 @@ async function openNs(name) {
       }
       if (tab === "channels") {
         return rowListCard("Channels", n.channels.map((c) => ({
-          name: esc(c.name),
-          sub: `${esc(c.policy)}${c.category ? ` · ${esc(c.category)}` : ""}${c.frozen ? " · frozen" : ""}${c.restricted ? " · restricted" : ""}`,
+          name: `#${esc(c.vanity || c.name)}`,
+          sub: `<span class="mono">${esc(c.name)}</span> · ${esc(c.policy)}${c.category ? ` · ${esc(c.category)}` : ""}${c.frozen ? " · frozen" : ""}${c.restricted ? " · restricted" : ""}`,
           type: c.kind,
           actions: `<button class="btn small" data-action="channel" data-id="${esc(c.name)}">open</button>`,
         })), n.channels.length);
@@ -1155,11 +1159,19 @@ async function openNs(name) {
                <button class="btn" data-action="modNs" data-id="${esc(n.name)}" data-x="unban">Unban</button>
              </div>`);
       }
-      if (!IS_OPERATOR) return noPerm("operator");
-      return actionCard("Operator takeover",
+      const deleteCard = can("admin.destroy")
+        ? actionCard("Delete namespace",
+            "Permanently deletes <b>" + esc(n.name) + "</b> and its entire subtree — every channel, membership, role, invite and grant. This cannot be undone.",
+            `<div class="btns"><button class="btn danger solid" data-action="nsDelete" data-id="${esc(n.name)}">Delete namespace</button></div>`, true)
+        : "";
+      if (!IS_OPERATOR) return deleteCard || noPerm("operator");
+      return deleteCard + actionCard("Operator takeover",
         "§2.4 rung 3. Seizes the namespace immediately — no delay and nothing to cancel — rotating the root key and handing ownership to the account you name. It is announced to members and permanently marked operator-initiated in <span class=\"mono\">root-history</span>. Requires the network signing key, so it runs server-side.",
         `<input type="text" id="nsTakeover" placeholder="new owner account" />
-         <div class="btns"><button class="btn danger solid" data-action="nsTakeover" data-id="${esc(n.name)}">Take over namespace</button></div>`, true);
+         <div class="btns"><button class="btn danger solid" data-action="nsTakeover" data-id="${esc(n.name)}">Take over namespace</button></div>`, true) +
+        actionCard("Seize to support",
+          "§6.7 hand ownership to the network <b>support account</b> — a login-disabled identity that holds seized communities for moderation. The fresh root key is discarded, so only another operator takeover can move ownership out again. Requires <span class=\"mono\">support_account</span> in the server config.",
+          `<div class="btns"><button class="btn danger" data-action="nsSeizeSupport" data-id="${esc(n.name)}">Seize to support</button></div>`);
     },
   });
 }
@@ -1421,6 +1433,23 @@ const clicks = {
     if (!confirm(`Seize "${el.dataset.id}" and hand it to ${owner}?\n\nThis applies immediately, rotates the root key, and is permanently recorded as operator-initiated. It cannot be undone by the current owner.`)) return;
     try {
       await api(`/namespaces/${encodeURIComponent(el.dataset.id)}/takeover`, { method: "POST", body: JSON.stringify({ new_owner: owner }) });
+      refresh();
+    } catch (e) { alert(e.message); }
+  },
+  nsDelete: async (el) => {
+    const name = el.dataset.id;
+    if (!confirm(`Delete namespace "${name}" and EVERYTHING in it — channels, memberships, roles, invites, grants?\n\nThis cannot be undone.`)) return;
+    if (prompt(`Type the namespace name to confirm:`) !== name) { alert("Name didn't match — not deleted."); return; }
+    try {
+      await api(`/namespaces/${encodeURIComponent(name)}`, { method: "DELETE" });
+      go("namespaces");
+    } catch (e) { alert(e.message); }
+  },
+  nsSeizeSupport: async (el) => {
+    const name = el.dataset.id;
+    if (!confirm(`Seize "${name}" to the support account for moderation?\n\nOwnership transfers to the login-disabled support account and the root key is discarded — only another operator takeover can move it out again.`)) return;
+    try {
+      await api(`/namespaces/${encodeURIComponent(name)}/seize-support`, { method: "POST" });
       refresh();
     } catch (e) { alert(e.message); }
   },

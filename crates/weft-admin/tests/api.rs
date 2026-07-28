@@ -76,6 +76,7 @@ struct MockLive {
     ejects: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     deletes: Arc<std::sync::Mutex<Vec<String>>>,
     disconnects: Arc<std::sync::Mutex<Vec<String>>>,
+    removed: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -93,6 +94,9 @@ impl weft_admin::Live for MockLive {
     async fn disconnect_account(&self, account: &weft_proto::Account) -> usize {
         self.disconnects.lock().unwrap().push(account.to_string());
         2 // pretend the account had two devices connected
+    }
+    async fn remove_channel(&self, channel: &weft_proto::ChannelName) {
+        self.removed.lock().unwrap().push(channel.to_string());
     }
 }
 
@@ -1780,6 +1784,251 @@ async fn namespace_detail_and_operator_takeover() {
     let history = store.root_history(&ns).await.unwrap();
     assert_eq!(history.len(), 1);
     assert!(history[0].operator_initiated);
+}
+
+#[tokio::test]
+async fn admin_deletes_a_namespace_and_cascades() {
+    use weft_store::{ChannelStore, MembershipStore, NamespaceRecord, NamespaceStore, RoleStore};
+    let store = Arc::new(MemoryStore::default());
+    for name in ["admin", "owner", "bob"] {
+        store
+            .register(&name.parse().unwrap(), PasswordHash::new(PASSWORD).as_phc())
+            .await
+            .unwrap();
+    }
+    let ns: weft_proto::NamespaceName = "gaming".parse().unwrap();
+    let ns_id = "01arz3ndektsv4rrffq69g5fav";
+    let ns_scope = format!("ns:{ns_id}");
+    let chan: weft_proto::ChannelName = format!("#{ns_id}/general").parse().unwrap();
+    store
+        .create_namespace(NamespaceRecord {
+            id: ns_id.to_string(),
+            name: ns.clone(),
+            owner: "owner".parse().unwrap(),
+            root_key: "ROOT".into(),
+            visibility: "public".into(),
+            title: None,
+            description: None,
+            icon: None,
+            recovery_set: None,
+            pending_recovery: None,
+            categories: Vec::new(),
+            federation: false,
+            frozen: false,
+            welcome_channel: None,
+        })
+        .await
+        .unwrap();
+    store
+        .upsert_channel(
+            &chan,
+            "general",
+            weft_proto::RetentionPolicy::Permanent,
+            weft_proto::ChannelKind::Text,
+        )
+        .await
+        .unwrap();
+    store
+        .set_ns_membership(&"bob".parse().unwrap(), ns_id, 0)
+        .await
+        .unwrap();
+    store
+        .set_role(
+            &ns_scope,
+            "mod",
+            "#e8b93d",
+            &["ban".to_string()],
+            false,
+            false,
+            0,
+        )
+        .await
+        .unwrap();
+
+    let live = MockLive::default();
+    let live_arc = Arc::new(live.clone());
+    let auth = auth::config(
+        b"a-test-session-secret".to_vec(),
+        ["admin".parse().unwrap()],
+    );
+    let app = weft_admin::router(
+        AdminState::from_store(Arc::clone(&store), auth, "test.net".into()).with_live(live_arc),
+    );
+    let cookie = session(&app).await;
+
+    // DELETE by the vanity name → 204.
+    let res = app
+        .clone()
+        .oneshot(del("/admin/api/v1/namespaces/gaming", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // The whole subtree is gone: record, channel, membership, role.
+    assert!(store.namespace_by_id(ns_id).await.unwrap().is_none());
+    assert!(store.channel(&chan).await.unwrap().is_none());
+    assert!(store.ns_members(ns_id).await.unwrap().is_empty());
+    assert!(store.roles(&ns_scope).await.unwrap().is_empty());
+    // The live channel actor was stopped (invariant: no posting after delete).
+    assert!(live.removed.lock().unwrap().contains(&chan.to_string()));
+}
+
+#[tokio::test]
+async fn seize_to_support_transfers_ownership() {
+    use weft_store::{NamespaceRecord, NamespaceStore};
+    let store = Arc::new(MemoryStore::default());
+    for name in ["admin", "owner", "support"] {
+        store
+            .register(&name.parse().unwrap(), PasswordHash::new(PASSWORD).as_phc())
+            .await
+            .unwrap();
+    }
+    let ns: weft_proto::NamespaceName = "gaming".parse().unwrap();
+    store
+        .create_namespace(NamespaceRecord {
+            id: "01arz3ndektsv4rrffq69g5fav".to_string(),
+            name: ns.clone(),
+            owner: "owner".parse().unwrap(),
+            root_key: "ROOT".into(),
+            visibility: "public".into(),
+            title: None,
+            description: None,
+            icon: None,
+            recovery_set: None,
+            pending_recovery: None,
+            categories: Vec::new(),
+            federation: false,
+            frozen: false,
+            welcome_channel: None,
+        })
+        .await
+        .unwrap();
+
+    let auth = auth::config(
+        b"a-test-session-secret".to_vec(),
+        ["admin".parse().unwrap()],
+    );
+    let app = weft_admin::router(
+        AdminState::from_store(Arc::clone(&store), auth, "test.net".into())
+            .with_support_account(Some("support".into())),
+    );
+    let cookie = session(&app).await;
+
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/gaming/seize-support",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    // Ownership moved to the support account.
+    let rec = store.namespace(&ns).await.unwrap().unwrap();
+    assert_eq!(rec.owner.as_str(), "support");
+}
+
+#[tokio::test]
+async fn support_account_is_protected_from_admin_edits() {
+    // §6.7 no admin — operator or not — may unsuspend, delete, or promote the
+    // support account; it must stay a login-disabled moderation identity.
+    let store = Arc::new(MemoryStore::default());
+    for name in ["admin", "support"] {
+        store
+            .register(&name.parse().unwrap(), PasswordHash::new(PASSWORD).as_phc())
+            .await
+            .unwrap();
+    }
+    let auth = auth::config(
+        b"a-test-session-secret".to_vec(),
+        ["admin".parse().unwrap()],
+    );
+    let app = weft_admin::router(
+        AdminState::from_store(Arc::clone(&store), auth, "test.net".into())
+            .with_support_account(Some("support".into())),
+    );
+    let cookie = session(&app).await;
+
+    // Un-suspend (would make it loginnable) → 403.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/support/unsuspend",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    // Promote to operator → 403.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/accounts/support/operator",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    // Delete → 403.
+    let res = app
+        .oneshot(del(
+            "/admin/api/v1/accounts/support?confirm=support",
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn seize_to_support_is_501_when_unconfigured() {
+    // No support account configured → the endpoint refuses cleanly.
+    use weft_store::{NamespaceRecord, NamespaceStore};
+    let store = Arc::new(MemoryStore::default());
+    store
+        .register(
+            &"admin".parse().unwrap(),
+            PasswordHash::new(PASSWORD).as_phc(),
+        )
+        .await
+        .unwrap();
+    store
+        .create_namespace(NamespaceRecord {
+            id: "01arz3ndektsv4rrffq69g5fav".to_string(),
+            name: "gaming".parse().unwrap(),
+            owner: "owner".parse().unwrap(),
+            root_key: "ROOT".into(),
+            visibility: "public".into(),
+            title: None,
+            description: None,
+            icon: None,
+            recovery_set: None,
+            pending_recovery: None,
+            categories: Vec::new(),
+            federation: false,
+            frozen: false,
+            welcome_channel: None,
+        })
+        .await
+        .unwrap();
+    let auth = auth::config(
+        b"a-test-session-secret".to_vec(),
+        ["admin".parse().unwrap()],
+    );
+    let app = weft_admin::router(AdminState::from_store(store, auth, "test.net".into()));
+    let cookie = session(&app).await;
+    let res = app
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/gaming/seize-support",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED);
 }
 
 #[tokio::test]

@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use weft_store::{
-    AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore,
+    AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore, InviteStore,
     MediaBlocklistStore, MembershipStore, ModerationStore, NamespaceStore, NetblockStore,
     PeerStore, ReportStore, RoleStore,
 };
@@ -49,6 +49,10 @@ pub trait Live: Send + Sync {
     /// rooms broadcast a leave); persistent membership is retained, exactly as
     /// when the client's own network drops.
     async fn disconnect_account(&self, account: &weft_proto::Account) -> usize;
+
+    /// Stop a channel's live actor (e.g. during a namespace delete) so it can't
+    /// keep accepting posts after its store rows are gone. No-op if not live.
+    async fn remove_channel(&self, channel: &weft_proto::ChannelName);
 }
 
 /// The stores the admin API touches, as trait objects — one process's backend
@@ -68,6 +72,7 @@ pub struct AdminState {
     pub(crate) media_blocks: Arc<dyn MediaBlocklistStore>,
     pub(crate) roles: Arc<dyn RoleStore>,
     pub(crate) emoji: Arc<dyn EmojiStore>,
+    pub(crate) invites: Arc<dyn InviteStore>,
     pub(crate) audit: Arc<dyn AuditStore>,
     pub(crate) auth: Arc<AuthConfig>,
     pub(crate) network: String,
@@ -84,6 +89,14 @@ pub struct AdminState {
     pub(crate) live_connections: Option<Arc<std::sync::atomic::AtomicUsize>>,
     /// Live-server actions (kick/eject via the channel actors) — embedded only.
     pub(crate) live: Option<Arc<dyn Live>>,
+    /// §13 media blobs, so the panel can render attachment images from its own
+    /// operator-authed route (the public `/media` endpoint uses a query-string
+    /// bearer that an `<img>` tag can't carry). `None` = images 501 / link only.
+    pub(crate) blobs: Option<Arc<dyn weft_store::BlobStore>>,
+    /// §6.7 the network's support account — an operator can "seize to support" a
+    /// namespace, transferring ownership to this (login-disabled) account for
+    /// moderation. `None` = the feature is unconfigured.
+    pub(crate) support_account: Option<String>,
 }
 
 /// Default WC3 soft-delete grace window: 7 days.
@@ -107,6 +120,7 @@ impl AdminState {
             + MediaBlocklistStore
             + RoleStore
             + EmojiStore
+            + InviteStore
             + AuditStore
             + 'static,
     {
@@ -124,6 +138,7 @@ impl AdminState {
             media_blocks: store.clone(),
             roles: store.clone(),
             emoji: store.clone(),
+            invites: store.clone(),
             audit: store,
             auth: Arc::new(auth),
             network,
@@ -131,7 +146,22 @@ impl AdminState {
             dm_policy: weft_proto::RetentionPolicy::Ephemeral,
             live_connections: None,
             live: None,
+            blobs: None,
+            support_account: None,
         }
+    }
+
+    /// §6.7 configure the network's support account for "seize to support".
+    pub fn with_support_account(mut self, account: Option<String>) -> Self {
+        self.support_account = account;
+        self
+    }
+
+    /// Embedded mode: attach the media blob store so the panel renders attachment
+    /// images from its own operator-authed route.
+    pub fn with_blobs(mut self, blobs: Arc<dyn weft_store::BlobStore>) -> Self {
+        self.blobs = Some(blobs);
+        self
     }
 
     /// Override the WC3 soft-delete grace window (default 7 days).

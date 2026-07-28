@@ -66,6 +66,12 @@ pub struct Config {
     /// a user-supplied URL server-side (SSRF-guarded) and returns its OpenGraph
     /// preview, so clients don't leak the viewer's IP to arbitrary hosts.
     pub unfurl: Unfurl,
+    /// §6.7 moderation: a network-wide **support account** that holds a namespace
+    /// after an operator "seize to support". Provisioned suspended at boot (it can
+    /// never log in), it exists only to own seized communities for moderation.
+    /// `None` disables the feature. Example: `support_account = "support"`.
+    #[serde(default)]
+    pub support_account: Option<String>,
 }
 
 fn default_max_connections() -> usize {
@@ -478,6 +484,7 @@ impl Default for Config {
             smtp: Smtp::default(),
             max_connections: default_max_connections(),
             unfurl: Unfurl::default(),
+            support_account: None,
         }
     }
 }

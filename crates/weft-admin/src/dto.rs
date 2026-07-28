@@ -106,7 +106,10 @@ pub struct AccountDetail {
 /// persistent roster (§6.3), offline members included.
 #[derive(Serialize)]
 pub struct ChannelDetail {
+    /// Canonical wire name `#<ns-id>/<chan-id>` (v0.13).
     pub name: String,
+    /// Human display name (v0.13); the wire name is opaque ids.
+    pub vanity: String,
     pub policy: String,
     pub members: Vec<String>,
     /// WC7 posting state: `frozen` refuses everyone but `ns-admin`; `restricted`
@@ -140,6 +143,8 @@ pub struct AccountMessage {
 #[derive(Serialize)]
 pub struct Channel {
     pub name: String,
+    /// Human display name (v0.13); "" for a top-level channel.
+    pub vanity: String,
     pub policy: String,
 }
 
@@ -551,6 +556,8 @@ pub struct NamespaceMember {
 #[derive(Serialize)]
 pub struct NamespaceChannel {
     pub name: String,
+    /// Human display name (v0.13); the wire name is opaque ids.
+    pub vanity: String,
     pub kind: String,
     pub policy: String,
     pub category: Option<String>,

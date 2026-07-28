@@ -53,6 +53,7 @@ pub fn routes() -> Router<AdminState> {
             "/api/v1/accounts/:name/disconnect",
             post(disconnect_account),
         )
+        .route("/api/v1/media/:hash", get(fetch_media))
         .route("/api/v1/channels", get(list_channels))
         .route("/api/v1/channels/:name/detail", get(channel_detail))
         .route("/api/v1/channels/:name/freeze", post(freeze_channel))
@@ -62,6 +63,10 @@ pub fn routes() -> Router<AdminState> {
             axum::routing::delete(delete_channel),
         )
         .route("/api/v1/namespaces", get(list_namespaces))
+        .route(
+            "/api/v1/namespaces/:name",
+            axum::routing::delete(delete_namespace_admin),
+        )
         .route("/api/v1/namespaces/:name/detail", get(namespace_detail))
         .route(
             "/api/v1/namespaces/:name/visibility",
@@ -74,6 +79,10 @@ pub fn routes() -> Router<AdminState> {
         .route(
             "/api/v1/namespaces/:name/takeover",
             post(takeover_namespace),
+        )
+        .route(
+            "/api/v1/namespaces/:name/seize-support",
+            post(seize_support_namespace),
         )
         .route("/api/v1/namespaces/:name/freeze", post(freeze_namespace))
         .route(
@@ -444,6 +453,9 @@ async fn delete_account(
     if account == who {
         return (StatusCode::FORBIDDEN, "cannot delete your own account").into_response();
     }
+    if let Some(r) = guard_support(&st, &account) {
+        return r;
+    }
     // Typed-name confirmation: the caller must prove intent by echoing the name.
     if q.confirm.as_deref() != Some(name.as_str()) {
         return (
@@ -484,6 +496,9 @@ async fn restore_account(
     let Ok(account) = name.parse::<Account>() else {
         return (StatusCode::BAD_REQUEST, "bad account").into_response();
     };
+    if let Some(r) = guard_support(&st, &account) {
+        return r;
+    }
     match st.accounts.cancel_deletion(&account).await {
         Ok(true) => {
             audit(
@@ -545,20 +560,68 @@ async fn account_messages(
     }
 }
 
-async fn list_channels(State(st): State<AdminState>) -> Response {
-    match st.channels.list_channels().await {
-        Ok(chans) => Json(
-            chans
-                .into_iter()
-                .map(|(name, policy)| dto::Channel {
-                    name: name.to_string(),
-                    policy: policy.to_string(),
-                })
-                .collect::<Vec<_>>(),
+/// `GET /media/:hash` — stream a media blob for the panel's attachment `<img>`
+/// tags. Operator-authed via the ordinary admin session (the public `/media`
+/// endpoint needs a query-string bearer an `<img>` can't send). Embedded only.
+async fn fetch_media(State(st): State<AdminState>, Path(hash): Path<String>) -> Response {
+    let Some(blobs) = &st.blobs else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "media not available in standalone mode",
         )
-        .into_response(),
+            .into_response();
+    };
+    let Some(h) = weft_store::BlobHash::parse(&hash) else {
+        return (StatusCode::BAD_REQUEST, "bad media hash").into_response();
+    };
+    let mime = blobs
+        .stat(&h)
+        .await
+        .ok()
+        .flatten()
+        .map(|m| m.mime)
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    match blobs.get(&h, None).await {
+        Ok(Some(bytes)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, mime),
+                (
+                    axum::http::header::CACHE_CONTROL,
+                    "private, max-age=31536000, immutable".to_string(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such media").into_response(),
         Err(e) => internal(e),
     }
+}
+
+async fn list_channels(State(st): State<AdminState>) -> Response {
+    let chans = match st.channels.list_channels().await {
+        Ok(c) => c,
+        Err(e) => return internal(e),
+    };
+    // v0.13: the wire name is opaque ids — carry each channel's vanity so the
+    // panel renders `#general`, not `#<ns-id>/<chan-id>`.
+    let mut out = Vec::with_capacity(chans.len());
+    for (name, policy) in chans {
+        let vanity = st
+            .channels
+            .channel(&name)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.vanity)
+            .unwrap_or_default();
+        out.push(dto::Channel {
+            name: name.to_string(),
+            vanity,
+            policy: policy.to_string(),
+        });
+    }
+    Json(out).into_response()
 }
 
 // ---- WC2 permission management (operator-only) ----
@@ -572,6 +635,20 @@ async fn require_operator(st: &AdminState, who: &Account) -> Option<Response> {
         (
             StatusCode::FORBIDDEN,
             "only an operator can change admin permissions",
+        )
+            .into_response()
+    })
+}
+
+/// §6.7 the network **support account** is protected: no admin — operator or not
+/// — may edit, suspend, unsuspend, restore, delete, promote, demote, or
+/// disconnect it. It exists only to hold seized namespaces and must stay
+/// login-disabled. `Some(403)` when `target` is the support account.
+fn guard_support(st: &AdminState, target: &Account) -> Option<Response> {
+    (st.support_account.as_deref() == Some(target.as_str())).then(|| {
+        (
+            StatusCode::FORBIDDEN,
+            "the support account is protected and cannot be modified",
         )
             .into_response()
     })
@@ -674,6 +751,9 @@ async fn set_admin_scopes(
     let Ok(account) = name.parse::<Account>() else {
         return (StatusCode::BAD_REQUEST, "bad account").into_response();
     };
+    if let Some(r) = guard_support(&st, &account) {
+        return r;
+    }
 
     // Parse strictly: a typo'd scope must fail loudly, never silently grant less.
     let mut caps: Vec<String> = Vec::new();
@@ -771,6 +851,9 @@ async fn set_operator_flag(
     let Ok(account) = name.parse::<Account>() else {
         return (StatusCode::BAD_REQUEST, "bad account").into_response();
     };
+    if let Some(r) = guard_support(&st, &account) {
+        return r;
+    }
     if !operator {
         // Two lockout guards: never demote yourself (you'd lose the ability to
         // undo it), and never remove the last operator (nobody could promote
@@ -844,6 +927,11 @@ async fn set_suspended(
     if suspend && account == who {
         return (StatusCode::FORBIDDEN, "cannot suspend your own account").into_response();
     }
+    // Never let an admin un-suspend the support account (that would make it
+    // loginnable) or otherwise touch it.
+    if let Some(r) = guard_support(&st, &account) {
+        return r;
+    }
     match st.accounts.set_suspended(&account, suspend).await {
         Ok(true) => {
             let action = if suspend {
@@ -898,6 +986,9 @@ async fn disconnect_account(
     let Ok(account) = name.parse::<Account>() else {
         return (StatusCode::BAD_REQUEST, "bad account").into_response();
     };
+    if let Some(r) = guard_support(&st, &account) {
+        return r;
+    }
     if st.live.is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -959,6 +1050,7 @@ async fn channel_detail(State(st): State<AdminState>, Path(name): Path<String>) 
             .collect();
         Ok::<_, StoreError>(Some(dto::ChannelDetail {
             name: channel.to_string(),
+            vanity: record.vanity.clone(),
             policy: record.policy.to_string(),
             members,
             frozen: record.frozen,
@@ -1404,6 +1496,7 @@ async fn namespace_detail(State(st): State<AdminState>, Path(name): Path<String>
             if let Some(c) = st.channels.channel(&chan).await? {
                 channels.push(dto::NamespaceChannel {
                     name: chan.to_string(),
+                    vanity: c.vanity.clone(),
                     kind: c.kind.to_string(),
                     policy: c.policy.to_string(),
                     category: c.category,
@@ -1495,6 +1588,75 @@ async fn account_dms(State(st): State<AdminState>, Path(name): Path<String>) -> 
         .into_response(),
         Err(e) => internal(e),
     }
+}
+
+/// `DELETE /namespaces/:name` — delete a whole namespace (community) and cascade
+/// its subtree, mirroring the wire `NS DELETE` (§6.2): stop each channel's live
+/// actor (embedded) + drop its row + channel-scope roles, clear memberships, drop
+/// ns-scope roles, revoke its invites + grants (all id-scoped, v0.13), then the
+/// record. A destroy-level operator action.
+async fn delete_namespace_admin(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Destroy) {
+        return r;
+    }
+    let Ok(ns) = name.parse::<weft_proto::NamespaceName>() else {
+        return (StatusCode::BAD_REQUEST, "bad namespace name").into_response();
+    };
+    let record = match st.namespaces.namespace(&ns).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such namespace").into_response(),
+        Err(e) => return internal(e),
+    };
+    let ns_id = record.id.clone();
+
+    let result = async {
+        // Channels are `#<ns-id>/…`; stop the live actor then drop the row + roles.
+        let prefix = format!("#{ns_id}/");
+        for (chan, _) in st.channels.list_channels().await? {
+            if !chan.as_str().starts_with(&prefix) {
+                continue;
+            }
+            if let Some(live) = &st.live {
+                live.remove_channel(&chan).await;
+            }
+            st.channels.delete_channel(&chan).await?;
+            let cscope = chan.to_string();
+            for role in st.roles.roles(&cscope).await.unwrap_or_default() {
+                let _ = st.roles.delete_role(&cscope, &role.name).await;
+            }
+        }
+        // Memberships (+ hide overrides), then ns-scope roles.
+        for member in st.memberships.ns_members(&ns_id).await.unwrap_or_default() {
+            let _ = st.memberships.clear_ns_membership(&member, &ns_id).await;
+        }
+        let ns_scope = format!("ns:{ns_id}");
+        for role in st.roles.roles(&ns_scope).await.unwrap_or_default() {
+            let _ = st.roles.delete_role(&ns_scope, &role.name).await;
+        }
+        // Invites + grant records (id-scoped), then the namespace record itself.
+        let _ = st.invites.revoke_invites_for_namespace(&ns_id).await;
+        let _ = st.caps.revoke_grants_for_namespace(&ns_id).await;
+        st.namespaces.delete_namespace(&record.name).await?;
+        Ok::<(), StoreError>(())
+    }
+    .await;
+    if let Err(e) = result {
+        return internal(e);
+    }
+    audit(
+        &st,
+        &who,
+        "namespace.delete",
+        ns.as_str(),
+        &json!({ "namespace": ns.to_string(), "id": ns_id }),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize)]
@@ -1770,6 +1932,76 @@ async fn takeover_namespace(
         "new_root_seed": new_root.seed_b64(),
     }))
     .into_response()
+}
+
+/// `POST /namespaces/:name/seize-support` — §6.7 seize a namespace to the
+/// network's **support account** for moderation. Like a takeover, but the new
+/// owner is the configured, login-disabled support account, and the fresh root
+/// **seed is discarded** (nobody holds it — only another operator takeover can
+/// move ownership out again). Operator-only.
+async fn seize_support_namespace(
+    State(st): State<AdminState>,
+    Extension(who): Extension<Account>,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(r) = require_operator(&st, &who).await {
+        return r;
+    }
+    let Some(support) = st.support_account.clone() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "no support account configured (`support_account` in weft.toml)",
+        )
+            .into_response();
+    };
+    let Ok(ns) = name.parse::<weft_proto::NamespaceName>() else {
+        return (StatusCode::BAD_REQUEST, "bad namespace name").into_response();
+    };
+    let Ok(support_acct) = support.parse::<Account>() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "bad support account").into_response();
+    };
+    match st.namespaces.namespace(&ns).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such namespace").into_response(),
+        Err(e) => return internal(e),
+    }
+    // The support account is provisioned (suspended) at boot; guard anyway.
+    match st.accounts.account_ulid(&support_acct).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "support account is not provisioned",
+            )
+                .into_response()
+        }
+        Err(e) => return internal(e),
+    }
+    // A fresh root key that no one keeps — the seized namespace can only be moved
+    // out again by another operator takeover (network-key authority).
+    let new_root = weft_crypto::Keypair::generate();
+    if let Err(e) = st
+        .namespaces
+        .rotate_root(
+            &ns,
+            support_acct.as_str(),
+            &new_root.public().to_b64(),
+            true, // operator_initiated — permanent in root-history
+            now_ms(),
+        )
+        .await
+    {
+        return internal(e);
+    }
+    audit(
+        &st,
+        &who,
+        "namespace.seize_support",
+        ns.as_str(),
+        &json!({ "namespace": ns.to_string(), "support_account": support }),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// `POST /namespaces/:name/freeze` — WC7 **full freeze**: lock every channel in

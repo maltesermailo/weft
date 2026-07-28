@@ -172,9 +172,10 @@ impl Registry {
         Some(handle)
     }
 
-    /// Remove a channel (CHANNEL DELETE). Dropping the handle closes the
-    /// actor's inbox, so the task winds down once its last message drains.
-    pub(crate) fn remove(&self, name: &ChannelName) -> Option<ChannelHandle> {
+    /// Remove a channel (CHANNEL DELETE, or a namespace-delete cascade from the
+    /// admin panel). Dropping the handle closes the actor's inbox, so the task
+    /// winds down once its last message drains.
+    pub fn remove(&self, name: &ChannelName) -> Option<ChannelHandle> {
         self.channels.write().expect("registry lock").remove(name)
     }
 
