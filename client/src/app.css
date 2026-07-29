@@ -1020,22 +1020,17 @@ button:disabled {
    viewport. Messages are rendered newest-first in the DOM; `column-reverse`
    flips them so newest sits at the bottom. `scrollTop` is 0 at the bottom. */
 .message-scroll {
+  /* Plain vertical scroller: virtua owns the inner layout (absolutely-positioned
+     windowed rows), so no flex / column-reverse here — we anchor to the bottom
+     imperatively via `scrollToIndex`. */
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  overflow-anchor: none; /* we anchor to the bottom ourselves via column-reverse */
+  overflow-anchor: none;
   padding: 14px 20px 6px;
-  display: flex;
-  flex-direction: column-reverse;
-  align-items: stretch;
-  /* Hide the native scrollbar: with column-reverse the newest is at scrollTop 0,
-     so the browser paints the thumb near the *top* of the track (inverted) even
-     though you're at the bottom. Wheel/trackpad scrolling is unaffected. */
-  scrollbar-width: none; /* Firefox */
 }
-.message-scroll::-webkit-scrollbar {
-  display: none; /* WebKit/Chromium (Tauri) */
-}
+/* (virtua uses the native scrollbar, styled by the global ::-webkit-scrollbar
+   rules above — no longer hidden as it was under the old custom overlay.) */
 /* List children keep their natural height (overflow + scroll) rather than
    shrinking to fit the flex container. */
 .message-scroll > * {
@@ -1183,13 +1178,6 @@ button:disabled {
   padding: 4px 8px;
   border-radius: var(--radius-md);
   margin-bottom: 2px;
-  /* Virtualize rendering: the browser skips layout/paint for off-screen rows
-     and remembers each row's measured height (`contain-intrinsic-size: auto`),
-     so a large / kept-alive list stays cheap without hand-rolled windowing —
-     the scroll, load-older and unread-divider logic all keep working. The
-     number is only the first-paint estimate before a row has been measured. */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 48px;
 }
 .msg-group:hover {
   background: #191c24;

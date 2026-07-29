@@ -536,8 +536,28 @@ then the reducer that wires it all from events.
         the models but the `AppCtx` getters/setters now **delegate** to them —
         `+page` dropped ~24 state decls, **zero component churn** (they keep
         reading `app.*`). Per-component `store`-direct reads can follow later.
-  - [ ] **Remaining panels** (same pattern): reports, roster. Then the larger
-        views (chat pane, rail, sidebar). `+page` collapses toward a thin shell.
+  - [~] **Reports + Roster panels.** Parked mid-way for the pivot below —
+        `models/reports.svelte.ts` (`Reports`: queue + open + target, owns
+        `RESOLVE_ACTIONS`) exists as scaffolding, not yet wired. Roster data is
+        already on `Server.members` (Phase 2b); only the fetch/streaming state
+        (`nsMembersLoading`/`loadingNsMembers`/`nsMemberBuf`) remains in `+page`.
+  - [ ] **Remaining views** (chat pane, rail, sidebar) — superseded by the
+        **routing pivot** below (views become route files).
+
+- **Virtualization (2026-07-30).** `MessageList` rewritten from column-reverse +
+      custom scrollbar to **virtua** (`VList`, dep added via **pnpm** — the repo's
+      package manager, NOT npm). Chronological data; bottom-anchor + stick +
+      scroll-to-unread via imperative `scrollToIndex`; load-older via `onscroll` +
+      `shift`; dividers/top-indicator in the item snippet. Replaces the CSS
+      `content-visibility` stopgap → constant DOM. **Runtime behaviors to verify
+      in-app** (not testable here): open positioning, stick-to-bottom, load-older
+      shift, and kept-alive `display:none` hide/show re-measure (the last is
+      resolved by the routing pivot, which drops keep-alive).
+- **Routing pivot (next, per 2026-07-30 decision).** SvelteKit file routes for
+      views (already on adapter-static SPA): connection + store + reducer move to
+      a root `+layout`; `active`/`activeServer`/`homeView` become URL-derived;
+      keep-alive dropped (virtua makes per-route mount cheap). This supersedes the
+      by-hand big-view extraction and is the real `+page` teardown.
 
 ## 5. Decisions & invariants to preserve
 
