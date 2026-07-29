@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { VList } from "virtua/svelte";
+  import { get } from "svelte/store";
+  import { createVirtualizer } from "@tanstack/svelte-virtual";
   import { getApp } from "$lib/context";
   import { spoilerReveal } from "$lib/actions";
   import type { Msg } from "$lib/types";
@@ -8,25 +9,89 @@
 
   const app = getApp();
   // This list owns ONE channel and stays mounted while it's kept-alive, so
-  // switching back is instant. virtua windows the rows (constant DOM regardless
-  // of history length); we drive the bottom-anchor / stick / load-older here.
+  // switching back is instant. @tanstack/virtual is headless: WE own the scroll
+  // element and windowing math, absolutely position each row inside a spacer of
+  // the total size, and drive the bottom-anchor / stick / load-older natively.
   let { channel, active }: { channel: string; active: boolean } = $props();
 
   const ch = $derived(app.channelRecord(channel));
-  // Chronological (oldest → newest). virtua is a top-anchored virtualizer, so we
-  // scroll it to the end on open and stick to the bottom as messages arrive.
+  // Chronological (oldest → newest). We anchor to the bottom by pinning the
+  // scroll element to its own scrollHeight and re-asserting it as rows measure.
   const messages = $derived(ch?.messages.filter((m) => !m.thread) ?? []);
   const loadingThis = $derived(app.loadingHistory === channel);
 
-  let vlist = $state<VList<Msg>>();
+  let scrollEl = $state<HTMLElement>();
   let showLoader = $state(false);
   let positioned = false; // one-time open positioning done?
   let requestedLoad = false; // asked for the first page yet?
   let atBottom = true; // is the viewport pinned to the newest message?
-  // While an older page is loading, `shift` keeps the scroll position as the
-  // prepended messages measure in (virtua's reverse-infinite-scroll mode).
-  let loadingOlder = $state(false);
+  // While an older page loads we hold the scroll fixed relative to the bottom
+  // (older content prepends above, so distance-from-bottom is invariant).
+  let loadingOlder = false;
+  let anchorDistBottom = 0;
   let lastCount = 0;
+
+  const getKey = (i: number) => messages[i]?.key ?? i;
+
+  const virtualizer = createVirtualizer<HTMLElement, HTMLElement>({
+    // Real count is applied by the setOptions effect below once `messages` is
+    // read reactively; start at 0 to avoid an eager non-reactive read here.
+    count: 0,
+    getScrollElement: () => scrollEl ?? null,
+    estimateSize: () => 64,
+    getItemKey: getKey,
+    overscan: 10,
+  });
+  // Read the (stable) virtualizer instance WITHOUT subscribing. Using
+  // `$virtualizer` inside an effect would subscribe it to the store, and since
+  // setOptions / measurement fire the store's onChange, the effect would loop
+  // forever. `$virtualizer` is used ONLY in the template (reactive windowing);
+  // effects/actions go through `v()`.
+  const v = () => get(virtualizer);
+
+  // measureElement ref: report each row's real height (dynamic rows — text,
+  // media, dividers). Caching is keyed by message key, so measurements survive
+  // an older-page prepend even as indices shift.
+  function measure(node: HTMLElement) {
+    v().measureElement(node);
+    return {
+      destroy() {
+        v().measureElement(null);
+      },
+    };
+  }
+
+  const raf = () => new Promise((r) => requestAnimationFrame(() => r(null)));
+
+  // Re-assert scrollTop=scrollHeight across a few frames: rows measure in over
+  // several frames after render, so the true bottom keeps moving until sizes
+  // settle. Bounded loop — no standing reactive coupling to the virtualizer.
+  async function pinBottom(frames = 8) {
+    let prev = -1;
+    for (let i = 0; i < frames; i++) {
+      if (!scrollEl) return;
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+      await raf();
+      const cur = Math.round(scrollEl.scrollTop);
+      if (cur === prev) break;
+      prev = cur;
+    }
+  }
+
+  // Hold distance-from-bottom while an older page prepends + measures in, then
+  // release the load-older guard.
+  async function restoreOlder(frames = 8) {
+    let prev = -1;
+    for (let i = 0; i < frames; i++) {
+      if (!scrollEl) break;
+      scrollEl.scrollTop = Math.max(0, scrollEl.scrollHeight - anchorDistBottom);
+      await raf();
+      const cur = Math.round(scrollEl.scrollTop);
+      if (cur === prev) break;
+      prev = cur;
+    }
+    loadingOlder = false;
+  }
 
   // First open: fetch this channel's first page once (under a skeleton) if we
   // don't have it. Kept lists mount only when first opened, so this fires once.
@@ -37,62 +102,89 @@
     app.loadHistory(channel, true);
   });
 
+  // Keep the virtualizer's count in sync and (re)attach it to the scroll element
+  // once it mounts — setOptions runs `_willUpdate`, which observes the now-present
+  // element. Depends ONLY on messages.length + scrollEl (never the store), so it
+  // can't loop against the onChange it triggers.
+  $effect(() => {
+    const n = messages.length;
+    void scrollEl; // dependency: re-attach when the element binds
+    v().setOptions({ count: n, getItemKey: getKey, getScrollElement: () => scrollEl ?? null });
+  });
+
   // Position once the data is ready — either already present on mount, or the
   // first page just landed. An empty (but loaded) channel still resolves here so
-  // the skeleton drops; a non-empty one waits for the <VList> to mount first.
+  // the skeleton drops; a non-empty one waits for the scroll element to mount.
   $effect(() => {
     if (positioned || !ch?.historyLoaded) return;
-    if (messages.length && !vlist) return; // wait for the list element to mount
+    if (messages.length && !scrollEl) return;
     positioned = true;
+    // Skeleton stays only if we're still fetching the first page (set above);
+    // an already-cached channel positions silently, so switching back is instant.
     void positionOpen();
   });
 
+  function unreadIndex() {
+    const boundary = active ? app.newBoundary : null;
+    return boundary === null ? -1 : messages.findIndex((m) => !m.system && !m.own && m.ts > boundary);
+  }
+
   async function positionOpen() {
+    // Immediate estimate-based pin so the very first paint is already near the
+    // bottom (no top-flash on switch), then refine as real heights measure in.
+    if (scrollEl && messages.length && unreadIndex() <= 0) {
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }
+
     await tick();
-    if (vlist && messages.length) {
-      // Jump to the unread divider when it's genuinely inside the loaded page and
-      // this is the active view; otherwise rest at the newest (bottom).
-      const boundary = active ? app.newBoundary : null;
-      const idx = boundary === null ? -1 : messages.findIndex((m) => !m.system && !m.own && m.ts > boundary);
+    await raf(); // let the first ResizeObserver measurement pass land
+
+    if (scrollEl && messages.length) {
+      const idx = unreadIndex();
+
       if (idx > 0) {
-        vlist.scrollToIndex(idx, { align: "start" });
+        // Unread divider inside the loaded page → rest there.
+        const off = v().getOffsetForIndex(idx, "start");
+        if (off) scrollEl.scrollTop = off[0];
         atBottom = false;
       } else {
-        vlist.scrollToIndex(messages.length - 1, { align: "end" });
+        // Rest at the newest — re-assert until the measured bottom settles
+        // (fixes the half-render / black-top-gap open).
         atBottom = true;
+        await pinBottom();
       }
       lastCount = messages.length;
-      await tick();
     }
+
     showLoader = false;
   }
 
-  function onScroll(offset: number) {
-    if (!vlist || !positioned) return;
-    const max = vlist.getScrollSize() - vlist.getViewportSize();
-    atBottom = offset >= max - 40;
-    // Near the top → page older. `shift` (below) keeps the position as they land.
-    if (offset < 200 && ch?.hasMore && !loadingOlder) {
+  function onScroll() {
+    if (!scrollEl || !positioned) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollEl;
+    atBottom = scrollTop + clientHeight >= scrollHeight - 40;
+    // Near the top → page older. We hold distance-from-bottom while it lands.
+    if (scrollTop < 200 && ch?.hasMore && !loadingOlder) {
       loadingOlder = true;
+      anchorDistBottom = scrollHeight - scrollTop;
       app.loadHistory(channel, false);
     }
   }
 
-  // React to the message set changing: a live append sticks to bottom (if we
-  // were pinned there); an older-page prepend just clears the loading flag
-  // (`shift` already held the position).
+  // React to the message set changing: a live append sticks to the bottom (if we
+  // were pinned there); an older-page prepend restores the anchor. Depends only
+  // on messages.length — no virtualizer subscription, so no feedback loop.
   $effect(() => {
     const n = messages.length;
-    if (!positioned || !vlist) {
+    if (!positioned || !scrollEl) {
       lastCount = n;
       return;
     }
     if (n > lastCount) {
       if (loadingOlder) {
-        loadingOlder = false; // prepend landed
+        void restoreOlder();
       } else if (atBottom) {
-        const last = n - 1;
-        queueMicrotask(() => vlist?.scrollToIndex(last, { align: "end" }));
+        void pinBottom(4);
       }
     }
     lastCount = n;
@@ -103,39 +195,39 @@
   Bottom-anchored, virtualized list. Rows render oldest→newest; each row carries
   its own leading day-divider and (before the first unread) the "New messages"
   divider, plus the top-of-history indicator on the first row. Kept-alive but
-  inactive → hidden, DOM + virtua state retained for an instant return.
+  inactive → hidden, DOM + virtualizer state retained for an instant return.
 -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="msg-list-wrap" class:list-hidden={!active} use:spoilerReveal>
   {#if ch && messages.length}
-    <VList
-      bind:this={vlist}
-      class="message-scroll"
-      data={messages}
-      getKey={(m) => m.key}
-      shift={loadingOlder}
-      onscroll={onScroll}
-    >
-      {#snippet children(m: Msg, i: number)}
-        {@const prev = messages[i - 1]}
-        {#if i === 0}
-          {#if loadingThis}
-            <div class="day-sep">loading history…</div>
-          {:else if ch?.truncated}
-            <div class="day-sep">older messages have expired</div>
-          {:else if ch && ch.historyLoaded && !ch.hasMore}
-            <div class="day-sep">beginning of {app.titleOf(ch.name)}</div>
+    <div bind:this={scrollEl} class="message-scroll" onscroll={onScroll}>
+      <div class="vspacer" style="height: {$virtualizer.getTotalSize()}px;">
+        {#each $virtualizer.getVirtualItems() as row (row.key)}
+          {@const m = messages[row.index]}
+          {#if m}
+            {@const prev = messages[row.index - 1]}
+            <div class="vrow" data-index={row.index} use:measure style="transform: translateY({row.start}px);">
+              {#if row.index === 0}
+                {#if loadingThis}
+                  <div class="day-sep">loading history…</div>
+                {:else if ch?.truncated}
+                  <div class="day-sep">older messages have expired</div>
+                {:else if ch && ch.historyLoaded && !ch.hasMore}
+                  <div class="day-sep">beginning of {app.titleOf(ch.name)}</div>
+                {/if}
+              {/if}
+              {#if !prev || app.dayKey(prev.ts) !== app.dayKey(m.ts)}
+                <div class="day-sep date"><span>{app.dayLabel(m.ts)}</span></div>
+              {/if}
+              {#if active && m.key === app.newDividerKey}
+                <div class="new-sep" id="new-divider"><span>New messages</span></div>
+              {/if}
+              <MessageItem {m} />
+            </div>
           {/if}
-        {/if}
-        {#if !prev || app.dayKey(prev.ts) !== app.dayKey(m.ts)}
-          <div class="day-sep date"><span>{app.dayLabel(m.ts)}</span></div>
-        {/if}
-        {#if active && m.key === app.newDividerKey}
-          <div class="new-sep" id="new-divider"><span>New messages</span></div>
-        {/if}
-        <MessageItem {m} />
-      {/snippet}
-    </VList>
+        {/each}
+      </div>
+    </div>
   {:else if ch}
     <div class="message-scroll"><div class="empty-hint">No messages yet — say something.</div></div>
   {:else}
@@ -156,3 +248,18 @@
     </div>
   {/if}
 </div>
+
+<style>
+  /* The spacer holds the full virtual height; rows are positioned within it. */
+  .vspacer {
+    position: relative;
+    width: 100%;
+  }
+
+  .vrow {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+  }
+</style>

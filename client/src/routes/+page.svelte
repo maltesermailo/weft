@@ -4453,12 +4453,14 @@
         <ChatTopbar />
 
         <div class="msg-area">
-          <!-- One self-contained, kept-alive list per recently-opened channel;
-               only the active one is shown. Each owns its scroll, scrollbar and
-               skeleton — switching back is instant. -->
-          {#each keptChannels as ch (ch)}
-            <MessageList channel={ch} active={ch === active} />
-          {/each}
+          <!-- The active channel's self-contained virtualized list. Keyed on the
+               channel so switching remounts it fresh (re-anchoring to the newest
+               message); history + roster stay cached in the channel record, so
+               the remount is cheap. A hidden (display:none) virtualized list
+               can't be measured, so we render only the active one. -->
+          {#key active}
+            <MessageList channel={active} active />
+          {/key}
         </div>
         <Composer />
       {/if}

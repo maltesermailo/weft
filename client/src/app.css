@@ -1020,9 +1020,9 @@ button:disabled {
    viewport. Messages are rendered newest-first in the DOM; `column-reverse`
    flips them so newest sits at the bottom. `scrollTop` is 0 at the bottom. */
 .message-scroll {
-  /* Plain vertical scroller: virtua owns the inner layout (absolutely-positioned
-     windowed rows), so no flex / column-reverse here — we anchor to the bottom
-     imperatively via `scrollToIndex`. */
+  /* Plain vertical scroller: @tanstack/virtual owns the inner layout
+     (absolutely-positioned windowed rows in a full-height spacer), so no flex /
+     column-reverse here — we anchor to the bottom natively via `scrollTop`. */
   flex: 1;
   min-height: 0;
   overflow-y: auto;
