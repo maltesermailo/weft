@@ -426,27 +426,118 @@ then the reducer that wires it all from events.
         bundles clean (`npm run build` ✓). **Deferred to Phase 3:** grants
         (`grantsByScope`) + deny-list (`modDeny`) — they're scope-keyed
         permission/moderation state that restructures with the caps walk.
-- [ ] **Phase 3 — roles + permissions as traversal.** Now also absorbs the
-      pieces deferred from Phase 2: convert `RoleDefC` → `Role` class (with
-      `grants(cap)`), give `Server.roles` + `Membership.roles: Role[]` (direct
-      refs), and fold `grantsByScope` + `modDeny` onto `Server`. Then introduce
-      `ChannelOverride` + `Session.can(cap, channel)` / `Membership.can(cap)`;
-      delete `capsFor` and the `serverCap`/`canModerate`/`serverCanGrant`/
-      `canOpenServerSettings`/`badgeFor` functions, repointing every gate at the
-      walk (models reach the caps via the `store` singleton — established in 2c).
-      This is the change that most directly removes "convoluted" string-key
-      permission logic.
-- [ ] **Phase 4 — `Session` + `Social` + `Federation`.** Fold the connect-form
-      `$state` soup, friends/groups/calls (→ `Account` refs), netblocks/manifests.
-- [ ] **Phase 5 — `AppStore.apply` reducer.** Move the ~800-line `handle(e)`
-      switch into `store.apply(event)` dispatching to model methods; replace the
-      `*Buf`/`*FetchQueue` pairs with `Collector`. This is the phase that
-      actually shrinks `+page.svelte`.
-- [ ] **Phase 6 — component extraction, now unblocked.** With the graph in
-      context, split the remaining large views (chat pane, rail, sidebar, modal
-      cluster) so they read models directly. `+page.svelte` collapses toward a
-      thin shell wiring `store → layout`. Continues the in-progress
-      componentization.
+- **Phase 3 — roles + permissions.** Also absorbs the role pieces deferred from
+      Phase 2. Split because the caps gating is security-sensitive UI.
+  - [x] **3a — `Role` class.** ✅ 2026-07-29. `RoleDefC` → `Role` class
+        (`models/role.svelte.ts`, `$state` fields + `grants(cap)`, `caps` stays
+        `string[]`). `rolesByScope` holds `Role[]`; reducer builds `new Role(…)`.
+        Type swapped in `context.ts`/`+page`/`RolesTab`; dead `RoleDefC` removed.
+  - [x] **3b — `Server.roles` + `Membership.roles: Role[]`.** ✅ 2026-07-29. The
+        "server has members which have roles" graph edge. `Server.roles` (+
+        `Server.role(id)`) mirrored from the `ns:<id>` ROLE flush (same array ref
+        as `rolesByScope` — no divergence); `Membership.roles` resolves `roleIds`
+        through `server.role(id)`. Low-risk: `rolesByScope` + every gate/display
+        helper untouched, so no component changed. (Note: this leaves ns roles in
+        two places transiently; 3c's single-source consolidation removes
+        `rolesByScope`'s ns slice.)
+  - [x] **3c — caps as traversal (the security-critical core).** ✅ 2026-07-29.
+        `capsFor` (record) → `store.session.caps` (`SvelteMap`, keyed
+        `account|scope`) on a new `Session` model (`models/session.svelte.ts`,
+        also holds `account` — the "me" identity, set on `connected`). The gates
+        became `Session` methods: `can(cap, scope)` / `moderates(scope)` /
+        `canGrant(scope)` / `ownerAt(account, scope)` / `capsAt(account, scope)` /
+        `get isOperator`. `Badge` moved onto the model. **Safety:** each `+page`
+        gate's *scope-selection* logic (`canModerate`/`serverCap`/`canModDelete`/
+        `serverCanGrant`/`isOwnerAt`/`isStaff`/`badgeFor` — which scopes it walks,
+        the `ensureCapsAt` fetches) is **unchanged**; only the cap *lookup*
+        relocated, so the moderation-UI gating is provably identical. `AppCtx`
+        gate methods kept stable → no component moved. Caps stay **server-resolved**
+        (from `caps` events) — this is a scope-walk, not a role re-derivation.
+  - [x] **3c-tail — grants/deny relocated + roles consolidated.** ✅ 2026-07-29.
+        `grantsByScope` → `store.grants` and `modDeny` → `store.deny`
+        (store-level `SvelteMap`s + `GrantRow`/`DenyRow` types) — kept store-level,
+        NOT on `Server`, since they're scope-keyed across `ns:`/`*`/`#chan`.
+        Setters re-`set` the whole entry (SvelteMap values aren't deeply
+        reactive). Both were `+page`-internal, so no `AppCtx`/component change.
+        `rolesByScope` ns-slice consolidated into `Server.roles` (single source):
+        a `rolesAt(scope)` helper resolves ns → `Server.roles`, else the by-scope
+        record; the flush writes ns roles only to `Server.roles`; ~13 `+page`
+        readers + `AppCtx.rolesByScope`→`rolesAt(scope)` + 5 component reads
+        (`RolesTab`/`ServerSettingsModal`/`MemberList`/`ChannelSettings`/
+        `ProfileCard`) migrated. `rolesByScope` now holds only `*`/`#chan`.
+- **Phase 4 — `Social` + `Federation` (+ Session, deferred).**
+  - [x] **4a — `Federation`.** ✅ 2026-07-29. `models/federation.svelte.ts` —
+        `netblocks` + `manifests` as `SvelteMap`s on `store.federation`
+        (`ManifestInfo` type). Reducer (`manifest`/`netblocked`) + operator
+        actions (`refreshNetblocks`/`netblockRemove`) write the maps;
+        `AppCtx.netblocks`/`manifests` → `ReadonlyMap`; `FederationPanel` reads
+        `[...app.netblocks]` / `[...app.manifests.values()]`.
+  - [x] **4b — `Social`.** ✅ 2026-07-29. `models/social.svelte.ts` — friends,
+        groups, and calls on `store.social`: `friends`/`groups`/`groupCallRoster`
+        `SvelteMap`s + `incomingCall`/`activeCall`/`activeGroupCall` `$state`.
+        Reducer + friend/group/call helpers migrated; `AppCtx` getters stable
+        (only `ChatTopbar` `groupCallRoster.get(...)` + `groupCallRoster` →
+        `ReadonlyMap` changed). Userrefs stay `account@network` strings —
+        resolved to `Account`s at the UI edge (`<Avatar>` interns via
+        `accountOf`), so no wholesale ref-typing churn. `group-member` re-`set`s
+        the map entry (SvelteMap values aren't deeply reactive).
+  - [x] **4c — connect-form grouped into `ConnectForm`.** ✅ 2026-07-29.
+        `models/connect.svelte.ts` — the login-screen cluster (`mode`, `host`,
+        `account`, `password`, `email`, `serverStep`, `emailRequired`, `probing`,
+        `insecure`, `authError`, `authFailed`, `deviceKeyAvailable`) as one
+        reactive object, held `+page`-local (`const cf`; ephemeral pre-auth UI,
+        not shared store). The payoff: **`ConnectScreen` went from 13 bindable
+        props to a single `form` object** (mutated by reference — no `bind:`).
+        The pervasive identity/lifecycle scalars (`account`/`network`/`status`,
+        read 173/62/×) stayed put — deliberately not churned. Note: the bulk
+        token-rename briefly left `mode`/`host` undefined (black screen in dev)
+        until the manual `mode`/`host` pass + object-key fixes landed — watch
+        object **keys**/**type fields** (`{ host: … }`) when regex-renaming a var.
+- [~] **Phase 5 — `AppStore.apply` reducer. REASSESSED — not doing the reducer
+      move (2026-07-29).** The premise was wrong: `handle(e)` is an *orchestrator*,
+      not a pure state reducer. Each case interleaves model mutation with
+      navigation (`active`/`activeServer`/`selectServer`/`goHome`), lifecycle
+      (`status`/`initVoice`/reconnect), UI-panel state (`keptChannels`/
+      `threadMessages`/`pinsList`/`searching`), and side-effects (`weft.*`/`toast`/
+      `connectCallMedia`/`persistDms`/desktop `notify`/`localStorage`). Moving it
+      into `store.apply()` would **invert** the dependency (store → UI/side-effects)
+      — strictly worse. It also can't move to a plain module: Svelte 5 `$state`
+      is component-local, and the UI/nav state it read-writes is deliberately kept
+      in `+page` (see §5 "view state ≠ domain state"). Prereq for any move would be
+      objectifying the UI/nav state onto a model — which contradicts that decision.
+      The `Collector<T>` sub-item (fold the `*Buf` accumulators) is pure churn over
+      native arrays (wrap `[]`+`push`+`=[]` as `push`/`flush`) on the fragile
+      batch-flush path — skipped as risk-without-reward. **`+page` is shrunk by
+      Phase 6 (moving cohesive UI + its handlers into components), not by relocating
+      the orchestrator.** `Collector` (collector.ts) is now effectively unused —
+      remove it, or keep for a future streaming-response helper.
+- **Phase 6 — component extraction (the real `+page` shrinker).** Move cohesive
+      UI *and its handlers/state* out of `+page` into components that read models
+      from `store`/context. The streaming reducer stays in `+page` (it's an
+      orchestrator, see Phase 5) but writes to a panel model the component reads.
+  - [x] **Search + Pins panels.** ✅ 2026-07-29. `models/panels.svelte.ts` —
+        `SearchPanel` + `PinsPanel` on `store.search`/`store.pins` (open/query/
+        scope/results/loading + the `buf`/`loadingChannel` streaming machinery the
+        reducer writes). `SearchModal` now owns `runSearch`/`jumpToResult` (calls
+        `weft.search` + reads `store.search`); `PinsModal` reads `store.pins.list`.
+        `+page` dropped ~11 state decls + `runSearch`/`jumpToResult`; `openSearch`/
+        `openPins` are thin triggers; `AppCtx` lost 8 members (`searchOpen`/
+        `searchQuery`/`searchScope`/`searchResults`/`searching`/`runSearch`/
+        `jumpToResult`/`pinsList`). Reducer routes MESSAGE/BATCH into the models.
+  - [x] **Threads + Invites panels.** ✅ 2026-07-29. `models/threads.svelte.ts`
+        (`Threads`: side-panel `root`/`messages`/`composer` + list-modal `list` +
+        `names` SvelteMap + streaming `buf`/`loadingRoot`/`listBuf`/`loadingList`)
+        and `models/invites.svelte.ts` (`Invites`: list `scope`/`list` + create
+        `createScope`/`link`/`id` + streaming; owns the `InviteInfo` type, which
+        `context.ts` now re-exports). On `store.threads`/`store.invites`. The
+        reducer routes MESSAGE/THREAD/INVITED/BATCH into the models; live thread
+        replies append to `store.threads.messages`. Given the breadth (threads: 4
+        components + the message reducer; invites: 6 components), state moved to
+        the models but the `AppCtx` getters/setters now **delegate** to them —
+        `+page` dropped ~24 state decls, **zero component churn** (they keep
+        reading `app.*`). Per-component `store`-direct reads can follow later.
+  - [ ] **Remaining panels** (same pattern): reports, roster. Then the larger
+        views (chat pane, rail, sidebar). `+page` collapses toward a thin shell.
 
 ## 5. Decisions & invariants to preserve
 

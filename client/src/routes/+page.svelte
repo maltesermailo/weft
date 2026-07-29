@@ -2,8 +2,10 @@
   import { onMount, tick, untrack } from "svelte";
   import * as weft from "$lib/weft";
   import { EVERYONE_ROLE } from "$lib/constants";
-  import type { Msg, CtxItem, RoleDefC, ThreadInfo, MentionOpt } from "$lib/types";
-  import { provideApp } from "$lib/context";
+  import type { Msg, CtxItem, ThreadInfo, MentionOpt } from "$lib/types";
+  import { Role } from "$lib/models/role.svelte";
+  import { ConnectForm } from "$lib/models/connect.svelte";
+  import { provideApp, type InviteInfo } from "$lib/context";
   import { store, type NotifLevel } from "$lib/models/store.svelte";
   import { Channel } from "$lib/models/channel.svelte";
   import { Membership } from "$lib/models/membership.svelte";
@@ -70,37 +72,16 @@
   let status = $state<Status>("connect");
   let network = $state("");
   let account = $state("");
-  let authError = $state("");
-  // AUTH-FAILED is followed by the server closing the stream; this flag lets the
-  // `closed` handler keep the specific auth reason instead of clobbering it with
-  // a generic "connection closed".
-  let authFailed = false;
 
-  let mode = $state<weft.Mode>("login");
-  // Web build: the network is wherever the page was served from (same-origin,
-  // P3 embed); desktop: a QUIC host the user types. The web value is display-only
-  // — the WASM backend derives its WS URL from window.location regardless.
-  let host = $state(
-    weft.isWeb && typeof window !== "undefined" ? window.location.host : "127.0.0.1:4433",
-  );
-  let formAccount = $state("");
-  let formPassword = $state("");
-  // §6.1 register email — shown/required only when the homeserver advertises it.
-  let formEmail = $state("");
-  // client.toml: TLS mode (verified by default) + optional prefill host.
-  let insecureMode = $state(false);
-
-  // ---- homeserver selection (§3.6) ----
-  // Two-step connect screen: pick the homeserver first ("server"), then log in
-  // or register ("auth"). The chosen server is remembered as the local config so
-  // it's the default next launch, changeable via a "Change" button. On web the
-  // network is always the page origin, so the picker step is skipped.
+  // The connect / login screen state (homeserver + auth inputs + probe results),
+  // grouped into one object passed to `ConnectScreen`. See connect.svelte.ts.
+  // Web build: the network is the page origin (display-only — the WASM backend
+  // derives its WS URL from window.location); desktop: a QUIC host the user
+  // types. On web the picker step is skipped (start on "auth").
+  const cf = new ConnectForm();
+  cf.host = weft.isWeb && typeof window !== "undefined" ? window.location.host : "127.0.0.1:4433";
+  if (weft.isWeb) cf.serverStep = "auth";
   const HOMESERVER_KEY = "weft:homeserver";
-  let serverStep = $state<"server" | "auth">(weft.isWeb ? "auth" : "server");
-  // Whether THIS homeserver requires an email at REGISTER (from its WELCOME).
-  let emailRequired = $state(false);
-  // A probe (HELLO→WELCOME only) is in flight to learn the server's shape.
-  let probing = $state(false);
 
   // ---- session lifecycle (Phase 8) ----
   const SAVED_KEY = "weft:last-connect";
@@ -134,7 +115,7 @@
       switcherQuery = "";
     } else if (e.key === "Escape") {
       switcherOpen = false;
-      pinsOpen = false;
+      store.pins.open = false;
       discoverOpen = false;
       settingsOpen = false;
       nsSettingsOpen = false;
@@ -170,11 +151,7 @@
     const nsScope = roleScopeOf(active);
     ensureCapsAt(account, active);
     ensureCapsAt(account, nsScope);
-    const has = (scope: string) => {
-      const c = capsFor[`${account}|${scope}`];
-      return !!c && (c.owner || c.list.includes("delete-any"));
-    };
-    return has(active) || has(nsScope);
+    return store.session.can("delete-any", active) || store.session.can("delete-any", nsScope);
   }
   // Do I hold moderation power (mute/ban/kick, or owner) in a channel's server?
   // Same scope rule as `canModDelete`: namespaced channels never consult `*`, so
@@ -186,11 +163,7 @@
     const nsScope = roleScopeOf(channel);
     ensureCapsAt(account, channel);
     ensureCapsAt(account, nsScope);
-    const ok = (scope: string) => {
-      const c = capsFor[`${account}|${scope}`];
-      return !!c && (c.owner || c.mod);
-    };
-    return ok(channel) || ok(nsScope);
+    return store.session.moderates(channel) || store.session.moderates(nsScope);
   }
   // Do I hold a *specific* capability at the active server's scope (`ns:<server>`,
   // or `*` at network level)? Owner/ns-admin (the `owner` flag) implies every cap;
@@ -200,16 +173,14 @@
   function serverCap(cap: string): boolean {
     const scope = activeServer ? `ns:${activeServer}` : "*";
     ensureCapsAt(account, scope);
-    const c = capsFor[`${account}|${scope}`];
-    return !!c && (c.owner || c.list.includes(cap));
+    return store.session.can(cap, scope);
   }
   // Do I hold any `grant:*` delegation cap at the server scope? Gates the Roles
   // tab — creating/assigning roles is capability delegation.
   function serverCanGrant(): boolean {
     const scope = activeServer ? `ns:${activeServer}` : "*";
     ensureCapsAt(account, scope);
-    const c = capsFor[`${account}|${scope}`];
-    return !!c && (c.owner || c.list.some((x) => x.startsWith("grant:")));
+    return store.session.canGrant(scope);
   }
   // Server Settings is reachable with any moderation/administration capability —
   // not plain member caps (send/invite). Each tab then gates itself, so a mod
@@ -306,7 +277,7 @@
   function userCtx(e: MouseEvent, name: string) {
     if (peerOf(name) === account) return; // no menu on yourself
     const ref = qualify(name);
-    const rel = friends[ref];
+    const rel = store.social.friends.get(ref);
     const items: CtxItem[] = [
       { label: "Open profile", icon: "profile", run: () => openFullProfile(name) },
       active === dmKeyFor(name)
@@ -527,7 +498,7 @@
   // mounted (hidden when inactive), so switching back is instant — DOM built,
   // images decoded, scroll position preserved. All scroll mechanics live inside
   // the component; here we just track which channels stay mounted.
-  const KEEP_ALIVE_MAX = 6;
+  const KEEP_ALIVE_MAX = 8;
   let keptChannels = $state<string[]>([]);
   // ---- servers/namespaces as rail tiles (Phase 6, flavor A) ----
   let activeServer = $state(""); // "" = network top-level channels; else a namespace
@@ -601,7 +572,7 @@
   );
   // Per-account key for the persisted dismissal.
   function emailNudgeKey(): string {
-    return `weft:email-nudge-dismissed:${host}:${account}`;
+    return `weft:email-nudge-dismissed:${cf.host}:${account}`;
   }
   function dismissEmailBanner() {
     emailBannerDismissed = true;
@@ -615,18 +586,10 @@
   let userMenu = $state(false);
   let userTab = $state<"account" | "appearance" | "connection" | "verification">("account");
   let dmInput = $state("");
-  // ---- social layer: friends (federation-able; keyed by full account@network) ----
-  // userref → "friends" | "incoming" | "outgoing"
-  let friends = $state<Record<string, string>>({});
+  // ---- social layer (friends / groups / calls) ----
+  // State lives on `store.social` (userrefs are `account@network`, resolved via
+  // the Account map at the UI edge). Only the add-friend input box stays local.
   let addFriendInput = $state("");
-  // group DMs: group id (`&<ulid>`) → { name?, members (userrefs) }
-  let groups = $state<Record<string, { name?: string; members: string[] }>>({});
-  // friend calls (1:1): incoming ring + the active call, if any.
-  let incomingCall = $state<{ from: string; room: string } | null>(null);
-  let activeCall = $state<{ peer: string; room: string; state: string } | null>(null);
-  // Group DM calls: gid → members currently in the call, and the gid we're in.
-  let groupCallRoster = $state<Record<string, string[]>>({});
-  let activeGroupCall = $state<string | null>(null);
   // ---- discover dialog (Phase 6) ----
   let discoverOpen = $state(false);
   // Namespace identity (metadata + membership + emoji) lives on interned Server
@@ -656,23 +619,11 @@
   let reportsOpen = $state(false);
   let reportQueue = $state<Record<string, Extract<weft.WeftEvent, { kind: "report-filed" }>>>({});
   let profileTarget = $state<string | null>(null); // member profile popout
-  let inviteLink = $state<string | null>(null);
-  let inviteId = $state<string | null>(null); // for INVITE REVOKE
-  let inviteCreateOpen = $state(false); // the invite-creation screen
-  let inviteCreateScope = $state(""); // scope the create screen mints at
-  // Discord-style invites menu: the live invites at a scope, each revocable.
-  type InviteInfo = Extract<weft.WeftEvent, { kind: "invite-info" }>;
-  let invitesOpen = $state(false);
-  let invitesScope = $state("");
-  let invitesList = $state<InviteInfo[]>([]);
-  let invitesBuf: InviteInfo[] = [];
-  let loadingInvites = false;
-  // ---- federation (§11, operator) ----
+  // ---- §6.5 invites (list menu + create screen) — state on `store.invites`.
+  // ---- federation (§11, operator) — state lives on `store.federation` ----
   let federationOpen = $state(false);
-  let netblocks = $state<Record<string, string | null>>({}); // network → reason
-  let manifests = $state<Record<string, Extract<weft.WeftEvent, { kind: "manifest" }>>>({});
   function refreshNetblocks() {
-    netblocks = {};
+    store.federation.netblocks.clear();
     weft.netblockList().catch((e) => toast(String(e), "error"));
   }
   function openFederation() {
@@ -687,7 +638,7 @@
       .catch((e) => toast(String(e), "error"));
   }
   function netblockRemove(nw: string) {
-    delete netblocks[nw];
+    store.federation.netblocks.delete(nw);
     weft.netblockRemove(nw).catch((e) => toast(String(e), "error"));
   }
   function bridgePropose(scope: string, peer: string, history: string, media: string, typing: boolean) {
@@ -699,47 +650,23 @@
   function bridgeSever(peer: string) {
     weft.bridgeSever(peer).catch((e) => toast(String(e), "error"));
   }
-  // ---- pins (§6.4) ----
-  let pinsOpen = $state(false);
-  let pinsList = $state<Msg[]>([]);
-  let loadingPins: string | null = null;
-  let pinsBuf: Msg[] = [];
-  // ---- message search (§6.4) — results arrive as a BATCH like pins ----
-  let searchOpen = $state(false);
-  let searchQuery = $state("");
-  let searchScope = $state(""); // the channel searched
-  let searchResults = $state<Msg[]>([]);
-  let searching = $state(false);
-  let loadingSearch: string | null = null; // channel whose result batch is inbound
-  let searchBuf: Msg[] = [];
-  // ---- threads (§9.4) — a side panel showing one thread (root + replies) ----
-  let threadRoot = $state<Msg | null>(null);
-  let threadMessages = $state<Msg[]>([]);
-  let threadComposer = $state("");
-  let loadingThread: string | null = null; // root msgid whose thread batch is inbound
-  let threadBuf: Msg[] = [];
-  // ---- threads list (§9.4) — a channel's threads, arriving as a BATCH ----
-  let threadsOpen = $state(false);
-  let threadsList = $state<ThreadInfo[]>([]);
-  let threadsBuf: ThreadInfo[] = [];
-  let loadingThreads = false;
-  // Root msgid → display name, kept live from THREAD / THREAD-NAMED events so
-  // the inline indicator and the thread panel title show the name everywhere.
-  let threadNames = $state<Record<string, string>>({});
-  // ---- capability badges (§10.4 CAPS), keyed `account|scope` ----
-  let capsFor = $state<Record<string, { owner: boolean; mod: boolean; list: string[] }>>({});
+  // ---- pins + message search (§6.4) — state on `store.pins` / `store.search`
+  // (self-contained panels); results stream in as BATCHes, routed by the reducer.
+  // ---- threads (§9.4) — side panel + list modal — state on `store.threads`.
+  // ---- capability badges (§10.4 CAPS) — the resolved cache + gate methods live
+  // on `store.session`; keyed `account|scope`. `ensureCapsAt` fetches on demand.
   const capsInflight = new Set<string>();
   function ensureCapsAt(account: string, scope: string) {
     if (!scope || !account) return;
     const key = `${account}|${scope}`;
-    if (key in capsFor || capsInflight.has(key)) return;
+    if (store.session.caps.has(key) || capsInflight.has(key)) return;
     capsInflight.add(key);
     weft.caps(account, scope).catch(() => capsInflight.delete(key));
   }
   const ensureCaps = (account: string, channel: string) =>
     channel.startsWith("#") && ensureCapsAt(account, channel);
-  const badgeFor = (account: string, channel: string) => capsFor[`${account}|${channel}`];
-  const isOperator = $derived(capsFor[`${account}|*`]?.owner ?? false);
+  const badgeFor = (account: string, channel: string) => store.session.capsAt(account, channel);
+  const isOperator = $derived(store.session.isOperator);
   /// The role/authority scope for the active view: the namespace if we're in
   /// one, else global.
   const roleScopeOf = (channel: string) => {
@@ -747,9 +674,14 @@
     return ns ? `ns:${ns}` : "*";
   };
 
-  // ---- §6.5 named roles (capability-token bundles), keyed by scope ----
-  let rolesByScope = $state<Record<string, RoleDefC[]>>({});
-  let roleBuf: RoleDefC[] = [];
+  // ---- §6.5 named roles (capability-token bundles) ----
+  // Namespace roles live on `Server.roles` (single source); the `*` (operator)
+  // and `#chan` (channel-override) scopes stay in this by-scope record. `rolesAt`
+  // is the unified read.
+  let rolesByScope = $state<Record<string, Role[]>>({});
+  const rolesAt = (scope: string): Role[] =>
+    scope.startsWith("ns:") ? (store.servers.get(scope.slice(3))?.roles ?? []) : (rolesByScope[scope] ?? []);
+  let roleBuf: Role[] = [];
   // Roles arrive in `r…`-id BATCHes; a queue tracks which scope each answers,
   // so several scopes can be fetched at once (e.g. ns + channel).
   let roleFetchQueue: string[] = [];
@@ -761,9 +693,8 @@
   }
 
   // ---- §6.5 per-subject grants at a scope (channel-permission member
-  // overrides), keyed by scope. Arrive in `gr…`-id BATCHes with a scope queue,
-  // mirroring the roles path. ----
-  let grantsByScope = $state<Record<string, { subject: string; caps: string[] }[]>>({});
+  // overrides). Live on `store.grants`; arrive in `gr…`-id BATCHes with a scope
+  // queue (buffered here), mirroring the roles path. ----
   let grantBuf: { subject: string; caps: string[] }[] = [];
   let grantFetchQueue: string[] = [];
   function fetchGrants(scope: string) {
@@ -809,11 +740,11 @@
   /// v0.13: role identity is the id (names aren't unique) — resolve an id to its
   /// definition at a scope for display (name/color). ROLE-MEMBER / NS-MEMBER-INFO
   /// carry ids, so member rosters map through this to render.
-  const roleById = (scope: string, id: string): RoleDefC | undefined =>
-    (rolesByScope[scope] ?? []).find((r) => r.id === id);
+  const roleById = (scope: string, id: string): Role | undefined =>
+    rolesAt(scope).find((r) => r.id === id);
   /// Is this account the owner/operator at the scope (implicit all-caps)?
   const isOwnerAt = (account: string, scope: string) =>
-    capsFor[`${account}|${scope}`]?.owner ?? false;
+    store.session.ownerAt(account, scope);
   /// The *real* owner of the active namespace — the record's owner, NOT anyone
   /// who merely holds ns-admin caps (a network operator holds them everywhere,
   /// but that's web-admin authority, not ownership of this server).
@@ -824,7 +755,7 @@
   /// lazily. Surfaced as a "Staff" badge — never as server ownership.
   const isStaff = (account: string): boolean => {
     ensureCapsAt(peerOf(account), "*");
-    return capsFor[`${peerOf(account)}|*`]?.owner ?? false;
+    return store.session.ownerAt(peerOf(account), "*");
   };
   // Explicit role membership (§6.5) keyed `account|scope`, from ROLE-MEMBER —
   // a role is worn because it was assigned, never inferred from caps.
@@ -854,10 +785,10 @@
     fetchRoles(scope);
   }
   /// The role definitions an account is assigned at a scope.
-  function rolesOf(account: string, scope: string): RoleDefC[] {
+  function rolesOf(account: string, scope: string): Role[] {
     // memberRoles holds role **ids** (v0.13 ROLE-MEMBER); match by id.
     const ids = new Set(memberRoles[`${account}|${scope}`] ?? []);
-    return (rolesByScope[scope] ?? []).filter((r) => ids.has(r.id));
+    return rolesAt(scope).filter((r) => ids.has(r.id));
   }
   // The color to tint an account's name with — their highest assigned role at
   // the active namespace (Discord-style), excluding the implicit @everyone.
@@ -936,7 +867,7 @@
   // Friend helpers for the profile modal: normalize a (possibly bare) handle to
   // the `account@network` friend key, then read state / act on it.
   function friendState(handle: string): "friends" | "incoming" | "outgoing" | "none" {
-    return (friends[qualify(peerOf(handle))] as "friends" | "incoming" | "outgoing") ?? "none";
+    return (store.social.friends.get(qualify(peerOf(handle))) as "friends" | "incoming" | "outgoing") ?? "none";
   }
   function friendAction(handle: string, action: "add" | "accept" | "remove") {
     const ref = qualify(peerOf(handle));
@@ -944,7 +875,7 @@
     else if (action === "accept") acceptFriend(ref);
     else removeFriend(ref);
   }
-  function assignRoleTo(acct: string, role: RoleDefC) {
+  function assignRoleTo(acct: string, role: Role) {
     const scope = roleScopeOf(active);
     // Success is confirmed by the resulting ROLE-MEMBER event (see
     // `expectSuccess`); a missing-cap failure never confirms and its ERR toasts.
@@ -954,7 +885,7 @@
       .then(() => fetchMemberRoles(acct, scope)) // ROLES-OF queues after ASSIGN → fresh list
       .catch((e) => toast(String(e), "error"));
   }
-  function unassignRoleFrom(acct: string, role: RoleDefC) {
+  function unassignRoleFrom(acct: string, role: Role) {
     const scope = roleScopeOf(active);
     expectSuccess(`roles:${acct}|${scope}`, `Roles updated for ${acct}`);
     weft
@@ -981,14 +912,12 @@
     | "recovery"
     | "danger"
   >("overview");
-  // §6.7 moderation deny-list (mutes + bans) per scope, for the Bans tab.
-  let modDeny = $state<
-    Record<string, { account: string; kind: string; by?: string | null; reason?: string | null }[]>
-  >({});
+  // §6.7 moderation deny-list (mutes + bans) per scope, for the Bans tab —
+  // lives on `store.deny`.
   const banScope = () => (activeServer ? `ns:${activeServer}` : "*");
-  const denyList = () => modDeny[banScope()] ?? [];
+  const denyList = () => store.deny.get(banScope()) ?? [];
   function refreshBans() {
-    modDeny[banScope()] = []; // full refresh; the batch response repopulates
+    store.deny.set(banScope(), []); // full refresh; the batch response repopulates
     weft.modList(banScope()).catch((e) => toast(String(e), "error"));
   }
   function liftMod(kind: string, account: string) {
@@ -1007,7 +936,7 @@
     // A role may hold zero permissions (granted later); only a name is required.
     if (!newRoleName.trim()) return;
     // Append at the bottom of the ordered list.
-    const position = rolesByScope[nsRoleScope()]?.length ?? 0;
+    const position = rolesAt(nsRoleScope()).length;
     createRoleAt(
       nsRoleScope(),
       newRoleName.trim(),
@@ -1027,7 +956,7 @@
   }
   // The implicit @everyone role's current caps at the active server (or []).
   const everyoneCaps = (): string[] =>
-    (rolesByScope[nsRoleScope()] ?? []).find((r) => r.name === EVERYONE_ROLE)?.caps ?? [];
+    rolesAt(nsRoleScope()).find((r) => r.name === EVERYONE_ROLE)?.caps ?? [];
   // Set the @everyone baseline. Non-empty → upsert the reserved role; empty →
   // delete it (the server rejects an empty cap list, and "no role" = no
   // baseline). It's never assigned or hoisted.
@@ -1043,14 +972,14 @@
     }
     // @everyone is the one reserved, per-scope-unique role — safe to resolve by
     // name; delete addresses it by its id.
-    const everyone = (rolesByScope[scope] ?? []).find((r) => r.name === EVERYONE_ROLE);
+    const everyone = rolesAt(scope).find((r) => r.name === EVERYONE_ROLE);
     if (everyone) deleteRoleAt(scope, everyone.id).catch((e) => toast(String(e), "error"));
   }
   // Move a role up/down in the ordered list, then persist the new order (§6.5).
   // Addressed by the role id (names aren't unique, v0.13).
   function moveRole(roleId: string, dir: -1 | 1) {
     const scope = nsRoleScope();
-    const list = [...(rolesByScope[scope] ?? [])];
+    const list = [...rolesAt(scope)];
     const i = list.findIndex((r) => r.id === roleId);
     const j = i + dir;
     if (i < 0 || j < 0 || j >= list.length) return;
@@ -1069,7 +998,7 @@
   // replaces every field and carries a name change (keeping members + issued
   // caps) — no separate RENAME + upsert (§6.5).
   function saveRole(
-    role: RoleDefC,
+    role: Role,
     patch: { name: string; color: string; caps: string[]; hoist: boolean; pingable: boolean },
   ) {
     const scope = nsRoleScope();
@@ -1598,16 +1527,16 @@
     return net === network ? acct : null;
   }
   const friendList = $derived(
-    Object.entries(friends)
+    [...store.social.friends]
       .filter(([, s]) => s === "friends")
       .map(([u]) => u)
       .sort((a, b) => friendLabel(a).localeCompare(friendLabel(b))),
   );
   const incomingRequests = $derived(
-    Object.entries(friends).filter(([, s]) => s === "incoming").map(([u]) => u).sort(),
+    [...store.social.friends].filter(([, s]) => s === "incoming").map(([u]) => u).sort(),
   );
   const outgoingRequests = $derived(
-    Object.entries(friends).filter(([, s]) => s === "outgoing").map(([u]) => u).sort(),
+    [...store.social.friends].filter(([, s]) => s === "outgoing").map(([u]) => u).sort(),
   );
   function addFriend() {
     const user = qualify(addFriendInput);
@@ -1650,14 +1579,14 @@
   let newGroupInput = $state("");
   // A group's display label: its name, else the member handles (minus self).
   function groupLabel(id: string): string {
-    const g = groups[id];
+    const g = store.social.groups.get(id);
     if (!g) return "Group";
     if (g.name) return g.name;
     const me = `${account}@${network}`;
     const others = g.members.filter((m) => m !== me).map((m) => friendLabel(m));
     return others.length ? others.join(", ") : "Group";
   }
-  const groupList = $derived(Object.keys(groups));
+  const groupList = $derived([...store.social.groups.keys()]);
   function createGroup() {
     const members = newGroupInput
       .split(/[,\s]+/)
@@ -1712,37 +1641,38 @@
   function leaveGroupCall(id: string) {
     weft.groupCallLeave(id).catch(() => {});
     disconnectCallMedia();
-    if (activeGroupCall === id) activeGroupCall = null;
+    if (store.social.activeGroupCall === id) store.social.activeGroupCall = null;
   }
 
   // ---- friend calls (1:1) ----
   function callUser(user: string) {
-    if (activeCall) return; // already in a call
+    if (store.social.activeCall) return; // already in a call
     // Calls are a friends-only feature — block any non-friend target (the
     // single gate behind every call entry point: context menu, topbar, profile).
-    if (friends[qualify(user)] !== "friends") {
+    if (store.social.friends.get(qualify(user)) !== "friends") {
       toast("You can only call friends", "error");
       return;
     }
     weft.call(user).catch((e) => toast(String(e), "error"));
   }
   function acceptCall() {
-    if (!incomingCall) return;
-    const { from, room } = incomingCall;
+    const incoming = store.social.incomingCall;
+    if (!incoming) return;
+    const { from, room } = incoming;
     weft.callAccept(from).catch((e) => toast(String(e), "error"));
-    activeCall = { peer: from, room, state: "active" };
-    incomingCall = null;
+    store.social.activeCall = { peer: from, room, state: "active" };
+    store.social.incomingCall = null;
   }
   function declineCall() {
-    if (!incomingCall) return;
-    weft.callDecline(incomingCall.from).catch(() => {});
-    incomingCall = null;
+    if (!store.social.incomingCall) return;
+    weft.callDecline(store.social.incomingCall.from).catch(() => {});
+    store.social.incomingCall = null;
   }
   function endCall() {
-    if (!activeCall) return;
-    weft.callEnd(activeCall.peer).catch(() => {});
+    if (!store.social.activeCall) return;
+    weft.callEnd(store.social.activeCall.peer).catch(() => {});
     disconnectCallMedia();
-    activeCall = null;
+    store.social.activeCall = null;
   }
   function setStatus(s: string) {
     myStatus = s;
@@ -1756,8 +1686,9 @@
       case "connected":
         network = e.network;
         account = e.account;
+        store.session.account = e.account; // the "me" identity for the cap gates
         status = "online";
-        authError = "";
+        cf.authError = "";
         reconnecting = false;
         reconnectAttempts = 0;
         ensureCapsAt(account, "*"); // learn operator status (federation gating)
@@ -1777,8 +1708,8 @@
         } catch {
           emailBannerDismissed = false;
         }
-        friends = {};
-        groups = {};
+        store.social.friends.clear();
+        store.social.groups.clear();
         weft.listFriends().catch(() => {}); // social layer: load friends + requests
         weft.listGroups().catch(() => {}); // and group DMs
         restoreDms(); // re-open the 1:1 DMs from last session (history loads on click)
@@ -1792,11 +1723,11 @@
         try {
           localStorage.setItem(
             SAVED_KEY,
-            JSON.stringify({ host, account: formAccount.trim(), password: formPassword }),
+            JSON.stringify({ host: cf.host, account: cf.account.trim(), password: cf.password }),
           );
           // Remember the homeserver as the local default (desktop) so the picker
           // is pre-filled and skippable next launch. On web it's the origin.
-          if (!weft.isWeb) localStorage.setItem(HOMESERVER_KEY, host);
+          if (!weft.isWeb) localStorage.setItem(HOMESERVER_KEY, cf.host);
         } catch {
           /* storage unavailable */
         }
@@ -1824,7 +1755,7 @@
         // §3.6 the negotiation WELCOME, seen before auth — remember whether this
         // homeserver requires a register email (form shaping) and whether it can
         // actually mail codes at all (gates the no-email nudge).
-        emailRequired = e.email_required;
+        cf.emailRequired = e.email_required;
         serverEmailAvailable = e.email_available;
         break;
       case "media-token":
@@ -1834,21 +1765,21 @@
         reconnecting = false;
         lastCreds = null;
         status = "connect";
-        authError = e.reason;
-        authFailed = true;
+        cf.authError = e.reason;
+        cf.authFailed = true;
         break;
       case "closed":
         // A probe tears its own handshake-only connection down; that close is
         // expected and must not touch the connect screen's state.
-        if (probing) break;
+        if (cf.probing) break;
         if (manualLogout) {
           manualLogout = false;
           break;
         }
         // AUTH-FAILED already closed the stream (§3.6) and set a specific
         // reason — don't overwrite it with the generic close message.
-        if (authFailed) {
-          authFailed = false;
+        if (cf.authFailed) {
+          cf.authFailed = false;
           break;
         }
         // Unexpected drop while online → keep the UI and auto-reconnect.
@@ -1857,7 +1788,7 @@
         } else if (status === "connecting") {
           // A user-initiated attempt failed before authenticating.
           status = "connect";
-          authError = e.reason;
+          cf.authError = e.reason;
         }
         // Otherwise the socket was idle (e.g. a probe's own teardown) — a close
         // there carries no user-facing meaning, so leave the screen untouched.
@@ -1937,13 +1868,13 @@
           net: !e.system && e.network !== network ? e.network : undefined,
           attachments: e.attachments?.length ? e.attachments : undefined,
         });
-        // Batch messages buffer until BATCH END. A SEARCH batch routes to the
-        // search buffer, a PINS batch (loadingPins) to the pins buffer, else a
-        // HISTORY batch to the history buffer.
+        // Batch messages buffer until BATCH END. A SEARCH / PINS / thread batch
+        // routes to its panel model; else the HISTORY batch to the per-channel
+        // history buffer.
         if (e.history) {
-          if (loadingThread) threadBuf.push(msg);
-          else if (loadingSearch) searchBuf.push(msg);
-          else if (loadingPins) pinsBuf.push(msg);
+          if (store.threads.loadingRoot) store.threads.buf.push(msg);
+          else if (store.search.loadingChannel) store.search.buf.push(msg);
+          else if (store.pins.loadingChannel) store.pins.buf.push(msg);
           else (histByTarget[e.target] ??= []).push(msg); // route to the page's own channel
           break;
         }
@@ -1961,8 +1892,9 @@
           const idx = ch.messages.findIndex((m) => m.pending && m.label === e.label);
           if (idx !== -1) {
             ch.messages.splice(idx, 1, msg);
-            const ti = threadMessages.findIndex((m) => m.pending && m.label === e.label);
-            if (ti !== -1) threadMessages = threadMessages.map((m, i) => (i === ti ? msg : m));
+            const ti = store.threads.messages.findIndex((m) => m.pending && m.label === e.label);
+            if (ti !== -1)
+              store.threads.messages = store.threads.messages.map((m, i) => (i === ti ? msg : m));
             break;
           }
         }
@@ -1981,12 +1913,12 @@
         ch.messages.push(msg);
         // If this is a live reply in the open thread, show it in the panel too.
         if (
-          threadRoot &&
+          store.threads.root &&
           key === active &&
-          msg.thread === threadRoot.msgid &&
-          !threadMessages.some((m) => m.msgid === msg.msgid)
+          msg.thread === store.threads.root.msgid &&
+          !store.threads.messages.some((m) => m.msgid === msg.msgid)
         ) {
-          threadMessages = [...threadMessages, msg];
+          store.threads.messages = [...store.threads.messages, msg];
         }
         if (key.startsWith("#")) {
           if (e.network !== network) {
@@ -2117,10 +2049,12 @@
       case "emoji": {
         // §9.4 a namespace custom emoji (from EMOJI LIST or a live add).
         store.server(e.namespace).emoji.set(e.name, e.media);
+        mdCache.clear(); // rendered `:name:` may change
         break;
       }
       case "emoji-removed": {
         store.servers.get(e.namespace)?.emoji.delete(e.name);
+        mdCache.clear();
         break;
       }
       case "chanmeta": {
@@ -2144,76 +2078,78 @@
       case "pinned": {
         const ch = ensureChannel(e.channel);
         ch.pinnedIds = [...(ch.pinnedIds ?? []).filter((id) => id !== e.msgid), e.msgid];
-        if (pinsOpen && active === e.channel) weft.pins(e.channel).catch(() => {}); // refresh panel
+        if (store.pins.open && active === e.channel) weft.pins(e.channel).catch(() => {}); // refresh panel
         break;
       }
       case "unpinned": {
         const ch = channels[e.channel];
         if (ch) ch.pinnedIds = (ch.pinnedIds ?? []).filter((id) => id !== e.msgid);
-        if (pinsOpen && active === e.channel) pinsList = pinsList.filter((m) => m.msgid !== e.msgid);
+        if (store.pins.open && active === e.channel)
+          store.pins.list = store.pins.list.filter((m) => m.msgid !== e.msgid);
         break;
       }
       case "thread": {
-        if (e.name) threadNames[e.root] = e.name;
-        else delete threadNames[e.root];
-        if (loadingThreads)
-          threadsBuf.push({ root: e.root, name: e.name ?? undefined, replies: e.replies, last: e.last ?? undefined });
+        if (e.name) store.threads.names.set(e.root, e.name);
+        else store.threads.names.delete(e.root);
+        if (store.threads.loadingList)
+          store.threads.listBuf.push({ root: e.root, name: e.name ?? undefined, replies: e.replies, last: e.last ?? undefined });
         break;
       }
       case "thread-named": {
-        if (e.name) threadNames[e.root] = e.name;
-        else delete threadNames[e.root];
+        if (e.name) store.threads.names.set(e.root, e.name);
+        else store.threads.names.delete(e.root);
         // Reflect a live rename in an open threads list.
-        const i = threadsList.findIndex((t) => t.root === e.root);
-        if (i >= 0) threadsList[i] = { ...threadsList[i], name: e.name ?? undefined };
+        const i = store.threads.list.findIndex((t) => t.root === e.root);
+        if (i >= 0) store.threads.list[i] = { ...store.threads.list[i], name: e.name ?? undefined };
         break;
       }
       case "friend":
-        friends[e.user] = e.state;
+        store.social.friends.set(e.user, e.state);
         // A fresh incoming request is worth a nudge.
         if (e.state === "incoming") toast(`Friend request from ${e.user}`, "info");
         break;
       case "friend-removed":
-        delete friends[e.user];
+        store.social.friends.delete(e.user);
         break;
       case "group": {
-        groups[e.id] = { name: e.name ?? undefined, members: e.members };
+        store.social.groups.set(e.id, { name: e.name ?? undefined, members: e.members });
         ensureChannel(e.id); // a conversation entry so it lists + holds messages
         break;
       }
       case "group-member": {
-        const g = groups[e.group];
+        const g = store.social.groups.get(e.group);
         if (!g) break;
         const me = `${account}@${network}`;
+        // SvelteMap values aren't deeply reactive — re-set the entry on change.
         if (e.action === "join") {
-          if (!g.members.includes(e.user)) g.members = [...g.members, e.user];
-        } else {
-          g.members = g.members.filter((m) => m !== e.user);
+          if (!g.members.includes(e.user))
+            store.social.groups.set(e.group, { ...g, members: [...g.members, e.user] });
+        } else if (e.user === me) {
           // If *we* left, drop the conversation.
-          if (e.user === me) {
-            delete groups[e.group];
-            delete channels[e.group];
-            if (active === e.group) active = "";
-          }
+          store.social.groups.delete(e.group);
+          delete channels[e.group];
+          if (active === e.group) active = "";
+        } else {
+          store.social.groups.set(e.group, { ...g, members: g.members.filter((m) => m !== e.user) });
         }
         break;
       }
       case "call-ring":
-        incomingCall = { from: e.from, room: e.room };
+        store.social.incomingCall = { from: e.from, room: e.room };
         break;
       case "call-state":
         if (e.state === "ringing") {
-          activeCall = { peer: e.user, room: "", state: "ringing" };
+          store.social.activeCall = { peer: e.user, room: "", state: "ringing" };
         } else if (e.state === "active") {
-          incomingCall = null;
-          activeCall = { peer: e.user, room: activeCall?.room ?? "", state: "active" };
+          store.social.incomingCall = null;
+          store.social.activeCall = { peer: e.user, room: store.social.activeCall?.room ?? "", state: "active" };
           // Audio (LiveKit) connects on the CALL-MEDIA credential that follows.
         } else {
           if (e.state === "busy") toast(`${friendLabel(e.user)} is busy`, "info");
           else if (e.state === "declined") toast(`${friendLabel(e.user)} declined the call`, "info");
-          if (incomingCall?.from === e.user) incomingCall = null;
-          if (activeCall?.peer === e.user) {
-            activeCall = null;
+          if (store.social.incomingCall?.from === e.user) store.social.incomingCall = null;
+          if (store.social.activeCall?.peer === e.user) {
+            store.social.activeCall = null;
             disconnectCallMedia();
           }
         }
@@ -2225,17 +2161,17 @@
         void connectCallMedia(e.endpoint, e.token);
         break;
       case "group-call-state": {
-        const roster = groupCallRoster[e.group] ?? [];
+        const roster = store.social.groupCallRoster.get(e.group) ?? [];
         const me = `${account}@${network}`;
         if (e.state === "active") {
-          if (!roster.includes(e.user)) groupCallRoster[e.group] = [...roster, e.user];
-          if (e.user === me) activeGroupCall = e.group;
+          if (!roster.includes(e.user)) store.social.groupCallRoster.set(e.group, [...roster, e.user]);
+          if (e.user === me) store.social.activeGroupCall = e.group;
         } else {
           const next = roster.filter((u) => u !== e.user);
-          if (next.length) groupCallRoster[e.group] = next;
-          else delete groupCallRoster[e.group];
-          if (e.user === me && activeGroupCall === e.group) {
-            activeGroupCall = null;
+          if (next.length) store.social.groupCallRoster.set(e.group, next);
+          else store.social.groupCallRoster.delete(e.group);
+          if (e.user === me && store.social.activeGroupCall === e.group) {
+            store.social.activeGroupCall = null;
             disconnectCallMedia();
           }
         }
@@ -2243,25 +2179,27 @@
       }
       case "caps": {
         const set = e.caps ? e.caps.split(",") : [];
-        capsFor[`${e.account}|${e.scope}`] = {
+        store.session.caps.set(`${e.account}|${e.scope}`, {
           owner: set.includes("ns-admin") || set.includes("netblock"),
           mod: set.includes("mute") || set.includes("ban") || set.includes("kick"),
           list: set,
-        };
+        });
         capsInflight.delete(`${e.account}|${e.scope}`);
         confirmSuccess(`caps:${e.account}|${e.scope}`);
         break;
       }
       case "role":
-        roleBuf.push({
-          id: e.role,
-          name: e.name,
-          color: e.color,
-          caps: e.caps ? e.caps.split(",") : [],
-          hoist: e.hoist,
-          pingable: e.pingable,
-          position: e.position,
-        });
+        roleBuf.push(
+          new Role({
+            id: e.role,
+            name: e.name,
+            color: e.color,
+            caps: e.caps ? e.caps.split(",") : [],
+            hoist: e.hoist,
+            pingable: e.pingable,
+            position: e.position,
+          }),
+        );
         break;
       case "role-member":
         memberRoles[`${e.account}|${e.scope}`] = e.roles ? e.roles.split(",") : [];
@@ -2345,11 +2283,20 @@
         break;
       case "manifest":
         // A bridge's channel set/state (§11). `severed`/`removed` drops it.
-        if (e.state === "severed" || e.state === "removed") delete manifests[e.peer];
-        else manifests[e.peer] = e;
+        if (e.state === "severed" || e.state === "removed") store.federation.manifests.delete(e.peer);
+        else
+          store.federation.manifests.set(e.peer, {
+            peer: e.peer,
+            version: e.version,
+            state: e.state,
+            channels: e.channels,
+            history: e.history,
+            media: e.media,
+            typing: e.typing,
+          });
         break;
       case "netblocked":
-        netblocks[e.network] = e.reason;
+        store.federation.netblocks.set(e.network, e.reason);
         break;
       case "token":
         // A permission change is confirmed with a transient toast, never a
@@ -2359,22 +2306,22 @@
       case "invited":
         if (e.max_uses === 0) {
           // A revoke echo (INVITED … max-uses=0) — close it + drop from the menu.
-          if (inviteId === e.invite_id) {
-            inviteLink = null;
-            inviteId = null;
+          if (store.invites.id === e.invite_id) {
+            store.invites.link = null;
+            store.invites.id = null;
           }
-          invitesList = invitesList.filter((i) => i.invite_id !== e.invite_id);
+          store.invites.list = store.invites.list.filter((i) => i.invite_id !== e.invite_id);
         } else {
-          inviteLink = e.link ?? e.invite_id;
-          inviteId = e.invite_id;
+          store.invites.link = e.link ?? e.invite_id;
+          store.invites.id = e.invite_id;
           // A freshly-minted invite: reflect it live wherever the list is shown —
           // the standalone menu or the Server-Settings Invites tab.
-          const listShown = invitesOpen || (nsSettingsOpen && nsTab === "invites");
-          if (listShown && e.scope === invitesScope) weft.inviteList(invitesScope).catch(() => {});
+          const listShown = store.invites.listOpen || (nsSettingsOpen && nsTab === "invites");
+          if (listShown && e.scope === store.invites.scope) weft.inviteList(store.invites.scope).catch(() => {});
         }
         break;
       case "invite-info":
-        if (loadingInvites) invitesBuf.push(e);
+        if (store.invites.loading) store.invites.buf.push(e);
         break;
       case "reported":
         sys(`✓ report filed (${e.report_id})`);
@@ -2449,7 +2396,7 @@
         // before the `r…` role branch (neither prefix overlaps: "gr" ≠ "r").
         if (currentBatchId.startsWith("gr")) {
           const scope = grantFetchQueue.shift();
-          if (scope) grantsByScope[scope] = grantBuf;
+          if (scope) store.grants.set(scope, grantBuf);
           grantBuf = [];
           currentBatchId = "";
           break;
@@ -2458,44 +2405,49 @@
           const scope = roleFetchQueue.shift();
           // Keep roles in position order (server sorts, but be safe).
           roleBuf.sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
-          if (scope) rolesByScope[scope] = roleBuf;
+          if (scope) {
+            // Single source per scope: ns roles on the Server, others by-scope.
+            if (scope.startsWith("ns:")) store.server(scope.slice(3)).roles = roleBuf;
+            else rolesByScope[scope] = roleBuf;
+            mdCache.clear(); // role names/colors feed mention rendering
+          }
           roleBuf = [];
           currentBatchId = "";
           break;
         }
-        if (loadingThread) {
-          threadMessages = threadBuf;
-          threadBuf = [];
-          loadingThread = null;
+        if (store.threads.loadingRoot) {
+          store.threads.messages = store.threads.buf;
+          store.threads.buf = [];
+          store.threads.loadingRoot = null;
           break;
         }
-        if (loadingSearch) {
-          searchResults = searchBuf;
-          searchBuf = [];
-          loadingSearch = null;
-          searching = false;
+        if (store.search.loadingChannel) {
+          store.search.results = store.search.buf;
+          store.search.buf = [];
+          store.search.loadingChannel = null;
+          store.search.loading = false;
           break;
         }
-        if (loadingPins) {
-          const ch = channels[loadingPins];
-          if (ch) ch.pinnedIds = pinsBuf.map((m) => m.msgid).filter(Boolean) as string[];
-          pinsList = pinsBuf;
-          pinsBuf = [];
-          loadingPins = null;
+        if (store.pins.loadingChannel) {
+          const ch = channels[store.pins.loadingChannel];
+          if (ch) ch.pinnedIds = store.pins.buf.map((m) => m.msgid).filter(Boolean) as string[];
+          store.pins.list = store.pins.buf;
+          store.pins.buf = [];
+          store.pins.loadingChannel = null;
           break;
         }
-        if (loadingThreads) {
+        if (store.threads.loadingList) {
           // Newest activity first (last-activity msgid sorts by its ULID).
-          threadsBuf.sort((a, b) => (b.last ?? "").localeCompare(a.last ?? ""));
-          threadsList = threadsBuf;
-          threadsBuf = [];
-          loadingThreads = false;
+          store.threads.listBuf.sort((a, b) => (b.last ?? "").localeCompare(a.last ?? ""));
+          store.threads.list = store.threads.listBuf;
+          store.threads.listBuf = [];
+          store.threads.loadingList = false;
           break;
         }
-        if (loadingInvites) {
-          invitesList = invitesBuf;
-          invitesBuf = [];
-          loadingInvites = false;
+        if (store.invites.loading) {
+          store.invites.list = store.invites.buf;
+          store.invites.buf = [];
+          store.invites.loading = false;
           break;
         }
         // Flush every channel that accumulated a history page. Each page goes to
@@ -2550,16 +2502,17 @@
         // arrives inside a `mod`-batch; live actions arrive bare. `mute`/`ban`
         // add-or-replace; `unmute`/`unban` remove; `kick` is transient.
         if (e.action === "mute" || e.action === "ban") {
-          const list = (modDeny[e.scope] ??= []);
+          const list = store.deny.get(e.scope) ?? [];
           const i = list.findIndex((r) => r.account === e.account && r.kind === e.action);
           const rec = { account: e.account, kind: e.action, by: e.by, reason: e.reason };
-          if (i >= 0) list[i] = rec;
-          else list.push(rec);
+          store.deny.set(e.scope, i >= 0 ? list.map((r, j) => (j === i ? rec : r)) : [...list, rec]);
         } else if (e.action === "unmute" || e.action === "unban") {
           const kind = e.action === "unmute" ? "mute" : "ban";
-          if (modDeny[e.scope])
-            modDeny[e.scope] = modDeny[e.scope].filter(
-              (r) => !(r.account === e.account && r.kind === kind),
+          const cur = store.deny.get(e.scope);
+          if (cur)
+            store.deny.set(
+              e.scope,
+              cur.filter((r) => !(r.account === e.account && r.kind === kind)),
             );
         }
         // Moderation is reflected in Server Settings (the deny-list above) and
@@ -2575,53 +2528,52 @@
 
   // ---- actions ----
   // Device-key login availability (checked as host/account change).
-  let deviceKeyAvailable = $state(false);
   $effect(() => {
-    const h = host.trim();
-    const a = formAccount.trim();
+    const h = cf.host.trim();
+    const a = cf.account.trim();
     if (h && a)
       weft
         .hasDeviceKey(h, a)
-        .then((v) => (deviceKeyAvailable = v))
-        .catch(() => (deviceKeyAvailable = false));
-    else deviceKeyAvailable = false;
+        .then((v) => (cf.deviceKeyAvailable = v))
+        .catch(() => (cf.deviceKeyAvailable = false));
+    else cf.deviceKeyAvailable = false;
   });
   function keyLogin() {
-    mode = "key";
+    cf.mode = "key";
     doConnect();
   }
   function enrollThisDevice() {
     weft
-      .enrollDevice(host.trim(), account)
+      .enrollDevice(cf.host.trim(), account)
       .then(() => toast("Device key enrolled — passwordless login is on for next time"))
       .catch((e) => toast(String(e), "error"));
   }
 
   async function doConnect() {
-    if (!formAccount.trim()) return;
+    if (!cf.account.trim()) return;
     // §6.1 a register email is required only when the homeserver asks for one.
-    if (mode === "register" && emailRequired && !formEmail.trim()) {
-      authError = "this server requires an email address to register";
+    if (cf.mode === "register" && cf.emailRequired && !cf.email.trim()) {
+      cf.authError = "this server requires an email address to register";
       return;
     }
-    authError = "";
-    authFailed = false;
+    cf.authError = "";
+    cf.authFailed = false;
     status = "connecting";
     manualLogout = false;
     reconnectAttempts = 0;
     // Held in memory (never persisted) so a mid-session drop can reconnect.
-    lastCreds = { host: host.trim(), account: formAccount.trim(), password: formPassword };
+    lastCreds = { host: cf.host.trim(), account: cf.account.trim(), password: cf.password };
     try {
       await weft.connect(
-        host.trim(),
-        formAccount.trim(),
-        formPassword,
-        mode,
-        mode === "register" ? formEmail.trim() : undefined,
+        cf.host.trim(),
+        cf.account.trim(),
+        cf.password,
+        cf.mode,
+        cf.mode === "register" ? cf.email.trim() : undefined,
       );
     } catch (err) {
       status = "connect";
-      authError = String(err);
+      cf.authError = String(err);
     }
   }
 
@@ -2629,38 +2581,38 @@
   /// email?). Best-effort: a failure just leaves the email field optional — the
   /// server still enforces its own policy at REGISTER.
   async function probeServer() {
-    const h = host.trim();
+    const h = cf.host.trim();
     if (!h) return;
-    probing = true;
+    cf.probing = true;
     try {
       const info = await weft.probe(h);
-      emailRequired = info.emailRequired;
+      cf.emailRequired = info.emailRequired;
     } catch {
-      emailRequired = false;
+      cf.emailRequired = false;
     } finally {
-      probing = false;
+      cf.probing = false;
     }
   }
 
   /// Confirm the typed homeserver: persist it as the local default, move to the
   /// login/register step, and probe it for its register-email requirement.
   function chooseServer() {
-    const h = host.trim();
+    const h = cf.host.trim();
     if (!h) return;
     try {
       localStorage.setItem(HOMESERVER_KEY, h);
     } catch {
       /* storage unavailable */
     }
-    serverStep = "auth";
+    cf.serverStep = "auth";
     void probeServer();
   }
 
   /// "Change" on the login screen → back to the homeserver picker.
   function changeServer() {
-    authError = "";
-    emailRequired = false;
-    serverStep = "server";
+    cf.authError = "";
+    cf.emailRequired = false;
+    cf.serverStep = "server";
   }
 
   function joinNamespace(name: string) {
@@ -2674,7 +2626,7 @@
     // `#chan` joins one channel; a bare name (or `ns:name`) joins the whole
     // namespace — the server auto-joins every channel we're allowed to see.
     if (raw.startsWith("#")) {
-      weft.join(raw).catch((e) => (authError = String(e)));
+      weft.join(raw).catch((e) => (cf.authError = String(e)));
     } else {
       joinNamespace(raw.replace(/^ns:/, ""));
     }
@@ -3047,7 +2999,7 @@
     );
     // @mentions → pills; a mention of me / @everyone / @here / a pingable role
     // I hold highlights. Role pills carry the role's color.
-    const pingable = (rolesByScope[`ns:${activeServer}`] ?? []).filter((r) => r.pingable);
+    const pingable = rolesAt(`ns:${activeServer}`).filter((r) => r.pingable);
     const myRoleIds = new Set(memberRoles[`${account}|ns:${activeServer}`] ?? []);
     s = s.replace(/@(everyone|here|[a-z0-9][a-z0-9._-]*)/gi, (_full, name: string) => {
       const lower = name.toLowerCase();
@@ -3078,10 +3030,34 @@
     return s;
   }
 
+  // §9.4 rendered-message cache (Discord-style memoized parsing): markdown +
+  // syntax-highlight is the costly per-message work, so cache HTML by
+  // (server, body) — re-mounting an evicted channel (beyond the keep-alive
+  // window) then re-renders from cache instead of re-parsing. Custom emoji and
+  // role-mention styling are ns-scoped, so `activeServer` is part of the key;
+  // the cache is cleared when either changes (emoji add/remove, role flush).
+  // LRU: a Map keeps insertion order, so a hit re-inserts (most-recently-used)
+  // and eviction drops the oldest (`keys().next()`). Bounds memory without
+  // dropping the whole cache. Plain Map — not reactive.
+  const MD_CACHE_MAX = 4000;
+  const mdCache = new Map<string, string>();
+  function renderMd(text: string): string {
+    const key = `${activeServer} ${text}`;
+    const hit = mdCache.get(key);
+    if (hit !== undefined) {
+      mdCache.delete(key);
+      mdCache.set(key, hit); // touch → most-recently-used
+      return hit;
+    }
+    const html = renderMdRaw(text);
+    mdCache.set(key, html);
+    if (mdCache.size > MD_CACHE_MAX) mdCache.delete(mdCache.keys().next().value!);
+    return html;
+  }
   // Full render: lift out ``` / ~~~ fenced code blocks (verbatim, highlighted),
   // parse block-level constructs (headings, block quotes, lists, rules) line by
   // line, inline-format the rest, then splice the code blocks back in.
-  function renderMd(text: string): string {
+  function renderMdRaw(text: string): string {
     const blocks: { lang: string; code: string }[] = [];
     const lifted = text.replace(
       /(?:```|~~~)([a-zA-Z0-9+#.-]*)\n?([\s\S]*?)(?:```|~~~)/g,
@@ -3198,7 +3174,7 @@
     // memberRoles holds role ids; a role pings me if it's pingable and its
     // display name appears as an @mention in the body (v0.13).
     const mineIds = new Set(memberRoles[`${account}|${scope}`] ?? []);
-    return (rolesByScope[scope] ?? []).some(
+    return rolesAt(scope).some(
       (r) =>
         r.pingable &&
         mineIds.has(r.id) &&
@@ -3263,7 +3239,7 @@
     if ("here".startsWith(q)) opts.push({ name: "here", kind: "special", display: "here" });
     // Pingable roles at this server (single-word names — the token can't hold
     // spaces), so members can @-mention them from the composer.
-    for (const r of rolesByScope[`ns:${activeServer}`] ?? [])
+    for (const r of rolesAt(`ns:${activeServer}`))
       if (r.pingable && !/\s/.test(r.name) && r.name.toLowerCase().startsWith(q))
         opts.push({ name: r.name, kind: "role", display: r.name, color: r.color });
     // Members: match the account token OR the resolved display name, and carry
@@ -3444,10 +3420,10 @@
   // Invites — every entry point opens the creation screen (pick expiry + max
   // uses, then generate), rather than minting a fixed invite immediately.
   function openInviteCreate(scope?: string) {
-    inviteCreateScope = scope || scopesFor()[0] || "";
-    inviteLink = null;
-    inviteId = null;
-    inviteCreateOpen = true;
+    store.invites.createScope = scope || scopesFor()[0] || "";
+    store.invites.link = null;
+    store.invites.id = null;
+    store.invites.createOpen = true;
   }
   function mintInvite() {
     openInviteCreate();
@@ -3455,9 +3431,10 @@
   // Mint with the chosen limits — `null` = unlimited uses / never expires. The
   // resulting link arrives on the `invited` event and fills `inviteLink`.
   function generateInvite(maxUses: number | null, expiry: number | null) {
-    if (!inviteCreateScope) return;
+    const scope = store.invites.createScope;
+    if (!scope) return;
     weft
-      .inviteMint(inviteCreateScope, maxUses ?? undefined, expiry ?? undefined)
+      .inviteMint(scope, maxUses ?? undefined, expiry ?? undefined)
       .catch((e) => toast(String(e), "error"));
   }
   // Share an invite link with a friend by dropping it into their DM. Only
@@ -3473,18 +3450,18 @@
 
   // ---- Discord-style invites menu ----
   function loadInvites(scope: string) {
-    invitesScope = scope;
-    invitesList = [];
-    invitesBuf = [];
-    loadingInvites = true;
-    weft.inviteList(invitesScope).catch((e) => {
-      loadingInvites = false;
+    store.invites.scope = scope;
+    store.invites.list = [];
+    store.invites.buf = [];
+    store.invites.loading = true;
+    weft.inviteList(scope).catch((e) => {
+      store.invites.loading = false;
       toast(String(e), "error");
     });
   }
   function openInvites() {
     loadInvites(scopesFor()[0]);
-    invitesOpen = true;
+    store.invites.listOpen = true;
   }
   // The Server-Settings Invites tab lists the whole namespace's invites.
   function loadNsInvites() {
@@ -3492,10 +3469,10 @@
   }
   function revokeInvite(id: string) {
     weft.inviteRevoke(id).catch((e) => toast(String(e), "error"));
-    invitesList = invitesList.filter((i) => i.invite_id !== id); // optimistic
+    store.invites.list = store.invites.list.filter((i) => i.invite_id !== id); // optimistic
   }
   function createInvite() {
-    openInviteCreate(invitesScope || scopesFor()[0]);
+    openInviteCreate(store.invites.scope || scopesFor()[0]);
   }
   // Reconstruct the shareable link for an invite (the list doesn't carry it).
   function inviteLinkFor(inv: InviteInfo): string {
@@ -3666,7 +3643,7 @@
   // A channel-scoped role/@everyone override's caps (channel roles are named
   // after ns roles; `everyone` is the per-channel baseline).
   const chanRoleCaps = (name: string) =>
-    (rolesByScope[chanPermsCh ?? ""] ?? []).find((r) => r.name === name)?.caps ?? [];
+    rolesAt(chanPermsCh ?? "").find((r) => r.name === name)?.caps ?? [];
   // Apply a channel role / @everyone target's full cap set (the editor commits
   // a draft, not per-toggle): a non-empty set upserts the channel role, an
   // empty set deletes it. The ROLES refetch inside createRoleAt/deleteRoleAt
@@ -3680,7 +3657,7 @@
   }
 
   // Individual-member overrides at the channel scope (direct GRANTs).
-  const chanMemberGrants = () => grantsByScope[chanPermsCh ?? ""] ?? [];
+  const chanMemberGrants = () => store.grants.get(chanPermsCh ?? "") ?? [];
   const chanMemberCaps = (account: string) =>
     chanMemberGrants().find((g) => g.subject === account)?.caps ?? [];
   // Apply a member override's full cap set. record_grant replaces, so we GRANT
@@ -3690,13 +3667,14 @@
     const scope = chanPermsCh;
     const prev = chanMemberCaps(account);
 
-    const list = grantsByScope[scope] ?? [];
+    // Re-set the whole entry (SvelteMap values aren't deeply reactive).
+    const list = store.grants.get(scope) ?? [];
     const idx = list.findIndex((g) => g.subject === account);
     if (caps.length) {
-      if (idx >= 0) list[idx].caps = caps;
-      else grantsByScope[scope] = [...list, { subject: account, caps }];
+      if (idx >= 0) store.grants.set(scope, list.map((g, i) => (i === idx ? { ...g, caps } : g)));
+      else store.grants.set(scope, [...list, { subject: account, caps }]);
     } else if (idx >= 0) {
-      grantsByScope[scope] = list.filter((g) => g.subject !== account);
+      store.grants.set(scope, list.filter((g) => g.subject !== account));
     }
 
     (caps.length ? weft.grant(account, scope, caps.join(",")) : weft.revoke(account, scope, prev.join(",")))
@@ -3716,7 +3694,7 @@
     if (!chanPermsCh) return;
     const scope = chanPermsCh;
     const cur = chanMemberCaps(account);
-    grantsByScope[scope] = (grantsByScope[scope] ?? []).filter((g) => g.subject !== account);
+    store.grants.set(scope, (store.grants.get(scope) ?? []).filter((g) => g.subject !== account));
     if (cur.length) weft.revoke(account, scope, cur.join(",")).catch((e) => toast(String(e), "error"));
   }
   function openChanPerms(channel: string) {
@@ -3787,38 +3765,17 @@
   }
   function openPins() {
     if (!active.startsWith("#")) return;
-    pinsOpen = true;
-    pinsList = [];
-    loadingPins = active;
+    store.pins.open = true;
+    store.pins.list = [];
+    store.pins.loadingChannel = active;
     weft.pins(active).catch(() => {});
   }
 
-  // ---- message search (§6.4) ----
+  // ---- message search (§6.4) — `SearchModal` owns the query/jump; this just
+  // opens the panel on the active channel. Both stream server results (routed
+  // by the reducer into `store.search` / `store.pins`).
   function openSearch() {
-    if (!active.startsWith("#")) return;
-    searchQuery = "";
-    searchResults = [];
-    searchScope = active;
-    searchOpen = true;
-  }
-  function runSearch(query: string) {
-    const q = query.trim();
-    if (!q || !active.startsWith("#")) return;
-    searchQuery = q;
-    searchScope = active;
-    searchResults = [];
-    searchBuf = [];
-    searching = true;
-    loadingSearch = active;
-    weft.search(active, q).catch((e) => {
-      loadingSearch = null;
-      searching = false;
-      toast(String(e), "error");
-    });
-  }
-  function jumpToResult(m: Msg) {
-    searchOpen = false;
-    jumpTo(m.msgid); // best-effort: scrolls if the message is loaded in the timeline
+    if (active.startsWith("#")) store.search.begin(active);
   }
 
   // ---- threads (§9.4) ----
@@ -3827,27 +3784,28 @@
     !msgid || !activeChannel ? 0 : activeChannel.messages.filter((m) => m.thread === msgid).length;
   function openThread(root: Msg) {
     if (!root.msgid) return;
-    threadRoot = root;
-    threadMessages = [root];
-    threadComposer = "";
-    loadingThread = root.msgid;
+    store.threads.root = root;
+    store.threads.messages = [root];
+    store.threads.composer = "";
+    store.threads.loadingRoot = root.msgid;
     weft.history(active, undefined, root.msgid).catch((e) => {
-      loadingThread = null;
+      store.threads.loadingRoot = null;
       toast(String(e), "error");
     });
   }
   function closeThread() {
-    threadRoot = null;
-    threadMessages = [];
-    loadingThread = null;
-    threadBuf = [];
+    store.threads.root = null;
+    store.threads.messages = [];
+    store.threads.loadingRoot = null;
+    store.threads.buf = [];
   }
   function sendThread() {
-    const text = threadComposer.trim();
-    if (!text || !threadRoot?.msgid || !active) return;
+    const text = store.threads.composer.trim();
+    const root = store.threads.root?.msgid;
+    if (!text || !root || !active) return;
     weft
-      .sendMessage(active, text, undefined, [], threadRoot.msgid)
-      .then(() => (threadComposer = ""))
+      .sendMessage(active, text, undefined, [], root)
+      .then(() => (store.threads.composer = ""))
       .catch((e) => toast(String(e), "error"));
   }
   // Main timeline hides thread replies (they live in the thread panel), Discord-style.
@@ -3860,30 +3818,30 @@
     if (active !== threadChannel) {
       threadChannel = active;
       closeThread();
-      threadsOpen = false;
+      store.threads.listOpen = false;
     }
   });
 
   // ---- threads list (§9.4): all threads in the active channel ----
   function openThreads() {
     if (!active.startsWith("#")) return;
-    threadsOpen = true;
-    threadsList = [];
-    threadsBuf = [];
-    loadingThreads = true;
+    store.threads.listOpen = true;
+    store.threads.list = [];
+    store.threads.listBuf = [];
+    store.threads.loadingList = true;
     weft.listThreads(active).catch((e) => {
-      loadingThreads = false;
+      store.threads.loadingList = false;
       toast(String(e), "error");
     });
   }
   function closeThreads() {
-    threadsOpen = false;
+    store.threads.listOpen = false;
   }
   // Open a thread from the list. If its root is already in the timeline, reuse
   // it; otherwise seed a placeholder — the thread HISTORY (which includes the
   // root) replaces it on arrival.
   function openThreadByRoot(info: ThreadInfo) {
-    threadsOpen = false;
+    store.threads.listOpen = false;
     const loaded = activeChannel?.messages.find((m) => m.msgid === info.root);
     if (loaded) {
       openThread(loaded);
@@ -3893,11 +3851,12 @@
   }
   // A thread's display name (from THREAD / THREAD-NAMED), for the indicator
   // and the panel title.
-  const threadNameFor = (msgid?: string): string | undefined => (msgid ? threadNames[msgid] : undefined);
+  const threadNameFor = (msgid?: string): string | undefined => store.threads.nameFor(msgid);
   // Rename (or, with an empty string, clear the name of) the open thread.
   function renameThread(name: string) {
-    if (!threadRoot?.msgid || !active) return;
-    weft.nameThread(active, threadRoot.msgid, name.trim()).catch((e) => toast(String(e), "error"));
+    const root = store.threads.root?.msgid;
+    if (!root || !active) return;
+    weft.nameThread(active, root, name.trim()).catch((e) => toast(String(e), "error"));
   }
 
   // Namespace admin
@@ -3965,7 +3924,7 @@
   async function doTransfer() {
     const o = nsNewOwner.trim();
     if (o && (await appConfirm(`Transfer ownership of ${activeServer} to ${o}? This is signed by your root key and cannot be undone.`, "Transfer")))
-      weft.nsTransfer(network, activeServer, o).catch((e) => (authError = String(e)));
+      weft.nsTransfer(network, activeServer, o).catch((e) => (cf.authError = String(e)));
   }
   async function deleteNamespace() {
     if (await appConfirm(`Delete namespace ${activeServer}? This removes all its channels.`, "Delete")) {
@@ -3979,7 +3938,7 @@
     if (!activeServer) return;
     if (!(await appConfirm(`Revoke ALL invites for ${activeServer}? Every existing invite link stops working.`, "Revoke all"))) return;
     weft.inviteRevokeAll(`ns:${activeServer}`).catch(() => {});
-    invitesList = []; // optimistic — the list is now empty
+    store.invites.list = []; // optimistic — the list is now empty
     toast(`Revoked all invites for ${activeServer}`, "info");
   }
 
@@ -4007,14 +3966,14 @@
     weft
       .clientConfig()
       .then((c) => {
-        insecureMode = c.allow_insecure;
+        cf.insecure = c.allow_insecure;
         if (
           c.default_host &&
           !weft.isWeb &&
-          host === "127.0.0.1:4433" &&
+          cf.host === "127.0.0.1:4433" &&
           !localStorage.getItem(HOMESERVER_KEY)
         )
-          host = c.default_host;
+          cf.host = c.default_host;
       })
       .catch(() => {});
     // Restore the saved homeserver + last session. Desktop: a remembered
@@ -4024,23 +3983,23 @@
       if (!weft.isWeb) {
         const savedHost = localStorage.getItem(HOMESERVER_KEY);
         if (savedHost) {
-          host = savedHost;
-          serverStep = "auth";
+          cf.host = savedHost;
+          cf.serverStep = "auth";
         }
       }
 
       const saved = JSON.parse(localStorage.getItem(SAVED_KEY) ?? "null");
       // On web the network is always the page origin — don't restore a stale host.
-      if (saved?.host && !weft.isWeb) host = saved.host;
-      if (saved?.account) formAccount = saved.account;
+      if (saved?.host && !weft.isWeb) cf.host = saved.host;
+      if (saved?.account) cf.account = saved.account;
 
       if (saved?.host && saved?.account && saved?.password) {
         // A full session → log straight back in; no picker, no probe.
-        formPassword = saved.password;
-        mode = "login";
-        serverStep = "auth";
+        cf.password = saved.password;
+        cf.mode = "login";
+        cf.serverStep = "auth";
         doConnect();
-      } else if (serverStep === "auth") {
+      } else if (cf.serverStep === "auth") {
         // Have a homeserver but nothing to auto-login with → probe it so the
         // register form knows whether to require an email.
         void probeServer();
@@ -4095,13 +4054,13 @@
     leaveGroup,
     addToGroup,
     // group calls
-    get groupCallRoster() { return groupCallRoster; },
-    get activeGroupCall() { return activeGroupCall; },
+    get groupCallRoster() { return store.social.groupCallRoster; },
+    get activeGroupCall() { return store.social.activeGroupCall; },
     startGroupCall,
     leaveGroupCall,
     // friend calls
-    get incomingCall() { return incomingCall; },
-    get activeCall() { return activeCall; },
+    get incomingCall() { return store.social.incomingCall; },
+    get activeCall() { return store.social.activeCall; },
     get callMuted() { return callMedia.muted; },
     get callConnecting() { return callMedia.connecting; },
     callUser,
@@ -4182,18 +4141,18 @@
     openNsSettings,
     openServerProfile,
     mintInvite,
-    // invites menu (Discord-style)
-    get invitesList() { return invitesList; },
-    get invitesScope() { return invitesScope; },
+    // invites menu (Discord-style) — state on `store.invites`
+    get invitesList() { return store.invites.list; },
+    get invitesScope() { return store.invites.scope; },
     openInvites,
     loadNsInvites,
     revokeInvite,
     createInvite,
     inviteLinkFor,
     // invite creation screen
-    get inviteLink() { return inviteLink; },
-    get inviteId() { return inviteId; },
-    get inviteCreateScope() { return inviteCreateScope; },
+    get inviteLink() { return store.invites.link; },
+    get inviteId() { return store.invites.id; },
+    get inviteCreateScope() { return store.invites.createScope; },
     generateInvite,
     sendInviteDM,
     newCat: openCreateCategory,
@@ -4210,7 +4169,6 @@
     confirm: appConfirm,
     expectSuccess,
     get reportQueue() { return reportQueue; },
-    get pinsList() { return pinsList; },
     resolveActions: RESOLVE_ACTIONS,
     // chat topbar
     get membersVisible() { return membersVisible; },
@@ -4218,21 +4176,13 @@
     openPins,
     openReports,
     partActive: () => weft.part(active).catch(() => {}),
-    // search
-    get searchOpen() { return searchOpen; },
-    set searchOpen(v: boolean) { searchOpen = v; },
-    get searchQuery() { return searchQuery; },
-    get searchScope() { return searchScope; },
-    get searchResults() { return searchResults; },
-    get searching() { return searching; },
+    // search + pins panels own their state on `store.search` / `store.pins`.
     openSearch,
-    runSearch,
-    jumpToResult,
-    // threads
-    get threadRoot() { return threadRoot; },
-    get threadMessages() { return threadMessages; },
-    get threadComposer() { return threadComposer; },
-    set threadComposer(v: string) { threadComposer = v; },
+    // threads — state on `store.threads`
+    get threadRoot() { return store.threads.root; },
+    get threadMessages() { return store.threads.messages; },
+    get threadComposer() { return store.threads.composer; },
+    set threadComposer(v: string) { store.threads.composer = v; },
     get visibleMessages() { return visibleMessages; },
     get visibleMessagesReversed() { return visibleMessagesReversed; },
     threadCount,
@@ -4240,8 +4190,8 @@
     closeThread,
     sendThread,
     // threads list (§9.4)
-    get threadsOpen() { return threadsOpen; },
-    get threadsList() { return threadsList; },
+    get threadsOpen() { return store.threads.listOpen; },
+    get threadsList() { return store.threads.list; },
     openThreads,
     closeThreads,
     openThreadByRoot,
@@ -4304,7 +4254,7 @@
     set mentionIndex(v: number) { mentionIndex = v; },
     get typingLabel() { return typingLabel; },
     // roles (ProfileCard)
-    get rolesByScope() { return rolesByScope; },
+    rolesAt,
     rolesOf,
     roleById,
     ensureMemberRoles,
@@ -4339,8 +4289,8 @@
     toggleViewGated,
     // federation (operator)
     get isOperator() { return isOperator; },
-    get netblocks() { return netblocks; },
-    get manifests() { return manifests; },
+    get netblocks() { return store.federation.netblocks; },
+    get manifests() { return store.federation.manifests; },
     openFederation,
     refreshNetblocks,
     netblockAdd,
@@ -4350,7 +4300,7 @@
     bridgeSever,
     // user settings
     get theme() { return theme; },
-    get host() { return host; },
+    get host() { return cf.host; },
     get reconnecting() { return reconnecting; },
     setStatus,
     toggleTheme,
@@ -4420,19 +4370,9 @@
 
 {#if status !== "online"}
   <ConnectScreen
-    bind:mode
-    bind:host
-    bind:formAccount
-    bind:formPassword
-    bind:formEmail
+    form={cf}
     {status}
-    {authError}
-    {deviceKeyAvailable}
-    insecure={insecureMode}
-    serverStep={weft.isWeb ? "auth" : serverStep}
     canChangeServer={!weft.isWeb}
-    {emailRequired}
-    {probing}
     onconnect={doConnect}
     onkeylogin={keyLogin}
     onchooseserver={chooseServer}
@@ -4544,12 +4484,12 @@
       <ReportsQueueModal onclose={() => (reportsOpen = false)} />
     {/if}
 
-    {#if inviteCreateOpen}
-      <InviteCreateModal onclose={() => { inviteCreateOpen = false; inviteLink = null; inviteId = null; }} />
+    {#if store.invites.createOpen}
+      <InviteCreateModal onclose={() => { store.invites.createOpen = false; store.invites.link = null; store.invites.id = null; }} />
     {/if}
 
-    {#if invitesOpen}
-      <InvitesModal onclose={() => (invitesOpen = false)} />
+    {#if store.invites.listOpen}
+      <InvitesModal onclose={() => (store.invites.listOpen = false)} />
     {/if}
 
     {#if groupPickerOpen}
@@ -4561,16 +4501,16 @@
       />
     {/if}
 
-    {#if pinsOpen}
-      <PinsModal onclose={() => (pinsOpen = false)} />
+    {#if store.pins.open}
+      <PinsModal onclose={() => (store.pins.open = false)} />
     {/if}
 
-    {#if threadsOpen}
-      <ThreadsModal onclose={() => (threadsOpen = false)} />
+    {#if store.threads.listOpen}
+      <ThreadsModal onclose={() => (store.threads.listOpen = false)} />
     {/if}
 
-    {#if searchOpen}
-      <SearchModal onclose={() => (searchOpen = false)} />
+    {#if store.search.open}
+      <SearchModal onclose={() => (store.search.open = false)} />
     {/if}
 
     {#if newChanOpen}

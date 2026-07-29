@@ -26,11 +26,11 @@
 
   // The namespace's roles = the override picker's role source (@everyone aside).
   const nsRoles = $derived(
-    (app.rolesByScope[app.chanNsScope()] ?? []).filter((r) => r.name !== EVERYONE_ROLE),
+    app.rolesAt(app.chanNsScope()).filter((r) => r.name !== EVERYONE_ROLE),
   );
   // Role overrides live as channel-scoped roles; merge with just-added ones.
   const roleTargets = $derived.by(() => {
-    const present = (app.rolesByScope[channel] ?? [])
+    const present = app.rolesAt(channel)
       .filter((r) => r.name !== EVERYONE_ROLE)
       .map((r) => r.name);
     return [...new Set([...present, ...pendingRoles])].map(
@@ -116,7 +116,7 @@
     if (selected.kind === "member" && selected.account === account) selected = { kind: "everyone" };
   }
   const roleColor = (name: string) =>
-    (app.rolesByScope[app.chanNsScope()] ?? []).find((r) => r.name === name)?.color ?? "#99aab5";
+    app.rolesAt(app.chanNsScope()).find((r) => r.name === name)?.color ?? "#99aab5";
 
   const rec = $derived(app.channels[channel]);
   const ns = $derived(app.nsOf(channel)); // "" for a top-level channel

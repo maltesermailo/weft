@@ -41,7 +41,7 @@
     {/if}
     {#if app.activeIsGroup}
       {@const inCall = app.activeGroupCall === app.active}
-      {@const roster = app.groupCallRoster[app.active] ?? []}
+      {@const roster = app.groupCallRoster.get(app.active) ?? []}
       <button
         class="icon-btn"
         class:in-call={inCall}

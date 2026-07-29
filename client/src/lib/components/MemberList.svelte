@@ -23,7 +23,7 @@
   });
 
   // Hoisted roles, already in position order (top = highest).
-  const hoisted = $derived((app.rolesByScope[roleScope] ?? []).filter((r) => r.hoist));
+  const hoisted = $derived(app.rolesAt(roleScope).filter((r) => r.hoist));
 
   // A member's primary hoisted role **id** = the highest (first in order)
   // hoisted role they hold, or undefined (id-keyed — names aren't unique, v0.13).

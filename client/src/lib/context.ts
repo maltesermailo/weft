@@ -10,23 +10,19 @@
 // provides everything components consume).
 
 import { getContext, setContext } from "svelte";
-import type { Msg, Member, CtxItem, RoleDefC, ThreadInfo, MentionOpt } from "./types";
+import type { Msg, Member, CtxItem, ThreadInfo, MentionOpt } from "./types";
 import type { Account } from "./models/account.svelte";
 import type { Channel } from "./models/channel.svelte";
 import type { Server } from "./models/server.svelte";
 import type { Membership } from "./models/membership.svelte";
+import type { ManifestInfo } from "./models/federation.svelte";
+import type { Role } from "./models/role.svelte";
+import type { Badge } from "./models/session.svelte";
+import type { InviteInfo } from "./models/invites.svelte";
 
 export type RetentionMeta = { cls: string; label: string; icon: string };
-/** One live invite in the Discord-style invites menu (§6.5). */
-export type InviteInfo = {
-  scope: string;
-  invite_id: string;
-  creator: string;
-  uses_left: number | null;
-  used: number;
-  expiry: number | null;
-};
-export type Badge = { owner: boolean; mod: boolean; list: string[] };
+export type { InviteInfo } from "./models/invites.svelte";
+export type { Badge } from "./models/session.svelte";
 
 export interface AppCtx {
   // ---- identity / connection ----
@@ -87,7 +83,7 @@ export interface AppCtx {
   leaveGroup(id: string): void;
   addToGroup(id: string, handle: string): void;
   // ---- group calls ----
-  readonly groupCallRoster: Record<string, string[]>;
+  readonly groupCallRoster: ReadonlyMap<string, string[]>;
   readonly activeGroupCall: string | null;
   startGroupCall(id: string): void;
   leaveGroupCall(id: string): void;
@@ -243,24 +239,16 @@ export interface AppCtx {
     string,
     { report_id: string; msgid: string; category: string; state: string; reporter?: string | null }
   >;
-  readonly pinsList: Msg[];
   readonly resolveActions: string[];
 
   // ---- chat topbar ----
   membersVisible: boolean;
+  // Pins + search panels own their state on `store.pins` / `store.search`; these
+  // just open them on the active channel (from the topbar).
   openPins(): void;
   openReports(): void;
   partActive(): void;
-
-  // ---- message search (§6.4) ----
-  searchOpen: boolean;
-  readonly searchQuery: string;
-  readonly searchScope: string;
-  readonly searchResults: Msg[];
-  readonly searching: boolean;
   openSearch(): void;
-  runSearch(query: string): void;
-  jumpToResult(m: Msg): void;
 
   // ---- threads (§9.4) ----
   readonly threadRoot: Msg | null;
@@ -353,11 +341,12 @@ export interface AppCtx {
   readonly typingLabel: string;
 
   // ---- roles (ProfileCard) ----
-  readonly rolesByScope: Record<string, RoleDefC[]>;
-  rolesOf(account: string, scope: string): RoleDefC[];
+  /// Role definitions at a scope — ns roles from the `Server`, `*`/`#chan` by-scope.
+  rolesAt(scope: string): Role[];
+  rolesOf(account: string, scope: string): Role[];
   /// Resolve a role **id** to its definition at a scope (v0.13) — member rosters
   /// carry ids, so display maps through this for the name + color.
-  roleById(scope: string, id: string): RoleDefC | undefined;
+  roleById(scope: string, id: string): Role | undefined;
   ensureMemberRoles(account: string): void;
   ensureRoles(scope: string): void;
   roleScopeOf(channel: string): string;
@@ -381,8 +370,8 @@ export interface AppCtx {
   canOpenServerSettings(): boolean;
   /** An account's highest-role color at the active namespace, or "" (default). */
   nameColor(account: string): string;
-  assignRoleTo(acct: string, role: RoleDefC): void;
-  unassignRoleFrom(acct: string, role: RoleDefC): void;
+  assignRoleTo(acct: string, role: Role): void;
+  unassignRoleFrom(acct: string, role: Role): void;
   /** §6.2 NS INFO MEMBERS: the moderator roster for a namespace (once fetched). */
   nsMembers(ns: string): Membership[];
   /** A roster fetch is in flight. */
@@ -415,19 +404,8 @@ export interface AppCtx {
 
   // ---- federation (§11, operator) ----
   readonly isOperator: boolean;
-  readonly netblocks: Record<string, string | null>;
-  readonly manifests: Record<
-    string,
-    {
-      peer: string;
-      version: number;
-      state: string;
-      channels: string[];
-      history: string;
-      media: string;
-      typing: boolean;
-    }
-  >;
+  readonly netblocks: ReadonlyMap<string, string | null>;
+  readonly manifests: ReadonlyMap<string, ManifestInfo>;
   openFederation(): void;
   refreshNetblocks(): void;
   netblockAdd(network: string, reason?: string): void;
@@ -483,7 +461,7 @@ export interface AppCtx {
   reorderRoles(ids: string[]): void;
   /// Apply an edit to an existing role (by id). A changed `name` renames in
   /// place, so the role keeps its members and issued caps (§6.5).
-  saveRole(role: RoleDefC, patch: { name: string; color: string; caps: string[]; hoist: boolean; pingable: boolean }): void;
+  saveRole(role: Role, patch: { name: string; color: string; caps: string[]; hoist: boolean; pingable: boolean }): void;
   /// Delete a role by its id.
   deleteRole(roleId: string): void;
   /** The implicit @everyone role's current caps at the active server. */
@@ -512,8 +490,9 @@ export function getApp(): AppCtx {
 }
 
 // Re-export commonly used types for component convenience.
-export type { Msg, Member, CtxItem, RoleDefC, ThreadInfo, MentionOpt };
+export type { Msg, Member, CtxItem, ThreadInfo, MentionOpt };
 export type { Account } from "./models/account.svelte";
 export type { Channel } from "./models/channel.svelte";
 export type { Server } from "./models/server.svelte";
 export type { Membership } from "./models/membership.svelte";
+export type { Role } from "./models/role.svelte";

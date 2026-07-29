@@ -60,7 +60,7 @@
     return new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
   }
   // All namespace-scoped roles, for the in-line "add role" picker.
-  const nsRoles = $derived(app.rolesByScope[app.nsRoleScope()] ?? []);
+  const nsRoles = $derived(app.rolesAt(app.nsRoleScope()));
   // The namespace owner (implicit all-caps holder), surfaced with a crown.
   const ownerAccount = $derived(app.activeNsMeta?.owner ?? null);
   // Which member's add-role popover is open (keyed by `account@network`).
@@ -133,7 +133,7 @@
 
   // Live counts for the Overview stat strip (real data — no placeholders).
   const nsChannelCount = $derived(app.channelGroups.reduce((n, g) => n + g.list.length, 0));
-  const nsRoleCount = $derived((app.rolesByScope[app.nsRoleScope()] ?? []).length);
+  const nsRoleCount = $derived(app.rolesAt(app.nsRoleScope()).length);
   // §6.2 welcome-channel picker: this namespace's text channels + the current
   // setting (from the ns-meta the server last pushed).
   const nsTextChannels = $derived(app.channelGroups.flatMap((g) => g.list).filter((c) => !c.voice));

@@ -29,6 +29,16 @@
   // `onerror` chain (image → video → file) recovers if the guess was wrong.
   let kind = $state<"image" | "video" | "audio" | "file">("image");
 
+  // Per-image load gate: hold a shimmer placeholder over the reserved box until
+  // the bytes are decoded, then fade the image in — no half-drawn / popping
+  // artifact. A cached image is often `complete` before `onload` can bind, so
+  // check that on mount and reveal instantly (no flash for kept-alive channels).
+  let loaded = $state(false);
+  let imgEl = $state<HTMLImageElement | null>(null);
+  $effect(() => {
+    if (imgEl?.complete && imgEl.naturalWidth > 0) loaded = true;
+  });
+
   onMount(async () => {
     try {
       const r = await fetch(url, { headers: { Range: "bytes=0-0" } });
@@ -45,13 +55,22 @@
 </script>
 
 {#if kind === "image"}
-  <button class="att-image" onclick={() => openLightbox(url, name)} aria-label="Open image">
+  <button
+    class="att-image"
+    class:loading={!loaded}
+    style={box ? `width:${box.w}px;height:${box.h}px` : ""}
+    onclick={() => openLightbox(url, name)}
+    aria-label="Open image"
+  >
     <img
+      bind:this={imgEl}
       src={url}
       alt="attachment"
       loading="lazy"
       width={box?.w}
       height={box?.h}
+      class:loaded
+      onload={() => (loaded = true)}
       onerror={() => (kind = "video")}
     />
   </button>
@@ -73,6 +92,26 @@
     border: none;
     background: none;
     cursor: zoom-in;
+    position: relative;
+    margin-top: 4px;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  /* While the bytes decode, the button box (sized to the reserved dimensions)
+     shows a shimmer so the image fades in over a placeholder instead of popping
+     or half-drawing. A cached image reveals on the first frame (no flash). */
+  .att-image.loading {
+    background: var(--surface-2, rgba(127, 127, 127, 0.12));
+    background-image: linear-gradient(
+      100deg,
+      transparent 30%,
+      rgba(127, 127, 127, 0.14) 50%,
+      transparent 70%
+    );
+    background-size: 200% 100%;
+    animation: att-shimmer 1.1s ease-in-out infinite;
+    min-height: 80px;
+    min-width: 80px;
   }
   .att-image img {
     /* The width/height attributes carry the fitted box, so the browser reserves
@@ -84,7 +123,19 @@
     height: auto;
     border-radius: 8px;
     display: block;
-    margin-top: 4px;
+    opacity: 0;
+    transition: opacity 0.18s ease;
+  }
+  .att-image img.loaded {
+    opacity: 1;
+  }
+  @keyframes att-shimmer {
+    from {
+      background-position: 200% 0;
+    }
+    to {
+      background-position: -200% 0;
+    }
   }
   .att-audio {
     margin-top: 6px;

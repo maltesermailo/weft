@@ -2,9 +2,11 @@
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   import * as weft from "$lib/weft";
+  import { store } from "$lib/models/store.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
+  const pins = store.pins;
 </script>
 
 <div class="modal-wrap" transition:fade|global={{ duration: 190 }}>
@@ -15,7 +17,7 @@
       <button class="linkish" aria-label="Close" onclick={onclose}>✕</button>
     </div>
     <div class="modal-list">
-      {#each app.pinsList as m (m.key)}
+      {#each pins.list as m (m.key)}
         <div class="pin-card">
           <div class="avatar sm"><Avatar account={m.author} /></div>
           <div class="pin-body">

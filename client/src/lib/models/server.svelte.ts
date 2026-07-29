@@ -1,6 +1,7 @@
 // The client domain model — see docs/architecture/client-model-refactor.md.
 import { SvelteMap } from "svelte/reactivity";
 import type { Membership } from "./membership.svelte";
+import type { Role } from "./role.svelte";
 import { store, type NotifLevel } from "./store.svelte";
 
 /// The NS-META fields this model consumes (a structural subset of the wire
@@ -52,6 +53,9 @@ export class Server {
   /// §6.2 the moderator roster (NS INFO MEMBERS), once fetched (was
   /// `nsMembersByNs[id]`). Empty until a mod fetches it; not all servers load it.
   members = $state<Membership[]>([]);
+  /// §6.5 this namespace's role definitions (position-ordered), once fetched.
+  /// Populated from the `ns:<id>` ROLE flush; `Membership.roles` resolves here.
+  roles = $state<Role[]>([]);
 
   constructor(id: string) {
     this.id = id;
@@ -79,6 +83,11 @@ export class Server {
   /// A roster row by bare account handle, or undefined (§6.2 mutation helpers).
   member(handle: string): Membership | undefined {
     return this.members.find((m) => m.account.name === handle);
+  }
+
+  /// A role definition by id (§6.5), or undefined.
+  role(id: string): Role | undefined {
+    return this.roles.find((r) => r.id === id);
   }
 
   /// Absorb an NS-META event (marks the namespace loaded).

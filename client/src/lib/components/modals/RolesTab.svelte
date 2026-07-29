@@ -5,7 +5,7 @@
   // top = highest, mirroring the member-list grouping. The implicit @everyone
   // baseline and the "create a role" form are selectable rows in the same list.
   import { getApp } from "$lib/context";
-  import type { RoleDefC } from "$lib/types";
+  import type { Role } from "$lib/context";
   import { CAP_GROUPS, CAP_META, ROLE_COLORS, EVERYONE_ROLE } from "$lib/constants";
   import Avatar from "$lib/components/Avatar.svelte";
   import SaveBar from "$lib/components/SaveBar.svelte";
@@ -15,7 +15,7 @@
   // The implicit @everyone role is edited as its own selection, not dragged,
   // renamed, colored or deleted like a normal role.
   const roles = $derived(
-    (app.rolesByScope[app.nsRoleScope()] ?? []).filter((r) => r.name !== EVERYONE_ROLE),
+    app.rolesAt(app.nsRoleScope()).filter((r) => r.name !== EVERYONE_ROLE),
   );
 
   const sameCaps = (a: string[], b: string[]) =>
@@ -170,7 +170,7 @@
     list.splice(to, 0, moved);
     app.reorderRoles(list);
   }
-  function onRowKey(e: KeyboardEvent, r: RoleDefC) {
+  function onRowKey(e: KeyboardEvent, r: Role) {
     if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
     e.preventDefault();
     app.moveRole(r.id, e.key === "ArrowUp" ? -1 : 1);

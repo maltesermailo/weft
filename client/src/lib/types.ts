@@ -79,16 +79,4 @@ export type MentionOpt = {
 // The `NS INFO MEMBERS` roster row is now the `Membership` class — see
 // $lib/models/membership.svelte.
 
-/// A namespace-scoped role definition (name + color + caps + hoist + pingable + position).
-export type RoleDefC = {
-  /// Stable role ULID id (v0.13) — what mutations (assign/unassign/delete/
-  /// reorder/update) address. `name` is a mutable display label.
-  id: string;
-  name: string;
-  color: string;
-  caps: string[];
-  hoist: boolean;
-  /// Whether members may @-mention this role to ping its holders (§9.3).
-  pingable: boolean;
-  position: number;
-};
+// The role definition is now the `Role` class — see $lib/models/role.svelte.

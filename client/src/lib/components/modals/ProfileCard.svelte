@@ -23,7 +23,7 @@
   const scope = $derived(app.roleScopeOf(app.active));
   const myRoles = $derived(app.rolesOf(target, scope));
   // Exclude the implicit @everyone role — it's baseline, never assigned.
-  const allRoles = $derived((app.rolesByScope[scope] ?? []).filter((r) => r.name !== EVERYONE_ROLE));
+  const allRoles = $derived(app.rolesAt(scope).filter((r) => r.name !== EVERYONE_ROLE));
   const isSelf = $derived(target === app.account);
   // "Owner/admin" for controls means the real namespace owner or an explicitly
   // delegated ns-admin — NOT a network operator (their god-mode caps are

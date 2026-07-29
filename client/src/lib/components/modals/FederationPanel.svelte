@@ -39,7 +39,7 @@
     <div class="section-sep"></div>
     <div class="field-label">Blocked networks</div>
     <div class="modal-list">
-      {#each Object.entries(app.netblocks) as [nw, reason] (nw)}
+      {#each [...app.netblocks] as [nw, reason] (nw)}
         <div class="ns-card">
           <div class="ns-info">
             <div class="ns-name">{nw}</div>
@@ -60,7 +60,7 @@
     <div class="section-sep"></div>
     <div class="field-label">Bridges</div>
     <div class="modal-list">
-      {#each Object.values(app.manifests) as m (m.peer)}
+      {#each [...app.manifests.values()] as m (m.peer)}
         <div class="ns-card">
           <div class="ns-info">
             <div class="ns-name">{m.peer} <span class="rep-state {m.state}">{m.state}</span> · v{m.version}</div>

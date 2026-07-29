@@ -2,11 +2,31 @@
 import { SvelteMap } from "svelte/reactivity";
 import { Account } from "./account.svelte";
 import { Server } from "./server.svelte";
+import { Federation } from "./federation.svelte";
+import { Social } from "./social.svelte";
+import { Session } from "./session.svelte";
+import { SearchPanel, PinsPanel } from "./panels.svelte";
+import { Threads } from "./threads.svelte";
+import { Invites } from "./invites.svelte";
 
 /// A scope's notification level (§ notification prefs). Per-namespace (`ns:<id>`)
 /// or `net` for top-level channels; the default keeps only DMs/@mentions pinging.
 export type NotifLevel = "all" | "mentions" | "nothing";
 const NOTIF_KEY = "weft:notif-prefs";
+
+/// A capability grant at a scope (§6.5): a subject and their direct cap list —
+/// the channel/ns member overrides shown in the permission editor.
+export interface GrantRow {
+  subject: string;
+  caps: string[];
+}
+/// A moderation deny-list entry at a scope (§6.7): a mute or ban on an account.
+export interface DenyRow {
+  account: string;
+  kind: string;
+  by?: string | null;
+  reason?: string | null;
+}
 
 /**
  * Root client store: the identity maps and (from Phase 5) the inbound-event
@@ -25,6 +45,29 @@ export class AppStore {
 
   /** Notification level per scope (`ns:<id>` | `net`), client-side + persisted. */
   readonly notifPrefs = new SvelteMap<string, NotifLevel>();
+
+  /** §6.5 capability grants per scope (channel/ns member overrides). */
+  readonly grants = new SvelteMap<string, GrantRow[]>();
+  /** §6.7 moderation deny-list (mutes + bans) per scope. */
+  readonly deny = new SvelteMap<string, DenyRow[]>();
+
+  /** Operator-facing federation state (§11): netblocks + peering manifests. */
+  readonly federation = new Federation();
+
+  /** The social layer: friends, group DMs, and calls. */
+  readonly social = new Social();
+
+  /** The current user: identity + the resolved capability cache + gate methods. */
+  readonly session = new Session();
+
+  /** §6.4 message-search panel state (server-streamed results). */
+  readonly search = new SearchPanel();
+  /** §6.4 pinned-messages panel state (server-streamed). */
+  readonly pins = new PinsPanel();
+  /** §9.4 threads: open side panel + list modal. */
+  readonly threads = new Threads();
+  /** §6.5 invites: list menu + create screen. */
+  readonly invites = new Invites();
 
   constructor() {
     this.loadNotif();
