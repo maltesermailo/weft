@@ -142,6 +142,12 @@ impl Client {
     /// (both segments minted ULIDs). Consumes the `POLICY` reply.
     async fn create_channel(&mut self, ns_id: &str, vanity: &str) -> ChannelName {
         self.send(&format!("CHANNEL CREATE #{ns_id}/{vanity}"));
+        // A namespaced create ack leads with a CHANNEL-LAYOUT (carrying the vanity
+        // so the creator's client shows it, not the ULID), then the POLICY.
+        match self.recv().await.event {
+            Event::ChannelLayout { .. } => {}
+            other => panic!("expected CHANNEL-LAYOUT creating {vanity}, got {other:?}"),
+        }
         match self.recv().await.event {
             Event::Policy { channel, .. } => channel,
             other => panic!("expected POLICY creating {vanity}, got {other:?}"),
@@ -3374,6 +3380,10 @@ async fn any_user_can_create_a_namespace_and_owns_it() {
     // is the minted `#<ns-id>/<chan-id>`; she sent the desired vanity "chat"
     // ("general" is already taken by the channel NS CREATE auto-seeds).
     ada.send(&format!("@label=c1 CHANNEL CREATE #{ns_id}/chat"));
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::ChannelLayout { .. }
+    )); // vanity
     let reply = ada.recv().await;
     assert!(
         matches!(&reply.event, Event::Policy { channel, .. } if channel.namespace() == Some(ns_id.as_str())),
@@ -3508,6 +3518,10 @@ async fn ns_delete_cascades_channels() {
     };
     let ns_id = id.to_string();
     ada.send(&format!("@label=c1 CHANNEL CREATE #{ns_id}/chat"));
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::ChannelLayout { .. }
+    )); // vanity
     let Event::Policy { channel, .. } = ada.recv().await.event else {
         panic!("expected POLICY");
     };
@@ -5578,6 +5592,10 @@ async fn a_full_namespace_freeze_admits_only_the_owner() {
     };
     let ns_id = id.to_string();
     ada.send(&format!("CHANNEL CREATE #{ns_id}/lobby"));
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::ChannelLayout { .. }
+    )); // vanity
     let Event::Policy { channel: lobby, .. } = ada.recv().await.event else {
         panic!("expected POLICY");
     };
@@ -5998,6 +6016,10 @@ async fn channel_create_pushes_layout_to_online_ns_members() {
     };
     let ns_id = id.to_string();
     ada.send(&format!("CHANNEL CREATE #{ns_id}/chat"));
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::ChannelLayout { .. }
+    )); // vanity
     assert!(matches!(ada.recv().await.event, Event::Policy { .. }));
 
     // Bob joins the namespace (an online member).
@@ -6008,6 +6030,10 @@ async fn channel_create_pushes_layout_to_online_ns_members() {
     // Ada creates a NEW channel → bob receives its layout + policy live, with no
     // reconnect (acceptance #1: derived membership makes it his immediately).
     ada.send(&format!("CHANNEL CREATE #{ns_id}/clips"));
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::ChannelLayout { .. }
+    )); // vanity
     let Event::Policy { channel: clips, .. } = ada.recv().await.event else {
         panic!("expected POLICY");
     };

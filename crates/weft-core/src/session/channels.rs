@@ -126,6 +126,25 @@ impl<S: ControlStream> Session<S> {
                 }
             }
         }
+        // Tell the creator the channel's layout (carrying the vanity) so their
+        // client shows "chat", not the raw minted ULID — MEMBER/POLICY don't carry
+        // the vanity, the creator is skipped in the member push above, and the
+        // client keys its pending-create follow-ups (category/announce) off this
+        // CHANNEL-LAYOUT. Unlabeled: it's side info, not the create ack (the POLICY
+        // below is), so a labeled `drain_until_label` still lands on the POLICY.
+        if canonical.namespace().is_some() {
+            self.send_event(
+                None,
+                Event::ChannelLayout {
+                    channel: canonical.clone(),
+                    category: None,
+                    position: 0,
+                    kind,
+                    vanity: vanity.clone(),
+                },
+            )
+            .await?;
+        }
         self.send_event(
             label,
             Event::Policy {

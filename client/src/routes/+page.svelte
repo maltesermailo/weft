@@ -438,6 +438,9 @@
     nsMetaFetched.clear();
     presence = {};
     reportQueue = {};
+    // The in-memory skeleton is gone — the next login must do a full sync, not a
+    // cursor delta (which would leave the rail empty).
+    syncedThisSession = false;
     status = "connect";
   }
 
@@ -665,6 +668,9 @@
   // memberships as NS-MEMBER events; during that replay we populate the rail but
   // must NOT auto-navigate (that's only for a *live* join, e.g. creating a server).
   let syncing = false;
+  // False until this app session has synced once. A cold start does a full sync
+  // (rebuild the skeleton); only a later in-session reconnect replays the cursor.
+  let syncedThisSession = false;
   // ---- roles / invites / reports (Phase 7) ----
   const RESOLVE_ACTIONS = ["dismissed", "content-removed", "user-actioned", "escalated"];
   let reportTarget = $state<Msg | null>(null); // message being reported (ReportModal)
@@ -1808,8 +1814,16 @@
         // delta of everything missed since our stored cursor on reconnect. The
         // materialized rows flow through the ordinary message/edit/reaction
         // handlers (upsert by msgid); `sync-end` gives the next cursor.
+        //
+        // The cursor delta assumes the client still holds its skeleton in memory —
+        // it only re-sends missed messages, NOT the namespace/channel roster. So a
+        // cold start (fresh app launch, empty in-memory state) MUST do a full sync,
+        // or the rail comes up empty; only an in-session reconnect replays the
+        // cursor.
         syncing = true;
-        weft.sync(loadSyncCursor()).catch(() => (syncing = false));
+        const syncCursor = syncedThisSession ? loadSyncCursor() : undefined;
+        syncedThisSession = true;
+        weft.sync(syncCursor).catch(() => (syncing = false));
         break;
       case "server-info":
         // §3.6 the negotiation WELCOME, seen before auth — remember whether this
@@ -2115,6 +2129,16 @@
         break;
       }
       case "chanmeta": {
+        // §6.3 CHANNEL DELETE confirms with `deleted` — drop the channel from
+        // every local view (do NOT ensureChannel first, or it'd be re-created).
+        if (e.key === "deleted") {
+          delete channels[e.channel];
+          keptChannels = keptChannels.filter((c) => c !== e.channel);
+          delete unreadMap[e.channel];
+          delete unreadCount[e.channel];
+          if (active === e.channel) active = "";
+          break;
+        }
         const c = ensureChannel(e.channel);
         if (e.key === "topic") c.topic = e.value;
         else if (e.key === "posting") c.restricted = e.value === "restricted";

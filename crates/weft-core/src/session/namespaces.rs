@@ -524,10 +524,10 @@ impl<S: ControlStream> Session<S> {
                 }
 
                 // The creator is the namespace's first member. Persist that
-                // membership row so the server shows in their rail immediately
-                // (the NS-MEMBER below) AND survives a restart — on reconnect SYNC
-                // auto-rejoins the ns's visible channels (incl. the seeded
-                // `#general`) from this row, no Discover round-trip needed.
+                // membership row so the server shows in their rail (the client
+                // keys it off ns-membership + ownership) AND survives a restart —
+                // on reconnect SYNC re-emits the membership + the ns's visible
+                // channels (incl. the seeded `#general`), no Discover round-trip.
                 if let Err(e) = self
                     .ctx
                     .memberships

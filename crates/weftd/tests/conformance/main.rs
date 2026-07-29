@@ -1751,6 +1751,11 @@ async fn auto_bridge_requests_reachable_namespace() {
     // `general`); the canonical `#<ns-id>/<chan-id>` is what the manifest carries
     // and both sides address by.
     ada.send(&format!("CHANNEL CREATE #{ns_id}/chat")).await;
+    // The namespaced create ack leads with a CHANNEL-LAYOUT (vanity) then POLICY.
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::ChannelLayout { .. }
+    ));
     let chan = match ada.recv().await.event {
         Event::Policy { channel, .. } => channel.to_string(),
         other => panic!("expected POLICY, got {other:?}"),

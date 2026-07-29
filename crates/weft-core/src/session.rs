@@ -1558,7 +1558,17 @@ impl<S: ControlStream> Session<S> {
                     .await
                     .unwrap_or(false);
                 if !is_ns {
-                    return false;
+                    // The namespace owner is always a member of their own
+                    // namespace, even without an explicit membership row — covers
+                    // namespaces created before membership was recorded on create,
+                    // so an owner is never locked out of their own channels.
+                    let is_owner = matches!(
+                        self.ctx.namespaces.namespace_by_id(ns).await,
+                        Ok(Some(record)) if record.owner == *account
+                    );
+                    if !is_owner {
+                        return false;
+                    }
                 }
                 if self.view_gated_denied(channel, account).await {
                     return false;
