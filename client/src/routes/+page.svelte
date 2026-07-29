@@ -2,8 +2,11 @@
   import { onMount, tick, untrack } from "svelte";
   import * as weft from "$lib/weft";
   import { EVERYONE_ROLE } from "$lib/constants";
-  import type { Msg, Channel, CtxItem, RoleDefC, ThreadInfo, MentionOpt, MemberInfoC } from "$lib/types";
+  import type { Msg, CtxItem, RoleDefC, ThreadInfo, MentionOpt } from "$lib/types";
   import { provideApp } from "$lib/context";
+  import { store, type NotifLevel } from "$lib/models/store.svelte";
+  import { Channel } from "$lib/models/channel.svelte";
+  import { Membership } from "$lib/models/membership.svelte";
   import { highlightCode } from "$lib/highlight";
   import { shortcodeToChar, searchUnicode } from "$lib/shortcodes";
   import { installLinkGuard } from "$lib/linkguard.svelte";
@@ -262,7 +265,7 @@
   function chanCtx(e: MouseEvent, ch: Channel) {
     const muted = isMuted(ch.name);
     const items: CtxItem[] = [
-      { header: ch.name },
+      { header: `#${chanShort(ch.name)}` },
       { label: "Mark as read", icon: "markread", run: () => markRead(ch.name) },
       {
         label: muted ? "Unmute channel" : "Mute channel",
@@ -285,7 +288,11 @@
           label: "Delete channel",
           icon: "delete",
           danger: true,
-          run: () => weft.channelDelete(ch.name).catch((err) => toast(String(err), "error")),
+          run: async () => {
+            const name = chanShort(ch.name);
+            if (!(await appConfirm(`Delete #${name}? This can't be undone.`, "Delete"))) return;
+            weft.channelDelete(ch.name).catch((err) => toast(String(err), "error"));
+          },
         },
       );
     }
@@ -433,10 +440,9 @@
     active = "";
     activeServer = "";
     homeView = true;
-    discovered = {};
-    memberNs = {};
+    store.servers.clear();
     nsMetaFetched.clear();
-    presence = {};
+    store.resetPresence();
     reportQueue = {};
     // The in-memory skeleton is gone — the next login must do a full sync, not a
     // cursor delta (which would leave the rail empty).
@@ -474,53 +480,28 @@
     saveLayoutCache();
   }
 
-  // Unread / mention state kept in top-level reactive maps (keyed by channel
-  // name) rather than per-channel fields — guarantees the sidebar re-renders
-  // when a badge clears, independent of the channelGroups derivation.
-  let unreadMap = $state<Record<string, boolean>>({});
-  let mentionMap = $state<Record<string, boolean>>({});
-  // Numeric unread / mention tallies (Tier 1) — the badges show counts, not dots.
-  let unreadCount = $state<Record<string, number>>({});
-  let mentionCount = $state<Record<string, number>>({});
+  // Unread / mention state (dots + Tier 1 numeric badges) now lives on each
+  // Channel instance (`unread` / `mention` / `unreadCount` / `mentionCount`),
+  // not in parallel name-keyed maps.
   function markRead(name: string) {
-    if (unreadMap[name]) unreadMap[name] = false;
-    if (mentionMap[name]) mentionMap[name] = false;
-    if (unreadCount[name]) unreadCount[name] = 0;
-    if (mentionCount[name]) mentionCount[name] = 0;
+    channels[name]?.markRead();
   }
 
   // ---- notification preferences (per-user, localStorage) ----
   // Set per **namespace** (`ns:<name>`, or `net` for top-level) in the
-  // Notification Settings modal — not per channel. Effective level =
-  // namespace ?? "mentions" (the default keeps "only DMs/@mentions ping").
-  type NotifLevel = "all" | "mentions" | "nothing";
-  const NOTIF_KEY = "weft:notif-prefs";
-  const loadNotifPrefs = (): Record<string, NotifLevel> => {
-    try {
-      return JSON.parse(localStorage.getItem(NOTIF_KEY) ?? "{}");
-    } catch {
-      return {};
-    }
-  };
-  let notifPrefs = $state<Record<string, NotifLevel>>(loadNotifPrefs());
+  // Notification Settings modal — not per channel. The prefs live on the store
+  // (`store.notifPrefs`); `Channel.isMuted` / `Server.isMuted` read them too.
   // The namespace scope key for a channel (or the network for top-level).
   const scopeKeyOf = (channel: string) => {
     const ns = nsOf(channel);
     return ns ? `ns:${ns}` : "net";
   };
-  const notifLevel = (channel: string): NotifLevel =>
-    notifPrefs[scopeKeyOf(channel)] ?? "mentions";
-  const isMuted = (channel: string) => notifLevel(channel) === "nothing";
-  const serverMuted = (ns: string) => (notifPrefs[ns ? `ns:${ns}` : "net"] ?? "mentions") === "nothing";
-  const notifLevelOf = (scopeKey: string): NotifLevel => notifPrefs[scopeKey] ?? "mentions";
+  const notifLevel = (channel: string): NotifLevel => store.notifAt(scopeKeyOf(channel));
+  const isMuted = (channel: string) => store.mutedAt(scopeKeyOf(channel));
+  const serverMuted = (ns: string) => store.mutedAt(ns ? `ns:${ns}` : "net");
+  const notifLevelOf = (scopeKey: string): NotifLevel => store.notifAt(scopeKey);
   function setNotifLevel(scope: string, level: NotifLevel) {
-    notifPrefs[scope] = level;
-    notifPrefs = { ...notifPrefs };
-    try {
-      localStorage.setItem(NOTIF_KEY, JSON.stringify(notifPrefs));
-    } catch {
-      /* private mode — in-memory only */
-    }
+    store.setNotif(scope, level);
   }
   // ---- notification-settings modal (per-namespace) ----
   let notifSettingsOpen = $state(false);
@@ -576,10 +557,8 @@
   $effect(() => {
     if (homeView) activeServer = "";
   });
-  let presence = $state<Record<string, string>>({}); // account → status
-  // §10.3 account → display profile (nick + avatar hash). Filled from PROFILE
-  // events (broadcast on change) + on-demand PROFILES queries.
-  let profiles = $state<Record<string, { display?: string; avatar?: string; about?: string; status?: string }>>({});
+  // The shared client store (singleton) — the identity maps, namespaces, and
+  // client prefs. Domain models navigate to it too (see client-model-refactor.md).
   // §10.3 per-namespace display names (server nicknames), keyed "scope|account".
   let nicks = $state<Record<string, string>>({});
   const nickKey = (scope: string, account: string) => `${scope}|${account}`;
@@ -650,7 +629,8 @@
   let activeGroupCall = $state<string | null>(null);
   // ---- discover dialog (Phase 6) ----
   let discoverOpen = $state(false);
-  let discovered = $state<Record<string, Extract<weft.WeftEvent, { kind: "ns-meta" }>>>({});
+  // Namespace identity (metadata + membership + emoji) lives on interned Server
+  // objects in `store.servers` — see docs/architecture/client-model-refactor.md.
   let discoverCursor = $state<string | null>(null);
   // Namespace ids we've auto-joined on creation, so the reactive auto-join fires
   // once per freshly-created server (see the `ns-meta` handler).
@@ -660,10 +640,9 @@
   // we can't address the channel, so stash the follow-up actions keyed by
   // `<ns-id>|<slug>` and apply them when the matching layout arrives.
   let pendingChanCreate: Record<string, { cat: string; announce: boolean; voice: boolean }> = {};
-  // Namespace ids I'm a member of (from NS-MEMBER). A namespace with **no**
-  // channels wouldn't otherwise surface (the rail is derived from channels), so
-  // this keeps a just-joined empty server visible + selectable.
-  let memberNs = $state<Record<string, boolean>>({});
+  // My namespace membership is `Server.joined` (from NS-MEMBER). A namespace with
+  // **no** channels wouldn't otherwise surface (the rail is derived from
+  // channels), so this keeps a just-joined empty server visible + selectable.
   // True while an initial/reconnect SYNC is streaming. SYNC replays my namespace
   // memberships as NS-MEMBER events; during that replay we populate the rail but
   // must NOT auto-navigate (that's only for a *live* join, e.g. creating a server).
@@ -796,8 +775,9 @@
   // ---- §6.2 NS INFO MEMBERS: the moderator roster (members + join + roles) ----
   // Arrives as an `ni…`-id BATCH of `ns-member-info` events. `loadingNsMembers`
   // records which namespace is in flight so an empty roster still flushes.
-  let nsMembersByNs = $state<Record<string, MemberInfoC[]>>({});
-  let nsMemberBuf: MemberInfoC[] = [];
+  // The roster now lives on `Server.members` (Membership objects). `nsMemberBuf`
+  // accumulates raw rows until the `ni…` BATCH terminator flushes them.
+  let nsMemberBuf: { user: string; network: string; joinedMs: number; roles: string[] }[] = [];
   let loadingNsMembers: string | null = null;
   let nsMembersLoading = $state(false);
   function fetchNsMembers(ns: string) {
@@ -1132,16 +1112,16 @@
       if (nsSettingsOpen && nsTab === "members") fetchNsMembers(ns);
     }, 500);
   }
-  function memberRow(ns: string, account: string): MemberInfoC | undefined {
-    return (nsMembersByNs[ns] ?? []).find((m) => m.account === account);
+  function memberRow(ns: string, account: string): Membership | undefined {
+    return store.servers.get(ns)?.member(account);
   }
-  // v0.13: addressed by the role id. The roster's `m.roles` is a list of ids
+  // v0.13: addressed by the role id. The roster's `roleIds` is a list of ids
   // (NS-MEMBER-INFO), so the optimistic update adds/removes the same id.
   function assignNsRole(account: string, roleId: string) {
     const scope = nsRoleScope();
     const ns = activeServer;
     const m = memberRow(ns, account);
-    if (m && !m.roles.includes(roleId)) m.roles = [...m.roles, roleId];
+    if (m && !m.roleIds.includes(roleId)) m.roleIds = [...m.roleIds, roleId];
     expectSuccess(`roles:${account}|${scope}`, `Roles updated for ${account}`);
     weft
       .roleAssign(scope, account, roleId)
@@ -1161,7 +1141,7 @@
     const scope = nsRoleScope();
     const ns = activeServer;
     const m = memberRow(ns, account);
-    if (m) m.roles = m.roles.filter((r) => r !== roleId);
+    if (m) m.roleIds = m.roleIds.filter((r) => r !== roleId);
     expectSuccess(`roles:${account}|${scope}`, `Roles updated for ${account}`);
     weft
       .roleUnassign(scope, account, roleId)
@@ -1211,11 +1191,28 @@
   let nsRecKeys = $state("");
   let myRecoveryKey = $state("");
   let recoveryDoc = $state("");
-  let activeNsMeta = $derived(activeServer ? discovered[activeServer] : undefined);
+  // A legacy-shaped view of the active Server's metadata (snake_case field names
+  // the modals/banners already read). Undefined until NS-META has landed.
+  let activeNsMeta = $derived.by(() => {
+    const s = activeServer ? store.servers.get(activeServer) : undefined;
+    if (!s || !s.metaLoaded) return undefined;
+    return {
+      id: s.id,
+      name: s.name,
+      title: s.title,
+      description: s.description,
+      owner: s.owner,
+      visibility: s.visibility,
+      federation: s.federation,
+      welcome: s.welcome,
+      recovery_eta: s.recoveryEta,
+      recovery_rung: s.recoveryRung,
+      categories: s.categories,
+    };
+  });
   // v0.13: a namespace's rail tile / header key is its **id**; its display name
   // is the vanity from NS-META (fall back to the id only if we haven't seen it).
-  const serverName = (nsId: string): string =>
-    discovered[nsId]?.title || discovered[nsId]?.name || nsId;
+  const serverName = (nsId: string): string => store.servers.get(nsId)?.displayName ?? nsId;
   function showRecoveryKey() {
     weft
       .recoveryPubkey(network, activeServer)
@@ -1296,17 +1293,20 @@
   };
 
   function ensureChannel(name: string): Channel {
-    if (!channels[name]) {
-      channels[name] = { name, retention: "retained", messages: [], members: [] };
+    let ch = channels[name];
+    if (!ch) {
+      ch = new Channel(name);
       // Seed layout from the cache so groups/order render instantly on reload.
       const ns = nsOf(name);
+      if (ns) ch.server = store.server(ns); // the Channel → Server graph edge
       const cached = ns ? layoutCache[ns]?.chans[name] : undefined;
       if (cached) {
-        channels[name].category = cached.category;
-        channels[name].position = cached.position;
+        ch.category = cached.category;
+        ch.position = cached.position ?? 0;
       }
+      channels[name] = ch;
     }
-    return channels[name];
+    return ch;
   }
 
   // ---- history / scrollback (Phase 1) ----
@@ -1345,8 +1345,8 @@
   // Namespaces we hold channels in OR are a member of (the latter keeps a
   // channel-less server on the rail) — each becomes a rail tile (flavor A).
   // The rail = every namespace I belong to: one I hold a channel in, or one I'm
-  // a recorded member of. `memberNs` is the join barrier — populated by SYNC and
-  // live NS-MEMBER, and (below) by owning a namespace — so a channel-less server
+  // a recorded member of. `Server.joined` is the join barrier — populated by SYNC
+  // and live NS-MEMBER, and (below) by owning a namespace — so a channel-less server
   // (e.g. one I just created) still shows.
   let serverNamespaces = $derived(
     [
@@ -1355,7 +1355,7 @@
           .filter((c) => c.name.startsWith("#"))
           .map((c) => nsOf(c.name))
           .filter(Boolean),
-        ...Object.keys(memberNs),
+        ...[...store.servers.values()].filter((s) => s.joined).map((s) => s.id),
       ]),
     ].sort(),
   );
@@ -1365,23 +1365,21 @@
   const nsMetaFetched = new Set<string>();
   $effect(() => {
     for (const ns of serverNamespaces) {
-      if (!discovered[ns] && !nsMetaFetched.has(ns)) {
+      if (!store.servers.get(ns)?.metaLoaded && !nsMetaFetched.has(ns)) {
         nsMetaFetched.add(ns);
         weft.channels(ns).catch(() => {});
       }
     }
   });
-  // Server-tile unread/mention rollups (so unread in other servers is visible).
-  const serverUnread = (ns: string) =>
-    Object.keys(unreadMap).some((n) => unreadMap[n] && nsOf(n) === ns && n !== active);
-  const serverMention = (ns: string) =>
-    Object.keys(mentionMap).some((n) => mentionMap[n] && nsOf(n) === ns && n !== active);
+  // Server-tile unread/mention rollups (so unread in other servers is visible),
+  // folded over the server's own channels.
+  const serverChannels = (ns: string) =>
+    Object.values(channels).filter((c) => nsOf(c.name) === ns && c.name !== active);
+  const serverUnread = (ns: string) => serverChannels(ns).some((c) => c.unread);
+  const serverMention = (ns: string) => serverChannels(ns).some((c) => c.mention);
   // Total mentions across a server's channels, for the rail's numeric badge.
   const serverMentionCount = (ns: string) =>
-    Object.keys(mentionCount).reduce(
-      (sum, n) => (nsOf(n) === ns && n !== active ? sum + (mentionCount[n] ?? 0) : sum),
-      0,
-    );
+    serverChannels(ns).reduce((sum, c) => sum + c.mentionCount, 0);
   // Discord-style grouping for the *active server*: uncategorized channels sit
   // bare at the top (category "", no header), then each CHANNEL-LAYOUT category
   // (position-ordered) in its persisted order.
@@ -1389,7 +1387,7 @@
     const bare: Channel[] = [];
     const groups = new Map<string, Channel[]>();
     // Empty categories the admin created (client-side) show up too.
-    for (const cat of discovered[activeServer]?.categories ?? layoutCache[activeServer]?.cats ?? [])
+    for (const cat of store.servers.get(activeServer)?.categories ?? layoutCache[activeServer]?.cats ?? [])
       groups.set(cat, []);
     for (const c of Object.values(channels)) {
       if (!c.name.startsWith("#") || nsOf(c.name) !== activeServer) continue;
@@ -1439,7 +1437,7 @@
     for (const name of Object.keys(channels)) {
       if (name.startsWith("#") && nsOf(name) === ns) delete channels[name];
     }
-    delete discovered[ns];
+    store.servers.delete(ns); // drop the tile now; the NS-MEMBER part echo confirms
     goHome();
   }
   // Fetch a namespace's layout + categories from the server whenever it
@@ -1453,8 +1451,7 @@
     }
   });
 
-  // ---- §9.4 custom emoji, keyed namespace → (name → media ref) ----
-  let customEmoji = $state<Record<string, Record<string, string>>>({});
+  // ---- §9.4 custom emoji (per namespace) — now `Server.emoji` ----
   const emojiFetched = new Set<string>();
   $effect(() => {
     const s = activeServer;
@@ -1465,7 +1462,7 @@
   });
   // The active namespace's custom emoji as an array (for pickers).
   const activeEmoji = $derived(
-    Object.entries(customEmoji[activeServer] ?? {}).map(([name, media]) => ({ name, media })),
+    [...(activeServer ? (store.servers.get(activeServer)?.emoji ?? []) : [])].map(([name, media]) => ({ name, media })),
   );
   function addEmoji(name: string, media: string) {
     if (!activeServer) return;
@@ -1478,7 +1475,7 @@
   // Resolve a `:name:` shortcode to a fetchable image URL in the active
   // namespace, or null if it isn't a custom emoji here.
   const emojiUrlFor = (name: string): string | null => {
-    const media = customEmoji[activeServer]?.[name];
+    const media = activeServer ? store.servers.get(activeServer)?.emoji.get(name) : undefined;
     return media ? weft.mediaUrl(media) : null;
   };
 
@@ -1489,29 +1486,25 @@
 
   // ---- DM + presence helpers ----
   const peerOf = (key: string) => key.replace(/^@/, "");
-  const dotClass = (acct: string) => `dot ${presence[acct] ?? "offline"}`;
+  const dotClass = (acct: string) => store.accountOf(acct).dotClass;
 
-  // ---- §10.3 profile helpers ----
+  // ---- §10.3 profile helpers (thin views over the Account identity map) ----
   /** A fetchable avatar URL for an account, or null → render initials. */
-  const avatarUrl = (acct: string): string | null => {
-    const a = profiles[peerOf(acct)]?.avatar;
-    return a ? weft.avatarUrl(a) : null;
-  };
+  const avatarUrl = (acct: string): string | null => store.accountOf(acct).avatarUrl;
   /** An account's display name — the active server's nickname if set, else the
    *  global display name, else the bare account part (§10.3: the canonical
    *  handle is always shown separately). */
   const displayName = (acct: string): string => {
-    const key = peerOf(acct);
-    const nick = activeServer ? nicks[nickKey(`ns:${activeServer}`, key)] : undefined;
-    return nick || profiles[key]?.display || key.split("@")[0];
+    const nick = activeServer ? nicks[nickKey(`ns:${activeServer}`, peerOf(acct))] : undefined;
+    return nick || store.accountOf(acct).displayName;
   };
   /** An account's server nickname at the active server, or "" (for editors). */
   const nickOf = (acct: string): string =>
     (activeServer ? nicks[nickKey(`ns:${activeServer}`, peerOf(acct))] : "") ?? "";
   /** An account's free-text bio (§10.3), or "" if unset. */
-  const bioOf = (acct: string): string => profiles[peerOf(acct)]?.about ?? "";
+  const bioOf = (acct: string): string => store.accountOf(acct).about;
   /** An account's custom status (§10.3), or "" if unset. */
-  const statusOf = (acct: string): string => profiles[peerOf(acct)]?.status ?? "";
+  const statusOf = (acct: string): string => store.accountOf(acct).status;
   /** Set (or clear, with "") my own custom status. */
   function setCustomStatus(text: string) {
     weft.profileSet({ status: text }).catch((e) => toast(String(e), "error"));
@@ -1519,8 +1512,10 @@
   /** Fetch a profile we don't have yet (deduped; own + co-members). */
   function queryProfile(acct: string) {
     const a = peerOf(acct);
-    if (a && profiles[a] === undefined) {
-      profiles[a] = {}; // mark requested so we don't re-query
+    if (!a) return;
+    const acc = store.accountOf(a);
+    if (!acc.requested) {
+      acc.requested = true; // mark requested so we don't re-query
       weft.profilesQuery([a]).catch(() => {});
     }
   }
@@ -1894,7 +1889,7 @@
           } else {
             // Mark a just-joined member online (they announce, but a peer that
             // was already here won't have — best effort with this model).
-            presence[e.user] ??= "online";
+            store.accountOf(e.user).presence ??= "online";
           }
         } else {
           ch.members = ch.members.filter((m) => m.name !== e.user);
@@ -2012,12 +2007,7 @@
         const level = notifLevel(key);
         // A muted scope shows no unread indicator; others tally unread/mentions.
         if (!e.own && key !== active && level !== "nothing") {
-          unreadMap[key] = true;
-          unreadCount[key] = (unreadCount[key] ?? 0) + 1;
-          if (pinged) {
-            mentionMap[key] = true;
-            mentionCount[key] = (mentionCount[key] ?? 0) + 1;
-          }
+          ch.bump(pinged);
         }
         // Desktop notification while unfocused, gated by the scope's level:
         // "all" → every message, "mentions" → DMs/@mentions only, "nothing" → none.
@@ -2039,12 +2029,12 @@
         // handle, federated users by `account@network` (so same-name users on
         // different networks don't collide).
         const key = e.network === network ? e.account : `${e.account}@${e.network}`;
-        profiles[key] = {
-          display: e.display ?? undefined,
-          avatar: e.avatar ?? undefined,
-          about: e.about ?? undefined,
-          status: e.status ?? undefined,
-        };
+        const acc = store.accountOf(key);
+        acc.display = e.display ?? undefined;
+        acc.avatar = e.avatar ?? undefined;
+        acc.about = e.about ?? "";
+        acc.status = e.status ?? "";
+        acc.requested = true;
         break;
       }
       case "nick": {
@@ -2061,7 +2051,7 @@
         verifications[e.claim_kind] = { subject: e.subject, state: e.state };
         break;
       case "presence":
-        presence[e.user] = e.status;
+        store.accountOf(e.user).presence = e.status;
         break;
       case "marked": {
         // Read-marker sync from another device (§9.7).
@@ -2075,11 +2065,19 @@
         // cross-device MARK pushes override the client's live tally, so counts
         // survive reload/reconnect and stay in sync across devices. The channel
         // being viewed is read (auto-mark handles it); muted scopes stay silent.
-        if (e.channel !== active && !isMuted(e.channel)) {
-          unreadCount[e.channel] = e.unread;
-          unreadMap[e.channel] = e.unread > 0;
-          mentionCount[e.channel] = e.mentions;
-          mentionMap[e.channel] = e.mentions > 0;
+        //
+        // Only update a channel we actually have. The auth snapshot streams a
+        // count for every persisted read marker, including stale ones for
+        // deleted / no-longer-accessible channels; materializing those would pop
+        // a phantom rail tile (raw ULID name, NO-SUCH-TARGET on click). Real
+        // channels get their count from SYNC, which re-sends UNREAD-COUNTS right
+        // after each CHANNEL-LAYOUT — so guarding here loses nothing.
+        const ch = channels[e.channel];
+        if (ch && e.channel !== active && !isMuted(e.channel)) {
+          ch.unreadCount = e.unread;
+          ch.unread = e.unread > 0;
+          ch.mentionCount = e.mentions;
+          ch.mention = e.mentions > 0;
         }
         break;
       }
@@ -2100,13 +2098,14 @@
         // rail (and, on join, gets auto-selected below).
         if (e.user === account) {
           if (e.action === "join") {
-            memberNs[e.namespace] = true;
+            store.server(e.namespace).joined = true;
             // React visibly to a *live* join (create/join a server) by landing on
             // it. During SYNC we're just restoring the rail — don't hijack the
             // view by jumping to the last-restored namespace.
             if (!syncing && activeServer !== e.namespace) selectServer(e.namespace);
           } else {
-            delete memberNs[e.namespace];
+            const s = store.servers.get(e.namespace);
+            if (s) s.joined = false;
           }
         }
         break;
@@ -2117,25 +2116,19 @@
         break;
       case "emoji": {
         // §9.4 a namespace custom emoji (from EMOJI LIST or a live add).
-        (customEmoji[e.namespace] ??= {})[e.name] = e.media;
-        customEmoji = { ...customEmoji };
+        store.server(e.namespace).emoji.set(e.name, e.media);
         break;
       }
       case "emoji-removed": {
-        if (customEmoji[e.namespace]) {
-          delete customEmoji[e.namespace][e.name];
-          customEmoji = { ...customEmoji };
-        }
+        store.servers.get(e.namespace)?.emoji.delete(e.name);
         break;
       }
       case "chanmeta": {
         // §6.3 CHANNEL DELETE confirms with `deleted` — drop the channel from
         // every local view (do NOT ensureChannel first, or it'd be re-created).
         if (e.key === "deleted") {
-          delete channels[e.channel];
+          delete channels[e.channel]; // unread/mention tallies ride the instance
           keptChannels = keptChannels.filter((c) => c !== e.channel);
-          delete unreadMap[e.channel];
-          delete unreadCount[e.channel];
           if (active === e.channel) active = "";
           break;
         }
@@ -2276,7 +2269,7 @@
         break;
       case "ns-member-info":
         nsMemberBuf.push({
-          account: e.user,
+          user: e.user,
           network: e.network,
           joinedMs: e.joined_ms,
           roles: e.roles ?? [],
@@ -2301,21 +2294,8 @@
         const cur = channels[e.old];
         if (cur) {
           cur.name = e.new;
-          channels[e.new] = cur;
+          channels[e.new] = cur; // unread/mention tallies ride the instance
           delete channels[e.old];
-          for (const map of [unreadMap, mentionMap, unreadCount, mentionCount] as Record<
-            string,
-            boolean | number
-          >[]) {
-            if (map[e.old] !== undefined) {
-              map[e.new] = map[e.old];
-              delete map[e.old];
-            }
-          }
-          if (notifPrefs[e.old] !== undefined) {
-            notifPrefs[e.new] = notifPrefs[e.old];
-            delete notifPrefs[e.old];
-          }
           cacheChanLayout(e.new, cur.category, cur.position ?? 0);
           if (active === e.old) active = e.new;
           if (chanPermsCh === e.old) chanPermsCh = e.new;
@@ -2333,21 +2313,21 @@
         // namespace from every local view instead of storing a tombstone —
         // otherwise a deleted server would linger in the rail/channel list.
         if (e.owner === null && e.description === "deleted") {
-          delete discovered[e.id];
-          delete memberNs[e.id];
+          store.servers.delete(e.id);
           for (const name of Object.keys(channels)) {
             if (name.startsWith("#") && nsOf(name) === e.id) delete channels[name];
           }
           if (activeServer === e.id) goHome();
           break;
         }
-        discovered[e.id] = e;
+        const srv = store.server(e.id);
+        srv.applyMeta(e);
         cacheNsCats(e.id, e.categories ?? []);
         // Owning a namespace is membership — the owner can't leave it (only
         // transfer or delete). Record it so a server I just created appears in the
         // rail the instant its NS-META returns, with no channels and no Discover
         // round-trip, and stays put across Discover's transient resets.
-        if (e.owner === account) memberNs[e.id] = true;
+        if (e.owner === account) srv.joined = true;
         // A namespace I own but hold no channels in is one I just created (the
         // server seeds its `#general`): auto-join so I'm subscribed to it live —
         // no client-side channel creation needed.
@@ -2448,7 +2428,17 @@
         // since neither prefix overlaps, and flushed by the requested namespace
         // so an empty roster still lands.
         if (currentBatchId.startsWith("ni")) {
-          if (loadingNsMembers) nsMembersByNs[loadingNsMembers] = nsMemberBuf;
+          if (loadingNsMembers) {
+            const srv = store.server(loadingNsMembers);
+            srv.members = nsMemberBuf.map((r) => {
+              const handle = r.network === network ? r.user : `${r.user}@${r.network}`;
+              const m = new Membership(srv, store.accountOf(handle));
+              m.network = r.network;
+              m.joinedMs = r.joinedMs;
+              m.roleIds = r.roles;
+              return m;
+            });
+          }
           nsMemberBuf = [];
           loadingNsMembers = null;
           nsMembersLoading = false;
@@ -3075,7 +3065,7 @@
     // :name: → this server's custom emoji (an inline image) if it exists, else a
     // standard unicode emoji (`:smile:` → 😄); an unknown shortcode stays literal.
     s = s.replace(/:([a-zA-Z0-9_+-]+):/g, (full, name: string) => {
-      const media = customEmoji[activeServer]?.[name];
+      const media = activeServer ? store.servers.get(activeServer)?.emoji.get(name) : undefined;
       if (media) {
         const url = weft.mediaUrl(media).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
         return `<img class="custom-emoji" src="${url}" alt=":${name}:" title=":${name}:" />`;
@@ -3225,23 +3215,22 @@
   }
 
   // ---- typing indicators (Phase 4) ----
-  let typers = $state<Record<string, string[]>>({}); // channel -> accounts typing
   const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   function setTyping(channel: string, user: string, active: boolean) {
     const key = `${channel}\u0000${user}`;
     clearTimeout(typingTimers.get(key));
-    typers[channel] ??= [];
+    const ch = ensureChannel(channel);
     if (active) {
-      if (!typers[channel].includes(user)) typers[channel] = [...typers[channel], user];
+      if (!ch.typers.includes(user)) ch.typers = [...ch.typers, user];
       // Fallback expiry in case a `stop` is lost.
       typingTimers.set(key, setTimeout(() => setTyping(channel, user, false), 6000));
     } else {
-      typers[channel] = typers[channel].filter((u) => u !== user);
+      ch.typers = ch.typers.filter((u) => u !== user);
       typingTimers.delete(key);
     }
   }
   let typingLabel = $derived.by(() => {
-    const who = active ? (typers[active] ?? []) : [];
+    const who = activeChannel?.typers ?? [];
     if (!who.length) return "";
     if (who.length === 1) return `${who[0]} is typing…`;
     if (who.length === 2) return `${who[0]} and ${who[1]} are typing…`;
@@ -3422,10 +3411,10 @@
   // ---- discover + channel management (Phase 6) ----
   function openDiscover() {
     discoverOpen = true;
-    // `discovered` is the transient browse list — clear it. `memberNs` is real
-    // membership state (drives the rail); browsing must NOT wipe it, or my own
-    // channel-less servers would vanish until re-streamed.
-    discovered = {};
+    // Clear the transient browse list (loaded non-member servers) but KEEP the
+    // ones I'm in (their metadata drives the rail) and ones interned only as a
+    // channel's namespace (metaLoaded=false — a live `Channel.server` edge).
+    for (const [id, s] of store.servers) if (s.metaLoaded && !s.joined) store.servers.delete(id);
     nsMetaFetched.clear();
     discoverCursor = null;
     weft.discover().catch(() => {});
@@ -3593,7 +3582,7 @@
   let newCatOpen = $state(false);
   let newCatName = $state("");
   // Categories are server state (§6.3, on the namespace) — no client copy.
-  const nsCategories = () => discovered[activeServer]?.categories ?? [];
+  const nsCategories = () => store.servers.get(activeServer)?.categories ?? [];
   function setCategories(list: string[]) {
     if (activeServer) weft.nsMeta(activeServer, "categories", list.join(",")).catch((e) => toast(String(e), "error"));
   }
@@ -3663,8 +3652,8 @@
     if (to < 0) to = cats.length; // dropped on the implicit group → move to the end
     cats.splice(to, 0, dragCat);
 
-    const meta = discovered[activeServer];
-    if (meta) meta.categories = cats; // optimistic; the NS-META echo confirms
+    const s = store.servers.get(activeServer);
+    if (s) s.categories = cats; // optimistic; the NS-META echo confirms
     setCategories(cats);
   }
 
@@ -3913,7 +3902,7 @@
 
   // Namespace admin
   function openNsSettings() {
-    const meta = discovered[activeServer];
+    const meta = store.servers.get(activeServer);
     nsTitle = meta?.title ?? "";
     nsDesc = meta?.description ?? "";
     nsVis = meta?.visibility ?? "public";
@@ -4134,11 +4123,7 @@
     },
     openDiscover,
     get channels() { return channels; },
-    get presence() { return presence; },
-    get unreadMap() { return unreadMap; },
-    get mentionMap() { return mentionMap; },
-    get unreadCount() { return unreadCount; },
-    get mentionCount() { return mentionCount; },
+    accountOf: (handle: string) => store.accountOf(handle),
     isMuted,
     serverMuted,
     notifLevelOf,
@@ -4148,7 +4133,7 @@
     get notifSettingsOpen() { return notifSettingsOpen; },
     set notifSettingsOpen(v: boolean) { notifSettingsOpen = v; },
     openNotifSettings,
-    get discovered() { return discovered; },
+    get discoverList() { return [...store.servers.values()].filter((s) => s.metaLoaded); },
     get discoverCursor() { return discoverCursor; },
     scopesFor,
     markRead,
@@ -4168,7 +4153,7 @@
     setNick,
     chanShort,
     titleOf,
-    isNsMember: (nsId: string) => !!memberNs[nsId],
+    isNsMember: (nsId: string) => store.servers.get(nsId)?.joined ?? false,
     peerOf,
     dotClass,
     nsOf,
@@ -4222,6 +4207,7 @@
     moderate,
     openSettings: () => { userTab = "account"; settingsOpen = true; userMenu = false; },
     toast,
+    confirm: appConfirm,
     expectSuccess,
     get reportQueue() { return reportQueue; },
     get pinsList() { return pinsList; },
@@ -4323,7 +4309,7 @@
     roleById,
     ensureMemberRoles,
     ensureRoles,
-    get nsMembersByNs() { return nsMembersByNs; },
+    nsMembers: (ns: string) => store.servers.get(ns)?.members ?? [],
     get nsMembersLoading() { return nsMembersLoading; },
     fetchNsMembers,
     assignNsRole,
@@ -4485,7 +4471,7 @@
         name: c.name,
         label: c.name.startsWith("@") ? peerOf(c.name) : chanShort(c.name),
         sigil: c.name.startsWith("@") ? "@" : "#",
-        unread: !!unreadMap[c.name],
+        unread: c.unread,
       }))}
       onselect={switchTo}
       onclose={() => (switcherOpen = false)}

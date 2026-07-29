@@ -243,6 +243,18 @@ impl<S: ControlStream> Session<S> {
             }
         }
 
+        // Drop read markers for this namespace's channels — otherwise the login
+        // snapshot (§6.3) would keep emitting UNREAD-COUNTS for channels the
+        // account can no longer see. Non-fatal: membership is already gone.
+        if let Err(e) = self
+            .ctx
+            .accounts
+            .clear_marks_in_namespace(&account, &ns_str)
+            .await
+        {
+            error!("mark prune on ns-leave failed: {e}");
+        }
+
         let me = UserRef::new(account, self.ctx.info.network.clone());
         self.send_event(
             label,

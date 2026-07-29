@@ -431,6 +431,20 @@ where
         ]
     );
 
+    // NS LEAVE prunes an account's markers for that namespace's channels only
+    // (`#<ns-id>/…`) — top-level and other-namespace markers are untouched.
+    store.set_mark(&ada, "#nsx/general", &msgid(1)).await.unwrap();
+    store.set_mark(&ada, "#nsx/dev", &msgid(2)).await.unwrap();
+    store.set_mark(&ada, "#nsy/general", &msgid(3)).await.unwrap();
+    store.clear_marks_in_namespace(&ada, "nsx").await.unwrap();
+    let after = store.marks(&ada).await.unwrap();
+    assert!(
+        after.iter().all(|(t, _)| !t.starts_with("#nsx/")),
+        "clear_marks_in_namespace must drop every #nsx/ marker"
+    );
+    assert!(after.iter().any(|(t, _)| t == "#nsy/general"));
+    assert!(after.iter().any(|(t, _)| t == "#general")); // top-level untouched
+
     // -- server-computed unread counts (§6.3) --
     let unread_scope: Scope = Scope::Channel(format!("#unread-{tag}").parse().unwrap());
     let reader: Account = format!("reader-{tag}").parse().unwrap();
@@ -968,7 +982,26 @@ where
     let record = store.channel(&name).await.unwrap().unwrap();
     assert!(!record.frozen, "unfreeze leaves `restricted` alone");
     assert!(record.restricted);
+    // A read marker must not outlive its channel — otherwise the login snapshot
+    // (§6.3) emits UNREAD-COUNTS for a target that no longer exists (a phantom
+    // channel client-side). `delete_channel` prunes the channel's markers.
+    store.set_mark(&ada, name.as_str(), &msgid(9_000)).await.unwrap();
+    assert!(store
+        .marks(&ada)
+        .await
+        .unwrap()
+        .iter()
+        .any(|(t, _)| t == name.as_str()));
     assert!(store.delete_channel(&name).await.unwrap());
+    assert!(
+        !store
+            .marks(&ada)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(t, _)| t == name.as_str()),
+        "delete_channel must prune the channel's read markers"
+    );
     assert!(!store.delete_channel(&name).await.unwrap()); // idempotent-ish
     assert!(store.channel(&name).await.unwrap().is_none());
 

@@ -15,7 +15,7 @@
       <span class={app.dotClass(app.peerOf(app.active))}></span>
       <span>{app.peerOf(app.active)}</span>
     </div>
-    <div class="topic">{app.presence[app.peerOf(app.active)] ?? "offline"}</div>
+    <div class="topic">{app.accountOf(app.peerOf(app.active)).presence ?? "offline"}</div>
   {:else if app.activeChannel}
     {@const meta = app.retentionMeta[app.activeChannel.retention]}
     <div class="chan-title">

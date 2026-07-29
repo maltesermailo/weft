@@ -148,7 +148,9 @@
     app.expectSuccess(`policy:${channel}`, "Retention updated");
     weft.channelPolicy(channel, policy).catch((e) => app.toast(String(e), "error"));
   }
-  function deleteChannel() {
+  async function deleteChannel() {
+    if (!(await app.confirm(`Delete #${app.chanShort(channel)}? This can't be undone.`, "Delete")))
+      return;
     weft
       .channelDelete(channel)
       .then(() => onclose())

@@ -248,6 +248,15 @@ pub trait AccountStore: Send + Sync {
     /// All markers for an account — the §9.7 reconnect snapshot.
     async fn marks(&self, account: &Account) -> Result<Vec<(String, MsgId)>, StoreError>;
 
+    /// Drop an account's read markers for every channel in a namespace
+    /// (`#<ns-id>/…`). Called on `NS LEAVE` so the login snapshot stops emitting
+    /// counts for channels the account can no longer see.
+    async fn clear_marks_in_namespace(
+        &self,
+        account: &Account,
+        ns_id: &str,
+    ) -> Result<(), StoreError>;
+
     /// Record (or replace) a verification claim; starts unverified.
     /// One claim per kind per account.
     async fn upsert_verification(

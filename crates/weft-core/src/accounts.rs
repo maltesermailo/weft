@@ -183,6 +183,17 @@ impl Accounts {
         self.store.marks(account).await
     }
 
+    /// Drop an account's read markers for every channel in a namespace — called
+    /// on `NS LEAVE` so the login snapshot stops emitting counts for channels it
+    /// can no longer see.
+    pub async fn clear_marks_in_namespace(
+        &self,
+        account: &Account,
+        ns_id: &str,
+    ) -> Result<(), StoreError> {
+        self.store.clear_marks_in_namespace(account, ns_id).await
+    }
+
     /// §10.5 record (or replace) a verification claim — starts unverified.
     pub async fn upsert_verification(
         &self,

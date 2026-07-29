@@ -35,9 +35,9 @@
 
   // ---- join ----
   // Discover surfaces servers to *find + join* — hide ones I'm already in (they
-  // live on the rail). `discovered` also holds my member namespaces (SYNC seeds
+  // live on the rail). `discoverList` also holds my member namespaces (SYNC seeds
   // their NS-META), so without this they'd show here as if not joined.
-  const listed = $derived(Object.values(app.discovered).filter((ns) => !app.isNsMember(ns.id)));
+  const listed = $derived(app.discoverList.filter((ns) => !app.isNsMember(ns.id)));
   const matches = $derived(
     query.trim()
       ? listed.filter((ns) => {

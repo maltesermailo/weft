@@ -10,7 +10,11 @@
 // provides everything components consume).
 
 import { getContext, setContext } from "svelte";
-import type { Channel, Msg, Member, CtxItem, RoleDefC, ThreadInfo, MentionOpt, MemberInfoC } from "./types";
+import type { Msg, Member, CtxItem, RoleDefC, ThreadInfo, MentionOpt } from "./types";
+import type { Account } from "./models/account.svelte";
+import type { Channel } from "./models/channel.svelte";
+import type { Server } from "./models/server.svelte";
+import type { Membership } from "./models/membership.svelte";
 
 export type RetentionMeta = { cls: string; label: string; icon: string };
 /** One live invite in the Discord-style invites menu (§6.5). */
@@ -110,11 +114,8 @@ export interface AppCtx {
 
   // ---- data ----
   readonly channels: Record<string, Channel>;
-  readonly presence: Record<string, string>;
-  readonly unreadMap: Record<string, boolean>;
-  readonly mentionMap: Record<string, boolean>;
-  readonly unreadCount: Record<string, number>;
-  readonly mentionCount: Record<string, number>;
+  /** The interned global identity (profile + presence) for a handle (§10.3). */
+  accountOf(handle: string): Account;
   /** Notifications silenced for this channel (level "nothing"). */
   isMuted(channel: string): boolean;
   /** Notifications silenced for this whole server/namespace. */
@@ -128,20 +129,9 @@ export interface AppCtx {
   notifScopeLabel(): string;
   notifSettingsOpen: boolean;
   openNotifSettings(): void;
-  readonly discovered: Record<
-    string,
-    {
-      /// Immutable namespace id (v0.13) — the map is keyed by it; join/address
-      /// by this, display by `name`.
-      id: string;
-      name: string;
-      title?: string | null;
-      description?: string | null;
-      visibility: string;
-      owner?: string | null;
-      categories?: string[];
-    }
-  >;
+  /// Namespaces with loaded NS-META (the Discover browse list + my servers); the
+  /// modal filters out ones I'm already in. Each is an interned {@link Server}.
+  readonly discoverList: Server[];
   readonly discoverCursor: string | null;
   scopesFor(): string[];
   markRead(name: string): void;
@@ -244,6 +234,8 @@ export interface AppCtx {
 
   // ---- misc shared ----
   toast(text: string, kind?: string): void;
+  /// Ask the user to confirm a destructive action; resolves true if confirmed.
+  confirm(message: string, label?: string): Promise<boolean>;
   /// Register a server-confirmed success toast: fires when the matching
   /// confirming event lands (not on send), so cap failures never show success.
   expectSuccess(key: string, message: string): void;
@@ -391,8 +383,8 @@ export interface AppCtx {
   nameColor(account: string): string;
   assignRoleTo(acct: string, role: RoleDefC): void;
   unassignRoleFrom(acct: string, role: RoleDefC): void;
-  /** §6.2 NS INFO MEMBERS: the moderator roster per namespace (once fetched). */
-  readonly nsMembersByNs: Record<string, MemberInfoC[]>;
+  /** §6.2 NS INFO MEMBERS: the moderator roster for a namespace (once fetched). */
+  nsMembers(ns: string): Membership[];
   /** A roster fetch is in flight. */
   readonly nsMembersLoading: boolean;
   /** Fetch the moderator roster for a namespace (cap-gated server-side). */
@@ -520,4 +512,8 @@ export function getApp(): AppCtx {
 }
 
 // Re-export commonly used types for component convenience.
-export type { Channel, Msg, Member, CtxItem, RoleDefC, ThreadInfo, MentionOpt };
+export type { Msg, Member, CtxItem, RoleDefC, ThreadInfo, MentionOpt };
+export type { Account } from "./models/account.svelte";
+export type { Channel } from "./models/channel.svelte";
+export type { Server } from "./models/server.svelte";
+export type { Membership } from "./models/membership.svelte";

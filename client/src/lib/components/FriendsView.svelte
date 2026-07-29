@@ -11,7 +11,7 @@
   const avatarAccount = (user: string) => app.friendLocalAccount(user) ?? user;
   const statusOf = (user: string) => {
     const acct = app.friendLocalAccount(user);
-    return acct ? (app.presence[acct] ?? "offline") : "offline";
+    return acct ? (app.accountOf(acct).presence ?? "offline") : "offline";
   };
   const isOnline = (user: string) => {
     const s = statusOf(user);

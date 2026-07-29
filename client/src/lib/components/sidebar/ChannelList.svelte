@@ -45,9 +45,9 @@
           class="channel-item"
           class:active={ch.name === app.active}
           class:in-voice={ch.voice && voice.channel === ch.name}
-          class:unread={app.unreadMap[ch.name] && !app.isMuted(ch.name)}
-          class:mention={app.mentionMap[ch.name]}
-          class:muted={app.isMuted(ch.name)}
+          class:unread={ch.unread && !ch.isMuted}
+          class:mention={ch.mention}
+          class:muted={ch.isMuted}
           class:drop-before={dt?.name === ch.name && !dt?.after}
           class:drop-after={dt?.name === ch.name && dt?.after}
           draggable="true"
@@ -63,7 +63,7 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" /></svg>
           {/if}
           <span class="ci-name">{app.chanShort(ch.name)}</span>
-          {#if app.mentionCount[ch.name]}<span class="mention-badge">{app.mentionCount[ch.name]}</span>{/if}
+          {#if ch.mentionCount}<span class="mention-badge">{ch.mentionCount}</span>{/if}
           <span class="dot {meta.cls} chan-ret" title={meta.label}></span>
         </button>
         {#if ch.voice && rosterOf(ch.name).length}

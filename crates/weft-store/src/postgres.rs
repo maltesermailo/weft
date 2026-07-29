@@ -1034,6 +1034,22 @@ impl AccountStore for PgStore {
             .collect()
     }
 
+    async fn clear_marks_in_namespace(
+        &self,
+        account: &Account,
+        ns_id: &str,
+    ) -> Result<(), StoreError> {
+        // Channels embed the ns id as their first segment (`#<ns-id>/…`); ns ids
+        // are ULIDs, so they carry no LIKE metacharacters.
+        sqlx::query("DELETE FROM weft_marks WHERE account = $1 AND target LIKE $2")
+            .bind(account.as_str())
+            .bind(format!("#{ns_id}/%"))
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
     async fn upsert_verification(
         &self,
         account: &Account,
@@ -1262,7 +1278,17 @@ impl ChannelStore for PgStore {
             .execute(&self.pool)
             .await
             .map_err(backend_err)?;
-        Ok(result.rows_affected() == 1)
+        let deleted = result.rows_affected() == 1;
+        if deleted {
+            // Prune orphaned read markers so the login snapshot (§6.3) stops
+            // emitting MARKED / UNREAD-COUNTS for a channel that no longer exists.
+            sqlx::query("DELETE FROM weft_marks WHERE target = $1")
+                .bind(name.as_str())
+                .execute(&self.pool)
+                .await
+                .map_err(backend_err)?;
+        }
+        Ok(deleted)
     }
 
     async fn rename_channel(

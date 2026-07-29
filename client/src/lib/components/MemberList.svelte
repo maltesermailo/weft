@@ -4,7 +4,7 @@
   const app = getApp();
   const members = $derived(app.activeChannel?.members ?? []);
   const statusOf = (name: string) =>
-    name === app.account ? app.myStatus : (app.presence[name] ?? "offline");
+    name === app.account ? app.myStatus : (app.accountOf(name).presence ?? "offline");
   const isOnline = (name: string) => {
     const s = statusOf(name);
     return s !== "offline" && s !== "invisible";

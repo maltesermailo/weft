@@ -52,31 +52,7 @@ export type ThreadInfo = {
   last?: string;
 };
 
-export type Channel = {
-  /// Canonical wire name `#<ns-id>/<chan-id>` (v0.13) — how the channel is
-  /// addressed. Display uses `vanity`.
-  name: string;
-  /// Human display name (from CHANNEL-LAYOUT `vanity=`); the wire name is opaque
-  /// ids. Empty/undefined for a top-level channel or before the layout arrives.
-  vanity?: string;
-  retention: string;
-  messages: Msg[];
-  members: Member[];
-  /// History backfill.
-  historyLoaded?: boolean;
-  hasMore?: boolean; // older pages available upstream
-  truncated?: boolean; // a retention gap at the top (§6.4)
-  /// Channel management + layout.
-  topic?: string;
-  restricted?: boolean; // §6.7 posting requires the `send` cap
-  viewGated?: boolean; // §6.3 visibility requires the `view` cap
-  lastRead?: string; // newest msgid we've marked read
-  category?: string; // CHANNEL-LAYOUT grouping
-  position?: number;
-  voice?: boolean; // §16 a voice-only channel (kind=voice) — entered via VOICE JOIN
-  rosterLoaded?: boolean; // MEMBERS snapshot fetched
-  pinnedIds?: string[]; // pinned msgids (§6.4)
-};
+// `Channel` is now a reactive class — see $lib/models/channel.svelte.
 
 /// A right-click context-menu entry.
 export type CtxItem =
@@ -100,17 +76,8 @@ export type MentionOpt = {
   color?: string;
 };
 
-/// One row of the `NS INFO MEMBERS` moderator roster (§6.2): a namespace
-/// member with their canonical handle, Unix-ms join time (`0` = unknown), and
-/// the ns-scoped roles they've been assigned.
-export type MemberInfoC = {
-  account: string;
-  network: string;
-  joinedMs: number;
-  /// Assigned role **ids** (v0.13 NS-MEMBER-INFO) — map through `roleById` for
-  /// the display name/color; names aren't unique.
-  roles: string[];
-};
+// The `NS INFO MEMBERS` roster row is now the `Membership` class — see
+// $lib/models/membership.svelte.
 
 /// A namespace-scoped role definition (name + color + caps + hoist + pingable + position).
 export type RoleDefC = {

@@ -867,6 +867,19 @@ impl AccountStore for MemoryStore {
             .unwrap_or_default())
     }
 
+    async fn clear_marks_in_namespace(
+        &self,
+        account: &Account,
+        ns_id: &str,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(record) = inner.accounts.get_mut(account) {
+            let prefix = format!("#{ns_id}/");
+            record.marks.retain(|target, _| !target.starts_with(&prefix));
+        }
+        Ok(())
+    }
+
     async fn upsert_verification(
         &self,
         account: &Account,
@@ -1037,7 +1050,16 @@ impl ChannelStore for MemoryStore {
     async fn delete_channel(&self, name: &ChannelName) -> Result<bool, StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         inner.chan_ids.remove(name);
-        Ok(inner.channels.remove(name).is_some())
+        let removed = inner.channels.remove(name).is_some();
+        if removed {
+            // Prune orphaned read markers so the login snapshot (§6.3) stops
+            // emitting MARKED / UNREAD-COUNTS for a channel that no longer exists.
+            let target = name.as_str();
+            for record in inner.accounts.values_mut() {
+                record.marks.remove(target);
+            }
+        }
+        Ok(removed)
     }
 
     async fn rename_channel(

@@ -7,7 +7,7 @@
 
   const isSelf = $derived(target === app.account);
   const handle = $derived(target.includes("@") ? target : `${target}@${app.network}`);
-  const status = $derived(isSelf ? app.myStatus : (app.presence[target] ?? "offline"));
+  const status = $derived(isSelf ? app.myStatus : (app.accountOf(target).presence ?? "offline"));
   const online = $derived(status !== "offline" && status !== "invisible");
   const bio = $derived(app.bioOf(target));
   const badge = $derived(app.badgeFor(target, app.active));

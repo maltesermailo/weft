@@ -16,7 +16,7 @@
   } = $props();
 
   const b = $derived(app.badgeFor(target, app.active));
-  const pr = $derived(app.presence[target] ?? "offline");
+  const pr = $derived(app.accountOf(target).presence ?? "offline");
   // Roles + moderation are server-member controls — show them only when we're
   // actually viewing one of the server's channels, not from friends/DMs.
   const inServer = $derived(app.active.startsWith("#"));

@@ -38,12 +38,12 @@
 
   // ---- Members directory (NS INFO MEMBERS) ----
   let memberSearch = $state("");
-  const roster = $derived(app.nsMembersByNs[app.activeServer] ?? []);
+  const roster = $derived(app.nsMembers(app.activeServer));
   const shownMembers = $derived(
     roster.filter(
       (m) =>
-        app.displayName(m.account).toLowerCase().includes(memberSearch.toLowerCase()) ||
-        m.account.toLowerCase().includes(memberSearch.toLowerCase()),
+        app.displayName(m.account.name).toLowerCase().includes(memberSearch.toLowerCase()) ||
+        m.account.name.toLowerCase().includes(memberSearch.toLowerCase()),
     ),
   );
   // A member's role pill is keyed by role **id** (v0.13); resolve its color +
@@ -303,26 +303,27 @@
             <span>Roles</span>
             <span>Joined</span>
           </div>
-          {#each shownMembers as m (m.account + "@" + m.network)}
-            {@const handle = m.account + "@" + m.network}
-            {@const isOwner = ownerAccount === m.account}
+          {#each shownMembers as m (m.account.name + "@" + m.network)}
+            {@const acct = m.account.name}
+            {@const handle = acct + "@" + m.network}
+            {@const isOwner = ownerAccount === acct}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div class="mem-row" oncontextmenu={(e) => app.nsMemberCtx(e, m.account)}>
+            <div class="mem-row" oncontextmenu={(e) => app.nsMemberCtx(e, acct)}>
               <div class="mem-id">
-                <span class="mem-avatar"><Avatar account={m.account} /></span>
+                <span class="mem-avatar"><Avatar account={acct} /></span>
                 <div class="mem-id-meta">
                   <div class="mem-name">
-                    {app.displayName(m.account)}
+                    {app.displayName(acct)}
                     {#if isOwner}<span class="mem-owner" title="Server owner">👑 Owner</span>{/if}
                   </div>
-                  <div class="mem-handle">{m.account}{m.network !== app.network ? `@${m.network}` : ""}</div>
+                  <div class="mem-handle">{acct}{m.network !== app.network ? `@${m.network}` : ""}</div>
                 </div>
               </div>
               <div class="mem-roles">
-                {#each m.roles as r (r)}
+                {#each m.roleIds as r (r)}
                   <span class="role-pill editable" style="--role:{roleColor(r)}">
                     <span class="role-dot"></span>{roleName(r)}
-                    <button class="role-x" title="Remove role" aria-label={`Remove ${roleName(r)}`} onclick={() => app.unassignNsRole(m.account, r)}>✕</button>
+                    <button class="role-x" title="Remove role" aria-label={`Remove ${roleName(r)}`} onclick={() => app.unassignNsRole(acct, r)}>✕</button>
                   </span>
                 {/each}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -331,14 +332,14 @@
                   <button
                     class="role-add"
                     title="Add role"
-                    aria-label={`Add a role to ${app.displayName(m.account)}`}
+                    aria-label={`Add a role to ${app.displayName(acct)}`}
                     onclick={() => (addRoleFor = addRoleFor === handle ? null : handle)}
                   >+</button>
                   {#if addRoleFor === handle}
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div class="role-add-menu" role="menu">
-                      {#each unheldRoles(m.roles) as r (r.name)}
-                        <button class="role-add-opt" onclick={() => { app.assignNsRole(m.account, r.id); addRoleFor = null; }}>
+                      {#each unheldRoles(m.roleIds) as r (r.name)}
+                        <button class="role-add-opt" onclick={() => { app.assignNsRole(acct, r.id); addRoleFor = null; }}>
                           <span class="role-dot" style="--role:{r.color}"></span>{r.name}
                         </button>
                       {:else}

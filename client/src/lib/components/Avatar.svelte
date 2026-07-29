@@ -4,9 +4,9 @@
   import { getApp } from "$lib/context";
   const app = getApp();
   let { account }: { account: string } = $props();
-  const url = $derived(app.avatarUrl(account));
+  const acc = $derived(app.accountOf(account));
 </script>
 
-{#if url}
-  <img class="avatar-img" src={url} alt="" />
-{:else}{app.initials(account)}{/if}
+{#if acc.avatarUrl}
+  <img class="avatar-img" src={acc.avatarUrl} alt="" />
+{:else}{acc.initials}{/if}
