@@ -3393,6 +3393,40 @@ async fn any_user_can_create_a_namespace_and_owns_it() {
 }
 
 #[tokio::test]
+async fn ns_create_records_membership_so_it_survives_a_reconnect() {
+    // Regression: creating a namespace must persist the creator's membership, so a
+    // fresh login (SYNC — the reconnect path) restores it to the rail. Previously
+    // the creator wasn't recorded as a member and the server only reappeared after
+    // opening Discover.
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    let ns_id = ada.create_ns("gaming").await;
+
+    // Simulate the reconnect: a fresh SYNC skeleton must report the membership
+    // (NS-MEMBER) and its auto-seeded #general (CHANNEL-LAYOUT).
+    ada.send("@label=s SYNC preview=0");
+    let mut saw_member = false;
+    let mut saw_general = false;
+    loop {
+        match ada.recv().await.event {
+            Event::NsMember {
+                namespace,
+                action: MemberAction::Join,
+                ..
+            } if namespace.to_string() == ns_id => saw_member = true,
+            Event::ChannelLayout { vanity, .. } if vanity == "general" => saw_general = true,
+            Event::SyncEnd { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(
+        saw_member,
+        "SYNC restores the created namespace's membership"
+    );
+    assert!(saw_general, "…and its seeded #general channel");
+}
+
+#[tokio::test]
 async fn ns_create_is_blocked_by_an_admin_vanity_lock() {
     // §2.3: an operator reserves a vanity in the web admin panel (store-direct);
     // NS CREATE of that name is then refused until the lock is lifted.

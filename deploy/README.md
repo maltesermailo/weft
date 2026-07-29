@@ -52,8 +52,10 @@ openssl rand -hex 32   # → Postgres password
 openssl rand -hex 32   # → LiveKit secret
 ```
 
-Keep those two strings handy — each goes in **two** places (there's no `.env`, so
-matching values are duplicated; keep them in sync).
+Keep those two strings handy — each goes in **two** places (secrets aren't
+sourced from `.env`, so matching values are duplicated; keep them in sync). The
+`.env` file exists, but only for Compose wiring — the reverse-proxy toggle and
+which host ports are published (see [Running without Caddy](#running-without-caddy-http-on-the-host)).
 
 ### 4. Edit the four config files
 
@@ -286,6 +288,42 @@ cd client && pnpm dev         # web client against it
 ```
 
 That's the fast inner loop; the Compose stack above is for a real deployment.
+
+---
+
+## Running without Caddy (HTTP on the host)
+
+Use this when something else already terminates TLS (an external load balancer,
+an existing nginx/Traefik, Cloudflare) or on a trusted LAN — you keep the Compose
+stack but drop the bundled proxy and publish weftd's HTTP port straight on the
+host. It's driven by `.env`, no compose-file edits:
+
+```dotenv
+# deploy/.env
+COMPOSE_PROFILES=          # empty → do NOT start Caddy
+WEFT_HTTP_BIND=0.0.0.0     # advertise weftd's HTTP port on every host interface
+WEFT_HTTP_PORT=8081        # host port (change if 8081 is taken)
+```
+
+```bash
+docker compose up -d       # postgres + livekit + weftd, no caddy
+curl http://<host>:8081/.well-known/weft
+```
+
+weftd now serves the web client, same-origin `/ws`, `/.well-known/weft`, and
+`/media` as **plain HTTP** on `<host>:8081` — put your own TLS in front, or use it
+as-is on a trusted network. Notes:
+
+- **QUIC (4433/udp) still needs its own cert** — a proxy can't terminate it. Without
+  Caddy writing into the shared volume, weftd boots on a self-signed placeholder
+  (native clients must opt into insecure mode, or give it a real cert — see
+  [Standalone TLS](#standalone-tls-running-weftd-without-caddy) for the `[acme]` /
+  `[tls]` options).
+- **LiveKit voice signaling** was fronted by Caddy too; front it yourself (or set
+  `[voice] enabled = false` in `weft.toml`) if you need voice in this mode.
+
+The default `.env` (`COMPOSE_PROFILES=caddy`, `WEFT_HTTP_BIND=127.0.0.1`) keeps the
+full proxied stack — weftd's HTTP stays loopback-only and Caddy fronts it on 443.
 
 ---
 

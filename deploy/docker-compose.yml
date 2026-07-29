@@ -1,12 +1,17 @@
 name: weft
 
 # Full weft deployment: weftd (embedded web client) + PostgreSQL + LiveKit
-# (voice) + Caddy (TLS + reverse proxy). No .env — edit the config files:
+# (voice) + Caddy (TLS + reverse proxy). Edit the config files:
 #   - weft.toml     (weftd)
 #   - livekit.yaml  (LiveKit keys)
 #   - Caddyfile     (domains)
 #   - POSTGRES_* below
 # `docker compose up -d --build`.
+#
+# The `.env` file controls Compose-level wiring: COMPOSE_PROFILES toggles the
+# Caddy reverse proxy, and WEFT_HTTP_BIND/WEFT_HTTP_PORT choose where weftd's
+# HTTP port is published. To run WITHOUT Caddy (HTTP straight on the host), set
+# COMPOSE_PROFILES= and WEFT_HTTP_BIND=0.0.0.0 in `.env`.
 
 services:
   postgres:
@@ -59,11 +64,18 @@ services:
       - caddy_data:/data:ro
     ports:
       - "4433:4433/udp"        # QUIC control plane (desktop/native clients)
-    # HTTP (8081) is reached via Caddy on the internal network — not published.
+      # weftd's HTTP listener (plain HTTP: web client, /ws, /.well-known, /media).
+      # Defaults to 127.0.0.1 — loopback only, so it's NOT exposed while Caddy
+      # fronts it on 443. Set WEFT_HTTP_BIND=0.0.0.0 in .env (with COMPOSE_PROFILES
+      # empty) to advertise it on the host directly, without Caddy.
+      - "${WEFT_HTTP_BIND:-127.0.0.1}:${WEFT_HTTP_PORT:-8081}:8081"
 
   caddy:
     image: caddy:2
     restart: unless-stopped
+    # Only starts when the "caddy" profile is active (COMPOSE_PROFILES in .env,
+    # the default). Clear COMPOSE_PROFILES to run without the reverse proxy.
+    profiles: ["caddy"]
     depends_on:
       - weftd
       - livekit

@@ -522,6 +522,21 @@ impl<S: ControlStream> Session<S> {
                         error!("seed default channel failed: {e}");
                     }
                 }
+
+                // The creator is the namespace's first member. Persist that
+                // membership row so the server shows in their rail immediately
+                // (the NS-MEMBER below) AND survives a restart — on reconnect SYNC
+                // auto-rejoins the ns's visible channels (incl. the seeded
+                // `#general`) from this row, no Discover round-trip needed.
+                if let Err(e) = self
+                    .ctx
+                    .memberships
+                    .set_ns_membership(&account, &ns_id, unix_now() as i64)
+                    .await
+                {
+                    error!("seed creator ns membership failed: {e}");
+                }
+
                 self.send_event(label, Self::ns_meta_event(&record)).await?;
                 Ok(Flow::Continue)
             }

@@ -528,6 +528,12 @@
     notifSettingsOpen = true;
     serverMenu = false;
   }
+  /// §10.5 open the user settings on the verification tab (from the no-email nudge).
+  function openVerification() {
+    userTab = "verification";
+    settingsOpen = true;
+    userMenu = false;
+  }
   let active = $state("");
   let joinInput = $state("");
   let composer = $state("");
@@ -590,6 +596,39 @@
   let myStatus = $state("online");
   // §10.5 the caller's own verification claims, keyed by kind (email/birthday).
   let verifications = $state<Record<string, { subject: string; state: string }>>({});
+  // `VERIFY LIST` streams its claims with no terminator, so we can't know an
+  // account has zero claims until the response has had time to arrive. Gate the
+  // "no email" nudge on this flag (flipped a beat after login) to avoid flashing
+  // the banner at every account that *does* have an email.
+  let verificationsLoaded = $state(false);
+  let verifyLoadTimer: ReturnType<typeof setTimeout> | null = null;
+  // Whether THIS server can actually mail codes (WELCOME `features=email`, §10.5).
+  let serverEmailAvailable = $state(false);
+  // The user dismissed the "add an email" nudge — persisted, so it's gone for
+  // good on this account (loaded on connect, keyed by host+account).
+  let emailBannerDismissed = $state(false);
+  // §10.5 nudge: a logged-in account with no email on file can't do a password
+  // reset — warn and offer a jump to the verification page. Only when the server
+  // can actually send mail, and only until the user dismisses it once.
+  let needsEmailWarning = $derived(
+    status === "online" &&
+      verificationsLoaded &&
+      serverEmailAvailable &&
+      !verifications.email &&
+      !emailBannerDismissed,
+  );
+  // Per-account key for the persisted dismissal.
+  function emailNudgeKey(): string {
+    return `weft:email-nudge-dismissed:${host}:${account}`;
+  }
+  function dismissEmailBanner() {
+    emailBannerDismissed = true;
+    try {
+      localStorage.setItem(emailNudgeKey(), "1");
+    } catch {
+      /* storage unavailable */
+    }
+  }
   // Footer user menu (presence + settings + logout) and the user-settings page tab.
   let userMenu = $state(false);
   let userTab = $state<"account" | "appearance" | "connection" | "verification">("account");
@@ -1299,6 +1338,10 @@
   let activeIsGroup = $derived(active.startsWith("&"));
   // Namespaces we hold channels in OR are a member of (the latter keeps a
   // channel-less server on the rail) — each becomes a rail tile (flavor A).
+  // The rail = every namespace I belong to: one I hold a channel in, or one I'm
+  // a recorded member of. `memberNs` is the join barrier — populated by SYNC and
+  // live NS-MEMBER, and (below) by owning a namespace — so a channel-less server
+  // (e.g. one I just created) still shows.
   let serverNamespaces = $derived(
     [
       ...new Set([
@@ -1719,7 +1762,20 @@
         ensureCapsAt(account, "*"); // learn operator status (federation gating)
         initVoice(account); // §16 wire the voice controller to the event stream
         queryProfile(account); // §10.3 load our own profile
-        weft.verifyList().catch(() => {}); // §10.5 load our verification claims
+        // §10.5 (re)load our verification claims. Reset the cache + the "loaded"
+        // gate so a reconnect re-evaluates the no-email nudge cleanly; flip the
+        // gate a beat later, once the streamed claims have had time to land.
+        verifications = {};
+        verificationsLoaded = false;
+        if (verifyLoadTimer) clearTimeout(verifyLoadTimer);
+        verifyLoadTimer = setTimeout(() => (verificationsLoaded = true), 2000);
+        weft.verifyList().catch(() => {});
+        // Restore whether this account already dismissed the "add email" nudge.
+        try {
+          emailBannerDismissed = localStorage.getItem(emailNudgeKey()) === "1";
+        } catch {
+          emailBannerDismissed = false;
+        }
         friends = {};
         groups = {};
         weft.listFriends().catch(() => {}); // social layer: load friends + requests
@@ -1757,8 +1813,10 @@
         break;
       case "server-info":
         // §3.6 the negotiation WELCOME, seen before auth — remember whether this
-        // homeserver requires a register email so the form can adapt.
+        // homeserver requires a register email (form shaping) and whether it can
+        // actually mail codes at all (gates the no-email nudge).
         emailRequired = e.email_required;
+        serverEmailAvailable = e.email_available;
         break;
       case "media-token":
         weft.setMediaBearer(e.token); // §13 fetch bearer for /media URLs
@@ -2252,6 +2310,7 @@
         // otherwise a deleted server would linger in the rail/channel list.
         if (e.owner === null && e.description === "deleted") {
           delete discovered[e.id];
+          delete memberNs[e.id];
           for (const name of Object.keys(channels)) {
             if (name.startsWith("#") && nsOf(name) === e.id) delete channels[name];
           }
@@ -2260,9 +2319,14 @@
         }
         discovered[e.id] = e;
         cacheNsCats(e.id, e.categories ?? []);
+        // Owning a namespace is membership — the owner can't leave it (only
+        // transfer or delete). Record it so a server I just created appears in the
+        // rail the instant its NS-META returns, with no channels and no Discover
+        // round-trip, and stays put across Discover's transient resets.
+        if (e.owner === account) memberNs[e.id] = true;
         // A namespace I own but hold no channels in is one I just created (the
-        // server seeds its `#general`): auto-join so it appears in the rail and
-        // I'm subscribed — no client-side channel creation needed.
+        // server seeds its `#general`): auto-join so I'm subscribed to it live —
+        // no client-side channel creation needed.
         if (
           e.owner === account &&
           !autoJoinedNs.has(e.id) &&
@@ -3334,8 +3398,10 @@
   // ---- discover + channel management (Phase 6) ----
   function openDiscover() {
     discoverOpen = true;
+    // `discovered` is the transient browse list — clear it. `memberNs` is real
+    // membership state (drives the rail); browsing must NOT wipe it, or my own
+    // channel-less servers would vanish until re-streamed.
     discovered = {};
-    memberNs = {};
     nsMetaFetched.clear();
     discoverCursor = null;
     weft.discover().catch(() => {});
@@ -4366,6 +4432,12 @@
   <!-- ================= MAIN APP ================= -->
   {#if reconnecting}
     <div class="reconnect-banner">Connection lost — reconnecting…</div>
+  {:else if needsEmailWarning}
+    <div class="email-banner">
+      <span>⚠ No email is on file for this account — you won't be able to reset your password.</span>
+      <button class="email-banner-btn" onclick={openVerification}>Add email</button>
+      <button class="email-banner-close" aria-label="Dismiss" title="Dismiss" onclick={dismissEmailBanner}>✕</button>
+    </div>
   {/if}
   <Toasts {toasts} />
   <Lightbox />
@@ -4395,7 +4467,11 @@
       onclose={() => (switcherOpen = false)}
     />
   {/if}
-  <div class="app" class:members-collapsed={!membersVisible || activeChannel?.voice}>
+  <div
+    class="app"
+    class:members-collapsed={!membersVisible || activeChannel?.voice}
+    class:with-top-banner={needsEmailWarning && !reconnecting}
+  >
     <!-- COMMUNITY RAIL -->
     <CommunityRail />
 

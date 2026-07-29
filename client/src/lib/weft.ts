@@ -85,7 +85,7 @@ export type Mode = "login" | "register" | "key" | "probe";
 
 export type WeftEvent =
   | { kind: "connected"; network: string; account: string }
-  | { kind: "server-info"; network: string; email_required: boolean }
+  | { kind: "server-info"; network: string; email_required: boolean; email_available: boolean }
   | { kind: "auth-failed"; reason: string }
   | { kind: "media-token"; token: string }
   | { kind: "backfill"; token: string }

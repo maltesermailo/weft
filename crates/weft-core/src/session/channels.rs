@@ -94,6 +94,12 @@ impl<S: ControlStream> Session<S> {
         if let Some(ns) = canonical.namespace() {
             if let Ok(members) = self.ctx.memberships.ns_members(ns).await {
                 for member in members {
+                    // The creator receives the labeled `POLICY` ack below — skip
+                    // the redundant self-push (it would otherwise pollute their own
+                    // CHANNEL CREATE response now that the ns owner is a member).
+                    if actor.local() == Some(&member) {
+                        continue;
+                    }
                     self.ctx
                         .directory
                         .notify(

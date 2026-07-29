@@ -310,9 +310,16 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
     // advertises `features=voice` only when it actually came up; it's installed
     // into `ctx` once boot returns it.
     let voice_sfu = build_voice_backend(&config.voice, &network);
+    // §10.5 whether a real mailer is wired (SMTP configured, not the dev
+    // log-mailer): gates the `email` feature so clients only nudge users toward
+    // an email when the server can actually deliver verification/reset codes.
+    let smtp_configured = config.smtp.enabled && !config.smtp.host.is_empty();
     let mut features = vec!["presence".to_string()]; // media/e2ee/backfill: later
     if voice_sfu.is_some() {
         features.push("voice".to_string());
+    }
+    if smtp_configured {
+        features.push("email".to_string());
     }
     let info = ServerInfo {
         network: network.clone(),
@@ -325,8 +332,8 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
     // boot survive on Postgres.
     let registration_open = config.registration == config::Registration::Open;
     // §6.1 require-email is only meaningful with a deliverable reset code: refuse
-    // to boot if it's on without SMTP (mirrors the mailer-enable condition below).
-    let smtp_configured = config.smtp.enabled && !config.smtp.host.is_empty();
+    // to boot if it's on without SMTP (`smtp_configured`, computed above — it
+    // also gates the `email` feature; same condition as the mailer-enable below).
     let require_email = config.require_email;
     if require_email && !smtp_configured {
         anyhow::bail!(

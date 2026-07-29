@@ -60,6 +60,11 @@ pub enum ClientEvent {
     ServerInfo {
         network: String,
         email_required: bool,
+        /// The server has a real mailer configured (`features=email`, §10.5), so
+        /// verification/reset codes are actually deliverable. The connect screen
+        /// and the "no email on file" nudge use this — there's no point asking
+        /// for an email a server can never mail to.
+        email_available: bool,
     },
     /// Login/registration failed — the connect screen stays up with `reason`.
     AuthFailed {
@@ -557,6 +562,7 @@ pub fn on_line<E: EventSink>(
             sink.emit(ClientEvent::ServerInfo {
                 network: network.to_string(),
                 email_required: features.iter().any(|f| f == "email-required"),
+                email_available: features.iter().any(|f| f == "email"),
             });
             // A probe stops here — it only wanted the WELCOME. The binding tears
             // the connection down once it has the `ServerInfo`.

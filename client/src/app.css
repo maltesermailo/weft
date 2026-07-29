@@ -2417,6 +2417,64 @@ button:disabled {
   color: #1a1a1a;
   background: #e0a53c;
 }
+/* §10.5 "no email on file" nudge — a persistent yellow bar with a jump to the
+   verification page. Fixed at the top; `.app.with-top-banner` reserves the space
+   so it pushes the UI down instead of covering it. */
+.email-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 30px;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 0 12px;
+  font-size: 12.5px;
+  color: #1a1a1a;
+  background: #e0a53c;
+}
+.email-banner-btn {
+  flex: none;
+  padding: 3px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1a1a1a;
+  background: rgba(0, 0, 0, 0.16);
+  border: 1px solid rgba(0, 0, 0, 0.28);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.email-banner-btn:hover {
+  background: rgba(0, 0, 0, 0.26);
+}
+.email-banner-close {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: #1a1a1a;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.email-banner-close:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.16);
+}
+.app.with-top-banner {
+  height: calc(100vh - 30px);
+  margin-top: 30px;
+}
 /* §11.10 auto-federation "connecting…" banner. */
 .federating-banner {
   position: fixed;

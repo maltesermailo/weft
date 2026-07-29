@@ -3,32 +3,32 @@
 The single index of everything shipped, in progress, and planned — unifying the
 per-feature plans under [`docs/`](./docs) and the client tiers under
 [`client/`](./client). **Detail lives in the linked source doc; this page is the
-map + status.** Normative behavior is [`docs/protocol/weft-spec-v0.11.adoc`](docs/protocol/weft-spec-v0.11.adoc);
+map + status.** Normative behavior is [`docs/protocol/weft-spec-v0.13.adoc`](docs/protocol/weft-spec-v0.13.adoc);
 server milestones + conventions are in [`CLAUDE.md`](./CLAUDE.md).
 
 **Status:** ✅ shipped · ◑ partial · ⏳ in progress · ⬜ planned · 🚫 deferred (not building)
 
 **Sources indexed here**
 
-| Area | Detail doc |
-| --- | --- |
-| Protocol (normative) | [docs/protocol/weft-spec-v0.11.adoc](docs/protocol/weft-spec-v0.11.adoc) |
+| Area | Detail doc                                                                                                                                        |
+| --- |---------------------------------------------------------------------------------------------------------------------------------------------------|
+| Protocol (normative) | [docs/protocol/weft-spec-v0.13.adoc](docs/protocol/weft-spec-v0.13.adoc)                                                                          |
 | Protocol flows (conceptual) | [docs/protocol/weft-protocol-flows.md](docs/protocol/weft-protocol-flows.md) · [weft-federation-flows.md](docs/protocol/weft-federation-flows.md) |
-| Server architecture | [docs/architecture/weftd-server-architecture.md](docs/architecture/weftd-server-architecture.md) |
-| Security posture & threat model | [docs/security/security-posture.md](docs/security/security-posture.md) · [threat-model.md](docs/security/threat-model.md) |
-| Milestones M0–M7 + conventions | [CLAUDE.md](./CLAUDE.md) |
-| Client (Discord-parity) tiers | [client/ROADMAP.md](./client/ROADMAP.md) · [client/PLAN.md](./client/PLAN.md) |
-| Media (§13) | [docs/code/media-plan.md](docs/code/media-plan.md) |
-| Web client + embedding | [docs/code/web-client-plan.md](docs/code/web-client-plan.md) |
-| Web admin panel | [docs/code/web-admin-panel-plan.md](docs/code/web-admin-panel-plan.md) |
-| Profiles (§10.3) | [docs/code/profiles-plan.md](docs/code/profiles-plan.md) |
-| Auto-federation (§11.10) | [docs/code/auto-federation-plan.md](docs/code/auto-federation-plan.md) · [amendment](docs/code/auto-federation-spec-amendment.md) |
-| Identity, caps & federated roles | [docs/code/identity-caps-federated-roles-plan.md](docs/code/identity-caps-federated-roles-plan.md) |
-| Voice — WEFT-RT SFU (§16) | [docs/code/voice-plan.md](docs/code/voice-plan.md) |
-| Voice — LiveKit pivot | [docs/code/voice-livekit-plan.md](docs/code/voice-livekit-plan.md) |
-| E2EE via MLS (§5.2, §14) | [docs/code/e2ee-mls-plan.md](docs/code/e2ee-mls-plan.md) |
-| Modular monolith & scaling | [docs/code/modular-monolith-plan.md](docs/code/modular-monolith-plan.md) |
-| VPS / deploy testing | [deploy/](./deploy) |
+| Server architecture | [docs/architecture/weftd-server-architecture.md](docs/architecture/weftd-server-architecture.md)                                                  |
+| Security posture & threat model | [docs/security/security-posture.md](docs/security/security-posture.md) · [threat-model.md](docs/security/threat-model.md)                         |
+| Milestones M0–M7 + conventions | [CLAUDE.md](./CLAUDE.md)                                                                                                                          |
+| Client (Discord-parity) tiers | [client/ROADMAP.md](./client/ROADMAP.md) · [client/PLAN.md](./client/PLAN.md)                                                                     |
+| Media (§13) | [docs/code/media-plan.md](docs/code/media-plan.md)                                                                                                |
+| Web client + embedding | [docs/code/web-client-plan.md](docs/code/web-client-plan.md)                                                                                      |
+| Web admin panel | [docs/code/web-admin-panel-plan.md](docs/code/web-admin-panel-plan.md)                                                                            |
+| Profiles (§10.3) | [docs/code/profiles-plan.md](docs/code/profiles-plan.md)                                                                                          |
+| Auto-federation (§11.10) | [docs/code/auto-federation-plan.md](docs/code/auto-federation-plan.md) · [amendment](docs/code/auto-federation-spec-amendment.md)                 |
+| Identity, caps & federated roles | [docs/code/identity-caps-federated-roles-plan.md](docs/code/identity-caps-federated-roles-plan.md)                                                |
+| Voice — WEFT-RT SFU (§16) | [docs/code/voice-plan.md](docs/code/voice-plan.md)                                                                                                |
+| Voice — LiveKit pivot | [docs/code/voice-livekit-plan.md](docs/code/voice-livekit-plan.md)                                                                                |
+| E2EE via MLS (§5.2, §14) | [docs/code/e2ee-mls-plan.md](docs/code/e2ee-mls-plan.md)                                                                                          |
+| Modular monolith & scaling | [docs/code/modular-monolith-plan.md](docs/code/modular-monolith-plan.md)                                                                          |
+| VPS / deploy testing | [deploy/](./deploy)                                                                                                                               |
 
 ---
 
@@ -121,4 +121,4 @@ task appears to need one; don't add the dependency.
 
 ---
 
-*Open questions and any protocol-shape decisions live in spec [§18](docs/protocol/weft-spec-v0.11.adoc). When a plan doc and this index disagree, the plan doc (and ultimately the spec) win — update both in the same PR.*
+*Open questions and any protocol-shape decisions live in spec [§18](docs/protocol/weft-spec-v0.13.adoc). When a plan doc and this index disagree, the plan doc (and ultimately the spec) win — update both in the same PR.*
