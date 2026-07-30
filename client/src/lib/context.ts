@@ -235,11 +235,6 @@ export interface AppCtx {
   /// Register a server-confirmed success toast: fires when the matching
   /// confirming event lands (not on send), so cap failures never show success.
   expectSuccess(key: string, message: string): void;
-  readonly reportQueue: Record<
-    string,
-    { report_id: string; msgid: string; category: string; state: string; reporter?: string | null }
-  >;
-  readonly resolveActions: string[];
 
   // ---- chat topbar ----
   membersVisible: boolean;

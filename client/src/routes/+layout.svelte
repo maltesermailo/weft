@@ -4,17 +4,87 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import * as nav from "$lib/nav";
+  import { ui } from "$lib/ui.svelte";
+  import { conn, attemptReconnect, HOMESERVER_KEY, SAVED_KEY } from "$lib/connection.svelte";
+  import {
+    handle,
+    loadHistory,
+    loadSyncCursor,
+    hist,
+    syncState,
+    selectServer,
+    goHome,
+    fetchRoles,
+    fetchGrants,
+    fetchNsMembers,
+    createRoleAt,
+    deleteRoleAt,
+    roleFetchQueue,
+    sys,
+    pendingChanCreate,
+  } from "$lib/sync/reducer.svelte";
+  import { clock, msgEpoch, msgTime, dayKey, dayLabel, retentionOf } from "$lib/time";
+  import { scopeKeyOf, notifLevel, isMuted, serverMuted, notifLevelOf, setNotifLevel } from "$lib/notif";
+  import {
+    nicks,
+    nickKey,
+    nicksFetched,
+    peerOf,
+    initials,
+    dotClass,
+    avatarUrl,
+    displayName,
+    nickOf,
+    bioOf,
+    statusOf,
+    friendLabel,
+    queryProfile,
+  } from "$lib/profile.svelte";
+  import { toasts, toast, expectSuccess, confirmSuccess } from "$lib/toasts.svelte";
   import * as weft from "$lib/weft";
   import { EVERYONE_ROLE } from "$lib/constants";
   import type { Msg, CtxItem, ThreadInfo, MentionOpt } from "$lib/types";
   import { Role } from "$lib/models/role.svelte";
-  import { ConnectForm } from "$lib/models/connect.svelte";
+  import { cf, emailNudgeKey } from "$lib/models/connect.svelte";
   import { provideApp, type InviteInfo } from "$lib/context";
   import { store, type NotifLevel } from "$lib/models/store.svelte";
-  import { Channel } from "$lib/models/channel.svelte";
+  import {
+    rolesByScope,
+    memberRoles,
+    ensureCapsAt,
+    capsResolved,
+    ensureCaps,
+    badgeFor,
+    roleScopeOf,
+    rolesAt,
+    roleById,
+    isOwnerAt,
+    isStaff,
+    rolesOf,
+    fedRolesFetched,
+    fetchMemberRoles,
+    mentionsMe as sessionMentionsMe,
+  } from "$lib/models/session.svelte";
+  import {
+    Channel,
+    channels,
+    mkMsg,
+    nsOf,
+    chanShort,
+    channelRecord,
+    ensureChannel,
+    markRead,
+    resetChannels,
+    layoutCache,
+    loadLayoutCache,
+    cacheNsCats,
+    cacheChanLayout,
+    persistDms,
+    restoreDms,
+  } from "$lib/models/channel.svelte";
   import { Membership } from "$lib/models/membership.svelte";
-  import { highlightCode } from "$lib/highlight";
-  import { shortcodeToChar, searchUnicode } from "$lib/shortcodes";
+  import { searchUnicode } from "$lib/shortcodes";
+  import * as md from "$lib/markdown";
   import { installLinkGuard } from "$lib/linkguard.svelte";
   import LinkWarningModal from "$lib/components/modals/LinkWarningModal.svelte";
   import ConnectScreen from "$lib/components/ConnectScreen.svelte";
@@ -66,29 +136,23 @@
   import NotificationSettingsModal from "$lib/components/modals/NotificationSettingsModal.svelte";
 
   // ---- connection + form state ----
-  type Status = "connect" | "connecting" | "online";
-  let status = $state<Status>("connect");
-  let network = $state("");
-  let account = $state("");
+  // Identity + connection status live on `store.session`; these are read-only
+  // views so the ~100 bare `account`/`network`/`status` refs keep working while
+  // the setters (connected / logout / reconnect) write `store.session.*`.
+  const status = $derived(store.session.status);
+  const network = $derived(store.session.network);
+  const account = $derived(store.session.account);
 
   // The connect / login screen state (homeserver + auth inputs + probe results),
   // grouped into one object passed to `ConnectScreen`. See connect.svelte.ts.
   // Web build: the network is the page origin (display-only — the WASM backend
   // derives its WS URL from window.location); desktop: a QUIC host the user
   // types. On web the picker step is skipped (start on "auth").
-  const cf = new ConnectForm();
   cf.host = weft.isWeb && typeof window !== "undefined" ? window.location.host : "127.0.0.1:4433";
   if (weft.isWeb) cf.serverStep = "auth";
-  const HOMESERVER_KEY = "weft:homeserver";
 
   // ---- session lifecycle (Phase 8) ----
-  const SAVED_KEY = "weft:last-connect";
-  let lastCreds: { host: string; account: string; password: string } | null = null;
-  let manualLogout = false;
-  let reconnecting = $state(false);
-  let reconnectAttempts = 0;
-  let toasts = $state<{ id: number; text: string; kind: string }[]>([]);
-  let toastSeq = 0;
+  // Reconnect state + `attemptReconnect` → `$lib/connection.svelte` (`conn`).
   let settingsOpen = $state(false);
   // ---- quick switcher (Ctrl+K) ----
   let switcherOpen = $state(false);
@@ -114,14 +178,14 @@
       store.pins.open = false;
       discoverOpen = false;
       settingsOpen = false;
-      nsSettingsOpen = false;
+      ui.nsSettingsOpen = false;
       profileTarget = null;
       ctxMenu = null;
       serverMenu = false;
       userMenu = false;
       newChanOpen = false;
       newCatOpen = false;
-      chanPermsCh = null;
+      ui.chanPerms = null;
     }
   }
   // ---- right-click context menus ----
@@ -201,7 +265,7 @@
         openCtx(e, [{ label: "Delete", icon: "delete", danger: true, run: () => doDelete(m) }]);
       return;
     }
-    const items: CtxItem[] = [{ label: "Reply", run: () => (replyTo = m) }];
+    const items: CtxItem[] = [{ label: "Reply", run: () => (ui.replyTo = m) }];
     if (active.startsWith("#")) {
       items.push({ label: "Reply in thread", run: () => openThread(m) });
       items.push({
@@ -341,12 +405,6 @@
     }
   }
 
-  function toast(text: string, kind = "info") {
-    const id = toastSeq++;
-    toasts = [...toasts, { id, text, kind }];
-    setTimeout(() => (toasts = toasts.filter((t) => t.id !== id)), 4500);
-  }
-
   // In-app confirmation (the Tauri webview blocks native window.confirm, so
   // destructive actions must not rely on it). Resolves true/false.
   let confirmState = $state<{ message: string; label: string; resolve: (v: boolean) => void } | null>(null);
@@ -358,115 +416,32 @@
     confirmState = null;
   }
 
-  // ---- server-confirmed success toasts ----
-  // A weft call resolves on *send*, not on server confirmation, so we can't
-  // toast success in `.then()` (a missing-cap failure arrives later as an ERR
-  // event). Instead an action registers an expected key here; when the matching
-  // confirming event lands, `confirmSuccess` fires the toast. Unmatched keys
-  // simply expire — a failure just never confirms (and its ERR toasts).
-  let pendingSuccess = $state<Record<string, string>>({});
-  function expectSuccess(key: string, message: string) {
-    pendingSuccess[key] = message;
-    // Don't leave a stale expectation if the action silently fails.
-    setTimeout(() => delete pendingSuccess[key], 6000);
-  }
-  function confirmSuccess(key: string) {
-    const m = pendingSuccess[key];
-    if (m) {
-      delete pendingSuccess[key];
-      toast(m, "success");
-    }
-  }
-
-  function attemptReconnect() {
-    if (!lastCreds) {
-      status = "connect";
-      return;
-    }
-    reconnecting = true;
-    const delay = Math.min(1500 * 2 ** reconnectAttempts, 15000);
-    reconnectAttempts++;
-    setTimeout(() => {
-      if (!reconnecting) return; // logged out meanwhile
-      // Reconnect always uses login — the account already exists.
-      weft.connect(lastCreds!.host, lastCreds!.account, lastCreds!.password, "login").catch(() =>
-        attemptReconnect(),
-      );
-    }, delay);
-  }
-
   function logout() {
-    manualLogout = true;
-    reconnecting = false;
-    lastCreds = null;
+    conn.manualLogout = true;
+    ui.reconnecting = false;
+    conn.lastCreds = null;
     userMenu = false;
     settingsOpen = false;
     weft.disconnect().catch(() => {});
-    channels = {};
+    resetChannels();
     goto("/"); // reset the view so the next login lands home, not on a stale URL
     store.servers.clear();
     nsMetaFetched.clear();
     store.resetPresence();
-    reportQueue = {};
+    store.reports.queue.clear();
     // The in-memory skeleton is gone — the next login must do a full sync, not a
     // cursor delta (which would leave the rail empty).
-    syncedThisSession = false;
-    status = "connect";
+    syncState.synced = false;
+    store.session.status = "connect";
   }
 
-  // ---- live data (types in $lib/types) ----
-  let msgSeq = 0;
-  const mkMsg = (m: Omit<Msg, "key">): Msg => ({ ...m, key: msgSeq++ });
-
-  let channels = $state<Record<string, Channel>>({});
-
-  // ---- layout cache (server-authoritative, cached for instant reload) ----
-  // Per namespace: the category list + each channel's category/position. The
-  // server is the source of truth; this is a cache shown immediately on reload
-  // (Discord-style) and refreshed by the CHANNELS fetch.
-  type NsLayout = { cats: string[]; chans: Record<string, { category?: string; position?: number }> };
-  let layoutCache = $state<Record<string, NsLayout>>({});
-  function saveLayoutCache() {
-    try {
-      localStorage.setItem("weft:layout", JSON.stringify(layoutCache));
-    } catch {
-      /* ignore */
-    }
-  }
-  function cacheNsCats(ns: string, cats: string[]) {
-    (layoutCache[ns] ??= { cats: [], chans: {} }).cats = cats;
-    saveLayoutCache();
-  }
-  function cacheChanLayout(chanName: string, category: string | undefined, position: number) {
-    const ns = nsOf(chanName);
-    if (!ns) return;
-    ((layoutCache[ns] ??= { cats: [], chans: {} }).chans[chanName] = { category, position });
-    saveLayoutCache();
-  }
-
-  // Unread / mention state (dots + Tier 1 numeric badges) now lives on each
-  // Channel instance (`unread` / `mention` / `unreadCount` / `mentionCount`),
-  // not in parallel name-keyed maps.
-  function markRead(name: string) {
-    channels[name]?.markRead();
-  }
+  // ---- live data, channel collection + layout cache: `$lib/models/channel.svelte`
+  // (channels/mkMsg/ensureChannel/markRead/nsOf/chanShort/layoutCache/…). ----
 
   // ---- notification preferences (per-user, localStorage) ----
   // Set per **namespace** (`ns:<name>`, or `net` for top-level) in the
-  // Notification Settings modal — not per channel. The prefs live on the store
-  // (`store.notifPrefs`); `Channel.isMuted` / `Server.isMuted` read them too.
-  // The namespace scope key for a channel (or the network for top-level).
-  const scopeKeyOf = (channel: string) => {
-    const ns = nsOf(channel);
-    return ns ? `ns:${ns}` : "net";
-  };
-  const notifLevel = (channel: string): NotifLevel => store.notifAt(scopeKeyOf(channel));
-  const isMuted = (channel: string) => store.mutedAt(scopeKeyOf(channel));
-  const serverMuted = (ns: string) => store.mutedAt(ns ? `ns:${ns}` : "net");
-  const notifLevelOf = (scopeKey: string): NotifLevel => store.notifAt(scopeKey);
-  function setNotifLevel(scope: string, level: NotifLevel) {
-    store.setNotif(scope, level);
-  }
+  // Notification-pref resolvers (scopeKeyOf / notifLevel / isMuted / serverMuted /
+  // notifLevelOf / setNotifLevel) → `$lib/notif`.
   // ---- notification-settings modal (per-namespace) ----
   let notifSettingsOpen = $state(false);
   // The scope the modal edits = the active server (namespace, or the network).
@@ -495,14 +470,7 @@
   let composer = $state("");
   let membersVisible = $state(true);
   // ---- servers/namespaces as rail tiles (Phase 6, flavor A) ----
-  // "#gaming/general" → "gaming"; top-level "#general" → "".
-  const nsOf = (name: string) => name.match(/^#([^/]+)\//)?.[1] ?? "";
-  // Short channel label under a server tile: "#gaming/general" → "general".
-  // v0.13: the wire name's local segment is an opaque chan-id, so display the
-  // channel's vanity (from CHANNEL-LAYOUT); fall back to the raw segment only
-  // before the layout has arrived.
-  const chanShort = (name: string) =>
-    channels[name]?.vanity || name.replace(/^#[^/]+\//, "").replace(/^#/, "");
+  // `nsOf` / `chanShort` are channel-name helpers imported from the channel model.
   // A user-facing label for any target: `#vanity` for a channel, the peer's
   // display name for a DM, the group label for a group DM.
   const titleOf = (name: string): string => {
@@ -514,10 +482,7 @@
   // ---- DMs + presence (Phase 5) ----
   // The shared client store (singleton) — the identity maps, namespaces, and
   // client prefs. Domain models navigate to it too (see client-model-refactor.md).
-  // §10.3 per-namespace display names (server nicknames), keyed "scope|account".
-  let nicks = $state<Record<string, string>>({});
-  const nickKey = (scope: string, account: string) => `${scope}|${account}`;
-  const nicksFetched = new Set<string>();
+  // §10.3 nicks cache + profile/identity helpers → `$lib/profile.svelte`.
   // Pull a server's nicknames once, the first time it's viewed.
   $effect(() => {
     const s = activeServer;
@@ -530,36 +495,27 @@
   function setNick(scope: string, account: string, value: string) {
     weft.nick(scope, account, value).catch((e) => toast(String(e), "error"));
   }
-  let myStatus = $state("online");
+  const myStatus = $derived(store.session.myStatus);
   // §10.5 the caller's own verification claims, keyed by kind (email/birthday).
-  let verifications = $state<Record<string, { subject: string; state: string }>>({});
   // `VERIFY LIST` streams its claims with no terminator, so we can't know an
   // account has zero claims until the response has had time to arrive. Gate the
   // "no email" nudge on this flag (flipped a beat after login) to avoid flashing
   // the banner at every account that *does* have an email.
-  let verificationsLoaded = $state(false);
-  let verifyLoadTimer: ReturnType<typeof setTimeout> | null = null;
   // Whether THIS server can actually mail codes (WELCOME `features=email`, §10.5).
-  let serverEmailAvailable = $state(false);
   // The user dismissed the "add an email" nudge — persisted, so it's gone for
   // good on this account (loaded on connect, keyed by host+account).
-  let emailBannerDismissed = $state(false);
   // §10.5 nudge: a logged-in account with no email on file can't do a password
   // reset — warn and offer a jump to the verification page. Only when the server
   // can actually send mail, and only until the user dismisses it once.
   let needsEmailWarning = $derived(
     status === "online" &&
-      verificationsLoaded &&
-      serverEmailAvailable &&
-      !verifications.email &&
-      !emailBannerDismissed,
+      store.session.verificationsLoaded &&
+      ui.serverEmailAvailable &&
+      !store.session.verifications.email &&
+      !ui.emailBannerDismissed,
   );
-  // Per-account key for the persisted dismissal.
-  function emailNudgeKey(): string {
-    return `weft:email-nudge-dismissed:${cf.host}:${account}`;
-  }
   function dismissEmailBanner() {
-    emailBannerDismissed = true;
+    ui.emailBannerDismissed = true;
     try {
       localStorage.setItem(emailNudgeKey(), "1");
     } catch {
@@ -578,30 +534,22 @@
   let discoverOpen = $state(false);
   // Namespace identity (metadata + membership + emoji) lives on interned Server
   // objects in `store.servers` — see docs/architecture/client-model-refactor.md.
-  let discoverCursor = $state<string | null>(null);
   // Namespace ids we've auto-joined on creation, so the reactive auto-join fires
   // once per freshly-created server (see the `ns-meta` handler).
-  const autoJoinedNs = new Set<string>();
   // Channel creations awaiting their server-minted id. CHANNEL CREATE returns the
   // canonical `#<ns-id>/<chan-id>` asynchronously (as CHANNEL-LAYOUT); until then
   // we can't address the channel, so stash the follow-up actions keyed by
   // `<ns-id>|<slug>` and apply them when the matching layout arrives.
-  let pendingChanCreate: Record<string, { cat: string; announce: boolean; voice: boolean }> = {};
   // My namespace membership is `Server.joined` (from NS-MEMBER). A namespace with
   // **no** channels wouldn't otherwise surface (the rail is derived from
   // channels), so this keeps a just-joined empty server visible + selectable.
   // True while an initial/reconnect SYNC is streaming. SYNC replays my namespace
   // memberships as NS-MEMBER events; during that replay we populate the rail but
   // must NOT auto-navigate (that's only for a *live* join, e.g. creating a server).
-  let syncing = false;
   // False until this app session has synced once. A cold start does a full sync
   // (rebuild the skeleton); only a later in-session reconnect replays the cursor.
-  let syncedThisSession = false;
   // ---- roles / invites / reports (Phase 7) ----
-  const RESOLVE_ACTIONS = ["dismissed", "content-removed", "user-actioned", "escalated"];
-  let reportTarget = $state<Msg | null>(null); // message being reported (ReportModal)
-  let reportsOpen = $state(false);
-  let reportQueue = $state<Record<string, Extract<weft.WeftEvent, { kind: "report-filed" }>>>({});
+  // §6.7 reports state (queue + filing target) lives on `store.reports`.
   let profileTarget = $state<string | null>(null); // member profile popout
   // ---- §6.5 invites (list menu + create screen) — state on `store.invites`.
   // ---- federation (§11, operator) — state lives on `store.federation` ----
@@ -637,118 +585,32 @@
   // ---- pins + message search (§6.4) — state on `store.pins` / `store.search`
   // (self-contained panels); results stream in as BATCHes, routed by the reducer.
   // ---- threads (§9.4) — side panel + list modal — state on `store.threads`.
-  // ---- capability badges (§10.4 CAPS) — the resolved cache + gate methods live
-  // on `store.session`; keyed `account|scope`. `ensureCapsAt` fetches on demand.
-  const capsInflight = new Set<string>();
-  function ensureCapsAt(account: string, scope: string) {
-    if (!scope || !account) return;
-    const key = `${account}|${scope}`;
-    if (store.session.caps.has(key) || capsInflight.has(key)) return;
-    capsInflight.add(key);
-    weft.caps(account, scope).catch(() => capsInflight.delete(key));
-  }
-  const ensureCaps = (account: string, channel: string) =>
-    channel.startsWith("#") && ensureCapsAt(account, channel);
-  const badgeFor = (account: string, channel: string) => store.session.capsAt(account, channel);
+  // ---- capability + role reads: `$lib/models/session.svelte` (ensureCapsAt /
+  // rolesAt / roleById / rolesOf / isOwnerAt / isStaff / badgeFor / mentionsMe /
+  // roleScopeOf); `rolesByScope` / `memberRoles` state live there too. ----
   const isOperator = $derived(store.session.isOperator);
-  /// The role/authority scope for the active view: the namespace if we're in
-  /// one, else global.
-  const roleScopeOf = (channel: string) => {
-    const ns = nsOf(channel);
-    return ns ? `ns:${ns}` : "*";
-  };
+  // Mention test defaults `ns` to the active server (the session helper requires it).
+  const mentionsMe = (body: string, ns: string = activeServer) => sessionMentionsMe(body, ns);
 
-  // ---- §6.5 named roles (capability-token bundles) ----
-  // Namespace roles live on `Server.roles` (single source); the `*` (operator)
-  // and `#chan` (channel-override) scopes stay in this by-scope record. `rolesAt`
-  // is the unified read.
-  let rolesByScope = $state<Record<string, Role[]>>({});
-  const rolesAt = (scope: string): Role[] =>
-    scope.startsWith("ns:") ? (store.servers.get(scope.slice(3))?.roles ?? []) : (rolesByScope[scope] ?? []);
-  let roleBuf: Role[] = [];
+  // ---- §6.5 named roles: the fetch/batch machinery (queues + fetchRoles) ----
   // Roles arrive in `r…`-id BATCHes; a queue tracks which scope each answers,
   // so several scopes can be fetched at once (e.g. ns + channel).
-  let roleFetchQueue: string[] = [];
-  let currentBatchId = "";
-  function fetchRoles(scope: string) {
-    if (!scope) return;
-    roleFetchQueue.push(scope);
-    weft.roles(scope).catch(() => roleFetchQueue.pop());
-  }
 
   // ---- §6.5 per-subject grants at a scope (channel-permission member
   // overrides). Live on `store.grants`; arrive in `gr…`-id BATCHes with a scope
   // queue (buffered here), mirroring the roles path. ----
-  let grantBuf: { subject: string; caps: string[] }[] = [];
-  let grantFetchQueue: string[] = [];
-  function fetchGrants(scope: string) {
-    if (!scope) return;
-    grantFetchQueue.push(scope);
-    weft.grantsAt(scope).catch(() => grantFetchQueue.pop());
-  }
 
   // ---- §6.2 NS INFO MEMBERS: the moderator roster (members + join + roles) ----
-  // Arrives as an `ni…`-id BATCH of `ns-member-info` events. `loadingNsMembers`
-  // records which namespace is in flight so an empty roster still flushes.
-  // The roster now lives on `Server.members` (Membership objects). `nsMemberBuf`
-  // accumulates raw rows until the `ni…` BATCH terminator flushes them.
-  let nsMemberBuf: { user: string; network: string; joinedMs: number; roles: string[] }[] = [];
-  let loadingNsMembers: string | null = null;
-  let nsMembersLoading = $state(false);
-  function fetchNsMembers(ns: string) {
-    if (!ns) return;
-    loadingNsMembers = ns;
-    nsMembersLoading = true;
-    weft.nsInfoMembers(ns).catch((e) => {
-      nsMembersLoading = false;
-      loadingNsMembers = null;
-      toast(String(e), "error");
-    });
-  }
-  function createRoleAt(
-    scope: string,
-    name: string,
-    color: string,
-    caps: string,
-    hoist = false,
-    pingable = false,
-    position = 0,
-  ) {
-    roleFetchQueue.push(scope);
-    return weft.roleCreate(scope, color, caps, hoist, pingable, position, name);
-  }
-  function deleteRoleAt(scope: string, roleId: string) {
-    roleFetchQueue.push(scope);
-    return weft.roleDelete(scope, roleId);
-  }
-  /// v0.13: role identity is the id (names aren't unique) — resolve an id to its
-  /// definition at a scope for display (name/color). ROLE-MEMBER / NS-MEMBER-INFO
-  /// carry ids, so member rosters map through this to render.
-  const roleById = (scope: string, id: string): Role | undefined =>
-    rolesAt(scope).find((r) => r.id === id);
-  /// Is this account the owner/operator at the scope (implicit all-caps)?
-  const isOwnerAt = (account: string, scope: string) =>
-    store.session.ownerAt(account, scope);
+  // Arrives as an `ni…`-id BATCH of `ns-member-info` events. The roster + its
+  // fetch state (`membersLoading` + streaming `memberBuf`) live on `Server`;
+  // `loadingNsMembers` is the reducer's in-flight cursor (which ns to route the
+  // streamed rows to — the events don't carry the ns), so an empty roster still
+  // flushes.
   /// The *real* owner of the active namespace — the record's owner, NOT anyone
   /// who merely holds ns-admin caps (a network operator holds them everywhere,
   /// but that's web-admin authority, not ownership of this server).
   const isNsOwner = (account: string): boolean =>
     !!activeServer && peerOf(account) === (activeNsMeta?.owner ?? "");
-  /// Network staff (operator): holds `*`-scope authority. Detected from caps at
-  /// `*` (the `netblock`/`ns-admin`-at-`*` powers only operators have). Fetched
-  /// lazily. Surfaced as a "Staff" badge — never as server ownership.
-  const isStaff = (account: string): boolean => {
-    ensureCapsAt(peerOf(account), "*");
-    return store.session.ownerAt(peerOf(account), "*");
-  };
-  // Explicit role membership (§6.5) keyed `account|scope`, from ROLE-MEMBER —
-  // a role is worn because it was assigned, never inferred from caps.
-  let memberRoles = $state<Record<string, string[]>>({});
-  // §11.11 federated authors whose roles we've already fetched (`who|scope`).
-  const fedRolesFetched = new Set<string>();
-  function fetchMemberRoles(account: string, scope: string) {
-    weft.rolesOfAccount(scope, account).catch(() => {});
-  }
   // Eagerly fetch a member's namespace roles once, so the member list can group
   // by hoisted role without opening each profile. Deduped per (account, scope).
   const memberRolesFetched = new Set<string>();
@@ -767,12 +629,6 @@
     if (!scope || rolesFetched.has(scope)) return;
     rolesFetched.add(scope);
     fetchRoles(scope);
-  }
-  /// The role definitions an account is assigned at a scope.
-  function rolesOf(account: string, scope: string): Role[] {
-    // memberRoles holds role **ids** (v0.13 ROLE-MEMBER); match by id.
-    const ids = new Set(memberRoles[`${account}|${scope}`] ?? []);
-    return rolesAt(scope).filter((r) => ids.has(r.id));
   }
   // The color to tint an account's name with — their highest assigned role at
   // the active namespace (Discord-style), excluding the implicit @everyone.
@@ -878,24 +734,12 @@
       .catch((e) => toast(String(e), "error"));
   }
   // ---- namespace admin panel (§6.2 / §2.4 / §6.6) ----
-  let nsSettingsOpen = $state(false);
   // §10.3 per-server profile editor (your own nickname on this server).
   let serverProfileOpen = $state(false);
   function openServerProfile() {
     if (activeServer) serverProfileOpen = true;
     serverMenu = false;
   }
-  let nsTab = $state<
-    | "overview"
-    | "roles"
-    | "members"
-    | "emoji"
-    | "invites"
-    | "bans"
-    | "federation"
-    | "recovery"
-    | "danger"
-  >("overview");
   // §6.7 moderation deny-list (mutes + bans) per scope, for the Bans tab —
   // lives on `store.deny`.
   const banScope = () => (activeServer ? `ns:${activeServer}` : "*");
@@ -1022,7 +866,7 @@
   // simply snaps back on the refetch, and its ERR toasts.
   function reconcileRoster(ns: string) {
     setTimeout(() => {
-      if (nsSettingsOpen && nsTab === "members") fetchNsMembers(ns);
+      if (ui.nsSettingsOpen && ui.nsTab === "members") fetchNsMembers(ns);
     }, 500);
   }
   function memberRow(ns: string, account: string): Membership | undefined {
@@ -1160,99 +1004,19 @@
   };
   const retentionOrder = ["e2ee", "permanent", "retained", "ephemeral"];
 
-  const initials = (s: string) => s.replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "··";
-  const hhmm = (d: Date) =>
-    `${`${d.getHours()}`.padStart(2, "0")}:${`${d.getMinutes()}`.padStart(2, "0")}`;
-  const clock = () => hhmm(new Date());
-
-  // A msgid is `network/<ULID>`; the ULID's first 10 Crockford-base32 chars
-  // encode its 48-bit ms timestamp. Gives correct times for backfilled history
-  // (Phase 1), not just live arrival.
-  const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-  // Decode a msgid's ULID timestamp to epoch ms, or null if it isn't a ULID.
-  function msgEpoch(msgid: string | undefined): number | null {
-    const ulid = msgid?.split("/").pop() ?? "";
-    if (ulid.length < 10) return null;
-    let ms = 0;
-    for (let i = 0; i < 10; i++) {
-      const v = CROCKFORD.indexOf(ulid[i].toUpperCase());
-      if (v < 0) return null;
-      ms = ms * 32 + v;
-    }
-    return ms;
-  }
-  function msgTime(msgid: string): string {
-    const ms = msgEpoch(msgid);
-    return ms === null ? clock() : hhmm(new Date(ms));
-  }
-  // ---- day separators (Tier 1) ----
-  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const dayKey = (ts: number) => startOfDay(new Date(ts));
-  function dayLabel(ts: number): string {
-    const diff = Math.round((startOfDay(new Date()) - dayKey(ts)) / 86_400_000);
-    if (diff === 0) return "Today";
-    if (diff === 1) return "Yesterday";
-    return new Date(ts).toLocaleDateString(undefined, {
-      weekday: "long",
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-    });
-  }
-  const retentionOf = (policy: string) => {
-    if (policy.startsWith("retained")) return "retained";
-    if (["ephemeral", "permanent", "e2ee"].includes(policy)) return policy;
-    return "retained";
-  };
-
-  function ensureChannel(name: string): Channel {
-    let ch = channels[name];
-    if (!ch) {
-      ch = new Channel(name);
-      // Seed layout from the cache so groups/order render instantly on reload.
-      const ns = nsOf(name);
-      if (ns) ch.server = store.server(ns); // the Channel → Server graph edge
-      const cached = ns ? layoutCache[ns]?.chans[name] : undefined;
-      if (cached) {
-        ch.category = cached.category;
-        ch.position = cached.position ?? 0;
-      }
-      channels[name] = ch;
-    }
-    return ch;
-  }
+  // Time / ULID-timestamp / day-label / retention helpers → `$lib/time`.
 
   // ---- history / scrollback (Phase 1) ----
-  const HISTORY_LIMIT = 50;
-  let loadingHistory = $state<string | null>(null); // channel being backfilled
   // History pages buffered per *target channel*, keyed by the messages' own
   // `target`. This is what makes history robust: a page flushes to the channel it
   // names, so a concurrent MEMBERS/roles/… batch can never steal or clobber it,
   // whatever its batch id or arrival order.
-  let histByTarget: Record<string, Msg[]> = {};
 
-  const oldestMsgid = (ch?: Channel) => ch?.messages.find((m) => m.msgid)?.msgid;
 
-  // Fetch a channel's history page. Single-flight (`loadingHistory` guard);
+  // Fetch a channel's history page. Single-flight (`hist.loading` guard);
   // MessageList calls this on first open (initial) and on scroll-to-top (paging).
-  function loadHistory(target: string, initial: boolean) {
-    // Channels (`#`), DMs (`@`), and group DMs (`&`) all backfill; one at a time.
-    if (
-      loadingHistory ||
-      !(target.startsWith("#") || target.startsWith("@") || target.startsWith("&"))
-    )
-      return;
-    loadingHistory = target;
-    histByTarget[target] = [];
-    const before = initial ? undefined : oldestMsgid(channels[target]);
-    weft.history(target, before).catch(() => {
-      loadingHistory = null; // don't wedge paging if the fetch never lands
-    });
-  }
 
   let activeChannel = $derived(active ? channels[active] : undefined);
-  // A channel record by name — the active route's MessageList reads its own.
-  const channelRecord = (name: string): Channel | undefined => channels[name];
   let activeIsDm = $derived(active.startsWith("@"));
   let activeIsGroup = $derived(active.startsWith("&"));
   // Namespaces we hold channels in OR are a member of (the latter keeps a
@@ -1323,14 +1087,6 @@
     return out;
   });
 
-  function selectServer(ns: string) {
-    if (active.startsWith("#") && nsOf(active) === ns) return; // already in this server
-    // Land on the first channel in this server, else its empty view.
-    const first = Object.values(channels)
-      .filter((c) => c.name.startsWith("#") && nsOf(c.name) === ns)
-      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name))[0];
-    goto(nav.pathFor(first?.name ?? "", ns));
-  }
   // Right-click a rail tile: select the server and open its header menu (the
   // same Create Invite / Notification / Server Settings menu as clicking the name).
   function openServerMenu(ns: string) {
@@ -1394,40 +1150,11 @@
     Object.values(channels).filter((c) => c.name.startsWith("@") || c.name.startsWith("&")),
   );
 
-  // ---- DM + presence helpers ----
-  const peerOf = (key: string) => key.replace(/^@/, "");
-  const dotClass = (acct: string) => store.accountOf(acct).dotClass;
-
-  // ---- §10.3 profile helpers (thin views over the Account identity map) ----
-  /** A fetchable avatar URL for an account, or null → render initials. */
-  const avatarUrl = (acct: string): string | null => store.accountOf(acct).avatarUrl;
-  /** An account's display name — the active server's nickname if set, else the
-   *  global display name, else the bare account part (§10.3: the canonical
-   *  handle is always shown separately). */
-  const displayName = (acct: string): string => {
-    const nick = activeServer ? nicks[nickKey(`ns:${activeServer}`, peerOf(acct))] : undefined;
-    return nick || store.accountOf(acct).displayName;
-  };
-  /** An account's server nickname at the active server, or "" (for editors). */
-  const nickOf = (acct: string): string =>
-    (activeServer ? nicks[nickKey(`ns:${activeServer}`, peerOf(acct))] : "") ?? "";
-  /** An account's free-text bio (§10.3), or "" if unset. */
-  const bioOf = (acct: string): string => store.accountOf(acct).about;
-  /** An account's custom status (§10.3), or "" if unset. */
-  const statusOf = (acct: string): string => store.accountOf(acct).status;
+  // ---- DM + presence + §10.3 profile helpers (peerOf / dotClass / avatarUrl /
+  // displayName / nickOf / bioOf / statusOf / initials) → `$lib/profile.svelte`.
   /** Set (or clear, with "") my own custom status. */
   function setCustomStatus(text: string) {
     weft.profileSet({ status: text }).catch((e) => toast(String(e), "error"));
-  }
-  /** Fetch a profile we don't have yet (deduped; own + co-members). */
-  function queryProfile(acct: string) {
-    const a = peerOf(acct);
-    if (!a) return;
-    const acc = store.accountOf(a);
-    if (!acc.requested) {
-      acc.requested = true; // mark requested so we don't re-query
-      weft.profilesQuery([a]).catch(() => {});
-    }
   }
 
   function openDm(peer: string) {
@@ -1455,34 +1182,9 @@
   // The set of open 1:1 DMs is view state the server doesn't yet track (a
   // server-owned DM list is §18 territory), so we persist it per account so a
   // conversation — and its history on click — survives a reconnect / relaunch.
-  const dmStoreKey = () => `weft:dms:${account}@${network}`;
   // v0.12 SYNC cursor, per account+device (localStorage). Stored on every
   // `sync-end`, replayed on reconnect so `SYNC since=` catches up missed
   // messages + offline edits/reactions in one round trip.
-  const syncCursorKey = () => `weft:sync:${account}@${network}`;
-  function loadSyncCursor(): string | undefined {
-    try {
-      return localStorage.getItem(syncCursorKey()) ?? undefined;
-    } catch {
-      return undefined;
-    }
-  }
-  function persistDms() {
-    try {
-      const keys = Object.keys(channels).filter((k) => k.startsWith("@"));
-      localStorage.setItem(dmStoreKey(), JSON.stringify(keys));
-    } catch {
-      /* storage unavailable */
-    }
-  }
-  function restoreDms() {
-    try {
-      const keys: string[] = JSON.parse(localStorage.getItem(dmStoreKey()) ?? "[]");
-      for (const k of keys) if (k.startsWith("@")) ensureChannel(k);
-    } catch {
-      /* storage unavailable */
-    }
-  }
 
   // "Invite to server" — open the invites panel for the current server, where a
   // shareable link is minted (invites are link-based, §6.5).
@@ -1497,10 +1199,6 @@
     return h.includes("@") ? h : `${h}@${network}`;
   }
   // A friend's short label: bare handle for local, full ref for federated.
-  function friendLabel(user: string): string {
-    const [acct, net] = user.split("@");
-    return net === network ? displayName(acct) : user;
-  }
   // A friend's local account handle (for DM/profile/presence), if local.
   function friendLocalAccount(user: string): string | null {
     const [acct, net] = user.split("@");
@@ -1542,17 +1240,6 @@
   }
   // Pressing the DM/home tile lands on the most recently active conversation
   // (DM or group) — or the friends menu if there are none.
-  function goHome() {
-    const convos = dmList;
-    if (!convos.length) {
-      goto("/");
-      return;
-    }
-    const recent = convos.reduce((a, b) =>
-      (b.messages.at(-1)?.ts ?? 0) >= (a.messages.at(-1)?.ts ?? 0) ? b : a,
-    );
-    goto(nav.pathFor(recent.name));
-  }
 
   // ---- group DMs ----
   let newGroupInput = $state("");
@@ -1653,855 +1340,12 @@
     store.social.activeCall = null;
   }
   function setStatus(s: string) {
-    myStatus = s;
+    store.session.myStatus = s;
     userMenu = false;
     weft.presence(s).catch(() => {});
   }
 
   // ---- event handling ----
-  function handle(e: weft.WeftEvent) {
-    switch (e.kind) {
-      case "connected":
-        network = e.network;
-        account = e.account;
-        store.session.account = e.account; // the "me" identity for the cap gates
-        status = "online";
-        cf.authError = "";
-        reconnecting = false;
-        reconnectAttempts = 0;
-        ensureCapsAt(account, "*"); // learn operator status (federation gating)
-        initVoice(account); // §16 wire the voice controller to the event stream
-        queryProfile(account); // §10.3 load our own profile
-        // §10.5 (re)load our verification claims. Reset the cache + the "loaded"
-        // gate so a reconnect re-evaluates the no-email nudge cleanly; flip the
-        // gate a beat later, once the streamed claims have had time to land.
-        verifications = {};
-        verificationsLoaded = false;
-        if (verifyLoadTimer) clearTimeout(verifyLoadTimer);
-        verifyLoadTimer = setTimeout(() => (verificationsLoaded = true), 2000);
-        weft.verifyList().catch(() => {});
-        // Restore whether this account already dismissed the "add email" nudge.
-        try {
-          emailBannerDismissed = localStorage.getItem(emailNudgeKey()) === "1";
-        } catch {
-          emailBannerDismissed = false;
-        }
-        store.social.friends.clear();
-        store.social.groups.clear();
-        weft.listFriends().catch(() => {}); // social layer: load friends + requests
-        weft.listGroups().catch(() => {}); // and group DMs
-        restoreDms(); // re-open the 1:1 DMs from last session (history loads on click)
-        // Clear any half-finished history load from before a reconnect — its
-        // BATCH will never arrive, so a stale guard would block every new load.
-        loadingHistory = null;
-        histByTarget = {};
-        // Remember creds so the next launch logs straight back in. NOTE: this
-        // includes the password in localStorage — a dev convenience; the
-        // hardening is OS-keychain storage in the backend.
-        try {
-          localStorage.setItem(
-            SAVED_KEY,
-            JSON.stringify({ host: cf.host, account: cf.account.trim(), password: cf.password }),
-          );
-          // Remember the homeserver as the local default (desktop) so the picker
-          // is pre-filled and skippable next launch. On web it's the origin.
-          if (!weft.isWeb) localStorage.setItem(HOMESERVER_KEY, cf.host);
-        } catch {
-          /* storage unavailable */
-        }
-        // A returning session is auto-rejoined to its channels by the server
-        // (persistent membership, §6.3). A brand-new account joins nothing —
-        // it's not forced into the seeded server; the empty-home screen guides
-        // it to Discover / create / join instead.
-        //
-        // §6.9 SYNC (v0.12): pull the skeleton + a cursor on fresh login, or the
-        // delta of everything missed since our stored cursor on reconnect. The
-        // materialized rows flow through the ordinary message/edit/reaction
-        // handlers (upsert by msgid); `sync-end` gives the next cursor.
-        //
-        // The cursor delta assumes the client still holds its skeleton in memory —
-        // it only re-sends missed messages, NOT the namespace/channel roster. So a
-        // cold start (fresh app launch, empty in-memory state) MUST do a full sync,
-        // or the rail comes up empty; only an in-session reconnect replays the
-        // cursor.
-        syncing = true;
-        const syncCursor = syncedThisSession ? loadSyncCursor() : undefined;
-        syncedThisSession = true;
-        weft.sync(syncCursor).catch(() => (syncing = false));
-        break;
-      case "server-info":
-        // §3.6 the negotiation WELCOME, seen before auth — remember whether this
-        // homeserver requires a register email (form shaping) and whether it can
-        // actually mail codes at all (gates the no-email nudge).
-        cf.emailRequired = e.email_required;
-        serverEmailAvailable = e.email_available;
-        break;
-      case "media-token":
-        weft.setMediaBearer(e.token); // §13 fetch bearer for /media URLs
-        break;
-      case "auth-failed":
-        reconnecting = false;
-        lastCreds = null;
-        status = "connect";
-        cf.authError = e.reason;
-        cf.authFailed = true;
-        break;
-      case "closed":
-        // A probe tears its own handshake-only connection down; that close is
-        // expected and must not touch the connect screen's state.
-        if (cf.probing) break;
-        if (manualLogout) {
-          manualLogout = false;
-          break;
-        }
-        // AUTH-FAILED already closed the stream (§3.6) and set a specific
-        // reason — don't overwrite it with the generic close message.
-        if (cf.authFailed) {
-          cf.authFailed = false;
-          break;
-        }
-        // Unexpected drop while online → keep the UI and auto-reconnect.
-        if (lastCreds && (status === "online" || reconnecting)) {
-          attemptReconnect();
-        } else if (status === "connecting") {
-          // A user-initiated attempt failed before authenticating.
-          status = "connect";
-          cf.authError = e.reason;
-        }
-        // Otherwise the socket was idle (e.g. a probe's own teardown) — a close
-        // there carries no user-facing meaning, so leave the screen untouched.
-        break;
-      case "policy":
-        ensureChannel(e.channel).retention = retentionOf(e.policy);
-        confirmSuccess(`policy:${e.channel}`);
-        break;
-      case "member": {
-        const ch = ensureChannel(e.channel);
-        // Roster only — the Discord-style "joined"/"left" line is a persistent
-        // system MESSAGE the server emits alongside this event (see "message").
-        if (e.action === "join") {
-          if (!ch.members.some((m) => m.name === e.user)) {
-            ch.members.push({ name: e.user, origin: e.network === network ? "local" : "federated" });
-          }
-          ensureCaps(e.user, e.channel); // for the roster badge
-          queryProfile(e.user); // §10.3 learn their display name + avatar
-
-          if (e.user === account) {
-            // Jump to a channel we just joined only when we're actually browsing
-            // a server (not on the Friends/DMs home). This keeps startup — where
-            // the server auto-rejoins our channels — on the home view instead of
-            // yanking us into whichever channel's join event lands first.
-            if (!active && !homeView) goto(nav.pathFor(e.channel));
-            // Presence is broadcast to shared channels only, so re-announce
-            // ours whenever we join one (lets its members see our status).
-            weft.presence(myStatus).catch(() => {});
-          } else {
-            // Mark a just-joined member online (they announce, but a peer that
-            // was already here won't have — best effort with this model).
-            store.accountOf(e.user).presence ??= "online";
-          }
-        } else {
-          ch.members = ch.members.filter((m) => m.name !== e.user);
-          if (e.user === account) {
-            delete channels[e.channel];
-            if (active === e.channel) goto(nav.pathFor(Object.keys(channels)[0] ?? ""));
-          }
-        }
-        break;
-      }
-      case "message": {
-        // Channels key by name; DMs (`@to`) key by the *peer* — the other
-        // party — so both sides land in one conversation.
-        let key: string;
-        if (e.target.startsWith("#")) key = e.target;
-        else if (e.target.startsWith("@")) key = "@" + (e.own ? e.target.slice(1) : e.sender);
-        else if (e.target.startsWith("&")) key = e.target; // group DM: keyed by id
-        else break;
-        // Server-generated system messages (join/part, …) — a persistent line
-        // that rides the normal message + history path, rendered Discord-style.
-        const who = e.network === network ? e.sender : `${e.sender}@${e.network}`;
-        if (!e.system) queryProfile(who); // §10.3 the sender's avatar + display name
-        const systemBody = e.system
-          ? e.system === "join"
-            ? `${who} joined`
-            : e.system === "part"
-              ? `${who} left`
-              : e.system === "welcome"
-                ? `👋 Welcome, ${who}!`
-                : `${who} ${e.system}`
-          : null;
-        const msg = mkMsg({
-          author: e.sender,
-          body: systemBody ?? e.body,
-          system: e.system ? true : undefined,
-          time: msgTime(e.msgid),
-          ts: msgEpoch(e.msgid) ?? Date.now(),
-          own: e.own && !e.system,
-          msgid: e.msgid,
-          edited: e.edited,
-          md: e.md && !e.system,
-          replyTo: e.reply_to ?? undefined,
-          thread: e.thread ?? undefined,
-          bridged: e.network !== network,
-          net: !e.system && e.network !== network ? e.network : undefined,
-          attachments: e.attachments?.length ? e.attachments : undefined,
-        });
-        // Batch messages buffer until BATCH END. A SEARCH / PINS / thread batch
-        // routes to its panel model; else the HISTORY batch to the per-channel
-        // history buffer.
-        if (e.history) {
-          if (store.threads.loadingRoot) store.threads.buf.push(msg);
-          else if (store.search.loadingChannel) store.search.buf.push(msg);
-          else if (store.pins.loadingChannel) store.pins.buf.push(msg);
-          else (histByTarget[e.target] ??= []).push(msg); // route to the page's own channel
-          break;
-        }
-        // A DM we haven't got open yet (someone messaged us) → persist it so the
-        // conversation survives a reconnect.
-        const newDm = key.startsWith("@") && !channels[key];
-        const ch = ensureChannel(key);
-        if (newDm) persistDms();
-        // §3.5/§11.13 optimistic reconcile: our own echoed message carrying our
-        // label replaces the pending placeholder we showed on send, rather than
-        // adding a duplicate. Works identically for a local send and for one a
-        // home-authoritative channel minted elsewhere (our server re-attaches the
-        // label to the mirrored copy).
-        if (e.own && e.label) {
-          const idx = ch.messages.findIndex((m) => m.pending && m.label === e.label);
-          if (idx !== -1) {
-            ch.messages.splice(idx, 1, msg);
-            const ti = store.threads.messages.findIndex((m) => m.pending && m.label === e.label);
-            if (ti !== -1)
-              store.threads.messages = store.threads.messages.map((m, i) => (i === ti ? msg : m));
-            break;
-          }
-        }
-        // Upsert by msgid (v0.12 SYNC apply rule): a re-delivered message —
-        // history backfill, or a reconnect delta carrying an offline edit —
-        // replaces the existing copy in place with the final body + edited
-        // state, preserving accumulated reactions (which arrive as own events).
-        if (e.msgid) {
-          const idx = ch.messages.findIndex((m) => m.msgid === e.msgid);
-          if (idx !== -1) {
-            msg.reactions = ch.messages[idx].reactions;
-            ch.messages.splice(idx, 1, msg);
-            break;
-          }
-        }
-        ch.messages.push(msg);
-        // If this is a live reply in the open thread, show it in the panel too.
-        if (
-          store.threads.root &&
-          key === active &&
-          msg.thread === store.threads.root.msgid &&
-          !store.threads.messages.some((m) => m.msgid === msg.msgid)
-        ) {
-          store.threads.messages = [...store.threads.messages, msg];
-        }
-        if (key.startsWith("#")) {
-          if (e.network !== network) {
-            // §11.11 recognition: fetch a federated author's roles here (once)
-            // so the timeline can show their role color, keyed account@network.
-            const who = `${e.sender}@${e.network}`;
-            const rscope = roleScopeOf(key);
-            const fk = `${who}|${rscope}`;
-            if (!fedRolesFetched.has(fk)) {
-              fedRolesFetched.add(fk);
-              fetchMemberRoles(who, rscope);
-            }
-          } else {
-            ensureCaps(e.sender, key); // for the author badge
-          }
-        }
-        const pinged = !e.own && mentionsMe(e.body, nsOf(key));
-        const level = notifLevel(key);
-        // A muted scope shows no unread indicator; others tally unread/mentions.
-        if (!e.own && key !== active && level !== "nothing") {
-          ch.bump(pinged);
-        }
-        // Desktop notification while unfocused, gated by the scope's level:
-        // "all" → every message, "mentions" → DMs/@mentions only, "nothing" → none.
-        if (!e.own && !document.hasFocus()) {
-          const dm = e.target.startsWith("@");
-          const notify = level === "all" || (level === "mentions" && (dm || pinged));
-          // Qualify a foreign sender so the notification isn't ambiguous.
-          const who = e.network !== network ? `${e.sender}@${e.network}` : e.sender;
-          if (notify)
-            weft.notify(
-              dm ? `DM from ${who}` : `${who} in ${chanShort(key)}`,
-              e.body.slice(0, 140),
-            );
-        }
-        break;
-      }
-      case "profile": {
-        // §10.3 a display profile (nick + avatar). Key local users by their bare
-        // handle, federated users by `account@network` (so same-name users on
-        // different networks don't collide).
-        const key = e.network === network ? e.account : `${e.account}@${e.network}`;
-        const acc = store.accountOf(key);
-        acc.display = e.display ?? undefined;
-        acc.avatar = e.avatar ?? undefined;
-        acc.about = e.about ?? "";
-        acc.status = e.status ?? "";
-        acc.requested = true;
-        break;
-      }
-      case "nick": {
-        // §10.3 a per-namespace server nickname (empty = cleared).
-        const acct = e.network === network ? e.account : `${e.account}@${e.network}`;
-        const key = nickKey(e.scope, acct);
-        if (e.nick) nicks[key] = e.nick;
-        else delete nicks[key];
-        nicks = { ...nicks }; // re-trigger derivations (delete isn't tracked)
-        break;
-      }
-      case "verified":
-        // §10.5 one of our own verification claims (email/birthday).
-        verifications[e.claim_kind] = { subject: e.subject, state: e.state };
-        break;
-      case "presence":
-        store.accountOf(e.user).presence = e.status;
-        break;
-      case "marked": {
-        // Read-marker sync from another device (§9.7).
-        const ch = channels[e.channel];
-        if (ch) ch.lastRead = e.msgid;
-        markRead(e.channel);
-        break;
-      }
-      case "unread-counts": {
-        // Server-authoritative unread tally (§6.3) — the login snapshot and
-        // cross-device MARK pushes override the client's live tally, so counts
-        // survive reload/reconnect and stay in sync across devices. The channel
-        // being viewed is read (auto-mark handles it); muted scopes stay silent.
-        //
-        // Only update a channel we actually have. The auth snapshot streams a
-        // count for every persisted read marker, including stale ones for
-        // deleted / no-longer-accessible channels; materializing those would pop
-        // a phantom rail tile (raw ULID name, NO-SUCH-TARGET on click). Real
-        // channels get their count from SYNC, which re-sends UNREAD-COUNTS right
-        // after each CHANNEL-LAYOUT — so guarding here loses nothing.
-        const ch = channels[e.channel];
-        if (ch && e.channel !== active && !isMuted(e.channel)) {
-          ch.unreadCount = e.unread;
-          ch.unread = e.unread > 0;
-          ch.mentionCount = e.mentions;
-          ch.mention = e.mentions > 0;
-        }
-        break;
-      }
-      case "sync-end": {
-        syncing = false;
-        // §6.9 store the new cursor for this device's next reconnect delta.
-        try {
-          localStorage.setItem(syncCursorKey(), e.cursor);
-        } catch {
-          /* storage unavailable */
-        }
-        break;
-      }
-      case "ns-member": {
-        // §7.4 namespace-level join/part. Rosters + the sidebar are driven by
-        // the per-channel MEMBER/LAYOUT events; this ns-level marker additionally
-        // tracks *my own* membership so a channel-less server still appears in the
-        // rail (and, on join, gets auto-selected below).
-        if (e.user === account) {
-          if (e.action === "join") {
-            store.server(e.namespace).joined = true;
-            // React visibly to a *live* join (create/join a server) by landing on
-            // it. During SYNC we're just restoring the rail — don't hijack the
-            // view by jumping to the last-restored namespace.
-            if (!syncing && activeServer !== e.namespace) selectServer(e.namespace);
-          } else {
-            const s = store.servers.get(e.namespace);
-            if (s) s.joined = false;
-          }
-        }
-        break;
-      }
-      case "chan-sync":
-        // §7.9 per-channel SYNC header — previews are withheld in v1, so there's
-        // nothing to apply; the `reset` flag lands with the body-stream work.
-        break;
-      case "emoji": {
-        // §9.4 a namespace custom emoji (from EMOJI LIST or a live add).
-        store.server(e.namespace).emoji.set(e.name, e.media);
-        mdCache.clear(); // rendered `:name:` may change
-        break;
-      }
-      case "emoji-removed": {
-        store.servers.get(e.namespace)?.emoji.delete(e.name);
-        mdCache.clear();
-        break;
-      }
-      case "chanmeta": {
-        // §6.3 CHANNEL DELETE confirms with `deleted` — drop the channel from
-        // every local view (do NOT ensureChannel first, or it'd be re-created).
-        if (e.key === "deleted") {
-          delete channels[e.channel]; // unread/mention tallies ride the instance
-          if (active === e.channel) goto(nav.pathFor("", activeServer));
-          break;
-        }
-        const c = ensureChannel(e.channel);
-        if (e.key === "topic") c.topic = e.value;
-        else if (e.key === "posting") c.restricted = e.value === "restricted";
-        else if (e.key === "view-gated") c.viewGated = e.value === "true";
-        else if (e.key === "category") c.category = e.value || undefined;
-        else if (e.key === "position") c.position = parseInt(e.value, 10) || 0;
-        if (e.key === "category" || e.key === "position") cacheChanLayout(e.channel, c.category, c.position ?? 0);
-        break;
-      }
-      case "pinned": {
-        const ch = ensureChannel(e.channel);
-        ch.pinnedIds = [...(ch.pinnedIds ?? []).filter((id) => id !== e.msgid), e.msgid];
-        if (store.pins.open && active === e.channel) weft.pins(e.channel).catch(() => {}); // refresh panel
-        break;
-      }
-      case "unpinned": {
-        const ch = channels[e.channel];
-        if (ch) ch.pinnedIds = (ch.pinnedIds ?? []).filter((id) => id !== e.msgid);
-        if (store.pins.open && active === e.channel)
-          store.pins.list = store.pins.list.filter((m) => m.msgid !== e.msgid);
-        break;
-      }
-      case "thread": {
-        if (e.name) store.threads.names.set(e.root, e.name);
-        else store.threads.names.delete(e.root);
-        if (store.threads.loadingList)
-          store.threads.listBuf.push({ root: e.root, name: e.name ?? undefined, replies: e.replies, last: e.last ?? undefined });
-        break;
-      }
-      case "thread-named": {
-        if (e.name) store.threads.names.set(e.root, e.name);
-        else store.threads.names.delete(e.root);
-        // Reflect a live rename in an open threads list.
-        const i = store.threads.list.findIndex((t) => t.root === e.root);
-        if (i >= 0) store.threads.list[i] = { ...store.threads.list[i], name: e.name ?? undefined };
-        break;
-      }
-      case "friend":
-        store.social.friends.set(e.user, e.state);
-        // A fresh incoming request is worth a nudge.
-        if (e.state === "incoming") toast(`Friend request from ${e.user}`, "info");
-        break;
-      case "friend-removed":
-        store.social.friends.delete(e.user);
-        break;
-      case "group": {
-        store.social.groups.set(e.id, { name: e.name ?? undefined, members: e.members });
-        ensureChannel(e.id); // a conversation entry so it lists + holds messages
-        break;
-      }
-      case "group-member": {
-        const g = store.social.groups.get(e.group);
-        if (!g) break;
-        const me = `${account}@${network}`;
-        // SvelteMap values aren't deeply reactive — re-set the entry on change.
-        if (e.action === "join") {
-          if (!g.members.includes(e.user))
-            store.social.groups.set(e.group, { ...g, members: [...g.members, e.user] });
-        } else if (e.user === me) {
-          // If *we* left, drop the conversation.
-          store.social.groups.delete(e.group);
-          delete channels[e.group];
-          if (active === e.group) goto("/");
-        } else {
-          store.social.groups.set(e.group, { ...g, members: g.members.filter((m) => m !== e.user) });
-        }
-        break;
-      }
-      case "call-ring":
-        store.social.incomingCall = { from: e.from, room: e.room };
-        break;
-      case "call-state":
-        if (e.state === "ringing") {
-          store.social.activeCall = { peer: e.user, room: "", state: "ringing" };
-        } else if (e.state === "active") {
-          store.social.incomingCall = null;
-          store.social.activeCall = { peer: e.user, room: store.social.activeCall?.room ?? "", state: "active" };
-          // Audio (LiveKit) connects on the CALL-MEDIA credential that follows.
-        } else {
-          if (e.state === "busy") toast(`${friendLabel(e.user)} is busy`, "info");
-          else if (e.state === "declined") toast(`${friendLabel(e.user)} declined the call`, "info");
-          if (store.social.incomingCall?.from === e.user) store.social.incomingCall = null;
-          if (store.social.activeCall?.peer === e.user) {
-            store.social.activeCall = null;
-            disconnectCallMedia();
-          }
-        }
-        break;
-      case "call-media":
-        // The server authorized the call and minted our media credential — join
-        // the LiveKit room so audio flows. Works for both a 1:1 call (activeCall)
-        // and a group call (activeGroupCall) — the credential is the same shape.
-        void connectCallMedia(e.endpoint, e.token);
-        break;
-      case "group-call-state": {
-        const roster = store.social.groupCallRoster.get(e.group) ?? [];
-        const me = `${account}@${network}`;
-        if (e.state === "active") {
-          if (!roster.includes(e.user)) store.social.groupCallRoster.set(e.group, [...roster, e.user]);
-          if (e.user === me) store.social.activeGroupCall = e.group;
-        } else {
-          const next = roster.filter((u) => u !== e.user);
-          if (next.length) store.social.groupCallRoster.set(e.group, next);
-          else store.social.groupCallRoster.delete(e.group);
-          if (e.user === me && store.social.activeGroupCall === e.group) {
-            store.social.activeGroupCall = null;
-            disconnectCallMedia();
-          }
-        }
-        break;
-      }
-      case "caps": {
-        const set = e.caps ? e.caps.split(",") : [];
-        store.session.caps.set(`${e.account}|${e.scope}`, {
-          owner: set.includes("ns-admin") || set.includes("netblock"),
-          mod: set.includes("mute") || set.includes("ban") || set.includes("kick"),
-          list: set,
-        });
-        capsInflight.delete(`${e.account}|${e.scope}`);
-        confirmSuccess(`caps:${e.account}|${e.scope}`);
-        break;
-      }
-      case "role":
-        roleBuf.push(
-          new Role({
-            id: e.role,
-            name: e.name,
-            color: e.color,
-            caps: e.caps ? e.caps.split(",") : [],
-            hoist: e.hoist,
-            pingable: e.pingable,
-            position: e.position,
-          }),
-        );
-        break;
-      case "role-member":
-        memberRoles[`${e.account}|${e.scope}`] = e.roles ? e.roles.split(",") : [];
-        confirmSuccess(`roles:${e.account}|${e.scope}`);
-        break;
-      case "ns-member-info":
-        nsMemberBuf.push({
-          user: e.user,
-          network: e.network,
-          joinedMs: e.joined_ms,
-          roles: e.roles ?? [],
-        });
-        break;
-      case "grant-info":
-        grantBuf.push({ subject: e.subject, caps: e.caps ? e.caps.split(",") : [] });
-        break;
-      case "channel-layout": {
-        const ch = ensureChannel(e.channel);
-        ch.category = e.category ?? undefined;
-        ch.position = e.position;
-        ch.voice = e.channel_kind === "voice"; // §16 render as a voice channel
-        if (e.vanity) ch.vanity = e.vanity; // v0.13 display name; wire name is ids
-        cacheChanLayout(e.channel, ch.category, e.position);
-        reconcileChannelCreate(e.channel, e.vanity); // finish a pending create
-        break;
-      }
-      case "channel-renamed": {
-        // Re-key local state to the new identity (idempotent — this arrives as
-        // a broadcast plus a labeled copy to the initiator).
-        const cur = channels[e.old];
-        if (cur) {
-          cur.name = e.new;
-          channels[e.new] = cur; // unread/mention tallies ride the instance
-          delete channels[e.old];
-          cacheChanLayout(e.new, cur.category, cur.position ?? 0);
-          if (active === e.old) goto(nav.pathFor(e.new), { replaceState: true });
-          if (chanPermsCh === e.old) chanPermsCh = e.new;
-          // The actor was respawned under the new name — re-subscribe.
-          weft.join(e.new).catch(() => {});
-        }
-        confirmSuccess(`rename:${e.new}`);
-        break;
-      }
-      case "ns-meta":
-        // v0.13: namespaces are keyed by their immutable **id** everywhere the
-        // client addresses them (channels `#<id>/…`, scopes `ns:<id>`, the rail
-        // tile is `nsOf(channel)` = the id). The vanity `e.name` is display only.
-        // §6.2 deletion marker (owner cleared + description "deleted"): drop the
-        // namespace from every local view instead of storing a tombstone —
-        // otherwise a deleted server would linger in the rail/channel list.
-        if (e.owner === null && e.description === "deleted") {
-          store.servers.delete(e.id);
-          for (const name of Object.keys(channels)) {
-            if (name.startsWith("#") && nsOf(name) === e.id) delete channels[name];
-          }
-          if (activeServer === e.id) goHome();
-          break;
-        }
-        const srv = store.server(e.id);
-        srv.applyMeta(e);
-        cacheNsCats(e.id, e.categories ?? []);
-        // Owning a namespace is membership — the owner can't leave it (only
-        // transfer or delete). Record it so a server I just created appears in the
-        // rail the instant its NS-META returns, with no channels and no Discover
-        // round-trip, and stays put across Discover's transient resets.
-        if (e.owner === account) srv.joined = true;
-        // A namespace I own but hold no channels in is one I just created (the
-        // server seeds its `#general`): auto-join so I'm subscribed to it live —
-        // no client-side channel creation needed.
-        if (
-          e.owner === account &&
-          !autoJoinedNs.has(e.id) &&
-          !Object.values(channels).some((c) => c.name.startsWith("#") && nsOf(c.name) === e.id)
-        ) {
-          autoJoinedNs.add(e.id);
-          weft.nsJoin(e.id).catch(() => {});
-        }
-        break;
-      case "more":
-        discoverCursor = e.cursor;
-        break;
-      case "manifest":
-        // A bridge's channel set/state (§11). `severed`/`removed` drops it.
-        if (e.state === "severed" || e.state === "removed") store.federation.manifests.delete(e.peer);
-        else
-          store.federation.manifests.set(e.peer, {
-            peer: e.peer,
-            version: e.version,
-            state: e.state,
-            channels: e.channels,
-            history: e.history,
-            media: e.media,
-            typing: e.typing,
-          });
-        break;
-      case "netblocked":
-        store.federation.netblocks.set(e.network, e.reason);
-        break;
-      case "token":
-        // A permission change is confirmed with a transient toast, never a
-        // channel system line (those are for people, not admin bookkeeping).
-        toast(`Permissions updated for ${e.subject}`, "info");
-        break;
-      case "invited":
-        if (e.max_uses === 0) {
-          // A revoke echo (INVITED … max-uses=0) — close it + drop from the menu.
-          if (store.invites.id === e.invite_id) {
-            store.invites.link = null;
-            store.invites.id = null;
-          }
-          store.invites.list = store.invites.list.filter((i) => i.invite_id !== e.invite_id);
-        } else {
-          store.invites.link = e.link ?? e.invite_id;
-          store.invites.id = e.invite_id;
-          // A freshly-minted invite: reflect it live wherever the list is shown —
-          // the standalone menu or the Server-Settings Invites tab.
-          const listShown = store.invites.listOpen || (nsSettingsOpen && nsTab === "invites");
-          if (listShown && e.scope === store.invites.scope) weft.inviteList(store.invites.scope).catch(() => {});
-        }
-        break;
-      case "invite-info":
-        if (store.invites.loading) store.invites.buf.push(e);
-        break;
-      case "reported":
-        sys(`✓ report filed (${e.report_id})`);
-        break;
-      case "report-filed":
-        reportQueue[e.report_id] = e;
-        break;
-      case "report-resolved":
-        delete reportQueue[e.report_id];
-        sys(`✓ report ${e.report_id} resolved: ${e.action}`);
-        break;
-      case "typing":
-        if (e.user !== account) setTyping(e.channel, e.user, e.state === "start");
-        break;
-      case "reaction": {
-        // Live increment/decrement (§7). During a batch the target may still
-        // be buffered, so search there too.
-        const m = findMsg(e.target, e.msgid);
-        if (m) applyReaction(m, e.emoji, e.op, e.by);
-        break;
-      }
-      case "reactions": {
-        // Compacted summary from history (§12.1) — set the aggregate directly.
-        const m = findMsg(e.target, e.msgid);
-        if (m) {
-          m.reactions ??= {};
-          m.reactions[e.emoji] = { count: e.count, mine: e.by.includes(account) };
-        }
-        break;
-      }
-      case "batch-start":
-        currentBatchId = e.id; // `r…` = a ROLES batch (see below)
-        break; // messages between here and batch-end are buffered above
-      case "batch-end": {
-        // A MODLIST batch only refreshed the deny-list cache (handled per
-        // "moderated" event above) — nothing to flush here.
-        if (currentBatchId.startsWith("mod")) {
-          currentBatchId = "";
-          break;
-        }
-        // A MEMBERS roster batch (`m…`): each MEMBER folded in live already, so
-        // there's nothing to flush here. Crucially it must NOT fall through to the
-        // history branch, or it would steal the in-flight HISTORY's `loadingHistory`
-        // and the real page would be discarded. (Checked after `mod`, which also
-        // starts with "m".)
-        if (currentBatchId.startsWith("m")) {
-          currentBatchId = "";
-          break;
-        }
-        // NS INFO MEMBERS roster (`ni…`). Checked before the `r…` role branch
-        // since neither prefix overlaps, and flushed by the requested namespace
-        // so an empty roster still lands.
-        if (currentBatchId.startsWith("ni")) {
-          if (loadingNsMembers) {
-            const srv = store.server(loadingNsMembers);
-            srv.members = nsMemberBuf.map((r) => {
-              const handle = r.network === network ? r.user : `${r.user}@${r.network}`;
-              const m = new Membership(srv, store.accountOf(handle));
-              m.network = r.network;
-              m.joinedMs = r.joinedMs;
-              m.roleIds = r.roles;
-              return m;
-            });
-          }
-          nsMemberBuf = [];
-          loadingNsMembers = null;
-          nsMembersLoading = false;
-          currentBatchId = "";
-          break;
-        }
-        // GRANTS batch (`gr…`) — channel-permission member overrides. Checked
-        // before the `r…` role branch (neither prefix overlaps: "gr" ≠ "r").
-        if (currentBatchId.startsWith("gr")) {
-          const scope = grantFetchQueue.shift();
-          if (scope) store.grants.set(scope, grantBuf);
-          grantBuf = [];
-          currentBatchId = "";
-          break;
-        }
-        if (currentBatchId.startsWith("r")) {
-          const scope = roleFetchQueue.shift();
-          // Keep roles in position order (server sorts, but be safe).
-          roleBuf.sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
-          if (scope) {
-            // Single source per scope: ns roles on the Server, others by-scope.
-            if (scope.startsWith("ns:")) store.server(scope.slice(3)).roles = roleBuf;
-            else rolesByScope[scope] = roleBuf;
-            mdCache.clear(); // role names/colors feed mention rendering
-          }
-          roleBuf = [];
-          currentBatchId = "";
-          break;
-        }
-        if (store.threads.loadingRoot) {
-          store.threads.messages = store.threads.buf;
-          store.threads.buf = [];
-          store.threads.loadingRoot = null;
-          break;
-        }
-        if (store.search.loadingChannel) {
-          store.search.results = store.search.buf;
-          store.search.buf = [];
-          store.search.loadingChannel = null;
-          store.search.loading = false;
-          break;
-        }
-        if (store.pins.loadingChannel) {
-          const ch = channels[store.pins.loadingChannel];
-          if (ch) ch.pinnedIds = store.pins.buf.map((m) => m.msgid).filter(Boolean) as string[];
-          store.pins.list = store.pins.buf;
-          store.pins.buf = [];
-          store.pins.loadingChannel = null;
-          break;
-        }
-        if (store.threads.loadingList) {
-          // Newest activity first (last-activity msgid sorts by its ULID).
-          store.threads.listBuf.sort((a, b) => (b.last ?? "").localeCompare(a.last ?? ""));
-          store.threads.list = store.threads.listBuf;
-          store.threads.listBuf = [];
-          store.threads.loadingList = false;
-          break;
-        }
-        if (store.invites.loading) {
-          store.invites.list = store.invites.buf;
-          store.invites.buf = [];
-          store.invites.loading = false;
-          break;
-        }
-        // Flush every channel that accumulated a history page. Each page goes to
-        // the channel its messages name (`target`), so this is correct no matter
-        // which batch's END fired or whether `loadingHistory` was cleared — a
-        // stray batch can't lose a page. The requested channel is always flushed
-        // (an empty page still marks it loaded, so we stop re-requesting).
-        const requested = loadingHistory;
-        const targets = new Set(Object.keys(histByTarget));
-        if (requested) targets.add(requested);
-        for (const t of targets) {
-          const buf = histByTarget[t] ?? [];
-          delete histByTarget[t];
-          const ch = ensureChannel(t);
-          const seen = new Set(ch.messages.map((m) => m.msgid).filter(Boolean));
-          const older = buf.filter((m) => !m.msgid || !seen.has(m.msgid));
-          ch.messages = [...older, ...ch.messages];
-          ch.historyLoaded = true;
-          if (t === requested) {
-            ch.truncated = e.truncated;
-            ch.hasMore = !e.truncated && buf.length >= HISTORY_LIMIT;
-          }
-        }
-        loadingHistory = null;
-        // If the reader switched to another conversation while this page was in
-        // flight, its initial load was single-flight-blocked — kick it now. (The
-        // channel's own MessageList positions itself once its page lands; paging
-        // older needs no scroll adjustment — the column-reverse bottom is anchored.)
-        const cur = channels[active];
-        if (active !== requested && cur && !cur.voice && !cur.historyLoaded) {
-          loadHistory(active, true);
-        }
-        break;
-      }
-      case "deleted": {
-        // §7 tombstone — drop the message so it doesn't linger.
-        const ch = channels[e.target];
-        if (ch) ch.messages = ch.messages.filter((m) => m.msgid !== e.msgid);
-        break;
-      }
-      case "edited": {
-        // Update the original message in place (§7 edit-of).
-        const m = channels[e.target]?.messages.find((x) => x.msgid === e.edit_of);
-        if (m) {
-          m.body = e.body;
-          m.edited = true;
-        }
-        break;
-      }
-      case "moderated": {
-        // Keep the deny-list cache current (for the Bans tab). A MODLIST reply
-        // arrives inside a `mod`-batch; live actions arrive bare. `mute`/`ban`
-        // add-or-replace; `unmute`/`unban` remove; `kick` is transient.
-        if (e.action === "mute" || e.action === "ban") {
-          const list = store.deny.get(e.scope) ?? [];
-          const i = list.findIndex((r) => r.account === e.account && r.kind === e.action);
-          const rec = { account: e.account, kind: e.action, by: e.by, reason: e.reason };
-          store.deny.set(e.scope, i >= 0 ? list.map((r, j) => (j === i ? rec : r)) : [...list, rec]);
-        } else if (e.action === "unmute" || e.action === "unban") {
-          const kind = e.action === "unmute" ? "mute" : "ban";
-          const cur = store.deny.get(e.scope);
-          if (cur)
-            store.deny.set(
-              e.scope,
-              cur.filter((r) => !(r.account === e.account && r.kind === kind)),
-            );
-        }
-        // Moderation is reflected in Server Settings (the deny-list above) and
-        // by the target losing access — never as a channel system line, which
-        // would be timeline noise broadcast to every member.
-        break;
-      }
-      case "error":
-        toast(`${e.code}: ${e.text}`, "error");
-        break;
-    }
-  }
 
   // ---- actions ----
   // Device-key login availability (checked as host/account change).
@@ -2535,11 +1379,11 @@
     }
     cf.authError = "";
     cf.authFailed = false;
-    status = "connecting";
-    manualLogout = false;
-    reconnectAttempts = 0;
+    store.session.status = "connecting";
+    conn.manualLogout = false;
+    conn.reconnectAttempts = 0;
     // Held in memory (never persisted) so a mid-session drop can reconnect.
-    lastCreds = { host: cf.host.trim(), account: cf.account.trim(), password: cf.password };
+    conn.lastCreds = { host: cf.host.trim(), account: cf.account.trim(), password: cf.password };
     try {
       await weft.connect(
         cf.host.trim(),
@@ -2549,7 +1393,7 @@
         cf.mode === "register" ? cf.email.trim() : undefined,
       );
     } catch (err) {
-      status = "connect";
+      store.session.status = "connect";
       cf.authError = String(err);
     }
   }
@@ -2609,10 +1453,6 @@
     }
   }
 
-  function sys(body: string) {
-    if (activeChannel)
-      activeChannel.messages.push(mkMsg({ author: "", body, time: clock(), ts: Date.now(), own: false, system: true }));
-  }
 
   /// A capability-gated moderation action (§10.4). These are **server-side**:
   /// the client sends the wire intent and weftd enforces it (BAN/KICK/MUTE are
@@ -2744,7 +1584,7 @@
     // history replay) can reserve exact space before the bytes load (§13).
     const attachments = pendingAttachments.map((a) => weft.withMediaDims(a.uri, a.width, a.height));
     const target = active;
-    const savedReply = replyTo?.msgid;
+    const savedReply = ui.replyTo?.msgid;
     // §9.2/§11.13 optimistic send: show the message immediately as "sending",
     // keyed by a client nonce. The authoritative MESSAGE echoes the nonce back
     // (even when a home-authoritative channel mints it on another network) and
@@ -2766,7 +1606,7 @@
       }),
     );
     // Clear the composer optimistically; the placeholder carries the text.
-    replyTo = null;
+    ui.replyTo = null;
     stopTyping();
     composer = "";
     pendingAttachments = [];
@@ -2883,26 +1723,7 @@
 
   // Search the target's in-flight history buffer first (not committed yet), then
   // the channel's messages.
-  function findMsg(target: string, msgid: string): Msg | undefined {
-    return (
-      histByTarget[target]?.find((m) => m.msgid === msgid) ??
-      channels[target]?.messages.find((m) => m.msgid === msgid)
-    );
-  }
 
-  function applyReaction(m: Msg, emoji: string, op: string, by: string) {
-    m.reactions ??= {};
-    const cur = m.reactions[emoji] ?? { count: 0, mine: false };
-    if (op === "add") {
-      cur.count += 1;
-      if (by === account) cur.mine = true;
-    } else {
-      cur.count -= 1;
-      if (by === account) cur.mine = false;
-    }
-    if (cur.count <= 0) delete m.reactions[emoji];
-    else m.reactions[emoji] = cur;
-  }
 
   // Non-optimistic: the server echoes our own REACTION back (like a MSG ack),
   // which drives the count — so toggling can't double-count.
@@ -2913,254 +1734,18 @@
     (mine ? weft.unreact(m.msgid, emoji) : weft.react(m.msgid, emoji)).catch(() => {});
   }
 
-  // ---- markdown (Phase 4 · Tier 1) ----
-  // Escape-first: safe to feed {@html} because HTML is neutralised before any
-  // markdown token is turned back into a tag. Quotes are escaped too — the link
-  // rewriters interpolate a captured URL into `href="${url}"`, and a URL char
-  // class permits `"`, so without this a body like `https://x/"onfocus="…` would
-  // break out of the attribute and inject an event handler (attribute-injection
-  // XSS → the Tauri command bridge on desktop). Escaping here fixes it at the
-  // root, for every attribute interpolation, not just links.
-  const escapeHtml = (s: string) =>
-    s
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
+  // ---- markdown (Phase 4 · Tier 1) — rendering lives in `$lib/markdown`; the
+  // per-render mention/emoji context (`MdContext`) is built at the ctx boundary. ----
+  const mdContext = (): md.MdContext => ({
+    account,
+    activeServer,
+    pingable: rolesAt(`ns:${activeServer}`).filter((r) => r.pingable),
+    myRoleIds: new Set(memberRoles[`${account}|ns:${activeServer}`] ?? []),
+    emoji: (n) => (activeServer ? store.servers.get(activeServer)?.emoji.get(n) : undefined),
+  });
 
-  // Inline formatting for a single run of text (no fenced/block constructs).
-  // Code spans and links are stashed to placeholders BEFORE emphasis runs, so
-  // markdown characters inside a URL or code span (snake_case, a*b, …) can't be
-  // mangled into <em>/<strong>. \x00…\x00 is used as the placeholder delimiter
-  // because a NUL can never occur in a chat line.
-  function renderInline(text: string): string {
-    const stash: string[] = [];
-    const keep = (html: string) => {
-      const i = stash.length;
-      stash.push(html);
-      return `\x00T${i}\x00`;
-    };
-
-    let s = escapeHtml(text);
-
-    // Inline code — verbatim, highest precedence.
-    s = s.replace(/`([^`]+)`/g, (_m, c: string) => keep(`<code>${c}</code>`));
-
-    // Masked link [text](url) then bare URL — stashed so emphasis can't touch
-    // the URL. `data-mdlink` marks them for the click-through confirm guard.
-    s = s.replace(
-      /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-      (_m, txt: string, url: string) =>
-        keep(`<a href="${url}" target="_blank" rel="noopener noreferrer" data-mdlink="1">${txt}</a>`),
-    );
-    s = s.replace(
-      /(^|\s)(https?:\/\/[^\s<]+)/g,
-      (_m, pre: string, url: string) =>
-        pre + keep(`<a href="${url}" target="_blank" rel="noopener noreferrer" data-mdlink="1">${url}</a>`),
-    );
-
-    // Emphasis: ***bold-italic*** → **bold** → __bold__ → *italic* → _italic_ → ~~strike~~.
-    s = s.replace(/\*\*\*([^*]+)\*\*\*/g, "<strong><em>$1</em></strong>");
-    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
-    s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-    // _italic_ only at word boundaries, so snake_case is left alone.
-    s = s.replace(/(^|[^\w])_([^_\n]+)_(?=[^\w]|$)/g, "$1<em>$2</em>");
-    s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
-
-    // ||spoiler|| → click-to-reveal (revealed by a delegated handler in the list).
-    s = s.replace(
-      /\|\|([\s\S]+?)\|\|/g,
-      '<span class="spoiler" role="button" tabindex="0" title="Spoiler — click to reveal">$1</span>',
-    );
-    // @mentions → pills; a mention of me / @everyone / @here / a pingable role
-    // I hold highlights. Role pills carry the role's color.
-    const pingable = rolesAt(`ns:${activeServer}`).filter((r) => r.pingable);
-    const myRoleIds = new Set(memberRoles[`${account}|ns:${activeServer}`] ?? []);
-    s = s.replace(/@(everyone|here|[a-z0-9][a-z0-9._-]*)/gi, (_full, name: string) => {
-      const lower = name.toLowerCase();
-      const role = pingable.find((r) => r.name.toLowerCase() === lower);
-      const me =
-        name === account ||
-        lower === "everyone" ||
-        lower === "here" ||
-        (!!role && myRoleIds.has(role.id));
-      // Colors ride the wire, so only emit ones matching a strict hex pattern —
-      // never interpolate arbitrary text into a style attribute.
-      const style = role && /^#[0-9a-fA-F]{3,8}$/.test(role.color) ? ` style="color:${role.color}"` : "";
-      return `<span class="mention${me ? " me" : ""}"${style}>@${name}</span>`;
-    });
-    // :name: → this server's custom emoji (an inline image) if it exists, else a
-    // standard unicode emoji (`:smile:` → 😄); an unknown shortcode stays literal.
-    s = s.replace(/:([a-zA-Z0-9_+-]+):/g, (full, name: string) => {
-      const media = activeServer ? store.servers.get(activeServer)?.emoji.get(name) : undefined;
-      if (media) {
-        const url = weft.mediaUrl(media).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
-        return `<img class="custom-emoji" src="${url}" alt=":${name}:" title=":${name}:" />`;
-      }
-      return shortcodeToChar(name) ?? full;
-    });
-
-    // Restore stashed code spans / links.
-    s = s.replace(/\x00T(\d+)\x00/g, (_m, i: string) => stash[+i]);
-    return s;
-  }
-
-  // §9.4 rendered-message cache (Discord-style memoized parsing): markdown +
-  // syntax-highlight is the costly per-message work, so cache HTML by
-  // (server, body) — the message list remounts on every channel navigation
-  // now, so it re-renders from cache instead of re-parsing. Custom emoji and
-  // role-mention styling are ns-scoped, so `activeServer` is part of the key;
-  // the cache is cleared when either changes (emoji add/remove, role flush).
-  // LRU: a Map keeps insertion order, so a hit re-inserts (most-recently-used)
-  // and eviction drops the oldest (`keys().next()`). Bounds memory without
-  // dropping the whole cache. Plain Map — not reactive.
-  const MD_CACHE_MAX = 4000;
-  const mdCache = new Map<string, string>();
-  function renderMd(text: string): string {
-    const key = `${activeServer} ${text}`;
-    const hit = mdCache.get(key);
-    if (hit !== undefined) {
-      mdCache.delete(key);
-      mdCache.set(key, hit); // touch → most-recently-used
-      return hit;
-    }
-    const html = renderMdRaw(text);
-    mdCache.set(key, html);
-    if (mdCache.size > MD_CACHE_MAX) mdCache.delete(mdCache.keys().next().value!);
-    return html;
-  }
-  // Full render: lift out ``` / ~~~ fenced code blocks (verbatim, highlighted),
-  // parse block-level constructs (headings, block quotes, lists, rules) line by
-  // line, inline-format the rest, then splice the code blocks back in.
-  function renderMdRaw(text: string): string {
-    const blocks: { lang: string; code: string }[] = [];
-    const lifted = text.replace(
-      /(?:```|~~~)([a-zA-Z0-9+#.-]*)\n?([\s\S]*?)(?:```|~~~)/g,
-      (_m, lang: string, code: string) => {
-        const i = blocks.length;
-        blocks.push({ lang: lang.trim(), code: code.replace(/\n$/, "") });
-        return `\x00CB${i}\x00`;
-      },
-    );
-
-    const lines = lifted.split("\n");
-    const pieces: { block: boolean; html: string }[] = [];
-    const cbOnly = /^\s*\x00CB\d+\x00\s*$/;
-    let i = 0;
-    while (i < lines.length) {
-      const line = lines[i];
-
-      // A fenced-code placeholder alone on its line is a block.
-      if (cbOnly.test(line)) {
-        pieces.push({ block: true, html: line.trim() });
-        i++;
-        continue;
-      }
-      // ATX headings # / ## / ### (h1–h3, Discord-style).
-      const h = line.match(/^(#{1,3})\s+(.*)$/);
-      if (h) {
-        const lvl = h[1].length;
-        pieces.push({ block: true, html: `<h${lvl} class="md-h md-h${lvl}">${renderInline(h[2])}</h${lvl}>` });
-        i++;
-        continue;
-      }
-      // Thematic break: ---, ***, ___ (three or more).
-      if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
-        pieces.push({ block: true, html: `<hr class="md-hr" />` });
-        i++;
-        continue;
-      }
-      // Block quote: `>>> ` quotes the rest of the message; `> ` quotes a run.
-      const tri = line.match(/^>>>\s?(.*)$/);
-      if (tri) {
-        const rest = [tri[1], ...lines.slice(i + 1)];
-        pieces.push({
-          block: true,
-          html: `<blockquote class="md-quote">${rest.map((l) => renderInline(l)).join("<br>")}</blockquote>`,
-        });
-        break;
-      }
-      if (/^>\s?/.test(line)) {
-        const buf: string[] = [];
-        while (i < lines.length && /^>\s?/.test(lines[i])) {
-          buf.push(lines[i].replace(/^>\s?/, ""));
-          i++;
-        }
-        pieces.push({
-          block: true,
-          html: `<blockquote class="md-quote">${buf.map((l) => renderInline(l)).join("<br>")}</blockquote>`,
-        });
-        continue;
-      }
-      // Unordered list: -, *, + .
-      if (/^\s*[-*+]\s+/.test(line)) {
-        const items: string[] = [];
-        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
-          items.push(lines[i].replace(/^\s*[-*+]\s+/, ""));
-          i++;
-        }
-        pieces.push({
-          block: true,
-          html: `<ul class="md-list">${items.map((it) => `<li>${renderInline(it)}</li>`).join("")}</ul>`,
-        });
-        continue;
-      }
-      // Ordered list: 1. / 1) .
-      if (/^\s*\d+[.)]\s+/.test(line)) {
-        const items: string[] = [];
-        while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
-          items.push(lines[i].replace(/^\s*\d+[.)]\s+/, ""));
-          i++;
-        }
-        pieces.push({
-          block: true,
-          html: `<ol class="md-list">${items.map((it) => `<li>${renderInline(it)}</li>`).join("")}</ol>`,
-        });
-        continue;
-      }
-
-      // Plain line.
-      pieces.push({ block: false, html: renderInline(line) });
-      i++;
-    }
-
-    // Assemble: consecutive plain lines keep their newline (rendered by the
-    // container's pre-wrap); block elements bring their own separation.
-    let s = "";
-    for (let k = 0; k < pieces.length; k++) {
-      if (k > 0 && !pieces[k].block && !pieces[k - 1].block) s += "\n";
-      s += pieces[k].html;
-    }
-
-    // Splice fenced code blocks back in, highlighted.
-    s = s.replace(/\x00CB(\d+)\x00/g, (_m, i: string) => {
-      const b = blocks[+i];
-      const label = b.lang ? `<span class="code-lang">${escapeHtml(b.lang)}</span>` : "";
-      return `<pre class="code-block hljs">${label}<code>${highlightCode(b.code, b.lang)}</code></pre>`;
-    });
-    return s;
-  }
-  // Does a body mention the current account, @everyone/@here, or a pingable
-  // role the account holds at `ns` (the message's server; defaults to active)?
-  const mentionsMe = (body: string, ns: string = activeServer) => {
-    if (!account) return false;
-    if (new RegExp(`@${account}\\b`, "i").test(body) || /@(everyone|here)\b/i.test(body)) return true;
-    const scope = ns ? `ns:${ns}` : "*";
-    // memberRoles holds role ids; a role pings me if it's pingable and its
-    // display name appears as an @mention in the body (v0.13).
-    const mineIds = new Set(memberRoles[`${account}|${scope}`] ?? []);
-    return rolesAt(scope).some(
-      (r) =>
-        r.pingable &&
-        mineIds.has(r.id) &&
-        new RegExp(`@${r.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(body),
-    );
-  };
 
   // ---- replies (Phase 4) ----
-  let replyTo = $state<Msg | null>(null);
   function jumpTo(msgid?: string) {
     if (!msgid) return;
     const m = activeChannel?.messages.find((x) => x.msgid === msgid);
@@ -3168,20 +1753,6 @@
   }
 
   // ---- typing indicators (Phase 4) ----
-  const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  function setTyping(channel: string, user: string, active: boolean) {
-    const key = `${channel}\u0000${user}`;
-    clearTimeout(typingTimers.get(key));
-    const ch = ensureChannel(channel);
-    if (active) {
-      if (!ch.typers.includes(user)) ch.typers = [...ch.typers, user];
-      // Fallback expiry in case a `stop` is lost.
-      typingTimers.set(key, setTimeout(() => setTyping(channel, user, false), 6000));
-    } else {
-      ch.typers = ch.typers.filter((u) => u !== user);
-      typingTimers.delete(key);
-    }
-  }
   let typingLabel = $derived.by(() => {
     const who = activeChannel?.typers ?? [];
     if (!who.length) return "";
@@ -3371,7 +1942,7 @@
     // channel's namespace (metaLoaded=false — a live `Channel.server` edge).
     for (const [id, s] of store.servers) if (s.metaLoaded && !s.joined) store.servers.delete(id);
     nsMetaFetched.clear();
-    discoverCursor = null;
+    ui.discoverCursor = null;
     weft.discover().catch(() => {});
   }
 
@@ -3387,11 +1958,11 @@
 
   // Reporting (ReportModal owns its form + submit)
   function openReport(m: Msg) {
-    if (m.msgid) reportTarget = m;
+    if (m.msgid) store.reports.target = m;
   }
   function openReports() {
-    reportsOpen = true;
-    reportQueue = {};
+    store.reports.open = true;
+    store.reports.queue.clear();
     weft.reportsList(activeServer ? `ns:${activeServer}` : "*").catch(() => {});
   }
 
@@ -3509,27 +2080,6 @@
     newChanOpen = false;
   }
   // Finish a channel-create once the server echoes the canonical name + vanity.
-  function reconcileChannelCreate(canonical: string, vanity: string) {
-    const ns = nsOf(canonical);
-    if (!ns || !vanity) return;
-    const key = `${ns}|${vanity}`;
-    const pending = pendingChanCreate[key];
-    if (!pending) return;
-    delete pendingChanCreate[key];
-
-    const ch = ensureChannel(canonical);
-    ch.voice = pending.voice;
-    // Subscribe (text) so live messages arrive; voice rooms are entered via VOICE.
-    if (!pending.voice) weft.join(canonical).catch(() => {});
-    if (pending.cat) weft.channelMeta(canonical, "category", pending.cat).catch((e) => toast(String(e), "error"));
-    // Announcement channel: view-open, post-restricted to `send` holders (§6.7).
-    if (!pending.voice && pending.announce)
-      weft.channelMeta(canonical, "posting", "restricted").catch((e) => toast(String(e), "error"));
-    // Jump to the new channel (a voice room is *entered* by clicking it, so just
-    // navigate here rather than auto-joining the call).
-    if (!pending.voice) markRead(canonical);
-    goto(nav.pathFor(canonical));
-  }
 
   // ---- categories (Discord-style groupings) ----
   // A category is just a label channels carry (§6.3 CHANNEL META category). An
@@ -3614,36 +2164,35 @@
   }
 
   // ---- per-channel permissions (§6.5 grants at #chan scope, §6.7 restricted) ----
-  let chanPermsCh = $state<string | null>(null);
   function chanNsScope() {
-    const ns = nsOf(chanPermsCh ?? "");
+    const ns = nsOf(ui.chanPerms ?? "");
     return ns ? `ns:${ns}` : "*";
   }
   // A channel-scoped role/@everyone override's caps (channel roles are named
   // after ns roles; `everyone` is the per-channel baseline).
   const chanRoleCaps = (name: string) =>
-    rolesAt(chanPermsCh ?? "").find((r) => r.name === name)?.caps ?? [];
+    rolesAt(ui.chanPerms ?? "").find((r) => r.name === name)?.caps ?? [];
   // Apply a channel role / @everyone target's full cap set (the editor commits
   // a draft, not per-toggle): a non-empty set upserts the channel role, an
   // empty set deletes it. The ROLES refetch inside createRoleAt/deleteRoleAt
   // reconciles the view.
   function setChanRoleCaps(name: string, color: string, caps: string[]) {
-    if (!chanPermsCh) return;
+    if (!ui.chanPerms) return;
     (caps.length
-      ? createRoleAt(chanPermsCh, name, color, caps.join(","))
-      : deleteRoleAt(chanPermsCh, name)
+      ? createRoleAt(ui.chanPerms, name, color, caps.join(","))
+      : deleteRoleAt(ui.chanPerms, name)
     ).catch((e) => toast(String(e), "error"));
   }
 
   // Individual-member overrides at the channel scope (direct GRANTs).
-  const chanMemberGrants = () => store.grants.get(chanPermsCh ?? "") ?? [];
+  const chanMemberGrants = () => store.grants.get(ui.chanPerms ?? "") ?? [];
   const chanMemberCaps = (account: string) =>
     chanMemberGrants().find((g) => g.subject === account)?.caps ?? [];
   // Apply a member override's full cap set. record_grant replaces, so we GRANT
   // the new set (or REVOKE the old one when it empties). Optimistic locally.
   function setChanMemberCaps(account: string, caps: string[]) {
-    if (!chanPermsCh) return;
-    const scope = chanPermsCh;
+    if (!ui.chanPerms) return;
+    const scope = ui.chanPerms;
     const prev = chanMemberCaps(account);
 
     // Re-set the whole entry (SvelteMap values aren't deeply reactive).
@@ -3666,28 +2215,28 @@
   // Remove a whole channel override target. A role override deletes the
   // channel-scoped role; a member override revokes all their channel caps.
   function removeChanRole(name: string) {
-    if (!chanPermsCh) return;
-    deleteRoleAt(chanPermsCh, name).catch((e) => toast(String(e), "error"));
+    if (!ui.chanPerms) return;
+    deleteRoleAt(ui.chanPerms, name).catch((e) => toast(String(e), "error"));
   }
   function removeChanMember(account: string) {
-    if (!chanPermsCh) return;
-    const scope = chanPermsCh;
+    if (!ui.chanPerms) return;
+    const scope = ui.chanPerms;
     const cur = chanMemberCaps(account);
     store.grants.set(scope, (store.grants.get(scope) ?? []).filter((g) => g.subject !== account));
     if (cur.length) weft.revoke(account, scope, cur.join(",")).catch((e) => toast(String(e), "error"));
   }
   function openChanPerms(channel: string) {
-    chanPermsCh = channel;
+    ui.chanPerms = channel;
     fetchRoles(chanNsScope()); // the namespace's roles (the role picker source)
     fetchRoles(channel); // this channel's role + @everyone overrides
     fetchGrants(channel); // this channel's individual-member overrides
   }
   function toggleRestricted() {
-    const ch = chanPermsCh ? channels[chanPermsCh] : undefined;
-    if (!ch || !chanPermsCh) return;
+    const ch = ui.chanPerms ? channels[ui.chanPerms] : undefined;
+    if (!ch || !ui.chanPerms) return;
     const next = !ch.restricted;
     weft
-      .channelMeta(chanPermsCh, "posting", next ? "restricted" : "open")
+      .channelMeta(ui.chanPerms, "posting", next ? "restricted" : "open")
       .then(() => (ch.restricted = next))
       .catch((e) => toast(String(e), "error"));
   }
@@ -3695,11 +2244,11 @@
   // `view` cap (invariant 1 anti-enumeration). Grant `view` per target in the
   // permissions editor to let specific roles/members in.
   function toggleViewGated() {
-    const ch = chanPermsCh ? channels[chanPermsCh] : undefined;
-    if (!ch || !chanPermsCh) return;
+    const ch = ui.chanPerms ? channels[ui.chanPerms] : undefined;
+    if (!ch || !ui.chanPerms) return;
     const next = !ch.viewGated;
     weft
-      .channelMeta(chanPermsCh, "view-gated", next ? "true" : "false")
+      .channelMeta(ui.chanPerms, "view-gated", next ? "true" : "false")
       .then(() => (ch.viewGated = next))
       .catch((e) => toast(String(e), "error"));
   }
@@ -3847,8 +2396,8 @@
     nsDelegSubject = "";
     nsNewOwner = "";
     nsRecKeys = "";
-    nsTab = "overview";
-    nsSettingsOpen = true;
+    ui.nsTab = "overview";
+    ui.nsSettingsOpen = true;
     fetchRoles(nsRoleScope());
   }
   function saveNsMeta() {
@@ -3908,7 +2457,7 @@
   async function deleteNamespace() {
     if (await appConfirm(`Delete namespace ${activeServer}? This removes all its channels.`, "Delete")) {
       weft.nsDelete(activeServer).catch((e) => toast(String(e), "error"));
-      nsSettingsOpen = false;
+      ui.nsSettingsOpen = false;
     }
   }
 
@@ -3923,11 +2472,7 @@
 
   onMount(() => {
     // Restore the cached layout for instant render before the server refresh.
-    try {
-      layoutCache = JSON.parse(localStorage.getItem("weft:layout") ?? "{}");
-    } catch {
-      layoutCache = {};
-    }
+    loadLayoutCache();
     // Restore theme.
     try {
       if (localStorage.getItem("weft:theme") === "light") {
@@ -4072,7 +2617,7 @@
     set notifSettingsOpen(v: boolean) { notifSettingsOpen = v; },
     openNotifSettings,
     get discoverList() { return [...store.servers.values()].filter((s) => s.metaLoaded); },
-    get discoverCursor() { return discoverCursor; },
+    get discoverCursor() { return ui.discoverCursor; },
     scopesFor,
     markRead,
     get draggingChan() { return draggingChan; },
@@ -4147,8 +2692,6 @@
     toast,
     confirm: appConfirm,
     expectSuccess,
-    get reportQueue() { return reportQueue; },
-    resolveActions: RESOLVE_ACTIONS,
     // chat topbar
     get membersVisible() { return membersVisible; },
     set membersVisible(v: boolean) { membersVisible = v; },
@@ -4182,7 +2725,7 @@
     removeEmoji,
     emojiUrlFor,
     // message list / items
-    get loadingHistory() { return loadingHistory; },
+    get loadingHistory() { return hist.loading; },
     get newBoundary() { return newBoundary; },
     channelRecord,
     loadHistory,
@@ -4192,8 +2735,8 @@
     set editDraft(v: string) { editDraft = v; },
     get pickerKey() { return pickerKey; },
     set pickerKey(v: number | null) { pickerKey = v; },
-    get replyTo() { return replyTo; },
-    set replyTo(v: Msg | null) { replyTo = v; },
+    get replyTo() { return ui.replyTo; },
+    set replyTo(v: Msg | null) { ui.replyTo = v; },
     startEdit,
     saveEdit,
     cancelEdit,
@@ -4204,7 +2747,7 @@
     toggleReaction,
     jumpTo,
     msgCtx,
-    renderMd,
+    renderMd: (t: string) => md.renderMd(t, mdContext()),
     mentionsMe,
     dayKey,
     dayLabel,
@@ -4239,7 +2782,7 @@
     ensureMemberRoles,
     ensureRoles,
     nsMembers: (ns: string) => store.servers.get(ns)?.members ?? [],
-    get nsMembersLoading() { return nsMembersLoading; },
+    get nsMembersLoading() { return activeServer ? (store.servers.get(activeServer)?.membersLoading ?? false) : false; },
     fetchNsMembers,
     assignNsRole,
     unassignNsRole,
@@ -4280,7 +2823,7 @@
     // user settings
     get theme() { return theme; },
     get host() { return cf.host; },
-    get reconnecting() { return reconnecting; },
+    get reconnecting() { return ui.reconnecting; },
     setStatus,
     toggleTheme,
     enrollThisDevice: enrollThisDevice,
@@ -4288,10 +2831,10 @@
     // user settings (page overlay)
     get userTab() { return userTab; },
     set userTab(v: "account" | "appearance" | "connection" | "verification") { userTab = v; },
-    get verifications() { return verifications; },
+    get verifications() { return store.session.verifications; },
     // server settings (ns overlay)
-    get nsTab() { return nsTab; },
-    set nsTab(v: "overview" | "roles" | "members" | "emoji" | "invites" | "bans" | "federation" | "recovery" | "danger") { nsTab = v; },
+    get nsTab() { return ui.nsTab; },
+    set nsTab(v: "overview" | "roles" | "members" | "emoji" | "invites" | "bans" | "federation" | "recovery" | "danger") { ui.nsTab = v; },
     denyList,
     refreshBans,
     liftMod,
@@ -4362,8 +2905,8 @@
   />
 {:else}
   <!-- ================= MAIN APP ================= -->
-  {#if reconnecting}
-    <div class="reconnect-banner">Connection lost — reconnecting…</div>
+  {#if ui.reconnecting}
+    <div class="reconnect-banner">Connection lost — ui.reconnecting…</div>
   {:else if needsEmailWarning}
     <div class="email-banner">
       <span>⚠ No email is on file for this account — you won't be able to reset your password.</span>
@@ -4402,7 +2945,7 @@
   <div
     class="app"
     class:members-collapsed={!membersVisible || activeChannel?.voice}
-    class:with-top-banner={needsEmailWarning && !reconnecting}
+    class:with-top-banner={needsEmailWarning && !ui.reconnecting}
   >
     <!-- COMMUNITY RAIL -->
     <CommunityRail />
@@ -4439,13 +2982,13 @@
       <DiscoverModal onclose={() => (discoverOpen = false)} />
     {/if}
 
-    {#if reportTarget}
-      <ReportModal target={reportTarget} onclose={() => (reportTarget = null)} />
+    {#if store.reports.target}
+      <ReportModal target={store.reports.target} onclose={() => (store.reports.target = null)} />
     {/if}
 
 
-    {#if reportsOpen}
-      <ReportsQueueModal onclose={() => (reportsOpen = false)} />
+    {#if store.reports.open}
+      <ReportsQueueModal onclose={() => (store.reports.open = false)} />
     {/if}
 
     {#if store.invites.createOpen}
@@ -4495,8 +3038,8 @@
       <CreateCategoryModal bind:name={newCatName} onclose={() => (newCatOpen = false)} oncreate={createCategory} />
     {/if}
 
-    {#if chanPermsCh}
-      <ChannelSettings channel={chanPermsCh} onclose={() => (chanPermsCh = null)} />
+    {#if ui.chanPerms}
+      <ChannelSettings channel={ui.chanPerms} onclose={() => (ui.chanPerms = null)} />
     {/if}
 
     {#if profileTarget}
@@ -4523,8 +3066,8 @@
       <FederationPanel onclose={() => (federationOpen = false)} />
     {/if}
 
-    {#if nsSettingsOpen}
-      <ServerSettingsModal onclose={() => (nsSettingsOpen = false)} />
+    {#if ui.nsSettingsOpen}
+      <ServerSettingsModal onclose={() => (ui.nsSettingsOpen = false)} />
     {/if}
 
     {#if serverProfileOpen}

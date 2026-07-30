@@ -1,5 +1,6 @@
 // The client domain model — see docs/architecture/client-model-refactor.md.
 import type { Mode } from "$lib/weft";
+import { store } from "./store.svelte";
 
 /**
  * The connect / login screen state (§3.6 homeserver pick, §6.1 auth): the
@@ -33,3 +34,11 @@ export class ConnectForm {
   /// A device key exists for (host, account) → offer passwordless login.
   deviceKeyAvailable = $state(false);
 }
+
+/// The single connect-form instance (module singleton — imported by the layout,
+/// the reducer's auth handlers, and ConnectScreen).
+export const cf = new ConnectForm();
+
+/// Per-account localStorage key for the email-nudge banner dismissal.
+export const emailNudgeKey = (): string =>
+  `weft:email-nudge-dismissed:${cf.host}:${store.session.account}`;

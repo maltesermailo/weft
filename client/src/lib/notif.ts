@@ -1,0 +1,19 @@
+// Notification-preference reads/writes: thin resolvers over `store.notifPrefs`
+// (`Channel.isMuted` / `Server.isMuted` read the same store). Kept out of the
+// layout so the reducer can consult mute/level state directly.
+import { store, type NotifLevel } from "$lib/models/store.svelte";
+import { nsOf } from "$lib/models/channel.svelte";
+
+/// The notification scope key for a channel: its namespace, or the network.
+export const scopeKeyOf = (channel: string): string => {
+  const ns = nsOf(channel);
+  return ns ? `ns:${ns}` : "net";
+};
+
+export const notifLevel = (channel: string): NotifLevel => store.notifAt(scopeKeyOf(channel));
+export const isMuted = (channel: string): boolean => store.mutedAt(scopeKeyOf(channel));
+export const serverMuted = (ns: string): boolean => store.mutedAt(ns ? `ns:${ns}` : "net");
+export const notifLevelOf = (scopeKey: string): NotifLevel => store.notifAt(scopeKey);
+export function setNotifLevel(scope: string, level: NotifLevel): void {
+  store.setNotif(scope, level);
+}

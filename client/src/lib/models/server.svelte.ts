@@ -4,6 +4,14 @@ import type { Membership } from "./membership.svelte";
 import type { Role } from "./role.svelte";
 import { store, type NotifLevel } from "./store.svelte";
 
+/// One streamed `ns-member-info` roster row, buffered until the BATCH flush.
+export interface RosterRow {
+  user: string;
+  network: string;
+  joinedMs: number;
+  roles: string[];
+}
+
 /// The NS-META fields this model consumes (a structural subset of the wire
 /// event — kept here so the model stays decoupled from `$lib/weft`).
 export interface NsMetaFields {
@@ -53,6 +61,11 @@ export class Server {
   /// §6.2 the moderator roster (NS INFO MEMBERS), once fetched (was
   /// `nsMembersByNs[id]`). Empty until a mod fetches it; not all servers load it.
   members = $state<Membership[]>([]);
+  /// Roster fetch state: `membersLoading` gates the UI spinner; `memberBuf`
+  /// accumulates the streamed `ns-member-info` rows until the `ni…` BATCH
+  /// terminator flushes them into `members` (transient, non-reactive).
+  membersLoading = $state(false);
+  memberBuf: RosterRow[] = [];
   /// §6.5 this namespace's role definitions (position-ordered), once fetched.
   /// Populated from the `ns:<id>` ROLE flush; `Membership.roles` resolves here.
   roles = $state<Role[]>([]);

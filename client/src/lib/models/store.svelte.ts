@@ -8,6 +8,7 @@ import { Session } from "./session.svelte";
 import { SearchPanel, PinsPanel } from "./panels.svelte";
 import { Threads } from "./threads.svelte";
 import { Invites } from "./invites.svelte";
+import { Reports } from "./reports.svelte";
 
 /// A scope's notification level (§ notification prefs). Per-namespace (`ns:<id>`)
 /// or `net` for top-level channels; the default keeps only DMs/@mentions pinging.
@@ -68,6 +69,8 @@ export class AppStore {
   readonly threads = new Threads();
   /** §6.5 invites: list menu + create screen. */
   readonly invites = new Invites();
+  /** §6.7 moderation reports: queue modal + report-filing target. */
+  readonly reports = new Reports();
 
   constructor() {
     this.loadNotif();

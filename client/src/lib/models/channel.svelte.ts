@@ -94,3 +94,103 @@ export class Channel {
     }
   }
 }
+
+// ---- the channel collection (was the layout's `channels` record + helpers) ----
+// The app's open conversations, keyed by canonical wire name. A module singleton
+// mutated in place (never reassigned) so it can be a `const` export imported bare
+// and stay reactive across modules. Cleared via `resetChannels()` on logout.
+export const channels = $state<Record<string, Channel>>({});
+
+let msgSeq = 0;
+/// Stamp a unique, monotonic render key onto a message (session-local).
+export const mkMsg = (m: Omit<Msg, "key">): Msg => ({ ...m, key: msgSeq++ });
+
+/// The namespace id in `#<ns>/<chan>`, else "" (top-level / DM / group).
+export const nsOf = (name: string): string => name.match(/^#([^/]+)\//)?.[1] ?? "";
+
+/// Short channel label: the vanity if known, else the raw local segment.
+export const chanShort = (name: string): string =>
+  channels[name]?.vanity || name.replace(/^#[^/]+\//, "").replace(/^#/, "");
+
+/// The record for a name, or undefined (each MessageList reads its own).
+export const channelRecord = (name: string): Channel | undefined => channels[name];
+
+/// Intern a channel, seeding its Server edge + cached layout on first creation.
+export function ensureChannel(name: string): Channel {
+  let ch = channels[name];
+  if (!ch) {
+    ch = new Channel(name);
+    const ns = nsOf(name);
+    if (ns) ch.server = store.server(ns); // the Channel → Server graph edge
+    const cached = ns ? layoutCache[ns]?.chans[name] : undefined;
+    if (cached) {
+      ch.category = cached.category;
+      ch.position = cached.position ?? 0;
+    }
+    channels[name] = ch;
+  }
+  return ch;
+}
+
+/// Clear the unread counters for a channel by name.
+export function markRead(name: string): void {
+  channels[name]?.markRead();
+}
+
+/// Forget every conversation (logout) — mutates in place, never reassigns.
+export function resetChannels(): void {
+  for (const k of Object.keys(channels)) delete channels[k];
+}
+
+// ---- layout cache (server-authoritative, cached in localStorage for instant
+// reload): per namespace, the category list + each channel's category/position.
+type NsLayout = { cats: string[]; chans: Record<string, { category?: string; position?: number }> };
+export const layoutCache = $state<Record<string, NsLayout>>({});
+
+function saveLayoutCache(): void {
+  try {
+    localStorage.setItem("weft:layout", JSON.stringify(layoutCache));
+  } catch {
+    /* ignore */
+  }
+}
+/// Restore the cached layout from localStorage (boot). Mutates in place.
+export function loadLayoutCache(): void {
+  for (const k of Object.keys(layoutCache)) delete layoutCache[k];
+  try {
+    Object.assign(layoutCache, JSON.parse(localStorage.getItem("weft:layout") ?? "{}"));
+  } catch {
+    /* ignore */
+  }
+}
+export function cacheNsCats(ns: string, cats: string[]): void {
+  (layoutCache[ns] ??= { cats: [], chans: {} }).cats = cats;
+  saveLayoutCache();
+}
+export function cacheChanLayout(chanName: string, category: string | undefined, position: number): void {
+  const ns = nsOf(chanName);
+  if (!ns) return;
+  (layoutCache[ns] ??= { cats: [], chans: {} }).chans[chanName] = { category, position };
+  saveLayoutCache();
+}
+
+// ---- open-DM persistence (the server doesn't yet track a DM list — §18) ----
+// Persisted per account so a conversation (and its history on click) survives a
+// reconnect / relaunch.
+const dmStoreKey = () => `weft:dms:${store.session.account}@${store.session.network}`;
+export function persistDms(): void {
+  try {
+    const keys = Object.keys(channels).filter((k) => k.startsWith("@"));
+    localStorage.setItem(dmStoreKey(), JSON.stringify(keys));
+  } catch {
+    /* storage unavailable */
+  }
+}
+export function restoreDms(): void {
+  try {
+    const keys: string[] = JSON.parse(localStorage.getItem(dmStoreKey()) ?? "[]");
+    for (const k of keys) if (k.startsWith("@")) ensureChannel(k);
+  } catch {
+    /* storage unavailable */
+  }
+}

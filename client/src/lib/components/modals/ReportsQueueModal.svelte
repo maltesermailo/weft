@@ -1,6 +1,8 @@
 <script lang="ts">
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
+  import { store } from "$lib/models/store.svelte";
+  import { RESOLVE_ACTIONS } from "$lib/models/reports.svelte";
   import * as weft from "$lib/weft";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
@@ -14,7 +16,7 @@
       <button class="linkish" aria-label="Close" onclick={onclose}>✕</button>
     </div>
     <div class="modal-list">
-      {#each Object.values(app.reportQueue) as r (r.report_id)}
+      {#each store.reports.queue.values() as r (r.report_id)}
         <div class="ns-card report-card">
           <div class="ns-info">
             <div class="ns-name">{r.category} <span class="rep-state {r.state}">{r.state}</span></div>
@@ -22,7 +24,7 @@
           </div>
           <select onchange={(e) => weft.reportsResolve(r.report_id, e.currentTarget.value).catch(() => {})}>
             <option value="">resolve…</option>
-            {#each app.resolveActions as a (a)}<option value={a}>{a}</option>{/each}
+            {#each RESOLVE_ACTIONS as a (a)}<option value={a}>{a}</option>{/each}
           </select>
         </div>
       {:else}
