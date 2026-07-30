@@ -1011,9 +1011,6 @@ button:disabled {
   display: flex;
   flex-direction: column;
 }
-.msg-list-wrap.list-hidden {
-  display: none;
-}
 /* Bottom-anchored chat list (Discord-style): the newest message is the natural
    resting position, so it renders at the bottom with no scroll operation, and
    content growth (images loading, older pages prepended) never moves the

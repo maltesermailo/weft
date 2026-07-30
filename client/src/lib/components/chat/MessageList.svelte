@@ -8,10 +8,10 @@
   import MessageItem from "./MessageItem.svelte";
 
   const app = getApp();
-  // This list owns ONE channel and stays mounted while it's kept-alive, so
-  // switching back is instant. @tanstack/virtual is headless: WE own the scroll
-  // element and windowing math, absolutely position each row inside a spacer of
-  // the total size, and drive the bottom-anchor / stick / load-older natively.
+  // One list per channel; the channel route remounts it on navigation.
+  // @tanstack/virtual is headless: WE own the scroll element and windowing math,
+  // absolutely position each row inside a spacer of the total size, and drive the
+  // bottom-anchor / stick / load-older natively.
   let { channel, active }: { channel: string; active: boolean } = $props();
 
   const ch = $derived(app.channelRecord(channel));
@@ -194,11 +194,10 @@
 <!--
   Bottom-anchored, virtualized list. Rows render oldest→newest; each row carries
   its own leading day-divider and (before the first unread) the "New messages"
-  divider, plus the top-of-history indicator on the first row. Kept-alive but
-  inactive → hidden, DOM + virtualizer state retained for an instant return.
+  divider, plus the top-of-history indicator on the first row.
 -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="msg-list-wrap" class:list-hidden={!active} use:spoilerReveal>
+<div class="msg-list-wrap" use:spoilerReveal>
   {#if ch && messages.length}
     <div bind:this={scrollEl} class="message-scroll" onscroll={onScroll}>
       <div class="vspacer" style="height: {$virtualizer.getTotalSize()}px;">
