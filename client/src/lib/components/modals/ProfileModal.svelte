@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { bioOf, displayName, initials, statusOf } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -9,7 +10,7 @@
   const handle = $derived(target.includes("@") ? target : `${target}@${app.network}`);
   const status = $derived(isSelf ? app.myStatus : (app.accountOf(target).presence ?? "offline"));
   const online = $derived(status !== "offline" && status !== "invisible");
-  const bio = $derived(app.bioOf(target));
+  const bio = $derived(bioOf(target));
   const badge = $derived(app.badgeFor(target, app.active));
 
   const servers = $derived(app.mutualServers(target));
@@ -65,7 +66,7 @@
 
       <div class="pm-card-body">
         <div class="pm-nameline">
-          <span class="pm-name" style={app.nameColor(target) ? `color:${app.nameColor(target)}` : ""}>{app.displayName(target)}</span>
+          <span class="pm-name" style={app.nameColor(target) ? `color:${app.nameColor(target)}` : ""}>{displayName(target)}</span>
           {#if app.isStaff(target)}<span class="cap-badge staff">staff</span>{/if}
         </div>
         <button class="pm-handle" title="Copy handle" onclick={copyId}>
@@ -73,7 +74,7 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
         </button>
         <div class="pm-statusline"><span class="pm-sdot {status}" class:on={online}></span>{STATUS_LABEL[status] ?? "Offline"}</div>
-        {#if app.statusOf(target)}<div class="pm-custom-status">{app.statusOf(target)}</div>{/if}
+        {#if statusOf(target)}<div class="pm-custom-status">{statusOf(target)}</div>{/if}
 
         {#if !isSelf}
           <div class="pm-actions">
@@ -123,7 +124,7 @@
           <div class="pm-list">
             {#each servers as ns (ns)}
               <button class="pm-server" onclick={() => jumpServer(ns)}>
-                <span class="pm-server-icon">{app.initials(app.serverName(ns))}</span>
+                <span class="pm-server-icon">{initials(app.serverName(ns))}</span>
                 <span class="pm-server-name">{app.serverName(ns)}</span>
                 <svg class="pm-chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6" /></svg>
               </button>
@@ -132,7 +133,7 @@
         {:else}
           <div class="pm-empty">
             <div class="pm-empty-emoji">🪐</div>
-            <p>No servers in common{isSelf ? "" : ` with ${app.displayName(target)}`}.</p>
+            <p>No servers in common{isSelf ? "" : ` with ${displayName(target)}`}.</p>
           </div>
         {/if}
       {:else}

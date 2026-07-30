@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayName, nickOf } from "$lib/profile.svelte";
   // §10.3 quick per-namespace nickname editor, opened from a user's context
   // menu. Own nick needs `nick`; another member's needs `manage-nicks` — the
   // server enforces, a missing cap just ERRs.
@@ -11,7 +12,7 @@
   const isSelf = $derived(target === app.account);
   const scope = $derived(`ns:${app.activeServer}`);
   // Prefill once with the current nickname (the modal is opened fresh per target).
-  let value = $state(untrack(() => app.nickOf(target)));
+  let value = $state(untrack(() => nickOf(target)));
 
   function focusInput(node: HTMLInputElement) {
     node.focus();
@@ -27,7 +28,7 @@
   <button class="modal-backdrop" aria-label="Close" onclick={onclose}></button>
   <div class="modal" role="dialog" aria-modal="true" style="width: min(400px, 100%)">
     <div class="modal-head">
-      <h2>{isSelf ? "Set your nickname" : `Set nickname for ${app.displayName(target)}`}</h2>
+      <h2>{isSelf ? "Set your nickname" : `Set nickname for ${displayName(target)}`}</h2>
       <button class="linkish" aria-label="Close" onclick={onclose}>✕</button>
     </div>
     <p class="modal-sub">
@@ -38,7 +39,7 @@
         use:focusInput
         bind:value
         maxlength="128"
-        placeholder={app.displayName(target)}
+        placeholder={displayName(target)}
         onkeydown={(e) => e.key === "Enter" && save()}
       />
     </label>

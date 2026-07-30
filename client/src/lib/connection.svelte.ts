@@ -12,6 +12,22 @@ import { ui } from "$lib/ui.svelte";
 export const HOMESERVER_KEY = "weft:homeserver";
 export const SAVED_KEY = "weft:last-connect";
 
+/// SYNC-protocol flags: `syncing` = an initial/reconnect SYNC is streaming (so
+/// event handlers must not auto-navigate); `synced` = this app session has
+/// synced at least once (a later reconnect replays the cursor, not a full sync).
+export const syncState = { syncing: false, synced: false };
+
+/// The v0.12 SYNC cursor key (per account+device); replayed on reconnect so
+/// `SYNC since=` catches up missed messages + offline edits/reactions.
+export const syncCursorKey = (): string => `weft:sync:${store.session.account}@${store.session.network}`;
+export function loadSyncCursor(): string | undefined {
+  try {
+    return localStorage.getItem(syncCursorKey()) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export const conn = $state<{
   /// Credentials of the live session, kept for silent reconnect (null = none).
   lastCreds: { host: string; account: string; password: string } | null;

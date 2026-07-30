@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { friendLabel, initials } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -75,7 +76,7 @@
     app.friendList.filter((r) => {
       if (!app.friendLocalAccount(r)) return false;
       const q = search.trim().toLowerCase();
-      return !q || app.friendLabel(r).toLowerCase().includes(q) || r.toLowerCase().includes(q);
+      return !q || friendLabel(r).toLowerCase().includes(q) || r.toLowerCase().includes(q);
     }),
   );
   const onlineFriends = $derived(friends.filter(isOnline));
@@ -100,7 +101,7 @@
     <!-- Header -->
     <div class="ic-head">
       <div class="ic-server">
-        <div class="ic-icon">{app.initials(scopeLabel)}</div>
+        <div class="ic-icon">{initials(scopeLabel)}</div>
         <div class="ic-meta">
           <div class="ic-name">{app.activeNsMeta?.title || scopeLabel}</div>
           <div class="ic-scope">on {app.network}</div>
@@ -164,7 +165,7 @@
           <div class="ic-chips">
             {#each [...selected] as ref (ref)}
               <div class="ic-chip">
-                {app.friendLabel(ref)}
+                {friendLabel(ref)}
                 <button class="ic-chip-x" aria-label="Remove" onclick={() => toggle(ref)}>✕</button>
               </div>
             {/each}
@@ -176,7 +177,7 @@
             <button class="ic-friend" class:sel={selected.has(ref)} onclick={() => toggle(ref)}>
               <div class="ic-fav"><Avatar account={app.friendLocalAccount(ref) ?? ref} /><span class="ic-fdot {statusOf(ref)}"></span></div>
               <div class="ic-finfo">
-                <div class="ic-fname">{app.friendLabel(ref)}</div>
+                <div class="ic-fname">{friendLabel(ref)}</div>
                 <div class="ic-fsub">{statusOf(ref)}</div>
               </div>
               <span class="ic-check" class:on={selected.has(ref)}>

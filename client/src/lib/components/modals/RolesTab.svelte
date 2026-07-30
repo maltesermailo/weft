@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayName } from "$lib/profile.svelte";
   // §6.5 roles tab, redesigned as a two-pane editor (design/server-settings.html):
   // a searchable, drag-orderable role list on the left; a tabbed editor
   // (Display / Permissions) for the selected role on the right. Order is
@@ -64,7 +65,7 @@
       ? nsMembers.filter(
           (n) =>
             app.rolesOf(n, scope).some((r) => r.id === editing!.id) &&
-            (app.displayName(n).toLowerCase().includes(memberSearch.toLowerCase()) ||
+            (displayName(n).toLowerCase().includes(memberSearch.toLowerCase()) ||
               n.toLowerCase().includes(memberSearch.toLowerCase())),
         )
       : [],
@@ -319,7 +320,7 @@
             <div class="rl-member">
               <span class="rl-member-avatar"><Avatar account={name} /></span>
               <div class="rl-member-meta">
-                <div class="rl-member-name">{app.displayName(name)}</div>
+                <div class="rl-member-name">{displayName(name)}</div>
                 <div class="rl-member-handle">{name}</div>
               </div>
               <button

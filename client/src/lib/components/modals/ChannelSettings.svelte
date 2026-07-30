@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayName } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { untrack } from "svelte";
   import { getApp } from "$lib/context";
@@ -59,7 +60,7 @@
       .filter(
         (n) =>
           !memberTargets.includes(n) &&
-          (app.displayName(n).toLowerCase().includes(q) || n.toLowerCase().includes(q)),
+          (displayName(n).toLowerCase().includes(q) || n.toLowerCase().includes(q)),
       )
       .sort((a, b) => a.localeCompare(b));
   });
@@ -254,7 +255,7 @@
                   onclick={() => (selected = { kind: "member", account: m })}
                 >
                   <span class="cp-avatar"><Avatar account={m} /></span>
-                  <span class="cp-name">{app.displayName(m)}</span>
+                  <span class="cp-name">{displayName(m)}</span>
                 </button>
                 <button class="cp-x" title="Remove member override" aria-label={`Remove ${m} override`} onclick={() => removeMemberTarget(m)}>✕</button>
               </div>
@@ -282,7 +283,7 @@
                   <input class="cp-search" bind:value={memberQuery} placeholder="Search or type a name…" />
                   {#each memberChoices.slice(0, 8) as m (m)}
                     <button class="cp-pick" onclick={() => addMember(m)}>
-                      <span class="cp-avatar sm"><Avatar account={m} /></span>{app.displayName(m)}
+                      <span class="cp-avatar sm"><Avatar account={m} /></span>{displayName(m)}
                     </button>
                   {/each}
                   {#if memberQuery.trim() && !memberChoices.includes(memberQuery.trim())}
@@ -306,7 +307,7 @@
                 <span class="cp-tag">Role</span>
               {:else}
                 <span class="cp-avatar lg"><Avatar account={selected.account} /></span>
-                <span class="cp-head-name">{app.displayName(selected.account)}</span>
+                <span class="cp-head-name">{displayName(selected.account)}</span>
                 <span class="cp-tag">Member</span>
               {/if}
             </div>
@@ -316,7 +317,7 @@
               {:else if selected.kind === "role"}
                 Granted to everyone who holds <b>{selected.name}</b>, in this channel only.
               {:else}
-                A direct grant to <b>{app.displayName(selected.account)}</b>, in this channel only.
+                A direct grant to <b>{displayName(selected.account)}</b>, in this channel only.
               {/if}
             </p>
 

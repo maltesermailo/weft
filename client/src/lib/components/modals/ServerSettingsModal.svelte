@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayName, initials } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   import * as weft from "$lib/weft";
@@ -42,7 +43,7 @@
   const shownMembers = $derived(
     roster.filter(
       (m) =>
-        app.displayName(m.account.name).toLowerCase().includes(memberSearch.toLowerCase()) ||
+        displayName(m.account.name).toLowerCase().includes(memberSearch.toLowerCase()) ||
         m.account.name.toLowerCase().includes(memberSearch.toLowerCase()),
     ),
   );
@@ -153,7 +154,7 @@
   <nav class="so-nav">
     <div class="so-nav-inner">
       <div class="so-server-head">
-        <span class="so-server-avatar">{app.initials(app.activeNsMeta?.name || app.activeServer)}</span>
+        <span class="so-server-avatar">{initials(app.activeNsMeta?.name || app.activeServer)}</span>
         <div class="so-server-meta">
           <div class="so-server-name">{app.activeNsMeta?.name || app.activeServer}</div>
           <div class="so-server-sub">Server Settings</div>
@@ -216,7 +217,7 @@
 
         <div class="ov-card">
           <div class="ov-identity">
-            <span class="ov-avatar">{app.initials(app.nsTitle.trim() || app.activeNsMeta?.name || app.activeServer)}</span>
+            <span class="ov-avatar">{initials(app.nsTitle.trim() || app.activeNsMeta?.name || app.activeServer)}</span>
             <div class="ov-identity-meta">
               <div class="ov-identity-name">{app.nsTitle.trim() || app.activeNsMeta?.name || app.activeServer}</div>
               <div class="ov-identity-sub">Namespace on {app.network}</div>
@@ -313,7 +314,7 @@
                 <span class="mem-avatar"><Avatar account={acct} /></span>
                 <div class="mem-id-meta">
                   <div class="mem-name">
-                    {app.displayName(acct)}
+                    {displayName(acct)}
                     {#if isOwner}<span class="mem-owner" title="Server owner">👑 Owner</span>{/if}
                   </div>
                   <div class="mem-handle">{acct}{m.network !== app.network ? `@${m.network}` : ""}</div>
@@ -332,7 +333,7 @@
                   <button
                     class="role-add"
                     title="Add role"
-                    aria-label={`Add a role to ${app.displayName(acct)}`}
+                    aria-label={`Add a role to ${displayName(acct)}`}
                     onclick={() => (addRoleFor = addRoleFor === handle ? null : handle)}
                   >+</button>
                   {#if addRoleFor === handle}

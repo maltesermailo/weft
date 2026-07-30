@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { bioOf, nickOf, statusOf } from "$lib/profile.svelte";
   import { untrack } from "svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
@@ -42,7 +43,7 @@
   let roleMenuOpen = $state(false);
 
   // §10.3 moderator nickname edit (server enforces `manage-nicks`).
-  let nickDraft = $state(untrack(() => app.nickOf(target)));
+  let nickDraft = $state(untrack(() => nickOf(target)));
   // §6.7 moderation controls: scope (channel/namespace/network) + optional reason.
   let modScope = $state(app.scopesFor()[0]);
   let modReason = $state("");
@@ -93,14 +94,14 @@
       </div>
       <div class="profile-handle">{target.includes("@") ? target : `${target}@${app.network}`} · <span class="pres-{pr}">{pr}</span></div>
 
-      {#if app.statusOf(target)}
-        <div class="profile-custom-status">{app.statusOf(target)}</div>
+      {#if statusOf(target)}
+        <div class="profile-custom-status">{statusOf(target)}</div>
       {/if}
 
-      {#if app.bioOf(target)}
+      {#if bioOf(target)}
         <div class="profile-divider"></div>
         <div class="profile-section-label">About me</div>
-        <p class="profile-bio">{app.bioOf(target)}</p>
+        <p class="profile-bio">{bioOf(target)}</p>
       {/if}
 
       {#if inServer && (myRoles.length || canAssignRoles || targetIsOwner)}

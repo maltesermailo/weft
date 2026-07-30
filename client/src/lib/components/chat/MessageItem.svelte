@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayName } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
   import { autofocus } from "$lib/actions";
   import EmojiPicker from "./EmojiPicker.svelte";
@@ -36,7 +37,7 @@
       <div class="msg-meta">
         {#if m.net}
           <!-- Foreign sender: fully qualified, and no local profile to open. -->
-          <span class="author foreign" title="from {m.net}">{app.displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></span>
+          <span class="author foreign" title="from {m.net}">{displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></span>
           <!-- §11.11 recognition: a federated user's role(s) held on this network. -->
           {#each app.rolesOf(`${m.author}@${m.net}`, app.roleScopeOf(app.active)) as r (r.name)}
             <span class="role-pill" style="--role:{r.color}"><span class="role-dot"></span>{r.name}</span>
@@ -46,7 +47,7 @@
             class="author author-btn"
             style={app.nameColor(m.author) ? `color:${app.nameColor(m.author)}` : ""}
             onclick={(e) => app.openProfile(m.author, e)}
-          >{app.displayName(m.author)}</button>
+          >{displayName(m.author)}</button>
         {/if}
         {#if !m.net && app.isStaff(m.author)}<span class="cap-badge staff">staff</span>{/if}
         {#if m.own}<span class="cap-badge owner">you</span>{/if}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dotClass, peerOf } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
   const app = getApp();
 </script>
@@ -12,10 +13,10 @@
     <div class="topic">group DM</div>
   {:else if app.activeChannel && app.activeIsDm}
     <div class="chan-title">
-      <span class={app.dotClass(app.peerOf(app.active))}></span>
-      <span>{app.peerOf(app.active)}</span>
+      <span class={dotClass(peerOf(app.active))}></span>
+      <span>{peerOf(app.active)}</span>
     </div>
-    <div class="topic">{app.accountOf(app.peerOf(app.active)).presence ?? "offline"}</div>
+    <div class="topic">{app.accountOf(peerOf(app.active)).presence ?? "offline"}</div>
   {:else if app.activeChannel}
     {@const meta = app.retentionMeta[app.activeChannel.retention]}
     <div class="chan-title">
@@ -32,7 +33,7 @@
   {/if}
   <div class="topbar-actions">
     {#if app.activeIsDm}
-      <button class="icon-btn" title="Start call" aria-label="Start call" disabled={!!app.activeCall} onclick={() => app.callUser(app.peerOf(app.active))}>
+      <button class="icon-btn" title="Start call" aria-label="Start call" disabled={!!app.activeCall} onclick={() => app.callUser(peerOf(app.active))}>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" /></svg>
       </button>
       <button class="icon-btn" title="Create group" aria-label="Create group" onclick={app.openGroupPicker}>

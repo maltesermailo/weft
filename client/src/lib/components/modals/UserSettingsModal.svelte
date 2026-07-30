@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { avatarUrl, bioOf, displayName, initials } from "$lib/profile.svelte";
   import { untrack } from "svelte";
   import { fade, fly } from "svelte/transition";
   import { getApp } from "$lib/context";
@@ -11,11 +12,11 @@
   // successful save (which flows back as a PROFILE / PRESENCE event) clears the
   // dirty state on its own — no manual "saved" bookkeeping.
   const savedDisplay = $derived(
-    app.displayName(app.account) === app.account ? "" : app.displayName(app.account),
+    displayName(app.account) === app.account ? "" : displayName(app.account),
   );
-  const savedAbout = $derived(app.bioOf(app.account));
+  const savedAbout = $derived(bioOf(app.account));
   const savedStatus = $derived(app.myStatus);
-  const savedAvatarUrl = $derived(app.avatarUrl(app.account));
+  const savedAvatarUrl = $derived(avatarUrl(app.account));
 
   // Seed the draft from the current values (initial snapshot — intentionally not
   // reactive; the draft then diverges until saved/reverted).
@@ -149,7 +150,7 @@
               <div class="field-label">Profile picture</div>
               <div class="pe-avrow">
                 <button class="pe-av" title="Change avatar" onclick={() => fileInput?.click()}>
-                  {#if previewAvatarUrl}<img src={previewAvatarUrl} alt="" />{:else}{app.initials(app.account)}{/if}
+                  {#if previewAvatarUrl}<img src={previewAvatarUrl} alt="" />{:else}{initials(app.account)}{/if}
                   <span class="pe-av-overlay">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
                     Change
@@ -210,7 +211,7 @@
               <div class="pe-preview-banner"></div>
               <div class="pe-preview-avwrap">
                 <div class="pe-preview-av">
-                  {#if previewAvatarUrl}<img src={previewAvatarUrl} alt="" />{:else}{app.initials(app.account)}{/if}
+                  {#if previewAvatarUrl}<img src={previewAvatarUrl} alt="" />{:else}{initials(app.account)}{/if}
                   <span class="pe-preview-dot dot {dStatus}"></span>
                 </div>
               </div>

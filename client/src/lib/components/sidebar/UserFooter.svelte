@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { initials, statusOf } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -14,7 +15,7 @@
   // Custom-status modal, layered on top of the user menu.
   let statusModal = $state(false);
   let statusDraft = $state("");
-  const myCustom = $derived(app.statusOf(app.account));
+  const myCustom = $derived(statusOf(app.account));
   function openStatusModal() {
     statusDraft = myCustom;
     statusModal = true;
@@ -93,7 +94,7 @@
 
   <button class="sidebar-user" class:open={app.userMenu} title="User menu" onclick={() => (app.userMenu = !app.userMenu)}>
     <span class="avatar status-avatar">
-      {app.initials(app.account)}
+      {initials(app.account)}
       <span class="dot {app.myStatus} corner"></span>
     </span>
     <span class="who">

@@ -5,23 +5,12 @@
   import { page } from "$app/state";
   import * as nav from "$lib/nav";
   import { ui } from "$lib/ui.svelte";
-  import { conn, attemptReconnect, HOMESERVER_KEY, SAVED_KEY } from "$lib/connection.svelte";
+  import { conn, attemptReconnect, HOMESERVER_KEY, SAVED_KEY, loadSyncCursor, syncState } from "$lib/connection.svelte";
+  import { selectServer, goHome } from "$lib/navigation";
   import {
     handle,
     loadHistory,
-    loadSyncCursor,
     hist,
-    syncState,
-    selectServer,
-    goHome,
-    fetchRoles,
-    fetchGrants,
-    fetchNsMembers,
-    createRoleAt,
-    deleteRoleAt,
-    roleFetchQueue,
-    sys,
-    pendingChanCreate,
   } from "$lib/sync/reducer.svelte";
   import { clock, msgEpoch, msgTime, dayKey, dayLabel, retentionOf } from "$lib/time";
   import { scopeKeyOf, notifLevel, isMuted, serverMuted, notifLevelOf, setNotifLevel } from "$lib/notif";
@@ -63,6 +52,11 @@
     rolesOf,
     fedRolesFetched,
     fetchMemberRoles,
+    fetchRoles,
+    fetchGrants,
+    createRoleAt,
+    deleteRoleAt,
+    roleFetchQueue,
     mentionsMe as sessionMentionsMe,
   } from "$lib/models/session.svelte";
   import {
@@ -81,6 +75,8 @@
     cacheChanLayout,
     persistDms,
     restoreDms,
+    pendingChanCreate,
+    sys,
   } from "$lib/models/channel.svelte";
   import { Membership } from "$lib/models/membership.svelte";
   import { searchUnicode } from "$lib/shortcodes";
@@ -866,7 +862,7 @@
   // simply snaps back on the refetch, and its ERR toasts.
   function reconcileRoster(ns: string) {
     setTimeout(() => {
-      if (ui.nsSettingsOpen && ui.nsTab === "members") fetchNsMembers(ns);
+      if (ui.nsSettingsOpen && ui.nsTab === "members") store.server(ns).fetchMembers();
     }, 500);
   }
   function memberRow(ns: string, account: string): Membership | undefined {
@@ -891,7 +887,7 @@
       })
       .catch((e) => {
         toast(String(e), "error");
-        fetchNsMembers(ns);
+        store.server(ns).fetchMembers();
       });
   }
   function unassignNsRole(account: string, roleId: string) {
@@ -908,7 +904,7 @@
       })
       .catch((e) => {
         toast(String(e), "error");
-        fetchNsMembers(ns);
+        store.server(ns).fetchMembers();
       });
   }
   // Right-click a member row in the directory → namespace-scoped moderation.
@@ -2560,7 +2556,6 @@
     get outgoingRequests() { return outgoingRequests; },
     get addFriendInput() { return addFriendInput; },
     set addFriendInput(v: string) { addFriendInput = v; },
-    friendLabel,
     friendLocalAccount,
     addFriend,
     acceptFriend,
@@ -2625,20 +2620,11 @@
     get dropTarget() { return dropTarget; },
     set dropTarget(v: { name: string; after: boolean } | null) { dropTarget = v; },
     moveChannel,
-    initials,
-    avatarUrl,
-    displayName,
-    bioOf,
-    statusOf,
     setCustomStatus,
-    queryProfile,
-    nickOf,
     setNick,
     chanShort,
     titleOf,
     isNsMember: (nsId: string) => store.servers.get(nsId)?.joined ?? false,
-    peerOf,
-    dotClass,
     nsOf,
     badgeFor,
     serverUnread,
@@ -2783,7 +2769,7 @@
     ensureRoles,
     nsMembers: (ns: string) => store.servers.get(ns)?.members ?? [],
     get nsMembersLoading() { return activeServer ? (store.servers.get(activeServer)?.membersLoading ?? false) : false; },
-    fetchNsMembers,
+    fetchNsMembers: (ns: string) => store.server(ns).fetchMembers(),
     assignNsRole,
     unassignNsRole,
     nsMemberCtx,

@@ -62,8 +62,6 @@ export interface AppCtx {
   readonly incomingRequests: string[];
   readonly outgoingRequests: string[];
   addFriendInput: string;
-  /** Short label for a friend: bare handle if local, full ref if federated. */
-  friendLabel(user: string): string;
   /** The local account handle for a friend, or null if they're federated. */
   friendLocalAccount(user: string): string | null;
   addFriend(): void;
@@ -143,21 +141,8 @@ export interface AppCtx {
   moveCategory(dragCat: string, targetCat: string): void;
 
   // ---- helpers ----
-  initials(n: string): string;
-  /** §10.3 a fetchable avatar URL for an account, or null → render initials. */
-  avatarUrl(account: string): string | null;
-  /** §10.3 an account's display name, falling back to the canonical handle. */
-  displayName(account: string): string;
-  /** §10.3 an account's free-text bio, or "" if unset. */
-  bioOf(account: string): string;
-  /** §10.3 an account's custom status, or "" if unset. */
-  statusOf(account: string): string;
   /** Set (or clear, with "") my own custom status (§10.3). */
   setCustomStatus(text: string): void;
-  /** Fetch an account's profile if not already cached (deduped). */
-  queryProfile(account: string): void;
-  /** §10.3 an account's server nickname at the active server, or "" if unset. */
-  nickOf(account: string): string;
   /** Set a per-namespace nickname (empty clears). Own → `nick`, other → `manage-nicks`. */
   setNick(scope: string, account: string, nick: string): void;
   chanShort(n: string): string;
@@ -166,8 +151,6 @@ export interface AppCtx {
   titleOf(n: string): string;
   /// Am I a member of this namespace (by id)? Discover hides servers I'm in.
   isNsMember(nsId: string): boolean;
-  peerOf(n: string): string;
-  dotClass(acct: string): string;
   nsOf(n: string): string;
   badgeFor(account: string, scope: string): Badge | undefined;
   serverUnread(ns: string): boolean;

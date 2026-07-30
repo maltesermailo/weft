@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayName, dotClass, peerOf } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
@@ -23,11 +24,11 @@
         {#if ch.unreadCount}<span class="mention-badge">{ch.unreadCount}</span>{/if}
       </button>
     {:else}
-      <button class="channel-item dm" class:active={ch.name === app.active} class:unread={ch.unread} onclick={() => app.open(ch.name)} oncontextmenu={(e) => app.userCtx(e, app.peerOf(ch.name))}>
-        <span class="avatar sm"><Avatar account={app.peerOf(ch.name)} /></span>
-        <span class="dm-name">{app.displayName(ch.name)}</span>
+      <button class="channel-item dm" class:active={ch.name === app.active} class:unread={ch.unread} onclick={() => app.open(ch.name)} oncontextmenu={(e) => app.userCtx(e, peerOf(ch.name))}>
+        <span class="avatar sm"><Avatar account={peerOf(ch.name)} /></span>
+        <span class="dm-name">{displayName(ch.name)}</span>
         {#if ch.unreadCount}<span class="mention-badge">{ch.unreadCount}</span>{/if}
-        <span class={app.dotClass(app.peerOf(ch.name))}></span>
+        <span class={dotClass(peerOf(ch.name))}></span>
       </button>
     {/if}
   {/each}

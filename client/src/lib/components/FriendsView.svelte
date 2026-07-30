@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { friendLabel } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
@@ -84,7 +85,7 @@
           <div class="fv-row" oncontextmenu={(e) => app.userCtx(e, user)} role="listitem">
             <span class="fv-av"><Avatar account={avatarAccount(user)} /></span>
             <span class="fv-meta">
-              <span class="fv-name">{app.friendLabel(user)}</span>
+              <span class="fv-name">{friendLabel(user)}</span>
               <span class="fv-sub">Incoming friend request</span>
             </span>
             <span class="fv-acts">
@@ -104,7 +105,7 @@
           <div class="fv-row" role="listitem">
             <span class="fv-av"><Avatar account={avatarAccount(user)} /></span>
             <span class="fv-meta">
-              <span class="fv-name">{app.friendLabel(user)}</span>
+              <span class="fv-name">{friendLabel(user)}</span>
               <span class="fv-sub">Outgoing friend request</span>
             </span>
             <span class="fv-acts">
@@ -134,7 +135,7 @@
               {#if app.friendLocalAccount(user)}<span class="fv-dot {statusOf(user)}"></span>{/if}
             </span>
             <span class="fv-meta">
-              <span class="fv-name">{app.friendLabel(user)}</span>
+              <span class="fv-name">{friendLabel(user)}</span>
               <span class="fv-sub">{subtitle(user)}</span>
             </span>
             <span class="fv-acts">

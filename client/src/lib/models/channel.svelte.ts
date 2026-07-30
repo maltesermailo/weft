@@ -1,7 +1,14 @@
 // The client domain model — see docs/architecture/client-model-refactor.md.
+import { goto } from "$app/navigation";
+import { page } from "$app/state";
 import type { Msg, Member } from "$lib/types";
+import type { HandlerMap } from "$lib/sync/handler-map";
 import type { Server } from "./server.svelte";
 import { store } from "./store.svelte";
+import * as weft from "$lib/weft";
+import * as nav from "$lib/nav";
+import { toast } from "$lib/toasts.svelte";
+import { clock } from "$lib/time";
 
 /**
  * A channel, DM, or group conversation. The reactive replacement for the old
@@ -84,6 +91,23 @@ export class Channel {
     this.mentionCount = 0;
   }
 
+  /// Per-user typing-expiry timers (§4 TYPING); a fallback in case a `stop` is lost.
+  private typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /// Mark a user as typing (or stopped) here, with a 6s fallback expiry.
+  setTyping(user: string, active: boolean): void {
+    clearTimeout(this.typingTimers.get(user));
+    if (active) {
+      if (!this.typers.includes(user)) this.typers = [...this.typers, user];
+      this.typingTimers.set(
+        user,
+        setTimeout(() => this.setTyping(user, false), 6000),
+      );
+    } else {
+      this.typers = this.typers.filter((u) => u !== user);
+      this.typingTimers.delete(user);
+    }
+  }
+
   /// Tally one freshly-arrived message; a mention also bumps the mention counters.
   bump(mentioned: boolean): void {
     this.unread = true;
@@ -137,6 +161,29 @@ export function markRead(name: string): void {
   channels[name]?.markRead();
 }
 
+/// Post a local-only system line to the active channel (confirmations, notices).
+export function sys(body: string): void {
+  const active = nav.viewFrom(page.route?.id, page.params).active;
+  const ch = channels[active];
+  if (ch) ch.messages.push(mkMsg({ author: "", body, time: clock(), ts: Date.now(), own: false, system: true }));
+}
+
+/// Apply a §7 REACTION/REACTIONS delta to a message in place (`mine` tracks my
+/// own toggle so the picker highlights correctly).
+export function applyReaction(m: Msg, emoji: string, op: string, by: string): void {
+  m.reactions ??= {};
+  const cur = m.reactions[emoji] ?? { count: 0, mine: false };
+  if (op === "add") {
+    cur.count += 1;
+    if (by === store.session.account) cur.mine = true;
+  } else {
+    cur.count -= 1;
+    if (by === store.session.account) cur.mine = false;
+  }
+  if (cur.count <= 0) delete m.reactions[emoji];
+  else m.reactions[emoji] = cur;
+}
+
 /// Forget every conversation (logout) — mutates in place, never reassigns.
 export function resetChannels(): void {
   for (const k of Object.keys(channels)) delete channels[k];
@@ -174,6 +221,33 @@ export function cacheChanLayout(chanName: string, category: string | undefined, 
   saveLayoutCache();
 }
 
+// ---- pending channel-creates (§6.3): follow-up actions stashed by `<ns>|<slug>`
+// until the server echoes the canonical name + vanity, then reconciled. ----
+export const pendingChanCreate: Record<string, { cat: string; announce: boolean; voice: boolean }> = {};
+
+/// Finish a channel-create once the server confirms the canonical name + vanity:
+/// subscribe (text), apply the stashed category/announce flags, and navigate.
+export function reconcileChannelCreate(canonical: string, vanity: string): void {
+  const ns = nsOf(canonical);
+  if (!ns || !vanity) return;
+  const key = `${ns}|${vanity}`;
+  const pending = pendingChanCreate[key];
+  if (!pending) return;
+  delete pendingChanCreate[key];
+
+  const ch = ensureChannel(canonical);
+  ch.voice = pending.voice;
+  // Subscribe (text) so live messages arrive; voice rooms are entered via VOICE.
+  if (!pending.voice) weft.join(canonical).catch(() => {});
+  if (pending.cat) weft.channelMeta(canonical, "category", pending.cat).catch((e) => toast(String(e), "error"));
+  // Announcement channel: view-open, post-restricted to `send` holders (§6.7).
+  if (!pending.voice && pending.announce)
+    weft.channelMeta(canonical, "posting", "restricted").catch((e) => toast(String(e), "error"));
+  // Jump to the new channel (a voice room is *entered* by clicking it).
+  if (!pending.voice) markRead(canonical);
+  goto(nav.pathFor(canonical));
+}
+
 // ---- open-DM persistence (the server doesn't yet track a DM list — §18) ----
 // Persisted per account so a conversation (and its history on click) survives a
 // reconnect / relaunch.
@@ -194,3 +268,21 @@ export function restoreDms(): void {
     /* storage unavailable */
   }
 }
+
+/// §6.4 pin wire-event handlers: keep the channel's `pinnedIds` current and, if
+/// the Pins panel is open on that channel, refresh/prune it.
+export const pinsHandlers: HandlerMap = {
+  pinned: (e) => {
+    const ch = ensureChannel(e.channel);
+    ch.pinnedIds = [...(ch.pinnedIds ?? []).filter((id) => id !== e.msgid), e.msgid];
+    const active = nav.viewFrom(page.route?.id, page.params).active;
+    if (store.pins.open && active === e.channel) weft.pins(e.channel).catch(() => {});
+  },
+  unpinned: (e) => {
+    const ch = channels[e.channel];
+    if (ch) ch.pinnedIds = (ch.pinnedIds ?? []).filter((id) => id !== e.msgid);
+    const active = nav.viewFrom(page.route?.id, page.params).active;
+    if (store.pins.open && active === e.channel)
+      store.pins.list = store.pins.list.filter((m) => m.msgid !== e.msgid);
+  },
+};

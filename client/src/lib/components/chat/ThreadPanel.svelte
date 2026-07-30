@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayName } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
   import Attachment from "./Attachment.svelte";
@@ -61,10 +62,26 @@
     </div>
     <div class="thread-scroll">
       {#each app.threadMessages as m, i (m.key)}
-        <div class="thread-msg" class:root={i === 0}>
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="thread-msg" class:root={i === 0} oncontextmenu={(e) => app.msgCtx(e, m)}>
           <div class="avatar sm"><Avatar account={m.net ? `${m.author}@${m.net}` : m.author} /></div>
           <div class="thread-body">
-            <div class="thread-meta"><b>{app.displayName(m.author)}</b> <span class="time">{m.time}</span></div>
+            <div class="thread-meta">
+              {#if m.net}
+                <span class="author foreign" title="from {m.net}"
+                  >{displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></span
+                >
+              {:else}
+                <button
+                  class="author author-btn"
+                  style={app.nameColor(m.author) ? `color:${app.nameColor(m.author)}` : ""}
+                  onclick={(e) => app.openProfile(m.author, e)}>{displayName(m.author)}</button
+                >
+              {/if}
+              {#if !m.net && app.isStaff(m.author)}<span class="cap-badge staff">staff</span>{/if}
+              {#if m.own}<span class="cap-badge owner">you</span>{/if}
+              <span class="time">{m.time}</span>
+            </div>
             <div class="msg-line">{#if m.md}{@html app.renderMd(m.body)}{:else}{m.body}{/if}</div>
             {#if m.attachments?.length}
               <div class="attachments">{#each m.attachments as uri (uri)}<Attachment {uri} />{/each}</div>
@@ -167,6 +184,10 @@
     font-size: 12px;
     color: var(--text-muted);
     margin-bottom: 2px;
+  }
+  /* Keep the (now clickable) author compact within the dense thread meta. */
+  .thread-meta :global(.author) {
+    font-size: 13px;
   }
   .thread-meta .time {
     margin-left: 6px;

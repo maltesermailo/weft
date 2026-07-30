@@ -72,6 +72,7 @@
       if (!scrollEl) return;
       scrollEl.scrollTop = scrollEl.scrollHeight;
       await raf();
+      if (!scrollEl) return; // channel unmounted / switched during the frame
       const cur = Math.round(scrollEl.scrollTop);
       if (cur === prev) break;
       prev = cur;
@@ -86,6 +87,7 @@
       if (!scrollEl) break;
       scrollEl.scrollTop = Math.max(0, scrollEl.scrollHeight - anchorDistBottom);
       await raf();
+      if (!scrollEl) break; // channel unmounted / switched during the frame
       const cur = Math.round(scrollEl.scrollTop);
       if (cur === prev) break;
       prev = cur;

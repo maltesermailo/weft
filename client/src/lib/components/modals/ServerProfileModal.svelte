@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayName, nickOf } from "$lib/profile.svelte";
   import { untrack } from "svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
@@ -7,11 +8,11 @@
 
   const scope = `ns:${app.activeServer}`;
   const serverName = $derived(app.activeNsMeta?.title || app.activeNsMeta?.name || app.activeServer);
-  const current = $derived(app.nickOf(app.account));
-  let draft = $state(untrack(() => app.nickOf(app.account)));
+  const current = $derived(nickOf(app.account));
+  let draft = $state(untrack(() => nickOf(app.account)));
   const dirty = $derived(draft.trim() !== current);
   // The global display name we fall back to when there's no nickname.
-  const globalName = $derived(app.displayName(app.account));
+  const globalName = $derived(displayName(app.account));
 
   function save() {
     app.setNick(scope, app.account, draft.trim());

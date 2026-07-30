@@ -1,6 +1,9 @@
 // The client domain model — see docs/architecture/client-model-refactor.md.
 import { SvelteMap } from "svelte/reactivity";
 import type { Msg } from "$lib/types";
+import type { HandlerMap } from "$lib/sync/handler-map";
+import { store } from "./store.svelte";
+import { sys } from "./channel.svelte";
 
 /** A filed report as shown in the moderation queue (§6.7). */
 export interface ReportInfo {
@@ -25,3 +28,20 @@ export class Reports {
   target = $state<Msg | null>(null); // the message being reported (ReportModal)
   readonly queue = new SvelteMap<string, ReportInfo>();
 }
+
+/// §6.7 report wire-event handlers: filing confirmations + the moderation queue.
+export const reportsHandlers: HandlerMap = {
+  reported: (e) => sys(`✓ report filed (${e.report_id})`),
+  "report-filed": (e) =>
+    store.reports.queue.set(e.report_id, {
+      report_id: e.report_id,
+      msgid: e.msgid,
+      category: e.category,
+      state: e.state,
+      reporter: e.reporter,
+    }),
+  "report-resolved": (e) => {
+    store.reports.queue.delete(e.report_id);
+    sys(`✓ report ${e.report_id} resolved: ${e.action}`);
+  },
+};

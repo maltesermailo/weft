@@ -2,7 +2,9 @@
 import { SvelteMap } from "svelte/reactivity";
 import { store } from "./store.svelte";
 import * as weft from "$lib/weft";
-import type { Role } from "./role.svelte";
+import { Role } from "./role.svelte";
+import { confirmSuccess } from "$lib/toasts.svelte";
+import type { HandlerMap } from "$lib/sync/handler-map";
 
 /// A server-resolved capability set at a scope (§10.4): `owner` (implicit
 /// all-caps), `mod` (mute/ban/kick), and the raw cap list.
@@ -145,6 +147,43 @@ export function fetchMemberRoles(account: string, scope: string): void {
   weft.rolesOfAccount(scope, account).catch(() => {});
 }
 
+// ---- §6.5 role / grant fetch subsystem ----
+// Roles arrive in `r…`-id BATCHes, grants in `gr…` BATCHes; a per-request scope
+// queue records which scope each answer belongs to. The buffers accumulate the
+// streamed rows until the reducer flushes them (mutated in place — never
+// reassigned — so they stay `const` exports).
+export const roleBuf: Role[] = [];
+export const roleFetchQueue: string[] = [];
+export const grantBuf: { subject: string; caps: string[] }[] = [];
+export const grantFetchQueue: string[] = [];
+
+export function fetchRoles(scope: string): void {
+  if (!scope) return;
+  roleFetchQueue.push(scope);
+  weft.roles(scope).catch(() => roleFetchQueue.pop());
+}
+export function fetchGrants(scope: string): void {
+  if (!scope) return;
+  grantFetchQueue.push(scope);
+  weft.grantsAt(scope).catch(() => grantFetchQueue.pop());
+}
+export function createRoleAt(
+  scope: string,
+  name: string,
+  color: string,
+  caps: string,
+  hoist = false,
+  pingable = false,
+  position = 0,
+): Promise<unknown> {
+  roleFetchQueue.push(scope);
+  return weft.roleCreate(scope, color, caps, hoist, pingable, position, name);
+}
+export function deleteRoleAt(scope: string, roleId: string): Promise<unknown> {
+  roleFetchQueue.push(scope);
+  return weft.roleDelete(scope, roleId);
+}
+
 /// Does a body mention me, @everyone/@here, or a pingable role I hold at `ns`?
 export function mentionsMe(body: string, ns: string): boolean {
   const me = store.session.account;
@@ -159,3 +198,43 @@ export function mentionsMe(body: string, ns: string): boolean {
       new RegExp(`@${r.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(body),
   );
 }
+
+/// This domain's wire-event handlers (§10.4 caps + §6.5 roles). The `role` /
+/// `grant-info` rows buffer here; the reducer flushes each BATCH into
+/// `rolesByScope` / `store.grants` (it owns the batch cursor).
+export const sessionHandlers: HandlerMap = {
+  caps: (e) => {
+    const set = e.caps ? e.caps.split(",") : [];
+    store.session.caps.set(`${e.account}|${e.scope}`, {
+      owner: set.includes("ns-admin") || set.includes("netblock"),
+      mod: set.includes("mute") || set.includes("ban") || set.includes("kick"),
+      list: set,
+    });
+    capsResolved(e.account, e.scope);
+    confirmSuccess(`caps:${e.account}|${e.scope}`);
+  },
+  role: (e) => {
+    roleBuf.push(
+      new Role({
+        id: e.role,
+        name: e.name,
+        color: e.color,
+        caps: e.caps ? e.caps.split(",") : [],
+        hoist: e.hoist,
+        pingable: e.pingable,
+        position: e.position,
+      }),
+    );
+  },
+  "role-member": (e) => {
+    memberRoles[`${e.account}|${e.scope}`] = e.roles ? e.roles.split(",") : [];
+    confirmSuccess(`roles:${e.account}|${e.scope}`);
+  },
+  "grant-info": (e) => {
+    grantBuf.push({ subject: e.subject, caps: e.caps ? e.caps.split(",") : [] });
+  },
+  verified: (e) => {
+    // §10.5 one of our own verification claims (email/birthday).
+    store.session.verifications[e.claim_kind] = { subject: e.subject, state: e.state };
+  },
+};

@@ -1,12 +1,13 @@
 <script lang="ts">
+  import { displayName, queryProfile, statusOf } from "$lib/profile.svelte";
   import { getApp, type Member } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   const members = $derived(app.activeChannel?.members ?? []);
-  const statusOf = (name: string) =>
+  const presenceOf = (name: string) =>
     name === app.account ? app.myStatus : (app.accountOf(name).presence ?? "offline");
   const isOnline = (name: string) => {
-    const s = statusOf(name);
+    const s = presenceOf(name);
     return s !== "offline" && s !== "invisible";
   };
 
@@ -18,7 +19,7 @@
     app.ensureRoles(roleScope);
     for (const m of members) {
       app.ensureMemberRoles(m.name);
-      app.queryProfile(m.name); // so avatars + custom status show without opening a profile
+      queryProfile(m.name); // so avatars + custom status show without opening a profile
     }
   });
 
@@ -57,14 +58,14 @@
 {#snippet row(m: Member)}
   <div class="member-row" class:member-offline={!isOnline(m.name)} role="listitem" oncontextmenu={(e) => app.userCtx(e, m.name)}>
     <button class="member-id" onclick={(e) => app.openProfile(m.name, e)}>
-      <div class="avatar"><Avatar account={m.name} /><span class="dot {statusOf(m.name)} corner"></span></div>
+      <div class="avatar"><Avatar account={m.name} /><span class="dot {presenceOf(m.name)} corner"></span></div>
       <span class="member-text">
         <span class="member-name-line">
-          <span class="mname" style={app.nameColor(m.name) ? `color:${app.nameColor(m.name)}` : ""}>{app.displayName(m.name)}</span>
+          <span class="mname" style={app.nameColor(m.name) ? `color:${app.nameColor(m.name)}` : ""}>{displayName(m.name)}</span>
           {#if app.isStaff(m.name)}<span class="cap-badge staff">staff</span>{/if}
           {#if m.origin === "federated"}<span class="cap-badge bridged">br</span>{/if}
         </span>
-        {#if app.statusOf(m.name)}<span class="mstatus" title={app.statusOf(m.name)}>{app.statusOf(m.name)}</span>{/if}
+        {#if statusOf(m.name)}<span class="mstatus" title={statusOf(m.name)}>{statusOf(m.name)}</span>{/if}
       </span>
     </button>
     {#if m.name !== app.account}

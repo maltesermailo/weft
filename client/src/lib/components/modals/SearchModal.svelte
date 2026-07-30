@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayName } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   import { autofocus } from "$lib/actions";
@@ -59,7 +60,7 @@
           <button class="search-card" onclick={() => jumpToResult(m)}>
             <div class="avatar sm"><Avatar account={m.net ? `${m.author}@${m.net}` : m.author} /></div>
             <div class="search-body">
-              <div class="search-meta"><b>{app.displayName(m.author)}</b> <span class="time">{m.time}</span></div>
+              <div class="search-meta"><b>{displayName(m.author)}</b> <span class="time">{m.time}</span></div>
               <div class="msg-line">{#if m.md}{@html app.renderMd(m.body)}{:else}{m.body}{/if}</div>
             </div>
           </button>

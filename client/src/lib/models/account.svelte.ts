@@ -1,5 +1,7 @@
 // The client domain model — see docs/architecture/client-model-refactor.md.
 import * as weft from "$lib/weft";
+import type { HandlerMap } from "$lib/sync/handler-map";
+import { store } from "./store.svelte";
 
 /**
  * A global account identity (§10.3): profile + presence, independent of any one
@@ -55,3 +57,11 @@ export class Account {
     return this.avatar ? weft.avatarUrl(this.avatar) : null;
   }
 }
+
+/// §7 presence wire-event handler: an account's presence lands once on the
+/// interned Account and every surface referencing it updates.
+export const accountHandlers: HandlerMap = {
+  presence: (e) => {
+    store.accountOf(e.user).presence = e.status;
+  },
+};
