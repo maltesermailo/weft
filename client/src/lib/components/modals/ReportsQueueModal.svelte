@@ -1,9 +1,9 @@
 <script lang="ts">
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
-  import { store } from "$lib/models/store.svelte";
-  import { RESOLVE_ACTIONS } from "$lib/models/reports.svelte";
-  import * as weft from "$lib/weft";
+  import { getApp } from "$lib/ui/context";
+  import { store } from "$lib/store/store.svelte";
+  import { RESOLVE_ACTIONS } from "$lib/moderation/reports.svelte";
+  import * as weft from "$lib/transport/weft";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 </script>

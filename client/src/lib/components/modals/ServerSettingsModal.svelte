@@ -1,16 +1,18 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { nsMemberCtx } from "$lib/ctxmenu.svelte";
-  import { loadNsInvites, createInvite } from "$lib/models/invites.svelte";
-  import { nsAdmin, saveNsMeta, nsSetFederation, nsSetWelcome, showRecoveryKey, startRecovery, cosignRecovery, submitRecovery, activeEmoji, addEmoji, emojiUrlFor, removeEmoji } from "$lib/models/server.svelte";
-  import { denyList, refreshBans, liftMod } from "$lib/moderation";
-  import { bridgePropose, bridgeAccept, bridgeSever } from "$lib/models/federation.svelte";
-  import { rolesAt, roleById, nsRoleScope, serverCap, serverCanGrant, isNsOwner, assignNsRole, unassignNsRole } from "$lib/models/session.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import { displayName, initials } from "$lib/profile.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { nsMemberCtx } from "$lib/ui/ctxmenu.svelte";
+  import { loadNsInvites, createInvite } from "$lib/invites/invites.svelte";
+  import { nsAdmin, saveNsMeta, nsSetFederation, nsSetWelcome, showRecoveryKey, startRecovery, cosignRecovery, submitRecovery, activeEmoji, addEmoji, emojiUrlFor, removeEmoji } from "$lib/namespaces/server.svelte";
+  import { denyList, refreshBans, liftMod } from "$lib/moderation/moderation";
+  import { bridgePropose, bridgeAccept, bridgeSever } from "$lib/federation/federation.svelte";
+  import { serverCap, serverCanGrant, isNsOwner } from "$lib/session/session.svelte";
+import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$lib/roles/roles.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { displayName, initials } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
-  import * as weft from "$lib/weft";
+  import { getApp } from "$lib/ui/context";
+  import * as weft from "$lib/transport/weft";
+  import * as media from "$lib/media/media";
   import RolesTab from "$lib/components/modals/RolesTab.svelte";
   import InviteList from "$lib/components/InviteList.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -120,7 +122,7 @@
       const file = input.files?.[0];
       if (!file) return;
       try {
-        const up = await weft.upload(file);
+        const up = await media.upload(file);
         pendingEmoji = up.media;
       } catch (e) {
         app.toast(String(e), "error");

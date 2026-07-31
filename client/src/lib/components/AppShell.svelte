@@ -7,22 +7,22 @@
   props.
 -->
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
   import type { Snippet } from "svelte";
   import { goto } from "$app/navigation";
-  import * as nav from "$lib/nav";
-  import { getApp } from "$lib/context";
-  import { ui } from "$lib/ui.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import * as weft from "$lib/weft";
-  import { cf, emailNudgeKey } from "$lib/models/connect.svelte";
-  import { toasts } from "$lib/toasts.svelte";
-  import { ctxMenu } from "$lib/ctxmenu.svelte";
-  import { voiceUI } from "$lib/voiceui.svelte";
-  import { channels, chanShort } from "$lib/models/channel.svelte";
-  import { peerOf } from "$lib/profile.svelte";
-  import { openDm } from "$lib/navigation";
-  import { chanDraft, catDraft } from "$lib/channelcreate.svelte";
+  import * as nav from "$lib/navigation/nav";
+  import { getApp } from "$lib/ui/context";
+  import { ui } from "$lib/ui/ui.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import * as weft from "$lib/transport/weft";
+  import { cf, emailNudgeKey } from "$lib/session/connect.svelte";
+  import { toasts } from "$lib/notifications/toasts.svelte";
+  import { ctxMenu } from "$lib/ui/ctxmenu.svelte";
+  import { voiceUI } from "$lib/voice/voiceui.svelte";
+  import { channels, chanShort } from "$lib/channels/channel.svelte";
+  import { peerOf } from "$lib/profile/profile.svelte";
+  import { openDm } from "$lib/navigation/navigation";
+  import { chanDraft, catDraft } from "$lib/channels/channelcreate.svelte";
 
   import Toasts from "$lib/components/Toasts.svelte";
   import Lightbox from "$lib/components/chat/Lightbox.svelte";

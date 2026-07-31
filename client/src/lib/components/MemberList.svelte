@@ -1,12 +1,13 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { userCtx } from "$lib/ctxmenu.svelte";
-  import { openDm } from "$lib/navigation";
-  import { moderate } from "$lib/moderation";
-  import { rolesAt, rolesOf, nsRoleScope, nameColor, ensureMemberRoles, ensureRoles, canModerate, isStaff } from "$lib/models/session.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import { displayName, queryProfile, statusOf, openProfile } from "$lib/profile.svelte";
-  import { getApp, type Member } from "$lib/context";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { userCtx } from "$lib/ui/ctxmenu.svelte";
+  import { openDm } from "$lib/navigation/navigation";
+  import { moderate } from "$lib/moderation/moderation";
+  import { canModerate, isStaff } from "$lib/session/session.svelte";
+import { rolesAt, rolesOf, nsRoleScope, nameColor, ensureMemberRoles, ensureRoles } from "$lib/roles/roles.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { displayName, queryProfile, statusOf, openProfile } from "$lib/profile/profile.svelte";
+  import { getApp, type Member } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   const members = $derived(vm.activeChannel?.members ?? []);

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { fade } from "svelte/transition";
-  import { linkPrompt, closeLink, openConfirmed } from "$lib/linkguard.svelte";
+  import { linkPrompt, closeLink, openConfirmed } from "$lib/ui/linkguard.svelte";
 
   // Host of the real destination (falls back to the raw URL if it won't parse).
   const host = $derived.by(() => {

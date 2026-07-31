@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { openServerMenu, openDiscover } from "$lib/navigation";
-  import { serverMuted } from "$lib/notif";
-  import { initials } from "$lib/profile.svelte";
-  import { getApp } from "$lib/context";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { openServerMenu, openDiscover } from "$lib/navigation/navigation";
+  import { serverMuted } from "$lib/notifications/notif";
+  import { initials } from "$lib/profile/profile.svelte";
+  import { getApp } from "$lib/ui/context";
   const app = getApp();
 </script>
 

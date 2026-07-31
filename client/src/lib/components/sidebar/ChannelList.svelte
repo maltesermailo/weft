@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { open, openVoice } from "$lib/navigation";
-  import { chanCtx, catCtx, listCtx } from "$lib/ctxmenu.svelte";
-  import { ui } from "$lib/ui.svelte";
-  import { moveChannel, moveCategory } from "$lib/models/channel.svelte";
-  import { getApp } from "$lib/context";
-  import { voice, voiceRosters } from "$lib/voice.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { open, openVoice } from "$lib/navigation/navigation";
+  import { chanCtx, catCtx, listCtx } from "$lib/ui/ctxmenu.svelte";
+  import { ui } from "$lib/ui/ui.svelte";
+  import { moveChannel, moveCategory } from "$lib/channels/channel.svelte";
+  import { getApp } from "$lib/ui/context";
+  import { voice, voiceRosters } from "$lib/voice/voice.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   // Who's in a voice channel: the live LiveKit roster for the channel we've

@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { chanNsScope, chanRoleCaps, setChanRoleCaps, chanMemberGrants, chanMemberCaps, setChanMemberCaps, removeChanRole, removeChanMember, toggleRestricted, toggleViewGated } from "$lib/chanperms";
-  import { rolesAt } from "$lib/models/session.svelte";
-  import { channels } from "$lib/models/channel.svelte";
-  import { displayName } from "$lib/profile.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { chanNsScope, chanRoleCaps, setChanRoleCaps, chanMemberGrants, chanMemberCaps, setChanMemberCaps, removeChanRole, removeChanMember, toggleRestricted, toggleViewGated } from "$lib/roles/chanperms";
+  import { rolesAt } from "$lib/roles/roles.svelte";
+  import { channels } from "$lib/channels/channel.svelte";
+  import { displayName } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
   import { untrack } from "svelte";
-  import { getApp } from "$lib/context";
-  import * as weft from "$lib/weft";
+  import { getApp } from "$lib/ui/context";
+  import * as weft from "$lib/transport/weft";
   import { CHAN_CAPS, CAP_META, EVERYONE_ROLE, RETENTION_OPTIONS } from "$lib/constants";
   import Avatar from "$lib/components/Avatar.svelte";
   import SaveBar from "$lib/components/SaveBar.svelte";

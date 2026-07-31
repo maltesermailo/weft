@@ -1,13 +1,14 @@
 <script lang="ts">
-  import { msgCtx } from "$lib/ctxmenu.svelte";
-  import { threadCount, closeThread, sendThread, threadNameFor, renameThread } from "$lib/models/threads.svelte";
-  import { nameColor, isStaff } from "$lib/models/session.svelte";
-  import { renderMd } from "$lib/mdrender.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import { displayName, openProfile } from "$lib/profile.svelte";
-  import { getApp } from "$lib/context";
+  import { msgCtx } from "$lib/ui/ctxmenu.svelte";
+  import { threadCount, closeThread, sendThread, threadNameFor, renameThread } from "$lib/messages/threads.svelte";
+  import { isStaff } from "$lib/session/session.svelte";
+import { nameColor } from "$lib/roles/roles.svelte";
+  import { renderMd } from "$lib/rendering/mdrender.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { displayName, openProfile } from "$lib/profile/profile.svelte";
+  import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
-  import Attachment from "./Attachment.svelte";
+  import Attachment from "$lib/components/chat/Attachment.svelte";
   const app = getApp();
 
   function onKey(e: KeyboardEvent) {

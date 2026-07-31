@@ -1,12 +1,13 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { openDm } from "$lib/navigation";
-  import { friendState, friendAction, callUser } from "$lib/models/social.svelte";
-  import { badgeFor, nameColor, isStaff } from "$lib/models/session.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import { bioOf, displayName, initials, statusOf } from "$lib/profile.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { openDm } from "$lib/navigation/navigation";
+  import { friendState, friendAction, callUser } from "$lib/social/social.svelte";
+  import { badgeFor, isStaff } from "$lib/session/session.svelte";
+import { nameColor } from "$lib/roles/roles.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { bioOf, displayName, initials, statusOf } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   let { target, onclose }: { target: string; onclose: () => void } = $props();

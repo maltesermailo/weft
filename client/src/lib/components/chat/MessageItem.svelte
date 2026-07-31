@@ -1,19 +1,20 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { msgCtx } from "$lib/ctxmenu.svelte";
-  import { threadCount, openThread, threadNameFor } from "$lib/models/threads.svelte";
-  import { compose, startEdit, saveEdit, cancelEdit, editKey, doDelete, toggleReaction, jumpTo, togglePin, openReport } from "$lib/composer.svelte";
-  import { emojiUrlFor } from "$lib/models/server.svelte";
-  import { view } from "$lib/view.svelte";
-  import { renderMd } from "$lib/mdrender.svelte";
-  import { rolesOf, mentionsMe, nameColor, roleScopeOf, isStaff } from "$lib/models/session.svelte";
-  import { displayName, openProfile } from "$lib/profile.svelte";
-  import { getApp } from "$lib/context";
-  import { autofocus } from "$lib/actions";
-  import EmojiPicker from "./EmojiPicker.svelte";
-  import Attachment from "./Attachment.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { msgCtx } from "$lib/ui/ctxmenu.svelte";
+  import { threadCount, openThread, threadNameFor } from "$lib/messages/threads.svelte";
+  import { compose, startEdit, saveEdit, cancelEdit, editKey, doDelete, toggleReaction, jumpTo, togglePin, openReport } from "$lib/messages/composer.svelte";
+  import { emojiUrlFor } from "$lib/namespaces/server.svelte";
+  import { view } from "$lib/navigation/view.svelte";
+  import { renderMd } from "$lib/rendering/mdrender.svelte";
+  import { mentionsMe, isStaff } from "$lib/session/session.svelte";
+import { rolesOf, nameColor, roleScopeOf } from "$lib/roles/roles.svelte";
+  import { displayName, openProfile } from "$lib/profile/profile.svelte";
+  import { getApp } from "$lib/ui/context";
+  import { autofocus } from "$lib/ui/actions";
+  import EmojiPicker from "$lib/components/chat/EmojiPicker.svelte";
+  import Attachment from "$lib/components/chat/Attachment.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
-  import LinkPreview from "./LinkPreview.svelte";
+  import LinkPreview from "$lib/components/chat/LinkPreview.svelte";
   import type { Msg } from "$lib/types";
 
   const app = getApp();

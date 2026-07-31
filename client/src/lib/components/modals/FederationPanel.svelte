@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { netblockAdd, netblockRemove, bridgePropose, bridgeAccept, bridgeSever } from "$lib/models/federation.svelte";
-  import { store } from "$lib/models/store.svelte";
+  import { netblockAdd, netblockRemove, bridgePropose, bridgeAccept, bridgeSever } from "$lib/federation/federation.svelte";
+  import { store } from "$lib/store/store.svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 

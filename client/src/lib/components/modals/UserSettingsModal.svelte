@@ -1,13 +1,14 @@
 <script lang="ts">
-  import { cf } from "$lib/models/connect.svelte";
-  import { ui, toggleTheme } from "$lib/ui.svelte";
-  import { setStatus, enrollThisDevice, logout } from "$lib/connection.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import { avatarUrl, bioOf, displayName, initials } from "$lib/profile.svelte";
+  import { cf } from "$lib/session/connect.svelte";
+  import { ui, toggleTheme } from "$lib/ui/ui.svelte";
+  import { setStatus, enrollThisDevice, logout } from "$lib/connection/connection.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { avatarUrl, bioOf, displayName, initials } from "$lib/profile/profile.svelte";
   import { untrack } from "svelte";
   import { fade, fly } from "svelte/transition";
-  import { getApp } from "$lib/context";
-  import * as weft from "$lib/weft";
+  import { getApp } from "$lib/ui/context";
+  import * as weft from "$lib/transport/weft";
+  import * as media from "$lib/media/media";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 
@@ -92,8 +93,8 @@
     try {
       // Upload the bytes now (content-addressed); the profile only points at the
       // new blob once the draft is saved.
-      const res = await weft.upload(file);
-      pendingAvatar = { hash: weft.mediaHash(res.media), url: weft.mediaUrl(res.media) };
+      const res = await media.upload(file);
+      pendingAvatar = { hash: media.mediaHash(res.media), url: media.mediaUrl(res.media) };
       removeAvatar = false;
     } catch (err) {
       app.toast(String(err), "error");

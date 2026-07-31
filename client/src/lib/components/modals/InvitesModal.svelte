@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { store } from "$lib/models/store.svelte";
+  import { store } from "$lib/store/store.svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   import InviteList from "$lib/components/InviteList.svelte";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();

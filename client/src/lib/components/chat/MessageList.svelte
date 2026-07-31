@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { dayKey, dayLabel } from "$lib/time";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { dayKey, dayLabel } from "$lib/rendering/time";
   import { tick } from "svelte";
   import { get } from "svelte/store";
   import { createVirtualizer } from "@tanstack/svelte-virtual";
-  import { getApp } from "$lib/context";
-  import { spoilerReveal } from "$lib/actions";
+  import { getApp } from "$lib/ui/context";
+  import { spoilerReveal } from "$lib/ui/actions";
   import type { Msg } from "$lib/types";
-  import MessageItem from "./MessageItem.svelte";
+  import MessageItem from "$lib/components/chat/MessageItem.svelte";
 
   const app = getApp();
   // One list per channel; the channel route remounts it on navigation.

@@ -3,18 +3,18 @@
 // live in a sync-layer handler module rather than on the Channel model itself —
 // keeping the model free of nav/caps/profile imports (and cycles).
 import { goto } from "$app/navigation";
-import * as nav from "$lib/nav";
-import * as weft from "$lib/weft";
+import * as nav from "$lib/navigation/nav";
+import * as weft from "$lib/transport/weft";
 import type { HandlerMap } from "$lib/sync/handler-map";
-import { store } from "$lib/models/store.svelte";
-import { channels, ensureChannel, cacheChanLayout, reconcileChannelCreate } from "$lib/models/channel.svelte";
-import { ensureCaps } from "$lib/models/session.svelte";
-import { queryProfile } from "$lib/profile.svelte";
-import { selectServer } from "$lib/navigation";
-import { syncState } from "$lib/connection.svelte";
-import { view } from "$lib/view.svelte";
-import { ui } from "$lib/ui.svelte";
-import { confirmSuccess } from "$lib/toasts.svelte";
+import { store } from "$lib/store/store.svelte";
+import { channels, ensureChannel, cacheChanLayout, reconcileChannelCreate } from "$lib/channels/channel.svelte";
+import { ensureCaps } from "$lib/session/session.svelte";
+import { queryProfile } from "$lib/profile/profile.svelte";
+import { selectServer } from "$lib/navigation/navigation";
+import { syncState } from "$lib/connection/connection.svelte";
+import { view } from "$lib/navigation/view.svelte";
+import { ui } from "$lib/ui/ui.svelte";
+import { confirmSuccess } from "$lib/notifications/toasts.svelte";
 
 const me = (): string => store.session.account;
 

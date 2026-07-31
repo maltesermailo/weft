@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { store } from "$lib/models/store.svelte";
-  import { openDiscover } from "$lib/navigation";
+  import { store } from "$lib/store/store.svelte";
+  import { openDiscover } from "$lib/navigation/navigation";
   // Shown in the main pane when the account belongs to no servers/channels
   // (a fresh account, or one that left everything). It routes the user to the
   // Discover modal, which owns every path out: browse public servers, join by
   // name/invite, connect a foreign namespace, or create one.
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   const app = getApp();
 </script>
 

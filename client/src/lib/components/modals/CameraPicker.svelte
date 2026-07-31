@@ -3,7 +3,7 @@
   // start the camera on the LiveKit path. Also acts as "switch camera" while the
   // camera is already on.
   import { fade } from "svelte/transition";
-  import { voiceUI } from "$lib/voiceui.svelte";
+  import { voiceUI } from "$lib/voice/voiceui.svelte";
   import {
     voice,
     IS_DESKTOP,
@@ -12,7 +12,7 @@
     startNativeVoiceCamera,
     stopNativeVoiceCamera,
     listNativeCameras,
-  } from "$lib/voice.svelte";
+  } from "$lib/voice/voice.svelte";
 
   type Cam = { deviceId: string; label: string };
   let devices = $state<Cam[]>([]);

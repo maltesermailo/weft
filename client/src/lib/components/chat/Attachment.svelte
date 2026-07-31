@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getApp } from "$lib/context";
-  import { mediaHash, mediaDims } from "$lib/weft";
-  import { openLightbox } from "$lib/lightbox.svelte";
+  import { getApp } from "$lib/ui/context";
+  import { mediaHash, mediaDims } from "$lib/media/media";
+  import { openLightbox } from "$lib/ui/lightbox.svelte";
 
   const app = getApp();
   let { uri }: { uri: string } = $props();

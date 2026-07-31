@@ -1,6 +1,6 @@
 <script lang="ts">
   import { fade } from "svelte/transition";
-  import { lightbox, closeLightbox } from "$lib/lightbox.svelte";
+  import { lightbox, closeLightbox } from "$lib/ui/lightbox.svelte";
 
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") closeLightbox();

@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { store } from "$lib/models/store.svelte";
-  import { vm } from "$lib/viewmodel.svelte";
-  import { displayName, nickOf, setNick } from "$lib/profile.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { displayName, nickOf, setNick } from "$lib/profile/profile.svelte";
   import { untrack } from "svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 

@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { rolesAt, rolesOf, createRole, deleteRole, everyoneCaps, moveRole, nsRoleScope, reorderRoles, roleDraft, saveRole, setEveryoneCaps, toggleNewRoleCap, ensureMemberRoles, unassignRoleFrom } from "$lib/models/session.svelte";
-  import { displayName } from "$lib/profile.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { rolesAt, rolesOf, createRole, deleteRole, everyoneCaps, moveRole, nsRoleScope, reorderRoles, roleDraft, saveRole, setEveryoneCaps, toggleNewRoleCap, ensureMemberRoles, unassignRoleFrom } from "$lib/roles/roles.svelte";
+  import { displayName } from "$lib/profile/profile.svelte";
   // §6.5 roles tab, redesigned as a two-pane editor (design/server-settings.html):
   // a searchable, drag-orderable role list on the left; a tabbed editor
   // (Display / Permissions) for the selected role on the right. Order is
   // top = highest, mirroring the member-list grouping. The implicit @everyone
   // baseline and the "create a role" form are selectable rows in the same list.
-  import { getApp } from "$lib/context";
-  import type { Role } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
+  import type { Role } from "$lib/ui/context";
   import { CAP_GROUPS, CAP_META, ROLE_COLORS, EVERYONE_ROLE } from "$lib/constants";
   import Avatar from "$lib/components/Avatar.svelte";
   import SaveBar from "$lib/components/SaveBar.svelte";

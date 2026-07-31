@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { store } from "$lib/models/store.svelte";
-  import { vm } from "$lib/viewmodel.svelte";
-  import { displayName, nickOf, setNick } from "$lib/profile.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { displayName, nickOf, setNick } from "$lib/profile/profile.svelte";
   // §10.3 quick per-namespace nickname editor, opened from a user's context
   // menu. Own nick needs `nick`; another member's needs `manage-nicks` — the
   // server enforces, a missing cap just ERRs.
   import { untrack } from "svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   const app = getApp();
   let { target, onclose }: { target: string; onclose: () => void } = $props();
 

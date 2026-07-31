@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { compose, composeView, composerKey, onComposerInput, doSend, pickMention, pickEmojiSuggestion, attachFile, pasteFiles, dropFiles, removeAttachment } from "$lib/composer.svelte";
-  import { renderMd } from "$lib/mdrender.svelte";
-  import { getApp } from "$lib/context";
-  import { highlightComposer } from "$lib/mdhighlight";
-  import EmojiPicker from "./EmojiPicker.svelte";
-  import Avatar from "../Avatar.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { compose, composeView, composerKey, onComposerInput, doSend, pickMention, pickEmojiSuggestion, attachFile, pasteFiles, dropFiles, removeAttachment } from "$lib/messages/composer.svelte";
+  import { renderMd } from "$lib/rendering/mdrender.svelte";
+  import { getApp } from "$lib/ui/context";
+  import { highlightComposer } from "$lib/rendering/mdhighlight";
+  import EmojiPicker from "$lib/components/chat/EmojiPicker.svelte";
+  import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
 
   // Keep the arrow-key-highlighted autocomplete row scrolled into view.

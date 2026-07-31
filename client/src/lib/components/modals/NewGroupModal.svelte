@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { roster, friendLocalAccount } from "$lib/models/social.svelte";
-  import { friendLabel, peerOf } from "$lib/profile.svelte";
+  import { roster, friendLocalAccount } from "$lib/social/social.svelte";
+  import { friendLabel, peerOf } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
 
   let {

@@ -2,35 +2,39 @@
 // request/batch machinery (fetch queues, history buffering) and the message/
 // typing/channel-create helpers it owns. Imports the stores; never the reverse.
 import { page } from "$app/state";
-import * as nav from "$lib/nav";
-import * as weft from "$lib/weft";
+import * as nav from "$lib/navigation/nav";
+import * as weft from "$lib/transport/weft";
+import * as media from "$lib/media/media";
 import type { Msg } from "$lib/types";
-import { store } from "$lib/models/store.svelte";
-import { Channel, channels, mkMsg, ensureChannel, nsOf, chanShort, markRead, cacheNsCats, persistDms, restoreDms, applyReaction, pinsHandlers } from "$lib/models/channel.svelte";
-import { rosterFetchTarget } from "$lib/models/server.svelte";
-import { federationHandlers } from "$lib/models/federation.svelte";
-import { socialHandlers } from "$lib/models/social.svelte";
-import { sessionHandlers } from "$lib/models/session.svelte";
-import { threadsHandlers } from "$lib/models/threads.svelte";
-import { invitesHandlers } from "$lib/models/invites.svelte";
-import { accountHandlers } from "$lib/models/account.svelte";
-import { profileHandlers } from "$lib/profile.svelte";
-import { serverHandlers } from "$lib/models/server.svelte";
-import { reportsHandlers } from "$lib/models/reports.svelte";
-import { moderationHandlers } from "$lib/moderation";
+import { store } from "$lib/store/store.svelte";
+import { Channel, channels, ensureChannel, nsOf, chanShort, markRead, cacheNsCats, persistDms, restoreDms } from "$lib/channels/channel.svelte";
+import { mkMsg, applyReaction, pinsHandlers } from "$lib/messages/messages.svelte";
+import { rosterFetchTarget } from "$lib/namespaces/server.svelte";
+import { federationHandlers } from "$lib/federation/federation.svelte";
+import { socialHandlers } from "$lib/social/social.svelte";
+import { sessionHandlers } from "$lib/session/session.svelte";
+import { rolesHandlers } from "$lib/roles/roles.svelte";
+import { threadsHandlers } from "$lib/messages/threads.svelte";
+import { invitesHandlers } from "$lib/invites/invites.svelte";
+import { accountHandlers } from "$lib/profile/account.svelte";
+import { profileHandlers } from "$lib/profile/profile.svelte";
+import { serverHandlers } from "$lib/namespaces/server.svelte";
+import { reportsHandlers } from "$lib/moderation/reports.svelte";
+import { moderationHandlers } from "$lib/moderation/moderation";
 import { channelHandlers } from "$lib/sync/channel-handlers";
 import type { HandlerMap } from "$lib/sync/handler-map";
-import { goHome } from "$lib/navigation";
-import { rolesByScope, ensureCapsAt, ensureCaps, roleScopeOf, mentionsMe, fedRolesFetched, fetchMemberRoles, roleBuf, roleFetchQueue, grantBuf, grantFetchQueue } from "$lib/models/session.svelte";
-import { cf, emailNudgeKey } from "$lib/models/connect.svelte";
-import { conn, attemptReconnect, HOMESERVER_KEY, SAVED_KEY, syncCursorKey, loadSyncCursor, syncState } from "$lib/connection.svelte";
-import { ui } from "$lib/ui.svelte";
-import * as md from "$lib/markdown";
-import { toast, confirmSuccess } from "$lib/toasts.svelte";
-import { msgEpoch, msgTime, retentionOf } from "$lib/time";
-import { notifLevel, isMuted } from "$lib/notif";
-import { queryProfile } from "$lib/profile.svelte";
-import { initVoice, voice } from "$lib/voice.svelte";
+import { goHome } from "$lib/navigation/navigation";
+import { ensureCapsAt, ensureCaps, mentionsMe } from "$lib/session/session.svelte";
+import { rolesByScope, roleScopeOf, fedRolesFetched, fetchMemberRoles, roleBuf, roleFetchQueue, grantBuf, grantFetchQueue } from "$lib/roles/roles.svelte";
+import { cf, emailNudgeKey } from "$lib/session/connect.svelte";
+import { conn, attemptReconnect, HOMESERVER_KEY, SAVED_KEY, syncCursorKey, loadSyncCursor, syncState } from "$lib/connection/connection.svelte";
+import { ui } from "$lib/ui/ui.svelte";
+import * as md from "$lib/rendering/markdown";
+import { toast, confirmSuccess } from "$lib/notifications/toasts.svelte";
+import { msgEpoch, msgTime, retentionOf } from "$lib/rendering/time";
+import { notifLevel, isMuted } from "$lib/notifications/notif";
+import { queryProfile } from "$lib/profile/profile.svelte";
+import { initVoice, voice } from "$lib/voice/voice.svelte";
 
 // View state, mirrored from the URL exactly as the layout derives it (so the
 // extracted handlers read `active`/`account`/… unchanged).
@@ -88,6 +92,7 @@ const domainHandlers: HandlerMap = {
   ...federationHandlers,
   ...socialHandlers,
   ...sessionHandlers,
+  ...rolesHandlers,
   ...threadsHandlers,
   ...invitesHandlers,
   ...accountHandlers,
@@ -181,7 +186,7 @@ export function handle(e: weft.WeftEvent) {
       ui.serverEmailAvailable = e.email_available;
       break;
     case "media-token":
-      weft.setMediaBearer(e.token); // §13 fetch bearer for /media URLs
+      media.setMediaBearer(e.token); // §13 fetch bearer for /media URLs
       break;
     case "auth-failed":
       ui.reconnecting = false;

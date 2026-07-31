@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { openVoice } from "$lib/navigation";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { openVoice } from "$lib/navigation/navigation";
   // Persistent voice status panel — sits just above the user footer while
   // connected (Discord-style), independent of which channel you're viewing. It
   // drives the controller in `voice.svelte.ts` directly. Clicking the status
@@ -14,9 +14,9 @@
     startScreenShare,
     stopScreenShare,
     IS_DESKTOP,
-  } from "$lib/voice.svelte";
-  import { voiceUI, openScreenMenu } from "$lib/voiceui.svelte";
-  import { getApp } from "$lib/context";
+  } from "$lib/voice/voice.svelte";
+  import { voiceUI, openScreenMenu } from "$lib/voice/voiceui.svelte";
+  import { getApp } from "$lib/ui/context";
 
   const app = getApp();
   function openStage() {

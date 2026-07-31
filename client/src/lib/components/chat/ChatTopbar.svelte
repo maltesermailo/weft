@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { ui } from "$lib/ui.svelte";
-  import { vm } from "$lib/viewmodel.svelte";
-  import { openThreads } from "$lib/models/threads.svelte";
-  import { openGroupPicker, callUser, leaveGroup, groupLabel } from "$lib/models/social.svelte";
-  import { openInvites } from "$lib/models/invites.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import { dotClass, peerOf } from "$lib/profile.svelte";
-  import { getApp } from "$lib/context";
+  import { ui } from "$lib/ui/ui.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { openThreads } from "$lib/messages/threads.svelte";
+  import { openGroupPicker, callUser, leaveGroup, groupLabel } from "$lib/social/social.svelte";
+  import { openInvites } from "$lib/invites/invites.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { dotClass, peerOf } from "$lib/profile/profile.svelte";
+  import { getApp } from "$lib/ui/context";
   const app = getApp();
 </script>
 

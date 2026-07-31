@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { renderMd } from "$lib/mdrender.svelte";
-  import { displayName } from "$lib/profile.svelte";
+  import { renderMd } from "$lib/rendering/mdrender.svelte";
+  import { displayName } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
-  import * as weft from "$lib/weft";
-  import { store } from "$lib/models/store.svelte";
+  import { getApp } from "$lib/ui/context";
+  import * as weft from "$lib/transport/weft";
+  import { store } from "$lib/store/store.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();

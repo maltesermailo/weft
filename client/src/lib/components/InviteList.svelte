@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { revokeInvite, createInvite, inviteLinkFor } from "$lib/models/invites.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import { displayName } from "$lib/profile.svelte";
-  import { getApp } from "$lib/context";
+  import { revokeInvite, createInvite, inviteLinkFor } from "$lib/invites/invites.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { displayName } from "$lib/profile/profile.svelte";
+  import { getApp } from "$lib/ui/context";
   const app = getApp();
 
   // `showCreate` renders the trailing "Create invite" button (the standalone

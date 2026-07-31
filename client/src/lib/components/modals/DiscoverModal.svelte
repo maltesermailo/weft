@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { ui } from "$lib/ui.svelte";
-  import { vm } from "$lib/viewmodel.svelte";
-  import { store } from "$lib/models/store.svelte";
+  import { ui } from "$lib/ui/ui.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { store } from "$lib/store/store.svelte";
   // "Where do you want to go?" — the namespace entry point, built as a four-step
   // card (choose → join / invite / create) per design/namespace.html.
   //
@@ -9,8 +9,8 @@
   // into search: a query containing "/" is read as `network/namespace` and routes
   // through FEDERATE (§11.10) instead of a local join.
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
-  import * as weft from "$lib/weft";
+  import { getApp } from "$lib/ui/context";
+  import * as weft from "$lib/transport/weft";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 

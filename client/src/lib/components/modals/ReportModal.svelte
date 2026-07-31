@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
-  import * as weft from "$lib/weft";
+  import { getApp } from "$lib/ui/context";
+  import * as weft from "$lib/transport/weft";
   import { REPORT_CATEGORIES } from "$lib/constants";
   import type { Msg } from "$lib/types";
 

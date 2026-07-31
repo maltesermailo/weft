@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { open, openFriends, openGroup } from "$lib/navigation";
-  import { userCtx, groupCtx } from "$lib/ctxmenu.svelte";
-  import { roster, groupLabel } from "$lib/models/social.svelte";
-  import { displayName, dotClass, peerOf } from "$lib/profile.svelte";
-  import { getApp } from "$lib/context";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { open, openFriends, openGroup } from "$lib/navigation/navigation";
+  import { userCtx, groupCtx } from "$lib/ui/ctxmenu.svelte";
+  import { roster, groupLabel } from "$lib/social/social.svelte";
+  import { displayName, dotClass, peerOf } from "$lib/profile/profile.svelte";
+  import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
 </script>

@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { notifLevelOf, setNotifLevel, notifScopeKey, notifScopeLabel } from "$lib/notif";
-  import type { NotifLevel } from "$lib/models/store.svelte";
+  import { notifLevelOf, setNotifLevel, notifScopeKey, notifScopeLabel } from "$lib/notifications/notif";
+  import type { NotifLevel } from "$lib/store/store.svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 

@@ -1,22 +1,23 @@
 <script lang="ts">
-  import * as weft from "$lib/weft";
-  import type { LinkPreview } from "$lib/weft";
+  import * as weft from "$lib/transport/weft";
+  import * as media from "$lib/media/media";
+  import type { LinkPreview } from "$lib/media/media";
 
   let { url }: { url: string } = $props();
 
   let preview = $state<LinkPreview | null>(null);
 
-  // Re-fetch when the URL changes; the weft.unfurl cache dedupes repeats.
+  // Re-fetch when the URL changes; the media.unfurl cache dedupes repeats.
   $effect(() => {
     const u = url;
     preview = null;
-    weft.unfurl(u).then((p) => {
+    media.unfurl(u).then((p) => {
       // Guard against a stale resolve after the prop changed.
       if (u === url) preview = p;
     });
   });
 
-  const imageSrc = $derived(preview?.image ? weft.unfurlImageUrl(preview.image) : null);
+  const imageSrc = $derived(preview?.image ? media.unfurlImageUrl(preview.image) : null);
 </script>
 
 {#if preview && (preview.title || preview.description || imageSrc)}

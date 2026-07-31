@@ -52,7 +52,7 @@ export type ThreadInfo = {
   last?: string;
 };
 
-// `Channel` is now a reactive class — see $lib/models/channel.svelte.
+// `Channel` is now a reactive class — see $lib/channels/channel.svelte.
 
 /// A right-click context-menu entry.
 export type CtxItem =
@@ -77,6 +77,6 @@ export type MentionOpt = {
 };
 
 // The `NS INFO MEMBERS` roster row is now the `Membership` class — see
-// $lib/models/membership.svelte.
+// $lib/membership/membership.svelte.
 
-// The role definition is now the `Role` class — see $lib/models/role.svelte.
+// The role definition is now the `Role` class — see $lib/roles/role.svelte.

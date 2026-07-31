@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
   // Discord-style voice stage: shown in the main pane when the active channel is
   // a voice channel. Renders a tile per participant (camera video or avatar) plus
   // a large tile per active screen share, and a control bar.
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   import {
     voice,
     voiceRosters,
@@ -19,8 +19,8 @@
     nativeVideoUrl,
     IS_DESKTOP,
     type VoiceParticipant,
-  } from "$lib/voice.svelte";
-  import { voiceUI, openScreenMenu } from "$lib/voiceui.svelte";
+  } from "$lib/voice/voice.svelte";
+  import { voiceUI, openScreenMenu } from "$lib/voice/voiceui.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
 
   const app = getApp();

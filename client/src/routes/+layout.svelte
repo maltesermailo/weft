@@ -3,39 +3,42 @@
   import { onMount, untrack } from "svelte";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
-  import * as nav from "$lib/nav";
-  import { ui } from "$lib/ui.svelte";
-  import { conn, attemptReconnect, HOMESERVER_KEY, SAVED_KEY, nsMetaFetched, logout, doConnect, keyLogin, chooseServer, changeServer, probeServer } from "$lib/connection.svelte";
-  import { selectServer, goHome } from "$lib/navigation";
+  import * as nav from "$lib/navigation/nav";
+  import { ui } from "$lib/ui/ui.svelte";
+  import { conn, attemptReconnect, HOMESERVER_KEY, SAVED_KEY, nsMetaFetched, logout, doConnect, keyLogin, chooseServer, changeServer, probeServer } from "$lib/connection/connection.svelte";
+  import { selectServer, goHome } from "$lib/navigation/navigation";
   import { handle, loadHistory, hist } from "$lib/sync/reducer.svelte";
-  import { msgEpoch } from "$lib/time";
-  import { scopeKeyOf, notifLevel, isMuted, setNotifLevel } from "$lib/notif";
-  import { nicks, nicksFetched, peerOf, initials, dotClass, avatarUrl, displayName, nickOf, bioOf, statusOf } from "$lib/profile.svelte";
-  import { toasts, toast, expectSuccess } from "$lib/toasts.svelte";
-  import * as weft from "$lib/weft";
+  import { msgEpoch } from "$lib/rendering/time";
+  import { scopeKeyOf, notifLevel, isMuted, setNotifLevel } from "$lib/notifications/notif";
+  import { nicks, nicksFetched, peerOf, initials, dotClass, avatarUrl, displayName, nickOf, bioOf, statusOf } from "$lib/profile/profile.svelte";
+  import { toasts, toast, expectSuccess } from "$lib/notifications/toasts.svelte";
+  import * as weft from "$lib/transport/weft";
   
+  import * as media from "$lib/media/media";
   import type { Msg } from "$lib/types";
   
-  import { cf } from "$lib/models/connect.svelte";
-  import { provideApp } from "$lib/context";
-  import { store } from "$lib/models/store.svelte";
-  import { refreshNetblocks } from "$lib/models/federation.svelte";
-  import { moderate } from "$lib/moderation";
-  import { nsAdmin } from "$lib/models/server.svelte";
-  import { openInvites } from "$lib/models/invites.svelte";
-  import { qualify, acceptFriend, removeFriend } from "$lib/models/social.svelte";
+  import { cf } from "$lib/session/connect.svelte";
+  import { provideApp } from "$lib/ui/context";
+  import { store } from "$lib/store/store.svelte";
+  import { refreshNetblocks } from "$lib/federation/federation.svelte";
+  import { moderate } from "$lib/moderation/moderation";
+  import { nsAdmin } from "$lib/namespaces/server.svelte";
+  import { openInvites } from "$lib/invites/invites.svelte";
+  import { qualify, acceptFriend, removeFriend } from "$lib/social/social.svelte";
   
   
-  import { closeThread } from "$lib/models/threads.svelte";
-  import { vm } from "$lib/viewmodel.svelte";
+  import { closeThread } from "$lib/messages/threads.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
   
   import AppShell from "$lib/components/AppShell.svelte";
   
-  import { appConfirm } from "$lib/confirm.svelte";
-  import { openCreateChannel, openCreateChannelInCat, openCreateCategory } from "$lib/channelcreate.svelte";
-  import { roleScopeOf, nsRoleScope, isOwnerAt, isStaff, fetchRoles } from "$lib/models/session.svelte";
-  import { Channel, channels, mkMsg, nsOf, chanShort, channelRecord, ensureChannel, markRead, layoutCache, loadLayoutCache, persistDms } from "$lib/models/channel.svelte";
-  import { installLinkGuard } from "$lib/linkguard.svelte";
+  import { appConfirm } from "$lib/ui/confirm.svelte";
+  import { openCreateChannel, openCreateChannelInCat, openCreateCategory } from "$lib/channels/channelcreate.svelte";
+  import { isOwnerAt, isStaff } from "$lib/session/session.svelte";
+import { roleScopeOf, nsRoleScope, fetchRoles } from "$lib/roles/roles.svelte";
+  import { Channel, channels, nsOf, chanShort, channelRecord, ensureChannel, markRead, layoutCache, loadLayoutCache, persistDms } from "$lib/channels/channel.svelte";
+import { mkMsg } from "$lib/messages/messages.svelte";
+  import { installLinkGuard } from "$lib/ui/linkguard.svelte";
   import LinkWarningModal from "$lib/components/modals/LinkWarningModal.svelte";
   import ConnectScreen from "$lib/components/ConnectScreen.svelte";
   import Toasts from "$lib/components/Toasts.svelte";
@@ -43,8 +46,8 @@
   import QuickSwitcher from "$lib/components/QuickSwitcher.svelte";
   import CommunityRail from "$lib/components/CommunityRail.svelte";
   import MemberList from "$lib/components/MemberList.svelte";
-  import { voice } from "$lib/voice.svelte";
-  import { callMedia, disconnectCallMedia, toggleCallMute } from "$lib/callmedia.svelte";
+  import { voice } from "$lib/voice/voice.svelte";
+  import { callMedia, disconnectCallMedia, toggleCallMute } from "$lib/voice/callmedia.svelte";
   import VoiceBar from "$lib/components/VoiceBar.svelte";
   import CameraPicker from "$lib/components/modals/CameraPicker.svelte";
   import ScreenPicker from "$lib/components/modals/ScreenPicker.svelte";
@@ -95,7 +98,7 @@
   // In-app confirmation (the Tauri webview blocks native window.confirm, so
   // destructive actions must not rely on it). Resolves true/false.
 
-  // ---- live data, channel collection + layout cache: `$lib/models/channel.svelte`
+  // ---- live data, channel collection + layout cache: `$lib/channels/channel.svelte`
   // (channels/mkMsg/ensureChannel/markRead/nsOf/chanShort/layoutCache/…). ----
 
   // ---- notification preferences (per-user, localStorage) ----
@@ -173,7 +176,7 @@
   // ---- §6.5 invites (list menu + create screen) — state on `store.invites`.
   // ---- federation (§11, operator) — state lives on `store.federation` ----
   // Opens the operator §11 Federation panel (UI orchestration stays here; the
-  // panel's actions live on `$lib/models/federation.svelte`).
+  // panel's actions live on `$lib/federation/federation.svelte`).
   function openFederation() {
     ui.federationOpen = true;
     ui.settingsOpen = false;
@@ -182,7 +185,7 @@
   // ---- pins + message search (§6.4) — state on `store.pins` / `store.search`
   // (self-contained panels); results stream in as BATCHes, routed by the reducer.
   // ---- threads (§9.4) — side panel + list modal — state on `store.threads`.
-  // ---- capability + role reads: `$lib/models/session.svelte` (ensureCapsAt /
+  // ---- capability + role reads: `$lib/session/session.svelte` (ensureCapsAt /
   // rolesAt / roleById / rolesOf / isOwnerAt / isStaff / badgeFor / mentionsMe /
   // roleScopeOf); `rolesByScope` / `memberRoles` state live there too. ----
 
@@ -705,7 +708,7 @@
     get replyTo() { return ui.replyTo; },
     set replyTo(v: Msg | null) { ui.replyTo = v; },
     get newDividerKey() { return newDividerKey; },
-    mediaUrl: weft.mediaUrl,
+    mediaUrl: media.mediaUrl,
     // roles (ProfileCard)
     // channel permissions (per-target: @everyone / role / member)
     // federation (operator)

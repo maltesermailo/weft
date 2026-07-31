@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { getApp } from "$lib/context";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { getApp } from "$lib/ui/context";
   import EmptyHome from "$lib/components/EmptyHome.svelte";
-  import VoiceStage from "./VoiceStage.svelte";
-  import ChatTopbar from "./ChatTopbar.svelte";
-  import MessageList from "./MessageList.svelte";
-  import Composer from "./Composer.svelte";
+  import VoiceStage from "$lib/components/chat/VoiceStage.svelte";
+  import ChatTopbar from "$lib/components/chat/ChatTopbar.svelte";
+  import MessageList from "$lib/components/chat/MessageList.svelte";
+  import Composer from "$lib/components/chat/Composer.svelte";
 
   const app = getApp();
   // Shared by the channel / DM / group routes. `active` is URL-derived, so the

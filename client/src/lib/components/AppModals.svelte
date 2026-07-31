@@ -5,13 +5,13 @@
   (`activeServer` / `channelGroups`) the Create-Channel modal needs.
 -->
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { getApp } from "$lib/context";
-  import { ui } from "$lib/ui.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import { confirmDialog, resolveConfirm } from "$lib/confirm.svelte";
-  import { chanDraft, catDraft, createChannel, createCategory } from "$lib/channelcreate.svelte";
-  import { groupPicker, createGroupWith } from "$lib/models/social.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { getApp } from "$lib/ui/context";
+  import { ui } from "$lib/ui/ui.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { confirmDialog, resolveConfirm } from "$lib/ui/confirm.svelte";
+  import { chanDraft, catDraft, createChannel, createCategory } from "$lib/channels/channelcreate.svelte";
+  import { groupPicker, createGroupWith } from "$lib/social/social.svelte";
 
   import DiscoverModal from "$lib/components/modals/DiscoverModal.svelte";
   import ReportModal from "$lib/components/modals/ReportModal.svelte";

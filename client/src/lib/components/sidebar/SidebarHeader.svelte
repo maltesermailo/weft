@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { store } from "$lib/models/store.svelte";
-  import { vm } from "$lib/viewmodel.svelte";
-  import { nsLeave } from "$lib/navigation";
-  import { ui } from "$lib/ui.svelte";
-  import { serverCap, canOpenServerSettings, isNsOwner } from "$lib/models/session.svelte";
-  import { mintInvite } from "$lib/models/invites.svelte";
-  import { getApp } from "$lib/context";
+  import { store } from "$lib/store/store.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { nsLeave } from "$lib/navigation/navigation";
+  import { ui } from "$lib/ui/ui.svelte";
+  import { serverCap, canOpenServerSettings, isNsOwner } from "$lib/session/session.svelte";
+  import { mintInvite } from "$lib/invites/invites.svelte";
+  import { getApp } from "$lib/ui/context";
   const app = getApp();
 </script>
 

@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { activeEmoji, emojiUrlFor } from "$lib/models/server.svelte";
+  import { activeEmoji, emojiUrlFor } from "$lib/namespaces/server.svelte";
   // §9.4 unified emoji picker (modeled on design/emoji.html): a search box, a
   // category rail, and a scrolling grid whose FIRST section is this server's
   // custom emoji, followed by the unicode categories — plus a hover-preview bar.
   // `onpick` receives a unicode char or a `:name:` shortcode.
-  import { getApp } from "$lib/context";
-  import { EMOJI } from "$lib/emoji";
-  import { charName } from "$lib/shortcodes";
+  import { getApp } from "$lib/ui/context";
+  import { EMOJI } from "$lib/rendering/emoji";
+  import { charName } from "$lib/rendering/shortcodes";
   const app = getApp();
   let { onpick }: { onpick: (value: string) => void } = $props();
 

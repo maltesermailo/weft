@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { friendLabel } from "$lib/profile.svelte";
+  import { friendLabel } from "$lib/profile/profile.svelte";
   import { fade, fly } from "svelte/transition";
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
 

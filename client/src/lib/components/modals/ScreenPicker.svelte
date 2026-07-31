@@ -4,8 +4,8 @@
   // it from JS). Picking a source starts native capture → LiveKit.
   import { fade } from "svelte/transition";
   import { invoke } from "@tauri-apps/api/core";
-  import { voiceUI } from "$lib/voiceui.svelte";
-  import { voice, startNativeVoiceScreenshare, stopNativeVoiceScreenshare } from "$lib/voice.svelte";
+  import { voiceUI } from "$lib/voice/voiceui.svelte";
+  import { voice, startNativeVoiceScreenshare, stopNativeVoiceScreenshare } from "$lib/voice/voice.svelte";
 
   type Source = {
     id: string;

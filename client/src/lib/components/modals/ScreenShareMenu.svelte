@@ -4,8 +4,8 @@
   // restarting capture on the same source (the Rust side stops the previous
   // share first, so this is a switch, not a second publish).
   import { fade } from "svelte/transition";
-  import { voiceUI } from "$lib/voiceui.svelte";
-  import { voice, startNativeVoiceScreenshare, stopNativeVoiceScreenshare } from "$lib/voice.svelte";
+  import { voiceUI } from "$lib/voice/voiceui.svelte";
+  import { voice, startNativeVoiceScreenshare, stopNativeVoiceScreenshare } from "$lib/voice/voice.svelte";
 
   const QKEY = "weft:screenshare-quality";
   const RES = [

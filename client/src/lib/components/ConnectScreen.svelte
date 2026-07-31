@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ConnectForm } from "$lib/models/connect.svelte";
+  import type { ConnectForm } from "$lib/session/connect.svelte";
 
   // `form` is a mutable reference — the inputs bind to its fields directly, so
   // no per-field bindable props. `+page` reads the same object.

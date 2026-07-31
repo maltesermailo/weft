@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { revokeInvite, generateInvite, sendInviteDM } from "$lib/models/invites.svelte";
-  import { roster, friendLocalAccount } from "$lib/models/social.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import { friendLabel, initials } from "$lib/profile.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { revokeInvite, generateInvite, sendInviteDM } from "$lib/invites/invites.svelte";
+  import { roster, friendLocalAccount } from "$lib/social/social.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { friendLabel, initials } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();

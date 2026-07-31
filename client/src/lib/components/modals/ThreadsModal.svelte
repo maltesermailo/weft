@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { vm } from "$lib/viewmodel.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import { openThreadByRoot } from "$lib/models/threads.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { openThreadByRoot } from "$lib/messages/threads.svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 

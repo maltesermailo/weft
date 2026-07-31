@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { userCtx } from "$lib/ctxmenu.svelte";
-  import { messageFriend } from "$lib/navigation";
-  import { roster, friendLocalAccount, openGroupPicker, callUser } from "$lib/models/social.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import { friendLabel } from "$lib/profile.svelte";
-  import { getApp } from "$lib/context";
+  import { userCtx } from "$lib/ui/ctxmenu.svelte";
+  import { messageFriend } from "$lib/navigation/navigation";
+  import { roster, friendLocalAccount, openGroupPicker, callUser } from "$lib/social/social.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { friendLabel } from "$lib/profile/profile.svelte";
+  import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
 

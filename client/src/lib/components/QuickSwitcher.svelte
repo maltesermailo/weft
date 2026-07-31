@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { autofocus } from "$lib/actions";
+  import { autofocus } from "$lib/ui/actions";
 
   type Result = { name: string; label: string; sigil: string; unread: boolean };
 

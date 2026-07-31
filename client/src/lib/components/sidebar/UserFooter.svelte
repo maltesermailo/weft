@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { store } from "$lib/models/store.svelte";
-  import { vm } from "$lib/viewmodel.svelte";
-  import { setStatus, logout } from "$lib/connection.svelte";
-  import { ui } from "$lib/ui.svelte";
-  import { initials, statusOf, openNickDialog, setCustomStatus } from "$lib/profile.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { setStatus, logout } from "$lib/connection/connection.svelte";
+  import { ui } from "$lib/ui/ui.svelte";
+  import { initials, statusOf, openNickDialog, setCustomStatus } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
 

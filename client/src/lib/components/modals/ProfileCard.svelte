@@ -1,13 +1,14 @@
 <script lang="ts">
-  import { openDm } from "$lib/navigation";
-  import { scopesFor } from "$lib/models/channel.svelte";
-  import { moderate } from "$lib/moderation";
-  import { rolesAt, rolesOf, badgeFor, nameColor, canModerate, isNsOwner, assignRoleTo, unassignRoleFrom, roleScopeOf, isOwnerAt, isStaff } from "$lib/models/session.svelte";
-  import { store } from "$lib/models/store.svelte";
-  import { bioOf, nickOf, statusOf, openFullProfile, setNick } from "$lib/profile.svelte";
+  import { openDm } from "$lib/navigation/navigation";
+  import { scopesFor } from "$lib/channels/channel.svelte";
+  import { moderate } from "$lib/moderation/moderation";
+  import { badgeFor, canModerate, isNsOwner, isOwnerAt, isStaff } from "$lib/session/session.svelte";
+import { rolesAt, rolesOf, nameColor, assignRoleTo, unassignRoleFrom, roleScopeOf } from "$lib/roles/roles.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { bioOf, nickOf, statusOf, openFullProfile, setNick } from "$lib/profile/profile.svelte";
   import { untrack } from "svelte";
   import { fade } from "svelte/transition";
-  import { getApp } from "$lib/context";
+  import { getApp } from "$lib/ui/context";
   import { EVERYONE_ROLE } from "$lib/constants";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
