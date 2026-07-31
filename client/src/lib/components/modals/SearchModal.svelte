@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { jumpTo } from "$lib/composer.svelte";
   import { renderMd } from "$lib/mdrender.svelte";
   import { displayName } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
@@ -32,7 +33,7 @@
   }
   function jumpToResult(m: { msgid?: string }) {
     search.open = false;
-    app.jumpTo(m.msgid); // best-effort: scrolls if the message is loaded
+    jumpTo(m.msgid); // best-effort: scrolls if the message is loaded
   }
 </script>
 

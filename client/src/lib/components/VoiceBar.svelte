@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { vm } from "$lib/viewmodel.svelte";
+  import { openVoice } from "$lib/navigation";
   // Persistent voice status panel — sits just above the user footer while
   // connected (Discord-style), independent of which channel you're viewing. It
   // drives the controller in `voice.svelte.ts` directly. Clicking the status
@@ -18,7 +20,7 @@
 
   const app = getApp();
   function openStage() {
-    if (voice.channel) app.openVoice(voice.channel);
+    if (voice.channel) openVoice(voice.channel);
   }
   // Desktop always opens the picker — it lets you start, switch source/device,
   // change quality, or stop. Web toggles directly (or opens the camera picker).
@@ -47,7 +49,7 @@
       <span class="voice-live" class:connecting={voice.connecting} aria-hidden="true"></span>
       <span class="voice-status-text">
         <span class="voice-state">{voice.connecting ? "Connecting…" : "Voice Connected"}</span>
-        <span class="voice-chan">{app.titleOf(voice.channel)}</span>
+        <span class="voice-chan">{vm.titleOf(voice.channel)}</span>
       </span>
     </button>
 

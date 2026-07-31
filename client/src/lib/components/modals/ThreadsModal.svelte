@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { vm } from "$lib/viewmodel.svelte";
+  import { store } from "$lib/models/store.svelte";
+  import { openThreadByRoot } from "$lib/models/threads.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   const app = getApp();
@@ -6,7 +9,7 @@
 
   // A short preview of the root when a thread has no name yet.
   function preview(root: string): string {
-    const m = app.activeChannel?.messages.find((msg) => msg.msgid === root);
+    const m = vm.activeChannel?.messages.find((msg) => msg.msgid === root);
     if (m && m.body) return m.body.length > 60 ? m.body.slice(0, 60) + "…" : m.body;
     return "Thread";
   }
@@ -20,8 +23,8 @@
       <button class="linkish" aria-label="Close" onclick={onclose}>✕</button>
     </div>
     <div class="modal-list">
-      {#each app.threadsList as t (t.root)}
-        <button class="thread-card" onclick={() => app.openThreadByRoot(t)}>
+      {#each store.threads.list as t (t.root)}
+        <button class="thread-card" onclick={() => openThreadByRoot(t)}>
           <div class="thread-icon">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
           </div>

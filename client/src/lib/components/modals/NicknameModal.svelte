@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { displayName, nickOf } from "$lib/profile.svelte";
+  import { store } from "$lib/models/store.svelte";
+  import { vm } from "$lib/viewmodel.svelte";
+  import { displayName, nickOf, setNick } from "$lib/profile.svelte";
   // §10.3 quick per-namespace nickname editor, opened from a user's context
   // menu. Own nick needs `nick`; another member's needs `manage-nicks` — the
   // server enforces, a missing cap just ERRs.
@@ -9,7 +11,7 @@
   const app = getApp();
   let { target, onclose }: { target: string; onclose: () => void } = $props();
 
-  const isSelf = $derived(target === app.account);
+  const isSelf = $derived(target === store.session.account);
   const scope = $derived(`ns:${app.activeServer}`);
   // Prefill once with the current nickname (the modal is opened fresh per target).
   let value = $state(untrack(() => nickOf(target)));
@@ -19,7 +21,7 @@
     node.select();
   }
   function save() {
-    app.setNick(scope, target, value.trim());
+    setNick(scope, target, value.trim());
     onclose();
   }
 </script>
@@ -32,7 +34,7 @@
       <button class="linkish" aria-label="Close" onclick={onclose}>✕</button>
     </div>
     <p class="modal-sub">
-      Your display name on <b>{app.serverName(app.activeServer)}</b>{isSelf ? "" : ` for ${target}`} — leave empty to clear it.
+      Your display name on <b>{vm.serverName(app.activeServer)}</b>{isSelf ? "" : ` for ${target}`} — leave empty to clear it.
     </p>
     <label class="fld">Nickname
       <input

@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { roster } from "$lib/models/social.svelte";
+  import { vm } from "$lib/viewmodel.svelte";
+  import { revokeInvite, generateInvite, sendInviteDM } from "$lib/models/invites.svelte";
+  import { roster, friendLocalAccount } from "$lib/models/social.svelte";
   import { store } from "$lib/models/store.svelte";
   import { friendLabel, initials } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
@@ -34,7 +36,7 @@
 
   let copied = $state(false);
   function copy() {
-    const link = app.inviteLink;
+    const link = store.invites.link;
     if (!link) return;
     navigator.clipboard?.writeText(link).then(
       () => {
@@ -47,17 +49,17 @@
   }
 
   function generate() {
-    app.generateInvite(maxUses, expiry);
+    generateInvite(maxUses, expiry);
   }
   function revoke() {
-    if (app.inviteId) app.revokeInvite(app.inviteId);
+    if (store.invites.id) revokeInvite(store.invites.id);
   }
 
   // The scope this invite grants access to, in a friendly form.
   const scopeLabel = $derived(
-    app.inviteCreateScope.startsWith("ns:")
-      ? app.inviteCreateScope.slice(3)
-      : app.inviteCreateScope || app.network,
+    store.invites.createScope.startsWith("ns:")
+      ? store.invites.createScope.slice(3)
+      : store.invites.createScope || store.session.network,
   );
   const expiryLabel = $derived(EXPIRY_OPTS.find((o) => o.secs === expiry)?.label ?? "Never");
   const usesLabel = $derived(
@@ -70,13 +72,13 @@
   // Presence is keyed by the friend's local account; federated friends have no
   // local account and can't be DM'd, so the send list is local friends only.
   const statusOf = (ref: string) => {
-    const acct = app.friendLocalAccount(ref);
+    const acct = friendLocalAccount(ref);
     return acct ? (store.accountOf(acct).presence ?? "offline") : "offline";
   };
   const isOnline = (ref: string) => statusOf(ref) !== "offline" && statusOf(ref) !== "invisible";
   const friends = $derived(
     roster.friends.filter((r) => {
-      if (!app.friendLocalAccount(r)) return false;
+      if (!friendLocalAccount(r)) return false;
       const q = search.trim().toLowerCase();
       return !q || friendLabel(r).toLowerCase().includes(q) || r.toLowerCase().includes(q);
     }),
@@ -89,9 +91,9 @@
     selected = next;
   }
   function send() {
-    const link = app.inviteLink;
+    const link = store.invites.link;
     if (!link || !selected.size) return;
-    for (const ref of selected) app.sendInviteDM(ref, link);
+    for (const ref of selected) sendInviteDM(ref, link);
     app.toast(`Invite sent to ${selected.size} friend${selected.size === 1 ? "" : "s"}`, "info");
     selected = new Set();
   }
@@ -105,8 +107,8 @@
       <div class="ic-server">
         <div class="ic-icon">{initials(scopeLabel)}</div>
         <div class="ic-meta">
-          <div class="ic-name">{app.activeNsMeta?.title || scopeLabel}</div>
-          <div class="ic-scope">on {app.network}</div>
+          <div class="ic-name">{vm.activeNsMeta?.title || scopeLabel}</div>
+          <div class="ic-scope">on {store.session.network}</div>
         </div>
       </div>
       <div class="ic-title">Invite to server</div>
@@ -123,12 +125,12 @@
     {#if tab === "link"}
       <div class="ic-body">
         <div class="ic-field-label">Your invite link</div>
-        <div class="ic-linkbox" class:empty={!app.inviteLink}>
+        <div class="ic-linkbox" class:empty={!store.invites.link}>
           <div class="ic-linkinfo">
-            <div class="ic-linkcode">{app.inviteLink ?? "Choose options, then generate a link"}</div>
+            <div class="ic-linkcode">{store.invites.link ?? "Choose options, then generate a link"}</div>
             <div class="ic-linkexpire">Expires: {expiryLabel} · {usesLabel}</div>
           </div>
-          <button class="ic-copy" class:copied disabled={!app.inviteLink} onclick={copy}>
+          <button class="ic-copy" class:copied disabled={!store.invites.link} onclick={copy}>
             {copied ? "Copied" : "Copy"}
           </button>
         </div>
@@ -148,11 +150,11 @@
         </div>
 
         <div class="ic-actions">
-          {#if app.inviteId}
+          {#if store.invites.id}
             <button class="ic-btn-ghost danger" onclick={revoke}>Revoke</button>
           {/if}
           <button class="ic-btn-primary" onclick={generate}>
-            {app.inviteLink ? "Generate new link" : "Generate invite link"}
+            {store.invites.link ? "Generate new link" : "Generate invite link"}
           </button>
         </div>
       </div>
@@ -177,7 +179,7 @@
         <div class="ic-friends">
           {#snippet frow(ref: string)}
             <button class="ic-friend" class:sel={selected.has(ref)} onclick={() => toggle(ref)}>
-              <div class="ic-fav"><Avatar account={app.friendLocalAccount(ref) ?? ref} /><span class="ic-fdot {statusOf(ref)}"></span></div>
+              <div class="ic-fav"><Avatar account={friendLocalAccount(ref) ?? ref} /><span class="ic-fdot {statusOf(ref)}"></span></div>
               <div class="ic-finfo">
                 <div class="ic-fname">{friendLabel(ref)}</div>
                 <div class="ic-fsub">{statusOf(ref)}</div>
@@ -200,12 +202,12 @@
           {/if}
         </div>
 
-        {#if !app.inviteLink}
+        {#if !store.invites.link}
           <div class="ic-hint">Generate a link on the <b>Invite link</b> tab first, then send it here.</div>
         {/if}
         <div class="ic-actions">
           <button class="ic-btn-ghost" disabled={!selected.size} onclick={() => (selected = new Set())}>Clear</button>
-          <button class="ic-btn-primary" disabled={!selected.size || !app.inviteLink} onclick={send}>
+          <button class="ic-btn-primary" disabled={!selected.size || !store.invites.link} onclick={send}>
             {selected.size ? `Send ${selected.size} invite${selected.size === 1 ? "" : "s"}` : "Send invite"}
           </button>
         </div>

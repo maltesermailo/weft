@@ -1,8 +1,10 @@
 // The client domain model — see docs/architecture/client-model-refactor.md.
 import { SvelteMap } from "svelte/reactivity";
+import * as weft from "$lib/weft";
 import type { WeftEvent } from "$lib/weft";
 import type { HandlerMap } from "$lib/sync/handler-map";
 import { store } from "./store.svelte";
+import { toast } from "$lib/toasts.svelte";
 
 /// A peering manifest as surfaced to the operator (§11.6 MANIFEST event).
 export interface ManifestInfo {
@@ -51,3 +53,29 @@ export const federationHandlers: HandlerMap = {
   manifest: (e) => store.federation.applyManifest(e),
   netblocked: (e) => store.federation.applyNetblock(e),
 };
+
+// §11 operator federation actions — thin RPC wrappers with uniform error
+// toasts, kept beside the state they read/mutate (`store.federation`).
+export function refreshNetblocks(): void {
+  store.federation.netblocks.clear();
+  weft.netblockList().catch((e) => toast(String(e), "error"));
+}
+export function netblockAdd(network: string, reason?: string): void {
+  weft
+    .netblockAdd(network, reason)
+    .then(() => setTimeout(refreshNetblocks, 200))
+    .catch((e) => toast(String(e), "error"));
+}
+export function netblockRemove(network: string): void {
+  store.federation.netblocks.delete(network);
+  weft.netblockRemove(network).catch((e) => toast(String(e), "error"));
+}
+export function bridgePropose(scope: string, peer: string, history: string, media: string, typing: boolean): void {
+  weft.bridgePropose(scope, peer, history, media, typing).catch((e) => toast(String(e), "error"));
+}
+export function bridgeAccept(peer: string, version: number): void {
+  weft.bridgeAccept(peer, version).catch((e) => toast(String(e), "error"));
+}
+export function bridgeSever(peer: string): void {
+  weft.bridgeSever(peer).catch((e) => toast(String(e), "error"));
+}

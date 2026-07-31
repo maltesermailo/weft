@@ -3,9 +3,10 @@ import { SvelteMap } from "svelte/reactivity";
 import { goto } from "$app/navigation";
 import type { HandlerMap } from "$lib/sync/handler-map";
 import { store } from "./store.svelte";
+import * as weft from "$lib/weft";
 import { channels, ensureChannel } from "./channel.svelte";
 import { toast } from "$lib/toasts.svelte";
-import { friendLabel } from "$lib/profile.svelte";
+import { friendLabel, peerOf } from "$lib/profile.svelte";
 import { connectCallMedia, disconnectCallMedia } from "$lib/callmedia.svelte";
 import { view } from "$lib/view.svelte";
 
@@ -32,6 +33,99 @@ export const roster = {
   get outgoing() { return _outgoing; },
   get groups() { return _groups; },
 };
+
+/// A friend ref's local account handle (bare, no `@network`), or null when the
+/// friend lives on another network — cross-network DMs are out of scope.
+export function friendLocalAccount(user: string): string | null {
+  const [acct, net] = user.split("@");
+  return net === store.session.network ? acct : null;
+}
+
+/// Fully-qualify a typed handle to `account@network` (local network default).
+export function qualify(handle: string): string {
+  const h = handle.trim().replace(/^@/, "");
+  return h.includes("@") ? h : `${h}@${store.session.network}`;
+}
+
+export function acceptFriend(user: string): void {
+  weft.friendAccept(user).catch((e) => toast(String(e), "error"));
+}
+
+// Start a 1:1 call. Calls are a friends-only feature — the single gate behind
+// every call entry point (context menu, topbar, profile).
+export function callUser(user: string): void {
+  if (store.social.activeCall) return; // already in a call
+  if (store.social.friends.get(qualify(user)) !== "friends") {
+    toast("You can only call friends", "error");
+    return;
+  }
+  weft.call(user).catch((e) => toast(String(e), "error"));
+}
+// Unfriend / cancel an outgoing request / decline an incoming one.
+export function removeFriend(user: string): void {
+  weft.friendRemove(user).catch((e) => toast(String(e), "error"));
+}
+
+// ---- group-DM friend picker (NewGroupModal) ----
+export const groupPicker = $state<{ open: boolean; seed: string; pos: { left: number; top: number } | null }>({
+  open: false,
+  seed: "",
+  pos: null,
+});
+
+const GROUP_POP_W = 300;
+
+// Open the friend picker to grow a DM into a group. From a DM, seed the current
+// peer; from the Friends view (no active peer), open seedless. Anchor under the
+// button that opened it, right-aligned so it stays on-screen.
+export function openGroupPicker(e?: MouseEvent): void {
+  groupPicker.seed = view.active.startsWith("@") ? qualify(peerOf(view.active)) : "";
+
+  if (e?.currentTarget instanceof HTMLElement) {
+    const r = e.currentTarget.getBoundingClientRect();
+    const left = Math.max(8, Math.min(r.right - GROUP_POP_W, window.innerWidth - GROUP_POP_W - 8));
+    const top = Math.min(r.bottom + 8, window.innerHeight - 120);
+    groupPicker.pos = { left, top };
+  } else {
+    groupPicker.pos = null;
+  }
+
+  groupPicker.open = true;
+}
+
+export function createGroupWith(members: string[]): void {
+  groupPicker.open = false;
+  const uniq = [...new Set(members.map((m) => qualify(m)).filter((m) => m.includes("@")))];
+  if (uniq.length < 2) return; // the peer + at least one more
+  weft.groupCreate(uniq).catch((e) => toast(String(e), "error"));
+}
+
+export function leaveGroup(id: string): void {
+  weft.groupLeave(id).catch((e) => toast(String(e), "error"));
+}
+
+/// A group DM's display label: its name, else the member handles (minus self).
+export function groupLabel(id: string): string {
+  const g = store.social.groups.get(id);
+  if (!g) return "Group";
+  if (g.name) return g.name;
+
+  const me = `${store.session.account}@${store.session.network}`;
+  const others = g.members.filter((m) => m !== me).map((m) => friendLabel(m));
+  return others.length ? others.join(", ") : "Group";
+}
+
+/// My friendship state with a (possibly bare) handle.
+export function friendState(handle: string): "friends" | "incoming" | "outgoing" | "none" {
+  return (store.social.friends.get(qualify(peerOf(handle))) as "friends" | "incoming" | "outgoing") ?? "none";
+}
+/// Act on a friendship from the profile surfaces: add / accept / remove.
+export function friendAction(handle: string, action: "add" | "accept" | "remove"): void {
+  const ref = qualify(peerOf(handle));
+  if (action === "add") weft.friendAdd(ref).catch((e) => toast(String(e), "error"));
+  else if (action === "accept") acceptFriend(ref);
+  else removeFriend(ref);
+}
 
 /// A live 1:1 call: the peer userref + its LiveKit room and state.
 export interface ActiveCall {

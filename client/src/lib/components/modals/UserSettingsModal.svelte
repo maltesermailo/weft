@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { cf } from "$lib/models/connect.svelte";
+  import { ui, toggleTheme } from "$lib/ui.svelte";
+  import { setStatus, enrollThisDevice, logout } from "$lib/connection.svelte";
   import { store } from "$lib/models/store.svelte";
   import { avatarUrl, bioOf, displayName, initials } from "$lib/profile.svelte";
   import { untrack } from "svelte";
@@ -13,11 +16,11 @@
   // successful save (which flows back as a PROFILE / PRESENCE event) clears the
   // dirty state on its own — no manual "saved" bookkeeping.
   const savedDisplay = $derived(
-    displayName(app.account) === app.account ? "" : displayName(app.account),
+    displayName(store.session.account) === store.session.account ? "" : displayName(store.session.account),
   );
-  const savedAbout = $derived(bioOf(app.account));
-  const savedStatus = $derived(app.myStatus);
-  const savedAvatarUrl = $derived(avatarUrl(app.account));
+  const savedAbout = $derived(bioOf(store.session.account));
+  const savedStatus = $derived(store.session.myStatus);
+  const savedAvatarUrl = $derived(avatarUrl(store.session.account));
 
   // Seed the draft from the current values (initial snapshot — intentionally not
   // reactive; the draft then diverges until saved/reverted).
@@ -33,7 +36,7 @@
   const previewAvatarUrl = $derived(
     pendingAvatar ? pendingAvatar.url : removeAvatar ? null : savedAvatarUrl,
   );
-  const previewName = $derived(dName.trim() || app.account);
+  const previewName = $derived(dName.trim() || store.session.account);
 
   const STATUSES = [
     { key: "online", label: "Online" },
@@ -116,7 +119,7 @@
     else if (removeAvatar) opts.avatar = "";
     try {
       if (Object.keys(opts).length) await weft.profileSet(opts);
-      if (dStatus !== savedStatus) app.setStatus(dStatus);
+      if (dStatus !== savedStatus) setStatus(dStatus);
       pendingAvatar = null;
       removeAvatar = false;
     } catch (e) {
@@ -128,18 +131,18 @@
 <div class="settings-overlay" role="dialog" aria-modal="true" transition:fade|global={{ duration: 150 }}>
   <nav class="so-nav">
     <div class="so-nav-inner">
-      <div class="so-heading">{app.account}</div>
-      <button class="so-navitem" class:active={app.userTab === "account"} onclick={() => (app.userTab = "account")}>Account</button>
-      <button class="so-navitem" class:active={app.userTab === "appearance"} onclick={() => (app.userTab = "appearance")}>Appearance</button>
-      <button class="so-navitem" class:active={app.userTab === "verification"} onclick={() => (app.userTab = "verification")}>Verification</button>
-      <button class="so-navitem" class:active={app.userTab === "connection"} onclick={() => (app.userTab = "connection")}>Device &amp; connection</button>
+      <div class="so-heading">{store.session.account}</div>
+      <button class="so-navitem" class:active={ui.userTab === "account"} onclick={() => (ui.userTab = "account")}>Account</button>
+      <button class="so-navitem" class:active={ui.userTab === "appearance"} onclick={() => (ui.userTab = "appearance")}>Appearance</button>
+      <button class="so-navitem" class:active={ui.userTab === "verification"} onclick={() => (ui.userTab = "verification")}>Verification</button>
+      <button class="so-navitem" class:active={ui.userTab === "connection"} onclick={() => (ui.userTab = "connection")}>Device &amp; connection</button>
       <div class="so-heading">Session</div>
-      <button class="so-navitem danger" onclick={app.logout}>Log out</button>
+      <button class="so-navitem danger" onclick={logout}>Log out</button>
     </div>
   </nav>
   <main class="so-main">
     <div class="so-content">
-      {#if app.userTab === "account"}
+      {#if ui.userTab === "account"}
         <h1>Edit Profile</h1>
         <p class="so-sub">Changes preview live — save or revert them from the bar below.</p>
         <input type="file" accept="image/*" bind:this={fileInput} onchange={onAvatarPicked} hidden />
@@ -151,7 +154,7 @@
               <div class="field-label">Profile picture</div>
               <div class="pe-avrow">
                 <button class="pe-av" title="Change avatar" onclick={() => fileInput?.click()}>
-                  {#if previewAvatarUrl}<img src={previewAvatarUrl} alt="" />{:else}{initials(app.account)}{/if}
+                  {#if previewAvatarUrl}<img src={previewAvatarUrl} alt="" />{:else}{initials(store.session.account)}{/if}
                   <span class="pe-av-overlay">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
                     Change
@@ -195,7 +198,7 @@
 
             <!-- Identity + operator -->
             <div class="pe-card">
-              <div class="set-row"><span>Identity</span><b>{app.account}@{app.network}</b></div>
+              <div class="set-row"><span>Identity</span><b>{store.session.account}@{store.session.network}</b></div>
               {#if store.session.isOperator}
                 <div class="section-sep"></div>
                 <div class="field-label">Network defense</div>
@@ -212,13 +215,13 @@
               <div class="pe-preview-banner"></div>
               <div class="pe-preview-avwrap">
                 <div class="pe-preview-av">
-                  {#if previewAvatarUrl}<img src={previewAvatarUrl} alt="" />{:else}{initials(app.account)}{/if}
+                  {#if previewAvatarUrl}<img src={previewAvatarUrl} alt="" />{:else}{initials(store.session.account)}{/if}
                   <span class="pe-preview-dot dot {dStatus}"></span>
                 </div>
               </div>
               <div class="pe-preview-body">
                 <div class="pe-preview-name">{previewName}</div>
-                <div class="pe-preview-handle">{app.account}@{app.network}</div>
+                <div class="pe-preview-handle">{store.session.account}@{store.session.network}</div>
                 <div class="pe-preview-section">
                   <div class="pe-preview-slabel">About me</div>
                   <div class="pe-preview-bio" class:empty={!dAbout.trim()}>{dAbout.trim() || "No bio set."}</div>
@@ -228,31 +231,31 @@
             {#if isDirty}<div class="pe-unsaved">Unsaved changes</div>{/if}
           </aside>
         </div>
-      {:else if app.userTab === "appearance"}
+      {:else if ui.userTab === "appearance"}
         <h1>Appearance</h1>
         <p class="so-sub">Theme for this device.</p>
         <div class="field-label">Theme</div>
         <div class="status-inline">
-          <button class="chip-btn" class:on={app.theme === "dark"} onclick={() => app.theme !== "dark" && app.toggleTheme()}>Dark</button>
-          <button class="chip-btn" class:on={app.theme === "light"} onclick={() => app.theme !== "light" && app.toggleTheme()}>Light</button>
+          <button class="chip-btn" class:on={ui.theme === "dark"} onclick={() => ui.theme !== "dark" && toggleTheme()}>Dark</button>
+          <button class="chip-btn" class:on={ui.theme === "light"} onclick={() => ui.theme !== "light" && toggleTheme()}>Light</button>
         </div>
-      {:else if app.userTab === "verification"}
+      {:else if ui.userTab === "verification"}
         <h1>Verification</h1>
         <p class="so-sub">Verify your email and age. Only you can see these — they're never shown to other members.</p>
 
         <div class="field-label">Email</div>
-        {#if app.verifications.email}
+        {#if store.session.verifications.email}
           <div class="set-row">
-            <span>{app.verifications.email.subject}</span>
-            <b class="vstate {app.verifications.email.state}">{app.verifications.email.state === "confirmed" ? "✓ Verified" : "Pending"}</b>
+            <span>{store.session.verifications.email.subject}</span>
+            <b class="vstate {store.session.verifications.email.state}">{store.session.verifications.email.state === "confirmed" ? "✓ Verified" : "Pending"}</b>
           </div>
         {/if}
-        {#if app.verifications.email?.state !== "confirmed"}
+        {#if store.session.verifications.email?.state !== "confirmed"}
           <div class="vrow">
             <input class="prof-input" type="email" bind:value={emailDraft} placeholder="you@example.com" onkeydown={(e) => e.key === "Enter" && sendCode()} />
             <button class="ok-btn" onclick={sendCode}>Send code</button>
           </div>
-          {#if emailSent || app.verifications.email?.state === "pending"}
+          {#if emailSent || store.session.verifications.email?.state === "pending"}
             <p class="so-sub">Enter the code we emailed you (expires in 15 minutes).</p>
             <div class="vrow">
               <input class="prof-input" bind:value={codeDraft} maxlength="6" inputmode="numeric" placeholder="123456" onkeydown={(e) => e.key === "Enter" && confirmEmail()} />
@@ -263,27 +266,27 @@
 
         <div class="section-sep"></div>
         <div class="field-label">Birthday</div>
-        {#if app.verifications.birthday}
-          <div class="set-row"><span>{app.verifications.birthday.subject}</span><b class="vstate confirmed">✓ Set</b></div>
+        {#if store.session.verifications.birthday}
+          <div class="set-row"><span>{store.session.verifications.birthday.subject}</span><b class="vstate confirmed">✓ Set</b></div>
         {/if}
         <p class="so-sub">Self-declared (not independently verified).</p>
         <div class="vrow">
           <input class="prof-input" type="date" bind:value={birthdayDraft} />
           <button class="ok-btn" onclick={saveBirthday}>Save birthday</button>
         </div>
-      {:else if app.userTab === "connection"}
+      {:else if ui.userTab === "connection"}
         <h1>Device &amp; connection</h1>
         <p class="so-sub">This device's link to the network.</p>
-        <div class="set-row"><span>Server</span><b>{app.host}{app.reconnecting ? " · reconnecting…" : ""}</b></div>
+        <div class="set-row"><span>Server</span><b>{cf.host}{ui.reconnecting ? " · reconnecting…" : ""}</b></div>
         <div class="section-sep"></div>
         <div class="set-row">
           <span>Passwordless login on this device</span>
-          <button class="set-btn" onclick={app.enrollThisDevice}>Enroll device key</button>
+          <button class="set-btn" onclick={enrollThisDevice}>Enroll device key</button>
         </div>
       {/if}
     </div>
 
-    {#if app.userTab === "account" && isDirty}
+    {#if ui.userTab === "account" && isDirty}
       <div class="pe-savebar" transition:fly|global={{ y: 70, duration: 220 }}>
         <div class="pe-savebar-inner">
           <span class="pe-savebar-msg"><span class="pe-savebar-dot"></span>You have unsaved changes</span>

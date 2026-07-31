@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { vm } from "$lib/viewmodel.svelte";
   import { getApp } from "$lib/context";
   import EmptyHome from "$lib/components/EmptyHome.svelte";
   import VoiceStage from "./VoiceStage.svelte";
@@ -12,9 +13,9 @@
   // neutral placeholder until it lands rather than feeding undefined downstream.
 </script>
 
-{#if app.activeChannel?.voice}
+{#if vm.activeChannel?.voice}
   <VoiceStage />
-{:else if app.activeChannel}
+{:else if vm.activeChannel}
   <ChatTopbar />
 
   <div class="msg-area">

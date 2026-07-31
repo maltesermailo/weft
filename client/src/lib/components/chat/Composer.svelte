@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { vm } from "$lib/viewmodel.svelte";
+  import { compose, composeView, composerKey, onComposerInput, doSend, pickMention, pickEmojiSuggestion, attachFile, pasteFiles, dropFiles, removeAttachment } from "$lib/composer.svelte";
   import { renderMd } from "$lib/mdrender.svelte";
   import { getApp } from "$lib/context";
   import { highlightComposer } from "$lib/mdhighlight";
@@ -14,7 +16,7 @@
 
   let emojiOpen = $state(false);
   function insertEmoji(value: string) {
-    app.composer = app.composer + value;
+    compose.text = compose.text + value;
     emojiOpen = false;
   }
 
@@ -26,7 +28,7 @@
   // character-for-character (colour only, never weight/size), so the caret stays
   // aligned with the overlay.
   let overlay = $state<HTMLDivElement | null>(null);
-  const highlighted = $derived(highlightComposer(app.composer));
+  const highlighted = $derived(highlightComposer(compose.text));
 
   // While an IME composition is active the textarea's own (transparent) preedit
   // text would be invisible, so temporarily show the textarea and hide the
@@ -54,9 +56,9 @@
     }
   }
   // React to every composer change — typing, emoji insert, mention pick, and the
-  // reset to "" after send all flow through `app.composer`.
+  // reset to "" after send all flow through `compose.text`.
   $effect(() => {
-    app.composer;
+    compose.text;
     autosize();
     syncScroll();
   });
@@ -70,7 +72,7 @@
   }
   function onDrop(e: DragEvent) {
     dragActive = false;
-    app.dropFiles(e);
+    dropFiles(e);
   }
 </script>
 
@@ -85,15 +87,15 @@
   {#if dragActive}
     <div class="drop-hint">Drop files to attach</div>
   {/if}
-  {#if app.mentionQuery !== null && app.mentionMatches.length}
+  {#if compose.mentionQuery !== null && composeView.mentionMatches.length}
     <div class="mention-pop">
-      {#each app.mentionMatches as opt, i (opt.kind + ":" + opt.name)}
+      {#each composeView.mentionMatches as opt, i (opt.kind + ":" + opt.name)}
         <button
           class="mention-opt"
-          class:first={i === app.mentionIndex}
-          use:keepInView={i === app.mentionIndex}
-          onmouseenter={() => (app.mentionIndex = i)}
-          onclick={() => app.pickMention(opt.name)}
+          class:first={i === compose.mentionIndex}
+          use:keepInView={i === compose.mentionIndex}
+          onmouseenter={() => (compose.mentionIndex = i)}
+          onclick={() => pickMention(opt.name)}
         >
           {#if opt.kind === "member"}
             <span class="mention-avatar"><Avatar account={opt.name} /></span>
@@ -111,15 +113,15 @@
         </button>
       {/each}
     </div>
-  {:else if app.emojiQuery !== null && app.emojiSuggestions.length}
+  {:else if compose.emojiQuery !== null && composeView.emojiSuggestions.length}
     <div class="mention-pop">
-      {#each app.emojiSuggestions as em, i (em.name)}
+      {#each composeView.emojiSuggestions as em, i (em.name)}
         <button
           class="mention-opt"
-          class:first={i === app.emojiIndex}
-          use:keepInView={i === app.emojiIndex}
-          onmouseenter={() => (app.emojiIndex = i)}
-          onclick={() => app.pickEmojiSuggestion(em.name)}
+          class:first={i === compose.emojiIndex}
+          use:keepInView={i === compose.emojiIndex}
+          onmouseenter={() => (compose.emojiIndex = i)}
+          onclick={() => pickEmojiSuggestion(em.name)}
         >
           {#if em.url}<img class="custom-emoji" src={em.url} alt="" />{:else}<span class="emoji-glyph">{em.char}</span>{/if}
           :{em.name}:
@@ -133,9 +135,9 @@
       <button class="linkish" onclick={() => (app.replyTo = null)} aria-label="Cancel reply">✕</button>
     </div>
   {/if}
-  {#if app.pendingAttachments.length}
+  {#if compose.attachments.length}
     <div class="attach-tray">
-      {#each app.pendingAttachments as a, i (a.uri)}
+      {#each compose.attachments as a, i (a.uri)}
         <div class="attach-chip" title={a.name}>
           {#if a.mime.startsWith("image/")}
             <img src={app.mediaUrl(a.thumb ?? a.uri)} alt={a.name} />
@@ -143,19 +145,19 @@
             <span class="attach-icon">📎</span>
           {/if}
           <span class="attach-name">{a.name}</span>
-          <button class="attach-x" aria-label="Remove attachment" onclick={() => app.removeAttachment(i)}>✕</button>
+          <button class="attach-x" aria-label="Remove attachment" onclick={() => removeAttachment(i)}>✕</button>
         </div>
       {/each}
     </div>
   {/if}
-  {#if previewOn && app.composer.trim()}
+  {#if previewOn && compose.text.trim()}
     <div class="composer-preview">
       <div class="composer-preview-label">Preview</div>
-      <div class="msg-line">{@html renderMd(app.composer)}</div>
+      <div class="msg-line">{@html renderMd(compose.text)}</div>
     </div>
   {/if}
   <div class="composer">
-    <button class="icon-btn" title="Attach a file" aria-label="Attach a file" disabled={!app.active} onclick={app.attachFile}>
+    <button class="icon-btn" title="Attach a file" aria-label="Attach a file" disabled={!app.active} onclick={attachFile}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
     </button>
     <div class="composer-input" class:composing>
@@ -164,13 +166,13 @@
         class="composer-ta"
         bind:this={ta}
         rows="1"
-        placeholder={app.active ? `Message ${app.titleOf(app.active)}…` : "Join a channel first"}
+        placeholder={app.active ? `Message ${vm.titleOf(app.active)}…` : "Join a channel first"}
         disabled={!app.active}
-        bind:value={app.composer}
-        onkeydown={app.composerKey}
-        oninput={app.onComposerInput}
+        bind:value={compose.text}
+        onkeydown={composerKey}
+        oninput={onComposerInput}
         onscroll={syncScroll}
-        onpaste={app.pasteFiles}
+        onpaste={pasteFiles}
         oncompositionstart={() => (composing = true)}
         oncompositionend={() => (composing = false)}
       ></textarea>
@@ -195,13 +197,13 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><path d="M9 9h.01M15 9h.01" /></svg>
       </button>
     </div>
-    <button class="icon-btn" title="Send" aria-label="Send message" onclick={app.doSend}>
+    <button class="icon-btn" title="Send" aria-label="Send message" onclick={doSend}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 2 11 13" /><path d="M22 2 15 22l-4-9-9-4 20-7z" /></svg>
     </button>
   </div>
   <div class="composer-hint">
-    {#if app.typingLabel}
-      <span class="typing">{app.typingLabel}</span>
+    {#if composeView.typingLabel}
+      <span class="typing">{composeView.typingLabel}</span>
     {:else}
       <span><span class="k">Enter</span> send</span>
       <span><span class="k">Shift+Enter</span> newline</span>

@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { msgCtx } from "$lib/ctxmenu.svelte";
+  import { threadCount, closeThread, sendThread, threadNameFor, renameThread } from "$lib/models/threads.svelte";
+  import { nameColor, isStaff } from "$lib/models/session.svelte";
   import { renderMd } from "$lib/mdrender.svelte";
   import { store } from "$lib/models/store.svelte";
-  import { displayName } from "$lib/profile.svelte";
+  import { displayName, openProfile } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
   import Attachment from "./Attachment.svelte";
@@ -10,7 +13,7 @@
   function onKey(e: KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      app.sendThread();
+      sendThread();
     }
   }
 
@@ -19,13 +22,13 @@
   let editingName = $state(false);
   let nameDraft = $state("");
   function startRename() {
-    nameDraft = app.threadNameFor(store.threads.root?.msgid ?? undefined) ?? "";
+    nameDraft = threadNameFor(store.threads.root?.msgid ?? undefined) ?? "";
     editingName = true;
   }
   function commitRename() {
     if (!editingName) return;
     editingName = false;
-    app.renameThread(nameDraft);
+    renameThread(nameDraft);
   }
   function nameKey(e: KeyboardEvent) {
     if (e.key === "Enter") {
@@ -53,19 +56,19 @@
             onblur={commitRename}
           />
         {:else}
-          {@const named = app.threadNameFor(store.threads.root.msgid ?? undefined)}
+          {@const named = threadNameFor(store.threads.root.msgid ?? undefined)}
           <button class="name-btn" title="Rename thread" onclick={startRename}>
             {named ?? "Thread"}
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" /></svg>
           </button>
         {/if}
       </div>
-      <button class="linkish" aria-label="Close thread" onclick={app.closeThread}>✕</button>
+      <button class="linkish" aria-label="Close thread" onclick={closeThread}>✕</button>
     </div>
     <div class="thread-scroll">
-      {#each app.threadMessages as m, i (m.key)}
+      {#each store.threads.messages as m, i (m.key)}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="thread-msg" class:root={i === 0} oncontextmenu={(e) => app.msgCtx(e, m)}>
+        <div class="thread-msg" class:root={i === 0} oncontextmenu={(e) => msgCtx(e, m)}>
           <div class="avatar sm"><Avatar account={m.net ? `${m.author}@${m.net}` : m.author} /></div>
           <div class="thread-body">
             <div class="thread-meta">
@@ -76,11 +79,11 @@
               {:else}
                 <button
                   class="author author-btn"
-                  style={app.nameColor(m.author) ? `color:${app.nameColor(m.author)}` : ""}
-                  onclick={(e) => app.openProfile(m.author, e)}>{displayName(m.author)}</button
+                  style={nameColor(m.author) ? `color:${nameColor(m.author)}` : ""}
+                  onclick={(e) => openProfile(m.author, e)}>{displayName(m.author)}</button
                 >
               {/if}
-              {#if !m.net && app.isStaff(m.author)}<span class="cap-badge staff">staff</span>{/if}
+              {#if !m.net && isStaff(m.author)}<span class="cap-badge staff">staff</span>{/if}
               {#if m.own}<span class="cap-badge owner">you</span>{/if}
               <span class="time">{m.time}</span>
             </div>
@@ -90,12 +93,12 @@
             {/if}
           </div>
         </div>
-        {#if i === 0}<div class="thread-sep"><span>{app.threadCount(m.msgid)} {app.threadCount(m.msgid) === 1 ? "reply" : "replies"}</span></div>{/if}
+        {#if i === 0}<div class="thread-sep"><span>{threadCount(m.msgid)} {threadCount(m.msgid) === 1 ? "reply" : "replies"}</span></div>{/if}
       {/each}
     </div>
     <div class="thread-composer">
-      <textarea rows="1" placeholder="Reply to thread…" bind:value={app.threadComposer} onkeydown={onKey}></textarea>
-      <button class="icon-btn" title="Send" aria-label="Send reply" onclick={app.sendThread}>
+      <textarea rows="1" placeholder="Reply to thread…" bind:value={store.threads.composer} onkeydown={onKey}></textarea>
+      <button class="icon-btn" title="Send" aria-label="Send reply" onclick={sendThread}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 2 11 13" /><path d="M22 2 15 22l-4-9-9-4 20-7z" /></svg>
       </button>
     </div>

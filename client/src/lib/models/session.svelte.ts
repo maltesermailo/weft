@@ -3,7 +3,11 @@ import { SvelteMap } from "svelte/reactivity";
 import { store } from "./store.svelte";
 import * as weft from "$lib/weft";
 import { Role } from "./role.svelte";
-import { confirmSuccess } from "$lib/toasts.svelte";
+import type { Membership } from "./membership.svelte";
+import { confirmSuccess, toast, expectSuccess } from "$lib/toasts.svelte";
+import { EVERYONE_ROLE } from "$lib/constants";
+import { view } from "$lib/view.svelte";
+import { ui } from "$lib/ui.svelte";
 import type { HandlerMap } from "$lib/sync/handler-map";
 
 /// A server-resolved capability set at a scope (§10.4): `owner` (implicit
@@ -182,6 +186,275 @@ export function createRoleAt(
 export function deleteRoleAt(scope: string, roleId: string): Promise<unknown> {
   roleFetchQueue.push(scope);
   return weft.roleDelete(scope, roleId);
+}
+
+// ---- §6.6 role editor (RolesTab) ----
+// Roles live at the active namespace's scope (or the network `*` off-server).
+export const nsRoleScope = (): string => (view.activeServer ? `ns:${view.activeServer}` : "*");
+
+// The "new role" form draft. A single reactive object so the tab binds fields
+// directly (`roleDraft.name`, …) instead of five separate ctx entries.
+export const roleDraft = $state<{
+  name: string;
+  color: string;
+  caps: string[];
+  hoist: boolean;
+  pingable: boolean;
+}>({ name: "", color: "#5865f2", caps: [], hoist: false, pingable: false });
+
+export const toggleNewRoleCap = (c: string): void => {
+  roleDraft.caps = roleDraft.caps.includes(c) ? roleDraft.caps.filter((x) => x !== c) : [...roleDraft.caps, c];
+};
+
+export function createRole(): void {
+  // A role may hold zero permissions (granted later); only a name is required.
+  if (!roleDraft.name.trim()) return;
+
+  // Append at the bottom of the ordered list.
+  const position = rolesAt(nsRoleScope()).length;
+
+  createRoleAt(nsRoleScope(), roleDraft.name.trim(), roleDraft.color, roleDraft.caps.join(","), roleDraft.hoist, roleDraft.pingable, position)
+    .then(() => {
+      roleDraft.name = "";
+      roleDraft.caps = [];
+      roleDraft.hoist = false;
+      roleDraft.pingable = false;
+    })
+    .catch((e) => toast(String(e), "error"));
+}
+
+// The implicit @everyone role's current caps at the active server (or []).
+export const everyoneCaps = (): string[] => rolesAt(nsRoleScope()).find((r) => r.name === EVERYONE_ROLE)?.caps ?? [];
+
+// Set the @everyone baseline. Non-empty → upsert the reserved role; empty →
+// delete it (the server rejects an empty cap list, and "no role" = no
+// baseline). It's never assigned or hoisted.
+export function setEveryoneCaps(caps: string[]): void {
+  const scope = nsRoleScope();
+  // Non-empty upserts the @everyone role by name (ROLE CREATE matches it by
+  // name); empty deletes it — deletion addresses the role by its id (v0.13).
+  if (caps.length) {
+    createRoleAt(scope, EVERYONE_ROLE, "#99aab5", caps.join(","), false, false, 0).catch((e) => toast(String(e), "error"));
+    return;
+  }
+
+  const everyone = rolesAt(scope).find((r) => r.name === EVERYONE_ROLE);
+  if (everyone) deleteRoleAt(scope, everyone.id).catch((e) => toast(String(e), "error"));
+}
+
+// Move a role up/down in the ordered list, then persist the new order (§6.5).
+// Addressed by the role id (names aren't unique, v0.13).
+export function moveRole(roleId: string, dir: -1 | 1): void {
+  const scope = nsRoleScope();
+  const list = [...rolesAt(scope)];
+  const i = list.findIndex((r) => r.id === roleId);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= list.length) return;
+
+  [list[i], list[j]] = [list[j], list[i]];
+  roleFetchQueue.push(scope);
+  weft.rolesReorder(scope, list.map((r) => r.id)).catch((e) => toast(String(e), "error"));
+}
+
+// Persist an arbitrary order (drag-and-drop) — positions follow the id list.
+export function reorderRoles(ids: string[]): void {
+  const scope = nsRoleScope();
+  roleFetchQueue.push(scope);
+  weft.rolesReorder(scope, ids).catch((e) => toast(String(e), "error"));
+}
+
+// Apply a role edit. v0.13: a single ROLE UPDATE addressed by the role's id
+// replaces every field and carries a name change (keeping members + issued
+// caps) — no separate RENAME + upsert (§6.5).
+export function saveRole(
+  role: Role,
+  patch: { name: string; color: string; caps: string[]; hoist: boolean; pingable: boolean },
+): void {
+  const scope = nsRoleScope();
+  const name = patch.name.trim() || role.name;
+
+  // Zero permissions is valid (a cosmetic/hoist role, or perms granted later).
+  roleFetchQueue.push(scope);
+  weft
+    .roleUpdate(scope, role.id, patch.color, patch.caps.join(","), patch.hoist, patch.pingable, role.position, name)
+    .catch((e) => toast(String(e), "error"));
+}
+
+export function deleteRole(roleId: string): void {
+  deleteRoleAt(nsRoleScope(), roleId).catch((e) => toast(String(e), "error"));
+}
+
+// ---- lazy role hydration (member list + name colors) ----
+// Eagerly fetch a member's namespace roles once, so the member list can group
+// by hoisted role without opening each profile. Deduped per (account, scope).
+const memberRolesFetched = new Set<string>();
+export function ensureMemberRoles(account: string): void {
+  const scope = nsRoleScope();
+  const key = `${account}|${scope}`;
+  if (memberRolesFetched.has(key)) return;
+
+  memberRolesFetched.add(key);
+  fetchMemberRoles(account, scope);
+}
+// Eagerly fetch a scope's role *definitions* (names/colors/hoist) once, so the
+// member list can group by hoisted role on open — not only after a profile or
+// the perms modal happens to fetch them. Deduped per scope.
+const rolesFetched = new Set<string>();
+export function ensureRoles(scope: string): void {
+  if (!scope || rolesFetched.has(scope)) return;
+
+  rolesFetched.add(scope);
+  fetchRoles(scope);
+}
+
+// The color to tint an account's name with — their highest assigned role at
+// the active namespace (Discord-style), excluding the implicit @everyone.
+// "" ⇒ no colored role, render in the default text color. Fetches the member's
+// roles + the scope's role defs lazily so it resolves on next paint.
+export function nameColor(account: string): string {
+  const scope = roleScopeOf(view.active);
+  if (!scope.startsWith("ns:")) return "";
+
+  ensureMemberRoles(account);
+  ensureRoles(scope);
+
+  const top = rolesOf(account, scope).find((r) => r.name !== EVERYONE_ROLE);
+  return top?.color ?? "";
+}
+
+// ---- §10.4 permission gates ----
+// operator (`*`) status is deliberately NOT consulted for namespaced channels —
+// mirrors the server (context.rs): a network operator's god-mode is web-admin
+// authority, never day-to-day power on someone else's server. At the network
+// level (top-level channels) the scope *is* `*`, so operator power applies there.
+
+// The real owner of the active namespace — the record's owner, NOT anyone who
+// merely holds ns-admin caps (an operator holds them everywhere, but that's
+// web-admin authority, not ownership of this server).
+export const isNsOwner = (account: string): boolean =>
+  !!view.activeServer && account.replace(/^@/, "") === (store.servers.get(view.activeServer)?.owner ?? "");
+
+// Can I delete any message in the active channel (moderation delete-any)?
+export function canModDelete(): boolean {
+  const me = store.session.account;
+  if (!view.active.startsWith("#")) return false;
+
+  const nsScope = roleScopeOf(view.active);
+  ensureCapsAt(me, view.active);
+  ensureCapsAt(me, nsScope);
+  return store.session.can("delete-any", view.active) || store.session.can("delete-any", nsScope);
+}
+
+// Do I hold moderation power (mute/ban/kick, or owner) in a channel's server?
+// Namespaced channels never consult `*`; top-level channels honor operator caps
+// because their scope *is* `*`. Gates every moderation surface.
+export function canModerate(channel: string): boolean {
+  const me = store.session.account;
+  if (!channel.startsWith("#")) return false;
+
+  const nsScope = roleScopeOf(channel);
+  ensureCapsAt(me, channel);
+  ensureCapsAt(me, nsScope);
+  return store.session.moderates(channel) || store.session.moderates(nsScope);
+}
+
+// Do I hold a specific capability at the active server's scope (`ns:<server>`, or
+// `*` at network level)? Owner/ns-admin implies every cap; operator (`*`) counts
+// only at network level. The per-permission gate for server-menu actions.
+export function serverCap(cap: string): boolean {
+  const scope = view.activeServer ? `ns:${view.activeServer}` : "*";
+  ensureCapsAt(store.session.account, scope);
+  return store.session.can(cap, scope);
+}
+
+// Do I hold any `grant:*` delegation cap at the server scope? Gates the Roles tab.
+export function serverCanGrant(): boolean {
+  const scope = view.activeServer ? `ns:${view.activeServer}` : "*";
+  ensureCapsAt(store.session.account, scope);
+  return store.session.canGrant(scope);
+}
+
+// Server Settings is reachable with any moderation/administration capability —
+// not plain member caps. Each tab then gates itself.
+export function canOpenServerSettings(): boolean {
+  return (
+    isNsOwner(store.session.account) ||
+    serverCanGrant() ||
+    ["ns-admin", "ban", "mute", "kick", "reports", "chan-create", "policy", "manage-nicks"].some(serverCap)
+  );
+}
+
+// ---- §6.6 role assignment (profile card + members roster) ----
+// Assign / unassign a role at the active channel's role scope (ProfileCard).
+export function assignRoleTo(acct: string, role: Role): void {
+  const scope = roleScopeOf(view.active);
+  // Success is confirmed by the resulting ROLE-MEMBER event; a missing-cap
+  // failure never confirms and its ERR toasts.
+  expectSuccess(`roles:${acct}|${scope}`, `Roles updated for ${acct}`);
+  weft
+    .roleAssign(scope, acct, role.id)
+    .then(() => fetchMemberRoles(acct, scope)) // ROLES-OF queues after ASSIGN → fresh list
+    .catch((e) => toast(String(e), "error"));
+}
+export function unassignRoleFrom(acct: string, role: Role): void {
+  const scope = roleScopeOf(view.active);
+  expectSuccess(`roles:${acct}|${scope}`, `Roles updated for ${acct}`);
+  weft
+    .roleUnassign(scope, acct, role.id)
+    .then(() => fetchMemberRoles(acct, scope))
+    .catch((e) => toast(String(e), "error"));
+}
+
+// In-line role editing for the members directory. Both mutate the roster
+// optimistically then reconcile against the server truth shortly after — a
+// rejected change simply snaps back on the refetch (and its ERR toasts).
+function reconcileRoster(ns: string): void {
+  setTimeout(() => {
+    if (ui.nsSettingsOpen && ui.nsTab === "members") store.server(ns).fetchMembers();
+  }, 500);
+}
+const memberRow = (ns: string, account: string): Membership | undefined => store.servers.get(ns)?.member(account);
+
+// v0.13: addressed by the role id. The roster's `roleIds` is a list of ids, so
+// the optimistic update adds/removes the same id.
+export function assignNsRole(account: string, roleId: string): void {
+  const scope = nsRoleScope();
+  const ns = view.activeServer;
+  const m = memberRow(ns, account);
+  if (m && !m.roleIds.includes(roleId)) m.roleIds = [...m.roleIds, roleId];
+
+  expectSuccess(`roles:${account}|${scope}`, `Roles updated for ${account}`);
+  weft
+    .roleAssign(scope, account, roleId)
+    // Refresh BOTH rosters: the settings members tab AND `memberRoles` (which the
+    // member-list sidebar groups by hoisted role), else a hoisted assignment
+    // wouldn't regroup the sidebar until the next interaction.
+    .then(() => {
+      reconcileRoster(ns);
+      fetchMemberRoles(account, scope);
+    })
+    .catch((e) => {
+      toast(String(e), "error");
+      store.server(ns).fetchMembers();
+    });
+}
+export function unassignNsRole(account: string, roleId: string): void {
+  const scope = nsRoleScope();
+  const ns = view.activeServer;
+  const m = memberRow(ns, account);
+  if (m) m.roleIds = m.roleIds.filter((r) => r !== roleId);
+
+  expectSuccess(`roles:${account}|${scope}`, `Roles updated for ${account}`);
+  weft
+    .roleUnassign(scope, account, roleId)
+    .then(() => {
+      reconcileRoster(ns);
+      fetchMemberRoles(account, scope); // regroup the member-list sidebar too
+    })
+    .catch((e) => {
+      toast(String(e), "error");
+      store.server(ns).fetchMembers();
+    });
 }
 
 /// Does a body mention me, @everyone/@here, or a pingable role I hold at `ns`?

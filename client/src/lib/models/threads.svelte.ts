@@ -3,6 +3,10 @@ import { SvelteMap } from "svelte/reactivity";
 import type { Msg, ThreadInfo } from "$lib/types";
 import type { HandlerMap } from "$lib/sync/handler-map";
 import { store } from "./store.svelte";
+import { channels, mkMsg } from "./channel.svelte";
+import { view } from "$lib/view.svelte";
+import * as weft from "$lib/weft";
+import { toast } from "$lib/toasts.svelte";
 
 /**
  * §9.4 threads: the open thread **side panel** (root + replies + composer) and
@@ -57,3 +61,76 @@ export const threadsHandlers: HandlerMap = {
     if (i >= 0) store.threads.list[i] = { ...store.threads.list[i], name: e.name ?? undefined };
   },
 };
+
+// ---- §9.4 thread actions (ThreadPanel / ThreadsModal / message row) ----
+const activeChannel = () => (view.active ? channels[view.active] : undefined);
+
+// How many loaded replies a root has (its thread size), for the indicator.
+export const threadCount = (msgid?: string): number => {
+  const ch = activeChannel();
+  return !msgid || !ch ? 0 : ch.messages.filter((m) => m.thread === msgid).length;
+};
+
+// A thread's display name (from THREAD / THREAD-NAMED), for the indicator + title.
+export const threadNameFor = (msgid?: string): string | undefined => store.threads.nameFor(msgid);
+
+// ---- side panel ----
+export function openThread(root: Msg): void {
+  if (!root.msgid) return;
+  store.threads.root = root;
+  store.threads.messages = [root];
+  store.threads.composer = "";
+  store.threads.loadingRoot = root.msgid;
+  weft.history(view.active, undefined, root.msgid).catch((e) => {
+    store.threads.loadingRoot = null;
+    toast(String(e), "error");
+  });
+}
+export function closeThread(): void {
+  store.threads.root = null;
+  store.threads.messages = [];
+  store.threads.loadingRoot = null;
+  store.threads.buf = [];
+}
+export function sendThread(): void {
+  const text = store.threads.composer.trim();
+  const root = store.threads.root?.msgid;
+  if (!text || !root || !view.active) return;
+  weft
+    .sendMessage(view.active, text, undefined, [], root)
+    .then(() => (store.threads.composer = ""))
+    .catch((e) => toast(String(e), "error"));
+}
+// Rename (or, with an empty string, clear the name of) the open thread.
+export function renameThread(name: string): void {
+  const root = store.threads.root?.msgid;
+  if (!root || !view.active) return;
+  weft.nameThread(view.active, root, name.trim()).catch((e) => toast(String(e), "error"));
+}
+
+// ---- list modal ----
+export function openThreads(): void {
+  if (!view.active.startsWith("#")) return;
+  store.threads.listOpen = true;
+  store.threads.list = [];
+  store.threads.listBuf = [];
+  store.threads.loadingList = true;
+  weft.listThreads(view.active).catch((e) => {
+    store.threads.loadingList = false;
+    toast(String(e), "error");
+  });
+}
+export function closeThreads(): void {
+  store.threads.listOpen = false;
+}
+// Open a thread from the list. Reuse the root if it's already in the timeline;
+// otherwise seed a placeholder — the thread HISTORY (incl. the root) replaces it.
+export function openThreadByRoot(info: ThreadInfo): void {
+  store.threads.listOpen = false;
+  const loaded = activeChannel()?.messages.find((m) => m.msgid === info.root);
+  if (loaded) {
+    openThread(loaded);
+    return;
+  }
+  openThread(mkMsg({ author: "", body: "", time: "", ts: 0, own: false, msgid: info.root }));
+}

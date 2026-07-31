@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { ui } from "$lib/ui.svelte";
+  import { vm } from "$lib/viewmodel.svelte";
   import { store } from "$lib/models/store.svelte";
   // "Where do you want to go?" — the namespace entry point, built as a four-step
   // card (choose → join / invite / create) per design/namespace.html.
@@ -38,7 +40,7 @@
   // Discover surfaces servers to *find + join* — hide ones I'm already in (they
   // live on the rail). `discoverList` also holds my member namespaces (SYNC seeds
   // their NS-META), so without this they'd show here as if not joined.
-  const listed = $derived([...store.servers.values()].filter((s) => s.metaLoaded).filter((ns) => !app.isNsMember(ns.id)));
+  const listed = $derived([...store.servers.values()].filter((s) => s.metaLoaded).filter((ns) => !vm.isNsMember(ns.id)));
   const matches = $derived(
     query.trim()
       ? listed.filter((ns) => {
@@ -51,7 +53,7 @@
   const foreign = $derived.by(() => {
     const t = query.trim().replace(/^weft:\/\//, "");
     const m = t.match(/^([^/\s]+)\/([^/\s]+)$/);
-    return m && m[1] !== app.network ? t : null;
+    return m && m[1] !== store.session.network ? t : null;
   });
   // A namespace can be unlisted but still joinable by exact name (§2.2).
   const directName = $derived.by(() => {
@@ -85,7 +87,7 @@
     // invite id is passed through so a non-public but federation-open namespace
     // is reachable (the invite is its access control).
     const m = t.match(/^weft:\/\/([^/]+)\/(?:([^/]+)\/)?i\/(.+)$/);
-    if (m && m[1] !== app.network) {
+    if (m && m[1] !== store.session.network) {
       if (!m[2]) {
         redeemError = "This invite is for another network but names no namespace.";
         return;
@@ -109,7 +111,7 @@
       // id, seeds a default `#general`, and returns NS-META; the app then
       // auto-joins it (owner + no local channels) so it appears in the rail —
       // no client-side channel creation needed (v0.13).
-      await weft.nsCreate(app.network, name, createVis);
+      await weft.nsCreate(store.session.network, name, createVis);
       onclose();
     } catch (e) {
       app.toast(String(e), "error");
@@ -274,8 +276,8 @@
           {/if}
         {/each}
 
-        {#if app.discoverCursor && !query.trim()}
-          <button class="load-more" onclick={() => weft.discover(app.discoverCursor ?? undefined)}>
+        {#if ui.discoverCursor && !query.trim()}
+          <button class="load-more" onclick={() => weft.discover(ui.discoverCursor ?? undefined)}>
             Load more…
           </button>
         {/if}

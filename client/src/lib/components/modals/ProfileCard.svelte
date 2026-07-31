@@ -1,7 +1,10 @@
 <script lang="ts">
-  import { rolesAt, rolesOf, badgeFor } from "$lib/models/session.svelte";
+  import { openDm } from "$lib/navigation";
+  import { scopesFor } from "$lib/models/channel.svelte";
+  import { moderate } from "$lib/moderation";
+  import { rolesAt, rolesOf, badgeFor, nameColor, canModerate, isNsOwner, assignRoleTo, unassignRoleFrom, roleScopeOf, isOwnerAt, isStaff } from "$lib/models/session.svelte";
   import { store } from "$lib/models/store.svelte";
-  import { bioOf, nickOf, statusOf } from "$lib/profile.svelte";
+  import { bioOf, nickOf, statusOf, openFullProfile, setNick } from "$lib/profile.svelte";
   import { untrack } from "svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
@@ -23,18 +26,18 @@
   // Roles + moderation are server-member controls — show them only when we're
   // actually viewing one of the server's channels, not from friends/DMs.
   const inServer = $derived(app.active.startsWith("#"));
-  const scope = $derived(app.roleScopeOf(app.active));
+  const scope = $derived(roleScopeOf(app.active));
   const myRoles = $derived(rolesOf(target, scope));
   // Exclude the implicit @everyone role — it's baseline, never assigned.
   const allRoles = $derived(rolesAt(scope).filter((r) => r.name !== EVERYONE_ROLE));
-  const isSelf = $derived(target === app.account);
+  const isSelf = $derived(target === store.session.account);
   // "Owner/admin" for controls means the real namespace owner or an explicitly
   // delegated ns-admin — NOT a network operator (their god-mode caps are
   // web-admin authority, surfaced as a Staff badge, not server control here).
   const iAmOwner = $derived(
-    app.isNsOwner(app.account) || (app.isOwnerAt(app.account, scope) && !app.isStaff(app.account)),
+    isNsOwner(store.session.account) || (isOwnerAt(store.session.account, scope) && !isStaff(store.session.account)),
   );
-  const targetIsOwner = $derived(app.isNsOwner(target));
+  const targetIsOwner = $derived(isNsOwner(target));
   // Roles are the only capability source, so assigning one is a privileged act:
   // offer it for other accounts (the server enforces the caller's authority),
   // and for yourself only when you own the scope — there wearing a role is
@@ -47,7 +50,7 @@
   // §10.3 moderator nickname edit (server enforces `manage-nicks`).
   let nickDraft = $state(untrack(() => nickOf(target)));
   // §6.7 moderation controls: scope (channel/namespace/network) + optional reason.
-  let modScope = $state(app.scopesFor()[0]);
+  let modScope = $state(scopesFor()[0]);
   let modReason = $state("");
 
   // Keep the anchored card fully on-screen: the open-time coordinates are an
@@ -91,10 +94,10 @@
     </div>
     <div class="profile-body">
       <div class="profile-name-lg">
-        <span style={app.nameColor(target) ? `color:${app.nameColor(target)}` : ""}>{target}</span>
-        {#if app.isStaff(target)}<span class="cap-badge staff">staff</span>{/if}
+        <span style={nameColor(target) ? `color:${nameColor(target)}` : ""}>{target}</span>
+        {#if isStaff(target)}<span class="cap-badge staff">staff</span>{/if}
       </div>
-      <div class="profile-handle">{target.includes("@") ? target : `${target}@${app.network}`} · <span class="pres-{pr}">{pr}</span></div>
+      <div class="profile-handle">{target.includes("@") ? target : `${target}@${store.session.network}`} · <span class="pres-{pr}">{pr}</span></div>
 
       {#if statusOf(target)}
         <div class="profile-custom-status">{statusOf(target)}</div>
@@ -114,7 +117,7 @@
           {#each myRoles as r (r.id)}
             <span class="role-pill" style="--role: {r.color}">
               <span class="role-dot"></span>{r.name}
-              {#if canAssignRoles}<button class="pill-x" title="Remove {r.name}" aria-label="Remove {r.name}" onclick={() => app.unassignRoleFrom(target, r)}>×</button>{/if}
+              {#if canAssignRoles}<button class="pill-x" title="Remove {r.name}" aria-label="Remove {r.name}" onclick={() => unassignRoleFrom(target, r)}>×</button>{/if}
             </span>
           {/each}
           {#if canAssignRoles && unheldRoles.length}
@@ -124,7 +127,7 @@
                 <button class="role-add-backdrop" aria-label="Close" onclick={() => (roleMenuOpen = false)}></button>
                 <div class="role-add-menu">
                   {#each unheldRoles as r (r.id)}
-                    <button class="role-add-item" onclick={() => { app.assignRoleTo(target, r); roleMenuOpen = false; }}>
+                    <button class="role-add-item" onclick={() => { assignRoleTo(target, r); roleMenuOpen = false; }}>
                       <span class="role-dot" style="--role: {r.color}"></span>{r.name}
                     </button>
                   {/each}
@@ -140,38 +143,38 @@
 
       <div class="profile-divider"></div>
       <div class="profile-actions">
-        <button class="pf-primary" onclick={() => { app.openFullProfile(target); onclose(); }}>Open profile</button>
-        {#if target !== app.account}
-          <button class="pf-secondary" onclick={() => { app.openDm(target); onclose(); }}>Message</button>
+        <button class="pf-primary" onclick={() => { openFullProfile(target); onclose(); }}>Open profile</button>
+        {#if target !== store.session.account}
+          <button class="pf-secondary" onclick={() => { openDm(target); onclose(); }}>Message</button>
           {#if inServer && scope.startsWith("ns:")}
             <div class="pf-mod">
               <div class="profile-section-label">Server nickname</div>
               <div class="pf-mod-inputs">
                 <input bind:value={nickDraft} maxlength="128" placeholder="nickname (blank = default)" />
-                <button class="pf-secondary" onclick={() => app.setNick(scope, target, nickDraft.trim())}>Set</button>
+                <button class="pf-secondary" onclick={() => setNick(scope, target, nickDraft.trim())}>Set</button>
               </div>
             </div>
           {/if}
-          {#if inServer && app.canModerate(app.active)}
+          {#if inServer && canModerate(app.active)}
             <div class="pf-mod">
               <div class="profile-section-label">Moderation</div>
               <div class="pf-mod-inputs">
                 <select bind:value={modScope} aria-label="Scope">
-                  {#each app.scopesFor() as s (s)}<option value={s}>{s}</option>{/each}
+                  {#each scopesFor() as s (s)}<option value={s}>{s}</option>{/each}
                 </select>
                 <input bind:value={modReason} placeholder="reason (optional)" />
               </div>
               <div class="pf-mod-actions">
-                <button class="pf-secondary" onclick={() => app.moderate("mute", target, modScope, modReason)}>Mute</button>
-                <button class="pf-secondary" onclick={() => app.moderate("unmute", target, modScope)}>Unmute</button>
-                <button class="pf-secondary" onclick={() => app.moderate("kick", target, app.active, modReason)}>Kick</button>
-                <button class="pf-secondary danger" onclick={() => app.moderate("ban", target, modScope, modReason)}>Ban</button>
-                <button class="pf-secondary" onclick={() => app.moderate("unban", target, modScope)}>Unban</button>
+                <button class="pf-secondary" onclick={() => moderate("mute", target, modScope, modReason)}>Mute</button>
+                <button class="pf-secondary" onclick={() => moderate("unmute", target, modScope)}>Unmute</button>
+                <button class="pf-secondary" onclick={() => moderate("kick", target, app.active, modReason)}>Kick</button>
+                <button class="pf-secondary danger" onclick={() => moderate("ban", target, modScope, modReason)}>Ban</button>
+                <button class="pf-secondary" onclick={() => moderate("unban", target, modScope)}>Unban</button>
               </div>
             </div>
           {/if}
         {/if}
-        <button class="pf-secondary" onclick={() => navigator.clipboard?.writeText(target.includes("@") ? target : `${target}@${app.network}`)}>Copy ID</button>
+        <button class="pf-secondary" onclick={() => navigator.clipboard?.writeText(target.includes("@") ? target : `${target}@${store.session.network}`)}>Copy ID</button>
       </div>
     </div>
   </div>

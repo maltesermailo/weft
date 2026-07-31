@@ -1,5 +1,11 @@
 <script lang="ts">
-  import { rolesAt, roleById } from "$lib/models/session.svelte";
+  import { vm } from "$lib/viewmodel.svelte";
+  import { nsMemberCtx } from "$lib/ctxmenu.svelte";
+  import { loadNsInvites, createInvite } from "$lib/models/invites.svelte";
+  import { nsAdmin, saveNsMeta, nsSetFederation, nsSetWelcome, showRecoveryKey, startRecovery, cosignRecovery, submitRecovery, activeEmoji, addEmoji, emojiUrlFor, removeEmoji } from "$lib/models/server.svelte";
+  import { denyList, refreshBans, liftMod } from "$lib/moderation";
+  import { bridgePropose, bridgeAccept, bridgeSever } from "$lib/models/federation.svelte";
+  import { rolesAt, roleById, nsRoleScope, serverCap, serverCanGrant, isNsOwner, assignNsRole, unassignNsRole } from "$lib/models/session.svelte";
   import { store } from "$lib/models/store.svelte";
   import { displayName, initials } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
@@ -13,20 +19,20 @@
   // ---- Per-capability tab visibility (§6.5) ----
   // A moderator sees only the tabs they can act on; owner / ns-admin sees all.
   // Each maps to the concrete WEFT capability that governs that surface.
-  const isAdmin = $derived(app.isNsOwner(app.account) || app.serverCap("ns-admin"));
+  const isAdmin = $derived(isNsOwner(store.session.account) || serverCap("ns-admin"));
   // The active namespace's display name (v0.13) — `activeServer` is its id, used
   // for scopes/commands; anywhere a *name* is shown to the user, use this.
-  const serverVanity = $derived(app.activeNsMeta?.name || app.activeServer);
+  const serverVanity = $derived(vm.activeNsMeta?.name || app.activeServer);
   const tabPerm = $derived({
     overview: isAdmin,
-    roles: isAdmin || app.serverCanGrant(),
-    members: isAdmin || app.serverCanGrant() || ["ban", "mute", "kick", "reports"].some((c) => app.serverCap(c)),
+    roles: isAdmin || serverCanGrant(),
+    members: isAdmin || serverCanGrant() || ["ban", "mute", "kick", "reports"].some((c) => serverCap(c)),
     emoji: isAdmin,
-    invites: isAdmin || app.serverCap("invite"),
+    invites: isAdmin || serverCap("invite"),
     federation: isAdmin,
-    bans: isAdmin || app.serverCap("ban") || app.serverCap("mute"),
-    recovery: app.isNsOwner(app.account),
-    danger: app.isNsOwner(app.account),
+    bans: isAdmin || serverCap("ban") || serverCap("mute"),
+    recovery: isNsOwner(store.session.account),
+    danger: isNsOwner(store.session.account),
   } as Record<string, boolean>);
   const visibleTabs = $derived(
     (["overview", "roles", "members", "emoji", "invites", "federation", "bans", "recovery", "danger"] as const).filter(
@@ -41,7 +47,7 @@
 
   // ---- Members directory (NS INFO MEMBERS) ----
   let memberSearch = $state("");
-  const roster = $derived(app.nsMembers(app.activeServer));
+  const roster = $derived(vm.nsMembers(app.activeServer));
   const shownMembers = $derived(
     roster.filter(
       (m) =>
@@ -63,9 +69,9 @@
     return new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
   }
   // All namespace-scoped roles, for the in-line "add role" picker.
-  const nsRoles = $derived(rolesAt(app.nsRoleScope()));
+  const nsRoles = $derived(rolesAt(nsRoleScope()));
   // The namespace owner (implicit all-caps holder), surfaced with a crown.
-  const ownerAccount = $derived(app.activeNsMeta?.owner ?? null);
+  const ownerAccount = $derived(vm.activeNsMeta?.owner ?? null);
   // Which member's add-role popover is open (keyed by `account@network`).
   let addRoleFor = $state<string | null>(null);
   // Roles a member doesn't already hold — the options for their add-role menu.
@@ -99,7 +105,7 @@
   function proposeBridge() {
     const p = brPeer.trim();
     if (!p) return;
-    app.bridgePropose(`ns:${app.activeServer}`, p, brHistory, brMedia, brTyping);
+    bridgePropose(`ns:${app.activeServer}`, p, brHistory, brMedia, brTyping);
     brPeer = "";
   }
 
@@ -125,7 +131,7 @@
   function submitEmoji() {
     const name = emojiName.trim().replace(/[^a-zA-Z0-9_]/g, "");
     if (!name || !pendingEmoji) return;
-    app.addEmoji(name, pendingEmoji);
+    addEmoji(name, pendingEmoji);
     emojiName = "";
     pendingEmoji = "";
   }
@@ -135,18 +141,18 @@
   }
 
   // Live counts for the Overview stat strip (real data — no placeholders).
-  const nsChannelCount = $derived(app.channelGroups.reduce((n, g) => n + g.list.length, 0));
-  const nsRoleCount = $derived(rolesAt(app.nsRoleScope()).length);
+  const nsChannelCount = $derived(vm.channelGroups.reduce((n, g) => n + g.list.length, 0));
+  const nsRoleCount = $derived(rolesAt(nsRoleScope()).length);
   // §6.2 welcome-channel picker: this namespace's text channels + the current
   // setting (from the ns-meta the server last pushed).
-  const nsTextChannels = $derived(app.channelGroups.flatMap((g) => g.list).filter((c) => !c.voice));
-  const currentWelcome = $derived(app.activeNsMeta?.welcome ?? "");
+  const nsTextChannels = $derived(vm.channelGroups.flatMap((g) => g.list).filter((c) => !c.voice));
+  const currentWelcome = $derived(vm.activeNsMeta?.welcome ?? "");
 
   // Custom-emoji capacity gauge.
   const EMOJI_SLOTS = 50;
   let emojiSearch = $state("");
   const shownEmoji = $derived(
-    app.activeEmoji.filter((e) => e.name.toLowerCase().includes(emojiSearch.toLowerCase())),
+    activeEmoji().filter((e) => e.name.toLowerCase().includes(emojiSearch.toLowerCase())),
   );
 </script>
 
@@ -156,9 +162,9 @@
   <nav class="so-nav">
     <div class="so-nav-inner">
       <div class="so-server-head">
-        <span class="so-server-avatar">{initials(app.activeNsMeta?.name || app.activeServer)}</span>
+        <span class="so-server-avatar">{initials(vm.activeNsMeta?.name || app.activeServer)}</span>
         <div class="so-server-meta">
-          <div class="so-server-name">{app.activeNsMeta?.name || app.activeServer}</div>
+          <div class="so-server-name">{vm.activeNsMeta?.name || app.activeServer}</div>
           <div class="so-server-sub">Server Settings</div>
         </div>
       </div>
@@ -172,7 +178,7 @@
         <button class="so-navitem" class:active={app.nsTab === "roles"} onclick={() => (app.nsTab = "roles")}>Roles</button>
       {/if}
       {#if tabPerm.members}
-        <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => { app.nsTab = "members"; app.fetchNsMembers(app.activeServer); app.refreshBans(); }}>Members</button>
+        <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => { app.nsTab = "members"; vm.fetchNsMembers(app.activeServer); refreshBans(); }}>Members</button>
       {/if}
       {#if tabPerm.emoji}
         <button class="so-navitem" class:active={app.nsTab === "emoji"} onclick={() => (app.nsTab = "emoji")}>Emoji</button>
@@ -181,14 +187,14 @@
         <div class="so-heading">Community</div>
       {/if}
       {#if tabPerm.invites}
-        <button class="so-navitem" class:active={app.nsTab === "invites"} onclick={() => { app.nsTab = "invites"; app.loadNsInvites(); }}>Invites</button>
+        <button class="so-navitem" class:active={app.nsTab === "invites"} onclick={() => { app.nsTab = "invites"; loadNsInvites(); }}>Invites</button>
       {/if}
       {#if tabPerm.federation}
         <button class="so-navitem" class:active={app.nsTab === "federation"} onclick={() => (app.nsTab = "federation")}>Federation</button>
       {/if}
       {#if tabPerm.bans}
         <div class="so-heading">Moderation</div>
-        <button class="so-navitem" class:active={app.nsTab === "bans"} onclick={() => { app.nsTab = "bans"; app.refreshBans(); }}>Bans &amp; mutes</button>
+        <button class="so-navitem" class:active={app.nsTab === "bans"} onclick={() => { app.nsTab = "bans"; refreshBans(); }}>Bans &amp; mutes</button>
       {/if}
       {#if tabPerm.recovery || tabPerm.danger}
         <div class="so-heading">Security</div>
@@ -203,13 +209,13 @@
   </nav>
   <main class="so-main">
     <div class="so-content" class:wide={app.nsTab === "roles"}>
-      {#if app.activeNsMeta?.recovery_eta}
+      {#if vm.activeNsMeta?.recovery_eta}
         <div class="ns-card recovery-pending">
           <div class="ns-info">
-            <div class="ns-name">⚠ Recovery pending (rung {app.activeNsMeta.recovery_rung})</div>
+            <div class="ns-name">⚠ Recovery pending (rung {vm.activeNsMeta.recovery_rung})</div>
             <div class="ns-desc">A root rotation is scheduled. As the live owner you can veto it.</div>
           </div>
-          <button class="danger-btn" onclick={() => weft.nsRecoveryCancel(app.network, app.activeServer).catch((e) => app.toast(String(e), "error"))}>Cancel recovery</button>
+          <button class="danger-btn" onclick={() => weft.nsRecoveryCancel(store.session.network, app.activeServer).catch((e) => app.toast(String(e), "error"))}>Cancel recovery</button>
         </div>
       {/if}
 
@@ -219,14 +225,14 @@
 
         <div class="ov-card">
           <div class="ov-identity">
-            <span class="ov-avatar">{initials(app.nsTitle.trim() || app.activeNsMeta?.name || app.activeServer)}</span>
+            <span class="ov-avatar">{initials(nsAdmin.title.trim() || vm.activeNsMeta?.name || app.activeServer)}</span>
             <div class="ov-identity-meta">
-              <div class="ov-identity-name">{app.nsTitle.trim() || app.activeNsMeta?.name || app.activeServer}</div>
-              <div class="ov-identity-sub">Namespace on {app.network}</div>
+              <div class="ov-identity-name">{nsAdmin.title.trim() || vm.activeNsMeta?.name || app.activeServer}</div>
+              <div class="ov-identity-sub">Namespace on {store.session.network}</div>
             </div>
           </div>
           <div class="field-label">Display name</div>
-          <input class="text-input" bind:value={app.nsTitle} placeholder={serverVanity} />
+          <input class="text-input" bind:value={nsAdmin.title} placeholder={serverVanity} />
           <div class="ov-gap"></div>
           <div class="field-label">Visibility</div>
           <div class="segmented" role="radiogroup" aria-label="Visibility">
@@ -234,10 +240,10 @@
               <button
                 type="button"
                 class="seg"
-                class:on={app.nsVis === o.value}
+                class:on={nsAdmin.vis === o.value}
                 role="radio"
-                aria-checked={app.nsVis === o.value}
-                onclick={() => (app.nsVis = o.value)}
+                aria-checked={nsAdmin.vis === o.value}
+                onclick={() => (nsAdmin.vis = o.value)}
               >
                 <span class="seg-label">{o.label}</span>
                 <span class="seg-desc">{o.desc}</span>
@@ -246,11 +252,11 @@
           </div>
           <div class="ov-gap"></div>
           <div class="field-label">Description</div>
-          <textarea class="text-input ov-desc" rows="3" bind:value={app.nsDesc} placeholder="what's this namespace about"></textarea>
+          <textarea class="text-input ov-desc" rows="3" bind:value={nsAdmin.desc} placeholder="what's this namespace about"></textarea>
           <div class="ov-gap"></div>
           <div class="field-label">Welcome channel</div>
           <p class="so-sub" style="margin:0 0 8px">Post a greeting here whenever someone new joins the server.</p>
-          <select class="text-input" value={currentWelcome} onchange={(e) => app.nsSetWelcome(e.currentTarget.value)}>
+          <select class="text-input" value={currentWelcome} onchange={(e) => nsSetWelcome(e.currentTarget.value)}>
             <option value="">No welcome message</option>
             {#each nsTextChannels as c (c.name)}
               <option value={c.name}>#{app.chanShort(c.name)}</option>
@@ -268,21 +274,21 @@
             <div class="ov-stat-label">Roles</div>
           </div>
           <div class="ov-stat">
-            <div class="ov-stat-num" style="color:var(--thread-amber)">{app.activeEmoji.length}</div>
+            <div class="ov-stat-num" style="color:var(--thread-amber)">{activeEmoji().length}</div>
             <div class="ov-stat-label">Emoji</div>
           </div>
           <div class="ov-stat">
-            <div class="ov-stat-num" style="text-transform:capitalize">{app.nsVis}</div>
+            <div class="ov-stat-num" style="text-transform:capitalize">{nsAdmin.vis}</div>
             <div class="ov-stat-label">Visibility</div>
           </div>
         </div>
 
-        <div class="modal-actions"><button class="ok-btn" onclick={app.saveNsMeta}>Save changes</button></div>
+        <div class="modal-actions"><button class="ok-btn" onclick={saveNsMeta}>Save changes</button></div>
       {:else if app.nsTab === "invites"}
         <h1>Invites</h1>
         <p class="so-sub">Every active invite for <b>{serverVanity}</b> — who created it, how many times it's been used, its remaining uses and expiry. Revoke one, or close them all at once.</p>
         <div class="modal-actions">
-          <button class="ok-btn" onclick={app.createInvite}>Create invite</button>
+          <button class="ok-btn" onclick={createInvite}>Create invite</button>
           <button class="danger-btn" onclick={app.revokeAllInvites}>Revoke all</button>
         </div>
         <div class="section-sep"></div>
@@ -291,12 +297,12 @@
         <RolesTab />
       {:else if app.nsTab === "members"}
         <h1>Members</h1>
-        <p class="so-sub">Everyone in <b>{app.activeNsMeta?.name || app.activeServer}</b>, when they joined, and the roles they hold. Click a role's <b>✕</b> to remove it, <b>+</b> to add one — roles are the only way to grant capabilities. Right-click a member for moderation.</p>
+        <p class="so-sub">Everyone in <b>{vm.activeNsMeta?.name || app.activeServer}</b>, when they joined, and the roles they hold. Click a role's <b>✕</b> to remove it, <b>+</b> to add one — roles are the only way to grant capabilities. Right-click a member for moderation.</p>
 
         <div class="mem-search">
           <span aria-hidden="true">⌕</span>
           <input bind:value={memberSearch} placeholder="Search members" />
-          <button class="mem-refresh" title="Refresh" aria-label="Refresh roster" onclick={() => { app.fetchNsMembers(app.activeServer); app.refreshBans(); }}>↻</button>
+          <button class="mem-refresh" title="Refresh" aria-label="Refresh roster" onclick={() => { vm.fetchNsMembers(app.activeServer); refreshBans(); }}>↻</button>
         </div>
         <div class="mem-count">{shownMembers.length} {shownMembers.length === 1 ? "member" : "members"}</div>
 
@@ -311,7 +317,7 @@
             {@const handle = acct + "@" + m.network}
             {@const isOwner = ownerAccount === acct}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div class="mem-row" oncontextmenu={(e) => app.nsMemberCtx(e, acct)}>
+            <div class="mem-row" oncontextmenu={(e) => nsMemberCtx(e, acct)}>
               <div class="mem-id">
                 <span class="mem-avatar"><Avatar account={acct} /></span>
                 <div class="mem-id-meta">
@@ -319,14 +325,14 @@
                     {displayName(acct)}
                     {#if isOwner}<span class="mem-owner" title="Server owner">👑 Owner</span>{/if}
                   </div>
-                  <div class="mem-handle">{acct}{m.network !== app.network ? `@${m.network}` : ""}</div>
+                  <div class="mem-handle">{acct}{m.network !== store.session.network ? `@${m.network}` : ""}</div>
                 </div>
               </div>
               <div class="mem-roles">
                 {#each m.roleIds as r (r)}
                   <span class="role-pill editable" style="--role:{roleColor(r)}">
                     <span class="role-dot"></span>{roleName(r)}
-                    <button class="role-x" title="Remove role" aria-label={`Remove ${roleName(r)}`} onclick={() => app.unassignNsRole(acct, r)}>✕</button>
+                    <button class="role-x" title="Remove role" aria-label={`Remove ${roleName(r)}`} onclick={() => unassignNsRole(acct, r)}>✕</button>
                   </span>
                 {/each}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -342,7 +348,7 @@
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div class="role-add-menu" role="menu">
                       {#each unheldRoles(m.roleIds) as r (r.name)}
-                        <button class="role-add-opt" onclick={() => { app.assignNsRole(acct, r.id); addRoleFor = null; }}>
+                        <button class="role-add-opt" onclick={() => { assignNsRole(acct, r.id); addRoleFor = null; }}>
                           <span class="role-dot" style="--role:{r.color}"></span>{r.name}
                         </button>
                       {:else}
@@ -356,7 +362,7 @@
             </div>
           {:else}
             <div class="mem-empty">
-              {#if app.nsMembersLoading}
+              {#if vm.nsMembersLoading}
                 Loading roster…
               {:else if memberSearch}
                 No members match your search.
@@ -391,16 +397,16 @@
         <div class="em-gauge">
           <div class="em-gauge-top">
             <span>Emoji slots</span>
-            <span class="em-gauge-count">{app.activeEmoji.length} / {EMOJI_SLOTS}</span>
+            <span class="em-gauge-count">{activeEmoji().length} / {EMOJI_SLOTS}</span>
           </div>
           <div class="em-gauge-bar">
             <div
               class="em-gauge-fill"
-              class:full={app.activeEmoji.length >= EMOJI_SLOTS * 0.8}
-              style="width:{Math.min(100, (app.activeEmoji.length / EMOJI_SLOTS) * 100)}%"
+              class:full={activeEmoji().length >= EMOJI_SLOTS * 0.8}
+              style="width:{Math.min(100, (activeEmoji().length / EMOJI_SLOTS) * 100)}%"
             ></div>
           </div>
-          <div class="em-gauge-sub">{Math.max(0, EMOJI_SLOTS - app.activeEmoji.length)} slots remaining</div>
+          <div class="em-gauge-sub">{Math.max(0, EMOJI_SLOTS - activeEmoji().length)} slots remaining</div>
         </div>
 
         <div class="em-search">
@@ -411,14 +417,14 @@
         <div class="em-grid">
           {#each shownEmoji as em (em.name)}
             <div class="em-tile">
-              <img class="em-tile-img" src={app.emojiUrlFor(em.name) ?? ''} alt=":{em.name}:" />
+              <img class="em-tile-img" src={emojiUrlFor(em.name) ?? ''} alt=":{em.name}:" />
               <code class="em-tile-name">:{em.name}:</code>
-              <button class="em-tile-x" aria-label="Remove :{em.name}:" title="Remove" onclick={() => app.removeEmoji(em.name)}>🗑</button>
+              <button class="em-tile-x" aria-label="Remove :{em.name}:" title="Remove" onclick={() => removeEmoji(em.name)}>🗑</button>
             </div>
           {:else}
             <div class="em-empty">
               <div class="em-empty-icon">😊</div>
-              <p>{app.activeEmoji.length ? "No emoji match your search." : "No custom emoji yet — upload one above."}</p>
+              <p>{activeEmoji().length ? "No emoji match your search." : "No custom emoji yet — upload one above."}</p>
             </div>
           {/each}
         </div>
@@ -426,39 +432,39 @@
         <h1>Bans &amp; mutes</h1>
         <p class="so-sub">Accounts denied at <code>ns:{app.activeServer}</code>. A <b>ban</b> blocks join + posting; a <b>mute</b> blocks posting. Lifting one takes effect immediately.</p>
         <div class="modal-list">
-          {#each app.denyList() as d (d.kind + d.account)}
+          {#each denyList() as d (d.kind + d.account)}
             <div class="ns-card">
               <div class="ns-info">
                 <div class="ns-name">{d.account} <span class="rep-state {d.kind === "ban" ? "severed" : "added"}">{d.kind}</span></div>
                 <div class="ns-desc">{d.reason ? d.reason : "no reason given"}{d.by ? ` · by ${d.by}` : ""}</div>
               </div>
               <div class="fed-actions">
-                <button class="mini-danger" onclick={() => app.liftMod(d.kind, d.account)}>{d.kind === "ban" ? "Unban" : "Unmute"}</button>
+                <button class="mini-danger" onclick={() => liftMod(d.kind, d.account)}>{d.kind === "ban" ? "Unban" : "Unmute"}</button>
               </div>
             </div>
           {:else}
             <div class="empty-hint">No bans or mutes at this server.</div>
           {/each}
         </div>
-        <div class="modal-actions"><button class="set-btn" onclick={app.refreshBans}>Refresh</button></div>
+        <div class="modal-actions"><button class="set-btn" onclick={refreshBans}>Refresh</button></div>
       {:else if app.nsTab === "federation"}
         <h1>Federation</h1>
         <p class="so-sub">Bridge <b>{serverVanity}</b>'s channels to a peer network. You control this as the namespace owner — bridges are scoped to <code>ns:{app.activeServer}</code>, non-transitive, and every change notifies members.</p>
 
         <div class="field-label">Auto-federation</div>
-        <p class="so-sub">When open, another network can reach this namespace on demand — a user there references <code>{app.network}/{serverVanity}</code> and their server auto-establishes the bridge. Off by default; enabling it is an explicit opt-in.</p>
+        <p class="so-sub">When open, another network can reach this namespace on demand — a user there references <code>{store.session.network}/{serverVanity}</code> and their server auto-establishes the bridge. Off by default; enabling it is an explicit opt-in.</p>
         <label class="fed-check" style="margin-bottom:14px">
           <input
             type="checkbox"
-            checked={app.activeNsMeta?.federation ?? false}
-            onchange={(e) => app.nsSetFederation(e.currentTarget.checked)}
+            checked={vm.activeNsMeta?.federation ?? false}
+            onchange={(e) => nsSetFederation(e.currentTarget.checked)}
           />
           Open <b>{serverVanity}</b> to auto-federation
         </label>
-        {#if (app.activeNsMeta?.visibility ?? "") === "public"}
+        {#if (vm.activeNsMeta?.visibility ?? "") === "public"}
           <p class="so-sub">Public — reachable by <b>anyone</b> once open.</p>
         {:else}
-          <p class="so-sub">{(app.activeNsMeta?.visibility ?? "unlisted") === "private" ? "Private" : "Unlisted"} — reachable only to someone who holds an <b>invite</b> to this namespace (mint one in the Invites tab). The invite is the access control.</p>
+          <p class="so-sub">{(vm.activeNsMeta?.visibility ?? "unlisted") === "private" ? "Private" : "Unlisted"} — reachable only to someone who holds an <b>invite</b> to this namespace (mint one in the Invites tab). The invite is the access control.</p>
         {/if}
         <div class="section-sep"></div>
 
@@ -471,8 +477,8 @@
                 <div class="ns-desc">{m.channels.length} channel(s) · history {m.history} · media {m.media}{m.typing ? " · typing" : ""}</div>
               </div>
               <div class="fed-actions">
-                <button onclick={() => app.bridgeAccept(m.peer, m.version)}>Accept</button>
-                <button class="mini-danger" onclick={() => app.bridgeSever(m.peer)}>Sever</button>
+                <button onclick={() => bridgeAccept(m.peer, m.version)}>Accept</button>
+                <button class="mini-danger" onclick={() => bridgeSever(m.peer)}>Sever</button>
               </div>
             </div>
           {:else}
@@ -512,31 +518,31 @@
         <h1>Recovery quorum</h1>
         <p class="so-sub">M-of-N root recovery. Share your recovery key, or co-sign and submit a rotation.</p>
         <div class="field-label">Threshold M</div>
-        <input class="text-input" type="number" min="1" bind:value={app.nsRecM} />
+        <input class="text-input" type="number" min="1" bind:value={nsAdmin.recM} />
         <div class="section-sep"></div>
         <div class="field-label">Quorum keys (comma-separated b64 pubkeys)</div>
-        <input class="text-input" bind:value={app.nsRecKeys} placeholder="key1,key2,key3" />
-        <div class="modal-actions"><button class="ok-btn" onclick={() => app.nsRecKeys.trim() && weft.nsRecoverySet(app.activeServer, app.nsRecM, app.nsRecKeys.trim()).catch((e) => app.toast(String(e), "error"))}>Set recovery quorum</button></div>
+        <input class="text-input" bind:value={nsAdmin.recKeys} placeholder="key1,key2,key3" />
+        <div class="modal-actions"><button class="ok-btn" onclick={() => nsAdmin.recKeys.trim() && weft.nsRecoverySet(app.activeServer, nsAdmin.recM, nsAdmin.recKeys.trim()).catch((e) => app.toast(String(e), "error"))}>Set recovery quorum</button></div>
         <div class="section-sep"></div>
         <div class="set-row">
           <span>My recovery key (share for the quorum)</span>
-          <button class="set-btn" onclick={app.showRecoveryKey}>Reveal</button>
+          <button class="set-btn" onclick={showRecoveryKey}>Reveal</button>
         </div>
-        {#if app.myRecoveryKey}
-          <div class="modal-join"><input readonly value={app.myRecoveryKey} /><button onclick={() => navigator.clipboard?.writeText(app.myRecoveryKey)}>Copy</button></div>
+        {#if nsAdmin.myRecoveryKey}
+          <div class="modal-join"><input readonly value={nsAdmin.myRecoveryKey} /><button onclick={() => navigator.clipboard?.writeText(nsAdmin.myRecoveryKey)}>Copy</button></div>
         {/if}
         <div class="field-label">Rotation record (co-sign or submit)</div>
-        <textarea class="text-input" rows="2" bind:value={app.recoveryDoc} placeholder="paste a record to co-sign, or Start one below"></textarea>
+        <textarea class="text-input" rows="2" bind:value={nsAdmin.recoveryDoc} placeholder="paste a record to co-sign, or Start one below"></textarea>
         <div class="modal-actions">
-          <button class="set-btn" onclick={app.startRecovery}>Start (recover to me)</button>
-          <button class="set-btn" onclick={app.cosignRecovery}>Co-sign</button>
-          <button class="ok-btn" onclick={app.submitRecovery}>Submit</button>
+          <button class="set-btn" onclick={startRecovery}>Start (recover to me)</button>
+          <button class="set-btn" onclick={cosignRecovery}>Co-sign</button>
+          <button class="ok-btn" onclick={submitRecovery}>Submit</button>
         </div>
       {:else if app.nsTab === "danger"}
         <h1>Danger zone</h1>
         <p class="so-sub">Irreversible actions. Transfer is root-key-signed on this device.</p>
         <div class="field-label">Transfer ownership to</div>
-        <input class="text-input" bind:value={app.nsNewOwner} placeholder="account" />
+        <input class="text-input" bind:value={nsAdmin.newOwner} placeholder="account" />
         <div class="modal-actions">
           <button class="danger-btn" onclick={app.doTransfer}>Transfer (root-signed)</button>
         </div>

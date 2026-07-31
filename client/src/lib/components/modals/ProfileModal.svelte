@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { badgeFor } from "$lib/models/session.svelte";
+  import { vm } from "$lib/viewmodel.svelte";
+  import { openDm } from "$lib/navigation";
+  import { friendState, friendAction, callUser } from "$lib/models/social.svelte";
+  import { badgeFor, nameColor, isStaff } from "$lib/models/session.svelte";
   import { store } from "$lib/models/store.svelte";
   import { bioOf, displayName, initials, statusOf } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
@@ -8,15 +11,15 @@
   const app = getApp();
   let { target, onclose }: { target: string; onclose: () => void } = $props();
 
-  const isSelf = $derived(target === app.account);
-  const handle = $derived(target.includes("@") ? target : `${target}@${app.network}`);
-  const status = $derived(isSelf ? app.myStatus : (store.accountOf(target).presence ?? "offline"));
+  const isSelf = $derived(target === store.session.account);
+  const handle = $derived(target.includes("@") ? target : `${target}@${store.session.network}`);
+  const status = $derived(isSelf ? store.session.myStatus : (store.accountOf(target).presence ?? "offline"));
   const online = $derived(status !== "offline" && status !== "invisible");
   const bio = $derived(bioOf(target));
   const badge = $derived(badgeFor(target, app.active));
 
   const servers = $derived(app.mutualServers(target));
-  const rel = $derived(app.friendState(target));
+  const rel = $derived(friendState(target));
 
   const STATUS_LABEL: Record<string, string> = {
     online: "Online",
@@ -32,11 +35,11 @@
   let tab = $state<Tab>("servers");
 
   function message() {
-    app.openDm(target);
+    openDm(target);
     onclose();
   }
   function call() {
-    app.callUser(handle);
+    callUser(handle);
     onclose();
   }
   function jumpServer(ns: string) {
@@ -68,8 +71,8 @@
 
       <div class="pm-card-body">
         <div class="pm-nameline">
-          <span class="pm-name" style={app.nameColor(target) ? `color:${app.nameColor(target)}` : ""}>{displayName(target)}</span>
-          {#if app.isStaff(target)}<span class="cap-badge staff">staff</span>{/if}
+          <span class="pm-name" style={nameColor(target) ? `color:${nameColor(target)}` : ""}>{displayName(target)}</span>
+          {#if isStaff(target)}<span class="cap-badge staff">staff</span>{/if}
         </div>
         <button class="pm-handle" title="Copy handle" onclick={copyId}>
           {handle}
@@ -85,13 +88,13 @@
               Message
             </button>
             {#if rel === "friends"}
-              <button class="pm-btn" onclick={() => app.friendAction(target, "remove")}>Friends ✓</button>
+              <button class="pm-btn" onclick={() => friendAction(target, "remove")}>Friends ✓</button>
             {:else if rel === "incoming"}
-              <button class="pm-btn accent" onclick={() => app.friendAction(target, "accept")}>Accept request</button>
+              <button class="pm-btn accent" onclick={() => friendAction(target, "accept")}>Accept request</button>
             {:else if rel === "outgoing"}
-              <button class="pm-btn" onclick={() => app.friendAction(target, "remove")}>Requested</button>
+              <button class="pm-btn" onclick={() => friendAction(target, "remove")}>Requested</button>
             {:else}
-              <button class="pm-icon" title="Add friend" aria-label="Add friend" onclick={() => app.friendAction(target, "add")}>
+              <button class="pm-icon" title="Add friend" aria-label="Add friend" onclick={() => friendAction(target, "add")}>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><line x1="19" y1="8" x2="19" y2="14" /><line x1="22" y1="11" x2="16" y2="11" /></svg>
               </button>
             {/if}
@@ -126,8 +129,8 @@
           <div class="pm-list">
             {#each servers as ns (ns)}
               <button class="pm-server" onclick={() => jumpServer(ns)}>
-                <span class="pm-server-icon">{initials(app.serverName(ns))}</span>
-                <span class="pm-server-name">{app.serverName(ns)}</span>
+                <span class="pm-server-icon">{initials(vm.serverName(ns))}</span>
+                <span class="pm-server-name">{vm.serverName(ns)}</span>
                 <svg class="pm-chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6" /></svg>
               </button>
             {/each}

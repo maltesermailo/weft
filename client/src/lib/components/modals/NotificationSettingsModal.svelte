@@ -1,13 +1,15 @@
 <script lang="ts">
+  import { notifLevelOf, setNotifLevel, notifScopeKey, notifScopeLabel } from "$lib/notif";
+  import type { NotifLevel } from "$lib/models/store.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 
-  const scope = $derived(app.notifScopeKey());
-  const level = $derived(app.notifLevelOf(scope));
+  const scope = $derived(notifScopeKey());
+  const level = $derived(notifLevelOf(scope));
 
-  const OPTIONS = [
+  const OPTIONS: { value: NotifLevel; label: string; desc: string }[] = [
     {
       value: "all",
       label: "All messages",
@@ -30,7 +32,7 @@
   <button class="modal-backdrop" aria-label="Close" onclick={onclose}></button>
   <div class="modal" role="dialog" aria-modal="true">
     <div class="modal-head">
-      <h2>Notifications — {app.notifScopeLabel()}</h2>
+      <h2>Notifications — {notifScopeLabel()}</h2>
       <button class="linkish" aria-label="Close" onclick={onclose}>✕</button>
     </div>
     <p class="modal-sub">
@@ -42,7 +44,7 @@
         <button
           class="notif-option"
           class:on={level === o.value}
-          onclick={() => app.setNotifLevel(scope, o.value)}
+          onclick={() => setNotifLevel(scope, o.value)}
         >
           <span class="notif-radio" aria-hidden="true"></span>
           <span class="notif-text">

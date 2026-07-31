@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { vm } from "$lib/viewmodel.svelte";
+  import { chanNsScope, chanRoleCaps, setChanRoleCaps, chanMemberGrants, chanMemberCaps, setChanMemberCaps, removeChanRole, removeChanMember, toggleRestricted, toggleViewGated } from "$lib/chanperms";
   import { rolesAt } from "$lib/models/session.svelte";
   import { channels } from "$lib/models/channel.svelte";
   import { displayName } from "$lib/profile.svelte";
@@ -29,7 +31,7 @@
 
   // The namespace's roles = the override picker's role source (@everyone aside).
   const nsRoles = $derived(
-    rolesAt(app.chanNsScope()).filter((r) => r.name !== EVERYONE_ROLE),
+    rolesAt(chanNsScope()).filter((r) => r.name !== EVERYONE_ROLE),
   );
   // Role overrides live as channel-scoped roles; merge with just-added ones.
   const roleTargets = $derived.by(() => {
@@ -41,7 +43,7 @@
     );
   });
   const memberTargets = $derived.by(() => {
-    const present = app.chanMemberGrants().map((g) => g.subject);
+    const present = chanMemberGrants().map((g) => g.subject);
     return [...new Set([...present, ...pendingMembers])];
   });
   const addableRoles = $derived(nsRoles.filter((r) => !roleTargets.some((t) => t.name === r.name)));
@@ -50,7 +52,7 @@
   const memberChoices = $derived.by(() => {
     const seen = new Set<string>();
     const out: string[] = [];
-    for (const g of app.channelGroups)
+    for (const g of vm.channelGroups)
       for (const c of g.list)
         for (const m of c.members)
           if (!seen.has(m.name)) {
@@ -72,9 +74,9 @@
   const sameCaps = (a: string[], b: string[]) =>
     a.length === b.length && [...a].sort().join() === [...b].sort().join();
   const persistedCaps = () => {
-    if (selected.kind === "everyone") return app.chanRoleCaps(EVERYONE_ROLE);
-    if (selected.kind === "role") return app.chanRoleCaps(selected.name);
-    return app.chanMemberCaps(selected.account);
+    if (selected.kind === "everyone") return chanRoleCaps(EVERYONE_ROLE);
+    if (selected.kind === "role") return chanRoleCaps(selected.name);
+    return chanMemberCaps(selected.account);
   };
   let draft = $state<string[]>([]);
   // Re-seed the draft whenever the selected target changes (untracked reads so
@@ -91,9 +93,9 @@
     draft = [...persistedCaps()];
   }
   function savePerms() {
-    if (selected.kind === "everyone") app.setChanRoleCaps(EVERYONE_ROLE, "#99aab5", draft);
-    else if (selected.kind === "role") app.setChanRoleCaps(selected.name, selected.color, draft);
-    else app.setChanMemberCaps(selected.account, draft);
+    if (selected.kind === "everyone") setChanRoleCaps(EVERYONE_ROLE, "#99aab5", draft);
+    else if (selected.kind === "role") setChanRoleCaps(selected.name, selected.color, draft);
+    else setChanMemberCaps(selected.account, draft);
   }
   function addRole(r: { name: string; color: string }) {
     if (!pendingRoles.includes(r.name)) pendingRoles = [...pendingRoles, r.name];
@@ -110,16 +112,16 @@
   }
   function removeRoleTarget(name: string) {
     pendingRoles = pendingRoles.filter((n) => n !== name);
-    app.removeChanRole(name);
+    removeChanRole(name);
     if (selected.kind === "role" && selected.name === name) selected = { kind: "everyone" };
   }
   function removeMemberTarget(account: string) {
     pendingMembers = pendingMembers.filter((n) => n !== account);
-    app.removeChanMember(account);
+    removeChanMember(account);
     if (selected.kind === "member" && selected.account === account) selected = { kind: "everyone" };
   }
   const roleColor = (name: string) =>
-    rolesAt(app.chanNsScope()).find((r) => r.name === name)?.color ?? "#99aab5";
+    rolesAt(chanNsScope()).find((r) => r.name === name)?.color ?? "#99aab5";
 
   const rec = $derived(channels[channel]);
   const ns = $derived(app.nsOf(channel)); // "" for a top-level channel
@@ -205,14 +207,14 @@
         <div class="field-label">Announcement mode</div>
         <div class="set-row">
           <span>Everyone reads (<code>view</code>), only members with <code>send</code> may post</span>
-          <button class="chip-btn" class:on={rec?.restricted} onclick={app.toggleRestricted}>{rec?.restricted ? "On" : "Off"}</button>
+          <button class="chip-btn" class:on={rec?.restricted} onclick={toggleRestricted}>{rec?.restricted ? "On" : "Off"}</button>
         </div>
 
         <div class="section-sep"></div>
         <div class="field-label">Private channel</div>
         <div class="set-row">
           <span>Hide this channel from anyone without the <code>view</code> capability. Grant <code>view</code> to roles or members in <b>Permissions</b> to let them in.</span>
-          <button class="chip-btn" class:on={rec?.viewGated} onclick={app.toggleViewGated}>{rec?.viewGated ? "On" : "Off"}</button>
+          <button class="chip-btn" class:on={rec?.viewGated} onclick={toggleViewGated}>{rec?.viewGated ? "On" : "Off"}</button>
         </div>
       {:else if tab === "permissions"}
         <h1>Permissions</h1>

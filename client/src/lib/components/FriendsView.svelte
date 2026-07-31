@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { roster } from "$lib/models/social.svelte";
+  import { userCtx } from "$lib/ctxmenu.svelte";
+  import { messageFriend } from "$lib/navigation";
+  import { roster, friendLocalAccount, openGroupPicker, callUser } from "$lib/models/social.svelte";
   import { store } from "$lib/models/store.svelte";
   import { friendLabel } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
@@ -11,9 +13,9 @@
 
   // Local friends get a presence dot + avatar by handle; federated friends
   // render by their full `account@network` ref (no presence).
-  const avatarAccount = (user: string) => app.friendLocalAccount(user) ?? user;
+  const avatarAccount = (user: string) => friendLocalAccount(user) ?? user;
   const statusOf = (user: string) => {
-    const acct = app.friendLocalAccount(user);
+    const acct = friendLocalAccount(user);
     return acct ? (store.accountOf(acct).presence ?? "offline") : "offline";
   };
   const isOnline = (user: string) => {
@@ -28,7 +30,7 @@
     invisible: "Offline",
   };
   const subtitle = (user: string) => {
-    const acct = app.friendLocalAccount(user);
+    const acct = friendLocalAccount(user);
     return acct ? (STATUS[statusOf(user)] ?? "Offline") : user;
   };
 
@@ -59,7 +61,7 @@
       </button>
       <button class="fv-tab add" class:on={tab === "add"} onclick={() => (tab = "add")}>Add Friend</button>
     </nav>
-    <button class="fv-icon" title="New group DM" aria-label="New group DM" onclick={app.openGroupPicker}>
+    <button class="fv-icon" title="New group DM" aria-label="New group DM" onclick={openGroupPicker}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /><line x1="20" y1="8" x2="20" y2="14" /><line x1="17" y1="11" x2="23" y2="11" /></svg>
     </button>
   </header>
@@ -84,7 +86,7 @@
       {#if roster.incoming.length}
         <div class="fv-count">Incoming — {roster.incoming.length}</div>
         {#each roster.incoming as user (user)}
-          <div class="fv-row" oncontextmenu={(e) => app.userCtx(e, user)} role="listitem">
+          <div class="fv-row" oncontextmenu={(e) => userCtx(e, user)} role="listitem">
             <span class="fv-av"><Avatar account={avatarAccount(user)} /></span>
             <span class="fv-meta">
               <span class="fv-name">{friendLabel(user)}</span>
@@ -131,25 +133,25 @@
       {#if list.length}
         <div class="fv-count">{tab === "online" ? "Online" : "All Friends"} — {list.length}</div>
         {#each list as user (user)}
-          <div class="fv-row" oncontextmenu={(e) => app.userCtx(e, user)} role="listitem">
+          <div class="fv-row" oncontextmenu={(e) => userCtx(e, user)} role="listitem">
             <span class="fv-av">
               <Avatar account={avatarAccount(user)} />
-              {#if app.friendLocalAccount(user)}<span class="fv-dot {statusOf(user)}"></span>{/if}
+              {#if friendLocalAccount(user)}<span class="fv-dot {statusOf(user)}"></span>{/if}
             </span>
             <span class="fv-meta">
               <span class="fv-name">{friendLabel(user)}</span>
               <span class="fv-sub">{subtitle(user)}</span>
             </span>
             <span class="fv-acts">
-              {#if app.friendLocalAccount(user)}
-                <button class="fv-act" title="Message" aria-label="Message" onclick={() => app.messageFriend(user)}>
+              {#if friendLocalAccount(user)}
+                <button class="fv-act" title="Message" aria-label="Message" onclick={() => messageFriend(user)}>
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
                 </button>
               {/if}
-              <button class="fv-act call" title="Call" aria-label="Call" disabled={!!app.activeCall} onclick={() => app.callUser(user)}>
+              <button class="fv-act call" title="Call" aria-label="Call" disabled={!!app.activeCall} onclick={() => callUser(user)}>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" /></svg>
               </button>
-              <button class="fv-act" title="More" aria-label="More" onclick={(e) => app.userCtx(e, user)}>
+              <button class="fv-act" title="More" aria-label="More" onclick={(e) => userCtx(e, user)}>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></svg>
               </button>
             </span>

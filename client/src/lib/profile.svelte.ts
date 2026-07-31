@@ -5,6 +5,10 @@ import { SvelteMap } from "svelte/reactivity";
 import { page } from "$app/state";
 import * as nav from "$lib/nav";
 import { store } from "$lib/models/store.svelte";
+import { ui } from "$lib/ui.svelte";
+import { view } from "$lib/view.svelte";
+import { toast } from "$lib/toasts.svelte";
+import { roleScopeOf, ensureCaps, ensureCapsAt, fetchRoles, fetchMemberRoles } from "$lib/models/session.svelte";
 import type { HandlerMap } from "$lib/sync/handler-map";
 import * as weft from "$lib/weft";
 
@@ -79,3 +83,65 @@ export const profileHandlers: HandlerMap = {
     else nicks.delete(key);
   },
 };
+
+// ---- §10.3 profile actions ----
+// Normalize a (possibly `account@network`) handle to the bare *local* account,
+// keeping a genuinely federated ref whole.
+function localTarget(handle: string): string {
+  const at = handle.lastIndexOf("@");
+  return at > 0 && handle.slice(at + 1) === store.session.network ? handle.slice(0, at) : handle;
+}
+
+// Set (or clear, with "") a per-namespace nickname (§10.3).
+export function setNick(scope: string, account: string, value: string): void {
+  weft.nick(scope, account, value).catch((e) => toast(String(e), "error"));
+}
+
+// Set (or clear, with "") my own custom status (§10.3).
+export function setCustomStatus(text: string): void {
+  weft.profileSet({ status: text }).catch((e) => toast(String(e), "error"));
+}
+
+const POP_W = 340;
+const POP_H = 360;
+
+// Open the anchored ProfileCard popover next to the clicked row (Discord-style;
+// centered fallback when there's no event), then hydrate the target's profile,
+// caps and roles for display.
+export function openProfile(handle: string, e?: MouseEvent): void {
+  const target = localTarget(handle);
+  ui.profileTarget = target;
+
+  if (e?.currentTarget instanceof HTMLElement) {
+    const r = e.currentTarget.getBoundingClientRect();
+    let left = r.left - POP_W - 12; // prefer to the left of the row
+    if (left < 8) left = r.right + 12; // flip right if no room
+    left = Math.max(8, Math.min(left, window.innerWidth - POP_W - 8));
+    const top = Math.max(8, Math.min(r.top - 8, window.innerHeight - POP_H - 8));
+    ui.profilePos = { left, top };
+  } else {
+    ui.profilePos = null;
+  }
+
+  const scope = roleScopeOf(view.active);
+  queryProfile(target); // §10.3 nick / avatar / bio / custom status
+  ensureCaps(target, view.active); // channel-scope owner/mod badges
+  ensureCapsAt(target, scope); // for the owner check
+  fetchRoles(scope); // role definitions (names + colors)
+  fetchMemberRoles(target, scope); // this member's assigned roles
+}
+
+// The *full* profile modal (distinct from the anchored popover): a centered
+// dialog with bio, status, mutual servers and quick actions.
+export function openFullProfile(handle: string): void {
+  const target = localTarget(handle);
+  ui.profileModalTarget = target;
+  ui.profileTarget = null; // close the popover if it was open
+  queryProfile(target);
+  ensureCaps(target, view.active);
+}
+
+// §10.3 quick "Set nickname" dialog (per-namespace → targets the active server).
+export function openNickDialog(handle: string): void {
+  ui.nickTarget = localTarget(handle);
+}

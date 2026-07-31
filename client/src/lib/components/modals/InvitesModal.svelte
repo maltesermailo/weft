@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { store } from "$lib/models/store.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   import InviteList from "$lib/components/InviteList.svelte";
@@ -10,7 +11,7 @@
   <button class="modal-backdrop" aria-label="Close" onclick={onclose}></button>
   <div class="modal" role="dialog" aria-modal="true">
     <div class="modal-head">
-      <h2>Invites — {app.invitesScope}</h2>
+      <h2>Invites — {store.invites.scope}</h2>
       <button class="linkish" aria-label="Close" onclick={onclose}>✕</button>
     </div>
     <div class="modal-list">

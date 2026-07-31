@@ -1,4 +1,9 @@
 <script lang="ts">
+  import { ui } from "$lib/ui.svelte";
+  import { vm } from "$lib/viewmodel.svelte";
+  import { openThreads } from "$lib/models/threads.svelte";
+  import { openGroupPicker, callUser, leaveGroup, groupLabel } from "$lib/models/social.svelte";
+  import { openInvites } from "$lib/models/invites.svelte";
   import { store } from "$lib/models/store.svelte";
   import { dotClass, peerOf } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
@@ -6,25 +11,25 @@
 </script>
 
 <div class="chat-topbar">
-  {#if app.activeChannel && app.activeIsGroup}
+  {#if vm.activeChannel && vm.activeIsGroup}
     <div class="chan-title">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
-      <span>{app.groupLabel(app.active)}</span>
+      <span>{groupLabel(app.active)}</span>
     </div>
     <div class="topic">group DM</div>
-  {:else if app.activeChannel && app.activeIsDm}
+  {:else if vm.activeChannel && vm.activeIsDm}
     <div class="chan-title">
       <span class={dotClass(peerOf(app.active))}></span>
       <span>{peerOf(app.active)}</span>
     </div>
     <div class="topic">{store.accountOf(peerOf(app.active)).presence ?? "offline"}</div>
-  {:else if app.activeChannel}
-    {@const meta = app.retentionMeta[app.activeChannel.retention]}
+  {:else if vm.activeChannel}
+    {@const meta = app.retentionMeta[vm.activeChannel.retention]}
     <div class="chan-title">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" /></svg>
-      <span>{app.chanShort(app.activeChannel.name)}</span>
+      <span>{app.chanShort(vm.activeChannel.name)}</span>
     </div>
-    <div class="topic">{app.activeChannel.topic ?? ""}</div>
+    <div class="topic">{vm.activeChannel.topic ?? ""}</div>
     <div class="status-chip">
       <span style="display:flex;color:var(--{meta.cls})"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">{@html meta.icon}</svg></span>{meta.label}
     </div>
@@ -33,15 +38,15 @@
     <div class="topic"></div>
   {/if}
   <div class="topbar-actions">
-    {#if app.activeIsDm}
-      <button class="icon-btn" title="Start call" aria-label="Start call" disabled={!!app.activeCall} onclick={() => app.callUser(peerOf(app.active))}>
+    {#if vm.activeIsDm}
+      <button class="icon-btn" title="Start call" aria-label="Start call" disabled={!!app.activeCall} onclick={() => callUser(peerOf(app.active))}>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" /></svg>
       </button>
-      <button class="icon-btn" title="Create group" aria-label="Create group" onclick={app.openGroupPicker}>
+      <button class="icon-btn" title="Create group" aria-label="Create group" onclick={openGroupPicker}>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><line x1="19" y1="8" x2="19" y2="14" /><line x1="22" y1="11" x2="16" y2="11" /></svg>
       </button>
     {/if}
-    {#if app.activeIsGroup}
+    {#if vm.activeIsGroup}
       {@const inCall = app.activeGroupCall === app.active}
       {@const roster = app.groupCallRoster.get(app.active) ?? []}
       <button
@@ -60,28 +65,28 @@
       {#if roster.length}
         <span class="call-count" title="{roster.length} in call">{roster.length}</span>
       {/if}
-      <button class="icon-btn" title="Leave group" aria-label="Leave group" onclick={() => app.leaveGroup(app.active)}>
+      <button class="icon-btn" title="Leave group" aria-label="Leave group" onclick={() => leaveGroup(app.active)}>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5" /><path d="M21 12H9" /></svg>
       </button>
     {/if}
-    {#if app.activeChannel && !app.activeIsDm && !app.activeIsGroup}
+    {#if vm.activeChannel && !vm.activeIsDm && !vm.activeIsGroup}
       <button class="icon-btn" title="Search messages" aria-label="Search messages" onclick={app.openSearch}>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
       </button>
       <button class="icon-btn" title="Pinned messages" aria-label="Pinned messages" onclick={app.openPins}>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg>
       </button>
-      <button class="icon-btn" title="Threads" aria-label="Threads" onclick={app.openThreads}>
+      <button class="icon-btn" title="Threads" aria-label="Threads" onclick={openThreads}>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /><path d="M8 9h8" /><path d="M8 13h5" /></svg>
       </button>
-      <button class="icon-btn" title="Invite" aria-label="Invite" onclick={app.openInvites}>
+      <button class="icon-btn" title="Invite" aria-label="Invite" onclick={openInvites}>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><line x1="19" y1="8" x2="19" y2="14" /><line x1="22" y1="11" x2="16" y2="11" /></svg>
       </button>
       <button class="icon-btn" title="Reports queue" aria-label="Reports queue" onclick={app.openReports}>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" /><line x1="4" y1="22" x2="4" y2="15" /></svg>
       </button>
     {/if}
-    <button class="icon-btn" title="Toggle member list" aria-label="Toggle member list" onclick={() => (app.membersVisible = !app.membersVisible)}>
+    <button class="icon-btn" title="Toggle member list" aria-label="Toggle member list" onclick={() => (ui.membersVisible = !ui.membersVisible)}>
       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
     </button>
   </div>

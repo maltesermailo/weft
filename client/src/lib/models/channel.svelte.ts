@@ -7,6 +7,7 @@ import type { Server } from "./server.svelte";
 import { store } from "./store.svelte";
 import * as weft from "$lib/weft";
 import * as nav from "$lib/nav";
+import { view } from "$lib/view.svelte";
 import { toast } from "$lib/toasts.svelte";
 import { clock } from "$lib/time";
 
@@ -131,6 +132,74 @@ export const mkMsg = (m: Omit<Msg, "key">): Msg => ({ ...m, key: msgSeq++ });
 
 /// The namespace id in `#<ns>/<chan>`, else "" (top-level / DM / group).
 export const nsOf = (name: string): string => name.match(/^#([^/]+)\//)?.[1] ?? "";
+
+/// The covering scopes for the current target, most specific first: the channel
+/// itself (if one is open), its namespace, then the network `*`. Used to pick a
+/// default scope for invites and to resolve per-scope grants.
+export function scopesFor(): string[] {
+  const s: string[] = [];
+  if (view.active.startsWith("#")) s.push(view.active);
+
+  const ns = nsOf(view.active) || view.activeServer;
+  if (ns) s.push(`ns:${ns}`);
+
+  s.push("*");
+  return s;
+}
+
+// ---- §6.3 category list (server state, on the namespace) ----
+export const nsCategories = (): string[] => store.servers.get(view.activeServer)?.categories ?? [];
+export function setCategories(list: string[]): void {
+  if (view.activeServer) weft.nsMeta(view.activeServer, "categories", list.join(",")).catch((e) => toast(String(e), "error"));
+}
+
+// ---- Discord-style drag/drop reorder (ChannelList) ----
+// Move a channel into `targetCat` at `anchorName` (before/after), then renumber
+// that category so positions stay stable + ordered.
+export function moveChannel(dragName: string, targetCat: string, anchorName?: string, after = false): void {
+  const dragged = channels[dragName];
+  if (!dragged) return;
+
+  dragged.category = targetCat || undefined; // "" = uncategorized (bare top-level); optimistic
+  weft.channelMeta(dragName, "category", targetCat).catch((e) => toast(String(e), "error"));
+
+  const list = Object.values(channels)
+    .filter(
+      (c) => c.name.startsWith("#") && nsOf(c.name) === view.activeServer && (c.category || "") === targetCat && c.name !== dragName,
+    )
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name));
+
+  let at = anchorName ? list.findIndex((c) => c.name === anchorName) : -1;
+  if (at < 0) at = list.length;
+  else if (after) at += 1;
+  list.splice(at, 0, dragged);
+
+  list.forEach((c, i) => {
+    if (c.position !== i) {
+      c.position = i;
+      weft.channelMeta(c.name, "position", String(i)).catch(() => {});
+    }
+  });
+}
+
+// Reorder a named category (the bare top-level group "" stays put — only named
+// categories are persisted in the §6.3 NS categories list).
+export function moveCategory(dragCat: string, targetCat: string): void {
+  if (dragCat === targetCat || dragCat === "") return;
+
+  const cats = [...nsCategories()];
+  const from = cats.indexOf(dragCat);
+  if (from < 0) return;
+  cats.splice(from, 1);
+
+  let to = cats.indexOf(targetCat);
+  if (to < 0) to = cats.length; // dropped on the implicit group → move to the end
+  cats.splice(to, 0, dragCat);
+
+  const s = store.servers.get(view.activeServer);
+  if (s) s.categories = cats; // optimistic; the NS-META echo confirms
+  setCategories(cats);
+}
 
 /// Short channel label: the vanity if known, else the raw local segment.
 export const chanShort = (name: string): string =>

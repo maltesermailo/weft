@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { roster } from "$lib/models/social.svelte";
+  import { roster, friendLocalAccount } from "$lib/models/social.svelte";
   import { friendLabel, peerOf } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
@@ -32,7 +32,7 @@
     else next.add(u);
     picked = next;
   }
-  const avatarAccount = (u: string) => app.friendLocalAccount(u) ?? peerOf(u);
+  const avatarAccount = (u: string) => friendLocalAccount(u) ?? peerOf(u);
   // A seeded group needs ≥1 more; a seedless one needs ≥2 friends to be a group.
   const minPick = $derived(hasSeed ? 1 : 2);
   const total = $derived(picked.size + (hasSeed ? 1 : 0));

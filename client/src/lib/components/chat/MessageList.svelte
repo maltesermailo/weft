@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { vm } from "$lib/viewmodel.svelte";
   import { dayKey, dayLabel } from "$lib/time";
   import { tick } from "svelte";
   import { get } from "svelte/store";
@@ -215,7 +216,7 @@
                 {:else if ch?.truncated}
                   <div class="day-sep">older messages have expired</div>
                 {:else if ch && ch.historyLoaded && !ch.hasMore}
-                  <div class="day-sep">beginning of {app.titleOf(ch.name)}</div>
+                  <div class="day-sep">beginning of {vm.titleOf(ch.name)}</div>
                 {/if}
               {/if}
               {#if !prev || dayKey(prev.ts) !== dayKey(m.ts)}

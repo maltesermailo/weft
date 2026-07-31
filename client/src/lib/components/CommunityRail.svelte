@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { vm } from "$lib/viewmodel.svelte";
+  import { openServerMenu, openDiscover } from "$lib/navigation";
+  import { serverMuted } from "$lib/notif";
   import { initials } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
   const app = getApp();
@@ -10,15 +13,15 @@
   </button>
   <div class="rail-divider"></div>
   <div class="rail-communities">
-    {#each app.serverNamespaces as ns (ns)}
-      <div class="comm-tile" class:active={!app.homeView && app.activeServer === ns} class:muted={app.serverMuted(ns)} title={ns}>
-        <button onclick={() => app.selectServer(ns)} oncontextmenu={(e) => { e.preventDefault(); app.openServerMenu(ns); }} title={app.serverName(ns)}>{initials(app.serverName(ns))}</button>
-        {#if app.serverMentionCount(ns)}<span class="tile-badge mention">{app.serverMentionCount(ns)}</span>
-        {:else if app.serverUnread(ns) && !app.serverMuted(ns)}<span class="tile-badge"></span>{/if}
+    {#each vm.serverNamespaces as ns (ns)}
+      <div class="comm-tile" class:active={!app.homeView && app.activeServer === ns} class:muted={serverMuted(ns)} title={ns}>
+        <button onclick={() => app.selectServer(ns)} oncontextmenu={(e) => { e.preventDefault(); openServerMenu(ns); }} title={vm.serverName(ns)}>{initials(vm.serverName(ns))}</button>
+        {#if vm.serverMentionCount(ns)}<span class="tile-badge mention">{vm.serverMentionCount(ns)}</span>
+        {:else if vm.serverUnread(ns) && !serverMuted(ns)}<span class="tile-badge"></span>{/if}
       </div>
     {/each}
   </div>
-  <button class="rail-add" title="Discover namespaces" aria-label="Discover namespaces" onclick={app.openDiscover}>
+  <button class="rail-add" title="Discover namespaces" aria-label="Discover namespaces" onclick={openDiscover}>
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14" /></svg>
   </button>
 </nav>

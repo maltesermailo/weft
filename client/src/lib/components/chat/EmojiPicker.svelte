@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { activeEmoji, emojiUrlFor } from "$lib/models/server.svelte";
   // §9.4 unified emoji picker (modeled on design/emoji.html): a search box, a
   // category rail, and a scrolling grid whose FIRST section is this server's
   // custom emoji, followed by the unicode categories — plus a hover-preview bar.
@@ -21,11 +22,11 @@
   const sections = $derived.by<Section[]>(() => {
     const out: Section[] = [];
     // Per-server custom emoji first.
-    if (app.activeEmoji.length) {
-      const items: Item[] = app.activeEmoji.map((em) => ({
+    if (activeEmoji().length) {
+      const items: Item[] = activeEmoji().map((em) => ({
         value: `:${em.name}:`,
         name: em.name,
-        url: app.emojiUrlFor(em.name),
+        url: emojiUrlFor(em.name),
       }));
       out.push({
         id: "server",

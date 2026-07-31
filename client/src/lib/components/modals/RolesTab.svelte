@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { rolesAt, rolesOf } from "$lib/models/session.svelte";
+  import { vm } from "$lib/viewmodel.svelte";
+  import { rolesAt, rolesOf, createRole, deleteRole, everyoneCaps, moveRole, nsRoleScope, reorderRoles, roleDraft, saveRole, setEveryoneCaps, toggleNewRoleCap, ensureMemberRoles, unassignRoleFrom } from "$lib/models/session.svelte";
   import { displayName } from "$lib/profile.svelte";
   // §6.5 roles tab, redesigned as a two-pane editor (design/server-settings.html):
   // a searchable, drag-orderable role list on the left; a tabbed editor
@@ -13,11 +14,11 @@
   import SaveBar from "$lib/components/SaveBar.svelte";
 
   const app = getApp();
-  const scope = $derived(app.nsRoleScope());
+  const scope = $derived(nsRoleScope());
   // The implicit @everyone role is edited as its own selection, not dragged,
   // renamed, colored or deleted like a normal role.
   const roles = $derived(
-    rolesAt(app.nsRoleScope()).filter((r) => r.name !== EVERYONE_ROLE),
+    rolesAt(nsRoleScope()).filter((r) => r.name !== EVERYONE_ROLE),
   );
 
   const sameCaps = (a: string[], b: string[]) =>
@@ -34,7 +35,7 @@
   const nsMembers = $derived.by(() => {
     const seen = new Set<string>();
     const out: string[] = [];
-    for (const g of app.channelGroups)
+    for (const g of vm.channelGroups)
       for (const c of g.list)
         for (const m of c.members)
           if (!seen.has(m.name)) {
@@ -44,7 +45,7 @@
     return out.sort((a, b) => a.localeCompare(b));
   });
   $effect(() => {
-    for (const name of nsMembers) app.ensureMemberRoles(name);
+    for (const name of nsMembers) ensureMemberRoles(name);
   });
   let memberSearch = $state("");
 
@@ -81,7 +82,7 @@
   function pickEveryone() {
     selected = EVERYONE_ROLE;
     tab = "permissions";
-    everyoneDraft = [...app.everyoneCaps()];
+    everyoneDraft = [...everyoneCaps()];
   }
   function pickNew() {
     selected = "__new__";
@@ -102,7 +103,7 @@
 
   function save() {
     if (!editing) return;
-    app.saveRole(editing, {
+    saveRole(editing, {
       name: draft.name,
       color: draft.color,
       caps: draft.caps,
@@ -113,16 +114,16 @@
   }
   function remove(id: string) {
     if (selected === id) selected = null;
-    app.deleteRole(id);
+    deleteRole(id);
   }
   function create() {
-    app.createRole();
+    createRole();
     selected = null;
   }
 
   // ---- @everyone baseline editor ----
   let everyoneDraft = $state<string[]>([]);
-  const everyoneDirty = $derived(!sameCaps(everyoneDraft, app.everyoneCaps()));
+  const everyoneDirty = $derived(!sameCaps(everyoneDraft, everyoneCaps()));
   const toggleEveryoneCap = (c: string) =>
     (everyoneDraft = everyoneDraft.includes(c)
       ? everyoneDraft.filter((x) => x !== c)
@@ -136,11 +137,11 @@
   // later) — only the name is required.
   const saveDisabled = $derived(selected !== EVERYONE_ROLE && !draft.name.trim());
   function revertSelection() {
-    if (selected === EVERYONE_ROLE) everyoneDraft = [...app.everyoneCaps()];
+    if (selected === EVERYONE_ROLE) everyoneDraft = [...everyoneCaps()];
     else if (editing) pick(editing.id);
   }
   function saveSelection() {
-    if (selected === EVERYONE_ROLE) app.setEveryoneCaps(everyoneDraft);
+    if (selected === EVERYONE_ROLE) setEveryoneCaps(everyoneDraft);
     else if (editing) save();
   }
 
@@ -170,12 +171,12 @@
     const list = filtered.map((r) => r.id);
     const [moved] = list.splice(from, 1);
     list.splice(to, 0, moved);
-    app.reorderRoles(list);
+    reorderRoles(list);
   }
   function onRowKey(e: KeyboardEvent, r: Role) {
     if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
     e.preventDefault();
-    app.moveRole(r.id, e.key === "ArrowUp" ? -1 : 1);
+    moveRole(r.id, e.key === "ArrowUp" ? -1 : 1);
   }
 
   // Currently-selected role's live color, for the editor header preview.
@@ -247,20 +248,20 @@
     {#if selected === "__new__"}
       <div class="rl-head">
         <div class="rl-head-title">
-          <span class="rl-dot lg" style="background:{app.newRoleColor}"></span>
-          <span>{app.newRoleName.trim() || "New role"}</span>
+          <span class="rl-dot lg" style="background:{roleDraft.color}"></span>
+          <span>{roleDraft.name.trim() || "New role"}</span>
         </div>
       </div>
       <div class="rl-body">
         <div class="rl-field">
           <div class="field-label">Role name</div>
-          <input class="text-input" bind:value={app.newRoleName} placeholder="e.g. Moderator" />
+          <input class="text-input" bind:value={roleDraft.name} placeholder="e.g. Moderator" />
         </div>
-        {@render colorField(app.newRoleColor, (c) => (app.newRoleColor = c), app.newRoleName)}
-        {@render displayOptions(app.newRoleHoist, (v) => (app.newRoleHoist = v), app.newRolePingable, (v) => (app.newRolePingable = v), app.newRoleName)}
-        {@render permGroups(app.newRoleCaps, app.toggleNewRoleCap)}
+        {@render colorField(roleDraft.color, (c) => (roleDraft.color = c), roleDraft.name)}
+        {@render displayOptions(roleDraft.hoist, (v) => (roleDraft.hoist = v), roleDraft.pingable, (v) => (roleDraft.pingable = v), roleDraft.name)}
+        {@render permGroups(roleDraft.caps, toggleNewRoleCap)}
         <div class="rl-actions">
-          <button class="ok-btn" disabled={!app.newRoleName.trim()} onclick={create}>Create role</button>
+          <button class="ok-btn" disabled={!roleDraft.name.trim()} onclick={create}>Create role</button>
           <button class="linkish" onclick={() => (selected = null)}>Cancel</button>
         </div>
       </div>
@@ -328,7 +329,7 @@
                 class="rl-member-x"
                 aria-label="Remove {name} from {editing.name}"
                 title="Remove from {editing.name}"
-                onclick={() => app.unassignRoleFrom(name, editing)}
+                onclick={() => unassignRoleFrom(name, editing)}
               >✕</button>
             </div>
           {:else}
