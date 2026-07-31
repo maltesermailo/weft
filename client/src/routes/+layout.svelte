@@ -10,7 +10,7 @@
   import { handle, loadHistory, hist } from "$lib/sync/reducer.svelte";
   import { msgEpoch } from "$lib/rendering/time";
   import { scopeKeyOf, notifLevel, isMuted, setNotifLevel } from "$lib/notifications/notif";
-  import { nicks, nicksFetched, peerOf, initials, dotClass, avatarUrl, displayName, nickOf, bioOf, statusOf } from "$lib/profile/profile.svelte";
+  import { peerOf, initials, dotClass, avatarUrl, bioOf, statusOf, profileStore } from "$lib/profile/profile.svelte";
   import { toasts, toast, expectSuccess } from "$lib/notifications/toasts.svelte";
   import * as weft from "$lib/transport/weft";
   
@@ -20,11 +20,11 @@
   import { cf } from "$lib/session/connect.svelte";
   import { provideApp } from "$lib/ui/context";
   import { store } from "$lib/store/store.svelte";
-  import { refreshNetblocks } from "$lib/federation/federation.svelte";
+  
   import { moderate } from "$lib/moderation/moderation";
   import { nsAdmin } from "$lib/namespaces/server.svelte";
-  import { openInvites } from "$lib/invites/invites.svelte";
-  import { qualify, acceptFriend, removeFriend } from "$lib/social/social.svelte";
+  
+  
   
   
   import { closeThread } from "$lib/messages/threads.svelte";
@@ -34,9 +34,9 @@
   
   import { appConfirm } from "$lib/ui/confirm.svelte";
   import { openCreateChannel, openCreateChannelInCat, openCreateCategory } from "$lib/channels/channelcreate.svelte";
-  import { isOwnerAt, isStaff } from "$lib/session/session.svelte";
-import { roleScopeOf, nsRoleScope, fetchRoles } from "$lib/roles/roles.svelte";
-  import { Channel, channels, nsOf, chanShort, channelRecord, ensureChannel, markRead, layoutCache, loadLayoutCache, persistDms } from "$lib/channels/channel.svelte";
+  
+import { roleScopeOf, roleStore } from "$lib/roles/roles.svelte";
+  import { channelStore, Channel, nsOf } from "$lib/channels/channel.svelte";
 import { mkMsg } from "$lib/messages/messages.svelte";
   import { installLinkGuard } from "$lib/ui/linkguard.svelte";
   import LinkWarningModal from "$lib/components/modals/LinkWarningModal.svelte";
@@ -99,7 +99,7 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   // destructive actions must not rely on it). Resolves true/false.
 
   // ---- live data, channel collection + layout cache: `$lib/channels/channel.svelte`
-  // (channels/mkMsg/ensureChannel/markRead/nsOf/chanShort/layoutCache/…). ----
+  // (channels/mkMsg/channelStore.ensure/channelStore.markRead/nsOf/channelStore.short/channelStore.layoutCache/…). ----
 
   // ---- notification preferences (per-user, localStorage) ----
   // Set per **namespace** (`ns:<name>`, or `net` for top-level) in the
@@ -121,18 +121,18 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   const activeServer = $derived(view.activeServer); // "" = network top-level / home; else a namespace
   const homeView = $derived(view.homeView);
   // ---- servers/namespaces as rail tiles (Phase 6, flavor A) ----
-  // `nsOf` / `chanShort` are channel-name helpers imported from the channel model.
+  // `nsOf` / `channelStore.short` are channel-name helpers imported from the channel model.
   // A user-facing label for any target: `#vanity` for a channel, the peer's
   // display name for a DM, the group label for a group DM.
   // ---- DMs + presence (Phase 5) ----
   // The shared client store (singleton) — the identity maps, namespaces, and
   // client prefs. Domain models navigate to it too (see client-model-refactor.md).
-  // §10.3 nicks cache + profile/identity helpers → `$lib/profile.svelte`.
+  // §10.3 profileStore.nicks cache + profile/identity helpers → `$lib/profile.svelte`.
   // Pull a server's nicknames once, the first time it's viewed.
   $effect(() => {
     const s = activeServer;
-    if (s && !nicksFetched.has(s)) {
-      nicksFetched.add(s);
+    if (s && !profileStore.nicksFetched.has(s)) {
+      profileStore.nicksFetched.add(s);
       weft.nicksQuery(`ns:${s}`).catch(() => {});
     }
   });
@@ -180,16 +180,16 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   function openFederation() {
     ui.federationOpen = true;
     ui.settingsOpen = false;
-    refreshNetblocks();
+    store.federation.refreshNetblocks();
   }
   // ---- pins + message search (§6.4) — state on `store.pins` / `store.search`
   // (self-contained panels); results stream in as BATCHes, routed by the reducer.
   // ---- threads (§9.4) — side panel + list modal — state on `store.threads`.
   // ---- capability + role reads: `$lib/session/session.svelte` (ensureCapsAt /
-  // rolesAt / roleById / rolesOf / isOwnerAt / isStaff / badgeFor / mentionsMe /
+  // rolesAt / roleById / rolesOf / store.session.isOwnerAt / store.session.isStaff / badgeFor / mentionsMe /
   // roleScopeOf); `rolesByScope` / `memberRoles` state live there too. ----
 
-  // ---- §6.5 named roles: the fetch/batch machinery (queues + fetchRoles) ----
+  // ---- §6.5 named roles: the fetch/batch machinery (queues + roleStore.fetchRoles) ----
   // Roles arrive in `r…`-id BATCHes; a queue tracks which scope each answers,
   // so several scopes can be fetched at once (e.g. ns + channel).
 
@@ -207,7 +207,7 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   // can already see — a channel of that namespace listing them as a member.
   function mutualServers(target: string): string[] {
     return vm.serverNamespaces.filter((ns) =>
-      Object.values(channels).some(
+      Object.values(channelStore.channels).some(
         (c) => c.name.startsWith("#") && nsOf(c.name) === ns && c.members?.some((m) => m.name === target),
       ),
     );
@@ -229,8 +229,8 @@ import { mkMsg } from "$lib/messages/messages.svelte";
       return;
     }
     // Confirmed by the ROLE-MEMBER event; a cap failure never confirms.
-    expectSuccess(`roles:${who}|${nsRoleScope()}`, `Roles updated for ${who}`);
-    weft.roleAssign(nsRoleScope(), who, roleId).catch((e) => toast(String(e), "error"));
+    expectSuccess(`roles:${who}|${roleStore.nsRoleScope()}`, `Roles updated for ${who}`);
+    weft.roleAssign(roleStore.nsRoleScope(), who, roleId).catch((e) => toast(String(e), "error"));
   }
 
   // Right-click a member row in the directory → namespace-scoped moderation.
@@ -306,7 +306,7 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   // DM conversations (keyed `@peer`), plus any peer we've opened a blank DM with.
 
   // ---- DM + presence + §10.3 profile helpers (peerOf / dotClass / avatarUrl /
-  // displayName / nickOf / bioOf / statusOf / initials) → `$lib/profile.svelte`.
+  // profileStore.displayName / profileStore.nickOf / bioOf / statusOf / initials) → `$lib/profile.svelte`.
   /** Set (or clear, with "") my own custom status. */
   // The set of open 1:1 DMs is view state the server doesn't yet track (a
   // server-owned DM list is §18 territory), so we persist it per account so a
@@ -318,14 +318,14 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   // "Invite to server" — open the invites panel for the current server, where a
   // shareable link is minted (invites are link-based, §6.5).
   function inviteToServer() {
-    openInvites();
+    store.invites.openInvites();
   }
 
   // ---- social layer: friends ----
   // A friend's short label: bare handle for local, full ref for federated.
   // A friend's local account handle (for DM/profile/presence), if local.
   function addFriend() {
-    const user = qualify(addFriendInput);
+    const user = store.social.qualify(addFriendInput);
     if (!user || !user.includes("@")) return;
     addFriendInput = "";
     weft.friendAdd(user).catch((e) => toast(String(e), "error"));
@@ -337,14 +337,14 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   function createGroup() {
     const members = newGroupInput
       .split(/[,\s]+/)
-      .map((h) => qualify(h))
+      .map((h) => store.social.qualify(h))
       .filter((h) => h.includes("@"));
     if (!members.length) return;
     newGroupInput = "";
     weft.groupCreate(members).catch((e) => toast(String(e), "error"));
   }
   function addToGroup(id: string, handle: string) {
-    const user = qualify(handle);
+    const user = store.social.qualify(handle);
     if (user.includes("@")) weft.groupAdd(id, user).catch((e) => toast(String(e), "error"));
   }
   function startGroupCall(id: string) {
@@ -404,7 +404,7 @@ import { mkMsg } from "$lib/messages/messages.svelte";
     const a = active;
     if (!a.startsWith("#")) return;
     untrack(() => {
-      const ch = channels[a];
+      const ch = channelStore.channels[a];
       if (ch && !ch.rosterLoaded) {
         ch.rosterLoaded = true;
         weft.members(a).catch(() => {});
@@ -419,9 +419,9 @@ import { mkMsg } from "$lib/messages/messages.svelte";
     const a = active;
     if (!a.startsWith("@") && !a.startsWith("&")) return;
     untrack(() => {
-      if (!channels[a]) {
-        ensureChannel(a);
-        if (a.startsWith("@")) persistDms();
+      if (!channelStore.channels[a]) {
+        channelStore.ensure(a);
+        if (a.startsWith("@")) channelStore.persistDms();
       }
     });
   });
@@ -438,7 +438,7 @@ import { mkMsg } from "$lib/messages/messages.svelte";
     if (a === newDividerFor) return;
     newDividerFor = a;
     newBoundary = untrack(() => {
-      const lr = channels[a]?.lastRead;
+      const lr = channelStore.channels[a]?.lastRead;
       return lr ? msgEpoch(lr) : null;
     });
   });
@@ -457,7 +457,7 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   $effect(() => {
     const ch = vm.activeChannel;
     if (!ch || ch.voice) return;
-    markRead(ch.name);
+    channelStore.markRead(ch.name);
     if (!ch.name.startsWith("#")) return;
     let newest: string | undefined;
     for (let i = ch.messages.length - 1; i >= 0; i--)
@@ -519,7 +519,7 @@ import { mkMsg } from "$lib/messages/messages.svelte";
     nsAdmin.recKeys = "";
     ui.nsTab = "overview";
     ui.nsSettingsOpen = true;
-    fetchRoles(nsRoleScope());
+    roleStore.fetchRoles(roleStore.nsRoleScope());
   }
   // §11.10 on-demand federation: live "connecting…" state for the trigger. The
   // bridge establishes asynchronously; we surface the namespace when its
@@ -551,7 +551,7 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   $effect(() => {
     const f = federating;
     if (!f) return;
-    if (Object.keys(channels).some((c) => nsOf(c) === f.ns)) {
+    if (Object.keys(channelStore.channels).some((c) => nsOf(c) === f.ns)) {
       cancelFederating();
       selectServer(f.ns);
     }
@@ -579,7 +579,7 @@ import { mkMsg } from "$lib/messages/messages.svelte";
 
   onMount(() => {
     // Restore the cached layout for instant render before the server refresh.
-    loadLayoutCache();
+    channelStore.loadLayout();
     // Restore theme.
     try {
       if (localStorage.getItem("weft:theme") === "light") {
@@ -654,8 +654,8 @@ import { mkMsg } from "$lib/messages/messages.svelte";
     get addFriendInput() { return addFriendInput; },
     set addFriendInput(v: string) { addFriendInput = v; },
     addFriend,
-    acceptFriend,
-    removeFriend,
+    acceptFriend: (u: string) => store.social.acceptFriend(u),
+    removeFriend: (u: string) => store.social.removeFriend(u),
     // group DMs
     get newGroupInput() { return newGroupInput; },
     set newGroupInput(v: string) { newGroupInput = v; },
@@ -678,8 +678,8 @@ import { mkMsg } from "$lib/messages/messages.svelte";
     goHome,
     selectServer,
     openNotifSettings,
-    markRead,
-    chanShort,
+    markRead: (n: string) => channelStore.markRead(n),
+    chanShort: (n: string) => channelStore.short(n),
     nsOf,
     retentionMeta,
     openCreateChannel,
@@ -703,7 +703,7 @@ import { mkMsg } from "$lib/messages/messages.svelte";
     // message list / items
     get loadingHistory() { return hist.loading; },
     get newBoundary() { return newBoundary; },
-    channelRecord,
+    channelRecord: (n: string) => channelStore.get(n),
     loadHistory,
     get replyTo() { return ui.replyTo; },
     set replyTo(v: Msg | null) { ui.replyTo = v; },

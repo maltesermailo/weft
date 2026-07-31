@@ -1,7 +1,7 @@
 <script lang="ts">
   import { store } from "$lib/store/store.svelte";
   import { vm } from "$lib/navigation/viewmodel.svelte";
-  import { displayName, nickOf, setNick } from "$lib/profile/profile.svelte";
+  import { profileStore } from "$lib/profile/profile.svelte";
   // §10.3 quick per-namespace nickname editor, opened from a user's context
   // menu. Own nick needs `nick`; another member's needs `manage-nicks` — the
   // server enforces, a missing cap just ERRs.
@@ -14,14 +14,14 @@
   const isSelf = $derived(target === store.session.account);
   const scope = $derived(`ns:${app.activeServer}`);
   // Prefill once with the current nickname (the modal is opened fresh per target).
-  let value = $state(untrack(() => nickOf(target)));
+  let value = $state(untrack(() => profileStore.nickOf(target)));
 
   function focusInput(node: HTMLInputElement) {
     node.focus();
     node.select();
   }
   function save() {
-    setNick(scope, target, value.trim());
+    profileStore.setNick(scope, target, value.trim());
     onclose();
   }
 </script>
@@ -30,7 +30,7 @@
   <button class="modal-backdrop" aria-label="Close" onclick={onclose}></button>
   <div class="modal" role="dialog" aria-modal="true" style="width: min(400px, 100%)">
     <div class="modal-head">
-      <h2>{isSelf ? "Set your nickname" : `Set nickname for ${displayName(target)}`}</h2>
+      <h2>{isSelf ? "Set your nickname" : `Set nickname for ${profileStore.displayName(target)}`}</h2>
       <button class="linkish" aria-label="Close" onclick={onclose}>✕</button>
     </div>
     <p class="modal-sub">
@@ -41,7 +41,7 @@
         use:focusInput
         bind:value
         maxlength="128"
-        placeholder={displayName(target)}
+        placeholder={profileStore.displayName(target)}
         onkeydown={(e) => e.key === "Enter" && save()}
       />
     </label>

@@ -9,11 +9,11 @@ import { store } from "$lib/store/store.svelte";
 import { ui } from "$lib/ui/ui.svelte";
 import * as weft from "$lib/transport/weft";
 import { toast } from "$lib/notifications/toasts.svelte";
-import { channels, ensureChannel } from "$lib/channels/channel.svelte";
+import { channelStore } from "$lib/channels/channel.svelte";
 import { mkMsg, sys } from "$lib/messages/messages.svelte";
 import { clock } from "$lib/rendering/time";
-import { rolesAt } from "$lib/roles/roles.svelte";
-import { displayName } from "$lib/profile/profile.svelte";
+import { roleStore } from "$lib/roles/roles.svelte";
+import { profileStore } from "$lib/profile/profile.svelte";
 import { activeEmoji, emojiUrlFor } from "$lib/namespaces/server.svelte";
 import { moderate } from "$lib/moderation/moderation";
 import { searchUnicode } from "$lib/rendering/shortcodes";
@@ -45,7 +45,7 @@ export const compose = $state<{
   pickerKey: null,
 });
 
-const activeChannel = () => (view.active ? channels[view.active] : undefined);
+const activeChannel = () => (view.active ? channelStore.channels[view.active] : undefined);
 
 // ---- @-mention autocomplete ----
 const _mentionMatches = $derived.by<MentionOpt[]>(() => {
@@ -56,13 +56,13 @@ const _mentionMatches = $derived.by<MentionOpt[]>(() => {
   if ("everyone".startsWith(q)) opts.push({ name: "everyone", kind: "special", display: "everyone" });
   if ("here".startsWith(q)) opts.push({ name: "here", kind: "special", display: "here" });
   // Pingable roles at this server (single-word names — the token can't hold spaces).
-  for (const r of rolesAt(`ns:${view.activeServer}`))
+  for (const r of roleStore.rolesAt(`ns:${view.activeServer}`))
     if (r.pingable && !/\s/.test(r.name) && r.name.toLowerCase().startsWith(q))
       opts.push({ name: r.name, kind: "role", display: r.name, color: r.color });
   // Members: match the account token OR the resolved display name.
   for (const m of activeChannel()?.members ?? []) {
     if (m.name === me) continue;
-    const disp = displayName(m.name);
+    const disp = profileStore.displayName(m.name);
     if (!m.name.toLowerCase().startsWith(q) && !disp.toLowerCase().startsWith(q)) continue;
     const identity = m.name.includes("@") ? m.name : `${m.name}@${store.session.network}`;
     opts.push({ name: m.name, kind: "member", display: disp, identity });
@@ -210,7 +210,7 @@ export function doSend(): void {
   // by a client nonce the authoritative MESSAGE echoes back — so the send feels
   // instant regardless of federation latency.
   const label = crypto.randomUUID();
-  ensureChannel(target).messages.push(
+  channelStore.ensure(target).messages.push(
     mkMsg({
       author: store.session.account,
       body: text,
@@ -234,7 +234,7 @@ export function doSend(): void {
   weft.sendMessage(target, text, savedReply, attachments, undefined, label).catch((e) => {
     // Rejected (e.g. over-long body): drop the placeholder, restore the text so
     // it isn't silently eaten, and surface the error.
-    const ch = channels[target];
+    const ch = channelStore.channels[target];
     const i = ch?.messages.findIndex((m) => m.label === label) ?? -1;
     if (ch && i !== -1) ch.messages.splice(i, 1);
     compose.text = text;

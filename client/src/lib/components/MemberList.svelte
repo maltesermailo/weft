@@ -3,10 +3,10 @@
   import { userCtx } from "$lib/ui/ctxmenu.svelte";
   import { openDm } from "$lib/navigation/navigation";
   import { moderate } from "$lib/moderation/moderation";
-  import { canModerate, isStaff } from "$lib/session/session.svelte";
-import { rolesAt, rolesOf, nsRoleScope, nameColor, ensureMemberRoles, ensureRoles } from "$lib/roles/roles.svelte";
+  
+import { roleStore } from "$lib/roles/roles.svelte";
   import { store } from "$lib/store/store.svelte";
-  import { displayName, queryProfile, statusOf, openProfile } from "$lib/profile/profile.svelte";
+  import { statusOf, profileStore } from "$lib/profile/profile.svelte";
   import { getApp, type Member } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
@@ -21,22 +21,22 @@ import { rolesAt, rolesOf, nsRoleScope, nameColor, ensureMemberRoles, ensureRole
   // Roles live at the namespace scope; fetch the scope's role definitions AND
   // each member's assignments once, so we can group by hoisted role (Discord-
   // style) as soon as the list renders — not only after a profile is opened.
-  const roleScope = $derived(nsRoleScope());
+  const roleScope = $derived(roleStore.nsRoleScope());
   $effect(() => {
-    ensureRoles(roleScope);
+    roleStore.ensureRoles(roleScope);
     for (const m of members) {
-      ensureMemberRoles(m.name);
-      queryProfile(m.name); // so avatars + custom status show without opening a profile
+      roleStore.ensureMemberRoles(m.name);
+      profileStore.queryProfile(m.name); // so avatars + custom status show without opening a profile
     }
   });
 
   // Hoisted roles, already in position order (top = highest).
-  const hoisted = $derived(rolesAt(roleScope).filter((r) => r.hoist));
+  const hoisted = $derived(roleStore.rolesAt(roleScope).filter((r) => r.hoist));
 
   // A member's primary hoisted role **id** = the highest (first in order)
   // hoisted role they hold, or undefined (id-keyed — names aren't unique, v0.13).
   function primaryHoist(name: string): string | undefined {
-    const held = new Set(rolesOf(name, roleScope).map((r) => r.id));
+    const held = new Set(roleStore.rolesOf(name, roleScope).map((r) => r.id));
     return hoisted.find((r) => held.has(r.id))?.id;
   }
 
@@ -64,12 +64,12 @@ import { rolesAt, rolesOf, nsRoleScope, nameColor, ensureMemberRoles, ensureRole
 
 {#snippet row(m: Member)}
   <div class="member-row" class:member-offline={!isOnline(m.name)} role="listitem" oncontextmenu={(e) => userCtx(e, m.name)}>
-    <button class="member-id" onclick={(e) => openProfile(m.name, e)}>
+    <button class="member-id" onclick={(e) => profileStore.openProfile(m.name, e)}>
       <div class="avatar"><Avatar account={m.name} /><span class="dot {presenceOf(m.name)} corner"></span></div>
       <span class="member-text">
         <span class="member-name-line">
-          <span class="mname" style={nameColor(m.name) ? `color:${nameColor(m.name)}` : ""}>{displayName(m.name)}</span>
-          {#if isStaff(m.name)}<span class="cap-badge staff">staff</span>{/if}
+          <span class="mname" style={roleStore.nameColor(m.name) ? `color:${roleStore.nameColor(m.name)}` : ""}>{profileStore.displayName(m.name)}</span>
+          {#if store.session.isStaff(m.name)}<span class="cap-badge staff">staff</span>{/if}
           {#if m.origin === "federated"}<span class="cap-badge bridged">br</span>{/if}
         </span>
         {#if statusOf(m.name)}<span class="mstatus" title={statusOf(m.name)}>{statusOf(m.name)}</span>{/if}
@@ -80,7 +80,7 @@ import { rolesAt, rolesOf, nsRoleScope, nameColor, ensureMemberRoles, ensureRole
         <button class="mod-btn" title="Message {m.name}" aria-label="Message {m.name}" onclick={() => openDm(m.name)}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
         </button>
-        {#if canModerate(app.active)}
+        {#if store.session.canModerate(app.active)}
           <button class="mod-btn" title="Mute {m.name}" aria-label="Mute {m.name}" onclick={() => moderate("mute", m.name)}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M11 5 6 9H2v6h4l5 4V5z" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></svg>
           </button>

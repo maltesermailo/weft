@@ -2,10 +2,10 @@
   import { openDm } from "$lib/navigation/navigation";
   import { scopesFor } from "$lib/channels/channel.svelte";
   import { moderate } from "$lib/moderation/moderation";
-  import { badgeFor, canModerate, isNsOwner, isOwnerAt, isStaff } from "$lib/session/session.svelte";
-import { rolesAt, rolesOf, nameColor, assignRoleTo, unassignRoleFrom, roleScopeOf } from "$lib/roles/roles.svelte";
+  
+import { roleScopeOf, roleStore } from "$lib/roles/roles.svelte";
   import { store } from "$lib/store/store.svelte";
-  import { bioOf, nickOf, statusOf, openFullProfile, setNick } from "$lib/profile/profile.svelte";
+  import { bioOf, statusOf, profileStore } from "$lib/profile/profile.svelte";
   import { untrack } from "svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
@@ -22,23 +22,23 @@ import { rolesAt, rolesOf, nameColor, assignRoleTo, unassignRoleFrom, roleScopeO
     onclose: () => void;
   } = $props();
 
-  const b = $derived(badgeFor(target, app.active));
+  const b = $derived(store.session.badgeFor(target, app.active));
   const pr = $derived(store.accountOf(target).presence ?? "offline");
   // Roles + moderation are server-member controls — show them only when we're
   // actually viewing one of the server's channels, not from friends/DMs.
   const inServer = $derived(app.active.startsWith("#"));
   const scope = $derived(roleScopeOf(app.active));
-  const myRoles = $derived(rolesOf(target, scope));
+  const myRoles = $derived(roleStore.rolesOf(target, scope));
   // Exclude the implicit @everyone role — it's baseline, never assigned.
-  const allRoles = $derived(rolesAt(scope).filter((r) => r.name !== EVERYONE_ROLE));
+  const allRoles = $derived(roleStore.rolesAt(scope).filter((r) => r.name !== EVERYONE_ROLE));
   const isSelf = $derived(target === store.session.account);
   // "Owner/admin" for controls means the real namespace owner or an explicitly
   // delegated ns-admin — NOT a network operator (their god-mode caps are
   // web-admin authority, surfaced as a Staff badge, not server control here).
   const iAmOwner = $derived(
-    isNsOwner(store.session.account) || (isOwnerAt(store.session.account, scope) && !isStaff(store.session.account)),
+    store.session.isNsOwner(store.session.account) || (store.session.isOwnerAt(store.session.account, scope) && !store.session.isStaff(store.session.account)),
   );
-  const targetIsOwner = $derived(isNsOwner(target));
+  const targetIsOwner = $derived(store.session.isNsOwner(target));
   // Roles are the only capability source, so assigning one is a privileged act:
   // offer it for other accounts (the server enforces the caller's authority),
   // and for yourself only when you own the scope — there wearing a role is
@@ -49,7 +49,7 @@ import { rolesAt, rolesOf, nameColor, assignRoleTo, unassignRoleFrom, roleScopeO
   let roleMenuOpen = $state(false);
 
   // §10.3 moderator nickname edit (server enforces `manage-nicks`).
-  let nickDraft = $state(untrack(() => nickOf(target)));
+  let nickDraft = $state(untrack(() => profileStore.nickOf(target)));
   // §6.7 moderation controls: scope (channel/namespace/network) + optional reason.
   let modScope = $state(scopesFor()[0]);
   let modReason = $state("");
@@ -95,8 +95,8 @@ import { rolesAt, rolesOf, nameColor, assignRoleTo, unassignRoleFrom, roleScopeO
     </div>
     <div class="profile-body">
       <div class="profile-name-lg">
-        <span style={nameColor(target) ? `color:${nameColor(target)}` : ""}>{target}</span>
-        {#if isStaff(target)}<span class="cap-badge staff">staff</span>{/if}
+        <span style={roleStore.nameColor(target) ? `color:${roleStore.nameColor(target)}` : ""}>{target}</span>
+        {#if store.session.isStaff(target)}<span class="cap-badge staff">staff</span>{/if}
       </div>
       <div class="profile-handle">{target.includes("@") ? target : `${target}@${store.session.network}`} · <span class="pres-{pr}">{pr}</span></div>
 
@@ -118,7 +118,7 @@ import { rolesAt, rolesOf, nameColor, assignRoleTo, unassignRoleFrom, roleScopeO
           {#each myRoles as r (r.id)}
             <span class="role-pill" style="--role: {r.color}">
               <span class="role-dot"></span>{r.name}
-              {#if canAssignRoles}<button class="pill-x" title="Remove {r.name}" aria-label="Remove {r.name}" onclick={() => unassignRoleFrom(target, r)}>×</button>{/if}
+              {#if canAssignRoles}<button class="pill-x" title="Remove {r.name}" aria-label="Remove {r.name}" onclick={() => roleStore.unassignRoleFrom(target, r)}>×</button>{/if}
             </span>
           {/each}
           {#if canAssignRoles && unheldRoles.length}
@@ -128,7 +128,7 @@ import { rolesAt, rolesOf, nameColor, assignRoleTo, unassignRoleFrom, roleScopeO
                 <button class="role-add-backdrop" aria-label="Close" onclick={() => (roleMenuOpen = false)}></button>
                 <div class="role-add-menu">
                   {#each unheldRoles as r (r.id)}
-                    <button class="role-add-item" onclick={() => { assignRoleTo(target, r); roleMenuOpen = false; }}>
+                    <button class="role-add-item" onclick={() => { roleStore.assignRoleTo(target, r); roleMenuOpen = false; }}>
                       <span class="role-dot" style="--role: {r.color}"></span>{r.name}
                     </button>
                   {/each}
@@ -144,7 +144,7 @@ import { rolesAt, rolesOf, nameColor, assignRoleTo, unassignRoleFrom, roleScopeO
 
       <div class="profile-divider"></div>
       <div class="profile-actions">
-        <button class="pf-primary" onclick={() => { openFullProfile(target); onclose(); }}>Open profile</button>
+        <button class="pf-primary" onclick={() => { profileStore.openFullProfile(target); onclose(); }}>Open profile</button>
         {#if target !== store.session.account}
           <button class="pf-secondary" onclick={() => { openDm(target); onclose(); }}>Message</button>
           {#if inServer && scope.startsWith("ns:")}
@@ -152,11 +152,11 @@ import { rolesAt, rolesOf, nameColor, assignRoleTo, unassignRoleFrom, roleScopeO
               <div class="profile-section-label">Server nickname</div>
               <div class="pf-mod-inputs">
                 <input bind:value={nickDraft} maxlength="128" placeholder="nickname (blank = default)" />
-                <button class="pf-secondary" onclick={() => setNick(scope, target, nickDraft.trim())}>Set</button>
+                <button class="pf-secondary" onclick={() => profileStore.setNick(scope, target, nickDraft.trim())}>Set</button>
               </div>
             </div>
           {/if}
-          {#if inServer && canModerate(app.active)}
+          {#if inServer && store.session.canModerate(app.active)}
             <div class="pf-mod">
               <div class="profile-section-label">Moderation</div>
               <div class="pf-mod-inputs">

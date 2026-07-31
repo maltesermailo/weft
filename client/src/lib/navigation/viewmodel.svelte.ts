@@ -6,18 +6,18 @@
 // imports — that would cycle) so components read it directly, no AppCtx bridge.
 import { view } from "$lib/navigation/view.svelte";
 import { store } from "$lib/store/store.svelte";
-import { channels, nsOf, chanShort, layoutCache, type Channel } from "$lib/channels/channel.svelte";
-import { displayName, peerOf } from "$lib/profile/profile.svelte";
-import { groupLabel } from "$lib/social/social.svelte";
+import { channelStore, nsOf, type Channel } from "$lib/channels/channel.svelte";
+import { peerOf, profileStore } from "$lib/profile/profile.svelte";
 
-const _activeChannel = $derived(view.active ? channels[view.active] : undefined);
+
+const _activeChannel = $derived(view.active ? channelStore.channels[view.active] : undefined);
 
 // The rail = every namespace I belong to: one I hold a channel in, or one I'm a
 // recorded member of (`Server.joined`) — so a channel-less server still shows.
 const _serverNamespaces = $derived(
   [
     ...new Set([
-      ...Object.values(channels)
+      ...Object.values(channelStore.channels)
         .filter((c) => c.name.startsWith("#"))
         .map((c) => nsOf(c.name))
         .filter(Boolean),
@@ -26,7 +26,7 @@ const _serverNamespaces = $derived(
   ].sort(),
 );
 
-const _dmList = $derived(Object.values(channels).filter((c) => c.name.startsWith("@") || c.name.startsWith("&")));
+const _dmList = $derived(Object.values(channelStore.channels).filter((c) => c.name.startsWith("@") || c.name.startsWith("&")));
 
 // A legacy-shaped view of the active Server's metadata (snake_case field names
 // the modals/banners already read). Undefined until NS-META has landed.
@@ -55,10 +55,10 @@ const _channelGroups = $derived.by(() => {
   const groups = new Map<string, Channel[]>();
 
   // Empty categories the admin created (client-side) show up too.
-  for (const cat of store.servers.get(view.activeServer)?.categories ?? layoutCache[view.activeServer]?.cats ?? [])
+  for (const cat of store.servers.get(view.activeServer)?.categories ?? channelStore.layoutCache[view.activeServer]?.cats ?? [])
     groups.set(cat, []);
 
-  for (const c of Object.values(channels)) {
+  for (const c of Object.values(channelStore.channels)) {
     if (!c.name.startsWith("#") || nsOf(c.name) !== view.activeServer) continue;
     const cat = c.category;
     if (!cat) {
@@ -80,7 +80,7 @@ const _channelGroups = $derived.by(() => {
 
 // Server-tile unread/mention rollups, folded over the server's own channels
 // (excluding the active one).
-const serverChannels = (ns: string) => Object.values(channels).filter((c) => nsOf(c.name) === ns && c.name !== view.active);
+const serverChannels = (ns: string) => Object.values(channelStore.channels).filter((c) => nsOf(c.name) === ns && c.name !== view.active);
 
 export const vm = {
   get activeChannel() {
@@ -115,9 +115,9 @@ export const vm = {
   // User-facing label for any target — `#vanity` (channel), peer name (DM), or
   // group label (group DM).
   titleOf: (name: string): string => {
-    if (name.startsWith("#")) return `#${chanShort(name)}`;
-    if (name.startsWith("&")) return groupLabel(name);
-    if (name.startsWith("@")) return displayName(peerOf(name));
+    if (name.startsWith("#")) return `#${channelStore.short(name)}`;
+    if (name.startsWith("&")) return store.social.groupLabel(name);
+    if (name.startsWith("@")) return profileStore.displayName(peerOf(name));
     return name;
   },
   // §6.2 NS INFO MEMBERS: the moderator roster for a namespace (once fetched).

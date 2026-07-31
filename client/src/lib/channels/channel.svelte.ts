@@ -1,6 +1,6 @@
-// The client domain model — see docs/architecture/client-model-refactor.md.
+// The channels domain model — see docs/architecture/client-model-refactor.md.
+// File order (project convention): definitions → classes → operations → events.
 import { goto } from "$app/navigation";
-import { page } from "$app/state";
 import type { Msg, Member } from "$lib/types";
 import type { Server } from "$lib/namespaces/server.svelte";
 import { store } from "$lib/store/store.svelte";
@@ -9,19 +9,23 @@ import * as nav from "$lib/navigation/nav";
 import { view } from "$lib/navigation/view.svelte";
 import { toast } from "$lib/notifications/toasts.svelte";
 
+// ---- definitions ----
+
+/// Per-namespace layout cache (localStorage): the category list + each channel's
+/// category/position, so a reload paints the sidebar instantly (server-authoritative).
+type NsLayout = { cats: string[]; chans: Record<string, { category?: string; position?: number }> };
+
+// ---- classes ----
+
 /**
  * A channel, DM, or group conversation. The reactive replacement for the old
  * `Channel` record plus the four parallel per-name maps (`unreadMap`,
  * `mentionMap`, `unreadCount`, `mentionCount`) and the `typers` map — read state
  * now lives on the object it describes.
  *
- * Instances are stored in `+page.svelte`'s `channels` record. Svelte 5 does not
- * proxy class instances, so their `$state` fields stay individually reactive
- * even nested inside that `$state` record.
- *
- * Not yet folded in (later phases): `messages[].author` / `typers` become
- * `Account` refs with the Message model; the namespace back-reference and mute
- * level move onto `Server` (mute is a per-namespace setting, not per-channel).
+ * Instances are stored in `channelStore.channels`. Svelte 5 does not proxy class
+ * instances, so their `$state` fields stay individually reactive even nested
+ * inside that `$state` record.
  */
 export class Channel {
   /// Canonical wire name `#<ns-id>/<chan-id>` (v0.13), `@dm`, or `&group`.
@@ -118,11 +122,192 @@ export class Channel {
   }
 }
 
-// ---- the channel collection (was the layout's `channels` record + helpers) ----
-// The app's open conversations, keyed by canonical wire name. A module singleton
-// mutated in place (never reassigned) so it can be a `const` export imported bare
-// and stay reactive across modules. Cleared via `resetChannels()` on logout.
-export const channels = $state<Record<string, Channel>>({});
+/**
+ * The collection of open conversations + the operations over it (was the module
+ * `channels` record plus a dozen free helpers). A single reactive instance
+ * (`channelStore`); its `$state` fields stay reactive across bare imports.
+ */
+export class ChannelStore {
+  /// Open conversations, keyed by canonical wire name. Mutated in place.
+  channels = $state<Record<string, Channel>>({});
+  /// Per-namespace layout cache, mirrored to localStorage.
+  layoutCache = $state<Record<string, NsLayout>>({});
+  /// Pending channel-creates (§6.3): follow-up actions stashed by `<ns>|<slug>`
+  /// until the server echoes the canonical name + vanity, then reconciled.
+  pendingChanCreate: Record<string, { cat: string; announce: boolean; voice: boolean }> = {};
+
+  /// The record for a name, or undefined (each MessageList reads its own).
+  get(name: string): Channel | undefined {
+    return this.channels[name];
+  }
+
+  /// Intern a channel, seeding its Server edge + cached layout on first creation.
+  ensure(name: string): Channel {
+    let ch = this.channels[name];
+    if (!ch) {
+      ch = new Channel(name);
+      const ns = nsOf(name);
+      if (ns) ch.server = store.server(ns); // the Channel → Server graph edge
+      const cached = ns ? this.layoutCache[ns]?.chans[name] : undefined;
+      if (cached) {
+        ch.category = cached.category;
+        ch.position = cached.position ?? 0;
+      }
+      this.channels[name] = ch;
+    }
+    return ch;
+  }
+
+  /// Clear the unread counters for a channel by name.
+  markRead(name: string): void {
+    this.channels[name]?.markRead();
+  }
+
+  /// Forget every conversation (logout) — mutates in place, never reassigns.
+  reset(): void {
+    for (const k of Object.keys(this.channels)) delete this.channels[k];
+  }
+
+  /// Short channel label: the vanity if known, else the raw local segment.
+  short(name: string): string {
+    return this.channels[name]?.vanity || name.replace(/^#[^/]+\//, "").replace(/^#/, "");
+  }
+
+  // ---- §6.3 category list (server state, on the namespace) ----
+  nsCategories(): string[] {
+    return store.servers.get(view.activeServer)?.categories ?? [];
+  }
+  setCategories(list: string[]): void {
+    if (view.activeServer) weft.nsMeta(view.activeServer, "categories", list.join(",")).catch((e) => toast(String(e), "error"));
+  }
+
+  // ---- Discord-style drag/drop reorder (ChannelList) ----
+  // Move a channel into `targetCat` at `anchorName` (before/after), then renumber
+  // that category so positions stay stable + ordered.
+  moveChannel(dragName: string, targetCat: string, anchorName?: string, after = false): void {
+    const dragged = this.channels[dragName];
+    if (!dragged) return;
+
+    dragged.category = targetCat || undefined; // "" = uncategorized (bare top-level); optimistic
+    weft.channelMeta(dragName, "category", targetCat).catch((e) => toast(String(e), "error"));
+
+    const list = Object.values(this.channels)
+      .filter(
+        (c) => c.name.startsWith("#") && nsOf(c.name) === view.activeServer && (c.category || "") === targetCat && c.name !== dragName,
+      )
+      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name));
+
+    let at = anchorName ? list.findIndex((c) => c.name === anchorName) : -1;
+    if (at < 0) at = list.length;
+    else if (after) at += 1;
+    list.splice(at, 0, dragged);
+
+    list.forEach((c, i) => {
+      if (c.position !== i) {
+        c.position = i;
+        weft.channelMeta(c.name, "position", String(i)).catch(() => {});
+      }
+    });
+  }
+
+  // Reorder a named category (the bare top-level group "" stays put — only named
+  // categories are persisted in the §6.3 NS categories list).
+  moveCategory(dragCat: string, targetCat: string): void {
+    if (dragCat === targetCat || dragCat === "") return;
+
+    const cats = [...this.nsCategories()];
+    const from = cats.indexOf(dragCat);
+    if (from < 0) return;
+    cats.splice(from, 1);
+
+    let to = cats.indexOf(targetCat);
+    if (to < 0) to = cats.length; // dropped on the implicit group → move to the end
+    cats.splice(to, 0, dragCat);
+
+    const s = store.servers.get(view.activeServer);
+    if (s) s.categories = cats; // optimistic; the NS-META echo confirms
+    this.setCategories(cats);
+  }
+
+  // ---- layout cache persistence ----
+  private saveLayout(): void {
+    try {
+      localStorage.setItem("weft:layout", JSON.stringify(this.layoutCache));
+    } catch {
+      /* ignore */
+    }
+  }
+  /// Restore the cached layout from localStorage (boot). Mutates in place.
+  loadLayout(): void {
+    for (const k of Object.keys(this.layoutCache)) delete this.layoutCache[k];
+    try {
+      Object.assign(this.layoutCache, JSON.parse(localStorage.getItem("weft:layout") ?? "{}"));
+    } catch {
+      /* ignore */
+    }
+  }
+  cacheNsCats(ns: string, cats: string[]): void {
+    (this.layoutCache[ns] ??= { cats: [], chans: {} }).cats = cats;
+    this.saveLayout();
+  }
+  cacheChanLayout(chanName: string, category: string | undefined, position: number): void {
+    const ns = nsOf(chanName);
+    if (!ns) return;
+    (this.layoutCache[ns] ??= { cats: [], chans: {} }).chans[chanName] = { category, position };
+    this.saveLayout();
+  }
+
+  /// Finish a channel-create once the server confirms the canonical name + vanity:
+  /// subscribe (text), apply the stashed category/announce flags, and navigate.
+  reconcileCreate(canonical: string, vanity: string): void {
+    const ns = nsOf(canonical);
+    if (!ns || !vanity) return;
+    const key = `${ns}|${vanity}`;
+    const pending = this.pendingChanCreate[key];
+    if (!pending) return;
+    delete this.pendingChanCreate[key];
+
+    const ch = this.ensure(canonical);
+    ch.voice = pending.voice;
+    // Subscribe (text) so live messages arrive; voice rooms are entered via VOICE.
+    if (!pending.voice) weft.join(canonical).catch(() => {});
+    if (pending.cat) weft.channelMeta(canonical, "category", pending.cat).catch((e) => toast(String(e), "error"));
+    // Announcement channel: view-open, post-restricted to `send` holders (§6.7).
+    if (!pending.voice && pending.announce)
+      weft.channelMeta(canonical, "posting", "restricted").catch((e) => toast(String(e), "error"));
+    // Jump to the new channel (a voice room is *entered* by clicking it).
+    if (!pending.voice) this.markRead(canonical);
+    goto(nav.pathFor(canonical));
+  }
+
+  // ---- open-DM persistence (the server doesn't yet track a DM list — §18) ----
+  // Persisted per account so a conversation (and its history on click) survives a
+  // reconnect / relaunch.
+  private dmStoreKey(): string {
+    return `weft:dms:${store.session.account}@${store.session.network}`;
+  }
+  persistDms(): void {
+    try {
+      const keys = Object.keys(this.channels).filter((k) => k.startsWith("@"));
+      localStorage.setItem(this.dmStoreKey(), JSON.stringify(keys));
+    } catch {
+      /* storage unavailable */
+    }
+  }
+  restoreDms(): void {
+    try {
+      const keys: string[] = JSON.parse(localStorage.getItem(this.dmStoreKey()) ?? "[]");
+      for (const k of keys) if (k.startsWith("@")) this.ensure(k);
+    } catch {
+      /* storage unavailable */
+    }
+  }
+}
+
+/// The app's channel collection + operations. A module singleton.
+export const channelStore = new ChannelStore();
+
+// ---- operations ----
 
 /// The namespace id in `#<ns>/<chan>`, else "" (top-level / DM / group).
 export const nsOf = (name: string): string => name.match(/^#([^/]+)\//)?.[1] ?? "";
@@ -141,171 +326,7 @@ export function scopesFor(): string[] {
   return s;
 }
 
-// ---- §6.3 category list (server state, on the namespace) ----
-export const nsCategories = (): string[] => store.servers.get(view.activeServer)?.categories ?? [];
-export function setCategories(list: string[]): void {
-  if (view.activeServer) weft.nsMeta(view.activeServer, "categories", list.join(",")).catch((e) => toast(String(e), "error"));
-}
-
-// ---- Discord-style drag/drop reorder (ChannelList) ----
-// Move a channel into `targetCat` at `anchorName` (before/after), then renumber
-// that category so positions stay stable + ordered.
-export function moveChannel(dragName: string, targetCat: string, anchorName?: string, after = false): void {
-  const dragged = channels[dragName];
-  if (!dragged) return;
-
-  dragged.category = targetCat || undefined; // "" = uncategorized (bare top-level); optimistic
-  weft.channelMeta(dragName, "category", targetCat).catch((e) => toast(String(e), "error"));
-
-  const list = Object.values(channels)
-    .filter(
-      (c) => c.name.startsWith("#") && nsOf(c.name) === view.activeServer && (c.category || "") === targetCat && c.name !== dragName,
-    )
-    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name));
-
-  let at = anchorName ? list.findIndex((c) => c.name === anchorName) : -1;
-  if (at < 0) at = list.length;
-  else if (after) at += 1;
-  list.splice(at, 0, dragged);
-
-  list.forEach((c, i) => {
-    if (c.position !== i) {
-      c.position = i;
-      weft.channelMeta(c.name, "position", String(i)).catch(() => {});
-    }
-  });
-}
-
-// Reorder a named category (the bare top-level group "" stays put — only named
-// categories are persisted in the §6.3 NS categories list).
-export function moveCategory(dragCat: string, targetCat: string): void {
-  if (dragCat === targetCat || dragCat === "") return;
-
-  const cats = [...nsCategories()];
-  const from = cats.indexOf(dragCat);
-  if (from < 0) return;
-  cats.splice(from, 1);
-
-  let to = cats.indexOf(targetCat);
-  if (to < 0) to = cats.length; // dropped on the implicit group → move to the end
-  cats.splice(to, 0, dragCat);
-
-  const s = store.servers.get(view.activeServer);
-  if (s) s.categories = cats; // optimistic; the NS-META echo confirms
-  setCategories(cats);
-}
-
-/// Short channel label: the vanity if known, else the raw local segment.
-export const chanShort = (name: string): string =>
-  channels[name]?.vanity || name.replace(/^#[^/]+\//, "").replace(/^#/, "");
-
-/// The record for a name, or undefined (each MessageList reads its own).
-export const channelRecord = (name: string): Channel | undefined => channels[name];
-
-/// Intern a channel, seeding its Server edge + cached layout on first creation.
-export function ensureChannel(name: string): Channel {
-  let ch = channels[name];
-  if (!ch) {
-    ch = new Channel(name);
-    const ns = nsOf(name);
-    if (ns) ch.server = store.server(ns); // the Channel → Server graph edge
-    const cached = ns ? layoutCache[ns]?.chans[name] : undefined;
-    if (cached) {
-      ch.category = cached.category;
-      ch.position = cached.position ?? 0;
-    }
-    channels[name] = ch;
-  }
-  return ch;
-}
-
-/// Clear the unread counters for a channel by name.
-export function markRead(name: string): void {
-  channels[name]?.markRead();
-}
-
-/// Forget every conversation (logout) — mutates in place, never reassigns.
-export function resetChannels(): void {
-  for (const k of Object.keys(channels)) delete channels[k];
-}
-
-// ---- layout cache (server-authoritative, cached in localStorage for instant
-// reload): per namespace, the category list + each channel's category/position.
-type NsLayout = { cats: string[]; chans: Record<string, { category?: string; position?: number }> };
-export const layoutCache = $state<Record<string, NsLayout>>({});
-
-function saveLayoutCache(): void {
-  try {
-    localStorage.setItem("weft:layout", JSON.stringify(layoutCache));
-  } catch {
-    /* ignore */
-  }
-}
-/// Restore the cached layout from localStorage (boot). Mutates in place.
-export function loadLayoutCache(): void {
-  for (const k of Object.keys(layoutCache)) delete layoutCache[k];
-  try {
-    Object.assign(layoutCache, JSON.parse(localStorage.getItem("weft:layout") ?? "{}"));
-  } catch {
-    /* ignore */
-  }
-}
-export function cacheNsCats(ns: string, cats: string[]): void {
-  (layoutCache[ns] ??= { cats: [], chans: {} }).cats = cats;
-  saveLayoutCache();
-}
-export function cacheChanLayout(chanName: string, category: string | undefined, position: number): void {
-  const ns = nsOf(chanName);
-  if (!ns) return;
-  (layoutCache[ns] ??= { cats: [], chans: {} }).chans[chanName] = { category, position };
-  saveLayoutCache();
-}
-
-// ---- pending channel-creates (§6.3): follow-up actions stashed by `<ns>|<slug>`
-// until the server echoes the canonical name + vanity, then reconciled. ----
-export const pendingChanCreate: Record<string, { cat: string; announce: boolean; voice: boolean }> = {};
-
-/// Finish a channel-create once the server confirms the canonical name + vanity:
-/// subscribe (text), apply the stashed category/announce flags, and navigate.
-export function reconcileChannelCreate(canonical: string, vanity: string): void {
-  const ns = nsOf(canonical);
-  if (!ns || !vanity) return;
-  const key = `${ns}|${vanity}`;
-  const pending = pendingChanCreate[key];
-  if (!pending) return;
-  delete pendingChanCreate[key];
-
-  const ch = ensureChannel(canonical);
-  ch.voice = pending.voice;
-  // Subscribe (text) so live messages arrive; voice rooms are entered via VOICE.
-  if (!pending.voice) weft.join(canonical).catch(() => {});
-  if (pending.cat) weft.channelMeta(canonical, "category", pending.cat).catch((e) => toast(String(e), "error"));
-  // Announcement channel: view-open, post-restricted to `send` holders (§6.7).
-  if (!pending.voice && pending.announce)
-    weft.channelMeta(canonical, "posting", "restricted").catch((e) => toast(String(e), "error"));
-  // Jump to the new channel (a voice room is *entered* by clicking it).
-  if (!pending.voice) markRead(canonical);
-  goto(nav.pathFor(canonical));
-}
-
-// ---- open-DM persistence (the server doesn't yet track a DM list — §18) ----
-// Persisted per account so a conversation (and its history on click) survives a
-// reconnect / relaunch.
-const dmStoreKey = () => `weft:dms:${store.session.account}@${store.session.network}`;
-export function persistDms(): void {
-  try {
-    const keys = Object.keys(channels).filter((k) => k.startsWith("@"));
-    localStorage.setItem(dmStoreKey(), JSON.stringify(keys));
-  } catch {
-    /* storage unavailable */
-  }
-}
-export function restoreDms(): void {
-  try {
-    const keys: string[] = JSON.parse(localStorage.getItem(dmStoreKey()) ?? "[]");
-    for (const k of keys) if (k.startsWith("@")) ensureChannel(k);
-  } catch {
-    /* storage unavailable */
-  }
-}
-
+// ---- events ----
+// The channels domain's wire-event handlers live in `sync/channel-handlers.ts`
+// (member / ns-member / chanmeta / channel-layout / channel-renamed), registered
+// by the reducer alongside the other domains' handler maps.

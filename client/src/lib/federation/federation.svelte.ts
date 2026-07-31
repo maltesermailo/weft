@@ -46,6 +46,31 @@ export class Federation {
   applyNetblock(e: Extract<WeftEvent, { kind: "netblocked" }>): void {
     this.netblocks.set(e.network, e.reason);
   }
+
+  // ---- §11 operator federation actions (thin RPC wrappers, uniform toasts) ----
+  refreshNetblocks(): void {
+    this.netblocks.clear();
+    weft.netblockList().catch((e) => toast(String(e), "error"));
+  }
+  netblockAdd(network: string, reason?: string): void {
+    weft
+      .netblockAdd(network, reason)
+      .then(() => setTimeout(() => this.refreshNetblocks(), 200))
+      .catch((e) => toast(String(e), "error"));
+  }
+  netblockRemove(network: string): void {
+    this.netblocks.delete(network);
+    weft.netblockRemove(network).catch((e) => toast(String(e), "error"));
+  }
+  bridgePropose(scope: string, peer: string, history: string, media: string, typing: boolean): void {
+    weft.bridgePropose(scope, peer, history, media, typing).catch((e) => toast(String(e), "error"));
+  }
+  bridgeAccept(peer: string, version: number): void {
+    weft.bridgeAccept(peer, version).catch((e) => toast(String(e), "error"));
+  }
+  bridgeSever(peer: string): void {
+    weft.bridgeSever(peer).catch((e) => toast(String(e), "error"));
+  }
 }
 
 /// This domain's wire-event handlers, merged into the reducer's registry.
@@ -53,29 +78,3 @@ export const federationHandlers: HandlerMap = {
   manifest: (e) => store.federation.applyManifest(e),
   netblocked: (e) => store.federation.applyNetblock(e),
 };
-
-// §11 operator federation actions — thin RPC wrappers with uniform error
-// toasts, kept beside the state they read/mutate (`store.federation`).
-export function refreshNetblocks(): void {
-  store.federation.netblocks.clear();
-  weft.netblockList().catch((e) => toast(String(e), "error"));
-}
-export function netblockAdd(network: string, reason?: string): void {
-  weft
-    .netblockAdd(network, reason)
-    .then(() => setTimeout(refreshNetblocks, 200))
-    .catch((e) => toast(String(e), "error"));
-}
-export function netblockRemove(network: string): void {
-  store.federation.netblocks.delete(network);
-  weft.netblockRemove(network).catch((e) => toast(String(e), "error"));
-}
-export function bridgePropose(scope: string, peer: string, history: string, media: string, typing: boolean): void {
-  weft.bridgePropose(scope, peer, history, media, typing).catch((e) => toast(String(e), "error"));
-}
-export function bridgeAccept(peer: string, version: number): void {
-  weft.bridgeAccept(peer, version).catch((e) => toast(String(e), "error"));
-}
-export function bridgeSever(peer: string): void {
-  weft.bridgeSever(peer).catch((e) => toast(String(e), "error"));
-}

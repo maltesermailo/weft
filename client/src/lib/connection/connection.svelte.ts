@@ -8,7 +8,7 @@ import { cf } from "$lib/session/connect.svelte";
 import { store } from "$lib/store/store.svelte";
 import { ui } from "$lib/ui/ui.svelte";
 import { toast } from "$lib/notifications/toasts.svelte";
-import { resetChannels } from "$lib/channels/channel.svelte";
+import { channelStore } from "$lib/channels/channel.svelte";
 
 /// localStorage keys shared by the connect flow + the reducer.
 export const HOMESERVER_KEY = "weft:homeserver";
@@ -151,7 +151,7 @@ export function logout(): void {
   ui.userMenu = false;
   ui.settingsOpen = false;
   weft.disconnect().catch(() => {});
-  resetChannels();
+  channelStore.reset();
   goto("/"); // reset the view so the next login lands home, not on a stale URL
   store.servers.clear();
   nsMetaFetched.clear();

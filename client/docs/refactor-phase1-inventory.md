@@ -637,3 +637,140 @@ applyReaction/pinsHandlers → `messages/messages.svelte`), `session → session
 Decisions applied: calls stay folded (voice+social); media is its own domain; handlers by
 domain (`rolesHandlers` registered in the reducer); login lifecycle classified session.
 `weft.ts` NOT shattered — it is the transport/protocol client.
+
+---
+
+# Phase 3a — UI/business split + Rust-migration classification (ANALYSIS, no code)
+
+## Framing (what the empirical grounding shows)
+
+- **Zero `setInterval`** anywhere in the TS. The inbound plane is already fully event-driven:
+  one `"weft"` event from Rust (`TauriSink`) drives the reducer; voice already streams via a
+  Rust `Channel` + `voice-native-*` events. **There are no TS polling loops to convert.**
+- **Exactly one TS-driven connection loop**: `attemptReconnect` (exponential-backoff `setTimeout`
+  → `weft.connect`, creds in `conn.lastCreds`). Every other `setTimeout` is an ephemeral UI timer
+  (typing-stop, toast auto-remove, roster reconcile, verify-load gate) — not a candidate.
+- **Exactly 3 `fetch` sites**: `pullBackfill` (web/WASM path), `media.upload`, `media.unfurl`.
+- **localStorage** is all client-local cache/prefs (theme, creds, sync cursor, layout cache, DM
+  list, notif prefs, email-nudge) — already persists across reloads.
+- The Rust backend is already ~pure glue; **the protocol migration already happened** (every verb
+  is a Rust command). So the remaining TS "business" is overwhelmingly **optimistic-UI + reactive-
+  store mutation + web-dual-path + DOM/render** code that *correctly* stays in the webview.
+
+**Net: the honest migration surface is small and specific.** Below, the dominant buckets are the
+"keep" ones (with the reason they can't/shouldn't move); the short Move / Event / Split lists are
+the only items that need your per-item approval.
+
+## Keep-in-TS buckets (the majority — cannot or should-not move)
+
+| Bucket | What's in it | Why it stays |
+|---|---|---|
+| **Reactive-store-owning** | the whole reducer + every `*Handlers` map (session/roles/social/channel/federation/invites/profile/reports/moderation/server/threads/pins/account), all model classes (Channel/Server/Session/Account/Membership/Role), viewmodels | mutates the reactive Svelte `$state` graph the UI renders. Moving = inverting the whole client model into Rust and making Svelte a dumb view — a total rearchitecture, out of scope, anti-KISS. **CANNOT move.** |
+| **Optimistic-UI verb senders** | doSend, saveEdit, doDelete, toggleReaction, togglePin, moderate/liftMod, createRole/saveRole/assignNsRole/…, netblock/bridge actions, friendAction/createGroupWith, invite actions, ns-meta/recovery actions | body = optimistic store push + `weft.X()` (already a Rust command) + label dedup. The protocol work is *already in Rust*; the TS part is reactive UI. Round-tripping it back adds nothing. **Keep.** |
+| **Pure render/format helpers** | markdown (`renderMd`/`renderInline`/`renderMdRaw`/`highlightCode`/`escapeHtml`), URL builders (`mediaUrl`/`mediaHash`/`avatarUrl`/`unfurlImageUrl`/`mediaDims`), time (`msgEpoch`/`msgTime`/`retentionOf`), emoji shortcodes | called per-message at render, feed `innerHTML`, need reactive MdContext (emoji/mentions). Deterministic but **chatty per-render + context-coupled** — IPC round-trip per message is a net loss. **Keep** (spec's explicit "don't cross IPC per-render" rule). |
+| **Web-dual / no-Rust-on-web** | `pullBackfill` (WASM `feed_line`), the `invoke`/`ensureWasm`/WASM-vs-Tauri abstraction, `isWeb`/`IS_TAURI` branches | the client also ships as a **web WASM build with no Rust backend**. This code is the web path. **Cannot move.** |
+| **DOM / lifecycle / WebRTC** | voice web path (`onWebrtcOffer`/`onLiveKitOffer`/`getUserMedia`/`attachVideo`/`applyDeafen`), composer DOM extraction (`pasteFiles`/`dropFiles` read clipboard/drag events), nav (`goto`), popover geometry | bound to `window`/DOM/WebRTC/component lifecycle. **Cannot move.** (Native desktop voice is already in Rust — `voice_native.rs`.) |
+| **localStorage caches** | layout cache, DM list, notif prefs, sync cursor, theme, email-nudge, creds | already persist across reloads; not shared across devices. Moving to a Rust file = IPC for zero benefit. **Keep (YAGNI).** |
+
+## → Move to Rust (candidates — need approval)
+
+Both are **desktop-only wins** (the web build must keep its `fetch`, since there's no Rust there —
+the existing `invoke` abstraction would branch: Tauri command on desktop, `fetch` on web).
+
+| # | Method | Target surface | Benefit | Cost / caveat |
+|---|---|---|---|---|
+| M1 | `media.unfurl(url)` | `#[tauri::command] async unfurl(url) -> LinkPreview \| null` | bearer token never exposed in JS; no webview CORS/media-base dependence; Rust reuses the connection's host | must keep the web `fetch` path; two impls of one call |
+| M2 | `media.upload(file)` | `#[tauri::command] async upload_media(bytes/path) -> UploadResult` | same (no media-base config, no cross-origin fetch from webview); on desktop a file-drop already gives a **path**, so bytes needn't cross IPC | for picker/clipboard uploads the bytes DO cross IPC once (webview→Rust); web keeps `fetch` |
+
+**Recommendation:** M1 is the cleaner win (small JSON, clear security benefit). M2 is worth it only
+if the desktop media-base friction is actually biting; otherwise defer (YAGNI). Both are optional.
+
+## → Convert to Rust-dispatched event (candidate — need approval)
+
+| # | Method | Proposal | Payload |
+|---|---|---|---|
+| E1 | `attemptReconnect` (TS backoff loop) | Move the reconnect backoff into Rust `run_connection`: on transport close (not manual logout), Rust retries with backoff using creds retained in `Conn` state, and **emits a `connection-state` event**. TS drops the loop → just `listen("connection-state")` → set `ui.reconnecting` / `store.session.status`. | `{ state: "connecting"\|"online"\|"reconnecting"\|"closed", attempt?: number }` |
+
+Benefit: the connection lifecycle (already Rust-owned via `run_connection`) stops being half-driven
+by a TS timer; one source of truth. Caveat: Rust must retain last creds (extend `Conn`), and the
+**web/WASM build still needs its own TS reconnect** (no Rust) — so this is desktop-only + web keeps
+the loop. That dual-path cost makes E1 **borderline**; I lean *defer* unless you want it.
+
+## → Split (mixed methods) — worth it?
+
+Most `mixed` methods are UI-orchestration that merely also touch persistence or fire a verb; the
+"pure" half is trivial (a slug regex, a localStorage line), so splitting them adds indirection for
+no real separation (anti-KISS). The only ones with a genuinely reusable pure half:
+
+| Method | Pure half (could share) | UI half (stays) | Verdict |
+|---|---|---|---|
+| `doRename` (ChannelSettings) | slug validation | `weft.channelRename` + modal state | pure half too small — **keep whole** |
+| `toggleTheme` | — | dom dataset + localStorage + state | **keep** |
+| `saveProfile`/`onAvatarPicked` | — | diff + upload + local pending | **keep** |
+
+**Verdict: no split is worth doing.** (Flagging explicitly rather than manufacturing splits.)
+
+## Proposed new IPC surface (if M1/M2/E1 approved)
+
+- **Commands:** `unfurl(url) -> Option<LinkPreview>` (M1); `upload_media(...) -> UploadResult` (M2).
+  Both desktop-only; the `invoke` wrapper branches to `fetch` on web.
+- **Events:** `connection-state { state, attempt? }` (E1).
+- **Managed state:** extend `Conn` to retain `lastCreds` for Rust-side reconnect (E1).
+- **Channels:** none needed.
+- Payload types (`LinkPreview`, `UploadResult`) already exist in TS (`media.ts`) — mirror as serde
+  structs; no new codegen dep.
+
+## Bottom line for your approval
+
+The disciplined answer is that **very little should move** — the architecture already put the
+protocol in Rust, and the rest is reactive-UI/web-dual/render code that belongs in the webview.
+The only real candidates are **M1 (unfurl → Rust)**, **M2 (upload → Rust, optional)**, and
+**E1 (reconnect → Rust event, borderline)**. Approve/veto each individually.
+
+**STOP — Phase 3a analysis complete. Awaiting per-item approval before any 3b implementation.**
+
+---
+
+# Phase 4 — file-structure convention (definitions → classes → operations → events) + manager classes
+
+Convention: each domain file ordered **definitions → classes(with methods) → operations → events**;
+stateful domains get a manager/store class holding the collection + its operations as methods;
+stateless-utility domains (rendering, navigation, transport, media, ui-helpers) get **ordering only**
+(free functions kept — no empty wrapper classes).
+
+**Pilot ✅ `channels/channel.svelte.ts` — green (check 0/0, build ✓), 18 files changed.**
+Introduced `class ChannelStore` (fields `channels`/`layoutCache`/`pendingChanCreate` + methods
+get/ensure/markRead/reset/short/moveChannel/moveCategory/setCategories/nsCategories/cacheNsCats/
+cacheChanLayout/loadLayout/saveLayout(private)/reconcileCreate/persistDms/restoreDms/dmStoreKey(private))
++ `export const channelStore`. Free ops kept: `nsOf`, `scopesFor`. Consumers: `ensureChannel(x)`→
+`channelStore.ensure(x)`, `channels[x]`→`channelStore.channels[x]`, etc. AppCtx provideApp wrappers
+rebound (`markRead`/`chanShort`/`channelRecord` → arrow wrappers, to keep `this`).
+
+**HOLD**: awaiting Jannik's runtime verification of the pilot (module `$state`→class-field `$state`
+reactivity can't be statically confirmed) before rolling out the remaining 17 domains.
+
+**Rollout plan:**
+- manager-class + reorder (stateful): roles, profile, moderation, notifications (new class);
+  store, session, social, namespaces, membership, federation, invites, voice (fold ops into existing class).
+- ordering only (stateless): rendering, navigation, transport, media, ui.
+
+## Phase 4 — result (rollout done, green)
+
+File convention (definitions → classes → operations → events) + manager classes applied.
+Refined rule: **a domain gets a manager class only if it owns an interned collection**; a
+single-object state domain (ui/toasts/voice) or a stateless one stays $state-object + free ops.
+
+- **New manager class:** channels (ChannelStore), roles (RoleStore), profile (ProfileStore),
+  namespaces (NsAdmin — the settings draft + admin ops; Server stays the per-instance record).
+- **Folded free ops into the existing class:** federation (Federation), invites (Invites),
+  social (Social), session (Session — caps machinery + permission gates).
+- **No-op / already compliant:** moderation, notif, toasts, membership, store (AppStore),
+  rendering, navigation, transport, media, ui, voice.
+
+Recurring hazard handled each domain: a former free-fn passed as a callback (`onclick={x}`,
+provideApp shorthand, `.some(fn)`, render props) becomes an **unbound method** that loses `this` —
+TS doesn't catch it; wrapped each in an arrow. `check` 0/0 + `build` ✓ after every domain.
+
+**Open item — voice:** 40+ operations, but they drive a single WebRTC/LiveKit session (like `ui`,
+not a collection manager). Left ordering-only; converting the whole media plane to a class is
+high-risk for modest benefit. Decision pending.

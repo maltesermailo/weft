@@ -4,7 +4,7 @@
 // (decoupled from container state) — this module supplies the ambient inputs.
 import { renderMd as renderMdPure, type MdContext } from "$lib/rendering/markdown";
 import { store } from "$lib/store/store.svelte";
-import { rolesAt, memberRoles } from "$lib/roles/roles.svelte";
+import { roleStore } from "$lib/roles/roles.svelte";
 import { view } from "$lib/navigation/view.svelte";
 
 function mdContext(): MdContext {
@@ -14,8 +14,8 @@ function mdContext(): MdContext {
   return {
     account,
     activeServer,
-    pingable: rolesAt(`ns:${activeServer}`).filter((r) => r.pingable),
-    myRoleIds: new Set(memberRoles[`${account}|ns:${activeServer}`] ?? []),
+    pingable: roleStore.rolesAt(`ns:${activeServer}`).filter((r) => r.pingable),
+    myRoleIds: new Set(roleStore.memberRoles[`${account}|ns:${activeServer}`] ?? []),
     emoji: (n) => (activeServer ? store.servers.get(activeServer)?.emoji.get(n) : undefined),
   };
 }

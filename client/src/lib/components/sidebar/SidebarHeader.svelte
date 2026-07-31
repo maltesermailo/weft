@@ -3,8 +3,8 @@
   import { vm } from "$lib/navigation/viewmodel.svelte";
   import { nsLeave } from "$lib/navigation/navigation";
   import { ui } from "$lib/ui/ui.svelte";
-  import { serverCap, canOpenServerSettings, isNsOwner } from "$lib/session/session.svelte";
-  import { mintInvite } from "$lib/invites/invites.svelte";
+  
+  
   import { getApp } from "$lib/ui/context";
   const app = getApp();
 </script>
@@ -26,8 +26,8 @@
     {#if ui.serverMenu}
       <button class="ctx-backdrop" aria-label="Close menu" onclick={() => (ui.serverMenu = false)}></button>
       <div class="server-menu">
-        {#if serverCap("invite")}
-          <button class="sm-item" onclick={() => { mintInvite(); ui.serverMenu = false; }}>
+        {#if store.session.serverCap("invite")}
+          <button class="sm-item" onclick={() => { store.invites.mintInvite(); ui.serverMenu = false; }}>
             Create Invite
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M19 8v6M22 11h-6" /></svg>
           </button>
@@ -36,19 +36,19 @@
           Notification Settings
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.7 21a2 2 0 0 1-3.4 0" /></svg>
         </button>
-        {#if app.activeServer && serverCap("ns-admin")}
+        {#if app.activeServer && store.session.serverCap("ns-admin")}
           <button class="sm-item" onclick={app.openServerProfile}>
             Edit Server Profile
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
           </button>
         {/if}
-        {#if app.activeServer && canOpenServerSettings()}
+        {#if app.activeServer && store.session.canOpenServerSettings()}
           <button class="sm-item" onclick={() => { app.openNsSettings(); ui.serverMenu = false; }}>
             Server Settings
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>
           </button>
         {/if}
-        {#if serverCap("chan-create")}
+        {#if store.session.serverCap("chan-create")}
           <div class="sm-sep"></div>
           <button class="sm-item" onclick={() => app.openCreateChannel()}>
             Create Channel
@@ -61,7 +61,7 @@
         {/if}
         <div class="sm-sep"></div>
         <button class="sm-item" onclick={() => { navigator.clipboard?.writeText(app.activeServer || store.session.network); ui.serverMenu = false; }}>Copy Server ID</button>
-        {#if app.activeServer && !isNsOwner(store.session.account)}
+        {#if app.activeServer && !store.session.isNsOwner(store.session.account)}
           <div class="sm-sep"></div>
           <button class="sm-item danger" onclick={nsLeave}>
             Leave Server

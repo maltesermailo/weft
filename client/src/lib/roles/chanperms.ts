@@ -6,8 +6,8 @@ import { store } from "$lib/store/store.svelte";
 import { ui } from "$lib/ui/ui.svelte";
 import * as weft from "$lib/transport/weft";
 import { toast } from "$lib/notifications/toasts.svelte";
-import { channels, nsOf } from "$lib/channels/channel.svelte";
-import { rolesAt, createRoleAt, deleteRoleAt, fetchRoles, fetchGrants } from "$lib/roles/roles.svelte";
+import { channelStore, nsOf } from "$lib/channels/channel.svelte";
+import { roleStore } from "$lib/roles/roles.svelte";
 
 // The namespace scope of the channel being edited (its role picker's source).
 export function chanNsScope(): string {
@@ -17,14 +17,14 @@ export function chanNsScope(): string {
 
 // A channel-scoped role/@everyone override's caps (channel roles are named after
 // ns roles; `everyone` is the per-channel baseline).
-export const chanRoleCaps = (name: string): string[] => rolesAt(ui.chanPerms ?? "").find((r) => r.name === name)?.caps ?? [];
+export const chanRoleCaps = (name: string): string[] => roleStore.rolesAt(ui.chanPerms ?? "").find((r) => r.name === name)?.caps ?? [];
 
 // Apply a channel role / @everyone target's full cap set (the editor commits a
 // draft, not per-toggle): a non-empty set upserts the channel role, an empty set
-// deletes it. The ROLES refetch inside createRoleAt/deleteRoleAt reconciles the view.
+// deletes it. The ROLES refetch inside roleStore.createRoleAt/roleStore.deleteRoleAt reconciles the view.
 export function setChanRoleCaps(name: string, color: string, caps: string[]): void {
   if (!ui.chanPerms) return;
-  (caps.length ? createRoleAt(ui.chanPerms, name, color, caps.join(",")) : deleteRoleAt(ui.chanPerms, name)).catch((e) =>
+  (caps.length ? roleStore.createRoleAt(ui.chanPerms, name, color, caps.join(",")) : roleStore.deleteRoleAt(ui.chanPerms, name)).catch((e) =>
     toast(String(e), "error"),
   );
 }
@@ -52,7 +52,7 @@ export function setChanMemberCaps(account: string, caps: string[]): void {
 
   (caps.length ? weft.grant(account, scope, caps.join(",")) : weft.revoke(account, scope, prev.join(","))).catch((e) => {
     toast(String(e), "error");
-    fetchGrants(scope);
+    roleStore.fetchGrants(scope);
   });
 }
 
@@ -60,7 +60,7 @@ export function setChanMemberCaps(account: string, caps: string[]): void {
 // channel-scoped role; a member override revokes all their channel caps.
 export function removeChanRole(name: string): void {
   if (!ui.chanPerms) return;
-  deleteRoleAt(ui.chanPerms, name).catch((e) => toast(String(e), "error"));
+  roleStore.deleteRoleAt(ui.chanPerms, name).catch((e) => toast(String(e), "error"));
 }
 export function removeChanMember(account: string): void {
   if (!ui.chanPerms) return;
@@ -72,13 +72,13 @@ export function removeChanMember(account: string): void {
 
 export function openChanPerms(channel: string): void {
   ui.chanPerms = channel;
-  fetchRoles(chanNsScope()); // the namespace's roles (the role picker source)
-  fetchRoles(channel); // this channel's role + @everyone overrides
-  fetchGrants(channel); // this channel's individual-member overrides
+  roleStore.fetchRoles(chanNsScope()); // the namespace's roles (the role picker source)
+  roleStore.fetchRoles(channel); // this channel's role + @everyone overrides
+  roleStore.fetchGrants(channel); // this channel's individual-member overrides
 }
 
 export function toggleRestricted(): void {
-  const ch = ui.chanPerms ? channels[ui.chanPerms] : undefined;
+  const ch = ui.chanPerms ? channelStore.channels[ui.chanPerms] : undefined;
   if (!ch || !ui.chanPerms) return;
 
   const next = !ch.restricted;
@@ -92,7 +92,7 @@ export function toggleRestricted(): void {
 // cap (invariant 1 anti-enumeration). Grant `view` per target in the editor to
 // let specific roles/members in.
 export function toggleViewGated(): void {
-  const ch = ui.chanPerms ? channels[ui.chanPerms] : undefined;
+  const ch = ui.chanPerms ? channelStore.channels[ui.chanPerms] : undefined;
   if (!ch || !ui.chanPerms) return;
 
   const next = !ch.viewGated;

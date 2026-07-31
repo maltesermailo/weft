@@ -3,7 +3,7 @@
 // channel collection — no component state, so both can import it directly.
 import { goto } from "$app/navigation";
 import * as nav from "$lib/navigation/nav";
-import { channels, nsOf, ensureChannel, persistDms, markRead } from "$lib/channels/channel.svelte";
+import { channelStore, nsOf } from "$lib/channels/channel.svelte";
 import { view } from "$lib/navigation/view.svelte";
 import { ui } from "$lib/ui/ui.svelte";
 import { store } from "$lib/store/store.svelte";
@@ -12,7 +12,7 @@ import { toast } from "$lib/notifications/toasts.svelte";
 import { joinVoice, voice } from "$lib/voice/voice.svelte";
 import { nsMetaFetched } from "$lib/connection/connection.svelte";
 import { peerOf } from "$lib/profile/profile.svelte";
-import { friendLocalAccount } from "$lib/social/social.svelte";
+
 
 /// The DM channel key (`@peer`) for a (possibly `@`-prefixed) handle.
 export const dmKeyFor = (name: string): string => "@" + peerOf(name);
@@ -20,8 +20,8 @@ export const dmKeyFor = (name: string): string => "@" + peerOf(name);
 /// Open (or create) a 1:1 DM and route to it. Persisted so it survives reconnect.
 export function openDm(peer: string): void {
   const key = "@" + peer.replace(/^@/, "");
-  ensureChannel(key);
-  persistDms();
+  channelStore.ensure(key);
+  channelStore.persistDms();
   goto(nav.pathFor(key));
 }
 
@@ -29,26 +29,26 @@ export function openDm(peer: string): void {
 /// server-side. Switch away if it was the open conversation.
 export function closeDm(name: string): void {
   const key = dmKeyFor(name);
-  delete channels[key];
-  persistDms();
+  delete channelStore.channels[key];
+  channelStore.persistDms();
   if (view.active === key) goHome();
 }
 
 /// DM a friend (local friends only — DMs are per-network).
 export function messageFriend(user: string): void {
-  const acct = friendLocalAccount(user);
+  const acct = store.social.friendLocalAccount(user);
   if (acct) openDm(acct);
 }
 
 /// Open a target (channel/DM/group) + mark it read.
 export function open(name: string): void {
-  markRead(name);
+  channelStore.markRead(name);
   goto(nav.pathFor(name));
 }
 
 /// Open a group DM by id (ensuring the local channel exists first).
 export function openGroup(id: string): void {
-  ensureChannel(id);
+  channelStore.ensure(id);
   goto(nav.pathFor(id));
 }
 
@@ -71,15 +71,15 @@ export function nsLeave(): void {
 
   ui.serverMenu = false;
   weft.nsLeave(ns).catch((e) => toast(String(e), "error"));
-  for (const name of Object.keys(channels)) {
-    if (name.startsWith("#") && nsOf(name) === ns) delete channels[name];
+  for (const name of Object.keys(channelStore.channels)) {
+    if (name.startsWith("#") && nsOf(name) === ns) delete channelStore.channels[name];
   }
   store.servers.delete(ns); // drop the tile now; the NS-MEMBER part echo confirms
   goHome();
 }
 
 /// Open a voice channel's stage (switch the main view) and join the call if we're
-/// not already in it. Voice channels have no message timeline, so no markRead.
+/// not already in it. Voice channels have no message timeline, so no channelStore.markRead.
 export function openVoice(name: string): void {
   if (voice.channel !== name) joinVoice(name);
   goto(nav.pathFor(name));
@@ -100,7 +100,7 @@ export function openDiscover(): void {
 export function selectServer(ns: string): void {
   const a = view.active;
   if (a.startsWith("#") && nsOf(a) === ns) return; // already in this server
-  const first = Object.values(channels)
+  const first = Object.values(channelStore.channels)
     .filter((c) => c.name.startsWith("#") && nsOf(c.name) === ns)
     .sort((x, y) => (x.position ?? 0) - (y.position ?? 0) || x.name.localeCompare(y.name))[0];
   goto(nav.pathFor(first?.name ?? "", ns));
@@ -108,7 +108,7 @@ export function selectServer(ns: string): void {
 
 /// The DM/home tile: land on the most recently active conversation, else Friends.
 export function goHome(): void {
-  const convos = Object.values(channels).filter((c) => c.name.startsWith("@") || c.name.startsWith("&"));
+  const convos = Object.values(channelStore.channels).filter((c) => c.name.startsWith("@") || c.name.startsWith("&"));
   if (!convos.length) {
     goto("/");
     return;

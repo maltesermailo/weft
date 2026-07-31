@@ -2,12 +2,12 @@
 // drafts + submit). Draft state lives here so the modals bind directly and the
 // server-menu openers reach it without the AppCtx bridge. Channel creation is
 // server-side only: we send the desired vanity and reconcile on the CHANNEL-LAYOUT
-// echo (see `reconcileChannelCreate`).
+// echo (see `channelStore.reconcileCreate`).
 import { ui } from "$lib/ui/ui.svelte";
 import { view } from "$lib/navigation/view.svelte";
 import * as weft from "$lib/transport/weft";
 import { toast } from "$lib/notifications/toasts.svelte";
-import { channels, nsOf, pendingChanCreate, nsCategories, setCategories } from "$lib/channels/channel.svelte";
+import { channelStore, nsOf } from "$lib/channels/channel.svelte";
 
 export const chanDraft = $state<{
   open: boolean;
@@ -47,15 +47,15 @@ export function createChannel(): void {
   // v0.13: channels are `#<ns-id>/<chan-id>` — send the desired vanity as the
   // local segment; the server mints the id. We can't JOIN/META by the name we
   // sent (NO-SUCH-TARGET), so stash the follow-ups and apply them when
-  // CHANNEL-LAYOUT echoes the canonical name (see `reconcileChannelCreate`).
+  // CHANNEL-LAYOUT echoes the canonical name (see `channelStore.reconcileCreate`).
   const full = `#${view.activeServer}/${slug}`;
   const key = `${view.activeServer}|${slug}`;
-  pendingChanCreate[key] = { cat: chanDraft.category.trim(), announce: chanDraft.announce, voice: chanDraft.voice };
+  channelStore.pendingChanCreate[key] = { cat: chanDraft.category.trim(), announce: chanDraft.announce, voice: chanDraft.voice };
 
   weft
     .channelCreate(full, chanDraft.voice ? undefined : chanDraft.retention || undefined, chanDraft.voice ? "voice" : undefined)
     .catch((e) => {
-      delete pendingChanCreate[key];
+      delete channelStore.pendingChanCreate[key];
       toast(String(e), "error");
     });
 
@@ -71,7 +71,7 @@ export function createCategory(): void {
   const n = catDraft.name.trim();
   if (!n || !view.activeServer) return;
 
-  if (!nsCategories().includes(n)) setCategories([...nsCategories(), n]);
+  if (!channelStore.nsCategories().includes(n)) channelStore.setCategories([...channelStore.nsCategories(), n]);
   catDraft.name = "";
   catDraft.open = false;
 }
@@ -79,11 +79,11 @@ export function createCategory(): void {
 // Delete a category: uncategorize its channels (back to the bare top-level),
 // then drop the label from the §6.3 NS categories list.
 export function deleteCategory(cat: string): void {
-  for (const c of Object.values(channels)) {
+  for (const c of Object.values(channelStore.channels)) {
     if (c.name.startsWith("#") && nsOf(c.name) === view.activeServer && (c.category || "") === cat) {
       c.category = undefined;
       weft.channelMeta(c.name, "category", "").catch(() => {});
     }
   }
-  setCategories(nsCategories().filter((x) => x !== cat));
+  channelStore.setCategories(channelStore.nsCategories().filter((x) => x !== cat));
 }

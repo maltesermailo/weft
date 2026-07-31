@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { friendLabel } from "$lib/profile/profile.svelte";
+  import { profileStore } from "$lib/profile/profile.svelte";
   import { fade, fly } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
 
   // Short handle for a caller/peer userref.
-  const label = (u: string) => friendLabel(u);
+  const label = (u: string) => profileStore.friendLabel(u);
 </script>
 
 <!-- Incoming call — ringing modal with accept/decline -->

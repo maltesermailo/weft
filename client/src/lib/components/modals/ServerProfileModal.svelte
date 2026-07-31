@@ -1,7 +1,7 @@
 <script lang="ts">
   import { store } from "$lib/store/store.svelte";
   import { vm } from "$lib/navigation/viewmodel.svelte";
-  import { displayName, nickOf, setNick } from "$lib/profile/profile.svelte";
+  import { profileStore } from "$lib/profile/profile.svelte";
   import { untrack } from "svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
@@ -10,18 +10,18 @@
 
   const scope = `ns:${app.activeServer}`;
   const serverName = $derived(vm.activeNsMeta?.title || vm.activeNsMeta?.name || app.activeServer);
-  const current = $derived(nickOf(store.session.account));
-  let draft = $state(untrack(() => nickOf(store.session.account)));
+  const current = $derived(profileStore.nickOf(store.session.account));
+  let draft = $state(untrack(() => profileStore.nickOf(store.session.account)));
   const dirty = $derived(draft.trim() !== current);
   // The global display name we fall back to when there's no nickname.
-  const globalName = $derived(displayName(store.session.account));
+  const globalName = $derived(profileStore.displayName(store.session.account));
 
   function save() {
-    setNick(scope, store.session.account, draft.trim());
+    profileStore.setNick(scope, store.session.account, draft.trim());
     onclose();
   }
   function clearNick() {
-    setNick(scope, store.session.account, "");
+    profileStore.setNick(scope, store.session.account, "");
     onclose();
   }
 </script>

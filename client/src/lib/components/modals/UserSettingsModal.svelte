@@ -3,7 +3,7 @@
   import { ui, toggleTheme } from "$lib/ui/ui.svelte";
   import { setStatus, enrollThisDevice, logout } from "$lib/connection/connection.svelte";
   import { store } from "$lib/store/store.svelte";
-  import { avatarUrl, bioOf, displayName, initials } from "$lib/profile/profile.svelte";
+  import { avatarUrl, bioOf, initials, profileStore } from "$lib/profile/profile.svelte";
   import { untrack } from "svelte";
   import { fade, fly } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
@@ -17,7 +17,7 @@
   // successful save (which flows back as a PROFILE / PRESENCE event) clears the
   // dirty state on its own — no manual "saved" bookkeeping.
   const savedDisplay = $derived(
-    displayName(store.session.account) === store.session.account ? "" : displayName(store.session.account),
+    profileStore.displayName(store.session.account) === store.session.account ? "" : profileStore.displayName(store.session.account),
   );
   const savedAbout = $derived(bioOf(store.session.account));
   const savedStatus = $derived(store.session.myStatus);

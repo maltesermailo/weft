@@ -3,7 +3,7 @@
   import { vm } from "$lib/navigation/viewmodel.svelte";
   import { setStatus, logout } from "$lib/connection/connection.svelte";
   import { ui } from "$lib/ui/ui.svelte";
-  import { initials, statusOf, openNickDialog, setCustomStatus } from "$lib/profile/profile.svelte";
+  import { initials, statusOf, profileStore } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -25,12 +25,12 @@
     statusModal = true;
   }
   function saveStatus() {
-    setCustomStatus(statusDraft.trim());
+    profileStore.setCustomStatus(statusDraft.trim());
     statusModal = false;
     ui.userMenu = false;
   }
   function clearStatus() {
-    setCustomStatus("");
+    profileStore.setCustomStatus("");
     statusDraft = "";
     statusModal = false;
     ui.userMenu = false;
@@ -77,7 +77,7 @@
         {#if myCustom}<span class="um-clear" role="button" tabindex="0" title="Clear status" onclick={(e) => { e.stopPropagation(); clearStatus(); }} onkeydown={(e) => e.key === "Enter" && (e.stopPropagation(), clearStatus())}>✕</span>{/if}
       </button>
       {#if app.activeServer}
-        <button class="sm-item" onclick={() => { ui.userMenu = false; openNickDialog(store.session.account); }}>
+        <button class="sm-item" onclick={() => { ui.userMenu = false; profileStore.openNickDialog(store.session.account); }}>
           <span class="um-status">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 21v-2a4 4 0 0 1 4-4h4" /><circle cx="10" cy="7" r="4" /><path d="M16 19l2 2 4-4" /></svg>
             Set nickname on {vm.serverName(app.activeServer)}

@@ -1,9 +1,9 @@
 <script lang="ts">
   import { vm } from "$lib/navigation/viewmodel.svelte";
   import { chanNsScope, chanRoleCaps, setChanRoleCaps, chanMemberGrants, chanMemberCaps, setChanMemberCaps, removeChanRole, removeChanMember, toggleRestricted, toggleViewGated } from "$lib/roles/chanperms";
-  import { rolesAt } from "$lib/roles/roles.svelte";
-  import { channels } from "$lib/channels/channel.svelte";
-  import { displayName } from "$lib/profile/profile.svelte";
+  import { roleStore } from "$lib/roles/roles.svelte";
+  import { channelStore } from "$lib/channels/channel.svelte";
+  import { profileStore } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
   import { untrack } from "svelte";
   import { getApp } from "$lib/ui/context";
@@ -31,11 +31,11 @@
 
   // The namespace's roles = the override picker's role source (@everyone aside).
   const nsRoles = $derived(
-    rolesAt(chanNsScope()).filter((r) => r.name !== EVERYONE_ROLE),
+    roleStore.rolesAt(chanNsScope()).filter((r) => r.name !== EVERYONE_ROLE),
   );
   // Role overrides live as channel-scoped roles; merge with just-added ones.
   const roleTargets = $derived.by(() => {
-    const present = rolesAt(channel)
+    const present = roleStore.rolesAt(channel)
       .filter((r) => r.name !== EVERYONE_ROLE)
       .map((r) => r.name);
     return [...new Set([...present, ...pendingRoles])].map(
@@ -64,7 +64,7 @@
       .filter(
         (n) =>
           !memberTargets.includes(n) &&
-          (displayName(n).toLowerCase().includes(q) || n.toLowerCase().includes(q)),
+          (profileStore.displayName(n).toLowerCase().includes(q) || n.toLowerCase().includes(q)),
       )
       .sort((a, b) => a.localeCompare(b));
   });
@@ -121,9 +121,9 @@
     if (selected.kind === "member" && selected.account === account) selected = { kind: "everyone" };
   }
   const roleColor = (name: string) =>
-    rolesAt(chanNsScope()).find((r) => r.name === name)?.color ?? "#99aab5";
+    roleStore.rolesAt(chanNsScope()).find((r) => r.name === name)?.color ?? "#99aab5";
 
-  const rec = $derived(channels[channel]);
+  const rec = $derived(channelStore.channels[channel]);
   const ns = $derived(app.nsOf(channel)); // "" for a top-level channel
   // Re-seed the editable fields when the channel identity changes (including a
   // rename, which swaps the prop) — but untrack the record reads so unrelated
@@ -134,7 +134,7 @@
     channel;
     untrack(() => {
       slug = app.chanShort(channel);
-      topic = channels[channel]?.topic ?? "";
+      topic = channelStore.channels[channel]?.topic ?? "";
     });
   });
 
@@ -259,7 +259,7 @@
                   onclick={() => (selected = { kind: "member", account: m })}
                 >
                   <span class="cp-avatar"><Avatar account={m} /></span>
-                  <span class="cp-name">{displayName(m)}</span>
+                  <span class="cp-name">{profileStore.displayName(m)}</span>
                 </button>
                 <button class="cp-x" title="Remove member override" aria-label={`Remove ${m} override`} onclick={() => removeMemberTarget(m)}>✕</button>
               </div>
@@ -287,7 +287,7 @@
                   <input class="cp-search" bind:value={memberQuery} placeholder="Search or type a name…" />
                   {#each memberChoices.slice(0, 8) as m (m)}
                     <button class="cp-pick" onclick={() => addMember(m)}>
-                      <span class="cp-avatar sm"><Avatar account={m} /></span>{displayName(m)}
+                      <span class="cp-avatar sm"><Avatar account={m} /></span>{profileStore.displayName(m)}
                     </button>
                   {/each}
                   {#if memberQuery.trim() && !memberChoices.includes(memberQuery.trim())}
@@ -311,7 +311,7 @@
                 <span class="cp-tag">Role</span>
               {:else}
                 <span class="cp-avatar lg"><Avatar account={selected.account} /></span>
-                <span class="cp-head-name">{displayName(selected.account)}</span>
+                <span class="cp-head-name">{profileStore.displayName(selected.account)}</span>
                 <span class="cp-tag">Member</span>
               {/if}
             </div>
@@ -321,7 +321,7 @@
               {:else if selected.kind === "role"}
                 Granted to everyone who holds <b>{selected.name}</b>, in this channel only.
               {:else}
-                A direct grant to <b>{displayName(selected.account)}</b>, in this channel only.
+                A direct grant to <b>{profileStore.displayName(selected.account)}</b>, in this channel only.
               {/if}
             </p>
 

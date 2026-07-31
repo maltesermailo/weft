@@ -1,7 +1,7 @@
 <script lang="ts">
   import { vm } from "$lib/navigation/viewmodel.svelte";
-  import { rolesAt, rolesOf, createRole, deleteRole, everyoneCaps, moveRole, nsRoleScope, reorderRoles, roleDraft, saveRole, setEveryoneCaps, toggleNewRoleCap, ensureMemberRoles, unassignRoleFrom } from "$lib/roles/roles.svelte";
-  import { displayName } from "$lib/profile/profile.svelte";
+  import { roleStore } from "$lib/roles/roles.svelte";
+  import { profileStore } from "$lib/profile/profile.svelte";
   // §6.5 roles tab, redesigned as a two-pane editor (design/server-settings.html):
   // a searchable, drag-orderable role list on the left; a tabbed editor
   // (Display / Permissions) for the selected role on the right. Order is
@@ -14,11 +14,11 @@
   import SaveBar from "$lib/components/SaveBar.svelte";
 
   const app = getApp();
-  const scope = $derived(nsRoleScope());
+  const scope = $derived(roleStore.nsRoleScope());
   // The implicit @everyone role is edited as its own selection, not dragged,
   // renamed, colored or deleted like a normal role.
   const roles = $derived(
-    rolesAt(nsRoleScope()).filter((r) => r.name !== EVERYONE_ROLE),
+    roleStore.rolesAt(roleStore.nsRoleScope()).filter((r) => r.name !== EVERYONE_ROLE),
   );
 
   const sameCaps = (a: string[], b: string[]) =>
@@ -31,7 +31,7 @@
 
   // Members holding the selected role. Sourced from the union of this
   // namespace's visible channel rosters (the fullest roster the client has),
-  // then filtered by assignment. `rolesOf` needs the per-member data loaded.
+  // then filtered by assignment. `roleStore.rolesOf` needs the per-member data loaded.
   const nsMembers = $derived.by(() => {
     const seen = new Set<string>();
     const out: string[] = [];
@@ -45,7 +45,7 @@
     return out.sort((a, b) => a.localeCompare(b));
   });
   $effect(() => {
-    for (const name of nsMembers) ensureMemberRoles(name);
+    for (const name of nsMembers) roleStore.ensureMemberRoles(name);
   });
   let memberSearch = $state("");
 
@@ -66,8 +66,8 @@
     editing
       ? nsMembers.filter(
           (n) =>
-            rolesOf(n, scope).some((r) => r.id === editing!.id) &&
-            (displayName(n).toLowerCase().includes(memberSearch.toLowerCase()) ||
+            roleStore.rolesOf(n, scope).some((r) => r.id === editing!.id) &&
+            (profileStore.displayName(n).toLowerCase().includes(memberSearch.toLowerCase()) ||
               n.toLowerCase().includes(memberSearch.toLowerCase())),
         )
       : [],
@@ -82,7 +82,7 @@
   function pickEveryone() {
     selected = EVERYONE_ROLE;
     tab = "permissions";
-    everyoneDraft = [...everyoneCaps()];
+    everyoneDraft = [...roleStore.everyoneCaps()];
   }
   function pickNew() {
     selected = "__new__";
@@ -103,7 +103,7 @@
 
   function save() {
     if (!editing) return;
-    saveRole(editing, {
+    roleStore.saveRole(editing, {
       name: draft.name,
       color: draft.color,
       caps: draft.caps,
@@ -114,16 +114,16 @@
   }
   function remove(id: string) {
     if (selected === id) selected = null;
-    deleteRole(id);
+    roleStore.deleteRole(id);
   }
   function create() {
-    createRole();
+    roleStore.createRole();
     selected = null;
   }
 
   // ---- @everyone baseline editor ----
   let everyoneDraft = $state<string[]>([]);
-  const everyoneDirty = $derived(!sameCaps(everyoneDraft, everyoneCaps()));
+  const everyoneDirty = $derived(!sameCaps(everyoneDraft, roleStore.everyoneCaps()));
   const toggleEveryoneCap = (c: string) =>
     (everyoneDraft = everyoneDraft.includes(c)
       ? everyoneDraft.filter((x) => x !== c)
@@ -137,11 +137,11 @@
   // later) — only the name is required.
   const saveDisabled = $derived(selected !== EVERYONE_ROLE && !draft.name.trim());
   function revertSelection() {
-    if (selected === EVERYONE_ROLE) everyoneDraft = [...everyoneCaps()];
+    if (selected === EVERYONE_ROLE) everyoneDraft = [...roleStore.everyoneCaps()];
     else if (editing) pick(editing.id);
   }
   function saveSelection() {
-    if (selected === EVERYONE_ROLE) setEveryoneCaps(everyoneDraft);
+    if (selected === EVERYONE_ROLE) roleStore.setEveryoneCaps(everyoneDraft);
     else if (editing) save();
   }
 
@@ -171,12 +171,12 @@
     const list = filtered.map((r) => r.id);
     const [moved] = list.splice(from, 1);
     list.splice(to, 0, moved);
-    reorderRoles(list);
+    roleStore.reorderRoles(list);
   }
   function onRowKey(e: KeyboardEvent, r: Role) {
     if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
     e.preventDefault();
-    moveRole(r.id, e.key === "ArrowUp" ? -1 : 1);
+    roleStore.moveRole(r.id, e.key === "ArrowUp" ? -1 : 1);
   }
 
   // Currently-selected role's live color, for the editor header preview.
@@ -248,20 +248,20 @@
     {#if selected === "__new__"}
       <div class="rl-head">
         <div class="rl-head-title">
-          <span class="rl-dot lg" style="background:{roleDraft.color}"></span>
-          <span>{roleDraft.name.trim() || "New role"}</span>
+          <span class="rl-dot lg" style="background:{roleStore.roleDraft.color}"></span>
+          <span>{roleStore.roleDraft.name.trim() || "New role"}</span>
         </div>
       </div>
       <div class="rl-body">
         <div class="rl-field">
           <div class="field-label">Role name</div>
-          <input class="text-input" bind:value={roleDraft.name} placeholder="e.g. Moderator" />
+          <input class="text-input" bind:value={roleStore.roleDraft.name} placeholder="e.g. Moderator" />
         </div>
-        {@render colorField(roleDraft.color, (c) => (roleDraft.color = c), roleDraft.name)}
-        {@render displayOptions(roleDraft.hoist, (v) => (roleDraft.hoist = v), roleDraft.pingable, (v) => (roleDraft.pingable = v), roleDraft.name)}
-        {@render permGroups(roleDraft.caps, toggleNewRoleCap)}
+        {@render colorField(roleStore.roleDraft.color, (c) => (roleStore.roleDraft.color = c), roleStore.roleDraft.name)}
+        {@render displayOptions(roleStore.roleDraft.hoist, (v) => (roleStore.roleDraft.hoist = v), roleStore.roleDraft.pingable, (v) => (roleStore.roleDraft.pingable = v), roleStore.roleDraft.name)}
+        {@render permGroups(roleStore.roleDraft.caps, (c: string) => roleStore.toggleNewRoleCap(c))}
         <div class="rl-actions">
-          <button class="ok-btn" disabled={!roleDraft.name.trim()} onclick={create}>Create role</button>
+          <button class="ok-btn" disabled={!roleStore.roleDraft.name.trim()} onclick={create}>Create role</button>
           <button class="linkish" onclick={() => (selected = null)}>Cancel</button>
         </div>
       </div>
@@ -322,14 +322,14 @@
             <div class="rl-member">
               <span class="rl-member-avatar"><Avatar account={name} /></span>
               <div class="rl-member-meta">
-                <div class="rl-member-name">{displayName(name)}</div>
+                <div class="rl-member-name">{profileStore.displayName(name)}</div>
                 <div class="rl-member-handle">{name}</div>
               </div>
               <button
                 class="rl-member-x"
                 aria-label="Remove {name} from {editing.name}"
                 title="Remove from {editing.name}"
-                onclick={() => unassignRoleFrom(name, editing)}
+                onclick={() => roleStore.unassignRoleFrom(name, editing)}
               >✕</button>
             </div>
           {:else}

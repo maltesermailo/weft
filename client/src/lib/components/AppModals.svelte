@@ -11,7 +11,7 @@
   import { store } from "$lib/store/store.svelte";
   import { confirmDialog, resolveConfirm } from "$lib/ui/confirm.svelte";
   import { chanDraft, catDraft, createChannel, createCategory } from "$lib/channels/channelcreate.svelte";
-  import { groupPicker, createGroupWith } from "$lib/social/social.svelte";
+  
 
   import DiscoverModal from "$lib/components/modals/DiscoverModal.svelte";
   import ReportModal from "$lib/components/modals/ReportModal.svelte";
@@ -59,12 +59,12 @@
   <InvitesModal onclose={() => (store.invites.listOpen = false)} />
 {/if}
 
-{#if groupPicker.open}
+{#if store.social.groupPicker.open}
   <NewGroupModal
-    seed={groupPicker.seed}
-    pos={groupPicker.pos}
-    onclose={() => (groupPicker.open = false)}
-    oncreate={createGroupWith}
+    seed={store.social.groupPicker.seed}
+    pos={store.social.groupPicker.pos}
+    onclose={() => (store.social.groupPicker.open = false)}
+    oncreate={(m) => store.social.createGroupWith(m)}
   />
 {/if}
 

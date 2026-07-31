@@ -1,14 +1,14 @@
 <script lang="ts">
   import { vm } from "$lib/navigation/viewmodel.svelte";
   import { nsMemberCtx } from "$lib/ui/ctxmenu.svelte";
-  import { loadNsInvites, createInvite } from "$lib/invites/invites.svelte";
-  import { nsAdmin, saveNsMeta, nsSetFederation, nsSetWelcome, showRecoveryKey, startRecovery, cosignRecovery, submitRecovery, activeEmoji, addEmoji, emojiUrlFor, removeEmoji } from "$lib/namespaces/server.svelte";
+  
+  import { nsAdmin, activeEmoji, emojiUrlFor } from "$lib/namespaces/server.svelte";
   import { denyList, refreshBans, liftMod } from "$lib/moderation/moderation";
-  import { bridgePropose, bridgeAccept, bridgeSever } from "$lib/federation/federation.svelte";
-  import { serverCap, serverCanGrant, isNsOwner } from "$lib/session/session.svelte";
-import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$lib/roles/roles.svelte";
+  
+  
+import { roleStore } from "$lib/roles/roles.svelte";
   import { store } from "$lib/store/store.svelte";
-  import { displayName, initials } from "$lib/profile/profile.svelte";
+  import { initials, profileStore } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
   import * as weft from "$lib/transport/weft";
@@ -21,20 +21,20 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
   // ---- Per-capability tab visibility (§6.5) ----
   // A moderator sees only the tabs they can act on; owner / ns-admin sees all.
   // Each maps to the concrete WEFT capability that governs that surface.
-  const isAdmin = $derived(isNsOwner(store.session.account) || serverCap("ns-admin"));
+  const isAdmin = $derived(store.session.isNsOwner(store.session.account) || store.session.serverCap("ns-admin"));
   // The active namespace's display name (v0.13) — `activeServer` is its id, used
   // for scopes/commands; anywhere a *name* is shown to the user, use this.
   const serverVanity = $derived(vm.activeNsMeta?.name || app.activeServer);
   const tabPerm = $derived({
     overview: isAdmin,
-    roles: isAdmin || serverCanGrant(),
-    members: isAdmin || serverCanGrant() || ["ban", "mute", "kick", "reports"].some((c) => serverCap(c)),
+    roles: isAdmin || store.session.serverCanGrant(),
+    members: isAdmin || store.session.serverCanGrant() || ["ban", "mute", "kick", "reports"].some((c) => store.session.serverCap(c)),
     emoji: isAdmin,
-    invites: isAdmin || serverCap("invite"),
+    invites: isAdmin || store.session.serverCap("invite"),
     federation: isAdmin,
-    bans: isAdmin || serverCap("ban") || serverCap("mute"),
-    recovery: isNsOwner(store.session.account),
-    danger: isNsOwner(store.session.account),
+    bans: isAdmin || store.session.serverCap("ban") || store.session.serverCap("mute"),
+    recovery: store.session.isNsOwner(store.session.account),
+    danger: store.session.isNsOwner(store.session.account),
   } as Record<string, boolean>);
   const visibleTabs = $derived(
     (["overview", "roles", "members", "emoji", "invites", "federation", "bans", "recovery", "danger"] as const).filter(
@@ -53,17 +53,17 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
   const shownMembers = $derived(
     roster.filter(
       (m) =>
-        displayName(m.account.name).toLowerCase().includes(memberSearch.toLowerCase()) ||
+        profileStore.displayName(m.account.name).toLowerCase().includes(memberSearch.toLowerCase()) ||
         m.account.name.toLowerCase().includes(memberSearch.toLowerCase()),
     ),
   );
   // A member's role pill is keyed by role **id** (v0.13); resolve its color +
   // display name through the scope's definitions.
   function roleColor(id: string): string {
-    return roleById(`ns:${app.activeServer}`, id)?.color ?? "#99aab5";
+    return roleStore.roleById(`ns:${app.activeServer}`, id)?.color ?? "#99aab5";
   }
   function roleName(id: string): string {
-    return roleById(`ns:${app.activeServer}`, id)?.name ?? id;
+    return roleStore.roleById(`ns:${app.activeServer}`, id)?.name ?? id;
   }
   // Join date: "0" means the server had no recorded join time (pre-v0.12 backfill).
   function fmtJoined(ms: number): string {
@@ -71,7 +71,7 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
     return new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
   }
   // All namespace-scoped roles, for the in-line "add role" picker.
-  const nsRoles = $derived(rolesAt(nsRoleScope()));
+  const nsRoles = $derived(roleStore.rolesAt(roleStore.nsRoleScope()));
   // The namespace owner (implicit all-caps holder), surfaced with a crown.
   const ownerAccount = $derived(vm.activeNsMeta?.owner ?? null);
   // Which member's add-role popover is open (keyed by `account@network`).
@@ -107,7 +107,7 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
   function proposeBridge() {
     const p = brPeer.trim();
     if (!p) return;
-    bridgePropose(`ns:${app.activeServer}`, p, brHistory, brMedia, brTyping);
+    store.federation.bridgePropose(`ns:${app.activeServer}`, p, brHistory, brMedia, brTyping);
     brPeer = "";
   }
 
@@ -133,7 +133,7 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
   function submitEmoji() {
     const name = emojiName.trim().replace(/[^a-zA-Z0-9_]/g, "");
     if (!name || !pendingEmoji) return;
-    addEmoji(name, pendingEmoji);
+    nsAdmin.addEmoji(name, pendingEmoji);
     emojiName = "";
     pendingEmoji = "";
   }
@@ -144,7 +144,7 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
 
   // Live counts for the Overview stat strip (real data — no placeholders).
   const nsChannelCount = $derived(vm.channelGroups.reduce((n, g) => n + g.list.length, 0));
-  const nsRoleCount = $derived(rolesAt(nsRoleScope()).length);
+  const nsRoleCount = $derived(roleStore.rolesAt(roleStore.nsRoleScope()).length);
   // §6.2 welcome-channel picker: this namespace's text channels + the current
   // setting (from the ns-meta the server last pushed).
   const nsTextChannels = $derived(vm.channelGroups.flatMap((g) => g.list).filter((c) => !c.voice));
@@ -189,7 +189,7 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
         <div class="so-heading">Community</div>
       {/if}
       {#if tabPerm.invites}
-        <button class="so-navitem" class:active={app.nsTab === "invites"} onclick={() => { app.nsTab = "invites"; loadNsInvites(); }}>Invites</button>
+        <button class="so-navitem" class:active={app.nsTab === "invites"} onclick={() => { app.nsTab = "invites"; store.invites.loadNsInvites(); }}>Invites</button>
       {/if}
       {#if tabPerm.federation}
         <button class="so-navitem" class:active={app.nsTab === "federation"} onclick={() => (app.nsTab = "federation")}>Federation</button>
@@ -258,7 +258,7 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
           <div class="ov-gap"></div>
           <div class="field-label">Welcome channel</div>
           <p class="so-sub" style="margin:0 0 8px">Post a greeting here whenever someone new joins the server.</p>
-          <select class="text-input" value={currentWelcome} onchange={(e) => nsSetWelcome(e.currentTarget.value)}>
+          <select class="text-input" value={currentWelcome} onchange={(e) => nsAdmin.nsSetWelcome(e.currentTarget.value)}>
             <option value="">No welcome message</option>
             {#each nsTextChannels as c (c.name)}
               <option value={c.name}>#{app.chanShort(c.name)}</option>
@@ -285,12 +285,12 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
           </div>
         </div>
 
-        <div class="modal-actions"><button class="ok-btn" onclick={saveNsMeta}>Save changes</button></div>
+        <div class="modal-actions"><button class="ok-btn" onclick={() => nsAdmin.saveNsMeta()}>Save changes</button></div>
       {:else if app.nsTab === "invites"}
         <h1>Invites</h1>
         <p class="so-sub">Every active invite for <b>{serverVanity}</b> — who created it, how many times it's been used, its remaining uses and expiry. Revoke one, or close them all at once.</p>
         <div class="modal-actions">
-          <button class="ok-btn" onclick={createInvite}>Create invite</button>
+          <button class="ok-btn" onclick={() => store.invites.createInvite()}>Create invite</button>
           <button class="danger-btn" onclick={app.revokeAllInvites}>Revoke all</button>
         </div>
         <div class="section-sep"></div>
@@ -324,7 +324,7 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
                 <span class="mem-avatar"><Avatar account={acct} /></span>
                 <div class="mem-id-meta">
                   <div class="mem-name">
-                    {displayName(acct)}
+                    {profileStore.displayName(acct)}
                     {#if isOwner}<span class="mem-owner" title="Server owner">👑 Owner</span>{/if}
                   </div>
                   <div class="mem-handle">{acct}{m.network !== store.session.network ? `@${m.network}` : ""}</div>
@@ -334,7 +334,7 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
                 {#each m.roleIds as r (r)}
                   <span class="role-pill editable" style="--role:{roleColor(r)}">
                     <span class="role-dot"></span>{roleName(r)}
-                    <button class="role-x" title="Remove role" aria-label={`Remove ${roleName(r)}`} onclick={() => unassignNsRole(acct, r)}>✕</button>
+                    <button class="role-x" title="Remove role" aria-label={`Remove ${roleName(r)}`} onclick={() => roleStore.unassignNsRole(acct, r)}>✕</button>
                   </span>
                 {/each}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -343,14 +343,14 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
                   <button
                     class="role-add"
                     title="Add role"
-                    aria-label={`Add a role to ${displayName(acct)}`}
+                    aria-label={`Add a role to ${profileStore.displayName(acct)}`}
                     onclick={() => (addRoleFor = addRoleFor === handle ? null : handle)}
                   >+</button>
                   {#if addRoleFor === handle}
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div class="role-add-menu" role="menu">
                       {#each unheldRoles(m.roleIds) as r (r.name)}
-                        <button class="role-add-opt" onclick={() => { assignNsRole(acct, r.id); addRoleFor = null; }}>
+                        <button class="role-add-opt" onclick={() => { roleStore.assignNsRole(acct, r.id); addRoleFor = null; }}>
                           <span class="role-dot" style="--role:{r.color}"></span>{r.name}
                         </button>
                       {:else}
@@ -421,7 +421,7 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
             <div class="em-tile">
               <img class="em-tile-img" src={emojiUrlFor(em.name) ?? ''} alt=":{em.name}:" />
               <code class="em-tile-name">:{em.name}:</code>
-              <button class="em-tile-x" aria-label="Remove :{em.name}:" title="Remove" onclick={() => removeEmoji(em.name)}>🗑</button>
+              <button class="em-tile-x" aria-label="Remove :{em.name}:" title="Remove" onclick={() => nsAdmin.removeEmoji(em.name)}>🗑</button>
             </div>
           {:else}
             <div class="em-empty">
@@ -459,7 +459,7 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
           <input
             type="checkbox"
             checked={vm.activeNsMeta?.federation ?? false}
-            onchange={(e) => nsSetFederation(e.currentTarget.checked)}
+            onchange={(e) => nsAdmin.nsSetFederation(e.currentTarget.checked)}
           />
           Open <b>{serverVanity}</b> to auto-federation
         </label>
@@ -479,8 +479,8 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
                 <div class="ns-desc">{m.channels.length} channel(s) · history {m.history} · media {m.media}{m.typing ? " · typing" : ""}</div>
               </div>
               <div class="fed-actions">
-                <button onclick={() => bridgeAccept(m.peer, m.version)}>Accept</button>
-                <button class="mini-danger" onclick={() => bridgeSever(m.peer)}>Sever</button>
+                <button onclick={() => store.federation.bridgeAccept(m.peer, m.version)}>Accept</button>
+                <button class="mini-danger" onclick={() => store.federation.bridgeSever(m.peer)}>Sever</button>
               </div>
             </div>
           {:else}
@@ -528,7 +528,7 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
         <div class="section-sep"></div>
         <div class="set-row">
           <span>My recovery key (share for the quorum)</span>
-          <button class="set-btn" onclick={showRecoveryKey}>Reveal</button>
+          <button class="set-btn" onclick={() => nsAdmin.showRecoveryKey()}>Reveal</button>
         </div>
         {#if nsAdmin.myRecoveryKey}
           <div class="modal-join"><input readonly value={nsAdmin.myRecoveryKey} /><button onclick={() => navigator.clipboard?.writeText(nsAdmin.myRecoveryKey)}>Copy</button></div>
@@ -536,9 +536,9 @@ import { rolesAt, roleById, nsRoleScope, assignNsRole, unassignNsRole } from "$l
         <div class="field-label">Rotation record (co-sign or submit)</div>
         <textarea class="text-input" rows="2" bind:value={nsAdmin.recoveryDoc} placeholder="paste a record to co-sign, or Start one below"></textarea>
         <div class="modal-actions">
-          <button class="set-btn" onclick={startRecovery}>Start (recover to me)</button>
-          <button class="set-btn" onclick={cosignRecovery}>Co-sign</button>
-          <button class="ok-btn" onclick={submitRecovery}>Submit</button>
+          <button class="set-btn" onclick={() => nsAdmin.startRecovery()}>Start (recover to me)</button>
+          <button class="set-btn" onclick={() => nsAdmin.cosignRecovery()}>Co-sign</button>
+          <button class="ok-btn" onclick={() => nsAdmin.submitRecovery()}>Submit</button>
         </div>
       {:else if app.nsTab === "danger"}
         <h1>Danger zone</h1>

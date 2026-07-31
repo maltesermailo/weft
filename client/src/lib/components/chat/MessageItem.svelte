@@ -1,14 +1,15 @@
 <script lang="ts">
   import { vm } from "$lib/navigation/viewmodel.svelte";
+  import { store } from "$lib/store/store.svelte";
   import { msgCtx } from "$lib/ui/ctxmenu.svelte";
   import { threadCount, openThread, threadNameFor } from "$lib/messages/threads.svelte";
   import { compose, startEdit, saveEdit, cancelEdit, editKey, doDelete, toggleReaction, jumpTo, togglePin, openReport } from "$lib/messages/composer.svelte";
   import { emojiUrlFor } from "$lib/namespaces/server.svelte";
   import { view } from "$lib/navigation/view.svelte";
   import { renderMd } from "$lib/rendering/mdrender.svelte";
-  import { mentionsMe, isStaff } from "$lib/session/session.svelte";
-import { rolesOf, nameColor, roleScopeOf } from "$lib/roles/roles.svelte";
-  import { displayName, openProfile } from "$lib/profile/profile.svelte";
+  
+import { roleScopeOf, roleStore } from "$lib/roles/roles.svelte";
+  import { profileStore } from "$lib/profile/profile.svelte";
   import { getApp } from "$lib/ui/context";
   import { autofocus } from "$lib/ui/actions";
   import EmojiPicker from "$lib/components/chat/EmojiPicker.svelte";
@@ -32,7 +33,7 @@ import { rolesOf, nameColor, roleScopeOf } from "$lib/roles/roles.svelte";
 {#if m.system}
   <div class="msg-group"><div style="width:34px;flex-shrink:0"></div><div class="msg-body"><div class="msg-line system">{m.body}</div></div></div>
 {:else}
-  <div class="msg-group" class:mention-hit={!m.own && mentionsMe(m.body, view.activeServer)} class:pending={m.pending} id="msg-{m.key}" role="article" oncontextmenu={(e) => msgCtx(e, m)}>
+  <div class="msg-group" class:mention-hit={!m.own && store.session.mentionsMe(m.body, view.activeServer)} class:pending={m.pending} id="msg-{m.key}" role="article" oncontextmenu={(e) => msgCtx(e, m)}>
     <!-- §10.3 avatar: local by bare handle, federated by `author@network`. -->
     <div class="avatar"><Avatar account={m.net ? `${m.author}@${m.net}` : m.author} /></div>
     <div class="msg-body">
@@ -46,19 +47,19 @@ import { rolesOf, nameColor, roleScopeOf } from "$lib/roles/roles.svelte";
       <div class="msg-meta">
         {#if m.net}
           <!-- Foreign sender: fully qualified, and no local profile to open. -->
-          <span class="author foreign" title="from {m.net}">{displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></span>
+          <span class="author foreign" title="from {m.net}">{profileStore.displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></span>
           <!-- §11.11 recognition: a federated user's role(s) held on this network. -->
-          {#each rolesOf(`${m.author}@${m.net}`, roleScopeOf(app.active)) as r (r.name)}
+          {#each roleStore.rolesOf(`${m.author}@${m.net}`, roleScopeOf(app.active)) as r (r.name)}
             <span class="role-pill" style="--role:{r.color}"><span class="role-dot"></span>{r.name}</span>
           {/each}
         {:else}
           <button
             class="author author-btn"
-            style={nameColor(m.author) ? `color:${nameColor(m.author)}` : ""}
-            onclick={(e) => openProfile(m.author, e)}
-          >{displayName(m.author)}</button>
+            style={roleStore.nameColor(m.author) ? `color:${roleStore.nameColor(m.author)}` : ""}
+            onclick={(e) => profileStore.openProfile(m.author, e)}
+          >{profileStore.displayName(m.author)}</button>
         {/if}
-        {#if !m.net && isStaff(m.author)}<span class="cap-badge staff">staff</span>{/if}
+        {#if !m.net && store.session.isStaff(m.author)}<span class="cap-badge staff">staff</span>{/if}
         {#if m.own}<span class="cap-badge owner">you</span>{/if}
         <span class="time">{m.time}</span>
       </div>

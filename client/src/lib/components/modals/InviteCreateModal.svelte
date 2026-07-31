@@ -1,9 +1,9 @@
 <script lang="ts">
   import { vm } from "$lib/navigation/viewmodel.svelte";
-  import { revokeInvite, generateInvite, sendInviteDM } from "$lib/invites/invites.svelte";
-  import { roster, friendLocalAccount } from "$lib/social/social.svelte";
+  
+  import { roster } from "$lib/social/social.svelte";
   import { store } from "$lib/store/store.svelte";
-  import { friendLabel, initials } from "$lib/profile/profile.svelte";
+  import { initials, profileStore } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -49,10 +49,10 @@
   }
 
   function generate() {
-    generateInvite(maxUses, expiry);
+    store.invites.generateInvite(maxUses, expiry);
   }
   function revoke() {
-    if (store.invites.id) revokeInvite(store.invites.id);
+    if (store.invites.id) store.invites.revokeInvite(store.invites.id);
   }
 
   // The scope this invite grants access to, in a friendly form.
@@ -72,15 +72,15 @@
   // Presence is keyed by the friend's local account; federated friends have no
   // local account and can't be DM'd, so the send list is local friends only.
   const statusOf = (ref: string) => {
-    const acct = friendLocalAccount(ref);
+    const acct = store.social.friendLocalAccount(ref);
     return acct ? (store.accountOf(acct).presence ?? "offline") : "offline";
   };
   const isOnline = (ref: string) => statusOf(ref) !== "offline" && statusOf(ref) !== "invisible";
   const friends = $derived(
     roster.friends.filter((r) => {
-      if (!friendLocalAccount(r)) return false;
+      if (!store.social.friendLocalAccount(r)) return false;
       const q = search.trim().toLowerCase();
-      return !q || friendLabel(r).toLowerCase().includes(q) || r.toLowerCase().includes(q);
+      return !q || profileStore.friendLabel(r).toLowerCase().includes(q) || r.toLowerCase().includes(q);
     }),
   );
   const onlineFriends = $derived(friends.filter(isOnline));
@@ -93,7 +93,7 @@
   function send() {
     const link = store.invites.link;
     if (!link || !selected.size) return;
-    for (const ref of selected) sendInviteDM(ref, link);
+    for (const ref of selected) store.invites.sendInviteDM(ref, link);
     app.toast(`Invite sent to ${selected.size} friend${selected.size === 1 ? "" : "s"}`, "info");
     selected = new Set();
   }
@@ -169,7 +169,7 @@
           <div class="ic-chips">
             {#each [...selected] as ref (ref)}
               <div class="ic-chip">
-                {friendLabel(ref)}
+                {profileStore.friendLabel(ref)}
                 <button class="ic-chip-x" aria-label="Remove" onclick={() => toggle(ref)}>✕</button>
               </div>
             {/each}
@@ -179,9 +179,9 @@
         <div class="ic-friends">
           {#snippet frow(ref: string)}
             <button class="ic-friend" class:sel={selected.has(ref)} onclick={() => toggle(ref)}>
-              <div class="ic-fav"><Avatar account={friendLocalAccount(ref) ?? ref} /><span class="ic-fdot {statusOf(ref)}"></span></div>
+              <div class="ic-fav"><Avatar account={store.social.friendLocalAccount(ref) ?? ref} /><span class="ic-fdot {statusOf(ref)}"></span></div>
               <div class="ic-finfo">
-                <div class="ic-fname">{friendLabel(ref)}</div>
+                <div class="ic-fname">{profileStore.friendLabel(ref)}</div>
                 <div class="ic-fsub">{statusOf(ref)}</div>
               </div>
               <span class="ic-check" class:on={selected.has(ref)}>

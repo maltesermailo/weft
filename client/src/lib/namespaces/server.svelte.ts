@@ -11,80 +11,87 @@ import { view } from "$lib/navigation/view.svelte";
 import type { HandlerMap } from "$lib/sync/handler-map";
 
 // ---- §6.2 namespace-admin editor (ServerSettingsModal) ----
-// The Server Settings form draft. One reactive object so the modal binds fields
-// directly; `openNsSettings` seeds it from the live NS-META. `newOwner` (§2.4
-// transfer) + the recovery-quorum/record fields ride along.
-export const nsAdmin = $state<{
-  title: string;
-  desc: string;
-  vis: string;
-  newOwner: string;
-  recM: number;
-  recKeys: string;
-  myRecoveryKey: string;
-  recoveryDoc: string;
-}>({ title: "", desc: "", vis: "public", newOwner: "", recM: 2, recKeys: "", myRecoveryKey: "", recoveryDoc: "" });
 
-// Persist the overview edits (title/description/visibility) for the active ns.
-export function saveNsMeta(): void {
-  const ns = view.activeServer;
-  if (nsAdmin.title.trim()) weft.nsMeta(ns, "title", nsAdmin.title.trim()).catch(() => {});
-  if (nsAdmin.desc.trim()) weft.nsMeta(ns, "description", nsAdmin.desc.trim()).catch(() => {});
-  weft.nsVisibility(ns, nsAdmin.vis).catch(() => {});
+/**
+ * The Server Settings form draft + the ns-admin actions over the active
+ * namespace. One reactive instance (`nsAdmin`) so the modal binds fields
+ * directly (`nsAdmin.title`, …); `openNsSettings` seeds it from the live NS-META.
+ * `newOwner` (§2.4 transfer) + the recovery-quorum/record fields ride along.
+ */
+export class NsAdmin {
+  title = $state("");
+  desc = $state("");
+  vis = $state("public");
+  newOwner = $state("");
+  recM = $state(2);
+  recKeys = $state("");
+  myRecoveryKey = $state("");
+  recoveryDoc = $state("");
+
+  // Persist the overview edits (title/description/visibility) for the active ns.
+  saveNsMeta(): void {
+    const ns = view.activeServer;
+    if (this.title.trim()) weft.nsMeta(ns, "title", this.title.trim()).catch(() => {});
+    if (this.desc.trim()) weft.nsMeta(ns, "description", this.desc.trim()).catch(() => {});
+    weft.nsVisibility(ns, this.vis).catch(() => {});
+  }
+
+  // §11.10 open/close this namespace to on-demand federation (needs public).
+  nsSetFederation(open: boolean): void {
+    weft.nsMeta(view.activeServer, "federation", open ? "open" : "closed").catch((e) => toast(String(e), "error"));
+  }
+
+  // §6.2 set (or clear, "") the channel that greets new members.
+  nsSetWelcome(channel: string): void {
+    if (!view.activeServer) return;
+    weft.nsMeta(view.activeServer, "welcome", channel).catch((e) => toast(String(e), "error"));
+  }
+
+  // §2.4 recovery ladder: reveal my quorum pubkey / start / co-sign / submit a
+  // recovery record. The record is shared out-of-band and co-signed to quorum.
+  showRecoveryKey(): void {
+    weft
+      .recoveryPubkey(store.session.network, view.activeServer)
+      .then((k) => (this.myRecoveryKey = k))
+      .catch((e) => toast(String(e), "error"));
+  }
+  startRecovery(): void {
+    weft
+      .recoveryStart(store.session.network, view.activeServer, store.session.account)
+      .then((doc) => {
+        this.recoveryDoc = doc;
+        toast("Recovery started — share this record with your quorum to co-sign");
+      })
+      .catch((e) => toast(String(e), "error"));
+  }
+  cosignRecovery(): void {
+    if (!this.recoveryDoc.trim()) return;
+    weft
+      .recoveryCosign(store.session.network, view.activeServer, this.recoveryDoc.trim())
+      .then((doc) => (this.recoveryDoc = doc))
+      .catch((e) => toast(String(e), "error"));
+  }
+  submitRecovery(): void {
+    if (this.recoveryDoc.trim()) weft.nsRecover(view.activeServer, this.recoveryDoc.trim()).catch((e) => toast(String(e), "error"));
+  }
+
+  // §9.4 custom emoji (namespace-scoped) admin actions.
+  addEmoji(name: string, media: string): void {
+    if (!view.activeServer) return;
+    weft.emojiAdd(view.activeServer, name, media).catch((e) => toast(String(e), "error"));
+  }
+  removeEmoji(name: string): void {
+    if (!view.activeServer) return;
+    weft.emojiRemove(view.activeServer, name).catch((e) => toast(String(e), "error"));
+  }
 }
 
-// §11.10 open/close this namespace to on-demand federation (needs public).
-export function nsSetFederation(open: boolean): void {
-  weft.nsMeta(view.activeServer, "federation", open ? "open" : "closed").catch((e) => toast(String(e), "error"));
-}
+export const nsAdmin = new NsAdmin();
 
-// §6.2 set (or clear, "") the channel that greets new members.
-export function nsSetWelcome(channel: string): void {
-  if (!view.activeServer) return;
-  weft.nsMeta(view.activeServer, "welcome", channel).catch((e) => toast(String(e), "error"));
-}
-
-// §2.4 recovery ladder: reveal my quorum pubkey / start / co-sign / submit a
-// recovery record. The record is shared out-of-band and co-signed to quorum.
-export function showRecoveryKey(): void {
-  weft
-    .recoveryPubkey(store.session.network, view.activeServer)
-    .then((k) => (nsAdmin.myRecoveryKey = k))
-    .catch((e) => toast(String(e), "error"));
-}
-export function startRecovery(): void {
-  weft
-    .recoveryStart(store.session.network, view.activeServer, store.session.account)
-    .then((doc) => {
-      nsAdmin.recoveryDoc = doc;
-      toast("Recovery started — share this record with your quorum to co-sign");
-    })
-    .catch((e) => toast(String(e), "error"));
-}
-export function cosignRecovery(): void {
-  if (!nsAdmin.recoveryDoc.trim()) return;
-  weft
-    .recoveryCosign(store.session.network, view.activeServer, nsAdmin.recoveryDoc.trim())
-    .then((doc) => (nsAdmin.recoveryDoc = doc))
-    .catch((e) => toast(String(e), "error"));
-}
-export function submitRecovery(): void {
-  if (nsAdmin.recoveryDoc.trim()) weft.nsRecover(view.activeServer, nsAdmin.recoveryDoc.trim()).catch((e) => toast(String(e), "error"));
-}
-
-// ---- §9.4 custom emoji (namespace-scoped) ----
+// ---- §9.4 custom emoji reads (namespace-scoped) ----
 // The active namespace's custom emoji as an array (for pickers).
 export const activeEmoji = (): { name: string; media: string }[] =>
   [...(view.activeServer ? (store.servers.get(view.activeServer)?.emoji ?? []) : [])].map(([name, media]) => ({ name, media }));
-
-export function addEmoji(name: string, media: string): void {
-  if (!view.activeServer) return;
-  weft.emojiAdd(view.activeServer, name, media).catch((e) => toast(String(e), "error"));
-}
-export function removeEmoji(name: string): void {
-  if (!view.activeServer) return;
-  weft.emojiRemove(view.activeServer, name).catch((e) => toast(String(e), "error"));
-}
 
 // Resolve a `:name:` shortcode to a fetchable image URL in the active namespace,
 // or null if it isn't a custom emoji here.

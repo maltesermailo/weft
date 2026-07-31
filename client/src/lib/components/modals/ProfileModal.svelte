@@ -1,11 +1,11 @@
 <script lang="ts">
   import { vm } from "$lib/navigation/viewmodel.svelte";
   import { openDm } from "$lib/navigation/navigation";
-  import { friendState, friendAction, callUser } from "$lib/social/social.svelte";
-  import { badgeFor, isStaff } from "$lib/session/session.svelte";
-import { nameColor } from "$lib/roles/roles.svelte";
+  
+  
+import { roleStore } from "$lib/roles/roles.svelte";
   import { store } from "$lib/store/store.svelte";
-  import { bioOf, displayName, initials, statusOf } from "$lib/profile/profile.svelte";
+  import { bioOf, initials, statusOf, profileStore } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -17,10 +17,10 @@ import { nameColor } from "$lib/roles/roles.svelte";
   const status = $derived(isSelf ? store.session.myStatus : (store.accountOf(target).presence ?? "offline"));
   const online = $derived(status !== "offline" && status !== "invisible");
   const bio = $derived(bioOf(target));
-  const badge = $derived(badgeFor(target, app.active));
+  const badge = $derived(store.session.badgeFor(target, app.active));
 
   const servers = $derived(app.mutualServers(target));
-  const rel = $derived(friendState(target));
+  const rel = $derived(store.social.friendState(target));
 
   const STATUS_LABEL: Record<string, string> = {
     online: "Online",
@@ -40,7 +40,7 @@ import { nameColor } from "$lib/roles/roles.svelte";
     onclose();
   }
   function call() {
-    callUser(handle);
+    store.social.callUser(handle);
     onclose();
   }
   function jumpServer(ns: string) {
@@ -72,8 +72,8 @@ import { nameColor } from "$lib/roles/roles.svelte";
 
       <div class="pm-card-body">
         <div class="pm-nameline">
-          <span class="pm-name" style={nameColor(target) ? `color:${nameColor(target)}` : ""}>{displayName(target)}</span>
-          {#if isStaff(target)}<span class="cap-badge staff">staff</span>{/if}
+          <span class="pm-name" style={roleStore.nameColor(target) ? `color:${roleStore.nameColor(target)}` : ""}>{profileStore.displayName(target)}</span>
+          {#if store.session.isStaff(target)}<span class="cap-badge staff">staff</span>{/if}
         </div>
         <button class="pm-handle" title="Copy handle" onclick={copyId}>
           {handle}
@@ -89,13 +89,13 @@ import { nameColor } from "$lib/roles/roles.svelte";
               Message
             </button>
             {#if rel === "friends"}
-              <button class="pm-btn" onclick={() => friendAction(target, "remove")}>Friends ✓</button>
+              <button class="pm-btn" onclick={() => store.social.friendAction(target, "remove")}>Friends ✓</button>
             {:else if rel === "incoming"}
-              <button class="pm-btn accent" onclick={() => friendAction(target, "accept")}>Accept request</button>
+              <button class="pm-btn accent" onclick={() => store.social.friendAction(target, "accept")}>Accept request</button>
             {:else if rel === "outgoing"}
-              <button class="pm-btn" onclick={() => friendAction(target, "remove")}>Requested</button>
+              <button class="pm-btn" onclick={() => store.social.friendAction(target, "remove")}>Requested</button>
             {:else}
-              <button class="pm-icon" title="Add friend" aria-label="Add friend" onclick={() => friendAction(target, "add")}>
+              <button class="pm-icon" title="Add friend" aria-label="Add friend" onclick={() => store.social.friendAction(target, "add")}>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><line x1="19" y1="8" x2="19" y2="14" /><line x1="22" y1="11" x2="16" y2="11" /></svg>
               </button>
             {/if}
@@ -139,7 +139,7 @@ import { nameColor } from "$lib/roles/roles.svelte";
         {:else}
           <div class="pm-empty">
             <div class="pm-empty-emoji">🪐</div>
-            <p>No servers in common{isSelf ? "" : ` with ${displayName(target)}`}.</p>
+            <p>No servers in common{isSelf ? "" : ` with ${profileStore.displayName(target)}`}.</p>
           </div>
         {/if}
       {:else}

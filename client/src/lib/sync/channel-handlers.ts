@@ -7,9 +7,9 @@ import * as nav from "$lib/navigation/nav";
 import * as weft from "$lib/transport/weft";
 import type { HandlerMap } from "$lib/sync/handler-map";
 import { store } from "$lib/store/store.svelte";
-import { channels, ensureChannel, cacheChanLayout, reconcileChannelCreate } from "$lib/channels/channel.svelte";
-import { ensureCaps } from "$lib/session/session.svelte";
-import { queryProfile } from "$lib/profile/profile.svelte";
+import { channelStore } from "$lib/channels/channel.svelte";
+
+import { profileStore } from "$lib/profile/profile.svelte";
 import { selectServer } from "$lib/navigation/navigation";
 import { syncState } from "$lib/connection/connection.svelte";
 import { view } from "$lib/navigation/view.svelte";
@@ -20,13 +20,13 @@ const me = (): string => store.session.account;
 
 export const channelHandlers: HandlerMap = {
   member: (e) => {
-    const ch = ensureChannel(e.channel);
+    const ch = channelStore.ensure(e.channel);
     // Roster only — the "joined"/"left" line is a persistent system MESSAGE.
     if (e.action === "join") {
       if (!ch.members.some((m) => m.name === e.user))
         ch.members.push({ name: e.user, origin: e.network === store.session.network ? "local" : "federated" });
-      ensureCaps(e.user, e.channel); // roster badge
-      queryProfile(e.user); // §10.3 display name + avatar
+      store.session.ensureCaps(e.user, e.channel); // roster badge
+      profileStore.queryProfile(e.user); // §10.3 display name + avatar
       if (e.user === me()) {
                 // Jump to a just-joined channel only when browsing a server (not the
         // Friends/DMs home) — keeps startup auto-rejoins from yanking the view.
@@ -38,8 +38,8 @@ export const channelHandlers: HandlerMap = {
     } else {
       ch.members = ch.members.filter((m) => m.name !== e.user);
       if (e.user === me()) {
-        delete channels[e.channel];
-        if (view.active === e.channel) goto(nav.pathFor(Object.keys(channels)[0] ?? ""));
+        delete channelStore.channels[e.channel];
+        if (view.active === e.channel) goto(nav.pathFor(Object.keys(channelStore.channels)[0] ?? ""));
       }
     }
   },
@@ -60,42 +60,42 @@ export const channelHandlers: HandlerMap = {
   },
   chanmeta: (e) => {
     // §6.3 CHANNEL DELETE confirms with `deleted` — drop from every local view
-    // (do NOT ensureChannel first, or it'd be re-created).
+    // (do NOT channelStore.ensure first, or it'd be re-created).
     if (e.key === "deleted") {
-      delete channels[e.channel];
+      delete channelStore.channels[e.channel];
       if (view.active === e.channel) goto(nav.pathFor("", view.activeServer));
       return;
     }
-    const c = ensureChannel(e.channel);
+    const c = channelStore.ensure(e.channel);
     if (e.key === "topic") c.topic = e.value;
     else if (e.key === "posting") c.restricted = e.value === "restricted";
     else if (e.key === "view-gated") c.viewGated = e.value === "true";
     else if (e.key === "category") c.category = e.value || undefined;
     else if (e.key === "position") c.position = parseInt(e.value, 10) || 0;
-    if (e.key === "category" || e.key === "position") cacheChanLayout(e.channel, c.category, c.position ?? 0);
+    if (e.key === "category" || e.key === "position") channelStore.cacheChanLayout(e.channel, c.category, c.position ?? 0);
   },
   "channel-layout": (e) => {
-    const ch = ensureChannel(e.channel);
+    const ch = channelStore.ensure(e.channel);
     ch.category = e.category ?? undefined;
     ch.position = e.position;
     ch.voice = e.channel_kind === "voice"; // §16 render as a voice channel
     if (e.vanity) ch.vanity = e.vanity; // v0.13 display name; wire name is ids
-    cacheChanLayout(e.channel, ch.category, e.position);
-    reconcileChannelCreate(e.channel, e.vanity); // finish a pending create
+    channelStore.cacheChanLayout(e.channel, ch.category, e.position);
+    channelStore.reconcileCreate(e.channel, e.vanity); // finish a pending create
   },
   "channel-renamed": (e) => {
     // Re-key local state to the new identity (idempotent — arrives as a
     // broadcast plus a labeled copy to the initiator).
-    const cur = channels[e.old];
+    const cur = channelStore.channels[e.old];
     if (cur) {
       cur.name = e.new;
       // The server sends no live channel-layout on rename, so the old `vanity`
-      // would linger (showing the stale name until reload). Clear it → chanShort
+      // would linger (showing the stale name until reload). Clear it → channelStore.short
       // falls back to the new wire name's segment; a later layout sets the real one.
       cur.vanity = undefined;
-      channels[e.new] = cur; // unread/mention tallies ride the instance
-      delete channels[e.old];
-      cacheChanLayout(e.new, cur.category, cur.position ?? 0);
+      channelStore.channels[e.new] = cur; // unread/mention tallies ride the instance
+      delete channelStore.channels[e.old];
+      channelStore.cacheChanLayout(e.new, cur.category, cur.position ?? 0);
       if (view.active === e.old) goto(nav.pathFor(e.new), { replaceState: true });
       if (ui.chanPerms === e.old) ui.chanPerms = e.new;
       weft.join(e.new).catch(() => {}); // actor respawned under the new name — re-subscribe

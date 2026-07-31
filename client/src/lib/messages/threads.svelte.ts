@@ -3,7 +3,7 @@ import { SvelteMap } from "svelte/reactivity";
 import type { Msg, ThreadInfo } from "$lib/types";
 import type { HandlerMap } from "$lib/sync/handler-map";
 import { store } from "$lib/store/store.svelte";
-import { channels } from "$lib/channels/channel.svelte";
+import { channelStore } from "$lib/channels/channel.svelte";
 import { mkMsg } from "$lib/messages/messages.svelte";
 import { view } from "$lib/navigation/view.svelte";
 import * as weft from "$lib/transport/weft";
@@ -64,7 +64,7 @@ export const threadsHandlers: HandlerMap = {
 };
 
 // ---- §9.4 thread actions (ThreadPanel / ThreadsModal / message row) ----
-const activeChannel = () => (view.active ? channels[view.active] : undefined);
+const activeChannel = () => (view.active ? channelStore.channels[view.active] : undefined);
 
 // How many loaded replies a root has (its thread size), for the indicator.
 export const threadCount = (msgid?: string): number => {

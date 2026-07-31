@@ -7,7 +7,7 @@ import * as weft from "$lib/transport/weft";
 import * as media from "$lib/media/media";
 import type { Msg } from "$lib/types";
 import { store } from "$lib/store/store.svelte";
-import { Channel, channels, ensureChannel, nsOf, chanShort, markRead, cacheNsCats, persistDms, restoreDms } from "$lib/channels/channel.svelte";
+import { channelStore, Channel, nsOf } from "$lib/channels/channel.svelte";
 import { mkMsg, applyReaction, pinsHandlers } from "$lib/messages/messages.svelte";
 import { rosterFetchTarget } from "$lib/namespaces/server.svelte";
 import { federationHandlers } from "$lib/federation/federation.svelte";
@@ -24,8 +24,8 @@ import { moderationHandlers } from "$lib/moderation/moderation";
 import { channelHandlers } from "$lib/sync/channel-handlers";
 import type { HandlerMap } from "$lib/sync/handler-map";
 import { goHome } from "$lib/navigation/navigation";
-import { ensureCapsAt, ensureCaps, mentionsMe } from "$lib/session/session.svelte";
-import { rolesByScope, roleScopeOf, fedRolesFetched, fetchMemberRoles, roleBuf, roleFetchQueue, grantBuf, grantFetchQueue } from "$lib/roles/roles.svelte";
+
+import { roleScopeOf, roleStore } from "$lib/roles/roles.svelte";
 import { cf, emailNudgeKey } from "$lib/session/connect.svelte";
 import { conn, attemptReconnect, HOMESERVER_KEY, SAVED_KEY, syncCursorKey, loadSyncCursor, syncState } from "$lib/connection/connection.svelte";
 import { ui } from "$lib/ui/ui.svelte";
@@ -33,7 +33,7 @@ import * as md from "$lib/rendering/markdown";
 import { toast, confirmSuccess } from "$lib/notifications/toasts.svelte";
 import { msgEpoch, msgTime, retentionOf } from "$lib/rendering/time";
 import { notifLevel, isMuted } from "$lib/notifications/notif";
-import { queryProfile } from "$lib/profile/profile.svelte";
+import { profileStore } from "$lib/profile/profile.svelte";
 import { initVoice, voice } from "$lib/voice/voice.svelte";
 
 // View state, mirrored from the URL exactly as the layout derives it (so the
@@ -44,7 +44,7 @@ const network = $derived(store.session.network);
 const active = $derived(view.active);
 const activeServer = $derived(view.activeServer);
 const homeView = $derived(view.homeView);
-const activeChannel = $derived(active ? channels[active] : undefined);
+const activeChannel = $derived(active ? channelStore.channels[active] : undefined);
 const myStatus = $derived(store.session.myStatus);
 
 // Namespaces we've auto-joined this session (dedup for zero-join auto-subscribe).
@@ -77,7 +77,7 @@ export function loadHistory(target: string, initial: boolean) {
     return;
   hist.loading = target;
   histByTarget[target] = [];
-  const before = initial ? undefined : oldestMsgid(channels[target]);
+  const before = initial ? undefined : oldestMsgid(channelStore.channels[target]);
   weft.history(target, before).catch(() => {
     hist.loading = null; // don't wedge paging if the fetch never lands
   });
@@ -118,9 +118,9 @@ export function handle(e: weft.WeftEvent) {
       cf.authError = "";
       ui.reconnecting = false;
       conn.reconnectAttempts = 0;
-      ensureCapsAt(account, "*"); // learn operator status (federation gating)
+      store.session.ensureCapsAt(account, "*"); // learn operator status (federation gating)
       initVoice(account); // §16 wire the voice controller to the event stream
-      queryProfile(account); // §10.3 load our own profile
+      profileStore.queryProfile(account); // §10.3 load our own profile
       // §10.5 (re)load our verification claims. Reset the cache + the "loaded"
       // gate so a reconnect re-evaluates the no-email nudge cleanly; flip the
       // gate a beat later, once the streamed claims have had time to land.
@@ -139,7 +139,7 @@ export function handle(e: weft.WeftEvent) {
       store.social.groups.clear();
       weft.listFriends().catch(() => {}); // social layer: load friends + requests
       weft.listGroups().catch(() => {}); // and group DMs
-      restoreDms(); // re-open the 1:1 DMs from last session (history loads on click)
+      channelStore.restoreDms(); // re-open the 1:1 DMs from last session (history loads on click)
       // Clear any half-finished history load from before a reconnect — its
       // BATCH will never arrive, so a stale guard would block every new load.
       hist.loading = null;
@@ -221,7 +221,7 @@ export function handle(e: weft.WeftEvent) {
       // there carries no user-facing meaning, so leave the screen untouched.
       break;
     case "policy":
-      ensureChannel(e.channel).retention = retentionOf(e.policy);
+      channelStore.ensure(e.channel).retention = retentionOf(e.policy);
       confirmSuccess(`policy:${e.channel}`);
       break;
     case "message": {
@@ -235,7 +235,7 @@ export function handle(e: weft.WeftEvent) {
       // Server-generated system messages (join/part, …) — a persistent line
       // that rides the normal message + history path, rendered Discord-style.
       const who = e.network === network ? e.sender : `${e.sender}@${e.network}`;
-      if (!e.system) queryProfile(who); // §10.3 the sender's avatar + display name
+      if (!e.system) profileStore.queryProfile(who); // §10.3 the sender's avatar + display name
       const systemBody = e.system
         ? e.system === "join"
           ? `${who} joined`
@@ -273,9 +273,9 @@ export function handle(e: weft.WeftEvent) {
       }
       // A DM we haven't got open yet (someone messaged us) → persist it so the
       // conversation survives a reconnect.
-      const newDm = key.startsWith("@") && !channels[key];
-      const ch = ensureChannel(key);
-      if (newDm) persistDms();
+      const newDm = key.startsWith("@") && !channelStore.channels[key];
+      const ch = channelStore.ensure(key);
+      if (newDm) channelStore.persistDms();
       // §3.5/§11.13 optimistic reconcile: our own echoed message carrying our
       // label replaces the pending placeholder we showed on send, rather than
       // adding a duplicate. Works identically for a local send and for one a
@@ -320,15 +320,15 @@ export function handle(e: weft.WeftEvent) {
           const who = `${e.sender}@${e.network}`;
           const rscope = roleScopeOf(key);
           const fk = `${who}|${rscope}`;
-          if (!fedRolesFetched.has(fk)) {
-            fedRolesFetched.add(fk);
-            fetchMemberRoles(who, rscope);
+          if (!roleStore.fedRolesFetched.has(fk)) {
+            roleStore.fedRolesFetched.add(fk);
+            roleStore.fetchMemberRoles(who, rscope);
           }
         } else {
-          ensureCaps(e.sender, key); // for the author badge
+          store.session.ensureCaps(e.sender, key); // for the author badge
         }
       }
-      const pinged = !e.own && mentionsMe(e.body, nsOf(key));
+      const pinged = !e.own && store.session.mentionsMe(e.body, nsOf(key));
       const level = notifLevel(key);
       // A muted scope shows no unread indicator; others tally unread/mentions.
       if (!e.own && key !== active && level !== "nothing") {
@@ -343,7 +343,7 @@ export function handle(e: weft.WeftEvent) {
         const who = e.network !== network ? `${e.sender}@${e.network}` : e.sender;
         if (notify)
           weft.notify(
-            dm ? `DM from ${who}` : `${who} in ${chanShort(key)}`,
+            dm ? `DM from ${who}` : `${who} in ${channelStore.short(key)}`,
             e.body.slice(0, 140),
           );
       }
@@ -351,9 +351,9 @@ export function handle(e: weft.WeftEvent) {
     }
     case "marked": {
       // Read-marker sync from another device (§9.7).
-      const ch = channels[e.channel];
+      const ch = channelStore.channels[e.channel];
       if (ch) ch.lastRead = e.msgid;
-      markRead(e.channel);
+      channelStore.markRead(e.channel);
       break;
     }
     case "unread-counts": {
@@ -368,7 +368,7 @@ export function handle(e: weft.WeftEvent) {
       // a phantom rail tile (raw ULID name, NO-SUCH-TARGET on click). Real
       // channels get their count from SYNC, which re-sends UNREAD-COUNTS right
       // after each CHANNEL-LAYOUT — so guarding here loses nothing.
-      const ch = channels[e.channel];
+      const ch = channelStore.channels[e.channel];
       if (ch && e.channel !== active && !isMuted(e.channel)) {
         ch.unreadCount = e.unread;
         ch.unread = e.unread > 0;
@@ -407,15 +407,15 @@ export function handle(e: weft.WeftEvent) {
       // otherwise a deleted server would linger in the rail/channel list.
       if (e.owner === null && e.description === "deleted") {
         store.servers.delete(e.id);
-        for (const name of Object.keys(channels)) {
-          if (name.startsWith("#") && nsOf(name) === e.id) delete channels[name];
+        for (const name of Object.keys(channelStore.channels)) {
+          if (name.startsWith("#") && nsOf(name) === e.id) delete channelStore.channels[name];
         }
         if (activeServer === e.id) goHome();
         break;
       }
       const srv = store.server(e.id);
       srv.applyMeta(e);
-      cacheNsCats(e.id, e.categories ?? []);
+      channelStore.cacheNsCats(e.id, e.categories ?? []);
       // Owning a namespace is membership — the owner can't leave it (only
       // transfer or delete). Record it so a server I just created appears in the
       // rail the instant its NS-META returns, with no channels and no Discover
@@ -427,7 +427,7 @@ export function handle(e: weft.WeftEvent) {
       if (
         e.owner === account &&
         !autoJoinedNs.has(e.id) &&
-        !Object.values(channels).some((c) => c.name.startsWith("#") && nsOf(c.name) === e.id)
+        !Object.values(channelStore.channels).some((c) => c.name.startsWith("#") && nsOf(c.name) === e.id)
       ) {
         autoJoinedNs.add(e.id);
         weft.nsJoin(e.id).catch(() => {});
@@ -442,7 +442,7 @@ export function handle(e: weft.WeftEvent) {
       toast(`Permissions updated for ${e.subject}`, "info");
       break;
     case "typing":
-      if (e.user !== account) ensureChannel(e.channel).setTyping(e.user, e.state === "start");
+      if (e.user !== account) channelStore.ensure(e.channel).setTyping(e.user, e.state === "start");
       break;
     case "reaction": {
       // Live increment/decrement (§7). During a batch the target may still
@@ -491,26 +491,26 @@ export function handle(e: weft.WeftEvent) {
       // GRANTS batch (`gr…`) — channel-permission member overrides. Checked
       // before the `r…` role branch (neither prefix overlaps: "gr" ≠ "r").
       if (currentBatchId.startsWith("gr")) {
-        const scope = grantFetchQueue.shift();
-        // Store a COPY — `grantBuf` is a reused module buffer we clear next line.
-        if (scope) store.grants.set(scope, grantBuf.slice());
-        grantBuf.length = 0;
+        const scope = roleStore.grantFetchQueue.shift();
+        // Store a COPY — `roleStore.grantBuf` is a reused module buffer we clear next line.
+        if (scope) store.grants.set(scope, roleStore.grantBuf.slice());
+        roleStore.grantBuf.length = 0;
         currentBatchId = "";
         break;
       }
       if (currentBatchId.startsWith("r")) {
-        const scope = roleFetchQueue.shift();
+        const scope = roleStore.roleFetchQueue.shift();
         // Keep roles in position order (server sorts, but be safe).
-        roleBuf.sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
+        roleStore.roleBuf.sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
         if (scope) {
           // Single source per scope: ns roles on the Server, others by-scope. Store
-          // a COPY — `roleBuf` is a reused module buffer cleared just below (else the
+          // a COPY — `roleStore.roleBuf` is a reused module buffer cleared just below (else the
           // clear would empty the very array we just assigned).
-          if (scope.startsWith("ns:")) store.server(scope.slice(3)).roles = roleBuf.slice();
-          else rolesByScope[scope] = roleBuf.slice();
+          if (scope.startsWith("ns:")) store.server(scope.slice(3)).roles = roleStore.roleBuf.slice();
+          else roleStore.rolesByScope[scope] = roleStore.roleBuf.slice();
           md.clearMdCache(); // role names/colors feed mention rendering
         }
-        roleBuf.length = 0;
+        roleStore.roleBuf.length = 0;
         currentBatchId = "";
         break;
       }
@@ -528,7 +528,7 @@ export function handle(e: weft.WeftEvent) {
         break;
       }
       if (store.pins.loadingChannel) {
-        const ch = channels[store.pins.loadingChannel];
+        const ch = channelStore.channels[store.pins.loadingChannel];
         if (ch) ch.pinnedIds = store.pins.buf.map((m) => m.msgid).filter(Boolean) as string[];
         store.pins.list = store.pins.buf;
         store.pins.buf = [];
@@ -560,7 +560,7 @@ export function handle(e: weft.WeftEvent) {
       for (const t of targets) {
         const buf = histByTarget[t] ?? [];
         delete histByTarget[t];
-        const ch = ensureChannel(t);
+        const ch = channelStore.ensure(t);
         const seen = new Set(ch.messages.map((m) => m.msgid).filter(Boolean));
         const older = buf.filter((m) => !m.msgid || !seen.has(m.msgid));
         ch.messages = [...older, ...ch.messages];
@@ -575,7 +575,7 @@ export function handle(e: weft.WeftEvent) {
       // flight, its initial load was single-flight-blocked — kick it now. (The
       // channel's own MessageList positions itself once its page lands; paging
       // older needs no scroll adjustment — the column-reverse bottom is anchored.)
-      const cur = channels[active];
+      const cur = channelStore.channels[active];
       if (active !== requested && cur && !cur.voice && !cur.historyLoaded) {
         loadHistory(active, true);
       }
@@ -583,13 +583,13 @@ export function handle(e: weft.WeftEvent) {
     }
     case "deleted": {
       // §7 tombstone — drop the message so it doesn't linger.
-      const ch = channels[e.target];
+      const ch = channelStore.channels[e.target];
       if (ch) ch.messages = ch.messages.filter((m) => m.msgid !== e.msgid);
       break;
     }
     case "edited": {
       // Update the original message in place (§7 edit-of).
-      const m = channels[e.target]?.messages.find((x) => x.msgid === e.edit_of);
+      const m = channelStore.channels[e.target]?.messages.find((x) => x.msgid === e.edit_of);
       if (m) {
         m.body = e.body;
         m.edited = true;
@@ -605,7 +605,7 @@ export function handle(e: weft.WeftEvent) {
 export function findMsg(target: string, msgid: string): Msg | undefined {
   return (
     histByTarget[target]?.find((m) => m.msgid === msgid) ??
-    channels[target]?.messages.find((m) => m.msgid === msgid)
+    channelStore.channels[target]?.messages.find((m) => m.msgid === msgid)
   );
 }
 

@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { roster, friendLocalAccount } from "$lib/social/social.svelte";
-  import { friendLabel, peerOf } from "$lib/profile/profile.svelte";
+  import { store } from "$lib/store/store.svelte";
+  import { roster } from "$lib/social/social.svelte";
+  import { peerOf, profileStore } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -32,7 +33,7 @@
     else next.add(u);
     picked = next;
   }
-  const avatarAccount = (u: string) => friendLocalAccount(u) ?? peerOf(u);
+  const avatarAccount = (u: string) => store.social.friendLocalAccount(u) ?? peerOf(u);
   // A seeded group needs ≥1 more; a seedless one needs ≥2 friends to be a group.
   const minPick = $derived(hasSeed ? 1 : 2);
   const total = $derived(picked.size + (hasSeed ? 1 : 0));
@@ -54,7 +55,7 @@
   </div>
   <p class="ng-sub">
     {#if hasSeed}
-      Add friends to a group with <strong>{friendLabel(seed)}</strong>.
+      Add friends to a group with <strong>{profileStore.friendLabel(seed)}</strong>.
     {:else}
       Pick friends to start a group DM.
     {/if}
@@ -70,7 +71,7 @@
         onclick={() => toggle(u)}
       >
         <span class="avatar sm"><Avatar account={avatarAccount(u)} /></span>
-        <span class="ng-name">{friendLabel(u)}</span>
+        <span class="ng-name">{profileStore.friendLabel(u)}</span>
         <span class="ng-check" class:on={picked.has(u)} aria-hidden="true">
           {#if picked.has(u)}<svg width="11" height="11" viewBox="0 0 12 12" fill="none"><polyline points="2 6 5 9 10 3" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>{/if}
         </span>

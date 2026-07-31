@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { revokeInvite, createInvite, inviteLinkFor } from "$lib/invites/invites.svelte";
+  
   import { store } from "$lib/store/store.svelte";
-  import { displayName } from "$lib/profile/profile.svelte";
+  import { profileStore } from "$lib/profile/profile.svelte";
   import { getApp } from "$lib/ui/context";
   const app = getApp();
 
@@ -29,12 +29,12 @@
   {#each store.invites.list as inv (inv.invite_id)}
     <div class="invite-card">
       <div class="invite-main">
-        <button class="invite-code" title="Copy invite link" onclick={() => copy(inviteLinkFor(inv))}>
+        <button class="invite-code" title="Copy invite link" onclick={() => copy(store.invites.inviteLinkFor(inv))}>
           {inv.invite_id}
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
         </button>
         <div class="invite-meta">
-          <span>by <b>{displayName(inv.creator)}</b></span>
+          <span>by <b>{profileStore.displayName(inv.creator)}</b></span>
           <span>·</span>
           <span class="uses"><b>{inv.used}</b> {inv.used === 1 ? "use" : "uses"}</span>
           <span>·</span>
@@ -43,7 +43,7 @@
           <span>expires {expiryLabel(inv.expiry)}</span>
         </div>
       </div>
-      <button class="btn-danger" onclick={() => revokeInvite(inv.invite_id)}>Revoke</button>
+      <button class="btn-danger" onclick={() => store.invites.revokeInvite(inv.invite_id)}>Revoke</button>
     </div>
   {:else}
     <div class="empty-hint">No active invites for this scope.</div>
@@ -52,7 +52,7 @@
 
 {#if showCreate}
   <div class="invite-foot">
-    <button class="btn-primary" onclick={createInvite}>Create Invite</button>
+    <button class="btn-primary" onclick={() => store.invites.createInvite()}>Create Invite</button>
   </div>
 {/if}
 

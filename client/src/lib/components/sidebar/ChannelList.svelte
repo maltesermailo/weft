@@ -3,7 +3,7 @@
   import { open, openVoice } from "$lib/navigation/navigation";
   import { chanCtx, catCtx, listCtx } from "$lib/ui/ctxmenu.svelte";
   import { ui } from "$lib/ui/ui.svelte";
-  import { moveChannel, moveCategory } from "$lib/channels/channel.svelte";
+  import { channelStore } from "$lib/channels/channel.svelte";
   import { getApp } from "$lib/ui/context";
   import { voice, voiceRosters } from "$lib/voice/voice.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -22,7 +22,7 @@
       class:drop-target={ui.draggingChan}
       role="group"
       ondragover={(e) => ui.draggingChan && e.preventDefault()}
-      ondrop={(e) => { e.preventDefault(); if (ui.draggingChan) moveChannel(ui.draggingChan, group.category); ui.draggingChan = null; }}>
+      ondrop={(e) => { e.preventDefault(); if (ui.draggingChan) channelStore.moveChannel(ui.draggingChan, group.category); ui.draggingChan = null; }}>
       {#if group.category !== ""}
         <div
           class="retention-label cat-header"
@@ -37,7 +37,7 @@
           }}
           ondragend={() => { ui.draggingCat = null; ui.catDrop = null; }}
           ondragover={(e) => { if (!ui.draggingCat) return; e.preventDefault(); e.stopPropagation(); ui.catDrop = group.category; }}
-          ondrop={(e) => { if (!ui.draggingCat) return; e.preventDefault(); e.stopPropagation(); moveCategory(ui.draggingCat, group.category); ui.draggingCat = null; ui.catDrop = null; }}
+          ondrop={(e) => { if (!ui.draggingCat) return; e.preventDefault(); e.stopPropagation(); channelStore.moveCategory(ui.draggingCat, group.category); ui.draggingCat = null; ui.catDrop = null; }}
           oncontextmenu={(e) => catCtx(e, group.category)}>
           <span>{group.category}</span>
           <button class="cat-add" title="Create channel" aria-label="Create channel in {group.category}" onclick={() => app.openCreateChannelInCat(group.category)}>+</button>
@@ -59,7 +59,7 @@
           ondragstart={(e) => { ui.draggingChan = ch.name; e.dataTransfer?.setData("text/plain", ch.name); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}
           ondragend={() => { ui.draggingChan = null; ui.dropTarget = null; }}
           ondragover={(e) => { if (!ui.draggingChan || ui.draggingChan === ch.name) return; e.preventDefault(); const r = e.currentTarget.getBoundingClientRect(); ui.dropTarget = { name: ch.name, after: e.clientY > r.top + r.height / 2 }; }}
-          ondrop={(e) => { e.preventDefault(); e.stopPropagation(); if (ui.draggingChan) moveChannel(ui.draggingChan, ch.category || "", ch.name, ui.dropTarget?.after ?? false); ui.draggingChan = null; ui.dropTarget = null; }}
+          ondrop={(e) => { e.preventDefault(); e.stopPropagation(); if (ui.draggingChan) channelStore.moveChannel(ui.draggingChan, ch.category || "", ch.name, ui.dropTarget?.after ?? false); ui.draggingChan = null; ui.dropTarget = null; }}
           onclick={() => (ch.voice ? openVoice(ch.name) : open(ch.name))}
           oncontextmenu={(e) => chanCtx(e, ch)}>
           {#if ch.voice}

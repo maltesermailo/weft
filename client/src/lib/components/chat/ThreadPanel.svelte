@@ -1,11 +1,11 @@
 <script lang="ts">
   import { msgCtx } from "$lib/ui/ctxmenu.svelte";
   import { threadCount, closeThread, sendThread, threadNameFor, renameThread } from "$lib/messages/threads.svelte";
-  import { isStaff } from "$lib/session/session.svelte";
-import { nameColor } from "$lib/roles/roles.svelte";
+  
+import { roleStore } from "$lib/roles/roles.svelte";
   import { renderMd } from "$lib/rendering/mdrender.svelte";
   import { store } from "$lib/store/store.svelte";
-  import { displayName, openProfile } from "$lib/profile/profile.svelte";
+  import { profileStore } from "$lib/profile/profile.svelte";
   import { getApp } from "$lib/ui/context";
   import Avatar from "$lib/components/Avatar.svelte";
   import Attachment from "$lib/components/chat/Attachment.svelte";
@@ -75,16 +75,16 @@ import { nameColor } from "$lib/roles/roles.svelte";
             <div class="thread-meta">
               {#if m.net}
                 <span class="author foreign" title="from {m.net}"
-                  >{displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></span
+                  >{profileStore.displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></span
                 >
               {:else}
                 <button
                   class="author author-btn"
-                  style={nameColor(m.author) ? `color:${nameColor(m.author)}` : ""}
-                  onclick={(e) => openProfile(m.author, e)}>{displayName(m.author)}</button
+                  style={roleStore.nameColor(m.author) ? `color:${roleStore.nameColor(m.author)}` : ""}
+                  onclick={(e) => profileStore.openProfile(m.author, e)}>{profileStore.displayName(m.author)}</button
                 >
               {/if}
-              {#if !m.net && isStaff(m.author)}<span class="cap-badge staff">staff</span>{/if}
+              {#if !m.net && store.session.isStaff(m.author)}<span class="cap-badge staff">staff</span>{/if}
               {#if m.own}<span class="cap-badge owner">you</span>{/if}
               <span class="time">{m.time}</span>
             </div>

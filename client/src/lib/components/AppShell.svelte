@@ -19,7 +19,7 @@
   import { toasts } from "$lib/notifications/toasts.svelte";
   import { ctxMenu } from "$lib/ui/ctxmenu.svelte";
   import { voiceUI } from "$lib/voice/voiceui.svelte";
-  import { channels, chanShort } from "$lib/channels/channel.svelte";
+  import { channelStore } from "$lib/channels/channel.svelte";
   import { peerOf } from "$lib/profile/profile.svelte";
   import { openDm } from "$lib/navigation/navigation";
   import { chanDraft, catDraft } from "$lib/channels/channelcreate.svelte";
@@ -56,7 +56,7 @@
   let switcherQuery = $state("");
   const switcherResults = $derived.by(() => {
     const q = switcherQuery.toLowerCase().replace(/^[#@]/, "");
-    return Object.values(channels)
+    return Object.values(channelStore.channels)
       .filter((c) => c.name.toLowerCase().includes(q))
       .sort((a, b) => a.name.localeCompare(b.name))
       .slice(0, 25);
@@ -165,7 +165,7 @@
     bind:query={switcherQuery}
     results={switcherResults.map((c) => ({
       name: c.name,
-      label: c.name.startsWith("@") ? peerOf(c.name) : chanShort(c.name),
+      label: c.name.startsWith("@") ? peerOf(c.name) : channelStore.short(c.name),
       sigil: c.name.startsWith("@") ? "@" : "#",
       unread: c.unread,
     }))}

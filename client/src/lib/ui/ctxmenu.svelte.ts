@@ -10,21 +10,21 @@ import { ui } from "$lib/ui/ui.svelte";
 import { store } from "$lib/store/store.svelte";
 import * as weft from "$lib/transport/weft";
 import { toast } from "$lib/notifications/toasts.svelte";
-import { channels, chanShort, markRead, scopesFor } from "$lib/channels/channel.svelte";
+import { channelStore, scopesFor } from "$lib/channels/channel.svelte";
 import { isMuted, setNotifLevel, scopeKeyOf } from "$lib/notifications/notif";
-import { openInviteCreate, openInvites } from "$lib/invites/invites.svelte";
-import { canModerate, canModDelete } from "$lib/session/session.svelte";
+
+
 import { openChanPerms } from "$lib/roles/chanperms";
 import { appConfirm } from "$lib/ui/confirm.svelte";
 import { openThread } from "$lib/messages/threads.svelte";
 import { togglePin, openReport, startEdit, doDelete } from "$lib/messages/composer.svelte";
-import { openProfile, openFullProfile, openNickDialog, peerOf } from "$lib/profile/profile.svelte";
-import { qualify, acceptFriend, removeFriend, callUser, leaveGroup } from "$lib/social/social.svelte";
+import { peerOf, profileStore } from "$lib/profile/profile.svelte";
+
 import { openDm, closeDm, dmKeyFor } from "$lib/navigation/navigation";
 import { moderate, banScope, liftMod, denyList } from "$lib/moderation/moderation";
 import { openCreateChannel, openCreateChannelInCat, openCreateCategory, deleteCategory } from "$lib/channels/channelcreate.svelte";
 
-const activeChannel = () => channels[view.active];
+const activeChannel = () => channelStore.channels[view.active];
 
 let current = $state<{ x: number; y: number; items: CtxItem[] } | null>(null);
 export const ctxMenu = {
@@ -45,7 +45,7 @@ export function openCtx(e: MouseEvent, items: CtxItem[]): void {
 
 export function msgCtx(e: MouseEvent, m: Msg): void {
   if (!m.msgid) return; // nothing actionable without a real msgid
-  const mod = canModDelete();
+  const mod = store.session.canModDelete();
   // System (join/part) lines carry a msgid and are deletable — by the person
   // they're about (its author) or a moderator with delete-any. No other actions.
   if (m.system) {
@@ -80,18 +80,18 @@ export function msgCtx(e: MouseEvent, m: Msg): void {
 export function chanCtx(e: MouseEvent, ch: Channel): void {
   const muted = isMuted(ch.name);
   const items: CtxItem[] = [
-    { header: `#${chanShort(ch.name)}` },
-    { label: "Mark as read", icon: "markread", run: () => markRead(ch.name) },
+    { header: `#${channelStore.short(ch.name)}` },
+    { label: "Mark as read", icon: "markread", run: () => channelStore.markRead(ch.name) },
     {
       label: muted ? "Unmute channel" : "Mute channel",
       icon: muted ? "unmute" : "mute",
       run: () => setNotifLevel(scopeKeyOf(ch.name), muted ? "mentions" : "nothing"),
     },
     { label: "Copy name", icon: "copy", run: () => navigator.clipboard?.writeText(ch.name) },
-    { label: "Create invite", icon: "invite", run: () => openInviteCreate(scopesFor()[0]) },
+    { label: "Create invite", icon: "invite", run: () => store.invites.openInviteCreate(scopesFor()[0]) },
   ];
   // Channel administration is a moderator surface — hidden from non-moderators.
-  if (canModerate(ch.name)) {
+  if (store.session.canModerate(ch.name)) {
     items.push(
       { divider: true },
       { header: "Mod Menu", mod: true },
@@ -102,7 +102,7 @@ export function chanCtx(e: MouseEvent, ch: Channel): void {
         icon: "delete",
         danger: true,
         run: async () => {
-          const name = chanShort(ch.name);
+          const name = channelStore.short(ch.name);
           if (!(await appConfirm(`Delete #${name}? This can't be undone.`, "Delete"))) return;
           weft.channelDelete(ch.name).catch((err) => toast(String(err), "error"));
         },
@@ -115,25 +115,25 @@ export function chanCtx(e: MouseEvent, ch: Channel): void {
 // The right-click menu for any user, anywhere (member list, friends, DMs).
 export function userCtx(e: MouseEvent, name: string): void {
   if (peerOf(name) === store.session.account) return; // no menu on yourself
-  const ref = qualify(name);
+  const ref = store.social.qualify(name);
   const rel = store.social.friends.get(ref);
   const items: CtxItem[] = [
-    { label: "Open profile", icon: "profile", run: () => openFullProfile(name) },
+    { label: "Open profile", icon: "profile", run: () => profileStore.openFullProfile(name) },
     view.active === dmKeyFor(name)
       ? { label: "Close DM", icon: "close", run: () => closeDm(name) }
       : { label: "Message", icon: "message", run: () => openDm(name) },
   ];
   // Calling is a friends-only action.
-  if (rel === "friends") items.push({ label: "Call", icon: "call", run: () => callUser(ref) });
+  if (rel === "friends") items.push({ label: "Call", icon: "call", run: () => store.social.callUser(ref) });
   // §10.3 per-namespace nickname — only meaningful inside a server.
-  if (view.activeServer) items.push({ label: "Set nickname", icon: "nick", run: () => openNickDialog(name) });
+  if (view.activeServer) items.push({ label: "Set nickname", icon: "nick", run: () => profileStore.openNickDialog(name) });
 
   if (rel === "friends")
-    items.push({ label: "Remove friend", icon: "removefriend", danger: true, run: () => removeFriend(ref) });
+    items.push({ label: "Remove friend", icon: "removefriend", danger: true, run: () => store.social.removeFriend(ref) });
   else if (rel === "incoming")
-    items.push({ label: "Accept friend request", icon: "accept", run: () => acceptFriend(ref) });
+    items.push({ label: "Accept friend request", icon: "accept", run: () => store.social.acceptFriend(ref) });
   else if (rel === "outgoing")
-    items.push({ label: "Cancel friend request", icon: "cancel", run: () => removeFriend(ref) });
+    items.push({ label: "Cancel friend request", icon: "cancel", run: () => store.social.removeFriend(ref) });
   else
     items.push({
       label: "Add friend",
@@ -144,8 +144,8 @@ export function userCtx(e: MouseEvent, name: string): void {
   // Invite + moderation only make sense on a server member — i.e. viewing a channel.
   if (view.active.startsWith("#")) {
     items.push({ divider: true });
-    items.push({ label: "Invite to server", icon: "invite", run: () => openInvites() });
-    if (canModerate(view.active)) {
+    items.push({ label: "Invite to server", icon: "invite", run: () => store.invites.openInvites() });
+    if (store.session.canModerate(view.active)) {
       items.push({ header: "Mod Menu", mod: true });
       // Mute/ban at the namespace scope (server-wide, in Server Settings → Bans);
       // kick is per-channel (force-parts the active channel).
@@ -160,9 +160,9 @@ export function userCtx(e: MouseEvent, name: string): void {
 // The right-click menu for a group DM (in the DM list).
 export function groupCtx(e: MouseEvent, id: string): void {
   openCtx(e, [
-    { label: "Mark as read", icon: "markread", run: () => markRead(id) },
+    { label: "Mark as read", icon: "markread", run: () => channelStore.markRead(id) },
     { label: "Copy group ID", icon: "copy", run: () => navigator.clipboard?.writeText(id) },
-    { label: "Leave group", icon: "leave", danger: true, run: () => leaveGroup(id) },
+    { label: "Leave group", icon: "leave", danger: true, run: () => store.social.leaveGroup(id) },
   ]);
 }
 
@@ -174,7 +174,7 @@ export function nsMemberCtx(e: MouseEvent, target: string): void {
   const deny = denyList();
   const muted = deny.some((d) => d.account === target && d.kind === "mute");
   const banned = deny.some((d) => d.account === target && d.kind === "ban");
-  const items: CtxItem[] = [{ label: "Open profile", icon: "profile", run: () => openProfile(target) }];
+  const items: CtxItem[] = [{ label: "Open profile", icon: "profile", run: () => profileStore.openProfile(target) }];
 
   if (target !== store.session.account) {
     items.push({ divider: true });

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { netblockAdd, netblockRemove, bridgePropose, bridgeAccept, bridgeSever } from "$lib/federation/federation.svelte";
+  
   import { store } from "$lib/store/store.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
@@ -11,7 +11,7 @@
   function addBlock() {
     const n = nbNetwork.trim();
     if (!n) return;
-    netblockAdd(n, nbReason.trim() || undefined);
+    store.federation.netblockAdd(n, nbReason.trim() || undefined);
     nbNetwork = "";
     nbReason = "";
   }
@@ -24,7 +24,7 @@
   function propose() {
     const p = brPeer.trim();
     if (!p) return;
-    bridgePropose(brScope.trim() || "*", p, brHistory, brMedia, brTyping);
+    store.federation.bridgePropose(brScope.trim() || "*", p, brHistory, brMedia, brTyping);
     brPeer = "";
   }
 </script>
@@ -47,7 +47,7 @@
             <div class="ns-name">{nw}</div>
             <div class="ns-desc">{reason || "blocked"}</div>
           </div>
-          <button class="mini-danger" onclick={() => netblockRemove(nw)}>Unblock</button>
+          <button class="mini-danger" onclick={() => store.federation.netblockRemove(nw)}>Unblock</button>
         </div>
       {:else}
         <div class="empty-hint">No blocked networks.</div>
@@ -69,8 +69,8 @@
             <div class="ns-desc">{m.channels.length} channel(s) · history {m.history} · media {m.media}{m.typing ? " · typing" : ""}</div>
           </div>
           <div class="fed-actions">
-            <button onclick={() => bridgeAccept(m.peer, m.version)}>Accept</button>
-            <button class="mini-danger" onclick={() => bridgeSever(m.peer)}>Sever</button>
+            <button onclick={() => store.federation.bridgeAccept(m.peer, m.version)}>Accept</button>
+            <button class="mini-danger" onclick={() => store.federation.bridgeSever(m.peer)}>Sever</button>
           </div>
         </div>
       {:else}

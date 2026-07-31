@@ -1,6 +1,6 @@
 <script lang="ts">
   import { renderMd } from "$lib/rendering/mdrender.svelte";
-  import { displayName } from "$lib/profile/profile.svelte";
+  import { profileStore } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
   import * as weft from "$lib/transport/weft";
@@ -23,7 +23,7 @@
         <div class="pin-card">
           <div class="avatar sm"><Avatar account={m.author} /></div>
           <div class="pin-body">
-            <div class="pin-meta"><b>{displayName(m.author)}</b> <span class="time">{m.time}</span></div>
+            <div class="pin-meta"><b>{profileStore.displayName(m.author)}</b> <span class="time">{m.time}</span></div>
             <div class="msg-line">{#if m.md}{@html renderMd(m.body)}{:else}{m.body}{/if}</div>
           </div>
           <button class="linkish" title="Unpin" onclick={() => m.msgid && weft.pin(m.msgid, false).catch(() => {})}>unpin</button>
