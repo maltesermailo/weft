@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { renderMd } from "$lib/mdrender.svelte";
   import { displayName } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
@@ -23,7 +24,7 @@
           <div class="avatar sm"><Avatar account={m.author} /></div>
           <div class="pin-body">
             <div class="pin-meta"><b>{displayName(m.author)}</b> <span class="time">{m.time}</span></div>
-            <div class="msg-line">{#if m.md}{@html app.renderMd(m.body)}{:else}{m.body}{/if}</div>
+            <div class="msg-line">{#if m.md}{@html renderMd(m.body)}{:else}{m.body}{/if}</div>
           </div>
           <button class="linkish" title="Unpin" onclick={() => m.msgid && weft.pin(m.msgid, false).catch(() => {})}>unpin</button>
         </div>

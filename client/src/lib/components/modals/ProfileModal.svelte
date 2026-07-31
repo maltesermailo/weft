@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { badgeFor } from "$lib/models/session.svelte";
+  import { store } from "$lib/models/store.svelte";
   import { bioOf, displayName, initials, statusOf } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
@@ -8,10 +10,10 @@
 
   const isSelf = $derived(target === app.account);
   const handle = $derived(target.includes("@") ? target : `${target}@${app.network}`);
-  const status = $derived(isSelf ? app.myStatus : (app.accountOf(target).presence ?? "offline"));
+  const status = $derived(isSelf ? app.myStatus : (store.accountOf(target).presence ?? "offline"));
   const online = $derived(status !== "offline" && status !== "invisible");
   const bio = $derived(bioOf(target));
-  const badge = $derived(app.badgeFor(target, app.active));
+  const badge = $derived(badgeFor(target, app.active));
 
   const servers = $derived(app.mutualServers(target));
   const rel = $derived(app.friendState(target));

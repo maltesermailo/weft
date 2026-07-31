@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { rolesAt, roleById } from "$lib/models/session.svelte";
+  import { store } from "$lib/models/store.svelte";
   import { displayName, initials } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
@@ -50,10 +52,10 @@
   // A member's role pill is keyed by role **id** (v0.13); resolve its color +
   // display name through the scope's definitions.
   function roleColor(id: string): string {
-    return app.roleById(`ns:${app.activeServer}`, id)?.color ?? "#99aab5";
+    return roleById(`ns:${app.activeServer}`, id)?.color ?? "#99aab5";
   }
   function roleName(id: string): string {
-    return app.roleById(`ns:${app.activeServer}`, id)?.name ?? id;
+    return roleById(`ns:${app.activeServer}`, id)?.name ?? id;
   }
   // Join date: "0" means the server had no recorded join time (pre-v0.12 backfill).
   function fmtJoined(ms: number): string {
@@ -61,7 +63,7 @@
     return new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
   }
   // All namespace-scoped roles, for the in-line "add role" picker.
-  const nsRoles = $derived(app.rolesAt(app.nsRoleScope()));
+  const nsRoles = $derived(rolesAt(app.nsRoleScope()));
   // The namespace owner (implicit all-caps holder), surfaced with a crown.
   const ownerAccount = $derived(app.activeNsMeta?.owner ?? null);
   // Which member's add-role popover is open (keyed by `account@network`).
@@ -134,7 +136,7 @@
 
   // Live counts for the Overview stat strip (real data — no placeholders).
   const nsChannelCount = $derived(app.channelGroups.reduce((n, g) => n + g.list.length, 0));
-  const nsRoleCount = $derived(app.rolesAt(app.nsRoleScope()).length);
+  const nsRoleCount = $derived(rolesAt(app.nsRoleScope()).length);
   // §6.2 welcome-channel picker: this namespace's text channels + the current
   // setting (from the ns-meta the server last pushed).
   const nsTextChannels = $derived(app.channelGroups.flatMap((g) => g.list).filter((c) => !c.voice));
@@ -462,7 +464,7 @@
 
         <div class="field-label">Active bridges</div>
         <div class="modal-list">
-          {#each Object.values(app.manifests) as m (m.peer)}
+          {#each Object.values(store.federation.manifests) as m (m.peer)}
             <div class="ns-card">
               <div class="ns-info">
                 <div class="ns-name">{m.peer} <span class="rep-state {m.state}">{m.state}</span> · v{m.version}</div>

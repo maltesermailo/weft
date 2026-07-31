@@ -12,7 +12,7 @@
     loadHistory,
     hist,
   } from "$lib/sync/reducer.svelte";
-  import { clock, msgEpoch, msgTime, dayKey, dayLabel, retentionOf } from "$lib/time";
+  import { clock, msgEpoch } from "$lib/time";
   import { scopeKeyOf, notifLevel, isMuted, serverMuted, notifLevelOf, setNotifLevel } from "$lib/notif";
   import {
     nicks,
@@ -43,10 +43,8 @@
     ensureCapsAt,
     capsResolved,
     ensureCaps,
-    badgeFor,
     roleScopeOf,
     rolesAt,
-    roleById,
     isOwnerAt,
     isStaff,
     rolesOf,
@@ -57,7 +55,6 @@
     createRoleAt,
     deleteRoleAt,
     roleFetchQueue,
-    mentionsMe as sessionMentionsMe,
   } from "$lib/models/session.svelte";
   import {
     Channel,
@@ -80,7 +77,6 @@
   } from "$lib/models/channel.svelte";
   import { Membership } from "$lib/models/membership.svelte";
   import { searchUnicode } from "$lib/shortcodes";
-  import * as md from "$lib/markdown";
   import { installLinkGuard } from "$lib/linkguard.svelte";
   import LinkWarningModal from "$lib/components/modals/LinkWarningModal.svelte";
   import ConnectScreen from "$lib/components/ConnectScreen.svelte";
@@ -584,9 +580,6 @@
   // ---- capability + role reads: `$lib/models/session.svelte` (ensureCapsAt /
   // rolesAt / roleById / rolesOf / isOwnerAt / isStaff / badgeFor / mentionsMe /
   // roleScopeOf); `rolesByScope` / `memberRoles` state live there too. ----
-  const isOperator = $derived(store.session.isOperator);
-  // Mention test defaults `ns` to the active server (the session helper requires it).
-  const mentionsMe = (body: string, ns: string = activeServer) => sessionMentionsMe(body, ns);
 
   // ---- §6.5 named roles: the fetch/batch machinery (queues + fetchRoles) ----
   // Roles arrive in `r…`-id BATCHes; a queue tracks which scope each answers,
@@ -1200,18 +1193,6 @@
     const [acct, net] = user.split("@");
     return net === network ? acct : null;
   }
-  const friendList = $derived(
-    [...store.social.friends]
-      .filter(([, s]) => s === "friends")
-      .map(([u]) => u)
-      .sort((a, b) => friendLabel(a).localeCompare(friendLabel(b))),
-  );
-  const incomingRequests = $derived(
-    [...store.social.friends].filter(([, s]) => s === "incoming").map(([u]) => u).sort(),
-  );
-  const outgoingRequests = $derived(
-    [...store.social.friends].filter(([, s]) => s === "outgoing").map(([u]) => u).sort(),
-  );
   function addFriend() {
     const user = qualify(addFriendInput);
     if (!user || !user.includes("@")) return;
@@ -1248,7 +1229,6 @@
     const others = g.members.filter((m) => m !== me).map((m) => friendLabel(m));
     return others.length ? others.join(", ") : "Group";
   }
-  const groupList = $derived([...store.social.groups.keys()]);
   function createGroup() {
     const members = newGroupInput
       .split(/[,\s]+/)
@@ -1732,13 +1712,6 @@
 
   // ---- markdown (Phase 4 · Tier 1) — rendering lives in `$lib/markdown`; the
   // per-render mention/emoji context (`MdContext`) is built at the ctx boundary. ----
-  const mdContext = (): md.MdContext => ({
-    account,
-    activeServer,
-    pingable: rolesAt(`ns:${activeServer}`).filter((r) => r.pingable),
-    myRoleIds: new Set(memberRoles[`${account}|ns:${activeServer}`] ?? []),
-    emoji: (n) => (activeServer ? store.servers.get(activeServer)?.emoji.get(n) : undefined),
-  });
 
 
   // ---- replies (Phase 4) ----
@@ -2551,9 +2524,6 @@
     get dmList() { return dmList; },
     get activeNsMeta() { return activeNsMeta; },
     // social layer: friends
-    get friendList() { return friendList; },
-    get incomingRequests() { return incomingRequests; },
-    get outgoingRequests() { return outgoingRequests; },
     get addFriendInput() { return addFriendInput; },
     set addFriendInput(v: string) { addFriendInput = v; },
     friendLocalAccount,
@@ -2563,7 +2533,6 @@
     messageFriend,
     openFriends,
     // group DMs
-    get groupList() { return groupList; },
     get newGroupInput() { return newGroupInput; },
     set newGroupInput(v: string) { newGroupInput = v; },
     groupLabel,
@@ -2600,8 +2569,6 @@
       goto(nav.pathFor(name));
     },
     openDiscover,
-    get channels() { return channels; },
-    accountOf: (handle: string) => store.accountOf(handle),
     isMuted,
     serverMuted,
     notifLevelOf,
@@ -2611,7 +2578,6 @@
     get notifSettingsOpen() { return notifSettingsOpen; },
     set notifSettingsOpen(v: boolean) { notifSettingsOpen = v; },
     openNotifSettings,
-    get discoverList() { return [...store.servers.values()].filter((s) => s.metaLoaded); },
     get discoverCursor() { return ui.discoverCursor; },
     scopesFor,
     markRead,
@@ -2626,7 +2592,6 @@
     titleOf,
     isNsMember: (nsId: string) => store.servers.get(nsId)?.joined ?? false,
     nsOf,
-    badgeFor,
     serverUnread,
     serverMention,
     serverMentionCount,
@@ -2652,7 +2617,6 @@
     openServerProfile,
     mintInvite,
     // invites menu (Discord-style) — state on `store.invites`
-    get invitesList() { return store.invites.list; },
     get invitesScope() { return store.invites.scope; },
     openInvites,
     loadNsInvites,
@@ -2687,7 +2651,6 @@
     // search + pins panels own their state on `store.search` / `store.pins`.
     openSearch,
     // threads — state on `store.threads`
-    get threadRoot() { return store.threads.root; },
     get threadMessages() { return store.threads.messages; },
     get threadComposer() { return store.threads.composer; },
     set threadComposer(v: string) { store.threads.composer = v; },
@@ -2733,10 +2696,6 @@
     toggleReaction,
     jumpTo,
     msgCtx,
-    renderMd: (t: string) => md.renderMd(t, mdContext()),
-    mentionsMe,
-    dayKey,
-    dayLabel,
     get newDividerKey() { return newDividerKey; },
     // composer
     get composer() { return composer; },
@@ -2762,9 +2721,6 @@
     set mentionIndex(v: number) { mentionIndex = v; },
     get typingLabel() { return typingLabel; },
     // roles (ProfileCard)
-    rolesAt,
-    rolesOf,
-    roleById,
     ensureMemberRoles,
     ensureRoles,
     nsMembers: (ns: string) => store.servers.get(ns)?.members ?? [],
@@ -2796,9 +2752,6 @@
     toggleRestricted,
     toggleViewGated,
     // federation (operator)
-    get isOperator() { return isOperator; },
-    get netblocks() { return store.federation.netblocks; },
-    get manifests() { return store.federation.manifests; },
     openFederation,
     refreshNetblocks,
     netblockAdd,

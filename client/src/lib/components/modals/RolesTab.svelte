@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rolesAt, rolesOf } from "$lib/models/session.svelte";
   import { displayName } from "$lib/profile.svelte";
   // §6.5 roles tab, redesigned as a two-pane editor (design/server-settings.html):
   // a searchable, drag-orderable role list on the left; a tabbed editor
@@ -16,7 +17,7 @@
   // The implicit @everyone role is edited as its own selection, not dragged,
   // renamed, colored or deleted like a normal role.
   const roles = $derived(
-    app.rolesAt(app.nsRoleScope()).filter((r) => r.name !== EVERYONE_ROLE),
+    rolesAt(app.nsRoleScope()).filter((r) => r.name !== EVERYONE_ROLE),
   );
 
   const sameCaps = (a: string[], b: string[]) =>
@@ -64,7 +65,7 @@
     editing
       ? nsMembers.filter(
           (n) =>
-            app.rolesOf(n, scope).some((r) => r.id === editing!.id) &&
+            rolesOf(n, scope).some((r) => r.id === editing!.id) &&
             (displayName(n).toLowerCase().includes(memberSearch.toLowerCase()) ||
               n.toLowerCase().includes(memberSearch.toLowerCase())),
         )

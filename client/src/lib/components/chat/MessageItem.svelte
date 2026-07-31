@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { view } from "$lib/view.svelte";
+  import { renderMd } from "$lib/mdrender.svelte";
+  import { rolesOf, mentionsMe } from "$lib/models/session.svelte";
   import { displayName } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
   import { autofocus } from "$lib/actions";
@@ -23,7 +26,7 @@
 {#if m.system}
   <div class="msg-group"><div style="width:34px;flex-shrink:0"></div><div class="msg-body"><div class="msg-line system">{m.body}</div></div></div>
 {:else}
-  <div class="msg-group" class:mention-hit={!m.own && app.mentionsMe(m.body)} class:pending={m.pending} id="msg-{m.key}" role="article" oncontextmenu={(e) => app.msgCtx(e, m)}>
+  <div class="msg-group" class:mention-hit={!m.own && mentionsMe(m.body, view.activeServer)} class:pending={m.pending} id="msg-{m.key}" role="article" oncontextmenu={(e) => app.msgCtx(e, m)}>
     <!-- §10.3 avatar: local by bare handle, federated by `author@network`. -->
     <div class="avatar"><Avatar account={m.net ? `${m.author}@${m.net}` : m.author} /></div>
     <div class="msg-body">
@@ -39,7 +42,7 @@
           <!-- Foreign sender: fully qualified, and no local profile to open. -->
           <span class="author foreign" title="from {m.net}">{displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></span>
           <!-- §11.11 recognition: a federated user's role(s) held on this network. -->
-          {#each app.rolesOf(`${m.author}@${m.net}`, app.roleScopeOf(app.active)) as r (r.name)}
+          {#each rolesOf(`${m.author}@${m.net}`, app.roleScopeOf(app.active)) as r (r.name)}
             <span class="role-pill" style="--role:{r.color}"><span class="role-dot"></span>{r.name}</span>
           {/each}
         {:else}
@@ -57,7 +60,7 @@
         <textarea class="edit-box" rows="1" bind:value={app.editDraft} onkeydown={(e) => app.editKey(e, m)} use:autofocus></textarea>
         <div class="edit-hint">escape to <button class="linkish" onclick={app.cancelEdit}>cancel</button> · enter to <button class="linkish" onclick={() => app.saveEdit(m)}>save</button></div>
       {:else}
-        <div class="msg-line">{#if m.md}{@html app.renderMd(m.body)}{:else}{m.body}{/if}{#if m.edited}<span class="edited-tag" title="edited">(edited)</span>{/if}</div>
+        <div class="msg-line">{#if m.md}{@html renderMd(m.body)}{:else}{m.body}{/if}{#if m.edited}<span class="edited-tag" title="edited">(edited)</span>{/if}</div>
       {/if}
       {#if m.attachments?.length}
         <div class="attachments">

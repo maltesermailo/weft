@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { rolesAt } from "$lib/models/session.svelte";
+  import { channels } from "$lib/models/channel.svelte";
   import { displayName } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { untrack } from "svelte";
@@ -27,11 +29,11 @@
 
   // The namespace's roles = the override picker's role source (@everyone aside).
   const nsRoles = $derived(
-    app.rolesAt(app.chanNsScope()).filter((r) => r.name !== EVERYONE_ROLE),
+    rolesAt(app.chanNsScope()).filter((r) => r.name !== EVERYONE_ROLE),
   );
   // Role overrides live as channel-scoped roles; merge with just-added ones.
   const roleTargets = $derived.by(() => {
-    const present = app.rolesAt(channel)
+    const present = rolesAt(channel)
       .filter((r) => r.name !== EVERYONE_ROLE)
       .map((r) => r.name);
     return [...new Set([...present, ...pendingRoles])].map(
@@ -117,9 +119,9 @@
     if (selected.kind === "member" && selected.account === account) selected = { kind: "everyone" };
   }
   const roleColor = (name: string) =>
-    app.rolesAt(app.chanNsScope()).find((r) => r.name === name)?.color ?? "#99aab5";
+    rolesAt(app.chanNsScope()).find((r) => r.name === name)?.color ?? "#99aab5";
 
-  const rec = $derived(app.channels[channel]);
+  const rec = $derived(channels[channel]);
   const ns = $derived(app.nsOf(channel)); // "" for a top-level channel
   // Re-seed the editable fields when the channel identity changes (including a
   // rename, which swaps the prop) — but untrack the record reads so unrelated
@@ -130,7 +132,7 @@
     channel;
     untrack(() => {
       slug = app.chanShort(channel);
-      topic = app.channels[channel]?.topic ?? "";
+      topic = channels[channel]?.topic ?? "";
     });
   });
 

@@ -9,6 +9,30 @@ import { friendLabel } from "$lib/profile.svelte";
 import { connectCallMedia, disconnectCallMedia } from "$lib/callmedia.svelte";
 import { view } from "$lib/view.svelte";
 
+// Friend/group roster views, derived from the interned friends+groups maps.
+// Exposed as a getter object (Svelte 5 can't export a `$derived` binding) so
+// components read the live value directly instead of routing through AppCtx.
+const _friends = $derived(
+  [...store.social.friends]
+    .filter(([, s]) => s === "friends")
+    .map(([u]) => u)
+    .sort((a, b) => friendLabel(a).localeCompare(friendLabel(b))),
+);
+const _incoming = $derived(
+  [...store.social.friends].filter(([, s]) => s === "incoming").map(([u]) => u).sort(),
+);
+const _outgoing = $derived(
+  [...store.social.friends].filter(([, s]) => s === "outgoing").map(([u]) => u).sort(),
+);
+const _groups = $derived([...store.social.groups.keys()]);
+
+export const roster = {
+  get friends() { return _friends; },
+  get incoming() { return _incoming; },
+  get outgoing() { return _outgoing; },
+  get groups() { return _groups; },
+};
+
 /// A live 1:1 call: the peer userref + its LiveKit room and state.
 export interface ActiveCall {
   peer: string;

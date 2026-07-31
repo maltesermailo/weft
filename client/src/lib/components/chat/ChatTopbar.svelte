@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { store } from "$lib/models/store.svelte";
   import { dotClass, peerOf } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
   const app = getApp();
@@ -16,7 +17,7 @@
       <span class={dotClass(peerOf(app.active))}></span>
       <span>{peerOf(app.active)}</span>
     </div>
-    <div class="topic">{app.accountOf(peerOf(app.active)).presence ?? "offline"}</div>
+    <div class="topic">{store.accountOf(peerOf(app.active)).presence ?? "offline"}</div>
   {:else if app.activeChannel}
     {@const meta = app.retentionMeta[app.activeChannel.retention]}
     <div class="chan-title">

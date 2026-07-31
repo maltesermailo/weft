@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { store } from "$lib/models/store.svelte";
   import { avatarUrl, bioOf, displayName, initials } from "$lib/profile.svelte";
   import { untrack } from "svelte";
   import { fade, fly } from "svelte/transition";
@@ -195,7 +196,7 @@
             <!-- Identity + operator -->
             <div class="pe-card">
               <div class="set-row"><span>Identity</span><b>{app.account}@{app.network}</b></div>
-              {#if app.isOperator}
+              {#if store.session.isOperator}
                 <div class="section-sep"></div>
                 <div class="field-label">Network defense</div>
                 <p class="so-sub">Block abusive peer networks and manage network-wide bridges. Per-namespace federation lives in each namespace's Server Settings.</p>

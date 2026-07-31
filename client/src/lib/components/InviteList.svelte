@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { store } from "$lib/models/store.svelte";
   import { displayName } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
   const app = getApp();
@@ -24,7 +25,7 @@
 </script>
 
 <div class="invite-list">
-  {#each app.invitesList as inv (inv.invite_id)}
+  {#each store.invites.list as inv (inv.invite_id)}
     <div class="invite-card">
       <div class="invite-main">
         <button class="invite-code" title="Copy invite link" onclick={() => copy(app.inviteLinkFor(inv))}>

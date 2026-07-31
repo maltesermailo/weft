@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { roster } from "$lib/models/social.svelte";
   import { friendLabel, peerOf } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
@@ -23,7 +24,7 @@
 
   const hasSeed = $derived(!!seed);
   // Friends you can add — everyone except the peer who's already included.
-  const candidates = $derived(app.friendList.filter((u) => u !== seed));
+  const candidates = $derived(roster.friends.filter((u) => u !== seed));
   let picked = $state<Set<string>>(new Set());
   function toggle(u: string) {
     const next = new Set(picked);

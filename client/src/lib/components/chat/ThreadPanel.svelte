@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { renderMd } from "$lib/mdrender.svelte";
+  import { store } from "$lib/models/store.svelte";
   import { displayName } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -17,7 +19,7 @@
   let editingName = $state(false);
   let nameDraft = $state("");
   function startRename() {
-    nameDraft = app.threadNameFor(app.threadRoot?.msgid ?? undefined) ?? "";
+    nameDraft = app.threadNameFor(store.threads.root?.msgid ?? undefined) ?? "";
     editingName = true;
   }
   function commitRename() {
@@ -35,7 +37,7 @@
   }
 </script>
 
-{#if app.threadRoot}
+{#if store.threads.root}
   <aside class="thread-panel">
     <div class="thread-head">
       <div class="thread-title">
@@ -51,7 +53,7 @@
             onblur={commitRename}
           />
         {:else}
-          {@const named = app.threadNameFor(app.threadRoot.msgid ?? undefined)}
+          {@const named = app.threadNameFor(store.threads.root.msgid ?? undefined)}
           <button class="name-btn" title="Rename thread" onclick={startRename}>
             {named ?? "Thread"}
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" /></svg>
@@ -82,7 +84,7 @@
               {#if m.own}<span class="cap-badge owner">you</span>{/if}
               <span class="time">{m.time}</span>
             </div>
-            <div class="msg-line">{#if m.md}{@html app.renderMd(m.body)}{:else}{m.body}{/if}</div>
+            <div class="msg-line">{#if m.md}{@html renderMd(m.body)}{:else}{m.body}{/if}</div>
             {#if m.attachments?.length}
               <div class="attachments">{#each m.attachments as uri (uri)}<Attachment {uri} />{/each}</div>
             {/if}

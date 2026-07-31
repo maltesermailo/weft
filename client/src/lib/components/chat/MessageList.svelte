@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dayKey, dayLabel } from "$lib/time";
   import { tick } from "svelte";
   import { get } from "svelte/store";
   import { createVirtualizer } from "@tanstack/svelte-virtual";
@@ -217,8 +218,8 @@
                   <div class="day-sep">beginning of {app.titleOf(ch.name)}</div>
                 {/if}
               {/if}
-              {#if !prev || app.dayKey(prev.ts) !== app.dayKey(m.ts)}
-                <div class="day-sep date"><span>{app.dayLabel(m.ts)}</span></div>
+              {#if !prev || dayKey(prev.ts) !== dayKey(m.ts)}
+                <div class="day-sep date"><span>{dayLabel(m.ts)}</span></div>
               {/if}
               {#if active && m.key === app.newDividerKey}
                 <div class="new-sep" id="new-divider"><span>New messages</span></div>

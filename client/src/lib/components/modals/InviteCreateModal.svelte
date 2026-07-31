@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { roster } from "$lib/models/social.svelte";
+  import { store } from "$lib/models/store.svelte";
   import { friendLabel, initials } from "$lib/profile.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
@@ -69,11 +71,11 @@
   // local account and can't be DM'd, so the send list is local friends only.
   const statusOf = (ref: string) => {
     const acct = app.friendLocalAccount(ref);
-    return acct ? (app.accountOf(acct).presence ?? "offline") : "offline";
+    return acct ? (store.accountOf(acct).presence ?? "offline") : "offline";
   };
   const isOnline = (ref: string) => statusOf(ref) !== "offline" && statusOf(ref) !== "invisible";
   const friends = $derived(
-    app.friendList.filter((r) => {
+    roster.friends.filter((r) => {
       if (!app.friendLocalAccount(r)) return false;
       const q = search.trim().toLowerCase();
       return !q || friendLabel(r).toLowerCase().includes(q) || r.toLowerCase().includes(q);

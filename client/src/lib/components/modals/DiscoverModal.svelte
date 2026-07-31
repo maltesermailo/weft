@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { store } from "$lib/models/store.svelte";
   // "Where do you want to go?" — the namespace entry point, built as a four-step
   // card (choose → join / invite / create) per design/namespace.html.
   //
@@ -37,7 +38,7 @@
   // Discover surfaces servers to *find + join* — hide ones I'm already in (they
   // live on the rail). `discoverList` also holds my member namespaces (SYNC seeds
   // their NS-META), so without this they'd show here as if not joined.
-  const listed = $derived(app.discoverList.filter((ns) => !app.isNsMember(ns.id)));
+  const listed = $derived([...store.servers.values()].filter((s) => s.metaLoaded).filter((ns) => !app.isNsMember(ns.id)));
   const matches = $derived(
     query.trim()
       ? listed.filter((ns) => {

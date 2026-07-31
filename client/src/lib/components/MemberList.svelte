@@ -1,11 +1,13 @@
 <script lang="ts">
+  import { rolesAt, rolesOf } from "$lib/models/session.svelte";
+  import { store } from "$lib/models/store.svelte";
   import { displayName, queryProfile, statusOf } from "$lib/profile.svelte";
   import { getApp, type Member } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
   const members = $derived(app.activeChannel?.members ?? []);
   const presenceOf = (name: string) =>
-    name === app.account ? app.myStatus : (app.accountOf(name).presence ?? "offline");
+    name === app.account ? app.myStatus : (store.accountOf(name).presence ?? "offline");
   const isOnline = (name: string) => {
     const s = presenceOf(name);
     return s !== "offline" && s !== "invisible";
@@ -24,12 +26,12 @@
   });
 
   // Hoisted roles, already in position order (top = highest).
-  const hoisted = $derived(app.rolesAt(roleScope).filter((r) => r.hoist));
+  const hoisted = $derived(rolesAt(roleScope).filter((r) => r.hoist));
 
   // A member's primary hoisted role **id** = the highest (first in order)
   // hoisted role they hold, or undefined (id-keyed — names aren't unique, v0.13).
   function primaryHoist(name: string): string | undefined {
-    const held = new Set(app.rolesOf(name, roleScope).map((r) => r.id));
+    const held = new Set(rolesOf(name, roleScope).map((r) => r.id));
     return hoisted.find((r) => held.has(r.id))?.id;
   }
 

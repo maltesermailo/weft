@@ -58,9 +58,6 @@ export interface AppCtx {
       }
     | undefined;
   // ---- social layer: friends (federation-able; keys are account@network) ----
-  readonly friendList: string[];
-  readonly incomingRequests: string[];
-  readonly outgoingRequests: string[];
   addFriendInput: string;
   /** The local account handle for a friend, or null if they're federated. */
   friendLocalAccount(user: string): string | null;
@@ -70,7 +67,6 @@ export interface AppCtx {
   messageFriend(user: string): void;
   openFriends(): void;
   // ---- group DMs (ids are `&<ulid>`) ----
-  readonly groupList: string[];
   newGroupInput: string;
   /** A group's display label (its name, else member handles). */
   groupLabel(id: string): string;
@@ -107,9 +103,6 @@ export interface AppCtx {
   federate(target: string, invite?: string): void; // §11.10 join a foreign namespace on demand (invite unlocks non-public)
 
   // ---- data ----
-  readonly channels: Record<string, Channel>;
-  /** The interned global identity (profile + presence) for a handle (§10.3). */
-  accountOf(handle: string): Account;
   /** Notifications silenced for this channel (level "nothing"). */
   isMuted(channel: string): boolean;
   /** Notifications silenced for this whole server/namespace. */
@@ -123,9 +116,6 @@ export interface AppCtx {
   notifScopeLabel(): string;
   notifSettingsOpen: boolean;
   openNotifSettings(): void;
-  /// Namespaces with loaded NS-META (the Discover browse list + my servers); the
-  /// modal filters out ones I'm already in. Each is an interned {@link Server}.
-  readonly discoverList: Server[];
   readonly discoverCursor: string | null;
   scopesFor(): string[];
   markRead(name: string): void;
@@ -152,7 +142,6 @@ export interface AppCtx {
   /// Am I a member of this namespace (by id)? Discover hides servers I'm in.
   isNsMember(nsId: string): boolean;
   nsOf(n: string): string;
-  badgeFor(account: string, scope: string): Badge | undefined;
   serverUnread(ns: string): boolean;
   serverMention(ns: string): boolean;
   serverMentionCount(ns: string): number;
@@ -178,7 +167,6 @@ export interface AppCtx {
   openServerProfile(): void;
   mintInvite(): void;
   // ---- invites menu (Discord-style: list, creator, revoke) ----
-  readonly invitesList: InviteInfo[];
   readonly invitesScope: string;
   openInvites(): void;
   loadNsInvites(): void;
@@ -229,7 +217,6 @@ export interface AppCtx {
   openSearch(): void;
 
   // ---- threads (§9.4) ----
-  readonly threadRoot: Msg | null;
   readonly threadMessages: Msg[];
   threadComposer: string;
   /** The active channel's messages excluding thread replies (main timeline). */
@@ -281,12 +268,6 @@ export interface AppCtx {
   toggleReaction(m: Msg, emoji: string): void;
   jumpTo(msgid?: string): void;
   msgCtx(e: MouseEvent, m: Msg): void;
-  renderMd(body: string): string;
-  mentionsMe(body: string): boolean;
-  /** Day-bucket key (start-of-day epoch ms) for grouping messages under a date divider. */
-  dayKey(ts: number): number;
-  /** Human date-divider label ("Today" / "Yesterday" / "Monday, July 21, 2026"). */
-  dayLabel(ts: number): string;
   /** Render key of the message the "New messages" divider sits before, or null. */
   readonly newDividerKey: number | null;
 
@@ -320,11 +301,8 @@ export interface AppCtx {
 
   // ---- roles (ProfileCard) ----
   /// Role definitions at a scope — ns roles from the `Server`, `*`/`#chan` by-scope.
-  rolesAt(scope: string): Role[];
-  rolesOf(account: string, scope: string): Role[];
   /// Resolve a role **id** to its definition at a scope (v0.13) — member rosters
   /// carry ids, so display maps through this for the name + color.
-  roleById(scope: string, id: string): Role | undefined;
   ensureMemberRoles(account: string): void;
   ensureRoles(scope: string): void;
   roleScopeOf(channel: string): string;
@@ -381,9 +359,6 @@ export interface AppCtx {
   toggleViewGated(): void;
 
   // ---- federation (§11, operator) ----
-  readonly isOperator: boolean;
-  readonly netblocks: ReadonlyMap<string, string | null>;
-  readonly manifests: ReadonlyMap<string, ManifestInfo>;
   openFederation(): void;
   refreshNetblocks(): void;
   netblockAdd(network: string, reason?: string): void;

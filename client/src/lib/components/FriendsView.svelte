@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { roster } from "$lib/models/social.svelte";
+  import { store } from "$lib/models/store.svelte";
   import { friendLabel } from "$lib/profile.svelte";
   import { getApp } from "$lib/context";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -12,7 +14,7 @@
   const avatarAccount = (user: string) => app.friendLocalAccount(user) ?? user;
   const statusOf = (user: string) => {
     const acct = app.friendLocalAccount(user);
-    return acct ? (app.accountOf(acct).presence ?? "offline") : "offline";
+    return acct ? (store.accountOf(acct).presence ?? "offline") : "offline";
   };
   const isOnline = (user: string) => {
     const s = statusOf(user);
@@ -30,8 +32,8 @@
     return acct ? (STATUS[statusOf(user)] ?? "Offline") : user;
   };
 
-  const online = $derived(app.friendList.filter(isOnline));
-  const pendingCount = $derived(app.incomingRequests.length);
+  const online = $derived(roster.friends.filter(isOnline));
+  const pendingCount = $derived(roster.incoming.length);
 
   function onAddKey(e: KeyboardEvent) {
     if (e.key === "Enter") {
@@ -79,9 +81,9 @@
         </div>
       </div>
     {:else if tab === "pending"}
-      {#if app.incomingRequests.length}
-        <div class="fv-count">Incoming — {app.incomingRequests.length}</div>
-        {#each app.incomingRequests as user (user)}
+      {#if roster.incoming.length}
+        <div class="fv-count">Incoming — {roster.incoming.length}</div>
+        {#each roster.incoming as user (user)}
           <div class="fv-row" oncontextmenu={(e) => app.userCtx(e, user)} role="listitem">
             <span class="fv-av"><Avatar account={avatarAccount(user)} /></span>
             <span class="fv-meta">
@@ -99,9 +101,9 @@
           </div>
         {/each}
       {/if}
-      {#if app.outgoingRequests.length}
-        <div class="fv-count" style="margin-top:16px">Sent — {app.outgoingRequests.length}</div>
-        {#each app.outgoingRequests as user (user)}
+      {#if roster.outgoing.length}
+        <div class="fv-count" style="margin-top:16px">Sent — {roster.outgoing.length}</div>
+        {#each roster.outgoing as user (user)}
           <div class="fv-row" role="listitem">
             <span class="fv-av"><Avatar account={avatarAccount(user)} /></span>
             <span class="fv-meta">
@@ -116,7 +118,7 @@
           </div>
         {/each}
       {/if}
-      {#if !app.incomingRequests.length && !app.outgoingRequests.length}
+      {#if !roster.incoming.length && !roster.outgoing.length}
         <div class="fv-empty">
           <svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 3.07 9.8" /><path d="M1 1l22 22" /></svg>
           <p>No pending requests</p>
@@ -125,7 +127,7 @@
       {/if}
     {:else}
       <!-- online | all -->
-      {@const list = tab === "online" ? online : app.friendList}
+      {@const list = tab === "online" ? online : roster.friends}
       {#if list.length}
         <div class="fv-count">{tab === "online" ? "Online" : "All Friends"} — {list.length}</div>
         {#each list as user (user)}

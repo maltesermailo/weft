@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { store } from "$lib/models/store.svelte";
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/context";
   const app = getApp();
@@ -39,7 +40,7 @@
     <div class="section-sep"></div>
     <div class="field-label">Blocked networks</div>
     <div class="modal-list">
-      {#each [...app.netblocks] as [nw, reason] (nw)}
+      {#each [...store.federation.netblocks] as [nw, reason] (nw)}
         <div class="ns-card">
           <div class="ns-info">
             <div class="ns-name">{nw}</div>
@@ -60,7 +61,7 @@
     <div class="section-sep"></div>
     <div class="field-label">Bridges</div>
     <div class="modal-list">
-      {#each [...app.manifests.values()] as m (m.peer)}
+      {#each [...store.federation.manifests.values()] as m (m.peer)}
         <div class="ns-card">
           <div class="ns-info">
             <div class="ns-name">{m.peer} <span class="rep-state {m.state}">{m.state}</span> · v{m.version}</div>

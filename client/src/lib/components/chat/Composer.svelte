@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { renderMd } from "$lib/mdrender.svelte";
   import { getApp } from "$lib/context";
   import { highlightComposer } from "$lib/mdhighlight";
   import EmojiPicker from "./EmojiPicker.svelte";
@@ -150,7 +151,7 @@
   {#if previewOn && app.composer.trim()}
     <div class="composer-preview">
       <div class="composer-preview-label">Preview</div>
-      <div class="msg-line">{@html app.renderMd(app.composer)}</div>
+      <div class="msg-line">{@html renderMd(app.composer)}</div>
     </div>
   {/if}
   <div class="composer">

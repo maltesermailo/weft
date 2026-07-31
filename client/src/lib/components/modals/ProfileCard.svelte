@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { rolesAt, rolesOf, badgeFor } from "$lib/models/session.svelte";
+  import { store } from "$lib/models/store.svelte";
   import { bioOf, nickOf, statusOf } from "$lib/profile.svelte";
   import { untrack } from "svelte";
   import { fade } from "svelte/transition";
@@ -16,15 +18,15 @@
     onclose: () => void;
   } = $props();
 
-  const b = $derived(app.badgeFor(target, app.active));
-  const pr = $derived(app.accountOf(target).presence ?? "offline");
+  const b = $derived(badgeFor(target, app.active));
+  const pr = $derived(store.accountOf(target).presence ?? "offline");
   // Roles + moderation are server-member controls — show them only when we're
   // actually viewing one of the server's channels, not from friends/DMs.
   const inServer = $derived(app.active.startsWith("#"));
   const scope = $derived(app.roleScopeOf(app.active));
-  const myRoles = $derived(app.rolesOf(target, scope));
+  const myRoles = $derived(rolesOf(target, scope));
   // Exclude the implicit @everyone role — it's baseline, never assigned.
-  const allRoles = $derived(app.rolesAt(scope).filter((r) => r.name !== EVERYONE_ROLE));
+  const allRoles = $derived(rolesAt(scope).filter((r) => r.name !== EVERYONE_ROLE));
   const isSelf = $derived(target === app.account);
   // "Owner/admin" for controls means the real namespace owner or an explicitly
   // delegated ns-admin — NOT a network operator (their god-mode caps are
