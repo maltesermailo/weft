@@ -28,6 +28,11 @@ fn save_layout(blob: &str) {
         let _ = s.set_item(LAYOUT_KEY, blob);
     }
 }
+/// Restore the persisted channel layout (best-effort) — seeded on connect for an
+/// instant first paint, then reconciled at SYNC end.
+fn load_layout() -> Option<String> {
+    local_storage().ok()?.get_item(LAYOUT_KEY).ok().flatten()
+}
 
 /// The browser's `localStorage`, or an error if unavailable/blocked.
 fn local_storage() -> Result<web_sys::Storage, String> {
@@ -263,6 +268,38 @@ impl WeftClient {
                 }
                 if let Some(blob) = self.sink.state.borrow_mut().take_dirty_layout() {
                     save_layout(&blob);
+                }
+                return Ok(JsValue::UNDEFINED);
+            }
+            // §6.3 drag-reorder a category list (model-side optimism): the model
+            // reorders, we emit the diff (instant UI) + send the NS-META write.
+            "move_category" => {
+                let (diffs, sends) = self.sink.state.borrow_mut().move_category(
+                    &arg("ns"),
+                    &arg("drag"),
+                    &arg("target"),
+                );
+                for d in &diffs {
+                    self.sink.call(d);
+                }
+                if let Some(c) = self.conn.borrow_mut().as_mut() {
+                    for (ns, key, value) in sends {
+                        if let Ok(l) = build_ns_meta(&ns, &key, &value) {
+                            c.command(l);
+                        }
+                    }
+                }
+                if let Some(blob) = self.sink.state.borrow_mut().take_dirty_layout() {
+                    save_layout(&blob);
+                }
+                return Ok(JsValue::UNDEFINED);
+            }
+            // §4 typing fallback-expiry (local only): the host timer fired, so drop
+            // the typer from the model and emit the diff. No server write.
+            "typing_stop" => {
+                let diffs = self.sink.state.borrow_mut().typing_stop(&arg("channel"), &arg("user"));
+                for d in &diffs {
+                    self.sink.call(d);
                 }
                 return Ok(JsValue::UNDEFINED);
             }
@@ -527,13 +564,18 @@ impl WeftClient {
         let url = ws_url(host)?;
         let ws = WebSocket::new(&url).map_err(|_| format!("cannot open WebSocket to {url}"))?;
         let password = core::password_or_default(&password);
-        // Fresh session ⇒ fresh model (the server re-sends state on connect).
-        // NOTE: the layout cache is persisted (save) but NOT proactively seeded —
-        // seeding created channels from the cache (ghosts, incl. server-deleted
-        // ones), which also wedged the history single-flight. Channels are created
-        // only by real events; layout enriches them via `chan-state` diffs. A
-        // reconciled first-paint is a later step (see the migration plan).
+        // Fresh session ⇒ fresh model (the server re-sends state on connect), then
+        // seed the persisted channel layout for an instant first paint. Seeded
+        // channels are provisional: the model's SYNC-end reconcile prunes any the
+        // server doesn't re-confirm, so a channel deleted/left while offline can't
+        // linger as a ghost (the reason the seed was disabled before this slice).
         *self.sink.state.borrow_mut() = AppState::new();
+        if let Some(blob) = load_layout() {
+            let diffs = self.sink.state.borrow_mut().seed_layout(&blob);
+            for diff in &diffs {
+                self.sink.call(diff);
+            }
+        }
         *self.conn.borrow_mut() = Some(Conn {
             ws: ws.clone(),
             phase: Phase::HelloSent,

@@ -54,8 +54,9 @@ const _channelGroups = $derived.by(() => {
   const bare: Channel[] = [];
   const groups = new Map<string, Channel[]>();
 
-  // Empty categories the admin created (client-side) show up too.
-  for (const cat of store.servers.get(view.activeServer)?.categories ?? channelStore.layoutCache[view.activeServer]?.cats ?? [])
+  // Empty categories the admin created show up too. The list is model-owned
+  // (client-core) — seeded from the layout cache on connect, then NS-META.
+  for (const cat of store.servers.get(view.activeServer)?.categories ?? [])
     groups.set(cat, []);
 
   for (const c of Object.values(channelStore.channels)) {

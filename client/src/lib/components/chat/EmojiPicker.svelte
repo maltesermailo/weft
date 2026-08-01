@@ -5,6 +5,7 @@
   // custom emoji, followed by the unicode categories — plus a hover-preview bar.
   // `onpick` receives a unicode char or a `:name:` shortcode.
   import { getApp } from "$lib/ui/context";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
   import { EMOJI } from "$lib/rendering/emoji";
   import { charName } from "$lib/rendering/shortcodes";
   const app = getApp();
@@ -28,10 +29,11 @@
         name: em.name,
         url: emojiUrlFor(em.name),
       }));
+      const serverLabel = app.activeServer ? vm.serverName(app.activeServer) : "Server";
       out.push({
         id: "server",
-        label: app.activeServer || "Server",
-        icon: (app.activeServer || "S").slice(0, 1).toUpperCase(),
+        label: serverLabel,
+        icon: serverLabel.slice(0, 1).toUpperCase(),
         iconUrl: items[0]?.url ?? null,
         items,
       });

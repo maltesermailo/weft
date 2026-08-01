@@ -41,6 +41,9 @@ import { initVoice, voice } from "$lib/voice/voice.svelte";
 const view = $derived(nav.viewFrom(page.route?.id, page.params));
 const account = $derived(store.session.account);
 const network = $derived(store.session.network);
+// Without this, the bare `status` in the `closed` handler resolves to the
+// browser global `window.status` ("") — so the reconnect guard is never true.
+const status = $derived(store.session.status);
 const active = $derived(view.active);
 const activeServer = $derived(view.activeServer);
 const homeView = $derived(view.homeView);
@@ -416,7 +419,8 @@ export function handle(e: weft.WeftEvent) {
       }
       const srv = store.server(e.id);
       srv.applyMeta(e);
-      channelStore.cacheNsCats(e.id, e.categories ?? []);
+      // Categories (list + persistence) are model-owned now (client-core): the
+      // `cat-list` diff from this same NS-META sets `srv.categories` + saves.
       // Owning a namespace is membership — the owner can't leave it (only
       // transfer or delete). Record it so a server I just created appears in the
       // rail the instant its NS-META returns, with no channels and no Discover

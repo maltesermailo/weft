@@ -150,6 +150,13 @@ export type WeftEvent =
       category: string | null;
       position: number;
     }
+  // Model diffs for the channel identity lifecycle (client-core owns re-key +
+  // removal; TS applies them in `channelMirrorHandlers`, keeps the nav effects).
+  | { kind: "chan-renamed"; old: string; new: string }
+  | { kind: "chan-removed"; name: string }
+  | { kind: "cat-list"; ns: string; categories: string[] }
+  | { kind: "roster"; channel: string; members: { account: string; network: string }[] }
+  | { kind: "typers"; channel: string; users: string[] }
   | {
       kind: "ns-meta";
       /// Immutable namespace ULID id (v0.13) — the key the client addresses by.
@@ -524,6 +531,11 @@ export function sendMessage(
 export function typing(channel: string, active: boolean) {
   return invoke("typing", { channel, active });
 }
+/// §4 local-only typing fallback-expiry: drop a typer from the client-core model
+/// when its 6s timer fires (its `stop` was lost). No server write.
+export function typingStop(channel: string, user: string) {
+  return invoke("typing_stop", { channel, user });
+}
 
 export function presence(status: string) {
   return invoke("presence", { status });
@@ -801,6 +813,12 @@ export function channelMeta(channel: string, key: string, value: string) {
 /// (uncategorized) top-level group; `anchor` null = append at the end.
 export function moveChannel(ns: string, drag: string, target: string, anchor: string | undefined, after: boolean) {
   return invoke("move_channel", { ns, drag, target, anchor: anchor ?? null, after });
+}
+
+/// §6.3 drag-reorder a namespace's category list. The client-core model reorders,
+/// emits the `cat-list` diff (instant UI), and sends the `NS META` write.
+export function moveCategory(ns: string, drag: string, target: string) {
+  return invoke("move_category", { ns, drag, target });
 }
 
 export function discover(cursor?: string) {

@@ -244,7 +244,8 @@ export class Server {
     this.welcome = e.welcome ?? null;
     this.recoveryEta = e.recovery_eta ?? null;
     this.recoveryRung = e.recovery_rung ?? null;
-    this.categories = e.categories ?? [];
+    // `categories` is model-owned now (client-core) — applied via the `cat-list`
+    // diff from the same NS-META, not set here.
     this.metaLoaded = true;
   }
 }

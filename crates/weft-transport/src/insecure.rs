@@ -66,9 +66,7 @@ pub fn client_endpoint(alpn: &[u8]) -> io::Result<quinn::Endpoint> {
     ));
     // §3.4: QUIC keepalive substitutes for sending PINGs. Without it the
     // transport idle limit reaps quiet-but-healthy connections.
-    config.transport_config(std::sync::Arc::new(crate::quic::transport_config(Some(
-        std::time::Duration::from_secs(15),
-    ))));
+    config.transport_config(std::sync::Arc::new(crate::quic::client_transport_config()));
     endpoint.set_default_client_config(config);
     Ok(endpoint)
 }

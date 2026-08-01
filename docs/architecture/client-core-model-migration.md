@@ -176,7 +176,97 @@ The model is now authoritative for channel layout, with model-side drag optimism
   `deleted`; `channel-layout` only `reconcileCreate`; `ensureChannel` no longer cache-seeds;
   `channelStore.moveChannel` is a one-line `invoke("move_channel", …)` (its renumber logic deleted).
 
-**Deferred:** the ns-category *list* (`moveCategory`/`setCategories`/`nsCategories`) stays TS;
-`channel-renamed` + `deleted` still TS (the model doesn't re-key on rename yet, so a renamed channel's
-persisted layout can briefly ghost until reconciled — a rename-slice concern). `layoutCache.cats` stays
-live for the ns-category list; `layoutCache.chans` is now vestigial (unread).
+**Deferred:** the ns-category *list* (`moveCategory`/`setCategories`/`nsCategories`) stays TS.
+`layoutCache.cats` stays live for the ns-category list; `layoutCache.chans` is now vestigial (unread).
+
+## Rename + delete slice — DONE (model owns the channel identity lifecycle)
+
+The model now owns `channel-renamed` + CHANNEL `deleted`, closing the rename-ghost gap (the
+persisted layout re-keys with the channel instead of stranding the old name):
+- **Model** (`channels.rs`): `renamed(old, new)` re-keys `ChannelState` old→new, clears the stale
+  vanity, and marks the (name-keyed) layout dirty so persistence follows; `deleted(channel)` drops
+  the state. Two new diffs — `ChanRenamed { old, new }` and `ChanRemoved { name }` — tell the mirror
+  to re-key / drop its instance. `chanmeta` routes `deleted` here *before* the `or_default()` entry
+  so a delete never resurrects a channel. Idempotent (rename arrives as broadcast + labeled copy).
+- **TS flip**: `channelMirrorHandlers` gains `chan-renamed` (re-key the `Channel` instance —
+  unread/mention tallies + messages ride it — and clear vanity) and `chan-removed` (drop it).
+  `channel-handlers.ts` keeps only the **side-effects**: `chanmeta` deleted → leave the view;
+  `channel-renamed` → nav + `ui.chanPerms` re-target + `weft.join(new)` re-subscribe + toast. The
+  record re-key / removal / vanity-clear / `cacheChanLayout` are gone from TS (model-owned now).
+
+**Deferred:** the ns-category *list* (above); `cacheChanLayout` is now unused on the rename path
+(`layoutCache.chans` fully vestigial).
+
+## Seed reconciliation slice — DONE (instant first paint, no ghosts)
+
+The proactive layout seed is back on — the sidebar paints its last-known channel order instantly on
+connect — now made ghost-safe by SYNC-end reconciliation (the seed was disabled earlier because a
+stale cache stranded channels deleted/left while offline, which also wedged the history
+single-flight):
+- **Model** (`channels.rs`): a `provisional` set tracks cache-seeded channels. `seed()` marks each
+  seeded channel provisional (and now only restores **namespaced** channels — the only ones with a
+  layout *and* a confirming server event; `serialize` filters the same way). Any live event for a
+  channel (`layout`/`chanmeta`/`renamed`) **confirms** it (clears provisional). On `SyncEnd` —
+  which the server sends *after* a `CHANNEL-LAYOUT` per visible namespaced channel — `reconcile_seed`
+  prunes every still-provisional channel (drops it + emits `ChanRemoved`), so a stale entry can never
+  linger. The layout blob is marked dirty on prune so the host re-saves the cleaned cache.
+- **Hosts**: both wrappers `seed_layout(blob)` again on connect (`load_layout` restored — file in
+  app-data for desktop, `localStorage["weft:chan-layout"]` for web) and emit the diffs. Reconnect
+  re-seeds + re-reconciles the same way (the server re-enumerates on every SYNC).
+- **TS**: no changes — the seed rides the existing `chan-state` mirror handler and the prune rides
+  the `chan-removed` handler (from the rename/delete slice).
+
+**Edge:** deep-linking to a channel deleted-while-offline shows it until `SyncEnd` prunes it, then the
+route degrades to EmptyHome (the record is gone) — acceptable; the ghost is transient, not permanent.
+
+## Category-list slice — DONE (model owns categories; the TS `layoutCache` is gone)
+
+The per-namespace category list (Discord-style headers) is now model-owned, and with it the **whole TS
+`layoutCache`** (`weft:layout`) is deleted — all channel-layout persistence lives in one Rust blob:
+- **Model** (`channels.rs`): a `categories: BTreeMap<ns, Vec<String>>`. `set_categories` adopts the
+  server-authoritative list from `NsMeta` (a **no-op when unchanged** — NS-META fires on every ns
+  update); `move_category(ns, drag, target)` ports the TS reorder and returns a `CatList` diff (instant
+  UI) + the `NS META <ns> categories <list>` write. New `ChanDiff::CatList { ns, categories }`. The
+  persisted blob became `LayoutBlob { channels, categories }` (both `#[serde(default)]` → older
+  channel-only caches still load); `serialize`/`seed` carry categories too (seed emits a `CatList` per
+  ns — categories need no provisional reconcile, since NS-META replaces the whole list).
+- **Hosts**: `move_category` command — web dispatch (`build_ns_meta` send + explicit save) and a desktop
+  `#[tauri::command]` (relies on the NS-META echo to save, like `move_channel`).
+- **TS**: `weft.moveCategory` + a `cat-list` mirror handler (`store.server(ns).categories = …`).
+  `Server.applyMeta` no longer sets `categories` (the `cat-list` diff from the same NS-META does);
+  the reducer's `cacheNsCats` and the viewmodel's `layoutCache` fallback are gone; `channel.svelte.ts`
+  lost `layoutCache`/`saveLayout`/`loadLayout`/`cacheNsCats`/`cacheChanLayout` + the `NsLayout` type +
+  the boot `loadLayout()`. `nsCategories()`/`setCategories()` stay (category **add/remove** still send
+  NS-META and update via the Rust echo path).
+
+## Roster slice — DONE (model owns the channel member list)
+
+The per-channel member roster is now model-owned; the cross-domain side-effects stay in TS:
+- **Model** (`channels.rs`): `roster: BTreeMap<channel, Vec<RosterMember{account, network}>>` (transient —
+  rebuilt from events each session). `member` handles `MEMBER join`/`part` (incl. the MEMBERS batch):
+  dedup-add on join, remove on part, **no-op when unchanged** (a re-fetch's duplicate join, a part of
+  someone absent). Emits the **full list** as `ChanDiff::Roster` — idempotent, so a reconnect's re-sync
+  replaces cleanly (no incremental-drift/duplication). Roster follows `renamed` (re-key) and clears on
+  `deleted`. `network` is carried raw — the mirror resolves local/federated origin (needs the home net).
+- **TS**: a `roster` mirror handler sets `Channel.members` (resolving `origin` from `store.session.network`)
+  **only on an existing instance** — so a self-part (which deletes the instance first) makes the trailing
+  roster diff no-op instead of resurrecting a ghost. The `member` handler keeps its side-effects
+  (`ensureCaps`/`queryProfile`/self-join nav+presence/other-online) + the self-part leave (delete + nav,
+  which needs "me"); it no longer touches `Channel.members`.
+
+## Typing slice — DONE (model owns the typing set; timer stays host-side)
+
+- **Model** (`channels.rs`): `typers: BTreeMap<channel, Vec<String>>` (transient). `typing` handles
+  `TYPING start`/`stop` — dedup-add / remove, **no-op when unchanged** — and emits the full list as
+  `ChanDiff::Typers`. Follows `renamed`, clears on `deleted`. Never holds "me": the server broadcasts
+  typing **excluding the origin**, so self-typing is never received (no session knowledge needed).
+- **The 6s fallback-expiry timer stays host-side** (a timer isn't pure-model): on expiry the host fires
+  a **local-only `typing_stop` command** (`AppState::typing_stop` → `Typers` diff, no server write) —
+  web dispatch + a desktop `#[tauri::command]`, plus `weft.typingStop`.
+- **TS**: a `typers` mirror handler sets `Channel.typers` (existing instance only). `Channel.setTyping`
+  is now **timer-only** — it arms/clears the per-user 6s timer whose expiry calls `weft.typingStop`; the
+  set itself is model-owned. The reducer's `typing` case is unchanged (still calls `setTyping`).
+
+**Migration status:** the channels domain owns metadata + layout + rename/delete + seed-reconcile +
+categories + roster + typing. Remaining channel pieces: unread/mention (needs `mentionsMe` = roles/caps
+first — cross-domain), and the big **messages + history + optimistic send** slice.

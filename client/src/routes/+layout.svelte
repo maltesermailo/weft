@@ -98,8 +98,8 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   // In-app confirmation (the Tauri webview blocks native window.confirm, so
   // destructive actions must not rely on it). Resolves true/false.
 
-  // ---- live data, channel collection + layout cache: `$lib/channels/channel.svelte`
-  // (channels/mkMsg/channelStore.ensure/channelStore.markRead/nsOf/channelStore.short/channelStore.layoutCache/…). ----
+  // ---- live data, channel collection: `$lib/channels/channel.svelte`
+  // (channels/mkMsg/channelStore.ensure/channelStore.markRead/nsOf/channelStore.short/…). ----
 
   // ---- notification preferences (per-user, localStorage) ----
   // Set per **namespace** (`ns:<name>`, or `net` for top-level) in the
@@ -405,7 +405,10 @@ import { mkMsg } from "$lib/messages/messages.svelte";
     if (!a.startsWith("#")) return;
     untrack(() => {
       const ch = channelStore.channels[a];
-      if (ch && !ch.rosterLoaded) {
+      // Voice channels aren't in the server's runtime `joined` set, so a MEMBERS
+      // fetch answers CAP-REQUIRED ("join the channel first"); their roster comes
+      // from voice-state instead. Skip them.
+      if (ch && !ch.voice && !ch.rosterLoaded) {
         ch.rosterLoaded = true;
         weft.members(a).catch(() => {});
       }
@@ -558,11 +561,11 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   });
   async function doTransfer() {
     const o = nsAdmin.newOwner.trim();
-    if (o && (await appConfirm(`Transfer ownership of ${activeServer} to ${o}? This is signed by your root key and cannot be undone.`, "Transfer")))
+    if (o && (await appConfirm(`Transfer ownership of ${vm.serverName(activeServer)} to ${o}? This is signed by your root key and cannot be undone.`, "Transfer")))
       weft.nsTransfer(network, activeServer, o).catch((e) => (cf.authError = String(e)));
   }
   async function deleteNamespace() {
-    if (await appConfirm(`Delete namespace ${activeServer}? This removes all its channels.`, "Delete")) {
+    if (await appConfirm(`Delete namespace ${vm.serverName(activeServer)}? This removes all its channels.`, "Delete")) {
       weft.nsDelete(activeServer).catch((e) => toast(String(e), "error"));
       ui.nsSettingsOpen = false;
     }
@@ -571,15 +574,15 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   // Revoke every outstanding invite for the active namespace (ns-admin, §6.5).
   async function revokeAllInvites() {
     if (!activeServer) return;
-    if (!(await appConfirm(`Revoke ALL invites for ${activeServer}? Every existing invite link stops working.`, "Revoke all"))) return;
+    if (!(await appConfirm(`Revoke ALL invites for ${vm.serverName(activeServer)}? Every existing invite link stops working.`, "Revoke all"))) return;
     weft.inviteRevokeAll(`ns:${activeServer}`).catch(() => {});
     store.invites.list = []; // optimistic — the list is now empty
-    toast(`Revoked all invites for ${activeServer}`, "info");
+    toast(`Revoked all invites for ${vm.serverName(activeServer)}`, "info");
   }
 
   onMount(() => {
-    // Restore the cached layout for instant render before the server refresh.
-    channelStore.loadLayout();
+    // (Channel layout + category lists restore in the client-core model, seeded on
+    // connect from the `weft:chan-layout` blob — no TS layout cache to load here.)
     // Restore theme.
     try {
       if (localStorage.getItem("weft:theme") === "light") {

@@ -9,6 +9,7 @@
     retention = $bindable(),
     voice = $bindable(),
     activeServer,
+    serverName,
     categories,
     onclose,
     oncreate,
@@ -19,6 +20,8 @@
     retention: string;
     voice: boolean;
     activeServer: string;
+    /// The namespace's display name (vanity) — `activeServer` is its opaque ULID.
+    serverName: string;
     categories: string[];
     onclose: () => void;
     oncreate: () => void;
@@ -29,7 +32,7 @@
   <button class="modal-backdrop" aria-label="Close" onclick={onclose}></button>
   <div class="modal" role="dialog" aria-modal="true">
     <div class="modal-head">
-      <h2>Create channel{activeServer ? ` in ${activeServer}` : ""}</h2>
+      <h2>Create channel{activeServer ? ` in ${serverName}` : ""}</h2>
       <button class="linkish" aria-label="Close" onclick={onclose}>✕</button>
     </div>
     <label class="fld">Channel name

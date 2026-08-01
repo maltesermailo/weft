@@ -14,7 +14,7 @@
   <div class="rail-divider"></div>
   <div class="rail-communities">
     {#each vm.serverNamespaces as ns (ns)}
-      <div class="comm-tile" class:active={!app.homeView && app.activeServer === ns} class:muted={serverMuted(ns)} title={ns}>
+      <div class="comm-tile" class:active={!app.homeView && app.activeServer === ns} class:muted={serverMuted(ns)} title={vm.serverName(ns)}>
         <button onclick={() => app.selectServer(ns)} oncontextmenu={(e) => { e.preventDefault(); openServerMenu(ns); }} title={vm.serverName(ns)}>{initials(vm.serverName(ns))}</button>
         {#if vm.serverMentionCount(ns)}<span class="tile-badge mention">{vm.serverMentionCount(ns)}</span>
         {:else if vm.serverUnread(ns) && !serverMuted(ns)}<span class="tile-badge"></span>{/if}

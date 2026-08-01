@@ -62,6 +62,9 @@ fn save_layout(app: &AppHandle, blob: &str) {
         let _ = std::fs::write(p, blob);
     }
 }
+fn load_layout(app: &AppHandle) -> Option<String> {
+    std::fs::read_to_string(layout_path(app)?).ok()
+}
 
 /// Drive one connection to completion. Emits `Connected` once authed, then
 /// relays until the stream closes or the app drops the outbound sender.
@@ -79,15 +82,19 @@ pub async fn run_connection(
     mut outbound: mpsc::UnboundedReceiver<String>,
 ) {
     // The app-global model (shared with the `move_channel` command). Fresh session
-    // ⇒ reset it (the server re-sends state on connect).
-    // NOTE: the layout cache is persisted (save) but NOT proactively seeded —
-    // seeding created channels from the cache (ghosts, incl. server-deleted ones),
-    // which also wedged the history single-flight. Channels are created only by
-    // real events; layout enriches them via `chan-state` diffs. A reconciled
-    // first-paint is a later step (see the migration plan).
+    // ⇒ reset it (the server re-sends state on connect), then seed the persisted
+    // channel layout so the sidebar paints its last-known order instantly. Seeded
+    // channels are provisional: the model's SYNC-end reconcile prunes any the
+    // server doesn't re-confirm, so a channel deleted/left while offline can't
+    // linger as a ghost (the reason the seed was disabled before this slice).
     let model = app.state::<Model>().0.clone();
     *model.lock().unwrap() = AppState::new();
     let sink = TauriSink { app: app.clone(), state: model };
+    if let Some(blob) = load_layout(&app) {
+        for diff in sink.state.lock().unwrap().seed_layout(&blob) {
+            let _ = app.emit("weft", diff);
+        }
+    }
     let mut stream = match connect(addr, &server_name, allow_insecure).await {
         Ok(stream) => stream,
         Err(e) => return sink.emit(ClientEvent::Closed { reason: e }),

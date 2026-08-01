@@ -874,6 +874,36 @@ fn move_channel(
     Ok(())
 }
 
+/// §6.3 drag-reorder a namespace's category list (model-side optimism): the model
+/// reorders, we emit the diff (instant UI) and send the `NS META` write.
+#[tauri::command]
+fn move_category(
+    app: AppHandle,
+    conn: State<'_, Conn>,
+    model: State<'_, weft::Model>,
+    ns: String,
+    drag: String,
+    target: String,
+) -> Result<(), String> {
+    let (diffs, sends) = model.0.lock().unwrap().move_category(&ns, &drag, &target);
+    for d in diffs {
+        let _ = app.emit("weft", d);
+    }
+    for (ns, key, value) in sends {
+        conn.send(weft::build_ns_meta(&ns, &key, &value)?)?;
+    }
+    Ok(())
+}
+
+/// §4 typing fallback-expiry (local only): the host timer fired, so drop the
+/// typer from the model and emit the diff. No server write.
+#[tauri::command]
+fn typing_stop(app: AppHandle, model: State<'_, weft::Model>, channel: String, user: String) {
+    for d in model.0.lock().unwrap().typing_stop(&channel, &user) {
+        let _ = app.emit("weft", d);
+    }
+}
+
 #[tauri::command]
 fn discover(conn: State<'_, Conn>, cursor: Option<String>) -> Result<(), String> {
     conn.send(weft::build_discover(cursor)?)
@@ -1128,6 +1158,8 @@ pub fn run() {
             channel_delete,
             channel_meta,
             move_channel,
+            move_category,
+            typing_stop,
             discover,
             channels,
             send_message,

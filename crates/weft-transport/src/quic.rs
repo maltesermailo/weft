@@ -28,16 +28,30 @@ pub const ALPN: &[u8] = b"weft/1";
 /// arbiter of aliveness.
 const MAX_IDLE: Duration = Duration::from_secs(120);
 
+/// A client sends keepalives every [`CLIENT_KEEP_ALIVE`], so it can afford a
+/// short idle limit — and it *wants* one: this is how fast the client notices a
+/// dead or restarted server (unacked keepalives → idle timeout → `recv` errors
+/// → the reconnect fires). A passive server keeps the longer [`MAX_IDLE`], since
+/// it can't keepalive and must tolerate legitimately quiet clients.
+const CLIENT_MAX_IDLE: Duration = Duration::from_secs(30);
+const CLIENT_KEEP_ALIVE: Duration = Duration::from_secs(15);
+
 /// Shared transport tuning. `keep_alive`: §3.4 lets QUIC keepalives
 /// substitute for *sending* PINGs — clients want one; the server does not
 /// (liveness is the client's burden).
-pub(crate) fn transport_config(keep_alive: Option<Duration>) -> TransportConfig {
+pub(crate) fn transport_config(keep_alive: Option<Duration>, max_idle: Duration) -> TransportConfig {
     let mut transport = TransportConfig::default();
     transport.max_idle_timeout(Some(
-        IdleTimeout::try_from(MAX_IDLE).expect("well below the VarInt bound"),
+        IdleTimeout::try_from(max_idle).expect("well below the VarInt bound"),
     ));
     transport.keep_alive_interval(keep_alive);
     transport
+}
+
+/// Transport tuning for a client endpoint: send keepalives + a short idle limit
+/// so a dead/restarted server is detected quickly, driving the client reconnect.
+pub(crate) fn client_transport_config() -> TransportConfig {
+    transport_config(Some(CLIENT_KEEP_ALIVE), CLIENT_MAX_IDLE)
 }
 
 /// Build the QUIC server config from a fixed identity (ALPN pinned). A thin
@@ -108,7 +122,7 @@ pub fn server_config_resolving(
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let quic_tls = QuicServerConfig::try_from(tls).map_err(|_| TransportError::NoTls13)?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(quic_tls));
-    config.transport_config(Arc::new(transport_config(None)));
+    config.transport_config(Arc::new(transport_config(None, MAX_IDLE)));
     Ok(config)
 }
 
@@ -147,7 +161,7 @@ pub fn client_endpoint(alpn: &[u8]) -> io::Result<quinn::Endpoint> {
     let mut endpoint = quinn::Endpoint::client(([0, 0, 0, 0], 0).into())?;
     let mut config = quinn::ClientConfig::new(Arc::new(quic_tls));
     // §3.4: QUIC keepalive substitutes for client PINGs.
-    config.transport_config(Arc::new(transport_config(Some(Duration::from_secs(15)))));
+    config.transport_config(Arc::new(client_transport_config()));
     endpoint.set_default_client_config(config);
     Ok(endpoint)
 }

@@ -88,6 +88,7 @@
     bind:retention={chanDraft.retention}
     bind:voice={chanDraft.voice}
     activeServer={app.activeServer}
+    serverName={app.activeServer ? vm.serverName(app.activeServer) : ""}
     categories={vm.channelGroups.map((g) => g.category)}
     onclose={() => (chanDraft.open = false)}
     oncreate={createChannel}

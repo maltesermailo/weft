@@ -11,9 +11,6 @@ import { toast } from "$lib/notifications/toasts.svelte";
 
 // ---- definitions ----
 
-/// Per-namespace layout cache (localStorage): the category list + each channel's
-/// category/position, so a reload paints the sidebar instantly (server-authoritative).
-type NsLayout = { cats: string[]; chans: Record<string, { category?: string; position?: number }> };
 
 // ---- classes ----
 
@@ -96,17 +93,18 @@ export class Channel {
 
   /// Per-user typing-expiry timers (§4 TYPING); a fallback in case a `stop` is lost.
   private typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  /// Mark a user as typing (or stopped) here, with a 6s fallback expiry.
+  /// Manage the §4 fallback-expiry timer for `user` typing here. The `typers` set
+  /// itself is model-owned (applied by the `typers` mirror handler); this only
+  /// arms/clears the timer. On expiry (no `stop` arrived) it tells the model to
+  /// drop the typer via the local `typing_stop` command.
   setTyping(user: string, active: boolean): void {
     clearTimeout(this.typingTimers.get(user));
     if (active) {
-      if (!this.typers.includes(user)) this.typers = [...this.typers, user];
       this.typingTimers.set(
         user,
-        setTimeout(() => this.setTyping(user, false), 6000),
+        setTimeout(() => weft.typingStop(this.name, user).catch(() => {}), 6000),
       );
     } else {
-      this.typers = this.typers.filter((u) => u !== user);
       this.typingTimers.delete(user);
     }
   }
@@ -130,8 +128,6 @@ export class Channel {
 export class ChannelStore {
   /// Open conversations, keyed by canonical wire name. Mutated in place.
   channels = $state<Record<string, Channel>>({});
-  /// Per-namespace layout cache, mirrored to localStorage.
-  layoutCache = $state<Record<string, NsLayout>>({});
   /// Pending channel-creates (§6.3): follow-up actions stashed by `<ns>|<slug>`
   /// until the server echoes the canonical name + vanity, then reconciled.
   pendingChanCreate: Record<string, { cat: string; announce: boolean; voice: boolean }> = {};
@@ -188,52 +184,17 @@ export class ChannelStore {
     weft.moveChannel(view.activeServer, dragName, targetCat, anchorName, after).catch((e) => toast(String(e), "error"));
   }
 
-  // Reorder a named category (the bare top-level group "" stays put — only named
-  // categories are persisted in the §6.3 NS categories list).
+  // Reorder a named category (the bare top-level group "" stays put). Model-side
+  // optimism (client-core): the model reorders + emits the `cat-list` diff (instant
+  // UI) + sends the NS-META write. Its renumber logic moved to the Rust model.
   moveCategory(dragCat: string, targetCat: string): void {
-    if (dragCat === targetCat || dragCat === "") return;
-
-    const cats = [...this.nsCategories()];
-    const from = cats.indexOf(dragCat);
-    if (from < 0) return;
-    cats.splice(from, 1);
-
-    let to = cats.indexOf(targetCat);
-    if (to < 0) to = cats.length; // dropped on the implicit group → move to the end
-    cats.splice(to, 0, dragCat);
-
-    const s = store.servers.get(view.activeServer);
-    if (s) s.categories = cats; // optimistic; the NS-META echo confirms
-    this.setCategories(cats);
+    weft.moveCategory(view.activeServer, dragCat, targetCat).catch((e) => toast(String(e), "error"));
   }
 
-  // ---- layout cache persistence ----
-  private saveLayout(): void {
-    try {
-      localStorage.setItem("weft:layout", JSON.stringify(this.layoutCache));
-    } catch {
-      /* ignore */
-    }
-  }
-  /// Restore the cached layout from localStorage (boot). Mutates in place.
-  loadLayout(): void {
-    for (const k of Object.keys(this.layoutCache)) delete this.layoutCache[k];
-    try {
-      Object.assign(this.layoutCache, JSON.parse(localStorage.getItem("weft:layout") ?? "{}"));
-    } catch {
-      /* ignore */
-    }
-  }
-  cacheNsCats(ns: string, cats: string[]): void {
-    (this.layoutCache[ns] ??= { cats: [], chans: {} }).cats = cats;
-    this.saveLayout();
-  }
-  cacheChanLayout(chanName: string, category: string | undefined, position: number): void {
-    const ns = nsOf(chanName);
-    if (!ns) return;
-    (this.layoutCache[ns] ??= { cats: [], chans: {} }).chans[chanName] = { category, position };
-    this.saveLayout();
-  }
+  // Channel layout + category-list persistence is fully model-owned now
+  // (client-core: the `weft:chan-layout` blob, seeded on connect + reconciled at
+  // SYNC end). The old TS `weft:layout` cache — `layoutCache`/`saveLayout`/
+  // `loadLayout`/`cacheNsCats`/`cacheChanLayout` — is gone.
 
   /// Finish a channel-create once the server confirms the canonical name + vanity:
   /// subscribe (text), apply the stashed category/announce flags, and navigate.

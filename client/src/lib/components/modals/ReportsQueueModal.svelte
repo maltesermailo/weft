@@ -2,6 +2,7 @@
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
   import { store } from "$lib/store/store.svelte";
+  import { vm } from "$lib/navigation/viewmodel.svelte";
   import { RESOLVE_ACTIONS } from "$lib/moderation/reports.svelte";
   import * as weft from "$lib/transport/weft";
   const app = getApp();
@@ -12,7 +13,7 @@
   <button class="modal-backdrop" aria-label="Close" onclick={onclose}></button>
   <div class="modal" role="dialog" aria-modal="true">
     <div class="modal-head">
-      <h2>Reports — {app.activeServer ? `ns:${app.activeServer}` : "network"}</h2>
+      <h2>Reports — {app.activeServer ? vm.serverName(app.activeServer) : "network"}</h2>
       <button class="linkish" aria-label="Close" onclick={onclose}>✕</button>
     </div>
     <div class="modal-list">

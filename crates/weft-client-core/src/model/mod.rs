@@ -84,6 +84,25 @@ impl AppState {
         let r = self.channels.move_channel(ns, drag, target_cat, anchor, after);
         (r.diffs.into_iter().map(StateDiff::Chan).collect(), r.sends)
     }
+
+    /// Drag-reorder a namespace's category list (the `move_category` command):
+    /// returns the diff to emit (instant UI) + the `NS META <ns> categories <list>`
+    /// write the host must send.
+    pub fn move_category(
+        &mut self,
+        ns: &str,
+        drag: &str,
+        target: &str,
+    ) -> (Vec<StateDiff>, Vec<(String, String, String)>) {
+        let r = self.channels.move_category(ns, drag, target);
+        (r.diffs.into_iter().map(StateDiff::Chan).collect(), r.sends)
+    }
+
+    /// §4 remove a typer whose fallback-expiry timer fired host-side (its `stop`
+    /// was lost). Local only — no server write; returns the diff to emit.
+    pub fn typing_stop(&mut self, channel: &str, user: &str) -> Vec<StateDiff> {
+        self.channels.typing(channel, user, "stop").into_iter().map(StateDiff::Chan).collect()
+    }
 }
 
 #[cfg(test)]
