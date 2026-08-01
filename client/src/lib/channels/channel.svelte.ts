@@ -148,11 +148,8 @@ export class ChannelStore {
       ch = new Channel(name);
       const ns = nsOf(name);
       if (ns) ch.server = store.server(ns); // the Channel → Server graph edge
-      const cached = ns ? this.layoutCache[ns]?.chans[name] : undefined;
-      if (cached) {
-        ch.category = cached.category;
-        ch.position = cached.position ?? 0;
-      }
+      // Layout (category/position) is model-owned + persisted now (client-core):
+      // the model seeds the cached order on connect via chan-state diffs.
       this.channels[name] = ch;
     }
     return ch;
@@ -184,30 +181,11 @@ export class ChannelStore {
   // ---- Discord-style drag/drop reorder (ChannelList) ----
   // Move a channel into `targetCat` at `anchorName` (before/after), then renumber
   // that category so positions stay stable + ordered.
+  // Discord-style drag-reorder — model-side optimism: the client-core model does
+  // the renumber, emits the state diffs (instant UI via `channelMirrorHandlers`),
+  // and sends the CHANNEL META writes. `""` targetCat = bare top-level group.
   moveChannel(dragName: string, targetCat: string, anchorName?: string, after = false): void {
-    const dragged = this.channels[dragName];
-    if (!dragged) return;
-
-    dragged.category = targetCat || undefined; // "" = uncategorized (bare top-level); optimistic
-    weft.channelMeta(dragName, "category", targetCat).catch((e) => toast(String(e), "error"));
-
-    const list = Object.values(this.channels)
-      .filter(
-        (c) => c.name.startsWith("#") && nsOf(c.name) === view.activeServer && (c.category || "") === targetCat && c.name !== dragName,
-      )
-      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name));
-
-    let at = anchorName ? list.findIndex((c) => c.name === anchorName) : -1;
-    if (at < 0) at = list.length;
-    else if (after) at += 1;
-    list.splice(at, 0, dragged);
-
-    list.forEach((c, i) => {
-      if (c.position !== i) {
-        c.position = i;
-        weft.channelMeta(c.name, "position", String(i)).catch(() => {});
-      }
-    });
+    weft.moveChannel(view.activeServer, dragName, targetCat, anchorName, after).catch((e) => toast(String(e), "error"));
   }
 
   // Reorder a named category (the bare top-level group "" stays put — only named

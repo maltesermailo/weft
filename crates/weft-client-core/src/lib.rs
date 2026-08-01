@@ -7,6 +7,13 @@ use serde::Serialize;
 use weft_crypto::{sign_challenge, signature_to_b64, Keypair};
 use weft_proto::{Command, Event, MsgId, NsInfoKind, Reply, Request, Target};
 
+/// Client-core-owned application model + the reduce step (the model migration:
+/// `docs/architecture/client-core-model-migration.md`). Kept strictly separate
+/// from this codec layer: `ClientEvent` above is the *wire* vocabulary; the model
+/// emits its own `StateDiff` vocabulary, and per-domain event handlers live in
+/// `model::<domain>` (mirroring the TS per-domain handler maps). Pure, WASM-safe.
+pub mod model;
+
 /// How a binding delivers a parsed event to its UI — Tauri `emit`, a JS
 /// callback in wasm, a channel in tests.
 const DEFAULT_PASSWORD: &str = "weft-client-dev-pw";

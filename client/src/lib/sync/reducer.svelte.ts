@@ -21,7 +21,7 @@ import { profileHandlers } from "$lib/profile/profile.svelte";
 import { serverHandlers } from "$lib/namespaces/server.svelte";
 import { reportsHandlers } from "$lib/moderation/reports.svelte";
 import { moderationHandlers } from "$lib/moderation/moderation";
-import { channelHandlers } from "$lib/sync/channel-handlers";
+import { channelHandlers, channelMirrorHandlers } from "$lib/sync/channel-handlers";
 import type { HandlerMap } from "$lib/sync/handler-map";
 import { goHome } from "$lib/navigation/navigation";
 
@@ -102,6 +102,7 @@ const domainHandlers: HandlerMap = {
   ...reportsHandlers,
   ...moderationHandlers,
   ...channelHandlers,
+  ...channelMirrorHandlers, // client-core model diffs (chan-state) → local record
 };
 
 export function handle(e: weft.WeftEvent) {

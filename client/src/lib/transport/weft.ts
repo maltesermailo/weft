@@ -136,6 +136,21 @@ export type WeftEvent =
   | { kind: "role-member"; scope: string; account: string; roles: string }
   | { kind: "chanmeta"; channel: string; key: string; value: string }
   | {
+      /// Client-core model diff (weft-client-core `ChanDiff::ChanState`): a
+      /// channel's scalar metadata, emitted by the Rust model alongside the wire
+      /// event and applied by `channelMirrorHandlers`. Only the fields the model
+      /// owns from the event stream — `category`/`position` (layout) stay TS-owned.
+      kind: "chan-state";
+      name: string;
+      voice: boolean;
+      vanity: string;
+      topic: string | null;
+      restricted: boolean;
+      view_gated: boolean;
+      category: string | null;
+      position: number;
+    }
+  | {
       kind: "ns-meta";
       /// Immutable namespace ULID id (v0.13) — the key the client addresses by.
       id: string;
@@ -779,6 +794,13 @@ export function channelDelete(channel: string) {
 
 export function channelMeta(channel: string, key: string, value: string) {
   return invoke("channel_meta", { channel, key, value });
+}
+
+/// §6.3 drag-reorder a channel — the client-core model renumbers + emits diffs +
+/// sends the CHANNEL META writes (model-side optimism). `target` = "" is the bare
+/// (uncategorized) top-level group; `anchor` null = append at the end.
+export function moveChannel(ns: string, drag: string, target: string, anchor: string | undefined, after: boolean) {
+  return invoke("move_channel", { ns, drag, target, anchor: anchor ?? null, after });
 }
 
 export function discover(cursor?: string) {

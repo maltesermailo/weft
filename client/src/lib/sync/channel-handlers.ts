@@ -59,29 +59,18 @@ export const channelHandlers: HandlerMap = {
     // §7.9 per-channel SYNC header — previews withheld in v1, nothing to apply.
   },
   chanmeta: (e) => {
-    // §6.3 CHANNEL DELETE confirms with `deleted` — drop from every local view
-    // (do NOT channelStore.ensure first, or it'd be re-created).
+    // §6.3 CHANNEL DELETE → drop from every local view. Everything else
+    // (topic/posting/view-gated/category/position) is model-owned → applied by
+    // `channelMirrorHandlers` (chan-state).
     if (e.key === "deleted") {
       delete channelStore.channels[e.channel];
       if (view.active === e.channel) goto(nav.pathFor("", view.activeServer));
-      return;
     }
-    const c = channelStore.ensure(e.channel);
-    if (e.key === "topic") c.topic = e.value;
-    else if (e.key === "posting") c.restricted = e.value === "restricted";
-    else if (e.key === "view-gated") c.viewGated = e.value === "true";
-    else if (e.key === "category") c.category = e.value || undefined;
-    else if (e.key === "position") c.position = parseInt(e.value, 10) || 0;
-    if (e.key === "category" || e.key === "position") channelStore.cacheChanLayout(e.channel, c.category, c.position ?? 0);
   },
   "channel-layout": (e) => {
-    const ch = channelStore.ensure(e.channel);
-    ch.category = e.category ?? undefined;
-    ch.position = e.position;
-    ch.voice = e.channel_kind === "voice"; // §16 render as a voice channel
-    if (e.vanity) ch.vanity = e.vanity; // v0.13 display name; wire name is ids
-    channelStore.cacheChanLayout(e.channel, ch.category, e.position);
-    channelStore.reconcileCreate(e.channel, e.vanity); // finish a pending create
+    // category/position/voice/vanity are model-owned (applied by chan-state);
+    // this handler only finishes a pending create (subscribe + navigate).
+    channelStore.reconcileCreate(e.channel, e.vanity);
   },
   "channel-renamed": (e) => {
     // Re-key local state to the new identity (idempotent — arrives as a
@@ -101,5 +90,23 @@ export const channelHandlers: HandlerMap = {
       weft.join(e.new).catch(() => {}); // actor respawned under the new name — re-subscribe
     }
     confirmSuccess(`rename:${e.new}`);
+  },
+};
+
+/// Model-mirror handlers (client-core migration): apply the Rust `chan-state`
+/// diff — the channel-metadata fields the model now owns (topic / posting /
+/// view-gated / voice / vanity) — onto the local `Channel` record. Registered in
+/// the reducer next to `channelHandlers`. `category`/`position` (layout) stay in
+/// `channelHandlers` until the layout+persistence slice.
+export const channelMirrorHandlers: HandlerMap = {
+  "chan-state": (e) => {
+    const ch = channelStore.ensure(e.name);
+    ch.voice = e.voice;
+    ch.vanity = e.vanity || undefined; // model sends "" for unset; keep TS undefined
+    ch.topic = e.topic ?? undefined; // model sends null for unset
+    ch.restricted = e.restricted;
+    ch.viewGated = e.view_gated;
+    ch.category = e.category ?? undefined; // layout — model-owned + persisted
+    ch.position = e.position;
   },
 };

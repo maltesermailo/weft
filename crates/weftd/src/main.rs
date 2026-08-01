@@ -12,12 +12,14 @@ async fn main() -> anyhow::Result<()> {
         return weftd::admin_cli::run(&args[2..]).await;
     }
 
-    weftd::telemetry::init();
-
+    // Load config first so its `log` filter drives the subscriber (`RUST_LOG`
+    // still overrides). Config load does no logging, so nothing is lost.
     let config = match args.get(1) {
         Some(path) => weftd::config::load(path)?,
         None => weftd::Config::default(),
     };
+
+    weftd::telemetry::init(&config.log);
 
     let server = weftd::start(config).await?;
     info!(quic = %server.quic_addr, ws = ?server.ws_addr, http = ?server.http_addr, "weftd listening");

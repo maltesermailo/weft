@@ -9,7 +9,7 @@ mod weft;
 
 use std::sync::Mutex;
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
 
 /// The active connection's outbound command channel (None until connected).
@@ -846,6 +846,34 @@ fn channel_meta(
     conn.send(weft::build_channel_meta(&channel, &key, &value)?)
 }
 
+/// §6.3 drag-reorder a channel (model-side optimism): the client-core model
+/// renumbers, we emit the resulting state diffs (instant UI) and send the
+/// `CHANNEL META` writes to the server. Replaces the TS renumber in `moveChannel`.
+#[tauri::command]
+fn move_channel(
+    app: AppHandle,
+    conn: State<'_, Conn>,
+    model: State<'_, weft::Model>,
+    ns: String,
+    drag: String,
+    target: String,
+    anchor: Option<String>,
+    after: bool,
+) -> Result<(), String> {
+    let (diffs, sends) = model
+        .0
+        .lock()
+        .unwrap()
+        .move_channel(&ns, &drag, &target, anchor.as_deref(), after);
+    for d in diffs {
+        let _ = app.emit("weft", d);
+    }
+    for (channel, key, value) in sends {
+        conn.send(weft::build_channel_meta(&channel, &key, &value)?)?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn discover(conn: State<'_, Conn>, cursor: Option<String>) -> Result<(), String> {
     conn.send(weft::build_discover(cursor)?)
@@ -976,6 +1004,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(Conn::default())
+        .manage(weft::Model::default())
         .manage(screencap::CaptureState::default())
         .manage(voice_native::NativeVoice::default())
         .setup(|app| {
@@ -1098,6 +1127,7 @@ pub fn run() {
             channel_rename,
             channel_delete,
             channel_meta,
+            move_channel,
             discover,
             channels,
             send_message,

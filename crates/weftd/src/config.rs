@@ -12,6 +12,10 @@ use serde::Deserialize;
 pub struct Config {
     /// This network's DNS name — the identity everything is scoped to.
     pub network: String,
+    /// `tracing` log filter (`EnvFilter` syntax): a bare level (`"debug"`) or
+    /// per-target directives (`"info,weft_core=debug"`). Default `"info"`.
+    /// `RUST_LOG` in the environment overrides this when set.
+    pub log: String,
     /// WELCOME trailing text (§3.6).
     pub motd: Option<String>,
     /// The static channel set (JOIN never auto-creates and CHANNEL CREATE
@@ -478,6 +482,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             network: "localhost".to_string(),
+            log: "info".to_string(),
             motd: None,
             channels: vec![ChannelConfig::Name("#general".to_string())],
             registration: Registration::Open,

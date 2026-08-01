@@ -16,6 +16,12 @@ network = "weft.example.com"
 # WELCOME banner shown to clients on connect (§3.6). Optional.
 motd = "Welcome to weft.example.com"
 
+# Log verbosity — a `tracing` EnvFilter directive. A bare level applies to
+# everything (`"debug"`, `"warn"`); per-target directives scope it (e.g.
+# `"info,weft_core=debug"` to debug just the session/verb path). Default "info".
+# Setting `RUST_LOG` in the environment overrides this.
+log = "info"
+
 # ── accounts & operators ─────────────────────────────────────────────────────
 # `open`  — anyone may REGISTER (§6.1).
 # `closed` — REGISTER is refused; provision accounts out of band.

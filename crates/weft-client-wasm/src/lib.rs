@@ -14,8 +14,20 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{CloseEvent, MessageEvent, WebSocket};
 use weft_client_core as core;
+use weft_client_core::model::AppState;
 use weft_client_core::{ClientEvent, EventSink, Mode, Phase};
 use weft_crypto::Keypair;
+
+/// localStorage key for the client-core channel-layout cache (model-owned;
+/// distinct from the legacy TS `weft:layout` which the flip removes).
+const LAYOUT_KEY: &str = "weft:chan-layout";
+
+/// Persist the channel layout (best-effort).
+fn save_layout(blob: &str) {
+    if let Ok(s) = local_storage() {
+        let _ = s.set_item(LAYOUT_KEY, blob);
+    }
+}
 
 /// The browser's `localStorage`, or an error if unavailable/blocked.
 fn local_storage() -> Result<web_sys::Storage, String> {
@@ -45,14 +57,31 @@ fn stored_key(key: &str) -> Result<Keypair, String> {
     Ok(kp)
 }
 
-/// Deliver a parsed event to the JS callback (serde → `JsValue`).
+/// Delivers wire events + model state-diffs to the JS callback (serde → `JsValue`).
+/// Holds the client-core `AppState`: each wire event is run through `reduce` and
+/// the resulting `StateDiff`s are emitted right after the raw event, on the same
+/// callback (TS routes on `kind`). S1 parity mode — TS logs the diffs, doesn't
+/// apply them yet. See `docs/architecture/client-core-model-migration.md`.
 #[derive(Clone)]
-struct JsSink(js_sys::Function);
+struct JsSink {
+    func: js_sys::Function,
+    state: Rc<RefCell<AppState>>,
+}
+
+impl JsSink {
+    fn call(&self, v: &impl serde::Serialize) {
+        if let Ok(js) = serde_wasm_bindgen::to_value(v) {
+            let _ = self.func.call1(&JsValue::NULL, &js);
+        }
+    }
+}
 
 impl EventSink for JsSink {
     fn emit(&self, event: ClientEvent) {
-        if let Ok(js) = serde_wasm_bindgen::to_value(&event) {
-            let _ = self.0.call1(&JsValue::NULL, &js);
+        let diffs = self.state.borrow_mut().reduce(&event);
+        self.call(&event); // the wire event (un-migrated TS handlers still consume it)
+        for d in &diffs {
+            self.call(d); // model state diffs (parity: logged by TS)
         }
     }
 }
@@ -107,6 +136,10 @@ impl Conn {
         ) {
             let _ = self.ws.send_with_str(&out);
         }
+        // Persist the channel layout if this event changed it.
+        if let Some(blob) = self.sink.state.borrow_mut().take_dirty_layout() {
+            save_layout(&blob);
+        }
         if close {
             let _ = self.ws.close();
             return;
@@ -141,7 +174,10 @@ impl WeftClient {
     pub fn new(on_event: js_sys::Function) -> WeftClient {
         WeftClient {
             conn: Rc::new(RefCell::new(None)),
-            sink: JsSink(on_event),
+            sink: JsSink {
+                func: on_event,
+                state: Rc::new(RefCell::new(AppState::new())),
+            },
             _keep: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -203,6 +239,31 @@ impl WeftClient {
                     .unwrap_or(0);
                 clear_keepalive(handle);
                 *self.conn.borrow_mut() = None;
+                return Ok(JsValue::UNDEFINED);
+            }
+            // §6.3 drag-reorder (model-side optimism): the model renumbers; we emit
+            // the state diffs (instant UI) + send the CHANNEL META writes.
+            "move_channel" => {
+                let (diffs, sends) = self.sink.state.borrow_mut().move_channel(
+                    &arg("ns"),
+                    &arg("drag"),
+                    &arg("target"),
+                    opt("anchor").as_deref(),
+                    flag("after"),
+                );
+                for d in &diffs {
+                    self.sink.call(d);
+                }
+                if let Some(c) = self.conn.borrow_mut().as_mut() {
+                    for (channel, key, value) in sends {
+                        if let Ok(l) = build_channel_meta(&channel, &key, &value) {
+                            c.command(l);
+                        }
+                    }
+                }
+                if let Some(blob) = self.sink.state.borrow_mut().take_dirty_layout() {
+                    save_layout(&blob);
+                }
                 return Ok(JsValue::UNDEFINED);
             }
             "client_config" => {
@@ -466,6 +527,13 @@ impl WeftClient {
         let url = ws_url(host)?;
         let ws = WebSocket::new(&url).map_err(|_| format!("cannot open WebSocket to {url}"))?;
         let password = core::password_or_default(&password);
+        // Fresh session ⇒ fresh model (the server re-sends state on connect).
+        // NOTE: the layout cache is persisted (save) but NOT proactively seeded —
+        // seeding created channels from the cache (ghosts, incl. server-deleted
+        // ones), which also wedged the history single-flight. Channels are created
+        // only by real events; layout enriches them via `chan-state` diffs. A
+        // reconciled first-paint is a later step (see the migration plan).
+        *self.sink.state.borrow_mut() = AppState::new();
         *self.conn.borrow_mut() = Some(Conn {
             ws: ws.clone(),
             phase: Phase::HelloSent,

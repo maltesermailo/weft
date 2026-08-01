@@ -4,21 +4,38 @@
 //! below so `lib.rs`'s `weft::build_*` / `weft::Mode` references are unchanged).
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 use weft_crypto::Keypair;
 use weft_transport::QuicControlStream;
 
 pub use weft_client_core::*;
+use weft_client_core::model::AppState;
 
-/// A Tauri `EventSink`: pushes each `ClientEvent` to the webview on the `weft`
-/// channel.
-struct TauriSink(AppHandle);
+/// A Tauri `EventSink`: runs each wire event through the client-core `AppState`
+/// and pushes the raw event + resulting model `StateDiff`s to the webview on the
+/// `weft` channel (both serialize to `{kind, …}`; TS routes on `kind`). S1 parity
+/// mode — TS logs the diffs, doesn't apply them yet.
+struct TauriSink {
+    app: AppHandle,
+    state: Arc<Mutex<AppState>>,
+}
+
+/// App-global client-core model, managed by Tauri: the connection task reduces
+/// events into it; the `move_channel` command mutates it (model-side drag optimism).
+#[derive(Default, Clone)]
+pub struct Model(pub Arc<Mutex<AppState>>);
 
 impl EventSink for TauriSink {
     fn emit(&self, event: ClientEvent) {
-        let _ = self.0.emit("weft", event);
+        let diffs = self.state.lock().unwrap().reduce(&event);
+        let _ = self.app.emit("weft", event); // the wire event
+        for d in diffs {
+            let _ = self.app.emit("weft", d); // model state diffs (parity: logged by TS)
+        }
     }
 }
 
@@ -30,6 +47,20 @@ pub async fn resolve(host: &str) -> Result<(SocketAddr, String), String> {
         .next()
         .ok_or_else(|| format!("no address for {host}"))?;
     Ok((addr, name.to_string()))
+}
+
+/// The client-core channel-layout cache file (model-owned; the flip removes the
+/// legacy TS `weft:layout` localStorage entry on the web side).
+fn layout_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join("chan-layout.json"))
+}
+fn save_layout(app: &AppHandle, blob: &str) {
+    if let Some(p) = layout_path(app) {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, blob);
+    }
 }
 
 /// Drive one connection to completion. Emits `Connected` once authed, then
@@ -47,7 +78,16 @@ pub async fn run_connection(
     allow_insecure: bool,
     mut outbound: mpsc::UnboundedReceiver<String>,
 ) {
-    let sink = TauriSink(app);
+    // The app-global model (shared with the `move_channel` command). Fresh session
+    // ⇒ reset it (the server re-sends state on connect).
+    // NOTE: the layout cache is persisted (save) but NOT proactively seeded —
+    // seeding created channels from the cache (ghosts, incl. server-deleted ones),
+    // which also wedged the history single-flight. Channels are created only by
+    // real events; layout enriches them via `chan-state` diffs. A reconciled
+    // first-paint is a later step (see the migration plan).
+    let model = app.state::<Model>().0.clone();
+    *model.lock().unwrap() = AppState::new();
+    let sink = TauriSink { app: app.clone(), state: model };
     let mut stream = match connect(addr, &server_name, allow_insecure).await {
         Ok(stream) => stream,
         Err(e) => return sink.emit(ClientEvent::Closed { reason: e }),
@@ -84,6 +124,9 @@ pub async fn run_connection(
                     let mut close = false;
                     if let Some(out) = on_line(&sink, &account, &password, email.as_deref(), mode, device.as_ref(), &mut net_name, &mut phase, &mut in_batch, &mut close, &raw) {
                         if send(&mut stream, &sink, &out).await.is_err() { return; }
+                    }
+                    if let Some(blob) = sink.state.lock().unwrap().take_dirty_layout() {
+                        save_layout(&app, &blob);
                     }
                     if close {
                         // Auth failed — tear down; the connect screen retries.
