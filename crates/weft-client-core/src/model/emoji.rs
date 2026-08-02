@@ -37,9 +37,11 @@ impl Emoji {
 
     fn set(&mut self, namespace: &str, name: &str, media: &str) -> Vec<EmojiDiff> {
         let entry = self.map.entry(namespace.to_string()).or_default();
+
         if entry.get(name).map(String::as_str) == Some(media) {
             return Vec::new(); // unchanged (a re-announce) → no diff
         }
+
         entry.insert(name.to_string(), media.to_string());
         vec![EmojiDiff::EmojiSet {
             namespace: namespace.to_string(),
@@ -50,9 +52,11 @@ impl Emoji {
 
     fn drop(&mut self, namespace: &str, name: &str) -> Vec<EmojiDiff> {
         let Some(entry) = self.map.get_mut(namespace) else { return Vec::new() };
+
         if entry.remove(name).is_none() {
             return Vec::new();
         }
+
         vec![EmojiDiff::EmojiDrop { namespace: namespace.to_string(), name: name.to_string() }]
     }
 }

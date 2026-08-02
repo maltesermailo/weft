@@ -58,21 +58,26 @@ impl Moderation {
             "mute" | "ban" => {
                 let rows = self.deny.entry(scope.to_string()).or_default();
                 let rec = DenyRow { account: account.to_string(), kind: action.to_string(), by, reason };
+
                 // Re-mute/ban updates `by`/`reason` in place; a new one appends.
                 match rows.iter_mut().find(|r| r.account == account && r.kind == action) {
                     Some(existing) => *existing = rec,
                     None => rows.push(rec),
                 }
+
                 vec![ModDiff::Deny { scope: scope.to_string(), rows: rows.clone() }]
             }
             "unmute" | "unban" => {
                 let kind = if action == "unmute" { "mute" } else { "ban" };
                 let Some(rows) = self.deny.get_mut(scope) else { return Vec::new() };
+
                 let before = rows.len();
                 rows.retain(|r| !(r.account == account && r.kind == kind));
+
                 if rows.len() == before {
                     return Vec::new(); // nothing matched → no diff
                 }
+
                 vec![ModDiff::Deny { scope: scope.to_string(), rows: rows.clone() }]
             }
             // `kick` (and anything else) is transient — no deny-list entry.

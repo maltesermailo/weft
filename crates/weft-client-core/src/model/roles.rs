@@ -78,6 +78,7 @@ impl Roles {
                     pingable: *pingable,
                     position: *position,
                 });
+
                 Vec::new() // buffered; the diff is emitted at the batch's end
             }
             ClientEvent::RoleMember { scope, account, roles } => {
@@ -91,6 +92,7 @@ impl Roles {
             // BATCH END flushes the buffered roles.
             ClientEvent::BatchStart { id } if id.starts_with('r') => {
                 self.in_role_batch = true;
+
                 Vec::new()
             }
             ClientEvent::BatchEnd { .. } => self.flush_roles(),
@@ -102,7 +104,9 @@ impl Roles {
         if !self.in_role_batch {
             return Vec::new();
         }
+
         self.in_role_batch = false;
+
         std::mem::take(&mut self.role_buf)
             .into_iter()
             .map(|(scope, mut roles)| {

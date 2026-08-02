@@ -355,8 +355,10 @@ export function handle(e: weft.WeftEvent) {
     case "marked": {
       // Read-marker sync from another device (§9.7).
       const ch = channelStore.channels[e.channel];
+
       if (ch) ch.lastRead = e.msgid;
       channelStore.markRead(e.channel);
+
       break;
     }
     case "unread-counts": {
@@ -372,12 +374,15 @@ export function handle(e: weft.WeftEvent) {
       // channels get their count from SYNC, which re-sends UNREAD-COUNTS right
       // after each CHANNEL-LAYOUT — so guarding here loses nothing.
       const ch = channelStore.channels[e.channel];
+
       if (ch && e.channel !== active && !isMuted(e.channel)) {
         ch.unreadCount = e.unread;
         ch.unread = e.unread > 0;
+
         ch.mentionCount = e.mentions;
         ch.mention = e.mentions > 0;
       }
+
       break;
     }
     case "sync-end": {

@@ -15,6 +15,7 @@
 
 pub mod channels;
 pub mod emoji;
+pub mod messages;
 pub mod moderation;
 pub mod presence;
 pub mod reports;

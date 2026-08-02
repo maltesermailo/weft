@@ -175,6 +175,7 @@ impl Channels {
     // member here and lets the (instance-gone) roster diff no-op in the mirror.
     fn member(&mut self, channel: &str, user: &str, network: &str, action: &str) -> Vec<ChanDiff> {
         let members = self.roster.entry(channel.to_string()).or_default();
+
         let changed = if action == "join" {
             if members.iter().any(|m| m.account == user) {
                 false
@@ -187,9 +188,11 @@ impl Channels {
             members.retain(|m| m.account != user);
             members.len() != before
         };
+
         if !changed {
             return Vec::new();
         }
+
         vec![ChanDiff::Roster { channel: channel.to_string(), members: members.clone() }]
     }
 
@@ -198,6 +201,7 @@ impl Channels {
     // `typing_stop` expiry command. Never holds "me" — self-typing isn't echoed.
     pub(super) fn typing(&mut self, channel: &str, user: &str, state: &str) -> Vec<ChanDiff> {
         let users = self.typers.entry(channel.to_string()).or_default();
+
         let changed = if state == "start" {
             if users.iter().any(|u| u == user) {
                 false
@@ -210,9 +214,11 @@ impl Channels {
             users.retain(|u| u != user);
             users.len() != before
         };
+
         if !changed {
             return Vec::new();
         }
+
         vec![ChanDiff::Typers { channel: channel.to_string(), users: users.clone() }]
     }
 
@@ -223,8 +229,10 @@ impl Channels {
         if self.categories.get(ns).map(Vec::as_slice) == Some(categories.as_slice()) {
             return Vec::new();
         }
+
         self.categories.insert(ns.to_string(), categories.clone());
         self.dirty = true;
+
         vec![ChanDiff::CatList { ns: ns.to_string(), categories }]
     }
 
@@ -234,19 +242,24 @@ impl Channels {
     /// `moveCategory`.
     pub fn move_category(&mut self, ns: &str, drag: &str, target: &str) -> MoveResult {
         let empty = MoveResult { diffs: Vec::new(), sends: Vec::new() };
+
         if drag == target || drag.is_empty() {
             return empty;
         }
+
         let mut cats = self.categories.get(ns).cloned().unwrap_or_default();
+
         let Some(from) = cats.iter().position(|c| c == drag) else {
             return empty;
         };
+
         cats.remove(from);
         let to = cats.iter().position(|c| c == target).unwrap_or(cats.len());
         cats.insert(to, drag.to_string());
 
         self.categories.insert(ns.to_string(), cats.clone());
         self.dirty = true;
+
         MoveResult {
             diffs: vec![ChanDiff::CatList { ns: ns.to_string(), categories: cats.clone() }],
             sends: vec![(ns.to_string(), "categories".into(), cats.join(","))],
@@ -260,8 +273,10 @@ impl Channels {
         if key == "deleted" {
             return self.deleted(channel);
         }
+
         self.provisional.remove(channel); // a live metadata event confirms it exists
         let ch = self.map.entry(channel.to_string()).or_default();
+
         match key {
             "topic" => ch.topic = Some(value.to_string()),
             "posting" => ch.restricted = value == "restricted",
@@ -270,9 +285,11 @@ impl Channels {
             "position" => ch.position = value.parse().unwrap_or(0), // parse failure → 0
             _ => return Vec::new(),
         }
+
         if key == "category" || key == "position" {
             self.dirty = true; // layout changed → the host re-persists
         }
+
         vec![self.snapshot(channel)]
     }
 
@@ -287,12 +304,15 @@ impl Channels {
     ) -> ChanDiff {
         self.provisional.remove(channel); // the server's live CHANNEL-LAYOUT confirms it
         let ch = self.map.entry(channel.to_string()).or_default();
+
         ch.category = category;
         ch.position = position;
         ch.voice = channel_kind == "voice";
+
         if !vanity.is_empty() {
             ch.vanity = vanity.to_string(); // empty must NOT clear an existing vanity
         }
+
         self.dirty = true; // category/position (layout) changed
         self.snapshot(channel)
     }
@@ -308,15 +328,19 @@ impl Channels {
             self.map.insert(new.to_string(), state);
             self.dirty = true; // the persisted layout is name-keyed → re-key + re-save
         }
+
         if let Some(members) = self.roster.remove(old) {
             self.roster.insert(new.to_string(), members); // roster follows the re-key
         }
+
         if let Some(users) = self.typers.remove(old) {
             self.typers.insert(new.to_string(), users);
         }
+
         // A rename is a live event → both names are confirmed (never provisional).
         self.provisional.remove(old);
         self.provisional.remove(new);
+
         vec![ChanDiff::ChanRenamed { old: old.to_string(), new: new.to_string() }]
     }
 
@@ -327,9 +351,11 @@ impl Channels {
         self.provisional.remove(channel);
         self.roster.remove(channel);
         self.typers.remove(channel);
+
         if self.map.remove(channel).is_some() {
             self.dirty = true; // the persisted layout set shrank → re-save
         }
+
         vec![ChanDiff::ChanRemoved { name: channel.to_string() }]
     }
 
@@ -339,9 +365,11 @@ impl Channels {
     // its instance, so the instant-paint cache can never strand a ghost.
     fn reconcile_seed(&mut self) -> Vec<ChanDiff> {
         let stale: Vec<String> = std::mem::take(&mut self.provisional).into_iter().collect();
+
         if !stale.is_empty() {
             self.dirty = true; // the persisted layout set shrank → re-save cleaned
         }
+
         stale
             .into_iter()
             .map(|name| {
@@ -365,6 +393,7 @@ impl Channels {
             .map(|(name, ch)| (name.clone(), LayoutEntry { category: ch.category.clone(), position: ch.position }))
             .collect();
         let blob = LayoutBlob { channels, categories: self.categories.clone() };
+
         serde_json::to_string(&blob).unwrap_or_default()
     }
 
@@ -375,22 +404,27 @@ impl Channels {
     pub fn seed(&mut self, blob: &str) -> Vec<ChanDiff> {
         let blob: LayoutBlob = serde_json::from_str(blob).unwrap_or_default();
         let mut diffs = Vec::new();
+
         for (name, entry) in blob.channels {
             if ns_of(&name).is_empty() {
                 continue; // defensive: an old cache may hold non-namespaced entries
             }
+
             let ch = self.map.entry(name.clone()).or_default();
             ch.category = entry.category;
             ch.position = entry.position;
+
             self.provisional.insert(name.clone());
             diffs.push(self.snapshot(&name));
         }
+
         // Category lists paint instantly too; NS-META overwrites the whole list (a
         // stale one is simply replaced), so these need no provisional reconcile.
         for (ns, categories) in blob.categories {
             self.categories.insert(ns.clone(), categories.clone());
             diffs.push(ChanDiff::CatList { ns, categories });
         }
+
         diffs
     }
 
@@ -450,19 +484,23 @@ impl Channels {
             .and_then(|a| list.iter().position(|n| n == a))
             .map(|i| i as i64)
             .unwrap_or(-1);
+
         if at < 0 {
             at = list.len() as i64;
         } else if after {
             at += 1;
         }
+
         list.insert(at as usize, drag.to_string());
 
         // Renumber 0..n; emit a write + diff only for channels whose position changed.
         for (i, name) in list.iter().enumerate() {
             let i = i as i64;
+
             if self.map[name].position != i {
                 self.map.get_mut(name).unwrap().position = i;
                 sends.push((name.clone(), "position".into(), i.to_string()));
+
                 if name != drag {
                     changed.push(name.clone());
                 }

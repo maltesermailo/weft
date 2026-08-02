@@ -56,6 +56,14 @@ Toolchain: MSRV 1.75, no nightly. Deps so far (workspace-pinned): thiserror, uli
 - ULIDs are assigned ONLY by the channel actor (single writer = per-channel total order, spec §9.1). Never mint a msgid elsewhere.
 - `label` handling: echo the label on every DIRECT response including ERR; never on broadcast copies (spec §3.5). Dedup MSG retries by `(session, label)` in a 5-minute window (spec §9.2).
 - `tracing` spans: per connection + per verb dispatch. No `println!` outside `main.rs`.
+- **Blank-line style (manual — formatters don't do this):** (1) a blank line **before and after every
+  multi-line braced control block** (`if`/`for`/`while`/`match`/closure-with-block) that sits among
+  other statements in a function or arm body — but **not** around one-liners (`if (x) return;`), and
+  **not** merely between sibling `match` arms / `switch` cases (those are already delimited). (2) a blank
+  line **between logical sections/operations** within a function or block (setup → work → return).
+  Statements that form **one operation** stay **together** (no blank between them) — e.g. `const ch = …;`
+  then a blank, then `if (ch) ch.lastRead = m;` immediately followed by `markRead(ch)` (one mark-read
+  operation), then a blank, then `break;`.
 
 ## Security invariants (implement AS TESTS, not just code)
 

@@ -51,6 +51,7 @@ impl Reports {
                         reporter: reporter.clone(),
                     },
                 );
+
                 self.snapshot()
             }
             ClientEvent::ReportResolved { report_id, .. } => {

@@ -358,7 +358,63 @@ display (member badges, name colors, hoisting), `@role` mention pinging, and —
 permission gates (which use the untouched `session.caps`).
 
 **Migration status:** the model owns **channels** + **presence** + **moderation** + **reports** + **emoji**
-+ **roles** (six domains). Remaining: the big channels **messages + history** slice (now unblocked for
-unread/mention — its S1 adds the model's "me" via the `Connected` event + model-side role storage +
-`mentions_me`), plus **invites**, **federation** (netblock quirk), the **ns-meta descriptor**, and
-**social/threads**.
++ **roles** (six domains). Remaining: the **messages** capstone (below), plus **invites**, **federation**
+(netblock quirk), the **ns-meta descriptor**, and **social/threads**.
+
+## Messages capstone — the store model (design + M1 done)
+
+Messages is the domain where the Rust model earns its keep most, but the split must be **sharper** than
+for the metadata domains, because it's the one domain with an *unbounded buffer* and a *scroll-coupled
+render path*. Get it wrong and you either ship megabytes over IPC or put scroll logic in Rust.
+
+**The line:**
+- **Rust owns the store (what is *true*):** the per-channel ordered buffer (id + modseq, gap/continuity —
+  the SYNC reconciliation surface), the ordering-sensitive **mutation semantics** (edit, redact, react,
+  **local-echo → ack reconcile** as first-class `pending`/`failed` state), unread/mention derivation
+  (feeds sidebar/notifications, so it can't live in the view), and pagination cursors.
+- **TS owns the render window (how it *looks*):** virtualized list state (scroll, anchor "pin to bottom
+  unless scrolled up", item-height caches, sticky day dividers), display grouping/coalescing (pure
+  presentation), composer/drafts/typing. The store carries **no clock** — the window derives `ts`/`time`
+  from the message `id`.
+- **IPC — two tiers, never stream the buffer:** a **pull** `messages_range { channel, before, limit }`
+  for bodies-in-bulk (JSON first, measure; binary later if pages get heavy); **thin push** diffs
+  (`MsgAppended`/`MsgUpdated`/`MsgRemoved`/`RangeInvalidated`) for the live tail, **scoped to channels
+  the frontend declared open** — background channels get only the cheap `UnreadChanged { channel, count,
+  mentions }`. TS holds a *dumb window cache* (materialized range + seq watermark), not a second store;
+  on a gap/`RangeInvalidated` it **refetches** the window (snapshot-recovery: diffs for speed, refetch
+  for truth). Local-echo: send → `send_message` → Rust inserts `pending` → `MsgAppended(pending)` →
+  instant render; ack → `MsgUpdated` swaps in the server id.
+
+**Why not keep it in TS:** the WASM host would need a duplicate splice/dedup/reconcile impl; unread
+derivation feeds non-message surfaces and desyncs when computed in the view; and modseq reconciliation
+*is* the protocol — two implementations disagree exactly on the sync edge case. (The one real cost —
+scroll-preserving prepends become an async fetch — is solved by anchor-based virtualization; the
+"network" is a sub-µs local hop.) It's the migration's **capstone** — not urgent while the TS path works,
+but new features (edits/reactions/threads) get designed into the Rust model from the start so the TS
+version stops growing.
+
+**Phases:** **M1** isolated store + semantics + thin diffs + `range` reader (unit-tested, unwired) →
+**M2** modseq/gap ordering + unread/mention derivation (uses migrated roles + `me`) → **M3** the two-tier
+IPC (`messages_range` + `send_message` commands, open-channel subscription scoping, `UnreadChanged`) →
+**M4** TS cutover (window cache + anchor virtualization + refetch-on-gap; gut the reducer's message path).
+
+**M1 — DONE (isolated, unwired).** `model/messages.rs`: `Msg` (incl. `pending`/`failed`/`reactions`) +
+per-channel `buffers` + `me`/`home` from `Connected`. Semantics: `insert_pending` (local echo),
+`ingest` (reconcile-by-label / upsert-by-id keeping reactions / append), `edit`, `redact`, `react`
+(ported `applyReaction`), `fail_pending`, and a `range(channel, before, limit)` reader. Thin
+`MsgAppended`/`MsgUpdated`/`MsgRemoved` diffs (`MsgUpdated` targets by *current* id, so a local→server ack
+is a clean update). **Not in `reduce`/`AppState`** — the app stays on the TS path until M4.
+
+**M2 — DONE (unread/mention derivation; isolated).** Per-channel `unread: {count, mentions}` — the
+model's authoritative tally, display-gating (mute/active) stays TS. `ingest` now takes a `mentioned` flag
+and **bumps** on a fresh non-own append (`+count`, `+mentions` when mentioned); `MARKED` **clears** it;
+`UNREAD-COUNTS` sets the **authoritative** server tally — each emitting a `UnreadChanged { channel, count,
+mentions }` diff (the cheap derived push a *background* channel gets instead of the body). `ingest` moved
+off `handle` (it needs the cross-domain `mentioned`, computed by `AppState` from the roles domain at
+wiring); `handle` now covers `Marked`/`UnreadCounts` + the no-cross-domain mutations. 7 tests.
+
+**Scope note:** the `mentioned` derivation itself (`mentions_me` reading role membership + pingable roles)
+lands with the **wiring** (M3) — that's where `AppState` reaches across domains and where the roles model
+gains the small stored copy it needs; adding it now would be unconsumed dead code. **modseq/gap ordering**
+folds into **M3** (the pull/history path) — it isn't exercised until out-of-order/older messages arrive,
+so implementing it now would be untested speculation.

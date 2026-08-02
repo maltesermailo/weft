@@ -40,6 +40,7 @@ impl Presence {
         if self.map.get(account).map(String::as_str) == Some(status) {
             return Vec::new();
         }
+
         self.map.insert(account.to_string(), status.to_string());
         vec![PresenceDiff::AcctPresence {
             account: account.to_string(),
