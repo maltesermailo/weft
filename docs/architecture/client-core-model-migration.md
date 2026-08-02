@@ -367,7 +367,15 @@ stateless transformer (the Rust twin of `federationHandlers`) reshaping NETBLOCK
 MANIFEST → `manifest-set` / `manifest-drop` (`severed`/`removed` resolved to the drop). The netblock maps +
 the clear-on-refresh + the optimistic remove stay TS mirror ops; migrated faithfully, **not** fixing the
 §11.6 netblock quirk (ADD and REMOVE both echo `NETBLOCKED …` with no reason → a remove reconciles via the
-refresh, not the echo). Remaining: the **ns-meta descriptor** and **social/threads**.
+refresh, not the echo). The **social** slice (`model/social.rs`): the durable social graph — `friends`
+(FRIEND/FRIEND-REMOVED → `friend-set`/`friend-drop`) + `groups` (GROUP/GROUP-MEMBER → `group-set`, self-part
+→ `group-drop`, tracking the session ref for self-leave). The **threads** slice (`model/threads.rs`): the
+`names` map (THREAD/THREAD-NAMED → `thread-name`) + the thread `list` (streamed via the `t` batch → flushed
+newest-first, live renames update the loaded list). **Deliberately left TS** (per the scope decision): the
+real-time **calls** (LiveKit media + ring/active/group-call state + toasts/nav) and the **thread reply
+panel** (root/messages/composer — it rides the `b` message-history path the messages capstone left TS). The
+split raw-event handlers keep only the side-effects (friend-request toast, `channelStore.ensure`/`delete`,
+self-leave nav). Remaining: the **ns-meta descriptor**.
 
 ## Messages capstone — the store model (design + M1 done)
 

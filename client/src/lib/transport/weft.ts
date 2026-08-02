@@ -205,6 +205,16 @@ export type WeftEvent =
   | { kind: "netblock-set"; network: string; reason: string | null }
   | { kind: "manifest-set"; manifest: { peer: string; version: number; state: string; channels: string[]; history: string; media: string; typing: boolean } }
   | { kind: "manifest-drop"; peer: string }
+  /// Social graph diffs (client-core model) — the mirror applies them onto
+  /// `store.social`'s friends / groups maps. Calls stay on the raw wire events.
+  | { kind: "friend-set"; user: string; state: string }
+  | { kind: "friend-drop"; user: string }
+  | { kind: "group-set"; id: string; name: string | null; members: string[] }
+  | { kind: "group-drop"; id: string }
+  /// §9.4 thread diffs (client-core model) — the mirror applies them onto
+  /// `store.threads`'s `names` map + `list`. The reply panel stays on wire events.
+  | { kind: "thread-name"; root: string; name: string | null }
+  | { kind: "thread-list"; threads: { root: string; name: string | null; replies: number; last: string | null }[] }
   | {
       kind: "ns-meta";
       /// Immutable namespace ULID id (v0.13) — the key the client addresses by.

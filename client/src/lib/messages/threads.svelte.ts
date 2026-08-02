@@ -29,11 +29,9 @@ export class Threads {
   /// Root msgid → thread display name (§9.4).
   readonly names = new SvelteMap<string, string>();
 
-  // ---- reducer streaming machinery (not reactive) ----
+  // ---- reply-panel streaming machinery (not reactive; the panel stays TS) ----
   buf: Msg[] = []; // replies batch → messages
   loadingRoot: string | null = null;
-  listBuf: ThreadInfo[] = [];
-  loadingList = false;
 
   /// A thread's display name (root msgid → name), if named.
   nameFor(msgid?: string): string | undefined {
@@ -41,25 +39,22 @@ export class Threads {
   }
 }
 
-/// §9.4 thread wire-event handlers. `thread` rows buffer into `listBuf` while a
-/// threads-list BATCH is loading; `thread-named` reflects a live rename.
+/// §9.4 thread mirror handlers (client-core migration): the `names` map + the
+/// `list` are the model's now — streamed via the `t` batch, with live renames
+/// resolved there. `thread-name` sets/clears a name; `thread-list` replaces the
+/// loaded list (its rename update rides the same diff).
 export const threadsHandlers: HandlerMap = {
-  thread: (e) => {
+  "thread-name": (e) => {
     if (e.name) store.threads.names.set(e.root, e.name);
     else store.threads.names.delete(e.root);
-    if (store.threads.loadingList)
-      store.threads.listBuf.push({
-        root: e.root,
-        name: e.name ?? undefined,
-        replies: e.replies,
-        last: e.last ?? undefined,
-      });
   },
-  "thread-named": (e) => {
-    if (e.name) store.threads.names.set(e.root, e.name);
-    else store.threads.names.delete(e.root);
-    const i = store.threads.list.findIndex((t) => t.root === e.root);
-    if (i >= 0) store.threads.list[i] = { ...store.threads.list[i], name: e.name ?? undefined };
+  "thread-list": (e) => {
+    store.threads.list = e.threads.map((t) => ({
+      root: t.root,
+      name: t.name ?? undefined,
+      replies: t.replies,
+      last: t.last ?? undefined,
+    }));
   },
 };
 
@@ -113,13 +108,8 @@ export function renameThread(name: string): void {
 export function openThreads(): void {
   if (!view.active.startsWith("#")) return;
   store.threads.listOpen = true;
-  store.threads.list = [];
-  store.threads.listBuf = [];
-  store.threads.loadingList = true;
-  weft.listThreads(view.active).catch((e) => {
-    store.threads.loadingList = false;
-    toast(String(e), "error");
-  });
+  store.threads.list = []; // optimistic clear; the `thread-list` diff refills on the batch's end
+  weft.listThreads(view.active).catch((e) => toast(String(e), "error"));
 }
 export function closeThreads(): void {
   store.threads.listOpen = false;

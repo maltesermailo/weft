@@ -180,29 +180,20 @@ export class Social {
 
 /// This domain's wire-event handlers (friends / group DMs / calls).
 export const socialHandlers: HandlerMap = {
+  // Friends + groups: the durable state is the client-core model's (→ friend-set /
+  // friend-drop / group-set / group-drop, applied by the mirror handlers below).
+  // These raw-event handlers keep only the side-effects the model can't do.
   friend: (e) => {
-    store.social.friends.set(e.user, e.state);
     if (e.state === "incoming") toast(`Friend request from ${e.user}`, "info"); // a fresh request is worth a nudge
   },
-  "friend-removed": (e) => store.social.friends.delete(e.user),
-  group: (e) => {
-    store.social.groups.set(e.id, { name: e.name ?? undefined, members: e.members });
-    channelStore.ensure(e.id); // a conversation entry so it lists + holds messages
-  },
+  group: (e) => channelStore.ensure(e.id), // a conversation entry so it lists + holds messages
   "group-member": (e) => {
-    const g = store.social.groups.get(e.group);
-    if (!g) return;
+    // Self-leave: drop the conversation + navigate away (the group state itself is
+    // the model's → group-drop).
     const me = `${store.session.account}@${store.session.network}`;
-    // SvelteMap values aren't deeply reactive — re-set the entry on change.
-    if (e.action === "join") {
-      if (!g.members.includes(e.user)) store.social.groups.set(e.group, { ...g, members: [...g.members, e.user] });
-    } else if (e.user === me) {
-      // If *we* left, drop the conversation.
-      store.social.groups.delete(e.group);
+    if (e.action !== "join" && e.user === me) {
       delete channelStore.channels[e.group];
       if (view.active === e.group) goto("/");
-    } else {
-      store.social.groups.set(e.group, { ...g, members: g.members.filter((m) => m !== e.user) });
     }
   },
   "call-ring": (e) => {
@@ -245,4 +236,9 @@ export const socialHandlers: HandlerMap = {
       }
     }
   },
+  // ---- model mirror (client-core migration): apply the social-graph diffs ----
+  "friend-set": (e) => store.social.friends.set(e.user, e.state),
+  "friend-drop": (e) => store.social.friends.delete(e.user),
+  "group-set": (e) => store.social.groups.set(e.id, { name: e.name ?? undefined, members: e.members }),
+  "group-drop": (e) => store.social.groups.delete(e.id),
 };

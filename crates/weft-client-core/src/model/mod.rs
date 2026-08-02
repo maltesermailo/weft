@@ -22,6 +22,8 @@ pub mod moderation;
 pub mod presence;
 pub mod reports;
 pub mod roles;
+pub mod social;
+pub mod threads;
 
 use std::collections::BTreeSet;
 
@@ -46,6 +48,8 @@ pub enum StateDiff {
     Msg(messages::MsgDiff),
     Invite(invites::InviteDiff),
     Federation(federation::FederationDiff),
+    Social(social::SocialDiff),
+    Thread(threads::ThreadDiff),
     // future domains: Ns(namespaces::NsDiff), …
 }
 
@@ -61,6 +65,8 @@ pub struct AppState {
     pub roles: roles::Roles,
     pub invites: invites::Invites,
     pub federation: federation::Federation,
+    pub social: social::Social,
+    pub threads: threads::Threads,
     pub messages: messages::Messages,
     /// Channels the frontend has declared **open** — the two-tier subscription
     /// scope. Message-body diffs (`MsgAppended`/`MsgUpdated`/`MsgRemoved`) push only
@@ -90,6 +96,8 @@ impl AppState {
         out.extend(self.roles.handle(event).into_iter().map(StateDiff::Role));
         out.extend(self.invites.handle(event).into_iter().map(StateDiff::Invite));
         out.extend(self.federation.handle(event).into_iter().map(StateDiff::Federation));
+        out.extend(self.social.handle(event).into_iter().map(StateDiff::Social));
+        out.extend(self.threads.handle(event).into_iter().map(StateDiff::Thread));
 
         // Messages (capstone store): non-cross-domain mutations via `handle`; a
         // live MESSAGE additionally needs the cross-domain `mentioned` flag, so it's

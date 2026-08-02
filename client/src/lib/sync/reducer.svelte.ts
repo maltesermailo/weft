@@ -494,6 +494,13 @@ export function handle(e: weft.WeftEvent) {
         currentBatchId = "";
         break;
       }
+      if (currentBatchId.startsWith("t")) {
+        // §9.4 thread-list batch — the client-core model buffers + flushes it
+        // (emitting `thread-list`). Checked before the `loadingRoot` state gate so
+        // an open reply panel can't steal it (the reply batch is a `b` history one).
+        currentBatchId = "";
+        break;
+      }
       if (store.threads.loadingRoot) {
         store.threads.messages = store.threads.buf;
         store.threads.buf = [];
@@ -513,14 +520,6 @@ export function handle(e: weft.WeftEvent) {
         store.pins.list = store.pins.buf;
         store.pins.buf = [];
         store.pins.loadingChannel = null;
-        break;
-      }
-      if (store.threads.loadingList) {
-        // Newest activity first (last-activity msgid sorts by its ULID).
-        store.threads.listBuf.sort((a, b) => (b.last ?? "").localeCompare(a.last ?? ""));
-        store.threads.list = store.threads.listBuf;
-        store.threads.listBuf = [];
-        store.threads.loadingList = false;
         break;
       }
       // Flush every channel that accumulated a history page. Each page goes to
