@@ -38,13 +38,12 @@ export class Federation {
     weft.netblockList().catch((e) => toast(String(e), "error"));
   }
   netblockAdd(network: string, reason?: string): void {
-    weft
-      .netblockAdd(network, reason)
-      .then(() => setTimeout(() => this.refreshNetblocks(), 200))
-      .catch((e) => toast(String(e), "error"));
+    // The ADD echo now carries the reason (→ `netblock-set`) — no LIST refresh.
+    weft.netblockAdd(network, reason).catch((e) => toast(String(e), "error"));
   }
   netblockRemove(network: string): void {
-    this.netblocks.delete(network);
+    // The server echoes NETBLOCK-REMOVED (→ `netblock-drop`), which removes it — no
+    // optimistic delete (which the old re-adding NETBLOCKED echo used to undo).
     weft.netblockRemove(network).catch((e) => toast(String(e), "error"));
   }
   bridgePropose(scope: string, peer: string, history: string, media: string, typing: boolean): void {
@@ -59,10 +58,12 @@ export class Federation {
 }
 
 /// Model-mirror handlers (client-core migration): apply the Rust federation diffs
-/// onto `store.federation`. NETBLOCKED / MANIFEST are reshaped by the model into
-/// these; `severed`/`removed` arrives pre-resolved as `manifest-drop`.
+/// onto `store.federation`. NETBLOCKED/NETBLOCK-REMOVED/MANIFEST are reshaped by
+/// the model into these; a block sets (with reason), an unblock drops, and a
+/// `severed`/`removed` manifest arrives pre-resolved as `manifest-drop`.
 export const federationHandlers: HandlerMap = {
   "netblock-set": (e) => store.federation.netblocks.set(e.network, e.reason),
+  "netblock-drop": (e) => store.federation.netblocks.delete(e.network),
   "manifest-set": (e) => store.federation.manifests.set(e.manifest.peer, e.manifest),
   "manifest-drop": (e) => store.federation.manifests.delete(e.peer),
 };

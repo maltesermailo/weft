@@ -8,7 +8,7 @@ import * as media from "$lib/media/media";
 import type { Msg } from "$lib/types";
 import { store } from "$lib/store/store.svelte";
 import { channelStore, Channel, nsOf } from "$lib/channels/channel.svelte";
-import { mkMsg, pinsHandlers, messageMirrorHandlers } from "$lib/messages/messages.svelte";
+import { mkMsg, applyReaction, pinsHandlers, messageMirrorHandlers } from "$lib/messages/messages.svelte";
 import { rosterFetchTarget } from "$lib/namespaces/server.svelte";
 import { federationHandlers } from "$lib/federation/federation.svelte";
 import { socialHandlers } from "$lib/social/social.svelte";
@@ -426,12 +426,19 @@ export function handle(e: weft.WeftEvent) {
     case "typing":
       if (e.user !== account) channelStore.ensure(e.channel).setTyping(e.user, e.state === "start");
       break;
-    case "reaction":
-      // Live §7 reaction — now the client-core store's: `reduce` applies it (to
-      // the live buffer) and emits `msg-updated`, mirrored by
-      // `messageMirrorHandlers`. A reaction to a pre-session history message not in
-      // the live buffer won't reflect until reload (an accepted M4-buffer limit).
+    case "reaction": {
+      // §7 reaction. The client-core store owns **live**-message reactions: `reduce`
+      // applies it and emits `msg-updated`, whose `assignRenderMsg` *assigns* the
+      // authoritative aggregate — so this in-place `applyReaction` on the same
+      // message is a harmless transient that the assign overrides. For a **pre-
+      // session history** message (in `ch.messages` via backfill, but not in the
+      // store's live buffer → no `msg-updated`), this is the only thing that
+      // reflects it. Raw event precedes its diff, so the order is always
+      // apply-then-assign, never a double-count.
+      const m = findMsg(e.target, e.msgid);
+      if (m) applyReaction(m, e.emoji, e.op, e.by);
       break;
+    }
     case "reactions": {
       // Compacted summary from history (§12.1) — set the aggregate directly.
       const m = findMsg(e.target, e.msgid);

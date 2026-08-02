@@ -23,6 +23,26 @@ export function sys(body: string): void {
   if (ch) ch.messages.push(mkMsg({ author: "", body, time: clock(), ts: Date.now(), own: false, system: true }));
 }
 
+/// Apply a §7 REACTION delta to a message in place (`mine` tracks my own toggle so
+/// the picker highlights correctly). Used by the reducer's `reaction` case as the
+/// **history fallback**: the client-core store owns live-message reactions (its
+/// `msg-updated` *assigns* the authoritative aggregate, overriding this for those),
+/// but pre-session history messages aren't in the store's buffer, so this is the
+/// only thing that reflects a reaction on them.
+export function applyReaction(m: Msg, emoji: string, op: string, by: string): void {
+  m.reactions ??= {};
+  const cur = m.reactions[emoji] ?? { count: 0, mine: false };
+  if (op === "add") {
+    cur.count += 1;
+    if (by === store.session.account) cur.mine = true;
+  } else {
+    cur.count -= 1;
+    if (by === store.session.account) cur.mine = false;
+  }
+  if (cur.count <= 0) delete m.reactions[emoji];
+  else m.reactions[emoji] = cur;
+}
+
 /// Map the client-core store's `CoreMsg` (the `msg-*` diff payload) to the render
 /// `Msg`: derive `time`/`ts` from the id (the store carries no clock), and drop the
 /// synthetic `local:<n>` id of a still-pending echo so it never becomes a real

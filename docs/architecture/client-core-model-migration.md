@@ -365,9 +365,9 @@ batch-end, keyed on the id prefix like roles' `r`) + revoke-drop on `INVITED max
 the model (`loading`/`buf` were reducer-internal). The **federation** slice (`model/federation.rs`): a
 stateless transformer (the Rust twin of `federationHandlers`) reshaping NETBLOCKED → `netblock-set` and
 MANIFEST → `manifest-set` / `manifest-drop` (`severed`/`removed` resolved to the drop). The netblock maps +
-the clear-on-refresh + the optimistic remove stay TS mirror ops; migrated faithfully, **not** fixing the
-§11.6 netblock quirk (ADD and REMOVE both echo `NETBLOCKED …` with no reason → a remove reconciles via the
-refresh, not the echo). The **social** slice (`model/social.rs`): the durable social graph — `friends`
+the clear-on-refresh stay TS mirror ops. (Originally migrated faithfully, replicating the §11.6 netblock
+quirk; that quirk was later **fixed** — see below — so a block now `netblock-set`s and an unblock
+`netblock-drop`s, and the client workarounds were retired.) The **social** slice (`model/social.rs`): the durable social graph — `friends`
 (FRIEND/FRIEND-REMOVED → `friend-set`/`friend-drop`) + `groups` (GROUP/GROUP-MEMBER → `group-set`, self-part
 → `group-drop`, tracking the session ref for self-leave). The **threads** slice (`model/threads.rs`): the
 `names` map (THREAD/THREAD-NAMED → `thread-name`) + the thread `list` (streamed via the `t` batch → flushed
@@ -381,8 +381,18 @@ self-leave nav). The **namespaces** slice (`model/namespaces.rs`): the namespace
 The mirror absorbs it via `Server.applyMeta`; categories ride `cat-list`, and `joined` + the deletion drop +
 the owner auto-join stay TS side-effects. (The wire NS-META carries no `welcome` — the descriptor's `welcome`
 stays null, replicating the pre-existing `ClientEvent` gap, not fixed here.) **All eleven planned domains are
-migrated.** Remaining is optional polish, not new domains: the react-on-pre-session-history gap and the §11.6
-netblock-quirk fix (both separate concerns, noted above).
+migrated.**
+
+**§11.6 netblock quirk — FIXED** (a real protocol change, not a migration): ADD and REMOVE both echoed a
+reason-less `NETBLOCKED <network>`, so the client couldn't distinguish block from unblock and a remove
+re-added the entry. Now `ADD`/`LIST` echo `NETBLOCKED <network> [:reason]` **with the reason**, and REMOVE
+echoes a distinct **`NETBLOCK-REMOVED <network>`** (proto `Event::NetblockRemoved`). Spanned proto (new
+event + round-trip test) → core (`on_netblock_add/remove`) → client-core (`ClientEvent::NetblockRemoved` +
+a `NetblockDrop` diff) → TS (`netblock-drop` mirror handler; the `netblockAdd` refresh-after + `netblockRemove`
+optimistic-delete workarounds retired) → spec (§11.6 + event catalog + Appendix A).
+
+**The migration is complete with no remaining known gaps** — the react-on-pre-session-history limitation was
+also fixed (see the M4-buffer note).
 
 ## Messages capstone — the store model (design + M1 done)
 
@@ -491,8 +501,12 @@ the store, mirrored onto `ch.messages`; **older history stays on the reducer's o
   edit/delete keep their idempotent TS `case` as a **history fallback** (the store's diffs also fire for live
   ones, harmlessly). `reactions` (compacted history summary) stays TS.
 
-**Known limitation (accepted):** an edit/delete/**react** to a *pre-session history* message not in the live
-buffer won't reflect until reload (edit/delete are covered by the TS fallback; react isn't). All checks green
+**~~Known limitation~~ — FIXED:** edit/delete/**react** to a *pre-session history* message (in `ch.messages`
+via backfill, but not in the store's live buffer) now all reflect via idempotent TS fallbacks. React was the
+tricky one: `case "reaction"` was restored and is safe because `msg-updated`'s `assignRenderMsg` *assigns*
+the store's authoritative aggregate — so for a live message the TS in-place `applyReaction` is a harmless
+transient the assign overrides (raw event always precedes its diff → apply-then-assign, no double-count),
+while for a history message (no `msg-updated`) the TS application is what reflects it. All checks green
 (Rust 55 tests, wasm + Tauri compile, `npm run check` 0/0 + build).
 
 **M4-scope — DONE (the two-tier IPC optimization).** Emit-all replaced by **per-channel scoping**: a
@@ -507,4 +521,4 @@ IPC (background channels no longer carry a body diff). **wasm serializer fix:** 
 `serialize_maps_as_objects(true)` so `Msg.reactions` (a `BTreeMap`) reaches the web build as a plain
 `Record` (not a JS `Map`) — matching the Tauri serde_json path + the TS types. The react-on-background limit
 narrows the pre-session-react gap (a background react on a *live* message is now caught by the pull's upsert;
-only pre-session-history reacts remain). All checks green.
+pre-session-history reacts were subsequently fixed — see the M4-buffer limitation note above). All checks green.

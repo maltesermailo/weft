@@ -1121,7 +1121,7 @@ impl<S: ControlStream> Session<S> {
         }
         let record = NetblockRecord {
             network: network.clone(),
-            reason,
+            reason: reason.clone(),
             added_ms: unix_now_ms(),
             actor: account.to_string(),
         };
@@ -1136,14 +1136,10 @@ impl<S: ControlStream> Session<S> {
         }
         // §16 M-lk-3b (invariant 7 "stop media"): drop the network's voice relays.
         self.ctx.relay_drop_peer(&network).await;
-        self.send_event(
-            label,
-            Event::Netblocked {
-                network,
-                reason: None,
-            },
-        )
-        .await?;
+        // Echo the reason (not a bare `NETBLOCKED network`) so the operator's list
+        // reflects it immediately — no LIST round-trip needed.
+        self.send_event(label, Event::Netblocked { network, reason })
+            .await?;
         Ok(Flow::Continue)
     }
 
@@ -1168,16 +1164,9 @@ impl<S: ControlStream> Session<S> {
             Err(e) => return self.internal(label, &e).await,
         }
         match self.ctx.netblocks.remove_netblock(&network).await {
-            Ok(true) => {
-                self.send_event(
-                    label,
-                    Event::Netblocked {
-                        network,
-                        reason: None,
-                    },
-                )
-                .await?
-            }
+            // §11.6 a distinct verb so the client removes the entry (a bare
+            // `NETBLOCKED` here used to re-add it — the netblock quirk).
+            Ok(true) => self.send_event(label, Event::NetblockRemoved { network }).await?,
             Ok(false) => return self.no_such_target(label).await,
             Err(e) => return self.internal(label, &e).await,
         }

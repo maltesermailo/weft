@@ -483,6 +483,12 @@ pub enum Event {
         network: NetworkName,
         reason: Option<String>,
     },
+    /// `NETBLOCK-REMOVED <network>` — a network was **un**-blocked (§11.6). A
+    /// distinct verb from `NETBLOCKED` so the ack disambiguates block from unblock
+    /// (both used to echo a reason-less `NETBLOCKED`, which re-added on removal).
+    NetblockRemoved {
+        network: NetworkName,
+    },
     /// `MEDIA-BLOCKED <hash> [:reason]` (§13) — the ack to `MEDIA BLOCK`/`UNBLOCK`
     /// and one per entry for `MEDIA BLOCKS`. Reason surfaces the operator note.
     MediaBlocked {
@@ -1427,6 +1433,12 @@ impl Event {
                     reason: args.trailing_opt(),
                 })
             }
+            "NETBLOCK-REMOVED" => {
+                let mut args = Args::new(line, "NETBLOCK-REMOVED");
+                Ok(Event::NetblockRemoved {
+                    network: args.req("network")?.parse()?,
+                })
+            }
             "MEDIA-BLOCKED" => {
                 let mut args = Args::new(line, "MEDIA-BLOCKED");
                 Ok(Event::MediaBlocked {
@@ -2186,6 +2198,7 @@ impl Event {
             Event::Netblocked { network, reason } => {
                 ("NETBLOCKED", vec![network.to_string()], reason.clone())
             }
+            Event::NetblockRemoved { network } => ("NETBLOCK-REMOVED", vec![network.to_string()], None),
             Event::MediaBlocked { hash, reason } => {
                 ("MEDIA-BLOCKED", vec![hash.clone()], reason.clone())
             }
@@ -3280,6 +3293,18 @@ mod tests {
             network: "evil.example".parse().unwrap(),
             reason: None,
         }));
+    }
+
+    #[test]
+    fn netblock_removed_event_round_trips() {
+        round_trip(&Reply::with_label(
+            Event::NetblockRemoved { network: "evil.example".parse().unwrap() },
+            "nb2",
+        ));
+        assert!(matches!(
+            Reply::parse("NETBLOCK-REMOVED evil.example").unwrap().event,
+            Event::NetblockRemoved { network } if network.as_str() == "evil.example"
+        ));
     }
 
     #[test]

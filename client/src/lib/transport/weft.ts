@@ -203,6 +203,7 @@ export type WeftEvent =
   /// §11 federation diffs (client-core model) — the mirror applies them onto
   /// `store.federation`'s netblock + manifest maps.
   | { kind: "netblock-set"; network: string; reason: string | null }
+  | { kind: "netblock-drop"; network: string }
   | { kind: "manifest-set"; manifest: { peer: string; version: number; state: string; channels: string[]; history: string; media: string; typing: boolean } }
   | { kind: "manifest-drop"; peer: string }
   /// Social graph diffs (client-core model) — the mirror applies them onto
@@ -258,6 +259,7 @@ export type WeftEvent =
       voice: boolean;
     }
   | { kind: "netblocked"; network: string; reason: string | null }
+  | { kind: "netblock-removed"; network: string }
   | { kind: "more"; cursor: string }
   | { kind: "token"; subject: string; scope: string }
   | { kind: "invited"; scope: string; invite_id: string; link: string | null; max_uses: number | null }

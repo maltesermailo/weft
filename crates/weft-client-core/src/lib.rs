@@ -312,6 +312,10 @@ pub enum ClientEvent {
         network: String,
         reason: Option<String>,
     },
+    /// `NETBLOCK-REMOVED <network>` — a network was un-blocked (§11.6).
+    NetblockRemoved {
+        network: String,
+    },
     /// `MORE <cursor>` — DISCOVER pagination continuation (§7).
     More {
         cursor: String,
@@ -1150,6 +1154,9 @@ pub fn on_line<E: EventSink>(
             network: network.to_string(),
             reason,
         }),
+        Event::NetblockRemoved { network } => {
+            sink.emit(ClientEvent::NetblockRemoved { network: network.to_string() })
+        }
         // Keepalive answers are internal — never shown.
         Event::Pong { .. } => {}
         // Batches, reactions, presence, etc. — surfaced raw for now.

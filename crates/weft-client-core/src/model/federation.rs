@@ -1,11 +1,11 @@
 //! Federation domain (§11) — the operator-facing block-list + peering-manifest
 //! live state. The Rust twin of `federationHandlers`: it reshapes NETBLOCKED /
-//! MANIFEST wire events into diffs the mirror applies onto `store.federation`.
-//! Stateless — each event maps directly to a diff. The block-list clear-on-refresh
-//! and the optimistic remove stay TS (UI operations on the mirror), as do the
-//! operator RPC wrappers. Faithful to the current TS `applyNetblock`/`applyManifest`
-//! (incl. the §11.6 "netblock quirk": ADD and REMOVE both echo `NETBLOCKED …` with
-//! no reason, so a remove reconciles via the refresh, not the echo).
+//! NETBLOCK-REMOVED / MANIFEST wire events into diffs the mirror applies onto
+//! `store.federation`. Stateless — each event maps directly to a diff. The
+//! block-list clear-on-refresh stays TS (a UI operation on the mirror), as do the
+//! operator RPC wrappers. `NETBLOCKED` (block, now carrying its reason) → set;
+//! `NETBLOCK-REMOVED` (unblock) → drop — the two are now distinct verbs, so a
+//! removal no longer re-adds the entry (the former §11.6 "netblock quirk").
 
 use serde::Serialize;
 
@@ -25,12 +25,13 @@ pub struct ManifestInfo {
 }
 
 /// This domain's state diffs — the mirror applies them onto `store.federation`.
-/// `NetblockSet` sets `netblocks[network]`; `ManifestSet`/`ManifestDrop` set/drop
-/// `manifests[peer]`. The refresh-clear + optimistic remove are TS mirror ops.
+/// `NetblockSet`/`NetblockDrop` set/drop `netblocks[network]`; `ManifestSet`/
+/// `ManifestDrop` set/drop `manifests[peer]`. The refresh-clear is a TS mirror op.
 #[derive(Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum FederationDiff {
     NetblockSet { network: String, reason: Option<String> },
+    NetblockDrop { network: String },
     ManifestSet { manifest: ManifestInfo },
     ManifestDrop { peer: String },
 }
@@ -42,10 +43,13 @@ pub struct Federation;
 impl Federation {
     pub fn handle(&mut self, event: &ClientEvent) -> Vec<FederationDiff> {
         match event {
-            // §11.6 a blocked network + reason (ADD/REMOVE both echo this — the
-            // remove reconciles via the refresh, not the echo; see the module note).
+            // §11.6 a blocked network + reason.
             ClientEvent::Netblocked { network, reason } => {
                 vec![FederationDiff::NetblockSet { network: network.clone(), reason: reason.clone() }]
+            }
+            // §11.6 an un-blocked network → drop it (distinct from a block now).
+            ClientEvent::NetblockRemoved { network } => {
+                vec![FederationDiff::NetblockDrop { network: network.clone() }]
             }
             // §11 a bridge's manifest: `severed`/`removed` drops it, any other state sets it.
             ClientEvent::Manifest { peer, state, .. } if state == "severed" || state == "removed" => {
@@ -92,6 +96,13 @@ mod tests {
         let d = f.handle(&ClientEvent::Netblocked { network: "evil.example".into(), reason: Some("spam".into()) });
         assert!(matches!(&d[0],
             FederationDiff::NetblockSet { network, reason } if network == "evil.example" && reason.as_deref() == Some("spam")));
+    }
+
+    #[test]
+    fn netblock_removed_maps_to_drop() {
+        let mut f = Federation;
+        let d = f.handle(&ClientEvent::NetblockRemoved { network: "evil.example".into() });
+        assert!(matches!(&d[0], FederationDiff::NetblockDrop { network } if network == "evil.example"));
     }
 
     #[test]

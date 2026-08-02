@@ -5078,9 +5078,10 @@ async fn netblock_add_list_remove_gated_on_cap() {
     op.send("@label=n1 NETBLOCK ADD evil.example :spam floods");
     let reply = op.recv().await;
     assert_eq!(reply.label.as_deref(), Some("n1"));
-    assert!(
-        matches!(&reply.event, Event::Netblocked { network, .. } if network.as_str() == "evil.example")
-    );
+    // The ADD echo now carries the reason (no LIST round-trip needed).
+    assert!(matches!(&reply.event,
+        Event::Netblocked { network, reason }
+        if network.as_str() == "evil.example" && reason.as_deref() == Some("spam floods")));
 
     op.send("NETBLOCK LIST");
     let listed = op.recv().await;
@@ -5095,8 +5096,10 @@ async fn netblock_add_list_remove_gated_on_cap() {
     let Event::Err(e) = err.event else { panic!() };
     assert_eq!(e.context.as_deref(), Some("netblock")); // §8 names the cap
 
+    // REMOVE now echoes a distinct NETBLOCK-REMOVED (not a re-adding NETBLOCKED).
     op.send("NETBLOCK REMOVE evil.example");
-    assert!(matches!(op.recv().await.event, Event::Netblocked { .. }));
+    assert!(matches!(op.recv().await.event,
+        Event::NetblockRemoved { network } if network.as_str() == "evil.example"));
     op.send("NETBLOCK REMOVE evil.example");
     op.expect_err(ErrCode::NoSuchTarget).await;
 }

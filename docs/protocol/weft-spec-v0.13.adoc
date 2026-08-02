@@ -445,7 +445,7 @@ Commands marked _(bridge)_ run only inside an authenticated bridge session; the 
 | `BRIDGE SEVER` _(bridge)_ | `BRIDGE SEVER <peer>` | ladder | Unilateral teardown. | `BRIDGE SEVER peer.example`
 | `BRIDGE REQUEST` _(bridge)_ | `BRIDGE REQUEST <vanity>` with optional `@invite=<id>` | bridge session | <<s11-10,§11.10>> — ask the peer to offer a manifest for one of _its_ namespaces, named by *vanity* (the peer resolves it to its `<ns-id>`, <<s5-3,§5.3>>); offered iff auto-federation-reachable (`federation` open **and** (`public` **or** a valid `invite` for that namespace)), always with `history=full` (rationale in <<s11-10,§11.10>>); else `NO-SUCH-TARGET` \| `BLOCKED`. | `@invite=iv_01J… BRIDGE REQUEST gaming` → `@manifest=<b64> BRIDGE PROPOSE ns:01J8NSGAMING peer.example history=full media=none typing=no` \| `NO-SUCH-TARGET`
 | `FEDERATE` | `FEDERATE <network>/<vanity>` with optional `@invite=<id>` | membership; `auto_bridge` open | <<s11-10,§11.10>> — a local user asks their *home* network to auto-establish an on-demand bridge to a foreign namespace, named by *vanity* (resolved to the peer's `<ns-id>` and pinned at handshake); the optional `invite` (a foreign-ns invite the user holds) unlocks a non-public one. Gated on NETBLOCK + a per-account cooldown; the bridge lands asynchronously (→ `MANIFEST` on the affected channels). Errors `UNSUPPORTED` (auto-federation off / self-network) `BLOCKED` `THROTTLED`. | `@invite=iv_01J… FEDERATE peer.example/gaming` → (ack) then `MANIFEST` on the channels (async)
-| `NETBLOCK` | `NETBLOCK ADD <network> [:reason]` / `REMOVE <network>` / `LIST` | `netblock` (`*` only) | Effects <<s11-6,§11.6>>. → `NETBLOCKED`. | `NETBLOCK ADD evil.example :abuse` → `NETBLOCKED evil.example`
+| `NETBLOCK` | `NETBLOCK ADD <network> [:reason]` / `REMOVE <network>` / `LIST` | `netblock` (`*` only) | Effects <<s11-6,§11.6>>. `ADD`/`LIST` → `NETBLOCKED` (carries the reason); `REMOVE` → `NETBLOCK-REMOVED`. | `NETBLOCK ADD evil.example :abuse` → `NETBLOCKED evil.example :abuse`
 | `MEDIA` | `MEDIA BLOCK <hash> [:reason]` / `UNBLOCK <hash>` / `BLOCKS` | `media-block` (`*` only) | <<s13,§13>> hash moderation: block deletes the blob + thumbnail and rejects re-upload + mirror (content = identity). → `MEDIA-BLOCKED`. | `MEDIA BLOCK <b3-hash> :csam` → `MEDIA-BLOCKED <b3-hash>`
 | `REPORT-FORWARD` _(bridge)_ | `REPORT-FORWARD <report-id> <msgid> <category> [:note]` | bridge session | Forward a report to the origin over the bridge; reporter identity stripped (<<s11-9,§11.9>>). Bridge-session-only. | `REPORT-FORWARD r_01J… peer.example/01J…A harassment :context`
 | `@as=` _(bridge tag)_ | `@as=<account> <any §6 user command>` | bridge session | <<s11-11,§11.11>> — homeserver authority: `F` runs one of its users' <<s6,§6>> commands on the home by tagging it `@as`. `H` reconstructs `account@F` and enforces against its own grants; the effect returns as an event (the labelled event is the ack). Content mints home-authoritatively (<<s11-12,§11.12>>). The user never connects to `H` (IP non-exposure). Bridge-session-only. | `@as=bob;label=g GRANT carol ns:01J8NSGAMING send` → `@label=g;token=<b64> TOKEN carol ns:01J8NSGAMING`
@@ -695,7 +695,8 @@ Events are the server→client half of the protocol; a client *MUST ignore any e
 | Event | Payload / tags | Example
 
 | `MANIFEST <peer> <version> <state>` | state ∈ `live\|added\|removed\|severed`; tags `channels=` (id form), `history=`, `media=`, `typing=`, `voice=`; announced to affected members on any bridge change (<<s11-5,§11.5>>) | `@channels=#01J8NSGAMING/01J8CHGENERAL;history=from-epoch;media=mirror;typing=no;voice=no MANIFEST peer.example 2 live`
-| `NETBLOCKED <network>` | `:reason` — the four <<s11-6,§11.6>> effects fired | `NETBLOCKED evil.example :abuse`
+| `NETBLOCKED <network>` | `:reason` — a network was blocked (the four <<s11-6,§11.6>> effects fired); the `ADD` ack carries the reason | `NETBLOCKED evil.example :abuse`
+| `NETBLOCK-REMOVED <network>` | a network was **un**-blocked (the `REMOVE` ack) — a distinct verb from `NETBLOCKED` so a client reflects add vs remove unambiguously (<<s11-6,§11.6>>) | `NETBLOCK-REMOVED evil.example`
 | `MEDIA-BLOCKED <hash>` | `:reason` — hash moderation (<<s13,§13>>) | `MEDIA-BLOCKED <b3-hash> :csam`
 |===
 
@@ -1038,6 +1039,8 @@ The operator's blocklist of remote networks — each entry `{network, private re
 
 The block is *name-keyed*, so key rotation never evades it — evasion requires a new domain. Authority: the network key or the `netblock` cap. List visibility is configurable (`blocklist_visibility: operators|members|public`). Namespace owners cannot override a netblock but may keep narrower denylists (extension). Because federation is non-transitive, one block is total isolation — no propagation machinery exists or is needed.
 
+*Operator acks (normative):* `NETBLOCK ADD` is acked by `NETBLOCKED <network> [:reason]` **carrying the reason** (so the operator's list reflects it without a `LIST` round-trip); `NETBLOCK REMOVE` is acked by `NETBLOCK-REMOVED <network>`. These are *distinct verbs* so a client applies a block (set) vs an unblock (delete) unambiguously — a bare reason-less `NETBLOCKED` for both would re-add an entry on removal.
+
 [[s11-7]]
 === 11.7 Federated history backfill
 Bridge peers use ordinary `HISTORY` over the bridge session. A request is served *iff all three hold*:
@@ -1377,7 +1380,7 @@ _Direction:_ `S→H` = spoke → home (a user's `@as` command) · `H→S` = home
 | Command | Syntax | Direction | Purpose
 
 | `MIRROR` | `MIRROR <requester-net> <hash> <sig>` (media data plane) | ↔ pull | Pull the bytes of an attachment (a content-addressed blob) a receiver doesn't yet hold, from the blob's origin network; self-authenticating, BLAKE3-verified.
-| `NETBLOCK ADD` / `REMOVE` / `LIST` | `NETBLOCK ADD <network> [:reason]` \| `REMOVE <network>` \| `LIST` | local (op) | Block / unblock / list remote networks; a block fires all four <<s11-6,§11.6>> effects. Cap `netblock` at `*`.
+| `NETBLOCK ADD` / `REMOVE` / `LIST` | `NETBLOCK ADD <network> [:reason]` \| `REMOVE <network>` \| `LIST` | local (op) | Block / unblock / list remote networks; a block fires all four <<s11-6,§11.6>> effects. `ADD`/`LIST` ack with `NETBLOCKED` (reason carried); `REMOVE` acks with `NETBLOCK-REMOVED`. Cap `netblock` at `*`.
 | `REPORT-FORWARD` | `REPORT-FORWARD <report-id> <msgid> <category> [:note]` | P↔P | Forward a report to the content's origin network; reporter identity stripped (invariant 12).
 | `FEDERATE` | `FEDERATE <network>/<vanity>` | client→home | A user asks their own server to auto-establish a bridge to a foreign namespace, named by *vanity* (resolved + pinned to the peer's `<ns-id>`); the server runs the `BRIDGE REQUEST` flow (<<s11-10,§11.10>>). The only federation command a client sends.
 |===
@@ -1413,7 +1416,8 @@ index; event shapes are normative in the cited section.
 
 | `MANIFEST` | `MANIFEST <peer> <version> <state>` (`state` ∈ `live\|added\|removed\|severed`) + tags `channels=`, `history=`, `media=`, `typing=`, `voice=` | →members | A bridge's audience changes (accept / add / remove / sever), so members learn what is now shared (<<s6-6,§6.6>>).
 | `GROUP-ROSTER` | `GROUP-ROSTER <&id> <creator@net> :<member@net>…` + tag `name=` | H→members | A cross-network group's authoritative membership; each receiver reconciles its local group (add/remove) and parts any of its own removed members. Sent on create + every change — the group analog of `MANIFEST`.
-| `NETBLOCKED` | `NETBLOCKED <network> [:reason]` | →owners | A manifest is severed by a netblock (<<s11-6,§11.6>>).
+| `NETBLOCKED` | `NETBLOCKED <network> [:reason]` | →owners / op | A manifest is severed by a netblock (<<s11-6,§11.6>>); also the operator's `NETBLOCK ADD`/`LIST` ack, carrying the reason.
+| `NETBLOCK-REMOVED` | `NETBLOCK-REMOVED <network>` | →op | The operator's `NETBLOCK REMOVE` ack — a distinct verb from `NETBLOCKED` so a client's blocklist reflects remove (not re-add) (<<s11-6,§11.6>>).
 |===
 
 .Fanned-out content — the §7 events, origin-preserved (<<s11-4,§11.4>>, <<s11-12,§11.12>>)
@@ -1680,6 +1684,10 @@ Each entry: what changed, why, and where it now lives. Implementation detail liv
 **(1) ULID identity for namespaces, roles, and channels.** A namespace, role, and channel each gain an immutable *ULID*, minted once at creation; their former names become mutable *vanity labels*, per-network-unique and lockable (<<s5-3,§5.3>>). The wire and every signed scope now carry the ULID: `ns:<ns-id>`, `#<ns-id>/<chan-id>` (both segments ULIDs), `#<chan-id>` for a top-level channel, and role commands/events reference the role ULID. `NS CREATE` / `CHANNEL CREATE` / `ROLE CREATE` take a *vanity* and the server mints the id; `NS-META` carries `id` + a `vanity=` tag, `CHANNEL-*` events carry the vanity alongside the id-name, and `ROLE`/`ROLE-MEMBER` carry role ids. Federation *pins the ULID* (`<network>/<ns-id>`); DISCOVER, invite links, and `FEDERATE` resolve vanity→ULID at the boundary and pin the id. *Why:* a name that _is_ the identity can't be renamed (it's baked into signed tokens, grants, channel names, and federation addressing) and can't be moderated independently — the ULID makes renames free and vanity names lockable, exactly as the earlier account name→ULID move did for accounts (<<s10-1,§10.1>>). Capability-token scope strings carry the ULID (no crypto structural change); old name-scope tokens become inert and re-mint from migrated grant records on next auth. → <<s2-1,§2.1>>, <<s5-3,§5.3>>, <<s6-2,§6.2>>, <<s6-3,§6.3>>, <<s6-5,§6.5>>, <<s7-4,§7.4>>, <<s10-4,§10.4>>, <<s11-10,§11.10>>. Full plan: `docs/architecture/ulid-identity-v0.13.md`.
 +
 **(2) Email registration + password reset.** `REGISTER` takes an optional contact email (`REGISTER <account> [<email>] :<password>`); a network MAY set `require_email` to make it mandatory for native clients (verify-later: the account works immediately, `VERIFY EMAIL` confirms whenever). The email is unique per account and powers reset. `RESET REQUEST <email>` mails a one-time code — answered with a *uniform* `RESET-SENT` whether or not the email is known (anti-enumeration) — and `RESET CONFIRM <email> <code> :<new-password>` sets the new password (`RESET-DONE`; the session stays unauthenticated, the client then `AUTH`s). Both reset verbs are valid only while UNAUTHED. The WEFT-IRC gateway is exempt from `require_email` (it auto-registers emailless accounts, which can't reset). `require_email` requires a configured mailer (<<s10-5,§10.5>>). → <<s6-1,§6.1>>, <<s7-1,§7.1>>, <<s10-5,§10.5>>.
+
+=== Post-v0.13 clarifications
+
+* _NETBLOCK acks disambiguated._ `NETBLOCK ADD` and `REMOVE` both used to echo a reason-less `NETBLOCKED <network>`, so a client couldn't tell block from unblock — applying either as a set meant a `REMOVE` *re-added* the entry (reconciled only via a `LIST` refresh). Now `ADD`/`LIST` echo `NETBLOCKED <network> [:reason]` **with the reason** and `REMOVE` echoes a distinct **`NETBLOCK-REMOVED <network>`**, so a client sets on the former and deletes on the latter — no refresh workaround. → <<s11-6,§11.6>>, <<s7,§7>>.
 
 '''
 
