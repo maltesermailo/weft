@@ -5,6 +5,7 @@
 // File order: definitions → classes → operations → events.
 import { store } from "$lib/store/store.svelte";
 import * as weft from "$lib/transport/weft";
+import * as md from "$lib/rendering/markdown";
 import { Role } from "$lib/roles/role.svelte";
 import type { Membership } from "$lib/membership/membership.svelte";
 import { confirmSuccess, toast, expectSuccess } from "$lib/notifications/toasts.svelte";
@@ -30,11 +31,10 @@ export class RoleStore {
   /// §11.11 federated authors whose roles we've already fetched (`who|scope`).
   fedRolesFetched = new Set<string>();
 
-  // §6.5 fetch subsystem: roles arrive in `r…`-id BATCHes, grants in `gr…`
-  // BATCHes; a per-request scope queue records which scope each answer belongs to.
-  // The buffers accumulate streamed rows until the reducer flushes them.
-  roleBuf: Role[] = [];
-  roleFetchQueue: string[] = [];
+  // §6.5 grants arrive in `gr…`-id BATCHes; a per-request scope queue records which
+  // scope each answer belongs to, and the buffer accumulates rows until the reducer
+  // flushes them. (Role definitions are model-owned now — client-core buffers the
+  // `r…` ROLE batch and emits `role-list`/`member-roles` diffs; no TS buffer/cursor.)
   grantBuf: { subject: string; caps: string[] }[] = [];
   grantFetchQueue: string[] = [];
 
@@ -71,8 +71,9 @@ export class RoleStore {
 
   fetchRoles(scope: string): void {
     if (!scope) return;
-    this.roleFetchQueue.push(scope);
-    weft.roles(scope).catch(() => this.roleFetchQueue.pop());
+    // The `r…` batch response is buffered + flushed by the client-core model,
+    // which routes each ROLE to its own scope — no client-side scope cursor.
+    weft.roles(scope).catch(() => {});
   }
   fetchGrants(scope: string): void {
     if (!scope) return;
@@ -88,11 +89,9 @@ export class RoleStore {
     pingable = false,
     position = 0,
   ): Promise<unknown> {
-    this.roleFetchQueue.push(scope);
     return weft.roleCreate(scope, color, caps, hoist, pingable, position, name);
   }
   deleteRoleAt(scope: string, roleId: string): Promise<unknown> {
-    this.roleFetchQueue.push(scope);
     return weft.roleDelete(scope, roleId);
   }
 
@@ -152,14 +151,12 @@ export class RoleStore {
     if (i < 0 || j < 0 || j >= list.length) return;
 
     [list[i], list[j]] = [list[j], list[i]];
-    this.roleFetchQueue.push(scope);
     weft.rolesReorder(scope, list.map((r) => r.id)).catch((e) => toast(String(e), "error"));
   }
 
   // Persist an arbitrary order (drag-and-drop) — positions follow the id list.
   reorderRoles(ids: string[]): void {
     const scope = this.nsRoleScope();
-    this.roleFetchQueue.push(scope);
     weft.rolesReorder(scope, ids).catch((e) => toast(String(e), "error"));
   }
 
@@ -171,7 +168,6 @@ export class RoleStore {
     const scope = this.nsRoleScope();
     const name = patch.name.trim() || role.name;
 
-    this.roleFetchQueue.push(scope);
     weft
       .roleUpdate(scope, role.id, patch.color, patch.caps.join(","), patch.hoist, patch.pingable, role.position, name)
       .catch((e) => toast(String(e), "error"));
@@ -293,25 +289,22 @@ export const roleScopeOf = (channel: string): string => {
 
 // ---- events ----
 
-/// This domain's wire-event handlers (§6.5 roles). The `role` / `grant-info`
-/// rows buffer on `roleStore`; the reducer flushes each BATCH into
-/// `roleStore.rolesByScope` / `store.grants` (it owns the batch cursor).
+/// This domain's wire-event handlers (§6.5 roles). Role definitions + membership
+/// are model-owned now (client-core buffers the `r…` ROLE batch and emits these
+/// diffs on its end); `grant-info` still buffers on `roleStore` (the reducer
+/// flushes the `gr…` grant BATCH into `store.grants`).
 export const rolesHandlers: HandlerMap = {
-  role: (e) => {
-    roleStore.roleBuf.push(
-      new Role({
-        id: e.role,
-        name: e.name,
-        color: e.color,
-        caps: e.caps ? e.caps.split(",") : [],
-        hoist: e.hoist,
-        pingable: e.pingable,
-        position: e.position,
-      }),
-    );
+  // Model diff: a scope's full role list. Route by scope (ns → Server, else
+  // by-scope), rebuild `Role` instances, and drop the md cache (role names/colors
+  // feed mention rendering).
+  "role-list": (e) => {
+    const roles = e.roles.map((r) => new Role(r));
+    if (e.scope.startsWith("ns:")) store.server(e.scope.slice(3)).roles = roles;
+    else roleStore.rolesByScope[e.scope] = roles;
+    md.clearMdCache();
   },
-  "role-member": (e) => {
-    roleStore.memberRoles[`${e.account}|${e.scope}`] = e.roles ? e.roles.split(",") : [];
+  "member-roles": (e) => {
+    roleStore.memberRoles[`${e.account}|${e.scope}`] = e.roles;
     confirmSuccess(`roles:${e.account}|${e.scope}`);
   },
   "grant-info": (e) => {

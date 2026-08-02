@@ -29,7 +29,6 @@ import { roleScopeOf, roleStore } from "$lib/roles/roles.svelte";
 import { cf, emailNudgeKey } from "$lib/session/connect.svelte";
 import { conn, attemptReconnect, HOMESERVER_KEY, SAVED_KEY, syncCursorKey, loadSyncCursor, syncState } from "$lib/connection/connection.svelte";
 import { ui } from "$lib/ui/ui.svelte";
-import * as md from "$lib/rendering/markdown";
 import { toast, confirmSuccess } from "$lib/notifications/toasts.svelte";
 import { msgEpoch, msgTime, retentionOf } from "$lib/rendering/time";
 import { notifLevel, isMuted } from "$lib/notifications/notif";
@@ -504,18 +503,9 @@ export function handle(e: weft.WeftEvent) {
         break;
       }
       if (currentBatchId.startsWith("r")) {
-        const scope = roleStore.roleFetchQueue.shift();
-        // Keep roles in position order (server sorts, but be safe).
-        roleStore.roleBuf.sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
-        if (scope) {
-          // Single source per scope: ns roles on the Server, others by-scope. Store
-          // a COPY — `roleStore.roleBuf` is a reused module buffer cleared just below (else the
-          // clear would empty the very array we just assigned).
-          if (scope.startsWith("ns:")) store.server(scope.slice(3)).roles = roleStore.roleBuf.slice();
-          else roleStore.rolesByScope[scope] = roleStore.roleBuf.slice();
-          md.clearMdCache(); // role names/colors feed mention rendering
-        }
-        roleStore.roleBuf.length = 0;
+        // §6.5 role batch — the client-core model buffers + flushes it (emitting
+        // `role-list` diffs); the reducer just consumes the batch boundary so it
+        // doesn't fall through to the history flush.
         currentBatchId = "";
         break;
       }

@@ -335,9 +335,30 @@ The §9.4 per-namespace `:name:` → media map is model-owned (`StateDiff`: `Cha
   mirrors that apply onto `Server.emoji` and keep the **`clearMdCache()`** side-effect (a `:name:` render
   changed). No wrapper changes.
 
+## Roles slice — DONE (role defs + membership; done to unblock messages' `mentionsMe`)
+
+The §6.5 role **definitions** (per scope) + **membership** (per `account|scope`) are model-owned. This
+was picked *before* messages because messages' unread/mention needs `mentionsMe`, which reads role data.
+- **Model** (new `model/roles.rs`): a **batch transformer** — `ROLE` events buffer grouped by the event's
+  own `scope`; the `r…`-prefixed `BATCH END` flushes each scope's buffer, sorted by `position`, as a
+  `RoleDiff::RoleList { scope, roles }` that **replaces** the scope's list. `ROLE-MEMBER` → a direct
+  `MemberRoles` diff. Because the `ROLE` event carries `scope`, the fragile TS `roleFetchQueue`
+  scope-cursor is **gone** — the model routes by the event's scope. The role *data* lives in the mirror;
+  the model owns the batch *logic* + transform. (Model-side role storage + `mentions_me` come with the
+  **messages** slice, which consumes them — kept out here to avoid dead code.)
+- **TS**: `rolesHandlers` swapped `role`/`role-member` for `role-list` (route ns→`Server.roles` else
+  `rolesByScope`, rebuild `Role` instances, `clearMdCache`) + `member-roles` mirrors; `grant-info` stays.
+  Removed: `roleBuf`, `roleFetchQueue` (+ all its `.push` in fetch/create/delete/reorder/save), and the
+  reducer's `r…` role-batch flush (now a bare boundary-consume). **Untouched:** `session.caps` and every
+  gate (`can`/`moderates`/`canGrant`), grants, and `mentionsMe` (reads the now-mirror-fed data). No
+  wrapper changes.
+
+**⚠ Smoke-test after this slice (security-adjacent):** the role editor (create/edit/delete/reorder), role
+display (member badges, name colors, hoisting), `@role` mention pinging, and — belt-and-suspenders — the
+permission gates (which use the untouched `session.caps`).
+
 **Migration status:** the model owns **channels** + **presence** + **moderation** + **reports** + **emoji**
-(five domains). The local-only "clear before on-demand re-fetch" command (`mod_refresh`, `reports_clear`)
-is an established sub-pattern. Remaining are the heavier slices: **invites** (streams `invite-info` into a
-buffer + optimistic revoke + mint/revoke echo), **federation** (needs the netblock quirk sorted first),
-the **ns-meta descriptor** (extend the emoji/category work to the full `Server` fields), **social/threads**,
-and the big channels **messages + history** slice.
++ **roles** (six domains). Remaining: the big channels **messages + history** slice (now unblocked for
+unread/mention — its S1 adds the model's "me" via the `Connected` event + model-side role storage +
+`mentions_me`), plus **invites**, **federation** (netblock quirk), the **ns-meta descriptor**, and
+**social/threads**.

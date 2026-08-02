@@ -162,6 +162,8 @@ export type WeftEvent =
   | { kind: "reports"; reports: { report_id: string; msgid: string; category: string; state: string; reporter: string | null }[] }
   | { kind: "emoji-set"; namespace: string; name: string; media: string }
   | { kind: "emoji-drop"; namespace: string; name: string }
+  | { kind: "role-list"; scope: string; roles: { id: string; name: string; color: string; caps: string[]; hoist: boolean; pingable: boolean; position: number }[] }
+  | { kind: "member-roles"; scope: string; account: string; roles: string[] }
   | {
       kind: "ns-meta";
       /// Immutable namespace ULID id (v0.13) — the key the client addresses by.

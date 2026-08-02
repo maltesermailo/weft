@@ -18,6 +18,7 @@ pub mod emoji;
 pub mod moderation;
 pub mod presence;
 pub mod reports;
+pub mod roles;
 
 use serde::Serialize;
 
@@ -36,7 +37,8 @@ pub enum StateDiff {
     Mod(moderation::ModDiff),
     Report(reports::ReportDiff),
     Emoji(emoji::EmojiDiff),
-    // future domains: Ns(namespaces::NsDiff), Role(roles::RoleDiff), …
+    Role(roles::RoleDiff),
+    // future domains: Ns(namespaces::NsDiff), …
 }
 
 /// The client-core model: one field per migrated domain. Grows one sub-state per
@@ -48,6 +50,7 @@ pub struct AppState {
     pub moderation: moderation::Moderation,
     pub reports: reports::Reports,
     pub emoji: emoji::Emoji,
+    pub roles: roles::Roles,
 }
 
 impl AppState {
@@ -67,6 +70,7 @@ impl AppState {
         out.extend(self.moderation.handle(event).into_iter().map(StateDiff::Mod));
         out.extend(self.reports.handle(event).into_iter().map(StateDiff::Report));
         out.extend(self.emoji.handle(event).into_iter().map(StateDiff::Emoji));
+        out.extend(self.roles.handle(event).into_iter().map(StateDiff::Role));
         // future domains, one line each:
         // out.extend(self.namespaces.handle(event).into_iter().map(StateDiff::Ns));
         out
