@@ -264,4 +264,8 @@ export const serverHandlers: HandlerMap = {
     store.servers.get(e.namespace)?.emoji.delete(e.name);
     md.clearMdCache();
   },
+  // §2/§6.2 the namespace descriptor is model-owned now (client-core reshapes
+  // NS-META, skipping the deletion tombstone). Absorb it via `applyMeta`; the
+  // `joined` flag + the deletion drop + the owner auto-join stay on the raw event.
+  "ns-descriptor": (e) => store.server(e.id).applyMeta(e),
 };

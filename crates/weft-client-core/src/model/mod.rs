@@ -19,6 +19,7 @@ pub mod federation;
 pub mod invites;
 pub mod messages;
 pub mod moderation;
+pub mod namespaces;
 pub mod presence;
 pub mod reports;
 pub mod roles;
@@ -50,7 +51,7 @@ pub enum StateDiff {
     Federation(federation::FederationDiff),
     Social(social::SocialDiff),
     Thread(threads::ThreadDiff),
-    // future domains: Ns(namespaces::NsDiff), …
+    Ns(namespaces::NsDiff),
 }
 
 /// The client-core model: one field per migrated domain. Grows one sub-state per
@@ -67,6 +68,7 @@ pub struct AppState {
     pub federation: federation::Federation,
     pub social: social::Social,
     pub threads: threads::Threads,
+    pub namespaces: namespaces::Namespaces,
     pub messages: messages::Messages,
     /// Channels the frontend has declared **open** — the two-tier subscription
     /// scope. Message-body diffs (`MsgAppended`/`MsgUpdated`/`MsgRemoved`) push only
@@ -98,6 +100,7 @@ impl AppState {
         out.extend(self.federation.handle(event).into_iter().map(StateDiff::Federation));
         out.extend(self.social.handle(event).into_iter().map(StateDiff::Social));
         out.extend(self.threads.handle(event).into_iter().map(StateDiff::Thread));
+        out.extend(self.namespaces.handle(event).into_iter().map(StateDiff::Ns));
 
         // Messages (capstone store): non-cross-domain mutations via `handle`; a
         // live MESSAGE additionally needs the cross-domain `mentioned` flag, so it's
@@ -117,8 +120,6 @@ impl AppState {
             out.extend(self.scope_msgs(diffs));
         }
 
-        // future domains, one line each:
-        // out.extend(self.namespaces.handle(event).into_iter().map(StateDiff::Ns));
         out
     }
 

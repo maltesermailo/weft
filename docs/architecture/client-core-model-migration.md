@@ -375,7 +375,14 @@ newest-first, live renames update the loaded list). **Deliberately left TS** (pe
 real-time **calls** (LiveKit media + ring/active/group-call state + toasts/nav) and the **thread reply
 panel** (root/messages/composer — it rides the `b` message-history path the messages capstone left TS). The
 split raw-event handlers keep only the side-effects (friend-request toast, `channelStore.ensure`/`delete`,
-self-leave nav). Remaining: the **ns-meta descriptor**.
+self-leave nav). The **namespaces** slice (`model/namespaces.rs`): the namespace **descriptor** — NS-META →
+`ns-descriptor` (name/title/description/owner/visibility/federation/recovery), a stateless transformer that
+**skips the §6.2 deletion tombstone** (applying it would resurrect the server the TS deletion branch drops).
+The mirror absorbs it via `Server.applyMeta`; categories ride `cat-list`, and `joined` + the deletion drop +
+the owner auto-join stay TS side-effects. (The wire NS-META carries no `welcome` — the descriptor's `welcome`
+stays null, replicating the pre-existing `ClientEvent` gap, not fixed here.) **All eleven planned domains are
+migrated.** Remaining is optional polish, not new domains: the react-on-pre-session-history gap and the §11.6
+netblock-quirk fix (both separate concerns, noted above).
 
 ## Messages capstone — the store model (design + M1 done)
 

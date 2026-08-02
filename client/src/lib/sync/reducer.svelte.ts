@@ -395,15 +395,14 @@ export function handle(e: weft.WeftEvent) {
         if (activeServer === e.id) goHome();
         break;
       }
-      const srv = store.server(e.id);
-      srv.applyMeta(e);
-      // Categories (list + persistence) are model-owned now (client-core): the
-      // `cat-list` diff from this same NS-META sets `srv.categories` + saves.
-      // Owning a namespace is membership — the owner can't leave it (only
-      // transfer or delete). Record it so a server I just created appears in the
-      // rail the instant its NS-META returns, with no channels and no Discover
-      // round-trip, and stays put across Discover's transient resets.
-      if (e.owner === account) srv.joined = true;
+      // The namespace **descriptor** (name/title/owner/visibility/federation/…) is
+      // model-owned now (client-core): the `ns-descriptor` diff from this same
+      // NS-META absorbs it via `applyMeta`; categories ride the `cat-list` diff.
+      // Owning a namespace is membership — the owner can't leave it (only transfer
+      // or delete). Record it so a server I just created appears in the rail the
+      // instant its NS-META returns, with no channels and no Discover round-trip,
+      // and stays put across Discover's transient resets.
+      if (e.owner === account) store.server(e.id).joined = true;
       // A namespace I own but hold no channels in is one I just created (the
       // server seeds its `#general`): auto-join so I'm subscribed to it live —
       // no client-side channel creation needed.
