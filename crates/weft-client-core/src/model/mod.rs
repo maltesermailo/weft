@@ -16,6 +16,7 @@
 pub mod channels;
 pub mod moderation;
 pub mod presence;
+pub mod reports;
 
 use serde::Serialize;
 
@@ -32,6 +33,7 @@ pub enum StateDiff {
     Chan(channels::ChanDiff),
     Presence(presence::PresenceDiff),
     Mod(moderation::ModDiff),
+    Report(reports::ReportDiff),
     // future domains: Ns(namespaces::NsDiff), Role(roles::RoleDiff), …
 }
 
@@ -42,6 +44,7 @@ pub struct AppState {
     pub channels: channels::Channels,
     pub presence: presence::Presence,
     pub moderation: moderation::Moderation,
+    pub reports: reports::Reports,
 }
 
 impl AppState {
@@ -59,6 +62,7 @@ impl AppState {
         out.extend(self.channels.handle(event).into_iter().map(StateDiff::Chan));
         out.extend(self.presence.handle(event).into_iter().map(StateDiff::Presence));
         out.extend(self.moderation.handle(event).into_iter().map(StateDiff::Mod));
+        out.extend(self.reports.handle(event).into_iter().map(StateDiff::Report));
         // future domains, one line each:
         // out.extend(self.namespaces.handle(event).into_iter().map(StateDiff::Ns));
         out
@@ -116,6 +120,12 @@ impl AppState {
     /// `refreshBans` reset). Local only — the batch response repopulates it.
     pub fn mod_refresh(&mut self, scope: &str) -> Vec<StateDiff> {
         self.moderation.clear(scope).into_iter().map(StateDiff::Mod).collect()
+    }
+
+    /// §6.7 clear the report queue ahead of an on-demand re-fetch (the reports
+    /// modal's open reset). Local only.
+    pub fn reports_clear(&mut self) -> Vec<StateDiff> {
+        self.reports.clear().into_iter().map(StateDiff::Report).collect()
     }
 }
 

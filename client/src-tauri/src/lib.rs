@@ -912,6 +912,14 @@ fn mod_refresh(app: AppHandle, model: State<'_, weft::Model>, scope: String) {
     }
 }
 
+/// §6.7 clear the report queue before an on-demand re-fetch (local only).
+#[tauri::command]
+fn reports_clear(app: AppHandle, model: State<'_, weft::Model>) {
+    for d in model.0.lock().unwrap().reports_clear() {
+        let _ = app.emit("weft", d);
+    }
+}
+
 #[tauri::command]
 fn discover(conn: State<'_, Conn>, cursor: Option<String>) -> Result<(), String> {
     conn.send(weft::build_discover(cursor)?)
@@ -1169,6 +1177,7 @@ pub fn run() {
             move_category,
             typing_stop,
             mod_refresh,
+            reports_clear,
             discover,
             channels,
             send_message,

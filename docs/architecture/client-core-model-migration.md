@@ -308,3 +308,22 @@ The §6.7 mute/ban deny-list cache is model-owned (`StateDiff` now aggregates `C
 protocol quirk (the removal echo `NETBLOCKED{reason:None}` re-adds the entry via `applyNetblock`), so a
 faithful migration would preserve a latent bug — better handled as its own considered change than folded
 into a routine slice.
+
+## Reports slice — DONE (report queue; third non-channel domain)
+
+The §6.7 moderation report queue is model-owned (`StateDiff` now: `Chan` + `Presence` + `Mod` + `Report`):
+- **Model** (new `model/reports.rs`): `queue: BTreeMap<report_id, ReportInfo{report_id, msgid, category,
+  state, reporter}>` (transient; fetched on demand). `REPORT-FILED` adds, `REPORT-RESOLVED` removes (no-op
+  if absent) — each emitting the whole queue as `ReportDiff::Reports` (idempotent; report_id/ULID order).
+  A `reports_clear` command backs the modal's open-reset.
+- **TS**: `reportsHandlers` dropped its `report-filed` handler and the `queue.delete` in `report-resolved`
+  — the model owns the queue via a `reports` mirror (rebuild `store.reports.queue`). The two `sys(…)`
+  channel confirmations (report filed / resolved) **stay** (they're system lines, not queue state), as do
+  the modal's `open`/`target` UI. `openReports` now calls `weft.reportsClear()` then `weft.reportsList`.
+  `reports_clear` wired in both wrappers (local-only). (The logout-time `queue.clear()` in
+  `connection.svelte` stays a direct UI reset — the model resets on the next connect anyway.)
+
+**Migration status:** the model owns **channels** + **presence** + **moderation** + **reports**. The
+local-only "clear before on-demand re-fetch" command (`mod_refresh`, `reports_clear`) is now an
+established sub-pattern. Remaining: federation (needs the netblock quirk sorted), server/ns-meta, invites,
+social/threads, and the big channels **messages** slice.

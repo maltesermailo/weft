@@ -29,19 +29,15 @@ export class Reports {
   readonly queue = new SvelteMap<string, ReportInfo>();
 }
 
-/// §6.7 report wire-event handlers: filing confirmations + the moderation queue.
+/// §6.7 report wire-event handlers. The queue itself is model-owned (client-core:
+/// REPORT-FILED adds, REPORT-RESOLVED removes → the `reports` diff below); these
+/// keep only the `sys(…)` channel confirmations.
 export const reportsHandlers: HandlerMap = {
   reported: (e) => sys(`✓ report filed (${e.report_id})`),
-  "report-filed": (e) =>
-    store.reports.queue.set(e.report_id, {
-      report_id: e.report_id,
-      msgid: e.msgid,
-      category: e.category,
-      state: e.state,
-      reporter: e.reporter,
-    }),
-  "report-resolved": (e) => {
-    store.reports.queue.delete(e.report_id);
-    sys(`✓ report ${e.report_id} resolved: ${e.action}`);
+  "report-resolved": (e) => sys(`✓ report ${e.report_id} resolved: ${e.action}`),
+  // Model diff: rebuild the queue (report_id → filed report) from the full list.
+  reports: (e) => {
+    store.reports.queue.clear();
+    for (const r of e.reports) store.reports.queue.set(r.report_id, r);
   },
 };

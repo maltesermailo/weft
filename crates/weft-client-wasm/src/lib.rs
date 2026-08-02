@@ -311,6 +311,14 @@ impl WeftClient {
                 }
                 return Ok(JsValue::UNDEFINED);
             }
+            // §6.7 clear the report queue before an on-demand re-fetch (local only).
+            "reports_clear" => {
+                let diffs = self.sink.state.borrow_mut().reports_clear();
+                for d in &diffs {
+                    self.sink.call(d);
+                }
+                return Ok(JsValue::UNDEFINED);
+            }
             "client_config" => {
                 let cfg = serde_json::json!({
                     "allow_insecure": false, "default_host": "",

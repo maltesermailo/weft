@@ -159,6 +159,7 @@ export type WeftEvent =
   | { kind: "typers"; channel: string; users: string[] }
   | { kind: "acct-presence"; account: string; status: string }
   | { kind: "deny"; scope: string; rows: { account: string; kind: string; by: string | null; reason: string | null }[] }
+  | { kind: "reports"; reports: { report_id: string; msgid: string; category: string; state: string; reporter: string | null }[] }
   | {
       kind: "ns-meta";
       /// Immutable namespace ULID id (v0.13) — the key the client addresses by.
@@ -770,6 +771,11 @@ export function report(msgid: string, category: string, scope: string, note?: st
 
 export function reportsList(scope: string, status?: string) {
   return invoke("reports_list", { scope, status: status ?? null });
+}
+/// §6.7 local-only: clear the client-core report queue before an on-demand
+/// re-fetch (the REPORTS LIST batch repopulates it). No server write.
+export function reportsClear() {
+  return invoke("reports_clear", {});
 }
 
 /// List the moderation deny-list (mutes + bans) at a scope (§6.7). Answered as

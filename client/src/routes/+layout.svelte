@@ -478,7 +478,9 @@ import { mkMsg } from "$lib/messages/messages.svelte";
   // Reporting (ReportModal owns its form + submit)
   function openReports() {
     store.reports.open = true;
-    store.reports.queue.clear();
+    // The queue is model-owned (client-core): clear it via the model, then
+    // re-fetch — the REPORTS LIST batch (REPORT-FILED events) repopulates it.
+    weft.reportsClear().catch(() => {});
     weft.reportsList(activeServer ? `ns:${activeServer}` : "*").catch(() => {});
   }
 
