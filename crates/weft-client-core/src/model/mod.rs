@@ -14,6 +14,7 @@
 //! Pure — no I/O, WASM-safe.
 
 pub mod channels;
+pub mod emoji;
 pub mod moderation;
 pub mod presence;
 pub mod reports;
@@ -34,6 +35,7 @@ pub enum StateDiff {
     Presence(presence::PresenceDiff),
     Mod(moderation::ModDiff),
     Report(reports::ReportDiff),
+    Emoji(emoji::EmojiDiff),
     // future domains: Ns(namespaces::NsDiff), Role(roles::RoleDiff), …
 }
 
@@ -45,6 +47,7 @@ pub struct AppState {
     pub presence: presence::Presence,
     pub moderation: moderation::Moderation,
     pub reports: reports::Reports,
+    pub emoji: emoji::Emoji,
 }
 
 impl AppState {
@@ -63,6 +66,7 @@ impl AppState {
         out.extend(self.presence.handle(event).into_iter().map(StateDiff::Presence));
         out.extend(self.moderation.handle(event).into_iter().map(StateDiff::Mod));
         out.extend(self.reports.handle(event).into_iter().map(StateDiff::Report));
+        out.extend(self.emoji.handle(event).into_iter().map(StateDiff::Emoji));
         // future domains, one line each:
         // out.extend(self.namespaces.handle(event).into_iter().map(StateDiff::Ns));
         out

@@ -323,7 +323,21 @@ The §6.7 moderation report queue is model-owned (`StateDiff` now: `Chan` + `Pre
   `reports_clear` wired in both wrappers (local-only). (The logout-time `queue.clear()` in
   `connection.svelte` stays a direct UI reset — the model resets on the next connect anyway.)
 
-**Migration status:** the model owns **channels** + **presence** + **moderation** + **reports**. The
-local-only "clear before on-demand re-fetch" command (`mod_refresh`, `reports_clear`) is now an
-established sub-pattern. Remaining: federation (needs the netblock quirk sorted), server/ns-meta, invites,
-social/threads, and the big channels **messages** slice.
+## Emoji slice — DONE (namespace custom-emoji map; fourth non-channel domain)
+
+The §9.4 per-namespace `:name:` → media map is model-owned (`StateDiff`: `Chan` + `Presence` + `Mod` +
+`Report` + `Emoji`):
+- **Model** (new `model/emoji.rs`): `map: BTreeMap<ns, BTreeMap<name, media>>` (transient). `EMOJI` sets
+  (no-op when unchanged — a re-announce), `EMOJI-REMOVED` drops (no-op if absent). **Incremental** diffs
+  (`EmojiSet`/`EmojiDrop`, one entry each — matching the event granularity) rather than a full-map, since
+  a namespace can carry many emoji. No command (purely event-driven).
+- **TS**: `serverHandlers` swapped its raw `emoji`/`emoji-removed` handlers for `emoji-set`/`emoji-drop`
+  mirrors that apply onto `Server.emoji` and keep the **`clearMdCache()`** side-effect (a `:name:` render
+  changed). No wrapper changes.
+
+**Migration status:** the model owns **channels** + **presence** + **moderation** + **reports** + **emoji**
+(five domains). The local-only "clear before on-demand re-fetch" command (`mod_refresh`, `reports_clear`)
+is an established sub-pattern. Remaining are the heavier slices: **invites** (streams `invite-info` into a
+buffer + optimistic revoke + mint/revoke echo), **federation** (needs the netblock quirk sorted first),
+the **ns-meta descriptor** (extend the emoji/category work to the full `Server` fields), **social/threads**,
+and the big channels **messages + history** slice.

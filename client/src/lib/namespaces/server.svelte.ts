@@ -253,11 +253,14 @@ export class Server {
 /// §9.4 custom-emoji wire-event handlers: keep a namespace's emoji map current
 /// (and drop the markdown cache since rendered `:name:` may change).
 export const serverHandlers: HandlerMap = {
-  emoji: (e) => {
+  // §9.4 custom emoji: the ns → `:name:` map is model-owned (client-core reduces
+  // the raw EMOJI/EMOJI-REMOVED events). These mirrors apply the model's diffs
+  // onto `Server.emoji` and drop the markdown cache (a `:name:` render changed).
+  "emoji-set": (e) => {
     store.server(e.namespace).emoji.set(e.name, e.media);
     md.clearMdCache();
   },
-  "emoji-removed": (e) => {
+  "emoji-drop": (e) => {
     store.servers.get(e.namespace)?.emoji.delete(e.name);
     md.clearMdCache();
   },

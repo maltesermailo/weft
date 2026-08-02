@@ -160,6 +160,8 @@ export type WeftEvent =
   | { kind: "acct-presence"; account: string; status: string }
   | { kind: "deny"; scope: string; rows: { account: string; kind: string; by: string | null; reason: string | null }[] }
   | { kind: "reports"; reports: { report_id: string; msgid: string; category: string; state: string; reporter: string | null }[] }
+  | { kind: "emoji-set"; namespace: string; name: string; media: string }
+  | { kind: "emoji-drop"; namespace: string; name: string }
   | {
       kind: "ns-meta";
       /// Immutable namespace ULID id (v0.13) — the key the client addresses by.
