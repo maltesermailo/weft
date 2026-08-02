@@ -270,3 +270,21 @@ The per-channel member roster is now model-owned; the cross-domain side-effects 
 **Migration status:** the channels domain owns metadata + layout + rename/delete + seed-reconcile +
 categories + roster + typing. Remaining channel pieces: unread/mention (needs `mentionsMe` = roles/caps
 first — cross-domain), and the big **messages + history + optimistic send** slice.
+
+## Presence slice — DONE (first non-channel domain)
+
+The first domain module that isn't `channels`, proving the multi-domain shape (the `StateDiff` enum now
+aggregates `Chan(..)` + `Presence(..)`; `AppState` gained a `presence` field; `reduce` offers each event
+to both):
+- **Model** (new `model/presence.rs`): `Presence { map: BTreeMap<account, status> }` (transient). The
+  `Presence` wire event sets it, **no-op when unchanged** (presence is re-announced on join/reconnect),
+  emitting `PresenceDiff::AcctPresence { account, status }`. The diff kind is **`acct-presence`** —
+  deliberately distinct from the raw `presence` wire event so the model's diff and the wire event never
+  collide in the TS handler map.
+- **TS**: `accountHandlers` swapped its raw `presence` handler for an `acct-presence` mirror
+  (`store.accountOf(account).presence = status`). The raw `presence` event now flows to TS unhandled
+  (the model owns it). No wrapper changes — the presence diff rides the sink generically.
+
+Note the two presence writes that intentionally stay in TS: the optimistic `??= "online"` on a member
+join (best-effort, the real event confirms via the model) and `store.session.myStatus` for *my own*
+status (the server never echoes my presence back to me, so the model never sees it).

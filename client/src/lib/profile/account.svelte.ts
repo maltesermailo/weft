@@ -59,10 +59,11 @@ export class Account {
   }
 }
 
-/// §7 presence wire-event handler: an account's presence lands once on the
-/// interned Account and every surface referencing it updates.
+/// §7 presence: model-owned (client-core). The raw `presence` wire event is
+/// reduced in the model, which emits an `acct-presence` diff; this mirror lands it
+/// once on the interned Account and every surface referencing it updates.
 export const accountHandlers: HandlerMap = {
-  presence: (e) => {
-    store.accountOf(e.user).presence = e.status;
+  "acct-presence": (e) => {
+    store.accountOf(e.account).presence = e.status;
   },
 };

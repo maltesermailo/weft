@@ -14,6 +14,7 @@
 //! Pure — no I/O, WASM-safe.
 
 pub mod channels;
+pub mod presence;
 
 use serde::Serialize;
 
@@ -28,6 +29,7 @@ use crate::ClientEvent;
 #[serde(untagged)]
 pub enum StateDiff {
     Chan(channels::ChanDiff),
+    Presence(presence::PresenceDiff),
     // future domains: Ns(namespaces::NsDiff), Role(roles::RoleDiff), …
 }
 
@@ -36,6 +38,7 @@ pub enum StateDiff {
 #[derive(Default)]
 pub struct AppState {
     pub channels: channels::Channels,
+    pub presence: presence::Presence,
 }
 
 impl AppState {
@@ -51,6 +54,7 @@ impl AppState {
     pub fn reduce(&mut self, event: &ClientEvent) -> Vec<StateDiff> {
         let mut out = Vec::new();
         out.extend(self.channels.handle(event).into_iter().map(StateDiff::Chan));
+        out.extend(self.presence.handle(event).into_iter().map(StateDiff::Presence));
         // future domains, one line each:
         // out.extend(self.namespaces.handle(event).into_iter().map(StateDiff::Ns));
         out
@@ -110,7 +114,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dispatch_routes_channel_events_and_ignores_the_rest() {
+    fn dispatch_routes_to_the_owning_domain_and_ignores_the_rest() {
         let mut st = AppState::new();
 
         // A channels event produces a channels diff.
@@ -119,13 +123,17 @@ mod tests {
             key: "topic".into(),
             value: "hi".into(),
         });
-        assert_eq!(diffs.len(), 1);
+        assert!(matches!(diffs.as_slice(), [StateDiff::Chan(_)]));
 
-        // An event no migrated domain owns produces nothing (TS still gets it raw).
+        // A presence event routes to the presence domain.
         let diffs = st.reduce(&ClientEvent::Presence {
             user: "a".into(),
             status: "online".into(),
         });
+        assert!(matches!(diffs.as_slice(), [StateDiff::Presence(_)]));
+
+        // An event no migrated domain owns produces nothing (TS still gets it raw).
+        let diffs = st.reduce(&ClientEvent::Closed { reason: "bye".into() });
         assert!(diffs.is_empty());
     }
 }

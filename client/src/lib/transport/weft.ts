@@ -157,6 +157,7 @@ export type WeftEvent =
   | { kind: "cat-list"; ns: string; categories: string[] }
   | { kind: "roster"; channel: string; members: { account: string; network: string }[] }
   | { kind: "typers"; channel: string; users: string[] }
+  | { kind: "acct-presence"; account: string; status: string }
   | {
       kind: "ns-meta";
       /// Immutable namespace ULID id (v0.13) — the key the client addresses by.
