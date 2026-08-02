@@ -21,6 +21,8 @@ pub mod presence;
 pub mod reports;
 pub mod roles;
 
+use std::collections::BTreeSet;
+
 use serde::Serialize;
 
 use crate::ClientEvent;
@@ -39,6 +41,7 @@ pub enum StateDiff {
     Report(reports::ReportDiff),
     Emoji(emoji::EmojiDiff),
     Role(roles::RoleDiff),
+    Msg(messages::MsgDiff),
     // future domains: Ns(namespaces::NsDiff), …
 }
 
@@ -52,6 +55,13 @@ pub struct AppState {
     pub reports: reports::Reports,
     pub emoji: emoji::Emoji,
     pub roles: roles::Roles,
+    pub messages: messages::Messages,
+    /// Channels the frontend has declared **open** — the two-tier subscription
+    /// scope. Message-body diffs (`MsgAppended`/`MsgUpdated`/`MsgRemoved`) push only
+    /// for these; every other channel gets just the cheap `UnreadChanged`. Empty by
+    /// default → minimal IPC until the frontend opens a channel. The sentinel `"*"`
+    /// means **all channels** (the frontend's emit-all mode before scoping lands).
+    open: BTreeSet<String>,
 }
 
 impl AppState {
@@ -72,9 +82,48 @@ impl AppState {
         out.extend(self.reports.handle(event).into_iter().map(StateDiff::Report));
         out.extend(self.emoji.handle(event).into_iter().map(StateDiff::Emoji));
         out.extend(self.roles.handle(event).into_iter().map(StateDiff::Role));
+
+        // Messages (capstone store): non-cross-domain mutations via `handle`; a
+        // live MESSAGE additionally needs the cross-domain `mentioned` flag, so it's
+        // ingested here. Both are subscription-scoped before reaching the frontend.
+        let msg_diffs = self.messages.handle(event);
+        out.extend(self.scope_msgs(msg_diffs));
+
+        // A live MESSAGE is ingested; **history-batch messages are not** — older
+        // history (and search / pins / thread views) is owned by the pull path /
+        // the frontend's own backfill, and ingesting it here would pollute the
+        // live buffer + falsely bump unread.
+        if let ClientEvent::Message { target, body, own, history: false, .. } = event {
+            let me = self.messages.me().to_string();
+            let mentioned = !*own && self.roles.mentions_me(&me, body, channel_ns(target));
+
+            let diffs = self.messages.ingest(event, mentioned);
+            out.extend(self.scope_msgs(diffs));
+        }
+
         // future domains, one line each:
         // out.extend(self.namespaces.handle(event).into_iter().map(StateDiff::Ns));
         out
+    }
+
+    /// Apply the two-tier subscription scope to freshly produced message diffs:
+    /// `UnreadChanged` always flows (the cheap background push); the body diffs
+    /// flow only for channels the frontend declared open.
+    fn scope_msgs(&self, diffs: Vec<messages::MsgDiff>) -> Vec<StateDiff> {
+        use messages::MsgDiff;
+
+        diffs
+            .into_iter()
+            .filter(|d| match d {
+                MsgDiff::UnreadChanged { .. } => true,
+                MsgDiff::MsgAppended { channel, .. }
+                | MsgDiff::MsgUpdated { channel, .. }
+                | MsgDiff::MsgRemoved { channel, .. } => {
+                    self.open.contains(channel) || self.open.contains("*")
+                }
+            })
+            .map(StateDiff::Msg)
+            .collect()
     }
 
     // ---- layout: persistence + the model-side drag-reorder (host-invoked) ----
@@ -136,6 +185,42 @@ impl AppState {
     pub fn reports_clear(&mut self) -> Vec<StateDiff> {
         self.reports.clear().into_iter().map(StateDiff::Report).collect()
     }
+
+    // ---- messages: the two-tier IPC surface (subscription + local echo + pull) ----
+
+    /// Declare the set of **open** channels — the subscription scope. Only these
+    /// receive message-body diffs; every other channel gets just `UnreadChanged`.
+    /// Replaces the whole set (the host re-sends it whenever the open view changes).
+    /// Pass `["*"]` for emit-all (every channel gets body diffs).
+    pub fn set_open_channels(&mut self, channels: Vec<String>) {
+        self.open = channels.into_iter().collect();
+    }
+
+    /// §9 optimistic send: insert a `pending` local echo and return its diff for an
+    /// instant render. The server echo (own + matching label) reconciles it to the
+    /// server id on ingest; the host still builds + sends the wire `MSG` itself.
+    pub fn send_message(&mut self, channel: &str, label: &str, body: &str, md: bool) -> Vec<StateDiff> {
+        let (_id, diffs) = self.messages.insert_pending(channel, label, body, md);
+
+        self.scope_msgs(diffs)
+    }
+
+    /// The **pull** half of the two-tier IPC: up to `limit` messages in `channel`
+    /// ending before `before` (exclusive, else newest). The frontend's window cache
+    /// fills from this — bulk bodies never stream over the push path.
+    pub fn messages_range(&self, channel: &str, before: Option<&str>, limit: usize) -> Vec<messages::Msg> {
+        self.messages.range(channel, before, limit)
+    }
+}
+
+/// The namespace of a message target for mention-scope resolution: `#<ns>/<chan>`
+/// → `<ns>`, else `""` (top-level channel / DM / group → the `*` network scope).
+fn channel_ns(target: &str) -> &str {
+    target
+        .strip_prefix('#')
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(ns, _)| ns)
+        .unwrap_or("")
 }
 
 #[cfg(test)]
@@ -164,5 +249,83 @@ mod tests {
         // An event no migrated domain owns produces nothing (TS still gets it raw).
         let diffs = st.reduce(&ClientEvent::Closed { reason: "bye".into() });
         assert!(diffs.is_empty());
+    }
+
+    fn msg(target: &str, sender: &str, msgid: &str, body: &str, own: bool) -> ClientEvent {
+        ClientEvent::Message {
+            target: target.into(), sender: sender.into(), network: "home".into(), msgid: msgid.into(),
+            body: body.into(), attachments: Vec::new(), system: None, own, history: false, edited: false,
+            reply_to: None, thread: None, md: false, label: None,
+        }
+    }
+
+    #[test]
+    fn message_scopes_body_to_open_channels_and_derives_mentions() {
+        let mut st = AppState::new();
+        st.reduce(&ClientEvent::Connected { network: "home".into(), account: "me".into() });
+
+        // A background (not-open) channel: only the cheap UnreadChanged flows.
+        let diffs = st.reduce(&msg("#n/c", "alice", "01a", "hi", false));
+        assert!(matches!(diffs.as_slice(),
+            [StateDiff::Msg(messages::MsgDiff::UnreadChanged { channel, count, mentions })]
+            if channel == "#n/c" && *count == 1 && *mentions == 0));
+
+        // Open it → the next message carries the body diff too, and `@me` mentions.
+        st.set_open_channels(vec!["#n/c".into()]);
+        let diffs = st.reduce(&msg("#n/c", "alice", "01b", "@me hi", false));
+        assert!(diffs.iter().any(|d| matches!(d, StateDiff::Msg(messages::MsgDiff::MsgAppended { .. }))));
+        assert!(diffs.iter().any(|d| matches!(d,
+            StateDiff::Msg(messages::MsgDiff::UnreadChanged { mentions, .. }) if *mentions == 1)));
+    }
+
+    #[test]
+    fn send_message_echoes_and_range_reads_the_buffer() {
+        let mut st = AppState::new();
+        st.reduce(&ClientEvent::Connected { network: "home".into(), account: "me".into() });
+        st.set_open_channels(vec!["#n/c".into()]);
+
+        let diffs = st.send_message("#n/c", "L1", "hey", false);
+        assert!(matches!(&diffs[0],
+            StateDiff::Msg(messages::MsgDiff::MsgAppended { msg, .. }) if msg.pending && msg.own));
+
+        // The pull path sees the echo; a server ack (own + label) reconciles it.
+        assert_eq!(st.messages_range("#n/c", None, 50).len(), 1);
+        st.reduce(&ClientEvent::Message {
+            target: "#n/c".into(), sender: "me".into(), network: "home".into(), msgid: "01srv".into(),
+            body: "hey".into(), attachments: Vec::new(), system: None, own: true, history: false,
+            edited: false, reply_to: None, thread: None, md: false, label: Some("L1".into()),
+        });
+
+        let range = st.messages_range("#n/c", None, 50);
+        assert_eq!(range.len(), 1); // reconciled in place, not duplicated
+        assert_eq!(range[0].id, "01srv");
+    }
+
+    #[test]
+    fn history_messages_are_not_ingested() {
+        let mut st = AppState::new();
+        st.reduce(&ClientEvent::Connected { network: "home".into(), account: "me".into() });
+        st.set_open_channels(vec!["*".into()]);
+
+        // A history-batch message (search / pins / thread / backfill) must not
+        // enter the live buffer or bump unread — the frontend owns older history.
+        let hist = ClientEvent::Message {
+            target: "#n/c".into(), sender: "alice".into(), network: "home".into(), msgid: "01a".into(),
+            body: "old".into(), attachments: Vec::new(), system: None, own: false, history: true,
+            edited: false, reply_to: None, thread: None, md: false, label: None,
+        };
+        assert!(st.reduce(&hist).is_empty());
+        assert!(st.messages_range("#n/c", None, 50).is_empty());
+    }
+
+    #[test]
+    fn open_star_emits_body_for_every_channel() {
+        let mut st = AppState::new();
+        st.reduce(&ClientEvent::Connected { network: "home".into(), account: "me".into() });
+        st.set_open_channels(vec!["*".into()]); // emit-all
+
+        // A channel never individually opened still gets the body diff.
+        let diffs = st.reduce(&msg("#n/other", "alice", "01a", "hi", false));
+        assert!(diffs.iter().any(|d| matches!(d, StateDiff::Msg(messages::MsgDiff::MsgAppended { .. }))));
     }
 }

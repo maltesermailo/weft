@@ -108,16 +108,6 @@ export class Channel {
       this.typingTimers.delete(user);
     }
   }
-
-  /// Tally one freshly-arrived message; a mention also bumps the mention counters.
-  bump(mentioned: boolean): void {
-    this.unread = true;
-    this.unreadCount += 1;
-    if (mentioned) {
-      this.mention = true;
-      this.mentionCount += 1;
-    }
-  }
 }
 
 /**

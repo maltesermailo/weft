@@ -73,9 +73,16 @@ struct JsSink {
     state: Rc<RefCell<AppState>>,
 }
 
+/// Serialize with maps as plain objects (not JS `Map`) — so `Msg.reactions`
+/// (a `BTreeMap`) reaches TS as a `Record<...>`, matching the Tauri serde_json
+/// path and the TS types. Shared by the event sink + the `messages_range` return.
+fn to_js(v: &impl serde::Serialize) -> Result<JsValue, serde_wasm_bindgen::Error> {
+    v.serialize(&serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true))
+}
+
 impl JsSink {
     fn call(&self, v: &impl serde::Serialize) {
-        if let Ok(js) = serde_wasm_bindgen::to_value(v) {
+        if let Ok(js) = to_js(v) {
             let _ = self.func.call1(&JsValue::NULL, &js);
         }
     }
@@ -319,6 +326,30 @@ impl WeftClient {
                 }
                 return Ok(JsValue::UNDEFINED);
             }
+            // §9 declare the open channels (the two-tier subscription scope): only
+            // these get message-body diffs; all others get just UnreadChanged.
+            "set_open_channels" => {
+                let channels = args
+                    .get("channels")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.sink.state.borrow_mut().set_open_channels(channels);
+                return Ok(JsValue::UNDEFINED);
+            }
+            // §9 the pull half of the two-tier IPC: a window of the message buffer.
+            "messages_range" => {
+                let msgs = self.sink.state.borrow().messages_range(
+                    &arg("channel"),
+                    opt("before").as_deref(),
+                    num("limit") as usize,
+                );
+                return to_js(&msgs).map_err(|e| e.to_string());
+            }
             "client_config" => {
                 let cfg = serde_json::json!({
                     "allow_insecure": false, "default_host": "",
@@ -364,14 +395,34 @@ impl WeftClient {
                             .collect()
                     })
                     .unwrap_or_default();
-                build_msg(
+
+                // Build the wire line first so a rejected send (e.g. over-long body)
+                // never leaves an orphaned optimistic echo in the store.
+                let line = build_msg(
                     &arg("target"),
                     &arg("body"),
                     opt("replyTo"),
                     attachments,
                     opt("thread"),
                     opt("label"),
-                )?
+                )?;
+
+                // §9 optimistic local echo (model store): render instantly; the ack
+                // (own MSG + same label) reconciles to the server id on ingest. Only
+                // with a reconcile label — else there's nothing to swap it against.
+                if let Some(label) = opt("label") {
+                    let diffs = self.sink.state.borrow_mut().send_message(
+                        &arg("target"),
+                        &label,
+                        &arg("body"),
+                        flag("md"),
+                    );
+                    for d in &diffs {
+                        self.sink.call(d);
+                    }
+                }
+
+                line
             }
             "edit" => build_edit(&arg("msgid"), &arg("body"))?,
             "delete" => build_delete(&arg("msgid"))?,

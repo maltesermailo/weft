@@ -85,6 +85,29 @@ function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<any> {
 
 export type Mode = "login" | "register" | "key" | "probe";
 
+/// A message as the client-core store serializes it (the `msg-*` diff payload).
+/// Snake_case + non-optional (Rust `Option`→`null`); the TS mirror maps it to the
+/// render `Msg` (deriving `key`/`time`/`ts`, dropping the synthetic `local:` id on
+/// a still-pending echo). `id` is the server msgid, or `local:<n>` while pending.
+export type CoreMsg = {
+  id: string;
+  author: string;
+  body: string;
+  system: boolean;
+  own: boolean;
+  edited: boolean;
+  md: boolean;
+  reply_to: string | null;
+  thread: string | null;
+  bridged: boolean;
+  network: string;
+  attachments: string[];
+  label: string | null;
+  reactions: Record<string, { count: number; mine: boolean }>;
+  pending: boolean;
+  failed: boolean;
+};
+
 export type WeftEvent =
   | { kind: "connected"; network: string; account: string }
   | { kind: "server-info"; network: string; email_required: boolean; email_available: boolean }
@@ -157,6 +180,16 @@ export type WeftEvent =
   | { kind: "cat-list"; ns: string; categories: string[] }
   | { kind: "roster"; channel: string; members: { account: string; network: string }[] }
   | { kind: "typers"; channel: string; users: string[] }
+  /// The model's authoritative unread tally (client-core messages store); applied
+  /// by `messageMirrorHandlers`, display-gated (active/muted) TS-side.
+  | { kind: "unread-changed"; channel: string; count: number; mentions: number }
+  // The client-core messages store's live-tail body diffs, applied by
+  // `messageMirrorHandlers` onto `ch.messages`. `msg-updated` targets by the
+  // message's *current* store id (a `local:<n>` echo before its ack), so a
+  // local→server reconcile is a clean in-place update.
+  | { kind: "msg-appended"; channel: string; msg: CoreMsg }
+  | { kind: "msg-updated"; channel: string; id: string; msg: CoreMsg }
+  | { kind: "msg-removed"; channel: string; id: string }
   | { kind: "acct-presence"; account: string; status: string }
   | { kind: "deny"; scope: string; rows: { account: string; kind: string; by: string | null; reason: string | null }[] }
   | { kind: "reports"; reports: { report_id: string; msgid: string; category: string; state: string; reporter: string | null }[] }
@@ -532,7 +565,21 @@ export function sendMessage(
     attachments: attachments ?? [],
     thread: thread ?? null,
     label: label ?? null,
+    md: true, // composed messages are markdown (§9.4) — the store echo renders it
   });
+}
+
+/// Declare the client-core store's message-subscription scope (which channels get
+/// live body diffs). `["*"]` = emit-all (every channel).
+export function setOpenChannels(channels: string[]) {
+  return invoke("set_open_channels", { channels });
+}
+
+/// Pull a window of the store's live buffer for `channel` — up to `limit`
+/// messages ending before `before` (exclusive), else the newest. Used to catch a
+/// channel up on open (messages / edits / reactions it missed while backgrounded).
+export function messagesRange(channel: string, before: string | undefined, limit: number): Promise<CoreMsg[]> {
+  return invoke("messages_range", { channel, before: before ?? null, limit }) as Promise<CoreMsg[]>;
 }
 
 export function typing(channel: string, active: boolean) {

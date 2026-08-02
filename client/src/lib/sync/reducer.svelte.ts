@@ -8,7 +8,7 @@ import * as media from "$lib/media/media";
 import type { Msg } from "$lib/types";
 import { store } from "$lib/store/store.svelte";
 import { channelStore, Channel, nsOf } from "$lib/channels/channel.svelte";
-import { mkMsg, applyReaction, pinsHandlers } from "$lib/messages/messages.svelte";
+import { mkMsg, pinsHandlers, messageMirrorHandlers } from "$lib/messages/messages.svelte";
 import { rosterFetchTarget } from "$lib/namespaces/server.svelte";
 import { federationHandlers } from "$lib/federation/federation.svelte";
 import { socialHandlers } from "$lib/social/social.svelte";
@@ -31,7 +31,7 @@ import { conn, attemptReconnect, HOMESERVER_KEY, SAVED_KEY, syncCursorKey, loadS
 import { ui } from "$lib/ui/ui.svelte";
 import { toast, confirmSuccess } from "$lib/notifications/toasts.svelte";
 import { msgEpoch, msgTime, retentionOf } from "$lib/rendering/time";
-import { notifLevel, isMuted } from "$lib/notifications/notif";
+import { notifLevel } from "$lib/notifications/notif";
 import { profileStore } from "$lib/profile/profile.svelte";
 import { initVoice, voice } from "$lib/voice/voice.svelte";
 
@@ -105,6 +105,7 @@ const domainHandlers: HandlerMap = {
   ...moderationHandlers,
   ...channelHandlers,
   ...channelMirrorHandlers, // client-core model diffs (chan-state) → local record
+  ...messageMirrorHandlers, // client-core message diffs (unread-changed) → counters
 };
 
 export function handle(e: weft.WeftEvent) {
@@ -277,36 +278,27 @@ export function handle(e: weft.WeftEvent) {
       // A DM we haven't got open yet (someone messaged us) → persist it so the
       // conversation survives a reconnect.
       const newDm = key.startsWith("@") && !channelStore.channels[key];
-      const ch = channelStore.ensure(key);
+      channelStore.ensure(key);
       if (newDm) channelStore.persistDms();
-      // §3.5/§11.13 optimistic reconcile: our own echoed message carrying our
-      // label replaces the pending placeholder we showed on send, rather than
-      // adding a duplicate. Works identically for a local send and for one a
-      // home-authoritative channel minted elsewhere (our server re-attaches the
-      // label to the mirrored copy).
+
+      // The channel's live buffer is the client-core store's now: this MESSAGE is
+      // ingested by `reduce` and mirrored onto `ch.messages` by
+      // `messageMirrorHandlers` (append + §3.5/§11.13 local-echo→ack reconcile +
+      // §9.2 upsert). The reducer keeps only the cross-cutting side-effects below.
+      //
+      // A re-delivery (already in the buffer) must not re-notify — the old
+      // reconcile/upsert early-break gave us that; recover it by reading the
+      // (store-owned) buffer. The body diff fires *after* this event, so a
+      // genuinely new message isn't present yet → `redelivered` is false for it.
+      const redelivered = !!e.msgid && !!channelStore.channels[key]?.messages.some((m) => m.msgid === e.msgid);
+
+      // The open thread panel is separate TS state (not the store) — reconcile its
+      // own optimistic echo when our labeled copy returns.
       if (e.own && e.label) {
-        const idx = ch.messages.findIndex((m) => m.pending && m.label === e.label);
-        if (idx !== -1) {
-          ch.messages.splice(idx, 1, msg);
-          const ti = store.threads.messages.findIndex((m) => m.pending && m.label === e.label);
-          if (ti !== -1)
-            store.threads.messages = store.threads.messages.map((m, i) => (i === ti ? msg : m));
-          break;
-        }
+        const ti = store.threads.messages.findIndex((m) => m.pending && m.label === e.label);
+        if (ti !== -1) store.threads.messages = store.threads.messages.map((m, i) => (i === ti ? msg : m));
       }
-      // Upsert by msgid (v0.12 SYNC apply rule): a re-delivered message —
-      // history backfill, or a reconnect delta carrying an offline edit —
-      // replaces the existing copy in place with the final body + edited
-      // state, preserving accumulated reactions (which arrive as own events).
-      if (e.msgid) {
-        const idx = ch.messages.findIndex((m) => m.msgid === e.msgid);
-        if (idx !== -1) {
-          msg.reactions = ch.messages[idx].reactions;
-          ch.messages.splice(idx, 1, msg);
-          break;
-        }
-      }
-      ch.messages.push(msg);
+
       // If this is a live reply in the open thread, show it in the panel too.
       if (
         store.threads.root &&
@@ -333,13 +325,12 @@ export function handle(e: weft.WeftEvent) {
       }
       const pinged = !e.own && store.session.mentionsMe(e.body, nsOf(key));
       const level = notifLevel(key);
-      // A muted scope shows no unread indicator; others tally unread/mentions.
-      if (!e.own && key !== active && level !== "nothing") {
-        ch.bump(pinged);
-      }
+      // Unread/mention tallying is now the model's (client-core M4): the store
+      // bumps on ingest and emits `unread-changed`, applied (display-gated) by
+      // `messageMirrorHandlers`. `pinged` still gates the desktop notification.
       // Desktop notification while unfocused, gated by the scope's level:
       // "all" → every message, "mentions" → DMs/@mentions only, "nothing" → none.
-      if (!e.own && !document.hasFocus()) {
+      if (!e.own && !redelivered && !document.hasFocus()) {
         const dm = e.target.startsWith("@");
         const notify = level === "all" || (level === "mentions" && (dm || pinged));
         // Qualify a foreign sender so the notification isn't ambiguous.
@@ -353,38 +344,21 @@ export function handle(e: weft.WeftEvent) {
       break;
     }
     case "marked": {
-      // Read-marker sync from another device (§9.7).
+      // Read-marker sync from another device (§9.7). The unread clear now rides
+      // the model's `unread-changed` diff (the store's `mark_read` on MARKED);
+      // this keeps the local read marker for the divider + auto-mark guard.
       const ch = channelStore.channels[e.channel];
 
       if (ch) ch.lastRead = e.msgid;
-      channelStore.markRead(e.channel);
 
       break;
     }
-    case "unread-counts": {
-      // Server-authoritative unread tally (§6.3) — the login snapshot and
-      // cross-device MARK pushes override the client's live tally, so counts
-      // survive reload/reconnect and stay in sync across devices. The channel
-      // being viewed is read (auto-mark handles it); muted scopes stay silent.
-      //
-      // Only update a channel we actually have. The auth snapshot streams a
-      // count for every persisted read marker, including stale ones for
-      // deleted / no-longer-accessible channels; materializing those would pop
-      // a phantom rail tile (raw ULID name, NO-SUCH-TARGET on click). Real
-      // channels get their count from SYNC, which re-sends UNREAD-COUNTS right
-      // after each CHANNEL-LAYOUT — so guarding here loses nothing.
-      const ch = channelStore.channels[e.channel];
-
-      if (ch && e.channel !== active && !isMuted(e.channel)) {
-        ch.unreadCount = e.unread;
-        ch.unread = e.unread > 0;
-
-        ch.mentionCount = e.mentions;
-        ch.mention = e.mentions > 0;
-      }
-
+    case "unread-counts":
+      // Server-authoritative unread tally (§6.3, login snapshot + cross-device
+      // MARK pushes) is now the model's: the store's `set_unread` adopts it and
+      // emits `unread-changed`, applied (display-gated, phantom-guarded) by
+      // `messageMirrorHandlers`. Nothing to do on the raw wire event.
       break;
-    }
     case "sync-end": {
       syncState.syncing = false;
       // §6.9 store the new cursor for this device's next reconnect delta.
@@ -453,13 +427,12 @@ export function handle(e: weft.WeftEvent) {
     case "typing":
       if (e.user !== account) channelStore.ensure(e.channel).setTyping(e.user, e.state === "start");
       break;
-    case "reaction": {
-      // Live increment/decrement (§7). During a batch the target may still
-      // be buffered, so search there too.
-      const m = findMsg(e.target, e.msgid);
-      if (m) applyReaction(m, e.emoji, e.op, e.by);
+    case "reaction":
+      // Live §7 reaction — now the client-core store's: `reduce` applies it (to
+      // the live buffer) and emits `msg-updated`, mirrored by
+      // `messageMirrorHandlers`. A reaction to a pre-session history message not in
+      // the live buffer won't reflect until reload (an accepted M4-buffer limit).
       break;
-    }
     case "reactions": {
       // Compacted summary from history (§12.1) — set the aggregate directly.
       const m = findMsg(e.target, e.msgid);

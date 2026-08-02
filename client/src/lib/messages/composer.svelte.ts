@@ -10,8 +10,7 @@ import { ui } from "$lib/ui/ui.svelte";
 import * as weft from "$lib/transport/weft";
 import { toast } from "$lib/notifications/toasts.svelte";
 import { channelStore } from "$lib/channels/channel.svelte";
-import { mkMsg, sys } from "$lib/messages/messages.svelte";
-import { clock } from "$lib/rendering/time";
+import { sys } from "$lib/messages/messages.svelte";
 import { roleStore } from "$lib/roles/roles.svelte";
 import { profileStore } from "$lib/profile/profile.svelte";
 import { activeEmoji, emojiUrlFor } from "$lib/namespaces/server.svelte";
@@ -206,37 +205,22 @@ export function doSend(): void {
   const target = view.active;
   const savedReply = ui.replyTo?.msgid;
 
-  // §9.2/§11.13 optimistic send: show the message immediately as "sending", keyed
-  // by a client nonce the authoritative MESSAGE echoes back — so the send feels
-  // instant regardless of federation latency.
+  // §9.2/§11.13 optimistic send: the client-core store inserts a `pending` echo
+  // (keyed by this label) and emits `msg-appended`, so it renders instantly; the
+  // authoritative MESSAGE echo carrying the same label reconciles it to the server
+  // id. The store owns the placeholder now — no TS-side push.
   const label = crypto.randomUUID();
-  channelStore.ensure(target).messages.push(
-    mkMsg({
-      author: store.session.account,
-      body: text,
-      time: clock(),
-      ts: Date.now(),
-      own: true,
-      md: true,
-      replyTo: savedReply,
-      attachments: attachments.length ? attachments : undefined,
-      label,
-      pending: true,
-    }),
-  );
 
-  // Clear optimistically; the placeholder carries the text.
+  // Clear optimistically; the echo carries the text.
   ui.replyTo = null;
   stopTyping();
   compose.text = "";
   compose.attachments = [];
 
   weft.sendMessage(target, text, savedReply, attachments, undefined, label).catch((e) => {
-    // Rejected (e.g. over-long body): drop the placeholder, restore the text so
-    // it isn't silently eaten, and surface the error.
-    const ch = channelStore.channels[target];
-    const i = ch?.messages.findIndex((m) => m.label === label) ?? -1;
-    if (ch && i !== -1) ch.messages.splice(i, 1);
+    // Rejected (e.g. over-long body): the wire line is built before the echo is
+    // inserted, so there's no placeholder to remove — just restore the text so it
+    // isn't silently eaten, and surface the error.
     compose.text = text;
     toast(String(e), "error");
   });

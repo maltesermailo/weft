@@ -47,13 +47,21 @@ pub enum RoleDiff {
     MemberRoles { scope: String, account: String, roles: Vec<String> },
 }
 
-/// The roles sub-model — just the streaming-batch state (buffer + window flag);
-/// the role/member data lives in the mirror. Transient.
+/// The roles sub-model — the streaming-batch state (buffer + window flag) plus a
+/// small stored copy of the role definitions + memberships that [`mentions_me`]
+/// needs. The mirror still holds its own copy for rendering; this one exists only
+/// so the **messages** store can derive a message's `mentioned` flag in the model.
+///
+/// [`mentions_me`]: Roles::mentions_me
 #[derive(Default)]
 pub struct Roles {
     // Buffer while a role batch streams, grouped by the ROLE event's own scope.
     role_buf: BTreeMap<String, Vec<Role>>,
     in_role_batch: bool,
+    /// Stored role definitions per scope (replaced at each batch's flush).
+    roles: BTreeMap<String, Vec<Role>>,
+    /// `"account|scope"` → the role ids that account holds (from `ROLE-MEMBER`).
+    member_roles: BTreeMap<String, Vec<String>>,
 }
 
 /// Split a comma-separated wire list (`""` → empty), used for `caps` and role ids.
@@ -82,10 +90,13 @@ impl Roles {
                 Vec::new() // buffered; the diff is emitted at the batch's end
             }
             ClientEvent::RoleMember { scope, account, roles } => {
+                let ids = split_list(roles);
+                self.member_roles.insert(format!("{account}|{scope}"), ids.clone());
+
                 vec![RoleDiff::MemberRoles {
                     scope: scope.clone(),
                     account: account.clone(),
-                    roles: split_list(roles),
+                    roles: ids,
                 }]
             }
             // §6.5 role batches are id-prefixed `r…`; mark the window so the matching
@@ -112,10 +123,65 @@ impl Roles {
             .map(|(scope, mut roles)| {
                 // Keep position order (the server sorts, but be safe).
                 roles.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.name.cmp(&b.name)));
+
+                self.roles.insert(scope.clone(), roles.clone());
+
                 RoleDiff::RoleList { scope, roles }
             })
             .collect()
     }
+
+    /// Port of the TS `session.mentionsMe`: does `body` ping `me` directly,
+    /// `@everyone`/`@here`, or a **pingable** role `me` holds at `ns`'s scope?
+    /// (`ns` empty → the network scope `*`.) The messages store calls this through
+    /// `AppState` to derive a message's `mentioned` flag for the unread tally.
+    pub fn mentions_me(&self, me: &str, body: &str, ns: &str) -> bool {
+        if me.is_empty() {
+            return false;
+        }
+
+        if mentions_token(body, me) || mentions_token(body, "everyone") || mentions_token(body, "here") {
+            return true;
+        }
+
+        let scope = if ns.is_empty() { "*".to_string() } else { format!("ns:{ns}") };
+        let Some(mine) = self.member_roles.get(&format!("{me}|{scope}")) else {
+            return false;
+        };
+
+        self.roles
+            .get(&scope)
+            .is_some_and(|roles| roles.iter().any(|r| r.pingable && mine.contains(&r.id) && mentions_token(body, &r.name)))
+    }
+}
+
+/// Case-insensitive `@token\b` test (the TS mention regex, compared literally).
+/// A match needs the char after `@token` to be a non-word char (`[A-Za-z0-9_]`)
+/// or end-of-string — the `\b` word boundary.
+fn mentions_token(body: &str, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+
+    let body = body.to_lowercase();
+    let needle = format!("@{}", token.to_lowercase());
+
+    let mut from = 0;
+    while let Some(rel) = body[from..].find(&needle) {
+        let end = from + rel + needle.len();
+        let boundary = match body[end..].chars().next() {
+            Some(c) => !(c.is_ascii_alphanumeric() || c == '_'),
+            None => true,
+        };
+
+        if boundary {
+            return true;
+        }
+
+        from = end;
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -193,5 +259,46 @@ mod tests {
         // Empty → cleared list.
         let RoleDiff::MemberRoles { roles, .. } = &r.handle(&member("ns:x", "alice", ""))[0] else { panic!() };
         assert!(roles.is_empty());
+    }
+
+    #[test]
+    fn mentions_me_direct_and_everyone_here() {
+        let r = Roles::default();
+        assert!(r.mentions_me("alice", "hey @alice look", ""));
+        assert!(r.mentions_me("alice", "@ALICE (case-insensitive)", ""));
+        assert!(r.mentions_me("alice", "ping @everyone now", "n"));
+        assert!(r.mentions_me("alice", "@here quick", "n"));
+        // Word boundary: `@alicexyz` is not a mention of `alice`.
+        assert!(!r.mentions_me("alice", "mail @alicexyz today", ""));
+        // Not mentioned at all.
+        assert!(!r.mentions_me("alice", "just chatting", ""));
+        // No "me" → never.
+        assert!(!r.mentions_me("", "@everyone", ""));
+    }
+
+    #[test]
+    fn mentions_me_pingable_role_i_hold() {
+        let mut r = Roles::default();
+        // Two roles at ns:x — Mods pingable, Muted not.
+        r.handle(&batch_start("r1"));
+        r.handle(&ClientEvent::Role {
+            scope: "ns:x".into(), role: "id-mods".into(), color: "#fff".into(), caps: "".into(),
+            hoist: false, pingable: true, position: 0, name: "Mods".into(),
+        });
+        r.handle(&ClientEvent::Role {
+            scope: "ns:x".into(), role: "id-muted".into(), color: "#fff".into(), caps: "".into(),
+            hoist: false, pingable: false, position: 1, name: "Muted".into(),
+        });
+        r.handle(&batch_end());
+        r.handle(&member("ns:x", "alice", "id-mods"));
+
+        // `ns` maps to the `ns:<ns>` scope; alice holds pingable Mods → mentioned.
+        assert!(r.mentions_me("alice", "hey @Mods help", "x"));
+        // A non-pingable role I hold does not ping.
+        assert!(!r.mentions_me("alice", "the @Muted list", "x"));
+        // A pingable role I do NOT hold does not ping me.
+        assert!(!r.mentions_me("bob", "@Mods", "x"));
+        // Right role name, wrong scope (no stored roles at `*`) → no ping.
+        assert!(!r.mentions_me("alice", "@Mods", ""));
     }
 }

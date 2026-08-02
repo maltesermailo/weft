@@ -118,6 +118,12 @@ impl Messages {
         }
     }
 
+    /// The session account (from `Connected`) — `AppState` reads it to derive a
+    /// message's `mentioned` flag via the roles domain.
+    pub fn me(&self) -> &str {
+        &self.me
+    }
+
     /// Optimistic send: insert a `pending` local echo. Returns its `local:<n>` id
     /// (the host keeps it to reconcile) + the append diff.
     pub fn insert_pending(&mut self, channel: &str, label: &str, body: &str, md: bool) -> (String, Vec<MsgDiff>) {

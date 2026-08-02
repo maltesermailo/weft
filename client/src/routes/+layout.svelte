@@ -37,7 +37,7 @@
   
 import { roleScopeOf, roleStore } from "$lib/roles/roles.svelte";
   import { channelStore, Channel, nsOf } from "$lib/channels/channel.svelte";
-import { mkMsg } from "$lib/messages/messages.svelte";
+import { mkMsg, catchUpChannel } from "$lib/messages/messages.svelte";
   import { installLinkGuard } from "$lib/ui/linkguard.svelte";
   import LinkWarningModal from "$lib/components/modals/LinkWarningModal.svelte";
   import ConnectScreen from "$lib/components/ConnectScreen.svelte";
@@ -471,6 +471,18 @@ import { mkMsg } from "$lib/messages/messages.svelte";
     if (newest && newest !== ch.lastRead) {
       ch.lastRead = newest;
       weft.mark(ch.name, newest).catch(() => {});
+    }
+  });
+
+  // client-core M4-scope: the messages store pushes live body diffs only for the
+  // OPEN channel — scope its subscription to the active view, and pull that
+  // channel's window on open so any messages / edits / reactions that landed while
+  // it was in the background catch up (the store buffered them; scoping suppressed
+  // their live diffs). Home / voice views subscribe to nothing.
+  $effect(() => {
+    weft.setOpenChannels(active ? [active] : []).catch(() => {});
+    if (active.startsWith("#") || active.startsWith("@") || active.startsWith("&")) {
+      void catchUpChannel(active);
     }
   });
 

@@ -418,3 +418,70 @@ lands with the **wiring** (M3) — that's where `AppState` reaches across domain
 gains the small stored copy it needs; adding it now would be unconsumed dead code. **modseq/gap ordering**
 folds into **M3** (the pull/history path) — it isn't exercised until out-of-order/older messages arrive,
 so implementing it now would be untested speculation.
+
+**M3 — DONE (the two-tier IPC + store goes live; TS not yet cut over).** The store is now wired into
+`reduce`/`AppState`: a live `MESSAGE` is `ingest`ed here (the branch computes `mentioned` cross-domain and
+routes it), and the `handle` mutations flow through too. Both are **subscription-scoped** by `AppState`
+(`scope_msgs`): `UnreadChanged` always flows (the cheap background push), body diffs
+(`MsgAppended`/`MsgUpdated`/`MsgRemoved`) only for channels in the `open` set — empty by default, so IPC
+stays minimal until the frontend opens one. The `mentioned` derivation moved to the **roles** domain: it
+now keeps a small stored copy (role defs per scope + `"account|scope"` memberships) and exposes
+`mentions_me(me, body, ns)` — a literal port of TS `session.mentionsMe` (direct `@me`, `@everyone`/`@here`,
+pingable role I hold; `\b` word-boundary via a manual `mentions_token`). The two-tier command surface, on
+`AppState` and both wrappers (wasm `invoke` + Tauri commands): `set_open_channels` (the subscription),
+`send_message` (optimistic local echo → `MsgAppended(pending)`, reconciled by the ack's label — inserted
+alongside the wire `MSG` send, only when a label is present), and the **pull** `messages_range(channel,
+before, limit)`. TS still runs its own message path (the diffs' `msg-*` kinds are unknown to it → ignored)
+until the **M4** cutover guts that path and consumes the store. **Deferred to M4:** modseq/gap ordering +
+`RangeInvalidated` (needs the pull/history path exercised), and the TS window cache. 6 new tests (2
+`mentions_me`, 2 `AppState` message routing/scope/echo; +2 kept from M1/M2 semantics).
+
+**M4 — IN PROGRESS (staged, low-risk first — decided 2026-08-02).** The send-echo isn't separable from the
+buffer (it renders into `ch.messages`), so the order is: unread first (self-contained), then the buffer +
+send-echo together. **M4-unread — DONE:** the unread/mention counters are now diff-driven. TS mirror handler
+`messageMirrorHandlers` (`messages/messages.svelte.ts`) applies the model's `unread-changed` diff onto the
+`Channel` counters, **display-gated TS-side** (the active channel + muted scopes call `markRead()` → no
+badge; phantom channels guarded by `if (!ch) return`). Registered in the reducer's `domainHandlers`. Removed
+from the TS path: `Channel.bump` (deleted, dead), the `case "message"` bump, the `case "marked"` counter
+clear (kept `lastRead`), and the `case "unread-counts"` body (now a no-op — the store's `set_unread` drives
+it). The active-channel path relies on the existing auto-mark `$effect` (`+layout.svelte`) that MARKs on each
+new message while viewing → the store clears via `MARKED`. `npm run check` 0/0 + build green.
+**M4-buffer — DONE (emit-all; needs interactive testing).** The channel's **live tail** now flows through
+the store, mirrored onto `ch.messages`; **older history stays on the reducer's own backfill** (`histByTarget`
+→ prepend, which already dedups by msgid), so the two don't fight. Design choices that kept it low-risk:
+- **Store = live-only:** `reduce` ingests a MESSAGE only when `history: false` (guard added). This also fixed
+  a latent M3 bug — history/search/pins/thread batch messages were being ingested (polluting the live buffer
+  + bumping unread); they aren't real live-tail and the frontend owns them.
+- **Emit-all, no pull:** `set_open_channels(["*"])` (a new `"*"` sentinel) is sent on `connected`, so the
+  store emits body diffs for **every** channel → `ch.messages` stays fresh exactly like the old path (no
+  pull-on-open, no bootstrap gap). Per-channel scoping + the `messages_range` window cache are a later step.
+- **Mirror handlers** (`messageMirrorHandlers`, `messages/messages.svelte.ts`): `msg-appended` → push,
+  `msg-updated` → find (by current msgid, or a pending echo by shared label) + **mutate in place** (stable
+  render key → no virtualization re-measure), `msg-removed` → filter. A `toRenderMsg`/`assignRenderMsg`
+  maps the store's `CoreMsg` → render `Msg` (derives `time`/`ts` from the id; a pending echo carries no real
+  msgid).
+- **Send-echo** via the store: `doSend` no longer pushes/removes a TS placeholder; the wrapper `send_message`
+  is **build-first** (a rejected send never leaves an orphan echo) then inserts the pending echo. Reducer
+  `case message` keeps only side-effects (notify/profile/roles/DM-persist/thread-panel) + a re-delivery guard
+  (recovered from the old reconcile/upsert early-break, so a re-send doesn't re-notify).
+- **Edit/delete/react split:** react is store-only (`case "reaction"` removed — not idempotent);
+  edit/delete keep their idempotent TS `case` as a **history fallback** (the store's diffs also fire for live
+  ones, harmlessly). `reactions` (compacted history summary) stays TS.
+
+**Known limitation (accepted):** an edit/delete/**react** to a *pre-session history* message not in the live
+buffer won't reflect until reload (edit/delete are covered by the TS fallback; react isn't). All checks green
+(Rust 55 tests, wasm + Tauri compile, `npm run check` 0/0 + build).
+
+**M4-scope — DONE (the two-tier IPC optimization).** Emit-all replaced by **per-channel scoping**: a
+`$effect` (`+layout.svelte`) sends `setOpenChannels([active])` on every active-view change, so the store
+pushes body diffs **only for the open channel** (background channels get just the cheap `unread-changed`).
+Opening a channel runs **`catchUpChannel(name)`** (`messages/messages.svelte.ts`): pull `messagesRange(name,
+undefined, 50)` and reconcile it into `ch.messages` — **upsert** rows already present (catch edits /
+reactions that landed while backgrounded) + **append** missed messages (matched by msgid, or a pending echo
+by label, so never duplicated). Older history stays TS-owned (the store's window is live-tail only); a live
+diff arriving during the async pull is deduped by the same match. This restores single-body-diff-per-message
+IPC (background channels no longer carry a body diff). **wasm serializer fix:** `to_js` now uses
+`serialize_maps_as_objects(true)` so `Msg.reactions` (a `BTreeMap`) reaches the web build as a plain
+`Record` (not a JS `Map`) — matching the Tauri serde_json path + the TS types. The react-on-background limit
+narrows the pre-session-react gap (a background react on a *live* message is now caught by the pull's upsert;
+only pre-session-history reacts remain). All checks green.

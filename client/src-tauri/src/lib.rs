@@ -309,22 +309,54 @@ fn react(conn: State<'_, Conn>, msgid: String, emoji: String, add: bool) -> Resu
 
 #[tauri::command]
 fn send_message(
+    app: AppHandle,
     conn: State<'_, Conn>,
+    model: State<'_, weft::Model>,
     target: String,
     body: String,
     reply_to: Option<String>,
     attachments: Option<Vec<String>>,
     thread: Option<String>,
     label: Option<String>,
+    md: Option<bool>,
 ) -> Result<(), String> {
-    conn.send(weft::build_msg(
-        &target,
-        &body,
-        reply_to,
-        attachments.unwrap_or_default(),
-        thread,
-        label,
-    )?)
+    // Build the wire line first so a rejected send (e.g. over-long body) never
+    // leaves an orphaned optimistic echo in the store.
+    let line = weft::build_msg(&target, &body, reply_to, attachments.unwrap_or_default(), thread, label.clone())?;
+
+    // §9 optimistic local echo (model store): render instantly; the ack (own MSG +
+    // same label) reconciles to the server id on ingest. Only with a reconcile
+    // label — else there's nothing to swap the echo against.
+    if let Some(label) = &label {
+        for d in model.0.lock().unwrap().send_message(&target, label, &body, md.unwrap_or(false)) {
+            let _ = app.emit("weft", d);
+        }
+    }
+
+    conn.send(line)
+}
+
+/// §9 declare the open channels (the two-tier subscription scope): only these get
+/// message-body diffs; every other channel gets just `UnreadChanged`. Local only.
+#[tauri::command]
+fn set_open_channels(model: State<'_, weft::Model>, channels: Vec<String>) {
+    model.0.lock().unwrap().set_open_channels(channels);
+}
+
+/// §9 the pull half of the two-tier IPC: a window of the message buffer for
+/// `channel`, ending before `before` (exclusive) if given, else the newest.
+#[tauri::command]
+fn messages_range(
+    model: State<'_, weft::Model>,
+    channel: String,
+    before: Option<String>,
+    limit: usize,
+) -> Vec<weft_client_core::model::messages::Msg> {
+    model
+        .0
+        .lock()
+        .unwrap()
+        .messages_range(&channel, before.as_deref(), limit)
 }
 
 #[tauri::command]
@@ -1181,6 +1213,8 @@ pub fn run() {
             discover,
             channels,
             send_message,
+            set_open_channels,
+            messages_range,
             send_raw
         ])
         .run(tauri::generate_context!())
