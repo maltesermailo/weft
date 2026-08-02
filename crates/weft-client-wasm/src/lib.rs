@@ -303,6 +303,14 @@ impl WeftClient {
                 }
                 return Ok(JsValue::UNDEFINED);
             }
+            // §6.7 clear a scope's deny list before a MOD LIST re-fetch (local only).
+            "mod_refresh" => {
+                let diffs = self.sink.state.borrow_mut().mod_refresh(&arg("scope"));
+                for d in &diffs {
+                    self.sink.call(d);
+                }
+                return Ok(JsValue::UNDEFINED);
+            }
             "client_config" => {
                 let cfg = serde_json::json!({
                     "allow_insecure": false, "default_host": "",

@@ -904,6 +904,14 @@ fn typing_stop(app: AppHandle, model: State<'_, weft::Model>, channel: String, u
     }
 }
 
+/// §6.7 clear a scope's deny list before a MOD LIST re-fetch (local only).
+#[tauri::command]
+fn mod_refresh(app: AppHandle, model: State<'_, weft::Model>, scope: String) {
+    for d in model.0.lock().unwrap().mod_refresh(&scope) {
+        let _ = app.emit("weft", d);
+    }
+}
+
 #[tauri::command]
 fn discover(conn: State<'_, Conn>, cursor: Option<String>) -> Result<(), String> {
     conn.send(weft::build_discover(cursor)?)
@@ -1160,6 +1168,7 @@ pub fn run() {
             move_channel,
             move_category,
             typing_stop,
+            mod_refresh,
             discover,
             channels,
             send_message,

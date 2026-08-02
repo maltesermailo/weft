@@ -158,6 +158,7 @@ export type WeftEvent =
   | { kind: "roster"; channel: string; members: { account: string; network: string }[] }
   | { kind: "typers"; channel: string; users: string[] }
   | { kind: "acct-presence"; account: string; status: string }
+  | { kind: "deny"; scope: string; rows: { account: string; kind: string; by: string | null; reason: string | null }[] }
   | {
       kind: "ns-meta";
       /// Immutable namespace ULID id (v0.13) — the key the client addresses by.
@@ -775,6 +776,11 @@ export function reportsList(scope: string, status?: string) {
 /// a batch of `moderated` events (each a current mute/ban).
 export function modList(scope: string) {
   return invoke("mod_list", { scope });
+}
+/// §6.7 local-only: clear a scope's deny list in the client-core model before a
+/// MOD LIST re-fetch (the batch response repopulates it). No server write.
+export function modRefresh(scope: string) {
+  return invoke("mod_refresh", { scope });
 }
 
 export function reportsResolve(reportId: string, action: string, note?: string) {

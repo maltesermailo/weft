@@ -15,7 +15,9 @@ export const banScope = (): string => (view.activeServer ? `ns:${view.activeServ
 export const denyList = () => store.deny.get(banScope()) ?? [];
 
 export function refreshBans(): void {
-  store.deny.set(banScope(), []); // full refresh; the batch response repopulates
+  // The deny cache is model-owned (client-core): clear the scope via the model,
+  // then re-fetch — the MOD LIST batch (MODERATED events) repopulates it.
+  weft.modRefresh(banScope()).catch(() => {});
   weft.modList(banScope()).catch((e) => toast(String(e), "error"));
 }
 
@@ -33,18 +35,10 @@ export function liftMod(kind: string, account: string): void {
 }
 
 export const moderationHandlers: HandlerMap = {
-  moderated: (e) => {
-    if (e.action === "mute" || e.action === "ban") {
-      const list = store.deny.get(e.scope) ?? [];
-      const i = list.findIndex((r) => r.account === e.account && r.kind === e.action);
-      const rec = { account: e.account, kind: e.action, by: e.by, reason: e.reason };
-      store.deny.set(e.scope, i >= 0 ? list.map((r, j) => (j === i ? rec : r)) : [...list, rec]);
-    } else if (e.action === "unmute" || e.action === "unban") {
-      const kind = e.action === "unmute" ? "mute" : "ban";
-      const cur = store.deny.get(e.scope);
-      if (cur) store.deny.set(e.scope, cur.filter((r) => !(r.account === e.account && r.kind === kind)));
-    }
-    // `kick` is transient — no deny-list entry. Moderation is surfaced in Server
-    // Settings + by the target losing access, never as a channel system line.
+  // §6.7 the deny-list cache is model-owned (client-core): the model reduces the
+  // raw MODERATED event (add-or-replace on mute/ban, remove on unmute/unban, kick
+  // transient) and emits this `deny` diff with the scope's full list.
+  deny: (e) => {
+    store.deny.set(e.scope, e.rows);
   },
 };

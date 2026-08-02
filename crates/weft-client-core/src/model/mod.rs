@@ -14,6 +14,7 @@
 //! Pure — no I/O, WASM-safe.
 
 pub mod channels;
+pub mod moderation;
 pub mod presence;
 
 use serde::Serialize;
@@ -30,6 +31,7 @@ use crate::ClientEvent;
 pub enum StateDiff {
     Chan(channels::ChanDiff),
     Presence(presence::PresenceDiff),
+    Mod(moderation::ModDiff),
     // future domains: Ns(namespaces::NsDiff), Role(roles::RoleDiff), …
 }
 
@@ -39,6 +41,7 @@ pub enum StateDiff {
 pub struct AppState {
     pub channels: channels::Channels,
     pub presence: presence::Presence,
+    pub moderation: moderation::Moderation,
 }
 
 impl AppState {
@@ -55,6 +58,7 @@ impl AppState {
         let mut out = Vec::new();
         out.extend(self.channels.handle(event).into_iter().map(StateDiff::Chan));
         out.extend(self.presence.handle(event).into_iter().map(StateDiff::Presence));
+        out.extend(self.moderation.handle(event).into_iter().map(StateDiff::Mod));
         // future domains, one line each:
         // out.extend(self.namespaces.handle(event).into_iter().map(StateDiff::Ns));
         out
@@ -106,6 +110,12 @@ impl AppState {
     /// was lost). Local only — no server write; returns the diff to emit.
     pub fn typing_stop(&mut self, channel: &str, user: &str) -> Vec<StateDiff> {
         self.channels.typing(channel, user, "stop").into_iter().map(StateDiff::Chan).collect()
+    }
+
+    /// §6.7 clear a scope's deny list ahead of a `MOD LIST` re-fetch (the
+    /// `refreshBans` reset). Local only — the batch response repopulates it.
+    pub fn mod_refresh(&mut self, scope: &str) -> Vec<StateDiff> {
+        self.moderation.clear(scope).into_iter().map(StateDiff::Mod).collect()
     }
 }
 

@@ -288,3 +288,23 @@ to both):
 Note the two presence writes that intentionally stay in TS: the optimistic `??= "online"` on a member
 join (best-effort, the real event confirms via the model) and `store.session.myStatus` for *my own*
 status (the server never echoes my presence back to me, so the model never sees it).
+
+## Moderation slice — DONE (deny-list cache; second non-channel domain)
+
+The §6.7 mute/ban deny-list cache is model-owned (`StateDiff` now aggregates `Chan` + `Presence` +
+`Mod`):
+- **Model** (new `model/moderation.rs`): `deny: BTreeMap<scope, Vec<DenyRow{account, kind, by, reason}>>`
+  (transient). `MODERATED` carries both sides — `mute`/`ban` add-or-replace (re-mute updates
+  `by`/`reason` in place), `unmute`/`unban` remove, `kick` transient (no entry) — each emitting the
+  scope's full list as `ModDiff::Deny` (idempotent → MOD LIST re-fetch / reconnect replaces cleanly).
+  A `mod_refresh` command clears a scope ahead of the MOD LIST re-fetch.
+- **TS**: `moderationHandlers` swapped its raw `moderated` handler for a `deny` mirror
+  (`store.deny.set(scope, rows)`); `refreshBans` now calls `weft.modRefresh(scope)` (the model clear)
+  then `weft.modList`. The **gate stays TS** — `banScope()`, the covering-scope walk, and `can_post`
+  are unchanged; only the cache moved. `mod_refresh` command wired in both wrappers (local-only, like
+  `typing_stop`).
+
+**Federation was deliberately skipped** for now: its `netblocks` half has optimistic clear/remove plus a
+protocol quirk (the removal echo `NETBLOCKED{reason:None}` re-adds the entry via `applyNetblock`), so a
+faithful migration would preserve a latent bug — better handled as its own considered change than folded
+into a routine slice.
