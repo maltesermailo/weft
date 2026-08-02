@@ -197,6 +197,14 @@ export type WeftEvent =
   | { kind: "emoji-drop"; namespace: string; name: string }
   | { kind: "role-list"; scope: string; roles: { id: string; name: string; color: string; caps: string[]; hoist: boolean; pingable: boolean; position: number }[] }
   | { kind: "member-roles"; scope: string; account: string; roles: string[] }
+  /// §6.5 the invite list for a scope (client-core model, streamed via the `il`
+  /// batch); the mirror sets `store.invites.list`.
+  | { kind: "invite-list"; invites: { scope: string; invite_id: string; creator: string; uses_left: number | null; used: number; expiry: number | null }[] }
+  /// §11 federation diffs (client-core model) — the mirror applies them onto
+  /// `store.federation`'s netblock + manifest maps.
+  | { kind: "netblock-set"; network: string; reason: string | null }
+  | { kind: "manifest-set"; manifest: { peer: string; version: number; state: string; channels: string[]; history: string; media: string; typing: boolean } }
+  | { kind: "manifest-drop"; peer: string }
   | {
       kind: "ns-meta";
       /// Immutable namespace ULID id (v0.13) — the key the client addresses by.

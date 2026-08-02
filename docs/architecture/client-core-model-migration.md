@@ -358,8 +358,16 @@ display (member badges, name colors, hoisting), `@role` mention pinging, and —
 permission gates (which use the untouched `session.caps`).
 
 **Migration status:** the model owns **channels** + **presence** + **moderation** + **reports** + **emoji**
-+ **roles** (six domains). Remaining: the **messages** capstone (below), plus **invites**, **federation**
-(netblock quirk), the **ns-meta descriptor**, and **social/threads**.
++ **roles** + the **messages** capstone (below, M1–M4 done) + **invites** (eight domains). The invites slice
+(`model/invites.rs`): the scope's invite **list** — streamed via the `il`-prefix batch (buffer → flush on
+batch-end, keyed on the id prefix like roles' `r`) + revoke-drop on `INVITED max-uses=0`, emitting the
+`invite-list` diff; TS keeps the create-screen `link`/`id` + re-fetch, the `list`/`loading`/`buf` moved to
+the model (`loading`/`buf` were reducer-internal). The **federation** slice (`model/federation.rs`): a
+stateless transformer (the Rust twin of `federationHandlers`) reshaping NETBLOCKED → `netblock-set` and
+MANIFEST → `manifest-set` / `manifest-drop` (`severed`/`removed` resolved to the drop). The netblock maps +
+the clear-on-refresh + the optimistic remove stay TS mirror ops; migrated faithfully, **not** fixing the
+§11.6 netblock quirk (ADD and REMOVE both echo `NETBLOCKED …` with no reason → a remove reconciles via the
+refresh, not the echo). Remaining: the **ns-meta descriptor** and **social/threads**.
 
 ## Messages capstone — the store model (design + M1 done)
 

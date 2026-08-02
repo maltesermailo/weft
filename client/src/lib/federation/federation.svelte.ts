@@ -1,7 +1,6 @@
 // The client domain model — see docs/architecture/client-model-refactor.md.
 import { SvelteMap } from "svelte/reactivity";
 import * as weft from "$lib/transport/weft";
-import type { WeftEvent } from "$lib/transport/weft";
 import type { HandlerMap } from "$lib/sync/handler-map";
 import { store } from "$lib/store/store.svelte";
 import { toast } from "$lib/notifications/toasts.svelte";
@@ -28,24 +27,10 @@ export class Federation {
   /// Live peering manifests, keyed by peer network.
   readonly manifests = new SvelteMap<string, ManifestInfo>();
 
-  /// §11 MANIFEST: a bridge's channel set/state; `severed`/`removed` drops it.
-  applyManifest(e: Extract<WeftEvent, { kind: "manifest" }>): void {
-    if (e.state === "severed" || e.state === "removed") this.manifests.delete(e.peer);
-    else
-      this.manifests.set(e.peer, {
-        peer: e.peer,
-        version: e.version,
-        state: e.state,
-        channels: e.channels,
-        history: e.history,
-        media: e.media,
-        typing: e.typing,
-      });
-  }
-  /// §11.6 NETBLOCKED: record a blocked network + reason.
-  applyNetblock(e: Extract<WeftEvent, { kind: "netblocked" }>): void {
-    this.netblocks.set(e.network, e.reason);
-  }
+  // The netblock + manifest maps are the client-core model's now: it reshapes
+  // NETBLOCKED / MANIFEST events into diffs (`netblock-set` / `manifest-set` /
+  // `manifest-drop`) applied by `federationHandlers` below. The clear-on-refresh
+  // + the optimistic remove stay here as UI operations on these maps.
 
   // ---- §11 operator federation actions (thin RPC wrappers, uniform toasts) ----
   refreshNetblocks(): void {
@@ -73,8 +58,11 @@ export class Federation {
   }
 }
 
-/// This domain's wire-event handlers, merged into the reducer's registry.
+/// Model-mirror handlers (client-core migration): apply the Rust federation diffs
+/// onto `store.federation`. NETBLOCKED / MANIFEST are reshaped by the model into
+/// these; `severed`/`removed` arrives pre-resolved as `manifest-drop`.
 export const federationHandlers: HandlerMap = {
-  manifest: (e) => store.federation.applyManifest(e),
-  netblocked: (e) => store.federation.applyNetblock(e),
+  "netblock-set": (e) => store.federation.netblocks.set(e.network, e.reason),
+  "manifest-set": (e) => store.federation.manifests.set(e.manifest.peer, e.manifest),
+  "manifest-drop": (e) => store.federation.manifests.delete(e.peer),
 };

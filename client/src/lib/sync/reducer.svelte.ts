@@ -487,6 +487,13 @@ export function handle(e: weft.WeftEvent) {
         currentBatchId = "";
         break;
       }
+      if (currentBatchId.startsWith("il")) {
+        // §6.5 invite-list batch — the client-core model buffers + flushes it
+        // (emitting `invite-list`); consume the boundary so it doesn't fall
+        // through to the history flush.
+        currentBatchId = "";
+        break;
+      }
       if (store.threads.loadingRoot) {
         store.threads.messages = store.threads.buf;
         store.threads.buf = [];
@@ -514,12 +521,6 @@ export function handle(e: weft.WeftEvent) {
         store.threads.list = store.threads.listBuf;
         store.threads.listBuf = [];
         store.threads.loadingList = false;
-        break;
-      }
-      if (store.invites.loading) {
-        store.invites.list = store.invites.buf;
-        store.invites.buf = [];
-        store.invites.loading = false;
         break;
       }
       // Flush every channel that accumulated a history page. Each page goes to

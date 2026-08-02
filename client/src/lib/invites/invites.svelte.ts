@@ -29,10 +29,7 @@ export class Invites {
   // ---- list menu ----
   listOpen = $state(false);
   scope = $state("");
-  list = $state<InviteInfo[]>([]);
-  // streaming machinery (reducer-only, not reactive)
-  loading = false;
-  buf: InviteInfo[] = [];
+  list = $state<InviteInfo[]>([]); // fed by the client-core `invite-list` model diff
 
   // ---- create screen ----
   createOpen = $state(false);
@@ -76,13 +73,8 @@ export class Invites {
   // ---- Discord-style invites menu ----
   private loadInvites(scope: string): void {
     this.scope = scope;
-    this.list = [];
-    this.buf = [];
-    this.loading = true;
-    weft.inviteList(scope).catch((e) => {
-      this.loading = false;
-      toast(String(e), "error");
-    });
+    this.list = []; // optimistic clear; the `invite-list` diff refills on the batch's end
+    weft.inviteList(scope).catch((e) => toast(String(e), "error"));
   }
   openInvites(): void {
     this.loadInvites(scopesFor()[0]);
@@ -111,17 +103,18 @@ export class Invites {
   }
 }
 
-/// §6.5 invite wire-event handlers. `invited` is the mint/revoke echo (updates
-/// the create screen + refreshes an open list); `invite-info` buffers list rows.
+/// §6.5 invite handlers. `invited` (the mint/revoke echo) updates the create
+/// screen + refreshes an open list; the list itself is the client-core model's —
+/// streamed + revoke-dropped there, mirrored by the `invite-list` diff.
 export const invitesHandlers: HandlerMap = {
   invited: (e) => {
     if (e.max_uses === 0) {
-      // A revoke echo (INVITED … max-uses=0) — close it + drop from the menu.
+      // A revoke echo (INVITED … max-uses=0). The list-drop is the model's
+      // (→ `invite-list`); here just close the create screen if it was this invite.
       if (store.invites.id === e.invite_id) {
         store.invites.link = null;
         store.invites.id = null;
       }
-      store.invites.list = store.invites.list.filter((i) => i.invite_id !== e.invite_id);
     } else {
       store.invites.link = e.link ?? e.invite_id;
       store.invites.id = e.invite_id;
@@ -130,7 +123,8 @@ export const invitesHandlers: HandlerMap = {
       if (listShown && e.scope === store.invites.scope) weft.inviteList(store.invites.scope).catch(() => {});
     }
   },
-  "invite-info": (e) => {
-    if (store.invites.loading) store.invites.buf.push(e);
+  // Model diff: the scope's invite list (buffered + revoke-dropped by the model).
+  "invite-list": (e) => {
+    store.invites.list = e.invites;
   },
 };

@@ -15,6 +15,8 @@
 
 pub mod channels;
 pub mod emoji;
+pub mod federation;
+pub mod invites;
 pub mod messages;
 pub mod moderation;
 pub mod presence;
@@ -42,6 +44,8 @@ pub enum StateDiff {
     Emoji(emoji::EmojiDiff),
     Role(roles::RoleDiff),
     Msg(messages::MsgDiff),
+    Invite(invites::InviteDiff),
+    Federation(federation::FederationDiff),
     // future domains: Ns(namespaces::NsDiff), …
 }
 
@@ -55,6 +59,8 @@ pub struct AppState {
     pub reports: reports::Reports,
     pub emoji: emoji::Emoji,
     pub roles: roles::Roles,
+    pub invites: invites::Invites,
+    pub federation: federation::Federation,
     pub messages: messages::Messages,
     /// Channels the frontend has declared **open** — the two-tier subscription
     /// scope. Message-body diffs (`MsgAppended`/`MsgUpdated`/`MsgRemoved`) push only
@@ -82,6 +88,8 @@ impl AppState {
         out.extend(self.reports.handle(event).into_iter().map(StateDiff::Report));
         out.extend(self.emoji.handle(event).into_iter().map(StateDiff::Emoji));
         out.extend(self.roles.handle(event).into_iter().map(StateDiff::Role));
+        out.extend(self.invites.handle(event).into_iter().map(StateDiff::Invite));
+        out.extend(self.federation.handle(event).into_iter().map(StateDiff::Federation));
 
         // Messages (capstone store): non-cross-domain mutations via `handle`; a
         // live MESSAGE additionally needs the cross-domain `mentioned` flag, so it's
