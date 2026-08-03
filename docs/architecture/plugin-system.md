@@ -205,7 +205,13 @@ the accepted cost of decision 4 (unrestricted, trusted).
 
 ## 12. Remaining before build
 
-The shape is settled. Next design step (all pre-code): pin the concrete **weft-proto** types — the
-`PLUGIN*` client verbs, the `PLUGIN-*` server events, and the **component/view codec** (the typed
-catalog as round-trip-tested L0 types) — then the **host-API trait** in weftd and the **hook port**
-in weft-core. Per the workspace rule, the proto types + round-trip tests come first.
+The shape is settled. **The complete normative specification now lives in `plugin-spec.md`** —
+manifest schema, lifecycle state machine, both runtime bindings, the full host-API reference, the
+hook catalog, the SDUI component catalog, the wire grammar, resource limits, the error taxonomy,
+security invariants (as tests), foreign-bridge integration, a 10-milestone build plan, and worked
+examples. This doc remains the *design rationale*; `plugin-spec.md` is the *implementer's reference*.
+
+Six decisions are flagged **open** in `plugin-spec.md` §19 (hook catalog, component catalog, the
+`DENIED` code, the WASM ABI, the tier-collapse confirmation, and slash-arg mapping) — each gates a
+specific milestone and none blocks starting M-plug-0/1. Per the workspace rule, the L0 proto types +
+round-trip tests (M-plug-1) come first once those two catalogs are ratified.
