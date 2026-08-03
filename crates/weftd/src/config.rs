@@ -49,6 +49,10 @@ pub struct Config {
     /// Foreign-bridge framework (§3): pinned adapter daemons (`[[foreign_bridge]]`).
     #[serde(default)]
     pub foreign_bridge: Vec<ForeignBridge>,
+    /// Plugin system (`docs/architecture/plugin-spec.md`): the `[plugin]` section
+    /// (`[[plugin.remote]]` App Services). Reserved in M-plug-0; consumed M-plug-2+.
+    #[serde(default)]
+    pub plugin: Plugin,
     pub listen: Listen,
     pub identity: Identity,
     pub storage: Storage,
@@ -419,6 +423,35 @@ pub struct ForeignBridge {
     pub key: String,
 }
 
+/// Plugin system (`docs/architecture/plugin-spec.md`). M-plug-0 reserves the
+/// `[plugin]` schema slot; the remote-plugin session router that consumes it
+/// arrives with M-plug-2.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct Plugin {
+    /// Remote plugins / App Services — pinned-key external processes (§3.1, §4.2),
+    /// mirroring `[[foreign_bridge]]`. `[[plugin.remote]]` entries.
+    pub remote: Vec<PluginRemote>,
+}
+
+/// A remote plugin / App Service (spec §14): a pinned key the process proves at
+/// `AUTH ADAPTER`, plus its id and optional bot + config.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginRemote {
+    /// Plugin id — the catalog/route key.
+    pub id: String,
+    /// Pinned Ed25519 signing key, base64.
+    pub key: String,
+    /// Optional bot account to provision + attribute (§9).
+    #[serde(default)]
+    pub bot: Option<String>,
+    /// Config keys delivered to the plugin at connect; secrets as `"env:X"` or
+    /// inline (redacted where weftd surfaces them, §14).
+    #[serde(default)]
+    pub config: std::collections::HashMap<String, String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Listen {
@@ -509,6 +542,7 @@ impl Default for Config {
             federation: Federation::default(),
             peers: Vec::new(),
             foreign_bridge: Vec::new(),
+            plugin: Plugin::default(),
             dm_policy: "permanent".to_string(),
             listen: Listen::default(),
             identity: Identity::default(),
@@ -564,5 +598,25 @@ mod tests {
     fn example_config_parses() {
         let raw = include_str!("../../../weftd.example.toml");
         toml::from_str::<super::Config>(raw).expect("weftd.example.toml must parse");
+    }
+
+    /// M-plug-0: the `[[plugin.remote]]` schema slot parses (an operator can
+    /// declare a remote plugin before the M-plug-2 router consumes it).
+    #[test]
+    fn plugin_remote_config_parses() {
+        let raw = r#"
+            network = "weft.example"
+            [[plugin.remote]]
+            id = "jira-bot"
+            key = "Zm9vYmFy"
+            bot = "jira"
+            [plugin.remote.config]
+            api_key = "env:JIRA_TOKEN"
+        "#;
+        let cfg = toml::from_str::<super::Config>(raw).expect("plugin.remote must parse");
+        let remote = &cfg.plugin.remote[0];
+        assert_eq!(remote.id, "jira-bot");
+        assert_eq!(remote.bot.as_deref(), Some("jira"));
+        assert_eq!(remote.config.get("api_key").map(String::as_str), Some("env:JIRA_TOKEN"));
     }
 }

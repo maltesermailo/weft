@@ -104,7 +104,7 @@ client            weftd session          weft-plugin Host      remote plugin (Ap
 **Data flow — a veto hook (pre-commit):**
 ```
 session about to commit a MSG  ─► HookPort.veto("message.posted", payload, deadline)
-   Host runs each veto hook (in-process: call the engine; remote: push + await, §8.3) ─► allow | deny
+   Host runs each veto hook (in-process only — §8.3; remote plugins are observe-only) ─► allow | deny
    deny  ─► session answers the poster ERR (the effect never commits)
    allow ─► commit proceeds; observe hooks fire post-commit, async
 ```
@@ -142,16 +142,21 @@ The right tool per job: cheap native declarative forms for the 80%, full-custom 
 
 ### 3.3 Custom-view widgets
 
-A widget is the plugin's **own web UI** loaded in a **`sandbox="allow-scripts"` null-origin iframe** (no
+A widget is a plugin's **own web UI** loaded in a **`sandbox="allow-scripts"` null-origin iframe** (no
 `allow-same-origin` ⇒ the frame cannot reach `window.__TAURI__`, any Tauri command, or the parent DOM). It
 talks to the client only via `postMessage` through a **capability broker** — a whitelisted subset of
-act-as-service / query / subscribe, **never** the device-key / screencap / moderation commands. This is
-the Matrix-**widget** model; it delivers arbitrary custom UI by **isolation, not HTML sanitization**. Theme
-tokens (the app's CSS variables) are passed in so a widget *can* match the app; styling is the widget's
-responsibility. Widget content is served by the plugin (a `remote` plugin from its own origin; an
-in-process plugin bundles assets the host serves). A widget is emitted as a `PLUGIN-VIEW container=custom`
-carrying a URL + params (§11.6, §12.2); it is placed/mounted by the client controller (§3.4) or, without a
-controller, by the stock client at the action's declared surface.
+act-as-service / query / subscribe, **never** the device-key / screencap / moderation commands. It delivers
+arbitrary custom UI by **isolation, not HTML sanitization**. Theme tokens (the app's CSS variables) are
+passed in so a widget *can* match the app; styling is the widget's responsibility.
+
+**Widget content is served by the plugin's client-side component, from local assets — never a remote
+origin** (§20-I). A plugin that wants a custom view ships a **client-side plugin package** (the Rhai
+controller, §3.4, plus a web-asset bundle: HTML/JS/CSS). The controller mounts a widget by naming one of
+its bundled assets; the client loads it into the sandboxed iframe from a **local `blob:`/asset URL**, so no
+remote code enters the app and CSP stays tight (`frame-src 'self' blob:`, no arbitrary origins — §3.6). A
+widget is emitted as `PLUGIN-VIEW container=custom` carrying a **widget ref** (which bundled asset) +
+params (§11.6, §12.2); the client controller (§3.4) mounts + places it. (Widgets therefore **require** a
+client-side plugin; a plugin with only SDUI needs none.)
 
 The earlier "sanitize plugin HTML into the main webview" option is **rejected** — the main context is
 csp:null with ~123 IPC commands, too dangerous for reflected content. Isolation replaces sanitization.
@@ -168,9 +173,13 @@ runtime, WASM-for-web + native-for-desktop). It is the plugin's **client control
 
 **Safe by construction:** Rhai reaches **only** a curated **client host API** (the broker); it has no
 `eval`, no DOM handle, and no path to the raw Tauri commands. This is the safe form of "client-side scripts
-for GUI" — no arbitrary JS. The curated client API and the widget broker share **one allowlist**. A plugin
-with no controller still gets widgets (the stock client mounts them at the declared surface); the
-controller is for cross-surface orchestration a self-contained widget can't do.
+for GUI" — no arbitrary JS. The curated client API and the widget broker share **one allowlist**.
+
+The controller is a **client-side plugin package**: the Rhai script + a web-asset bundle for any widgets it
+serves (§3.3). weft-client-core loads the package, runs the controller sandboxed, and mounts its widgets
+from the bundle (local `blob:` URLs). **Distribution** of the client package (operator-installed in the
+client, or pushed by a `remote` server plugin over the session on connect) is a follow-on detail — the
+runtime model above is fixed; the delivery channel is not yet pinned (noted in §20-I).
 
 ### 3.5 The App-Service SDK — `weft-appservice`
 
@@ -202,9 +211,10 @@ The SDK provides that base so authors write only handlers + logic; **the Matrix 
 
 The Tauri CSP is `null` today (`tauri.conf.json`) — no defense-in-depth; any XSS reaches all ~123 commands
 (device keys, screen/mic/camera, moderation). Before the widget surface ships: introduce a real **CSP**
-(tighten from `null`) with a scoped **`frame-src`** for widget origins, and a **command-allowlist** behind
-the broker. A security improvement independent of plugins (a latent XSS→full-compromise risk today) and a
-hard prerequisite for both the widget and client-controller surfaces.
+(tighten from `null`) — and because widgets are **locally** served (§3.3), `frame-src` stays tight
+(`'self' blob:`, no arbitrary remote origins) — plus a **command-allowlist** behind the broker. A security
+improvement independent of plugins (a latent XSS→full-compromise risk today) and a hard prerequisite for
+both the widget and client-controller surfaces.
 
 ## 4. Plugin identity & registration
 
@@ -397,14 +407,15 @@ Read scope is the whole server (trusted). Returns plain data structs, never live
 
 ### 7.6 `ui` — build SDUI responses
 ```
-ui.view(container, blocks, opts?) -> View    # container: modal|panel|custom; opts:{title,panel_key,submit_label,url,params}
-ui.widget(url, opts?)             -> View    # sugar for a container=custom view (§3.3, §11.6)
+ui.view(container, blocks, opts?) -> View    # container: modal|panel|custom; opts:{title,panel_key,submit_label,widget,params}
+ui.widget(ref, opts?)             -> View    # sugar for a container=custom view; ref = a client-bundle asset (§3.3, §11.6)
 ui.patch(view_or_key, ops)        -> Result<()>   # push into a live panel; ops §11.4
 ui.toast(kind, text) | ui.navigate(target) | ui.close() | ui.refresh(scope?)  -> Result   # terminals
 ```
 Component builders live under `ui.*` (`ui.text`, `ui.button`, `ui.table`, …). A handler returns a `View`
 (modal/panel/custom) or a terminal. `ui.patch` addresses an open **panel** by `panel_key` (§11.3); a closed
-key is a no-op `Ok`. A `custom` view carries a widget URL + params instead of a blocks tree.
+key is a no-op `Ok`. A `custom` view carries a widget **ref** (a client-bundle asset, §3.3) + params
+instead of a blocks tree.
 
 ### 7.7 `timers` — scheduled work (**in-process only**)
 Registered via `timer(id, schedule, handler)` (§6.4). `schedule`: `"every <dur>"` | `"cron <5-field>"`. No
@@ -440,7 +451,7 @@ by the service itself; a `secret=true` value is redacted everywhere weftd surfac
 A plugin subscribes with `hook(event, kind, handler, opts?)` (§6.4). Events are **pushed** to the plugin
 (over the session for remote; a direct engine call for in-process).
 
-### 8.1 Hookable events (v1 catalog — **DECISION §20-A**)
+### 8.1 Hookable events (v1 catalog — §20-A, ratified)
 
 | Event id | When | Veto-eligible | Payload highlights |
 |---|---|---|---|
@@ -463,16 +474,22 @@ Each event has a typed L0 payload (round-trip tested), delivered as a CBOR objec
 carry only already-authorized, non-secret data. **E2EE channel content is never delivered to a hook**
 (§17) — an `e2ee` `message.posted` omits the body.
 
-### 8.3 Veto semantics
-- A veto hook runs **before** the effect commits, returning `allow` or `deny(reason)`. First `deny` wins;
-  the session answers the actor an `ERR` (`DENIED`, §16) with the reason; the effect never happens.
+### 8.3 Veto semantics — **in-process only** (§20-H)
+
+Veto is an **in-process** capability (`rhai`/`wasm`). **A `remote` plugin registers only `observe` hooks**
+— a `veto` from a remote plugin is refused at registration. Remote moderation is done **observe + act**:
+the plugin observes `message.posted` (post-commit) and, if it decides to block, **deletes the message as
+its bot** (`messages.delete`, `as:bot`) — a brief flash-then-remove, not pre-commit suppression. (Rationale:
+a pre-commit veto over a network round-trip would put a remote hop on every hot-path post; in-process veto
+keeps that latency bounded and local.)
+
+For an in-process veto hook:
+- It runs **before** the effect commits, returning `allow` or `deny(reason)`. First `deny` wins; the
+  session answers the actor an `ERR` **`POLICY`** (§16) with the reason; the effect never happens.
 - Bounded by a **veto deadline** (§15, default 250 ms/hook). Overrun follows `fail`: `open` (default) ⇒
-  allow + log; `closed` ⇒ deny. A quarantined/disconnected plugin's veto hooks are removed (can't
-  fail-closed the server).
+  allow + log; `closed` ⇒ deny. A quarantined plugin's veto hooks are removed (can't fail-closed the server).
 - Runs **before** the capability side-effect commits (CLAUDE.md invariant 4 / `weft-spec` §10.4 order
   preserved).
-- **Remote veto (§20-H):** a remote veto hook is a network round-trip inside the deadline; permitted with
-  `fail: open` on a localhost/low-latency service, else restrict remote plugins to observe-only.
 
 ### 8.4 Observe semantics & ordering
 - Observe hooks fire **post-commit, async**; they cannot affect the action (this is exactly App-Service
@@ -503,7 +520,7 @@ invoke/submit/action handler ⇒ typed error; `as:bot` with no bot declared ⇒ 
 
 L0 types serialized as CBOR (internally tagged `{ "type": "...", ... }`, the `StateDiff` serde pattern).
 The client renders **only** known `type`s; an unknown type/patch-op is **skipped** (forward-compatible),
-never executed. Ids are `[a-z0-9-_]{1,64}`, unique within a view. **v1 set — DECISION §20-B.**
+never executed. Ids are `[a-z0-9-_]{1,64}`, unique within a view. **v1 set — §20-B, ratified.**
 
 ### 10.1 Inputs
 | type | fields |
@@ -536,7 +553,7 @@ never executed. Ids are `[a-z0-9-_]{1,64}`, unique within a view. **v1 set — D
 ```
 View = { container: "modal"|"panel"|"custom", title?, panel_key?, submit_label?,
          blocks:[Component]         # modal|panel
-         url, params?               # custom (widget, §3.3)
+         widget, params?            # custom — widget = a client-bundle asset ref (§3.3), not a URL
        }
 ```
 
@@ -571,9 +588,10 @@ Result = toast(kind,text) | navigate(target) | close(reason?) | refresh(scope?)
 Real side effects reach the client through the **normal event stream**, not the result.
 
 ### 11.6 Custom views (widgets)
-A `container = custom` view carries a **widget URL + params** (not blocks). The client mounts it in a
-sandboxed null-origin iframe (§3.3) at the target surface (or wherever the client controller places it,
-§3.4). The widget communicates via `postMessage` → the capability broker; it does **not** use
+A `container = custom` view carries a **widget ref + params** (not blocks, not a remote URL) — the ref
+names an asset in the plugin's **client-side bundle** (§3.3). The client controller mounts it from a local
+`blob:`/asset URL in a sandboxed null-origin iframe at the target surface (or wherever the controller
+places it, §3.4). The widget communicates via `postMessage` → the capability broker; it does **not** use
 `SUBMIT`/`ACTION` (those are for declarative views) — its interactivity is its own web app, brokered. A
 `PLUGIN-PATCH` MAY target a widget to hand it new params (`set` on the root); the widget re-reads them.
 Closing follows the same `CLOSE`/subscription rules as a panel.
@@ -597,7 +615,7 @@ New verbs under the `PLUGIN` family (client→server) and `PLUGIN-*` events (ser
 | Grammar | Meaning |
 |---|---|
 | `@catalog=<b64> PLUGIN-MANIFEST` | the declared actions/surfaces (reply to `PLUGINS`; pushed on change). |
-| `@view=<b64> PLUGIN-VIEW <view-id> <container>` | render/replace a view. `container ∈ modal\|panel\|custom`; a `custom` payload carries `{url,params}` (§11.6). |
+| `@view=<b64> PLUGIN-VIEW <view-id> <container>` | render/replace a view. `container ∈ modal\|panel\|custom`; a `custom` payload carries `{widget,params}` (a client-bundle asset ref, §11.6). |
 | `@patch=<b64> PLUGIN-PATCH <view-id>` | update a live panel/widget. |
 | `@result=<b64> PLUGIN-RESULT <view-id>` | terminal outcome. |
 
@@ -627,7 +645,8 @@ stays server-side.
 
 ### 13.1 Surfaces
 - `context-menu` — a message/channel/member/user/namespace ⋯ menu.
-- `slash` — a composer command `/<action>`; inputs map to args (§20-F).
+- `slash` — a composer command `/<action>`; inputs map to args — **both** positional (a bare token fills
+  the next unfilled input by declaration order) and `key:value` (binds by input id) are accepted (§20-F).
 - `settings` — a button/section in a settings page (channel/namespace/server).
 - `global` — command-palette entry and/or a side-panel launcher.
 - `server-menu` — an item in the **namespace/server header dropdown**. Always-visible; context = namespace.
@@ -702,10 +721,13 @@ Trusted, so limits bound **bugs/runaways**, not adversaries.
 `Unsupported`, `Internal` — a throw (Rhai) / `Err` (Rust/WASM SDK).
 
 **Wire (`ERR` to the client):**
+No new plugin error code (§20-C: **reuse** the existing registry).
+
 | Code | When |
 |---|---|
 | `NO-SUCH-TARGET` | unknown plugin / action / view-id (anti-enumeration, uniform) |
-| `DENIED` | a veto hook or provider re-check refused (carries the reason) — **DECISION §20-C** (new code vs reuse `POLICY`/`FORBIDDEN`) |
+| `POLICY` | a veto hook refused (carries the veto's reason) |
+| `FORBIDDEN` | a provider authority re-check refused on invoke (e.g. a foreign-member invoking an admin action) |
 | `MALFORMED` | undecodable `@params`/`@values` / bad ctx-ref |
 | `UNSUPPORTED` | a `PLUGIN` verb on a session/state that can't serve it |
 | `INTERNAL` | plugin fault / quarantine / disconnect mid-flow (flow closed) |
@@ -724,7 +746,8 @@ Trusted, so limits bound **bugs/runaways**, not adversaries.
 4. **E2EE opacity.** No hook/query/host-API/widget-broker path yields `e2ee` plaintext; `message.*` hook
    payloads omit the body for such channels. (Test.)
 5. **SSRF.** `weft.http` (in-process) refuses every non-public target via the shared classifier (invariant
-   13); a widget's iframe egress is its own origin, never weftd's network. (Test over the classifier.)
+   13). A widget is loaded from a local `blob:` (§3.3), not weftd's network; any network it makes is its
+   own sandboxed frame's, never weftd acting on its behalf. (Test over the classifier.)
 6. **Secret confidentiality.** A `secret=true` value never appears in a log line, admin response, or
    `PLUGIN-*` payload. (Test the redaction.)
 7. **KV isolation.** A plugin cannot read/write another plugin's KV namespace. (Test.)
@@ -762,8 +785,12 @@ actions are ordinary plugin actions.
 ## 19. Build milestones (round-7 order: remote-first, then widgets + client-Rhai, then in-process)
 
 **Track A — remote hosting + SDUI (the App Service path, built first):**
-- **M-plug-0 — foundations.** `weft-plugin` (host skeleton) + `weft-appservice` (SDK skeleton); generalize
-  `State::ForeignBridge` → `State::PluginService`; `[[plugin.remote]]` config. No engine deps.
+- **M-plug-0 — foundations. ✅ (2026-08-03)** `weft-plugin` (host skeleton, `Host`) + `weft-appservice`
+  (SDK skeleton, `AppService::builder`) crates in the workspace; `[[plugin.remote]]` config schema slot
+  reserved + tested. No engine deps. **Deferred to M-plug-2:** the `State::ForeignBridge` →
+  `State::PluginService` change — it's a *restructure* (the `realm` field is bridge-specific), not a
+  rename, and doing it before the plugin-service session logic exists would churn green foreign-bridge
+  code for no consumer (YAGNI). It lands with the remote transport that needs it.
 - **M-plug-1 — SDUI codec (L0).** weft-proto: the component/view/patch/result/widget types, the
   `PLUGIN*`/`PLUGIN-*` verbs+events (incl. `PLUGIN-REGISTER`, `container=custom`), base64-CBOR. **Round-trip
   tests first.**
@@ -774,8 +801,9 @@ actions are ordinary plugin actions.
   in the client renderer.
 - **M-plug-4 — act-as-service + identity.** The act-as callback (messages/channels/moderation/query),
   bot-account provisioning, `as_bot|system|user` with the §17 authority tests.
-- **M-plug-5 — hooks.** The HookPort in weft-core, event push (§8); observe (async) + veto (pre-commit,
-  bounded, remote round-trip per §20-H) with the invariant tests.
+- **M-plug-5 — hooks.** The HookPort in weft-core, event push (§8); **observe** hooks for remote plugins
+  (async), with the invariant tests. (Pre-commit **veto** is in-process only, §8.3 — it lands with the
+  Rhai in-process tier, M-plug-10. Remote moderation = observe + delete-as-bot.)
 - **M-plug-6 — panels + live patch + all surfaces.** `SUBSCRIBE`/`UNSUBSCRIBE`, `panel_key`, `PLUGIN-PATCH`,
   the six action surfaces incl. **server-menu**, **channel-list**.
 
@@ -788,30 +816,37 @@ actions are ordinary plugin actions.
   curated client host API (mount/place/destroy widgets, route messages, subscribe to client events, drive
   SDUI), sandboxed to the broker.
 
-**Track C — in-process server runtimes + polish (deferred):**
+**Track C — in-process Rhai + bridge + polish:**
 - **M-plug-10 — Rhai (in-process).** `rhai` + host `http`/`timers`/`kv` (SSRF, PluginKvStore mem+PG,
-  `timer`), hot-reload, `[plugins] dir` packages.
-- **M-plug-11 — WASM (in-process).** wasmtime, the guest ABI (§6.3), guest SDK, fuel/epoch/memory.
-- **M-plug-12 — foreign-bridge `bridge` feature (§18).** Realm/provisioning helpers in `weft-appservice`;
+  `timer`), hot-reload, `[plugins] dir` packages, **and the in-process pre-commit veto path** (§8.3).
+- **M-plug-11 — foreign-bridge `bridge` feature (§18).** Realm/provisioning helpers in `weft-appservice`;
   the bridge's structural actions. Closes the loop with the framework + the Matrix bridge.
-- **M-plug-13 — admin & lifecycle polish.** Enable/disable/reload, quarantine surfacing, per-plugin limits.
+- **M-plug-12 — admin & lifecycle polish.** Enable/disable/reload, quarantine surfacing, per-plugin limits.
 
-## 20. Open decisions (to ratify before the affected milestone)
+**Track D — WASM in-process (the last goal, §20-D):**
+- **M-plug-13 — WASM (in-process).** wasmtime, the guest ABI (§6.3, ABI decided here), guest SDK,
+  fuel/epoch/memory. Deliberately last: the Rhai in-process tier already validates the in-process model, so
+  WASM is pure runtime-parity work with no new surface.
 
-- **§20-A — hook catalog (§8.1).** Confirm the v1 event set + veto-eligibility. *(blocks M-plug-5)*
-- **§20-B — component catalog (§10).** Confirm the v1 widget set (esp. `table`, `image`). *(blocks M-plug-1)*
-- **§20-C — `DENIED` code (§16).** New registry code vs. reuse `POLICY`/`FORBIDDEN`. *(blocks M-plug-5)*
-- **§20-D — WASM ABI (§6.3).** Raw core-wasm vs. component-model. *(blocks M-plug-11 only)*
-- **§20-E — tier line.** Confirmed round 7: modes differ only in transport/I/O, not surface. *(resolved)*
-- **§20-F — slash-arg mapping (§13.4).** Positional-by-declaration vs. `key:value` vs. both. *(blocks M-plug-6)*
-- **§20-G — client-Rhai runtime location (§3.4).** In `weft-client-core` (WASM-web + native-desktop,
-  portable — **recommended**) vs. the Tauri Rust backend (desktop-only). *(blocks M-plug-9)*
-- **§20-H — veto over remote (§8.3).** Allow remote veto (round-trip within deadline, fail-open) vs.
-  remote = observe-only. *(blocks M-plug-5)*
-- **§20-I — widget content origin (§3.3).** Plugin serves from its own origin (needs `frame-src`) vs. weftd
-  proxies/serves the bundle. *(blocks M-plug-8)*
-- **§20-J — bridge helpers in the SDK (§3.5).** Behind a `weft-appservice` `bridge` feature (**recommended,
-  owner-leaning**) vs. baked in. *(blocks M-plug-12)*
+## 20. Decisions (ratified 2026-08-03 unless noted)
+
+- **§20-A — hook catalog (§8.1). RESOLVED:** the v1 event set + veto-eligibility as specced is adopted.
+- **§20-B — component catalog (§10). RESOLVED:** the v1 catalog as specced is adopted.
+- **§20-C — plugin error code (§16). RESOLVED: reuse.** No new code — `POLICY` for a veto-deny (carries
+  the reason), `FORBIDDEN` for a provider authority re-check.
+- **§20-D — WASM ABI (§6.3). DEFERRED to M-plug-13** (WASM is the last goal); raw core-wasm vs.
+  component-model decided when that milestone starts. Nothing earlier depends on it.
+- **§20-E — tier line. RESOLVED (round 7):** modes differ only in transport/I/O, not surface.
+- **§20-F — slash-arg mapping (§13.4). RESOLVED: both** — positional-by-declaration **and** `key:value`
+  are accepted (a bare token binds to the next unfilled input by declaration order; `key:value` binds by id).
+- **§20-G — client-Rhai runtime location (§3.4). RESOLVED: `weft-client-core`** (WASM-web + native-desktop,
+  one portable runtime).
+- **§20-H — veto over remote (§8.3). RESOLVED: remote = observe-only.** Remote plugins register only
+  `observe`; pre-commit `veto` is in-process (§8.3). Remote moderation = observe + **delete-as-bot**.
+- **§20-I — widget content origin (§3.3). RESOLVED: client-side plugins serve widgets** from local bundle
+  assets (`blob:`/asset URLs) — never a remote origin; `frame-src 'self' blob:`. *Follow-on (not blocking):*
+  how the client-side plugin **package** is distributed (operator-installed vs. server-pushed on connect).
+- **§20-J — bridge helpers in the SDK (§3.5). RESOLVED: behind a `weft-appservice` `bridge` feature.**
 
 ## 21. Worked examples
 
@@ -832,16 +867,24 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### 21.2 Automod (veto, conditional registration)
+### 21.2 Automod (remote = observe + delete-as-bot, §8.3)
+
+A remote plugin can't pre-commit veto (§20-H); it observes and removes offenders as its bot.
 
 ```rust
-let blocklist = ctx_config("blocklist").split(',').collect::<Vec<_>>();   // read at build time
+let blocklist = ctx_config("blocklist").split(',').collect::<Vec<_>>();
 AppService::builder(endpoint, keypair, "automod")
-    .hook("message.posted", Veto { fail: Open }, move |_ctx, ev| {
-        let hit = blocklist.iter().find(|w| ev.body.to_lowercase().contains(*w));
-        async move { Ok(match hit { Some(w) => Verdict::deny(format!("blocked: {w}")), None => Verdict::Allow }) }
+    .bot("automod")
+    .hook("message.posted", Observe, move |ctx, ev| {
+        let hit = blocklist.iter().any(|w| ev.body.to_lowercase().contains(w));
+        async move {
+            if hit { ctx.messages.delete(&ev.msgid).await?; }   // delete-as-bot (default actor in a hook)
+            Ok(())
+        }
     })
     .run().await?;
+// (For pre-commit suppression — block before anyone sees it — ship this as an in-process `rhai` veto
+//  plugin instead, §8.3 / M-plug-10.)
 ```
 
 ### 21.3 Translate (context-menu action + modal + the service's own HTTP)
@@ -860,18 +903,31 @@ AppService::builder(endpoint, keypair, "translate")
 
 ### 21.4 Role editor as a widget (custom view)
 
+The **server side** (below) declares a settings action that opens a widget by **ref**; the widget's web UI
++ the Rhai controller that mounts it are the plugin's **client-side package** (§3.3/§3.4), served locally.
+
 ```rust
-// A global action that opens the plugin's own web UI as a sandboxed widget.
+// SERVER side (remote App Service): declare the action; return a container=custom view naming a
+// client-bundle asset ("role-editor"), passing the namespace as a param.
 AppService::builder(endpoint, keypair, "role-editor")
     .action(action("roles").label("Role Editor").surface(Settings).context(Namespace),
         Handlers::on_invoke(|ctx, _p| async move {
-            let ns = ctx.context_ref();  // ns:<id>
-            Ok(View::widget(format!("https://roles.example/edit?ns={ns}"))  // container=custom
+            Ok(View::widget("role-editor")                       // ref into the client bundle, NOT a URL
+                   .param("ns", ctx.context_ref())               // ns:<id>
                    .title("Roles"))
-            // The widget (the plugin's web app) does the whole custom UI; it calls back through the
-            // postMessage broker to query roles + apply changes (channels.meta / act-as-service).
         }))
     .run().await?;
+```
+```rhai
+// CLIENT side (the plugin's client-side Rhai controller, in weft-client-core): mount the bundled widget
+// when the settings action fires; the iframe loads role-editor.html from the local bundle (blob URL).
+fn register(client) {
+    client.on_widget("role-editor", |mount, params| {
+        mount.iframe("role-editor.html", params);   // sandboxed null-origin; talks back via the broker
+    });
+}
+// The widget (role-editor.html, its own web app) does the whole custom UI and calls the broker to
+// query roles + apply changes (channels.meta / act-as-service).
 ```
 
 ### 21.5 In-process equivalents (Rhai, deferred tier — for reference)

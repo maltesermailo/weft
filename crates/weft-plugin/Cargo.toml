@@ -1,0 +1,13 @@
+[package]
+name = "weft-plugin"
+version.workspace = true
+edition.workspace = true
+# Not published to crates.io: workspace-internal, path deps only.
+publish = false
+rust-version.workspace = true
+license.workspace = true
+description = "WEFT plugin host (L3): the weftd-side plugin / App-Service router, action catalog, and SDUI router. See docs/architecture/plugin-spec.md. Carries no script engine (in-process Rhai/WASM arrive M-plug-10+)."
+
+# M-plug-0: skeleton only (no deps yet). weft-proto (the PLUGIN* / SDUI codec) is
+# wired in with M-plug-1; weft-core / weft-store with M-plug-2+ (plugin-spec.md §2).
+[dependencies]

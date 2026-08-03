@@ -9462,6 +9462,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "weft-appservice"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "weft-crypto",
+]
+
+[[package]]
 name = "weft-client-core"
 version = "0.1.0"
 dependencies = [
@@ -9527,6 +9535,10 @@ dependencies = [
  "weft-core",
  "weft-proto",
 ]
+
+[[package]]
+name = "weft-plugin"
+version = "0.1.0"
 
 [[package]]
 name = "weft-proto"

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weft-irc", "crates/weft-admin", "crates/weftd", "crates/weft-rt", "crates/weft-tui", "crates/weft-client-core", "crates/weft-client-wasm", "client/src-tauri"]
-default-members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weft-irc", "crates/weft-admin", "crates/weftd"]
+members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weft-irc", "crates/weft-admin", "crates/weftd", "crates/weft-rt", "crates/weft-tui", "crates/weft-plugin", "crates/weft-appservice", "crates/weft-client-core", "crates/weft-client-wasm", "client/src-tauri"]
+default-members = ["crates/weft-proto", "crates/weft-crypto", "crates/weft-store", "crates/weft-core", "crates/weft-transport", "crates/weft-irc", "crates/weft-admin", "crates/weftd", "crates/weft-plugin", "crates/weft-appservice"]
 
 [workspace.package]
 version = "0.1.0"
