@@ -492,6 +492,7 @@ impl<S: ControlStream> Session<S> {
             federation: false,     // §11.10 closed until the owner opts in
             frozen: false,         // WC7 full freeze — an operator action, never default
             welcome_channel: None, // §6.2 set later via NS META welcome
+            origin: None,          // a native namespace (foreign replicas set the URI)
         };
         match self.ctx.namespaces.create_namespace(record.clone()).await {
             Ok(true) => {

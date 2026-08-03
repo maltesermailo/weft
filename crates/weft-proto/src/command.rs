@@ -2,6 +2,7 @@
 //! §6.4). Unknown verbs decode to [`Command::Unknown`] — never an error (§4).
 
 use crate::error::{ParseError, SerializeError};
+use crate::foreign::{ForeignUri, Scheme};
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
 use crate::name::{Account, ChannelName, GroupId, NetworkName, Target, UserRef};
@@ -409,6 +410,13 @@ pub enum Command {
     /// *unlisted* namespace stays joinable by exact name (§2.2); the server
     /// resolves either form to the id.
     NsJoin { ns: crate::NamespaceRef },
+    /// `NS JOIN <scheme>://<realm>/<space>` — foreign-bridge framework
+    /// (`docs/architecture/foreign-bridge-framework.md` §3.3): the same `NS JOIN`
+    /// verb with a foreign-realm URI target, so weftd routes to the scheme's
+    /// adapter to provision the space on first contact (afterward it is an ordinary
+    /// local namespace). Foreignness is a property of the *target*, not a new verb
+    /// — the parser routes here when the target contains `://`.
+    NsJoinForeign { uri: crate::ForeignUri },
     /// `NS LEAVE <ns-id>` (§6.2) — drop namespace membership + all hide
     /// overrides + ns-scoped role assignments. Also reachable as the
     /// `PART ns:<id>` alias (lenient-in; strict-out is always `NS LEAVE`).
@@ -480,6 +488,12 @@ pub enum Command {
     /// server then challenges to prove control of the token's subject key,
     /// reusing the §6.1 `CHALLENGE`/`AUTH PROOF` flow.
     AuthBridge { network: NetworkName, token: String },
+    /// `AUTH ADAPTER <pubkey>` — foreign-bridge framework
+    /// (`docs/architecture/foreign-bridge-framework.md` §3): a pinned adapter
+    /// daemon proves control of its `[[foreign_bridge]]` key to enter
+    /// `State::ForeignBridge`, reusing the §6.1 `CHALLENGE`/`AUTH PROOF` flow. The
+    /// scheme(s) it may speak for are checked later at `REALM REGISTER`/`ASSERT`.
+    AuthAdapter { pubkey: String },
     /// `BRIDGE PROPOSE <scope> <peer> [history=] [media=] [typing=] [voice=]` with
     /// the signed manifest in a `manifest=<b64>` tag (§6.6, §11.1). `scope` is
     /// `#chan|ns:<name>|*`, validated by the capability layer. `voice` (§16) opts
@@ -529,6 +543,28 @@ pub enum Command {
         namespace: crate::VanityName,
         invite: Option<String>,
     },
+    /// `REALM REGISTER <scheme>` — foreign-bridge framework
+    /// (`docs/architecture/foreign-bridge-framework.md` §3.3): a pinned adapter's
+    /// **control link** declares a scheme it handles. Named `REALM REGISTER` (not
+    /// the design's bare `REGISTER`) to avoid colliding with account registration.
+    /// Honored only on a `State::ForeignBridge` session.
+    RealmRegister { scheme: Scheme },
+    /// `REALM ASSERT <scheme>://<realm>` — the connect-time binding of a **data
+    /// connection** to a single realm (framework §3.1). The URI is realm-only
+    /// (no path); a path makes it a parse error. Honored only on a
+    /// `State::ForeignBridge` session; a NETBLOCKed realm is refused here.
+    RealmAssert { realm: ForeignUri },
+    /// `REALM WITHDRAW` — graceful teardown of the connection's bound realm
+    /// (framework §3.1): weftd withdraws that realm's foreign namespaces. Distinct
+    /// from an operator `NETBLOCK REALM` (a block, not a disconnect).
+    RealmWithdraw,
+    /// `PROVISION-OK <job>` — control-link: the adapter finished provisioning the
+    /// space for `job`, so the parked `NS JOIN` completes (framework §3.3).
+    ProvisionOk { job: String },
+    /// `PROVISION-ERR <job>` — control-link: provisioning failed (absent / private
+    /// / encrypted / unjoinable). weftd answers the parked join `NO-SUCH-TARGET`,
+    /// uniform in code + timing with a nonexistent local namespace (invariant 1).
+    ProvisionErr { job: String },
     /// `NETBLOCK ADD <network> [:reason]` (§6.6, §11.6). Cap `netblock` at `*`.
     NetblockAdd {
         network: NetworkName,
@@ -848,6 +884,9 @@ impl Command {
                     "BRIDGE" => Ok(Command::AuthBridge {
                         network: args.req("network")?.parse()?,
                         token: args.req("token")?.to_string(),
+                    }),
+                    "ADAPTER" => Ok(Command::AuthAdapter {
+                        pubkey: args.req("pubkey")?.to_string(),
                     }),
                     _ => Err(ParseError::BadParam {
                         verb: "AUTH",
@@ -1416,9 +1455,22 @@ impl Command {
                         ns: args.req("ns")?.parse()?,
                         confirm: args.req("confirmation")?.parse()?,
                     }),
-                    "JOIN" => Ok(Command::NsJoin {
-                        ns: args.req("ns")?.parse()?,
-                    }),
+                    "JOIN" => {
+                        // Foreignness is a target property: a `<scheme>://…` URI
+                        // routes to the provisioning path, a bare ref is a local
+                        // namespace join (§3.3).
+                        let target = args.req("ns")?;
+
+                        if target.contains("://") {
+                            Ok(Command::NsJoinForeign {
+                                uri: target.parse()?,
+                            })
+                        } else {
+                            Ok(Command::NsJoin {
+                                ns: target.parse()?,
+                            })
+                        }
+                    }
                     "LEAVE" => Ok(Command::NsLeave {
                         ns: args.req("ns")?.parse()?,
                     }),
@@ -1650,6 +1702,41 @@ impl Command {
                     }),
                 }
             }
+            "REALM" => {
+                let mut args = Args::new(line, "REALM");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                match sub.as_str() {
+                    "REGISTER" => Ok(Command::RealmRegister {
+                        scheme: args.req("scheme")?.parse()?,
+                    }),
+                    "ASSERT" => {
+                        let realm: ForeignUri = args.req("realm")?.parse()?;
+
+                        // The binding names a realm, never a space/channel within it.
+                        if realm.path().is_empty() {
+                            Ok(Command::RealmAssert { realm })
+                        } else {
+                            Err(ParseError::BadParam {
+                                verb: "REALM",
+                                what: "realm",
+                                value: realm.to_string(),
+                            })
+                        }
+                    }
+                    "WITHDRAW" => Ok(Command::RealmWithdraw),
+                    _ => Err(ParseError::BadParam {
+                        verb: "REALM",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
+            "PROVISION-OK" => Ok(Command::ProvisionOk {
+                job: Args::new(line, "PROVISION-OK").req("job")?.to_string(),
+            }),
+            "PROVISION-ERR" => Ok(Command::ProvisionErr {
+                job: Args::new(line, "PROVISION-ERR").req("job")?.to_string(),
+            }),
             "MEDIA" => {
                 let mut args = Args::new(line, "MEDIA");
                 let sub = args.req("subcommand")?.to_ascii_uppercase();
@@ -2441,6 +2528,9 @@ impl Command {
                 None,
             ),
             Command::NsJoin { ns } => ("NS", vec!["JOIN".to_string(), ns.to_string()], None),
+            Command::NsJoinForeign { uri } => {
+                ("NS", vec!["JOIN".to_string(), uri.to_string()], None)
+            }
             Command::NsLeave { ns } => ("NS", vec!["LEAVE".to_string(), ns.to_string()], None),
             Command::NsTransfer {
                 ns,
@@ -2552,6 +2642,9 @@ impl Command {
                 vec!["BRIDGE".to_string(), network.to_string(), token.clone()],
                 None,
             ),
+            Command::AuthAdapter { pubkey } => {
+                ("AUTH", vec!["ADAPTER".to_string(), pubkey.clone()], None)
+            }
             Command::BridgePropose {
                 scope,
                 peer,
@@ -2602,6 +2695,17 @@ impl Command {
                 }
                 ("BRIDGE", vec!["REQUEST".to_string(), ns.to_string()], None)
             }
+            Command::RealmRegister { scheme } => (
+                "REALM",
+                vec!["REGISTER".to_string(), scheme.to_string()],
+                None,
+            ),
+            Command::RealmAssert { realm } => {
+                ("REALM", vec!["ASSERT".to_string(), realm.to_string()], None)
+            }
+            Command::RealmWithdraw => ("REALM", vec!["WITHDRAW".to_string()], None),
+            Command::ProvisionOk { job } => ("PROVISION-OK", vec![job.clone()], None),
+            Command::ProvisionErr { job } => ("PROVISION-ERR", vec![job.clone()], None),
             Command::NetblockAdd { network, reason } => (
                 "NETBLOCK",
                 vec!["ADD".to_string(), network.to_string()],
@@ -3577,6 +3681,20 @@ mod tests {
         round_trip(&Request::new(Command::NsJoin {
             ns: "my-server".parse().unwrap(),
         }));
+        // §3.3 a `<scheme>://` target routes to the foreign-provisioning variant,
+        // on the same `NS JOIN` verb.
+        round_trip(&Request::with_label(
+            Command::NsJoinForeign {
+                uri: "matrix://matrix.org/gaming".parse().unwrap(),
+            },
+            "j1",
+        ));
+        assert!(matches!(
+            Request::parse("NS JOIN matrix://matrix.org/gaming")
+                .unwrap()
+                .command,
+            Command::NsJoinForeign { .. }
+        ));
         round_trip(&Request::new(Command::NsLeave {
             ns: ns.parse().unwrap(),
         }));
@@ -3914,6 +4032,42 @@ mod tests {
         }));
         round_trip(&Request::new(Command::NetblockList));
         assert!(Request::parse("NETBLOCK FROB x.example").is_err());
+    }
+
+    #[test]
+    fn foreign_bridge_verbs_round_trip() {
+        round_trip(&Request::with_label(
+            Command::AuthAdapter {
+                pubkey: "Zm9vYmFy".into(),
+            },
+            "a1",
+        ));
+        round_trip(&Request::new(Command::RealmRegister {
+            scheme: "matrix".parse().unwrap(),
+        }));
+        round_trip(&Request::with_label(
+            Command::RealmAssert {
+                realm: "matrix://matrix.org".parse().unwrap(),
+            },
+            "b1",
+        ));
+        round_trip(&Request::new(Command::RealmWithdraw));
+        round_trip(&Request::new(Command::ProvisionOk { job: "j1".into() }));
+        round_trip(&Request::new(Command::ProvisionErr { job: "j1".into() }));
+
+        assert_eq!(
+            Request::new(Command::RealmAssert {
+                realm: "matrix://matrix.org".parse().unwrap(),
+            })
+            .serialize()
+            .unwrap(),
+            "REALM ASSERT matrix://matrix.org"
+        );
+
+        // ASSERT binds a realm, not a space/channel within it.
+        assert!(Request::parse("REALM ASSERT matrix://matrix.org/gaming").is_err());
+        assert!(Request::parse("REALM FROB matrix").is_err());
+        assert!(Request::parse("PROVISION-OK").is_err()); // job required
     }
 
     #[test]

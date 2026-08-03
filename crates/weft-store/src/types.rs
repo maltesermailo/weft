@@ -272,6 +272,13 @@ pub struct NamespaceRecord {
     /// system "welcome" line when a new member joins the namespace. `None` = no
     /// welcome message. Set via `NS META <name> welcome :<#chan>` (empty clears).
     pub welcome_channel: Option<String>,
+    /// Foreign-bridge framework (`docs/architecture/foreign-bridge-framework.md`
+    /// §3): the origin URI (`<scheme>://<realm>/<space>`) when this namespace is a
+    /// **replica of a foreign space**, else `None` for a native namespace. Marks
+    /// the record foreign so it is badged (client) and so weftd never treats a
+    /// local account as its social-home owner (§7). Discriminated in the shared
+    /// namespace table (reuse + marker, not a parallel foreign table).
+    pub origin: Option<String>,
 }
 
 /// A recovery in flight: rotates to `new_root_key` + `new_owner` at `eta_ms`

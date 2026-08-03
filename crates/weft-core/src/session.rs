@@ -19,10 +19,10 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use weft_crypto::{Capability, PublicKey, SignedManifest, TokenScope};
 use weft_proto::{
     Account, BridgeState, ChannelKind, ChannelName, Command, ContentState, ErrCode, ErrEvent,
-    Event, GroupId, HistoryMode, Line, MediaMode, MemberAction, MessageEvent, ModAction, MsgId,
-    MsgMeta, NamespaceName, NetworkName, NsInfoKind, ParseError, Reply, ReportScope, ReportStatus,
-    Request, ResolveAction, RetentionPolicy, StreamMode, Target, Ulid, UserRef, VerifyState,
-    Visibility, MAX_LABEL_BYTES,
+    Event, ForeignUri, GroupId, HistoryMode, Line, MediaMode, MemberAction, MessageEvent, ModAction,
+    MsgId, MsgMeta, NamespaceName, NetworkName, NsInfoKind, ParseError, Reply, ReportScope,
+    ReportStatus, Request, ResolveAction, RetentionPolicy, Scheme, StreamMode, Target, Ulid, UserRef,
+    VerifyState, Visibility, MAX_LABEL_BYTES,
 };
 
 use weft_store::{
@@ -252,6 +252,10 @@ enum ChallengeSubject {
     Device { account: Account },
     /// §11.2 bridge auth: the connecting party is the peer network.
     Bridge { peer: NetworkName },
+    /// §3 foreign-bridge adapter auth: the connecting party is a pinned adapter
+    /// daemon, identified only by its key (scheme authorization is checked later
+    /// at `REALM REGISTER`/`REALM ASSERT`).
+    Adapter,
 }
 
 #[derive(Debug, Clone)]
@@ -270,6 +274,15 @@ enum State {
     Bridge {
         peer: NetworkName,
         key: PublicKey,
+    },
+    /// Foreign-bridge framework (`docs/architecture/foreign-bridge-framework.md`
+    /// §3): a pinned adapter session. `key` is the adapter key proved at
+    /// `AUTH ADAPTER`. A **control link** stays `realm: None` (registers schemes,
+    /// receives `PROVISION`); a **data connection** binds one realm via
+    /// `REALM ASSERT`, after which `realm` is `Some`.
+    ForeignBridge {
+        key: PublicKey,
+        realm: Option<ForeignUri>,
     },
 }
 
@@ -395,6 +408,9 @@ struct Session<S> {
     /// session's run loop so all socket writes stay serialized.
     fed_out_tx: mpsc::Sender<String>,
     fed_out_rx: mpsc::Receiver<String>,
+    /// §3.3 foreign-bridge control link: schemes this session registered via
+    /// `REALM REGISTER`, dropped from the routing registry at cleanup.
+    foreign_schemes: Vec<Scheme>,
     /// §11.10 requester side: this outbound session asked for the peer's
     /// manifest, so it accepts the offer regardless of the auto-accept config.
     request_accept: bool,
@@ -461,6 +477,7 @@ impl<S: ControlStream> Session<S> {
             bridged: HashMap::new(),
             fed_out_tx,
             fed_out_rx,
+            foreign_schemes: Vec::new(),
             request_accept: false,
             backfilled: std::collections::HashSet::new(),
             backfill_demand_tx,
@@ -552,6 +569,12 @@ impl<S: ControlStream> Session<S> {
         for (_, forwarder) in self.bridged.drain() {
             forwarder.abort();
         }
+        // §3.3 a foreign-bridge control link is going away: drop the schemes it
+        // registered so weftd stops routing PROVISION to a dead session.
+        for scheme in std::mem::take(&mut self.foreign_schemes) {
+            self.ctx
+                .unregister_foreign_control(&scheme, &self.fed_out_tx);
+        }
         if let Some(account) = self.registered.take() {
             self.ctx
                 .directory
@@ -582,6 +605,12 @@ impl<S: ControlStream> Session<S> {
         // them before the Command decode that would treat them as Unknown.
         if let State::Bridge { peer, key } = self.state.clone() {
             return self.on_bridge_line(peer, key, &line).await;
+        }
+        // A foreign-bridge adapter session speaks the REALM/PROVISION context
+        // verbs (and, later, asserts foreign events) — route it before the client
+        // Command dispatch, like an ordinary bridge session.
+        if let State::ForeignBridge { key, realm } = self.state.clone() {
+            return self.on_foreign_bridge_line(key, realm, &line).await;
         }
         let request = match Request::from_line(&line) {
             Ok(request) => request,
@@ -628,8 +657,9 @@ impl<S: ControlStream> Session<S> {
             State::Negotiating => self.on_negotiating(label, cmd).await,
             State::Unauthed { challenge } => self.on_unauthed(label, cmd, challenge).await,
             State::Ready { account } => self.on_ready(label, cmd, account).await,
-            // Bridge lines are intercepted in `on_line` before Command decode.
-            State::Bridge { .. } => Ok(Flow::Continue),
+            // Bridge and foreign-bridge lines are intercepted in `on_line` before
+            // Command decode.
+            State::Bridge { .. } | State::ForeignBridge { .. } => Ok(Flow::Continue),
         }
     }
 
@@ -777,6 +807,10 @@ impl<S: ControlStream> Session<S> {
             Command::AuthBridge { network, token } => {
                 self.on_auth_bridge(label, network, token).await
             }
+            // §3 open a foreign-bridge adapter session: the adapter proves control
+            // of a pinned `[[foreign_bridge]]` key. An unpinned key takes the
+            // uniform AUTH-FAILED path (no adapter-existence oracle).
+            Command::AuthAdapter { pubkey } => self.on_auth_adapter(label, pubkey).await,
             // §6.1 step 2: verify sig(nonce ‖ network-name) and enrollment.
             Command::AuthProof { signature } => {
                 // The challenge is single-use: consumed on any PROOF.
@@ -828,6 +862,18 @@ impl<S: ControlStream> Session<S> {
                             self.welcome_bridge(label, peer, pending.device).await
                         } else {
                             debug!(%peer, "bridge auth rejected");
+                            self.auth_failed(label).await
+                        }
+                    }
+                    // §3 adapter PROOF: the key was resolved (pinned) at
+                    // AUTH ADAPTER, so a valid proof of control establishes the
+                    // foreign-bridge session, bound to that key.
+                    ChallengeSubject::Adapter => {
+                        if proof_ok {
+                            info!("foreign-bridge adapter authenticated");
+                            self.welcome_foreign_bridge(label, pending.device).await
+                        } else {
+                            debug!("adapter auth rejected");
                             self.auth_failed(label).await
                         }
                     }
@@ -1171,6 +1217,7 @@ impl<S: ControlStream> Session<S> {
                     .await
             }
             Command::NsJoin { ns } => self.on_ns_join(label, ns, account).await,
+            Command::NsJoinForeign { uri } => self.on_ns_join_foreign(label, uri, account).await,
             Command::NsLeave { ns } => self.on_ns_leave(label, ns, account).await,
             Command::Sync { since, preview } => self.on_sync(label, since, preview, account).await,
             Command::Discover { cursor } => self.on_discover(label, cursor).await,
@@ -1340,6 +1387,17 @@ impl<S: ControlStream> Session<S> {
                 self.unsupported(label, "VOICE REQUEST is bridge-session-only")
                     .await
             }
+            // Foreign-bridge framework (§3): the REALM binding/teardown and the
+            // PROVISION-OK/ERR control-link replies are spoken only on a pinned
+            // `State::ForeignBridge` adapter session, never by a local client.
+            Command::RealmRegister { .. }
+            | Command::RealmAssert { .. }
+            | Command::RealmWithdraw
+            | Command::ProvisionOk { .. }
+            | Command::ProvisionErr { .. } => {
+                self.unsupported(label, "foreign-bridge verb requires an adapter session")
+                    .await
+            }
             Command::NetblockAdd { network, reason } => {
                 self.on_netblock_add(label, network, reason, account).await
             }
@@ -1352,9 +1410,11 @@ impl<S: ControlStream> Session<S> {
             }
             Command::MediaUnblock { hash } => self.on_media_unblock(label, hash, account).await,
             Command::MediaBlocks => self.on_media_blocks(label, account).await,
-            // `AUTH BRIDGE` belongs in UNAUTHED; `REPORT-FORWARD` is
-            // bridge-session-only (§11.9) — neither is valid from a client.
-            Command::AuthBridge { .. } | Command::ReportForward { .. } => {
+            // `AUTH BRIDGE`/`AUTH ADAPTER` belong in UNAUTHED; `REPORT-FORWARD` is
+            // bridge-session-only (§11.9) — none is valid from a client.
+            Command::AuthBridge { .. }
+            | Command::AuthAdapter { .. }
+            | Command::ReportForward { .. } => {
                 self.not_authed(label, "not valid on a client session")
                     .await
             }

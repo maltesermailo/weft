@@ -46,6 +46,9 @@ pub struct Config {
     /// §11.2 pinned peers weftd dials outbound (`[[peers]]`).
     #[serde(default)]
     pub peers: Vec<Peer>,
+    /// Foreign-bridge framework (§3): pinned adapter daemons (`[[foreign_bridge]]`).
+    #[serde(default)]
+    pub foreign_bridge: Vec<ForeignBridge>,
     pub listen: Listen,
     pub identity: Identity,
     pub storage: Storage,
@@ -402,6 +405,20 @@ pub struct Peer {
     pub key: String,
 }
 
+/// Foreign-bridge framework (`docs/architecture/foreign-bridge-framework.md` §3):
+/// a pinned adapter daemon, authorized for one scheme. The adapter proves control
+/// of `key` at `AUTH ADAPTER`; `REALM REGISTER`/`ASSERT` for `scheme` then require
+/// that same key. Multiple `[[foreign_bridge]]` entries allow several adapters (or
+/// one adapter spanning several schemes with repeated entries).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForeignBridge {
+    /// Adapter protocol scheme, e.g. `matrix`.
+    pub scheme: String,
+    /// Adapter's signing key, base64.
+    pub key: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Listen {
@@ -491,6 +508,7 @@ impl Default for Config {
             namespaces: Namespaces::default(),
             federation: Federation::default(),
             peers: Vec::new(),
+            foreign_bridge: Vec::new(),
             dm_policy: "permanent".to_string(),
             listen: Listen::default(),
             identity: Identity::default(),

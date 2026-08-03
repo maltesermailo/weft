@@ -467,6 +467,15 @@ pub trait NamespaceStore: Send + Sync {
     /// its namespace (owner, vanity, visibility, …).
     async fn namespace_by_id(&self, id: &str) -> Result<Option<NamespaceRecord>, StoreError>;
 
+    /// Foreign-bridge framework (§3): the replica namespace for a foreign origin
+    /// URI (`<scheme>://<realm>/<space>`), if one has been provisioned. `None` =
+    /// not yet materialized (first contact → provision). Lets `NS JOIN <uri>` take
+    /// the known-local branch once a space exists.
+    async fn namespace_by_origin(
+        &self,
+        origin: &str,
+    ) -> Result<Option<NamespaceRecord>, StoreError>;
+
     /// Is this vanity name admin-locked (§2.3)? A locked vanity can't be
     /// (re-)registered via NS CREATE without an operator lifting the lock.
     async fn vanity_locked(&self, name: &NamespaceName) -> Result<bool, StoreError>;

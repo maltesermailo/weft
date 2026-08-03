@@ -80,6 +80,228 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    /// §3 AUTH ADAPTER: a foreign-bridge adapter proves control of a pinned
+    /// `[[foreign_bridge]]` key. An unpinned key funnels to the uniform
+    /// AUTH-FAILED (no adapter-existence oracle, invariant 1 discipline).
+    pub(super) async fn on_auth_adapter(
+        &mut self,
+        label: Option<String>,
+        pubkey: String,
+    ) -> io::Result<Flow> {
+        let device = PublicKey::from_b64(&pubkey)
+            .ok()
+            .filter(|k| self.ctx.adapter_key_pinned(k));
+
+        let Some(device) = device else {
+            return self.auth_failed(label).await;
+        };
+
+        let nonce: [u8; weft_crypto::CHALLENGE_NONCE_LEN] = rand::random();
+        self.send_event(
+            label,
+            Event::Challenge {
+                nonce: weft_crypto::b64::encode(nonce),
+            },
+        )
+        .await?;
+
+        self.state = State::Unauthed {
+            challenge: Some(PendingChallenge {
+                device,
+                nonce,
+                subject: ChallengeSubject::Adapter,
+            }),
+        };
+        Ok(Flow::Continue)
+    }
+
+    /// §3 adapter PROOF verified: enter the foreign-bridge context, realm-unbound.
+    /// A data connection binds its realm next with `REALM ASSERT`; a control link
+    /// stays unbound and registers schemes.
+    pub(super) async fn welcome_foreign_bridge(
+        &mut self,
+        label: Option<String>,
+        key: PublicKey,
+    ) -> io::Result<Flow> {
+        self.send_event(
+            label,
+            Event::Welcome {
+                network: self.ctx.info.network.clone(),
+                features: vec!["foreign-bridge".to_string()],
+                attestation: None,
+                motd: None,
+            },
+        )
+        .await?;
+
+        self.state = State::ForeignBridge { key, realm: None };
+        Ok(Flow::Continue)
+    }
+
+    /// §3 route a line on a pinned foreign-bridge adapter session. This slice
+    /// handles the context verbs — the REALM bind/teardown and control-link scheme
+    /// register; the PROVISION replies and asserted foreign events (NS-META / MSG
+    /// with `@as`) land with the provisioning + ingestion slices.
+    pub(super) async fn on_foreign_bridge_line(
+        &mut self,
+        key: PublicKey,
+        _realm: Option<ForeignUri>,
+        line: &Line,
+    ) -> io::Result<Flow> {
+        let request = match Request::from_line(line) {
+            Ok(req) => req,
+            Err(_) => return Ok(Flow::Continue), // tolerate noise on the bridge
+        };
+
+        match request.command {
+            Command::RealmRegister { scheme } => {
+                self.on_realm_register(request.label, key, scheme).await
+            }
+            Command::RealmAssert { realm } => self.on_realm_assert(request.label, key, realm).await,
+            Command::RealmWithdraw => self.on_realm_withdraw(key).await,
+            Command::ProvisionOk { job } => self.on_provision_result(job, true).await,
+            Command::ProvisionErr { job } => self.on_provision_result(job, false).await,
+            // A peer's asserted events and anything else is tolerated as noise
+            // until ingestion lands.
+            _ => Ok(Flow::Continue),
+        }
+    }
+
+    /// §3.3 REALM REGISTER: the control link declares a scheme it handles. The
+    /// proven key must be pinned for that scheme, else it is refused. The
+    /// scheme→session routing registry (PROVISION delivery) arrives with the
+    /// provisioning slice — this validates authorization only.
+    async fn on_realm_register(
+        &mut self,
+        label: Option<String>,
+        key: PublicKey,
+        scheme: Scheme,
+    ) -> io::Result<Flow> {
+        if !self.ctx.adapter_authorized(&key, &scheme) {
+            return self
+                .unsupported(label, "adapter key not pinned for that scheme")
+                .await;
+        }
+
+        // Route this session's raw-line writer as the control link for `scheme`,
+        // so a client's `NS JOIN <scheme>://…` can reach it with a PROVISION.
+        self.ctx
+            .register_foreign_control(scheme.clone(), self.fed_out_tx.clone());
+        if !self.foreign_schemes.contains(&scheme) {
+            self.foreign_schemes.push(scheme.clone());
+        }
+
+        info!(%scheme, "foreign-bridge adapter registered scheme");
+        Ok(Flow::Continue)
+    }
+
+    /// §3.3 `NS JOIN <uri>`: first contact with a foreign space. If an adapter for
+    /// the URI's scheme is registered, park the request and push a `PROVISION` over
+    /// its control link; the parked join completes on `PROVISION-OK`/`PROVISION-ERR`
+    /// (asynchronously — no immediate reply). No registered adapter → NO-SUCH-TARGET,
+    /// uniform with a nonexistent local namespace (invariant 1/4).
+    ///
+    /// The success materialization (PROVISION-OK → create the replica namespace +
+    /// join the requester) lands with the next slice; today a provisioned space
+    /// isn't yet stored, so the known-local branch only fires once it is.
+    pub(super) async fn on_ns_join_foreign(
+        &mut self,
+        label: Option<String>,
+        uri: ForeignUri,
+        account: Account,
+    ) -> io::Result<Flow> {
+        // §3.3 branch 2 (known-local): a space someone already provisioned is an
+        // ordinary namespace join, addressed by its replica id.
+        match self.ctx.namespaces.namespace_by_origin(&uri.to_string()).await {
+            Ok(Some(record)) => {
+                if let Ok(ns) = record.id.parse::<weft_proto::NamespaceRef>() {
+                    return self.on_ns_join(label, ns, account).await;
+                }
+            }
+            Ok(None) => {} // first contact → provision below
+            Err(e) => return self.internal(label, &e).await,
+        }
+
+        // §3.3 branch 3 (first contact): park + push a PROVISION to the adapter.
+        let started = self.ctx.begin_provision(
+            uri.scheme().clone(),
+            &uri,
+            self.fed_out_tx.clone(),
+            label.clone(),
+        );
+
+        if !started {
+            return self.no_such_target(label).await;
+        }
+
+        Ok(Flow::Continue)
+    }
+
+    /// §3.3 `PROVISION-OK`/`PROVISION-ERR`: the adapter finished (or failed)
+    /// provisioning the space for `job`. Deliver the outcome to the parked
+    /// `NS JOIN`'s session over its raw-line writer, echoing the join's label.
+    /// `ERR` → the uniform `NO-SUCH-TARGET` (invariant 4). `OK` → the space is
+    /// materialized and the requester joined — that completion needs the
+    /// foreign-namespace store (next slice); for now it is logged and the parked
+    /// request cleared.
+    async fn on_provision_result(&mut self, job: String, ok: bool) -> io::Result<Flow> {
+        let Some((reply, label)) = self.ctx.complete_provision(&job) else {
+            return Ok(Flow::Continue); // unknown/expired job — tolerate
+        };
+
+        if ok {
+            info!(%job, "PROVISION-OK — space materialization lands with the store slice");
+            return Ok(Flow::Continue);
+        }
+
+        let event = Event::Err(weft_proto::ErrEvent::new(
+            ErrCode::NoSuchTarget,
+            "no such target",
+        ));
+        let completion = match label {
+            Some(label) => Reply::with_label(event, label),
+            None => Reply::new(event),
+        };
+
+        if let Ok(line) = completion.serialize() {
+            let _ = reply.try_send(line);
+        }
+
+        Ok(Flow::Continue)
+    }
+
+    /// §3.1 REALM ASSERT: bind this data connection to a single realm — the
+    /// mandatory connect-time handshake. The proven key must be pinned for the
+    /// realm's scheme. Netblock gating + foreign-namespace assertion arrive in
+    /// later slices.
+    async fn on_realm_assert(
+        &mut self,
+        label: Option<String>,
+        key: PublicKey,
+        realm: ForeignUri,
+    ) -> io::Result<Flow> {
+        if !self.ctx.adapter_authorized(&key, realm.scheme()) {
+            return self
+                .unsupported(label, "adapter key not pinned for that scheme")
+                .await;
+        }
+
+        info!(%realm, "foreign-bridge data connection bound to realm");
+        self.state = State::ForeignBridge {
+            key,
+            realm: Some(realm),
+        };
+        Ok(Flow::Continue)
+    }
+
+    /// §3.1 REALM WITHDRAW: graceful teardown of the bound realm. Withdrawing the
+    /// realm's foreign namespaces arrives with the store slice; here we clear the
+    /// binding, returning the connection to the unbound (control-link) state.
+    async fn on_realm_withdraw(&mut self, key: PublicKey) -> io::Result<Flow> {
+        self.state = State::ForeignBridge { key, realm: None };
+        Ok(Flow::Continue)
+    }
+
     /// Route a line arriving on a bridge session: peer *events* ingest; peer
     /// *commands* drive the manifest state machine (§11.1) + backfill (§11.7).
     pub(super) async fn on_bridge_line(

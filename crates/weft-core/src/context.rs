@@ -171,6 +171,23 @@ pub struct ServerCtx {
     media: MediaRegistry,
     /// §11 federation config: pinned peer keys + auto-accept.
     pub(crate) federation: FederationConfig,
+    /// Foreign-bridge framework (`docs/architecture/foreign-bridge-framework.md`
+    /// §3): pinned adapter keys, each authorized for one scheme
+    /// (`[[foreign_bridge]]` config; multiple entries). An adapter authenticates
+    /// by proving control of a pinned key (`AUTH ADAPTER`); `REALM REGISTER` /
+    /// `REALM ASSERT` then require the proven key to be pinned for the asserted
+    /// scheme. A handful of entries — a linear scan, no hashing of keys.
+    pub(crate) foreign_adapters: Vec<(weft_proto::Scheme, PublicKey)>,
+    /// Foreign-bridge framework (§3.3): the registered adapter **control link**
+    /// per scheme — the raw-line writer weftd pushes `PROVISION` onto. Registered
+    /// at `REALM REGISTER`, dropped when the control session ends.
+    foreign_control:
+        std::sync::Mutex<HashMap<weft_proto::Scheme, tokio::sync::mpsc::Sender<String>>>,
+    /// Foreign-bridge framework (§3.3): parked `NS JOIN <uri>` requests awaiting a
+    /// `PROVISION-OK` / `PROVISION-ERR`, keyed by job token.
+    pending_provision: std::sync::Mutex<HashMap<String, PendingProvision>>,
+    /// Monotonic source of provisioning job tokens (§3.3).
+    provision_seq: AtomicU64,
     /// §2.2 namespace creation: `open` (any account, up to `ns_quota`) or
     /// gated (needs the `ns-create` cap).
     pub(crate) ns_creation_open: bool,
@@ -383,6 +400,14 @@ pub struct AutoBridgeRequest {
     pub invite: Option<String>,
 }
 
+/// A parked `NS JOIN <uri>` awaiting the adapter's `PROVISION-OK`/`PROVISION-ERR`
+/// (foreign-bridge framework §3.3). The completion (roster or NO-SUCH-TARGET) is
+/// pushed to the requester session's raw-line writer, echoing the join's label.
+struct PendingProvision {
+    reply: tokio::sync::mpsc::Sender<String>,
+    label: Option<String>,
+}
+
 /// Deliver a control line to a **peer network** (§11.14). Preferred path: the
 /// peer's persistent bridge (see [`ServerCtx::request_friend_deliver`]); the
 /// ephemeral tunnel driver is the fallback for a never-bridged peer. A user
@@ -502,6 +527,10 @@ impl ServerCtx {
             banned_substrings: Vec::new(),
             require_email: false,
             banned_regexes: Vec::new(),
+            foreign_adapters: Vec::new(),
+            foreign_control: std::sync::Mutex::new(HashMap::new()),
+            pending_provision: std::sync::Mutex::new(HashMap::new()),
+            provision_seq: AtomicU64::new(1),
             peers,
             netblocks,
             moderation,
@@ -789,6 +818,13 @@ impl ServerCtx {
                     .ok()
             })
             .collect();
+        self
+    }
+
+    /// weftd installs the pinned foreign-bridge adapters from `[[foreign_bridge]]`
+    /// config (framework §3). Each entry authorizes one key for one scheme.
+    pub fn with_foreign_adapters(mut self, adapters: Vec<(weft_proto::Scheme, PublicKey)>) -> Self {
+        self.foreign_adapters = adapters;
         self
     }
 
@@ -1129,6 +1165,118 @@ impl ServerCtx {
     /// trusting the key it proves control of (§11.2, trust-on-first-use).
     pub(crate) fn bridge_accept_any(&self) -> bool {
         self.federation.accept_any
+    }
+
+    // ---- foreign-bridge framework (§3) ----
+
+    /// A key presented at `AUTH ADAPTER` is a valid adapter iff it is pinned for
+    /// at least one scheme (`[[foreign_bridge]]`).
+    pub(crate) fn adapter_key_pinned(&self, key: &PublicKey) -> bool {
+        self.foreign_adapters.iter().any(|(_, k)| k == key)
+    }
+
+    /// Whether a proven adapter key is authorized to speak for `scheme` — the
+    /// gate on `REALM REGISTER` / `REALM ASSERT` (§3.1).
+    pub(crate) fn adapter_authorized(&self, key: &PublicKey, scheme: &weft_proto::Scheme) -> bool {
+        self.foreign_adapters
+            .iter()
+            .any(|(s, k)| s == scheme && k == key)
+    }
+
+    /// §3.3 register an adapter's control link for `scheme` (at REALM REGISTER).
+    /// A second registration for the same scheme replaces the first (last writer
+    /// wins — a redeployed adapter takes over).
+    pub(crate) fn register_foreign_control(
+        &self,
+        scheme: weft_proto::Scheme,
+        tx: tokio::sync::mpsc::Sender<String>,
+    ) {
+        self.foreign_control
+            .lock()
+            .expect("foreign_control lock")
+            .insert(scheme, tx);
+    }
+
+    /// §3.3 drop a control link when its session ends — but only if `tx` still owns
+    /// the slot, so a newer adapter that took over the scheme is left in place.
+    pub(crate) fn unregister_foreign_control(
+        &self,
+        scheme: &weft_proto::Scheme,
+        tx: &tokio::sync::mpsc::Sender<String>,
+    ) {
+        let mut map = self.foreign_control.lock().expect("foreign_control lock");
+
+        if map.get(scheme).is_some_and(|t| t.same_channel(tx)) {
+            map.remove(scheme);
+        }
+    }
+
+    /// §3.3 first contact with a foreign space: if an adapter for `scheme` is
+    /// registered, mint a job, park the requester (`reply` = its raw-line writer,
+    /// `label` = the join's label), and push `PROVISION <uri> <job>` over the
+    /// control link. `false` if no adapter handles the scheme (→ the caller answers
+    /// NO-SUCH-TARGET, uniform with a nonexistent local namespace).
+    pub(crate) fn begin_provision(
+        &self,
+        scheme: weft_proto::Scheme,
+        uri: &weft_proto::ForeignUri,
+        reply: tokio::sync::mpsc::Sender<String>,
+        label: Option<String>,
+    ) -> bool {
+        let control = self
+            .foreign_control
+            .lock()
+            .expect("foreign_control lock")
+            .get(&scheme)
+            .cloned();
+        let Some(control) = control else {
+            return false;
+        };
+
+        let job = format!(
+            "p{}",
+            self.provision_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let line = match weft_proto::Reply::new(weft_proto::Event::Provision {
+            uri: uri.clone(),
+            job: job.clone(),
+        })
+        .serialize()
+        {
+            Ok(line) => line,
+            Err(_) => return false,
+        };
+
+        // Park before sending so a fast PROVISION reply can never race ahead of
+        // the pending entry; roll back if the control link is gone.
+        self.pending_provision
+            .lock()
+            .expect("pending_provision lock")
+            .insert(job.clone(), PendingProvision { reply, label });
+
+        if control.try_send(line).is_err() {
+            self.pending_provision
+                .lock()
+                .expect("pending_provision lock")
+                .remove(&job);
+            return false;
+        }
+
+        true
+    }
+
+    /// §3.3 remove + return a parked provisioning request by job token: its
+    /// requester writer + the join's label. `None` for an unknown/expired job.
+    pub(crate) fn complete_provision(
+        &self,
+        job: &str,
+    ) -> Option<(tokio::sync::mpsc::Sender<String>, Option<String>)> {
+        self.pending_provision
+            .lock()
+            .expect("pending_provision lock")
+            .remove(job)
+            .map(|p| (p.reply, p.label))
     }
 
     /// Sign a manifest with this network's key (§11.3). The §11.3 authority

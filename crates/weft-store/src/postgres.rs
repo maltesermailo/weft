@@ -1712,8 +1712,8 @@ impl NamespaceStore for PgStore {
     async fn create_namespace(&self, record: NamespaceRecord) -> Result<bool, StoreError> {
         let result = sqlx::query(
             r#"
-            INSERT INTO weft_namespaces (name, owner, root_key, visibility, title, description, icon, federation, id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            INSERT INTO weft_namespaces (name, owner, root_key, visibility, title, description, icon, federation, id, origin)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
             ON CONFLICT (name) DO NOTHING
             "#,
         )
@@ -1727,6 +1727,7 @@ impl NamespaceStore for PgStore {
         .bind(record.federation)
         // Empty id → NULL (lazy backfill); new namespaces arrive with a minted id.
         .bind(Some(record.id.as_str()).filter(|s| !s.is_empty()))
+        .bind(&record.origin)
         .execute(&self.pool)
         .await
         .map_err(backend_err)?;
@@ -1778,6 +1779,18 @@ impl NamespaceStore for PgStore {
                 }
             }
         }
+    }
+
+    async fn namespace_by_origin(
+        &self,
+        origin: &str,
+    ) -> Result<Option<NamespaceRecord>, StoreError> {
+        let row = sqlx::query("SELECT * FROM weft_namespaces WHERE origin = $1")
+            .bind(origin)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        row.map(|row| namespace_from_row(&row)).transpose()
     }
 
     async fn namespace_by_id(&self, id: &str) -> Result<Option<NamespaceRecord>, StoreError> {
@@ -2163,6 +2176,8 @@ fn namespace_from_row(row: &sqlx::postgres::PgRow) -> Result<NamespaceRecord, St
         frozen: row.try_get("frozen").unwrap_or(false),
         // Pre-0044 rows predate the column; missing means "no welcome channel".
         welcome_channel: row.try_get("welcome_channel").unwrap_or(None),
+        // Pre-0052 rows predate the column; missing means "native namespace".
+        origin: row.try_get("origin").unwrap_or(None),
     })
 }
 

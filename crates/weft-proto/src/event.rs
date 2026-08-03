@@ -3,6 +3,7 @@
 
 use crate::errcode::ErrCode;
 use crate::error::{ParseError, SerializeError};
+use crate::foreign::ForeignUri;
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
 use crate::name::{Account, ChannelName, GroupId, NetworkName, Target, UserRef};
@@ -475,6 +476,16 @@ pub enum Event {
         media: MediaMode,
         typing: bool,
         voice: bool,
+    },
+    /// `PROVISION <scheme>://<realm>/<path> <job>` — foreign-bridge framework
+    /// (`docs/architecture/foreign-bridge-framework.md` §3.3): weftd's control-link
+    /// push asking the scheme's adapter to provision (resolve + join + enumerate) a
+    /// not-yet-known foreign space, correlated by `job`. The adapter answers
+    /// `PROVISION-OK`/`PROVISION-ERR <job>`. Sent only to a `State::ForeignBridge`
+    /// adapter session.
+    Provision {
+        uri: ForeignUri,
+        job: String,
     },
     /// `NETBLOCKED <network> [:reason]` — sent to bridge owners when a manifest
     /// is severed by a NETBLOCK (§11.6). Reason is included per the network's
@@ -1426,6 +1437,13 @@ impl Event {
                     voice: line.tags.get("voice").map(String::as_str) == Some("yes"),
                 })
             }
+            "PROVISION" => {
+                let mut args = Args::new(line, "PROVISION");
+                Ok(Event::Provision {
+                    uri: args.req("uri")?.parse()?,
+                    job: args.req("job")?.to_string(),
+                })
+            }
             "NETBLOCKED" => {
                 let mut args = Args::new(line, "NETBLOCKED");
                 Ok(Event::Netblocked {
@@ -2197,6 +2215,9 @@ impl Event {
             }
             Event::Netblocked { network, reason } => {
                 ("NETBLOCKED", vec![network.to_string()], reason.clone())
+            }
+            Event::Provision { uri, job } => {
+                ("PROVISION", vec![uri.to_string(), job.clone()], None)
             }
             Event::NetblockRemoved { network } => ("NETBLOCK-REMOVED", vec![network.to_string()], None),
             Event::MediaBlocked { hash, reason } => {
@@ -3293,6 +3314,27 @@ mod tests {
             network: "evil.example".parse().unwrap(),
             reason: None,
         }));
+    }
+
+    #[test]
+    fn provision_event_round_trips() {
+        round_trip(&Reply::with_label(
+            Event::Provision {
+                uri: "matrix://matrix.org/gaming".parse().unwrap(),
+                job: "j1".into(),
+            },
+            "j1",
+        ));
+        assert_eq!(
+            Reply::new(Event::Provision {
+                uri: "matrix://matrix.org/gaming".parse().unwrap(),
+                job: "j1".into(),
+            })
+            .serialize()
+            .unwrap(),
+            "PROVISION matrix://matrix.org/gaming j1"
+        );
+        assert!(Reply::parse("PROVISION matrix://matrix.org/gaming").is_err()); // job required
     }
 
     #[test]

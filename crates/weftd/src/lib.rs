@@ -385,6 +385,19 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
             Arc::new(weft_core::MemBlobStore::default())
         }
     };
+    // Foreign-bridge framework (§3): pinned adapter keys, each authorized for one
+    // scheme (`[[foreign_bridge]]`). An adapter proves its key at `AUTH ADAPTER`.
+    let mut foreign_adapters = Vec::new();
+    for adapter in &config.foreign_bridge {
+        match (
+            adapter.scheme.parse::<weft_proto::Scheme>(),
+            weft_core::PublicKey::from_b64(&adapter.key),
+        ) {
+            (Ok(s), Ok(k)) => foreign_adapters.push((s, k)),
+            _ => warn!(scheme = %adapter.scheme, "skipping [[foreign_bridge]] entry with invalid scheme/key"),
+        }
+    }
+
     // §6.7 banned-word filter for new usernames + namespace vanities.
     let (banned_substrings, banned_regexes) =
         load_banned_words(config.banned_words_file.as_deref());
@@ -409,6 +422,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 config.support_account.clone(),
                 banned_substrings.clone(),
                 banned_regexes.clone(),
+                foreign_adapters.clone(),
             )
             .await?
         }
@@ -441,6 +455,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 config.support_account.clone(),
                 banned_substrings.clone(),
                 banned_regexes.clone(),
+                foreign_adapters.clone(),
             )
             .await?
         }
@@ -825,6 +840,7 @@ async fn boot<S>(
     support_account: Option<String>,
     banned_substrings: Vec<String>,
     banned_regexes: Vec<String>,
+    foreign_adapters: Vec<(weft_proto::Scheme, weft_core::PublicKey)>,
 ) -> anyhow::Result<(
     Arc<ServerCtx>,
     Vec<(weft_proto::ChannelName, weft_proto::RetentionPolicy)>,
@@ -921,7 +937,8 @@ where
             federation,
         )
         .with_banned_words(banned_substrings, banned_regexes)
-        .with_require_email(require_email),
+        .with_require_email(require_email)
+        .with_foreign_adapters(foreign_adapters),
     );
     let admin_router = admin_ingredients.map(|(secret, ops, network)| {
         let auth = weft_admin::auth::config(secret, ops);

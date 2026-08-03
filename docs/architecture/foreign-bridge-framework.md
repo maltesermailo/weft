@@ -57,14 +57,22 @@ discord://123456789/general           a Discord guild+channel  (adapter-defined 
   the client fully interpret it. Clients render foreign accounts + namespaces **badged** with the
   realm ("Matrix · matrix.org").
 - weftd stores foreign namespaces / channels / accounts as **first-class foreign objects** —
-  origin `(scheme, realm)`, addressed by URI — parallel to (never mixed into) local WEFT
-  networks and namespaces.
+  origin `(scheme, realm)`, addressed by URI. **(Implementation, owner call 2026-08-03: these
+  reuse the existing namespace/channel/membership tables with an `origin` URI marker —
+  discriminated, not a parallel table set. A namespace with `origin = Some("<scheme>://<realm>/<space>")`
+  is the replica; `None` is native. The marker keeps it badged + URI-addressed and gates it out of
+  local social-home authority (§7), so "never disguised" holds without duplicate tables.)**
 
 ## 3. The `State::ForeignBridge` session context (new)
 
 An adapter holds **two kinds of link** to weftd, both `State::ForeignBridge`, both pinned-key
-authed (config: `[[foreign_bridge]] scheme=…, pubkey=…`; **multiple entries allowed** — several
-adapters, or sharded per-realm instances, connect concurrently):
+authed (config: `[[foreign_bridge]] scheme = "…", key = "<b64>"`; **multiple entries allowed** —
+several adapters, or one adapter authorized for several schemes, or sharded per-realm instances,
+connect concurrently). The handshake is **`AUTH ADAPTER <pubkey>`**, reusing the §6.1
+`CHALLENGE`/`AUTH PROOF` flow: the adapter proves control of a key pinned in `[[foreign_bridge]]`
+(an unpinned key → uniform `AUTH-FAILED`, no adapter-existence oracle) and enters
+`State::ForeignBridge`. The *scheme(s)* the key may speak for are checked later, at
+`REALM REGISTER` / `REALM ASSERT` (a key pinned for `matrix` cannot assert a `discord://` realm).
 
 - a **control link** (one per adapter, realm-agnostic) — registers the scheme(s) the adapter
   handles and carries **provisioning** requests weftd pushes for realms without a live data
@@ -131,10 +139,10 @@ assertions stand in for the manifest).
    │                    connection (adapter puppet-joins them), echo @label=j1 (roster + POLICY).
    │                    [no provisioning — the steady-state path]
    └─ unknown + has scheme → park the NS JOIN pending, keyed by a provisioning job; go to 3.
-3. weftd → adapter      (CONTROL link)  PROVISION matrix://matrix.org/gaming :job=j1
+3. weftd → adapter      (CONTROL link)  PROVISION matrix://matrix.org/gaming j1
 4. adapter              resolve #gaming:matrix.org → join via companion HS (S2S) → enumerate rooms.
 5a. not found / unjoinable / encrypted:
-    adapter → weftd     (CONTROL)  PROVISION-ERR :job=j1
+    adapter → weftd     (CONTROL)  PROVISION-ERR j1
     weftd → C           @label=j1 ERR NO-SUCH-TARGET          (uniform, invariant 1)
 5b. ok — adapter opens/uses the matrix.org DATA connection:
     REALM ASSERT        matrix://matrix.org                   (binds the connection)
@@ -142,7 +150,7 @@ assertions stand in for the manifest).
     CHANNEL-LAYOUT      matrix://matrix.org/gaming/general 0
     POLICY              matrix://matrix.org/gaming/general retained:90d
     …                   (weftd mints replica ULIDs — home-authoritative)
-    adapter → weftd     (CONTROL)  PROVISION-OK :job=j1
+    adapter → weftd     (CONTROL)  PROVISION-OK j1
 6. weftd                namespace now exists → add the requester as a member, relay the user-join to
                         the data connection (adapter puppet-joins the remote room), complete the
                         parked request:
@@ -152,8 +160,10 @@ assertions stand in for the manifest).
 - **Provisioning fires once per space, ever.** After step 5b the namespace is materialized and in
   `DISCOVER`; every later joiner takes branch 2-known — a local join + a relay puppet-join, no
   control-link traffic, no remote lookup.
-- **Control-link contract:** `REGISTER <scheme>` (adapter startup) · `PROVISION <uri> :job`
-  (weftd→adapter) · `PROVISION-OK`/`PROVISION-ERR :job` (adapter→weftd). Realm-agnostic; no content.
+- **Control-link contract:** `REALM REGISTER <scheme>` (adapter startup) · `PROVISION <uri> <job>`
+  (weftd→adapter) · `PROVISION-OK`/`PROVISION-ERR <job>` (adapter→weftd). Realm-agnostic; no content.
+  (`REALM REGISTER`, not the design's earlier bare `REGISTER`, so the verb never collides with
+  account registration; `job` is a positional correlation token, not a `:job=` tag.)
 - **Failure = `NO-SUCH-TARGET`**, uniform in code + timing with a nonexistent local namespace
   (invariant 1) — a private/encrypted/absent remote space is indistinguishable from "no such thing."
 
@@ -241,12 +251,14 @@ home and authoritative; see `matrix.md` §10.)
    tag: the per-realm connection + self-describing URI/account carry it.
 3. `NS JOIN` accepting a `<scheme>://` URI (the provisioning path, §3.3) + a scheme→adapter routing
    registry + label-correlated pending-request tracking (reuse the auto-federation machinery). On
-   the bridge context: the control-link contract (`REGISTER`/`PROVISION`/`PROVISION-OK|ERR`) and the
+   the bridge context: the control-link contract (`REALM REGISTER`/`PROVISION`/`PROVISION-OK|ERR`) and the
    data-connection `REALM ASSERT` (binding handshake) + `REALM WITHDRAW` (teardown). Leaving/listing/
    discovery reuse `NS LEAVE`/`PART`/`SYNC`/`DISCOVER` — **no new user verbs**.
 4. Foreign structure via reused `NS-META`/`CHANNEL-LAYOUT` assertions; foreign-scoped event
    ingestion (reusing `Cmd::Ingest`-style paths); home-authoritative replica minting.
-5. Store: foreign realms / namespaces / channels / membership tables (mem + PG, shared contract).
+5. Store: foreign namespaces / channels / membership via the **existing** tables + an `origin`
+   URI marker on the namespace record (mem + PG, shared contract; migration 0052) — reuse +
+   discriminator, not a parallel table set (owner call 2026-08-03).
 6. Realm-keyed `NETBLOCK`.
 
 That is the entire core change. **Adding an adapter afterwards touches none of it** — it is a new

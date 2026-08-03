@@ -4291,6 +4291,165 @@ fn ctx_open_federation(channels: &[&str], operators: &[&str]) -> Arc<ServerCtx> 
     ))
 }
 
+// ---- foreign-bridge framework (§3): adapter auth + REALM context ----
+
+/// A ctx pinning one foreign-bridge adapter key, authorized for `scheme`
+/// (`[[foreign_bridge]]`).
+fn ctx_adapter(scheme: &str, adapter_key: &weft_core::PublicKey) -> Arc<ServerCtx> {
+    let info = ServerInfo {
+        network: "test.example".parse().unwrap(),
+        motd: None,
+        features: Vec::new(),
+    };
+    let chans: Vec<(&str, &str)> = Vec::new();
+    Arc::new(
+        ServerCtx::new(
+            info,
+            chans
+                .iter()
+                .map(|(c, p)| (c.parse().unwrap(), p.parse::<RetentionPolicy>().unwrap())),
+            Keypair::generate(),
+            true,
+            Arc::new(MemoryStore::default()),
+            Arc::new(weft_core::MemBlobStore::default()),
+            "permanent".parse().unwrap(),
+            std::iter::empty::<weft_proto::Account>(),
+            true,
+            10,
+            weft_core::FederationConfig::default(),
+        )
+        .with_foreign_adapters(vec![(scheme.parse().unwrap(), *adapter_key)]),
+    )
+}
+
+/// Drive a session to `State::ForeignBridge`, proving control of the adapter
+/// `key`; consumes the WELCOME.
+async fn adapter_session(ctx: &Arc<ServerCtx>, key: &Keypair) -> Client {
+    let mut c = connect(ctx);
+    c.send("HELLO weft/1");
+    assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+
+    c.send(&format!("AUTH ADAPTER {}", key.public().to_b64()));
+    let Event::Challenge { nonce } = c.recv().await.event else {
+        panic!("expected CHALLENGE");
+    };
+    let nonce = weft_crypto::b64::decode(&nonce).unwrap();
+    let sig = weft_crypto::sign_challenge(key, &nonce, "test.example");
+    c.send(&format!(
+        "AUTH PROOF {}",
+        weft_crypto::signature_to_b64(&sig)
+    ));
+
+    assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+    c
+}
+
+#[tokio::test]
+async fn foreign_bridge_adapter_authenticates() {
+    let key = Keypair::generate();
+    let ctx = ctx_adapter("matrix", &key.public());
+
+    let mut c = connect(&ctx);
+    c.send("HELLO weft/1");
+    assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+
+    c.send(&format!("AUTH ADAPTER {}", key.public().to_b64()));
+    let Event::Challenge { nonce } = c.recv().await.event else {
+        panic!("expected CHALLENGE");
+    };
+    let nonce = weft_crypto::b64::decode(&nonce).unwrap();
+    let sig = weft_crypto::sign_challenge(&key, &nonce, "test.example");
+    c.send(&format!(
+        "AUTH PROOF {}",
+        weft_crypto::signature_to_b64(&sig)
+    ));
+
+    let Event::Welcome { features, .. } = c.recv().await.event else {
+        panic!("expected WELCOME after adapter PROOF");
+    };
+    assert!(features.iter().any(|f| f == "foreign-bridge"));
+}
+
+#[tokio::test]
+async fn foreign_bridge_unpinned_key_auth_fails() {
+    let pinned = Keypair::generate();
+    let ctx = ctx_adapter("matrix", &pinned.public());
+
+    // A different key, not pinned in `[[foreign_bridge]]`, gets the uniform
+    // AUTH-FAILED — no adapter-existence oracle (invariant 1 discipline).
+    let stranger = Keypair::generate();
+    let mut c = connect(&ctx);
+    c.send("HELLO weft/1");
+    assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+
+    c.send(&format!("AUTH ADAPTER {}", stranger.public().to_b64()));
+    c.expect_err(ErrCode::AuthFailed).await;
+}
+
+#[tokio::test]
+async fn foreign_bridge_realm_scheme_authorization() {
+    let key = Keypair::generate();
+    let ctx = ctx_adapter("matrix", &key.public());
+    let mut c = adapter_session(&ctx, &key).await;
+
+    // An authorized REALM ASSERT for the adapter's scheme binds the connection
+    // *silently*; a REALM ASSERT for a scheme the key is not pinned for is
+    // refused. Because a successful bind emits nothing, the single ERR we read
+    // must carry the *second* command's label — which also proves the first was
+    // silent.
+    c.send("@label=ok REALM ASSERT matrix://matrix.org");
+    c.send("@label=bad REALM ASSERT discord://evil.example");
+    let reply = c.expect_err(ErrCode::Unsupported).await;
+    assert_eq!(reply.label.as_deref(), Some("bad"));
+}
+
+#[tokio::test]
+async fn foreign_bridge_ns_join_provisions_then_errs() {
+    let key = Keypair::generate();
+    let ctx = ctx_adapter("matrix", &key.public());
+
+    // The adapter authenticates and registers its scheme on the control link.
+    let mut adapter = adapter_session(&ctx, &key).await;
+    adapter.send("REALM REGISTER matrix");
+    // REALM REGISTER is silent, so probe with an *unauthorized* register whose ERR
+    // proves (FIFO) the `matrix` registration was already processed.
+    adapter.send("@label=probe REALM REGISTER discord");
+    let probe = adapter.expect_err(ErrCode::Unsupported).await;
+    assert_eq!(probe.label.as_deref(), Some("probe"));
+
+    // A client joins a foreign namespace → weftd provisions via the adapter.
+    let mut client = ready(&ctx, "ada").await;
+    client.send("@label=j1 NS JOIN matrix://matrix.org/gaming");
+
+    // The adapter receives PROVISION with a correlation job on its control link.
+    let Event::Provision { uri, job } = adapter.recv().await.event else {
+        panic!("adapter expected a PROVISION push");
+    };
+    assert_eq!(uri.to_string(), "matrix://matrix.org/gaming");
+
+    // The adapter reports the space is unreachable.
+    adapter.send(&format!("PROVISION-ERR {job}"));
+
+    // The parked NS JOIN completes as the uniform NO-SUCH-TARGET (invariant 4),
+    // echoing the join's label.
+    let reply = client.expect_err(ErrCode::NoSuchTarget).await;
+    assert_eq!(reply.label.as_deref(), Some("j1"));
+}
+
+#[tokio::test]
+async fn foreign_bridge_ns_join_no_adapter_is_no_such_target() {
+    // The adapter is pinned in config but never connected/registered, so no
+    // control link exists for `matrix` — a foreign NS JOIN is indistinguishable
+    // from a nonexistent local namespace (invariant 1/4).
+    let key = Keypair::generate();
+    let ctx = ctx_adapter("matrix", &key.public());
+
+    let mut client = ready(&ctx, "ada").await;
+    client.send("@label=j1 NS JOIN matrix://matrix.org/gaming");
+    let reply = client.expect_err(ErrCode::NoSuchTarget).await;
+    assert_eq!(reply.label.as_deref(), Some("j1"));
+}
+
 /// Drive a session to `State::Bridge` as `peer`, proving control of `key`.
 async fn bridged_peer(ctx: &Arc<ServerCtx>, peer: &str, key: &Keypair) -> Client {
     let mut c = connect(ctx);

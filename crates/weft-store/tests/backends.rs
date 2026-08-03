@@ -1245,6 +1245,7 @@ where
             federation: false,
             frozen: false,
             welcome_channel: None,
+            origin: None,
         })
         .await
         .unwrap());
@@ -1265,6 +1266,7 @@ where
             federation: false,
             frozen: false,
             welcome_channel: None,
+            origin: None,
         })
         .await
         .unwrap());
@@ -1290,6 +1292,35 @@ where
         .await
         .unwrap()
         .is_none());
+
+    // Foreign-bridge framework (§3): a replica namespace is looked up by its
+    // origin URI; a native namespace (origin NULL) is never found that way.
+    assert!(store.namespace_by_origin("matrix://matrix.org/gaming").await.unwrap().is_none());
+    let foreign: weft_proto::NamespaceName = format!("foreign{tag}").parse().unwrap();
+    let origin = format!("matrix://matrix.org/{tag}");
+    assert!(store
+        .create_namespace(NamespaceRecord {
+            id: String::new(), // empty ⇒ lazily backfilled, like a native ns
+            name: foreign.clone(),
+            owner: format!("fowner-{tag}").parse().unwrap(),
+            root_key: String::new(),
+            visibility: "unlisted".into(),
+            title: None,
+            description: None,
+            icon: None,
+            recovery_set: None,
+            pending_recovery: None,
+            categories: Vec::new(),
+            federation: false,
+            frozen: false,
+            welcome_channel: None,
+            origin: Some(origin.clone()),
+        })
+        .await
+        .unwrap());
+    let by_origin = store.namespace_by_origin(&origin).await.unwrap().unwrap();
+    assert_eq!(by_origin.name, foreign);
+    assert_eq!(by_origin.origin.as_deref(), Some(origin.as_str()));
 
     // Admin vanity lock (§2.3): a standalone reservation — default unlocked,
     // toggleable, and settable even for a name with no namespace.
@@ -1494,6 +1525,7 @@ where
             federation: false,
             frozen: false,
             welcome_channel: None,
+            origin: None,
         })
         .await
         .unwrap();

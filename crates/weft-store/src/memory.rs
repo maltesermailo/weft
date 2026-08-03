@@ -1445,6 +1445,18 @@ impl NamespaceStore for MemoryStore {
         Ok(inner.namespaces.values().find(|r| r.id == id).cloned())
     }
 
+    async fn namespace_by_origin(
+        &self,
+        origin: &str,
+    ) -> Result<Option<NamespaceRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .namespaces
+            .values()
+            .find(|r| r.origin.as_deref() == Some(origin))
+            .cloned())
+    }
+
     async fn vanity_locked(&self, name: &NamespaceName) -> Result<bool, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner.ns_vanity_locked.contains(name))

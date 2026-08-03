@@ -22,6 +22,7 @@ mod command;
 mod errcode;
 mod error;
 mod event;
+mod foreign;
 mod id;
 mod line;
 mod name;
@@ -32,6 +33,7 @@ pub use command::{CallMediaGrant, Command, NsInfoKind, Request};
 pub use errcode::ErrCode;
 pub use error::{ParseError, SerializeError};
 pub use event::{ErrEvent, Event, MessageEvent, Reply};
+pub use foreign::{ForeignUri, Scheme, MAX_FOREIGN_URI_BYTES};
 pub use id::MsgId;
 pub use line::{
     escape_tag_value, unescape_tag_value, Line, Tags, HISTORY_STREAM_THRESHOLD, MAX_ATTACHMENTS,

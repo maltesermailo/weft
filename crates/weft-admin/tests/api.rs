@@ -1632,6 +1632,7 @@ async fn namespace_detail_and_operator_takeover() {
             federation: false,
             frozen: false,
             welcome_channel: None,
+            origin: None,
         })
         .await
         .unwrap();
@@ -1816,6 +1817,7 @@ async fn admin_deletes_a_namespace_and_cascades() {
             federation: false,
             frozen: false,
             welcome_channel: None,
+            origin: None,
         })
         .await
         .unwrap();
@@ -1900,6 +1902,7 @@ async fn seize_to_support_transfers_ownership() {
             federation: false,
             frozen: false,
             welcome_channel: None,
+            origin: None,
         })
         .await
         .unwrap();
@@ -2011,6 +2014,7 @@ async fn seize_to_support_is_501_when_unconfigured() {
             federation: false,
             frozen: false,
             welcome_channel: None,
+            origin: None,
         })
         .await
         .unwrap();
@@ -2062,6 +2066,7 @@ async fn admin_assigns_and_unassigns_a_namespace_role() {
             federation: false,
             frozen: false,
             welcome_channel: None,
+            origin: None,
         })
         .await
         .unwrap();
