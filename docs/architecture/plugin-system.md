@@ -19,17 +19,20 @@ renders them; interactions round-trip back to the plugin, which owns all flow lo
 | # | Axis | Decision |
 |---|---|---|
 | 1 | Audience / trust | **Operator-installed, trusted.** Isolation is for **stability + resource-bounding**, not defending against malice. No untrusted/community sandboxed tier yet (YAGNI). |
-| 2 | Server execution | **In-process, two runtimes: Rhai (light) + WASM (full).** Not an external daemon. |
+| 2 | Server execution | **Remote-first (round 7).** A plugin has three hosting modes over one API: **`remote`** (an external process — the Matrix App Service model — over a pinned-key session), plus in-process **`rhai`** and **`wasm`**. `remote` is **built first**; in-process is deferred. A foreign-bridge adapter becomes a `remote` plugin + realm verbs. |
 | 3 | Runtime tiers | **Same host-API surface on both** (owner call, round 5 — reverses the earlier light/full split). Rhai and WASM differ only in **execution character** (Rhai = scripting + hot-reload; WASM = compiled, heavier compute, other languages), **not** in capabilities. One host API to design + secure (§4). |
 | 4 | Authority scoping | **Unrestricted (trusted).** No per-plugin capability confinement — a plugin may use anything its runtime tier exposes. Blast radius = the whole server, accepted. |
 | 5 | Server powers | **All of:** event hooks · act-as-service · outbound network · storage + timers (§4). Plus declaring client actions (core). |
-| 6 | Client execution | **Declarative SDUI.** The stock client renders plugin-declared views from a typed catalog; **no arbitrary client code**. |
+| 6 | Client execution | **Declarative SDUI + sandboxed client-side Rhai (round 7 — supersedes "no client code").** The stock client renders SDUI from a typed catalog **and** runs an optional **client-side Rhai controller** (in `weft-client-core`) that orchestrates custom-view widgets + client UX. Still **no arbitrary JS** — Rhai is a sandbox by construction (only the bound API; never `__TAURI__`/DOM/eval). |
 | 7 | Plugin identity | **The plugin decides, per call:** its own **bot account**, a **system** identity, or **on behalf of the invoking user** (§5). |
 | 8 | Action result | **Interactive** — multi-step forms/wizards + rendered panels, not just fire-and-forget (§6). |
-| 9 | Action surfaces | **All:** context menus · slash commands · settings/admin panels · global (command palette + side panel) (§6). |
+| 9 | Action surfaces | **Six:** context menus · slash commands · settings/admin panels · global (palette + side panel) · **server-menu** (namespace header dropdown) · **channel-list** (sidebar) — the last two added round 6 (`plugin-spec.md` §12.1). |
 | 10 | Flow state | **Plugin-driven** — the plugin holds flow state; the client renders the current view and round-trips each step (§6). |
 | 11 | Live views | **Push-updatable panels** — a plugin may push a fresh view into an open panel unsolicited (live dashboards/queues) (§6). |
-| 12 | View richness | **Typed component catalog only** — no raw HTML / iframes. Safe, themeable, forward-compatible (§7). |
+| 12 | View richness | **Two render surfaces (round 7).** (a) **Declarative SDUI** — the typed catalog, native-themed, for lightweight surfaces (action inputs, settings, simple panels). (b) **Custom-view widgets** — a plugin's own web UI in a **sandboxed null-origin iframe** (Matrix-widget model) for bespoke views (role-editor-class). Custom UI is delivered by **isolation, not HTML sanitization**. |
+| 13 | Registration | **Unified code registration (round 6).** Actions, hooks, and timers all register in a load-time `register()` pass, **not** the manifest — which keeps only identity/runtime/bot/config. `plugin-spec.md` §5.4. |
+| 14 | Custom-view control | **Client-side Rhai (round 7).** The client controller mounts/places/destroys widgets, routes their `postMessage`, subscribes to client events, and drives SDUI locally — a safe client scripting layer (Rhai sandbox), reached through a curated client API broker (never the ~123 raw Tauri commands). |
+| 15 | Webview hardening | **CSP required (round 7).** The Tauri CSP is currently `null` (no defense-in-depth); a real policy + a scoped `frame-src` for widget origins is a prerequisite for the iframe surface — a security improvement independent of plugins. |
 
 ## 2. Goals / non-goals
 
@@ -203,13 +206,48 @@ the accepted cost of decision 4 (unrestricted, trusted).
 5. **Event hooks — declared observe | veto (§6a).** Observers post-commit/async; veto pre-commit/bounded
    with fail-open default.
 
+## 11a. Round-6 resolutions (owner, 2026-08-03)
+
+1. **Unified code registration.** Actions, hooks, and timers all register in a load-time `register()`
+   pass; the manifest keeps only identity/runtime/bot/config (`plugin-spec.md` §5.4, §6.11). Handlers
+   are inline closures (Rhai) / registration-token exports (WASM).
+2. **Two new action surfaces — `server-menu` + `channel-list`** (`plugin-spec.md` §12.1), bringing the
+   total to six. Both invoke with `context = namespace`.
+
+## 11b. Round-7 resolutions (owner, 2026-08-03)
+
+1. **Remote-first hosting (App Services).** A plugin's hosting is `remote` | `rhai` | `wasm` over one
+   API; **`remote` is built first**, in-process later. `remote` = the Matrix Application Service model —
+   an external process on a pinned-key session, receiving event pushes and calling back to act as its
+   users. The foreign-bridge adapter becomes a `remote` plugin + realm verbs; `State::ForeignBridge`
+   generalizes to the remote-plugin transport. A remote plugin brings its **own** I/O (HTTP/timers/DB),
+   so the host-provided `http`/`timers`/`kv` are conveniences only the *in-process* tiers need.
+2. **Two render surfaces (supersedes decision 12's "no iframes").** (a) declarative SDUI (native, light);
+   (b) **custom-view widgets** — the plugin's own web UI in a `sandbox="allow-scripts"` **null-origin**
+   iframe (no `allow-same-origin` ⇒ no `__TAURI__`, no command access) with a `postMessage` capability
+   bridge. This is the Matrix-widget model; custom UI comes from **isolation, not sanitization**. The
+   earlier "sanitize plugin HTML into the main webview" idea is **dropped** (main context = csp:null +
+   ~123 commands; too dangerous).
+3. **Client-side Rhai controller.** An optional per-plugin client script, run in a Rhai sandbox inside
+   `weft-client-core` (one runtime, WASM-for-web + native-for-desktop), that **controls the widgets** and
+   client UX: mount/place/destroy widgets, route their messages, subscribe to client events, drive SDUI
+   locally. Safe by construction — Rhai reaches only a **curated client API broker**, never the raw Tauri
+   commands, DOM, or `eval`. This is the safe form of "client-side scripts for GUI"; it reverses round-5's
+   "no client code" but keeps "no arbitrary JS."
+4. **CSP hardening is a prerequisite.** The Tauri CSP is `null` today; a real policy (+ a scoped
+   `frame-src` for widget origins, + a command allowlist behind the broker) must land with the widget
+   surface. A security improvement in its own right (a latent XSS→full-compromise risk today).
+
 ## 12. Remaining before build
 
-The shape is settled. **The complete normative specification now lives in `plugin-spec.md`** —
-manifest schema, lifecycle state machine, both runtime bindings, the full host-API reference, the
-hook catalog, the SDUI component catalog, the wire grammar, resource limits, the error taxonomy,
-security invariants (as tests), foreign-bridge integration, a 10-milestone build plan, and worked
-examples. This doc remains the *design rationale*; `plugin-spec.md` is the *implementer's reference*.
+The shape is settled. **The complete normative specification lives in `plugin-spec.md`** — now
+**consolidated through round 7**: the three hosting models (remote-first), the in-process package vs
+remote self-description, lifecycle (in-process states + remote connection), the shared handler
+contract + all three runtime bindings, the full host-API reference (with the in-process-only
+`http`/`timers`/`kv`), the hook catalog, the SDUI catalog + widget + client-controller surfaces, the
+wire grammar (incl. `PLUGIN-REGISTER`/`container=custom`), limits, errors, 12 security invariants (as
+tests), foreign-bridge integration, a 13-milestone 3-track build plan, and worked examples (remote-Rust
+first). This doc remains the *design rationale*; `plugin-spec.md` is the *implementer's reference*.
 
 Six decisions are flagged **open** in `plugin-spec.md` §19 (hook catalog, component catalog, the
 `DENIED` code, the WASM ABI, the tier-collapse confirmation, and slash-arg mapping) — each gates a

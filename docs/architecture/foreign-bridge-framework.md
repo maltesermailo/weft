@@ -284,7 +284,9 @@ daemon + a config stanza + an adapter-binding doc.
   via a companion homeserver, §3–§16) + the inbound binding (Matrix Spaces/rooms → foreign
   namespaces). Native identity: `@alice:matrix.org`, `matrix://matrix.org/…`. Transport: the
   companion HS speaks Matrix S2S; the adapter is simultaneously its appservice and a
-  `State::ForeignBridge` client to weftd.
+  `State::ForeignBridge` client to weftd. **Built on the `weft-appservice` SDK** (its `bridge` feature):
+  the bridge is a WEFT **remote plugin** (App Service) + the realm/provisioning helpers, so the generic
+  plugin/app-service machinery (`plugin-spec.md` §2a.5) is its base and it is not a bespoke server path.
 - **Discord — planned (`discord.md`).** Key differences to sketch when we get there: no open
   S2S federation → a bot token + gateway/websocket, so **outbound** is "our managed bot posts in a
   guild" and **inbound** is "the bot relays a guild's channels" (realm = guild snowflake); snowflake
