@@ -80,6 +80,8 @@ mod tests {
 
     fn ns_meta(id: &str, owner: Option<&str>, description: Option<&str>) -> ClientEvent {
         ClientEvent::NsMeta {
+            authority: None,
+            settings_disabled: Vec::new(),
             id: id.into(),
             name: "cool-server".into(),
             visibility: "public".into(),

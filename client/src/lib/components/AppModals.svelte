@@ -28,6 +28,8 @@
   import ProfileCard from "$lib/components/modals/ProfileCard.svelte";
   import NicknameModal from "$lib/components/modals/NicknameModal.svelte";
   import ConfirmModal from "$lib/components/modals/ConfirmModal.svelte";
+  import PluginModal from "$lib/components/plugins/PluginModal.svelte";
+  import { plugins } from "$lib/plugins/plugins.svelte";
   import ProfileModal from "$lib/components/modals/ProfileModal.svelte";
   import UserSettingsModal from "$lib/components/modals/UserSettingsModal.svelte";
   import FederationPanel from "$lib/components/modals/FederationPanel.svelte";
@@ -38,6 +40,12 @@
 
   const app = getApp();
 </script>
+
+<!-- A plugin's modal view (plugin-spec.md §11.2). Drawn like any other dialog;
+     what is inside it is whatever the plugin declared. -->
+{#if plugins.activeModal}
+  <PluginModal open={plugins.activeModal} />
+{/if}
 
 {#if ui.discoverOpen}
   <DiscoverModal onclose={() => (ui.discoverOpen = false)} />

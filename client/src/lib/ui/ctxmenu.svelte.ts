@@ -10,6 +10,7 @@ import { ui } from "$lib/ui/ui.svelte";
 import { store } from "$lib/store/store.svelte";
 import * as weft from "$lib/transport/weft";
 import { toast } from "$lib/notifications/toasts.svelte";
+import { plugins } from "$lib/plugins/plugins.svelte";
 import { channelStore, scopesFor } from "$lib/channels/channel.svelte";
 import { isMuted, setNotifLevel, scopeKeyOf } from "$lib/notifications/notif";
 
@@ -74,7 +75,30 @@ export function msgCtx(e: MouseEvent, m: Msg): void {
     if (mod) items.push({ label: "Delete", icon: "delete", danger: true, run: () => doDelete(m) });
     items.push({ label: "Report", run: () => openReport(m) });
   }
+  items.push(...pluginItems("message", m.msgid));
   openCtx(e, items);
+}
+
+/**
+ * Plugin-declared context-menu entries (plugin-spec.md §13.1), appended below
+ * the built-ins so a plugin can add to a menu without displacing what is there.
+ *
+ * `ctxRef` tells the plugin what it was invoked on — the msgid here — so it can
+ * act without a round trip to ask.
+ */
+function pluginItems(context: string, ctxRef?: string): CtxItem[] {
+  const matching = plugins
+    .actionsFor("context-menu")
+    .filter(({ action }) => action.context === context);
+  if (matching.length === 0) return [];
+
+  return [
+    { divider: true },
+    ...matching.map(({ plugin, action }) => ({
+      label: action.label,
+      run: () => plugins.invoke(plugin, action.id, ctxRef),
+    })),
+  ];
 }
 
 export function chanCtx(e: MouseEvent, ch: Channel): void {

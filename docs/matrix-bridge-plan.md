@@ -348,9 +348,24 @@ implements and the daemon is written against.*
       exist (invariant 1). Tested for all five verbs.
       **Terminal steps free the parking:** `PLUGIN-RESULT` (already) and `CLOSE` (new) — otherwise a
       dismissed view would pin the requester's writer for the life of the session.
-      **Remaining (the "mostly client" part):** the Svelte SDUI renderer — modals, forms, the
-      component catalog, context-menu + global surfaces. Also unbuilt: `PLUGIN-PATCH` push semantics
-      beyond the existing relay (a panel that nobody is subscribed to should stop being pushed).
+      **Client plumbing DONE 2026-08-05** (owner call: do the client before the daemon — nothing in
+      slices 7/9 had a consumer, and the renderer is what validates the component catalog, patch ops
+      and container kinds; a mistake there is a *proto* change that would invalidate the SDK and any
+      daemon built on it).
+      Three layers, bottom-up:
+      * **`weft-client-core`** — builders for all seven client verbs (`SUBSCRIBE`/`UNSUBSCRIBE` are
+        one call with a flag), four `ClientEvent` variants (`PluginManifest`/`View`/`Patch`/`Result`)
+        carrying the label so a view can be matched to the step that asked for it, and
+        `plugin_values` bridging the UI's JSON to the wire's CBOR. **Payloads are decoded to JSON at
+        this boundary**, so the frontend needs no CBOR decoder *and* an undecodable payload is
+        dropped where the types are rather than reaching a renderer that must guess. Tested both
+        ways, including the drop.
+      * **Tauri** — six commands wrapping them.
+      * **TS transport** — `plugins`/`pluginInvoke`/`pluginSubmit`/`pluginAction`/`pluginSubscribe`/
+        `pluginClose` + the four event variants on `WeftEvent`. `svelte-check`: 0 errors/0 warnings.
+      **Remaining:** the Svelte renderer itself — 13 component types, modal + panel containers, and
+      the launch surfaces (context-menu, slash, global, settings, server-menu, channel-list, admin).
+      That is the part that validates the catalog.
 - [~] **8. Capability-profile slice** (S–M) — **server half DONE 2026-08-04.**
       `authority=roles|levels|none` + `settings=<comma-list>` ride `NS-META` both ways: a provider
       declares them on its foreign assertion, they persist on the namespace record (migration 0054,
@@ -391,7 +406,7 @@ implements and the daemon is written against.*
       Matrix Spaces** on the companion homeserver (`matrix.md` §3–16 — already designed), so Matrix
       users join the Space/rooms natively and their participation arrives as slice-4c membership +
       slice-4 ingestion. Pure daemon work: no weftd change beyond 4c/4d.
-- [ ] **10b. Per-space bridging bans** (owner requirement 2026-08-04) — an admin page where
+- [~] **10b. Per-space bridging bans** (owner requirement 2026-08-04) — an admin page where
       **individual foreign spaces** can be banned from bridging, finer-grained than `NETBLOCK` (which
       is name-keyed and takes out a whole realm). Banning `matrix://matrix.org/#abusive-space` must
       not require severing `matrix.org`.

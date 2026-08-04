@@ -13,7 +13,10 @@ import { roleStore } from "$lib/roles/roles.svelte";
   import { getApp } from "$lib/ui/context";
   import * as weft from "$lib/transport/weft";
   import * as media from "$lib/media/media";
+  import type { NsTab } from "$lib/ui/ui.svelte";
   import RolesTab from "$lib/components/modals/RolesTab.svelte";
+  import PluginBlock from "$lib/components/plugins/PluginBlock.svelte";
+  import { plugins } from "$lib/plugins/plugins.svelte";
   import InviteList from "$lib/components/InviteList.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
@@ -25,6 +28,43 @@ import { roleStore } from "$lib/roles/roles.svelte";
   // The active namespace's display name (v0.13) — `activeServer` is its id, used
   // for scopes/commands; anywhere a *name* is shown to the user, use this.
   const serverVanity = $derived(vm.activeNsMeta?.name || app.activeServer);
+  // §7a.3 the namespace's capability profile. A provider-managed namespace says
+  // which native surfaces to hide — a Matrix-bridged one hides `roles`, because
+  // its authority is power levels and it supplies its own screen for them.
+  //
+  // Display gating only: the server already refuses these verbs on a replica, so
+  // hiding them stops us offering buttons that would be rejected. It is a hint
+  // that can be *stricter* than the server, never looser.
+  // §13.1 actions a plugin declared for the settings surface, scoped to what
+  // makes sense here: a namespace-context action, or one with no context.
+  const pluginPages = $derived(
+    plugins
+      .actionsFor("settings")
+      .filter(({ action }) => action.context === "namespace" || action.context === "none"),
+  );
+  /// Tab key for a plugin page. Namespaced so it can never collide with a native
+  /// tab name — a plugin should not be able to shadow "roles" by picking that id.
+  const pluginTab = (plugin: string, action: string): NsTab => `plugin:${plugin}:${action}`;
+  /// The panel backing the selected plugin page, once its flow has answered.
+  /// A settings page is a panel (§11.3), so that is what we look for; a plugin
+  /// that answers with a modal instead gets drawn as one, by `AppModals`.
+  const pluginView = $derived(
+    app.nsTab.startsWith("plugin:") ? [...plugins.views.values()].find((v) => v.isPanel) : undefined,
+  );
+
+  /// Open a plugin page: close whatever panel was showing (so its plugin stops
+  /// being told to push into a screen nobody is looking at), then invoke.
+  function openPluginPage(plugin: string, action: string) {
+    for (const v of plugins.views.values()) {
+      if (v.isPanel) plugins.close(v.id);
+    }
+
+    app.nsTab = pluginTab(plugin, action);
+    plugins.invoke(plugin, action, app.activeServer);
+  }
+
+  const profile = $derived(store.servers.get(app.activeServer));
+  const hidden = $derived(new Set(profile?.settingsDisabled ?? []));
   const tabPerm = $derived({
     overview: isAdmin,
     roles: isAdmin || store.session.serverCanGrant(),
@@ -38,13 +78,16 @@ import { roleStore } from "$lib/roles/roles.svelte";
   } as Record<string, boolean>);
   const visibleTabs = $derived(
     (["overview", "roles", "members", "emoji", "invites", "federation", "bans", "recovery", "danger"] as const).filter(
-      (t) => tabPerm[t],
+      (t) => tabPerm[t] && !hidden.has(t),
     ),
   );
   // Keep the active tab on something the user can actually see — a mod opening on
   // the default (admin-only) tab lands on their first real one instead.
   $effect(() => {
-    if (visibleTabs.length && !visibleTabs.includes(app.nsTab)) app.nsTab = visibleTabs[0];
+    // A plugin page is legitimately outside `visibleTabs` — it is not a native
+    // tab — so only native selections are corrected.
+    if (app.nsTab.startsWith("plugin:")) return;
+    if (visibleTabs.length && !visibleTabs.includes(app.nsTab as never)) app.nsTab = visibleTabs[0];
   });
 
   // ---- Members directory (NS INFO MEMBERS) ----
@@ -170,41 +213,55 @@ import { roleStore } from "$lib/roles/roles.svelte";
           <div class="so-server-sub">Server Settings</div>
         </div>
       </div>
-      {#if tabPerm.overview || tabPerm.roles || tabPerm.members || tabPerm.emoji}
+      {#if ["overview", "roles", "members", "emoji"].some((t) => visibleTabs.includes(t as never))}
         <div class="so-heading">Server Settings</div>
       {/if}
-      {#if tabPerm.overview}
+      {#if visibleTabs.includes("overview")}
         <button class="so-navitem" class:active={app.nsTab === "overview"} onclick={() => (app.nsTab = "overview")}>Overview</button>
       {/if}
-      {#if tabPerm.roles}
+      {#if visibleTabs.includes("roles")}
         <button class="so-navitem" class:active={app.nsTab === "roles"} onclick={() => (app.nsTab = "roles")}>Roles</button>
       {/if}
-      {#if tabPerm.members}
+      {#if visibleTabs.includes("members")}
         <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => { app.nsTab = "members"; vm.fetchNsMembers(app.activeServer); refreshBans(); }}>Members</button>
       {/if}
-      {#if tabPerm.emoji}
+      {#if visibleTabs.includes("emoji")}
         <button class="so-navitem" class:active={app.nsTab === "emoji"} onclick={() => (app.nsTab = "emoji")}>Emoji</button>
       {/if}
-      {#if tabPerm.invites || tabPerm.federation}
+      {#if visibleTabs.includes("invites") || visibleTabs.includes("federation")}
         <div class="so-heading">Community</div>
       {/if}
-      {#if tabPerm.invites}
+      {#if visibleTabs.includes("invites")}
         <button class="so-navitem" class:active={app.nsTab === "invites"} onclick={() => { app.nsTab = "invites"; store.invites.loadNsInvites(); }}>Invites</button>
       {/if}
-      {#if tabPerm.federation}
+      {#if visibleTabs.includes("federation")}
         <button class="so-navitem" class:active={app.nsTab === "federation"} onclick={() => (app.nsTab = "federation")}>Federation</button>
       {/if}
-      {#if tabPerm.bans}
+      {#if visibleTabs.includes("bans")}
         <div class="so-heading">Moderation</div>
         <button class="so-navitem" class:active={app.nsTab === "bans"} onclick={() => { app.nsTab = "bans"; refreshBans(); }}>Bans &amp; mutes</button>
       {/if}
-      {#if tabPerm.recovery || tabPerm.danger}
+      <!-- §13.1 plugin-supplied settings pages. A Matrix-bridged namespace hides
+           the native Roles tab (above) and puts Power Levels here instead. -->
+      {#if pluginPages.length}
+        <div class="so-heading">Plugins</div>
+        {#each pluginPages as { plugin, action } (plugin + action.id)}
+          <button
+            class="so-navitem"
+            class:active={app.nsTab === pluginTab(plugin, action.id)}
+            onclick={() => openPluginPage(plugin, action.id)}
+          >
+            {action.label}
+          </button>
+        {/each}
+      {/if}
+      {#if visibleTabs.includes("recovery") || visibleTabs.includes("danger")}
         <div class="so-heading">Security</div>
       {/if}
-      {#if tabPerm.recovery}
+      {#if visibleTabs.includes("recovery")}
         <button class="so-navitem" class:active={app.nsTab === "recovery"} onclick={() => (app.nsTab = "recovery")}>Recovery</button>
       {/if}
-      {#if tabPerm.danger}
+      {#if visibleTabs.includes("danger")}
         <button class="so-navitem danger" class:active={app.nsTab === "danger"} onclick={() => (app.nsTab = "danger")}>Danger zone</button>
       {/if}
     </div>
@@ -430,6 +487,20 @@ import { roleStore } from "$lib/roles/roles.svelte";
             </div>
           {/each}
         </div>
+      {:else if app.nsTab.startsWith("plugin:")}
+        {#if pluginView}
+          {#each pluginView.view.blocks ?? [] as block, i (i)}
+            <PluginBlock
+              {block}
+              bind:values={pluginView.values}
+              disabled={pluginView.busy}
+              onpress={(b) => plugins.press(pluginView, b.id)}
+              onsubmit={() => plugins.submit(pluginView)}
+            />
+          {/each}
+        {:else}
+          <p class="so-empty">Loading…</p>
+        {/if}
       {:else if app.nsTab === "bans"}
         <h1>Bans &amp; mutes</h1>
         <p class="so-sub">Accounts denied at <code>ns:{app.activeServer}</code>. A <b>ban</b> blocks join + posting; a <b>mute</b> blocks posting. Lifting one takes effect immediately.</p>

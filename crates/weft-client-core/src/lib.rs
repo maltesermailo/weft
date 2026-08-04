@@ -59,6 +59,34 @@ pub enum ClientEvent {
         network: String,
         account: String,
     },
+    /// §12.5 the action catalog — every registered plugin and what it declared,
+    /// so the client knows which surfaces to offer. Answers `PLUGINS`.
+    PluginManifest {
+        /// The catalog as JSON, decoded from the wire's b64 CBOR so the frontend
+        /// does not carry a CBOR decoder.
+        catalog: String,
+    },
+    /// §11.2 a plugin answered an invocation (or a step) with a view to render.
+    /// `view_id` correlates every later step, and `label` echoes the request that
+    /// produced it — `None` on an unsolicited push.
+    PluginView {
+        view_id: String,
+        view: String,
+        label: Option<String>,
+    },
+    /// §11.4 an update to an open view, unsolicited — the client applies the ops
+    /// rather than replacing what it has.
+    PluginPatch {
+        view_id: String,
+        patch: String,
+    },
+    /// §11.5 the flow ended: a toast, a navigation, a close, a refresh. The view
+    /// is gone after this.
+    PluginResult {
+        view_id: String,
+        result: String,
+        label: Option<String>,
+    },
     /// The negotiation WELCOME, surfaced before auth. Carries what the connect
     /// screen needs to shape the login/register form for this homeserver —
     /// notably whether an email is required at REGISTER (`features=email-required`,
@@ -285,6 +313,14 @@ pub enum ClientEvent {
         /// Provider liveness for a replica (`None` = native): the client shows a
         /// "bridge offline" indicator when `Some(false)`.
         provider_online: Option<bool>,
+        /// §7a.3 the capability profile: how the client should render this
+        /// namespace's authority (`roles` | `levels` | `none`), and which native
+        /// settings surfaces to hide. Absent authority = the native default.
+        ///
+        /// **Display gating only** — it grants nothing and enforces nothing; the
+        /// point is not to offer buttons the server would refuse.
+        authority: Option<String>,
+        settings_disabled: Vec<String>,
     },
     /// `CHANNEL-LAYOUT <#chan> <position>` with optional `category=`/`kind=` (§7).
     /// `channel_kind` is `text` (default) or `voice` (§16 voice-only room) —
@@ -911,6 +947,38 @@ pub fn on_line<E: EventSink>(
             key,
             value,
         }),
+        // §12.5/§11: the plugin surface. The wire carries these as base64 CBOR;
+        // decode them to JSON here so the frontend needs no CBOR decoder — and so
+        // a malformed payload is dropped at the boundary rather than blowing up a
+        // renderer.
+        Event::PluginManifest { catalog } => {
+            if let Some(catalog) = cbor_b64_to_json::<weft_proto::Catalog>(&catalog) {
+                sink.emit(ClientEvent::PluginManifest { catalog });
+            }
+        }
+        Event::PluginView { view_id, view } => {
+            if let Some(view) = cbor_b64_to_json::<weft_proto::View>(&view) {
+                sink.emit(ClientEvent::PluginView {
+                    view_id,
+                    view,
+                    label: label.clone(),
+                });
+            }
+        }
+        Event::PluginPatch { view_id, patch } => {
+            if let Some(patch) = cbor_b64_to_json::<Vec<weft_proto::PatchOp>>(&patch) {
+                sink.emit(ClientEvent::PluginPatch { view_id, patch });
+            }
+        }
+        Event::PluginResult { view_id, result } => {
+            if let Some(result) = cbor_b64_to_json::<weft_proto::ViewResult>(&result) {
+                sink.emit(ClientEvent::PluginResult {
+                    view_id,
+                    result,
+                    label: label.clone(),
+                });
+            }
+        }
         Event::NsMeta {
             id,
             vanity,
@@ -924,6 +992,8 @@ pub fn on_line<E: EventSink>(
             federation,
             origin,
             provider_online,
+            authority,
+            settings_disabled,
             ..
         } => sink.emit(ClientEvent::NsMeta {
             id: id.to_string(),
@@ -938,6 +1008,8 @@ pub fn on_line<E: EventSink>(
             categories,
             federation,
             origin: origin.map(|o| o.to_string()),
+            authority: authority.map(|a| a.to_string()),
+            settings_disabled,
             provider_online,
         }),
         Event::ChannelLayout {
@@ -2255,6 +2327,126 @@ pub fn build_ns_join(ns: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Decode a wire `b64(CBOR)` plugin payload into JSON for the frontend.
+///
+/// Round-tripping through the typed value rather than passing the blob through
+/// means a payload the codec cannot read is dropped **here**, at the boundary,
+/// instead of reaching a renderer that has to guess what to do with it.
+fn cbor_b64_to_json<T>(payload: &str) -> Option<String>
+where
+    T: serde::de::DeserializeOwned + serde::Serialize,
+{
+    let value = weft_proto::plugin_from_b64::<T>(payload).ok()?;
+
+    serde_json::to_string(&value).ok()
+}
+
+// ---- §12 plugin surface (plugin-spec.md §11–§13) ----
+
+/// Encode a submitted form's values for the wire.
+///
+/// The UI works in JSON; the wire wants base64 CBOR. Doing the conversion here
+/// keeps CBOR out of the frontend entirely, and rejects malformed input at the
+/// boundary rather than sending a payload the plugin cannot read.
+///
+/// Values are deliberately untyped — the shape is whatever the plugin's own
+/// components declared — so this validates that it is a JSON object of
+/// `component-id → value`, and nothing further. A `BTreeMap` keeps the encoding
+/// deterministic, matching the rest of the codebase.
+pub fn plugin_values(json: Option<String>) -> Result<Option<String>, String> {
+    let Some(json) = json else {
+        return Ok(None);
+    };
+
+    let values: std::collections::BTreeMap<String, serde_json::Value> = serde_json::from_str(&json)
+        .map_err(|e| format!("form values must be a JSON object: {e}"))?;
+
+    weft_proto::plugin_to_b64(&values)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// `PLUGINS` — fetch the action catalog.
+pub fn build_plugins() -> Result<String, String> {
+    weft_proto::Request::new(weft_proto::Command::Plugins)
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `PLUGIN INVOKE <plugin> <action>` — open a flow. `ctx_ref` names what the
+/// action was invoked on (a msgid, a channel, a member), `params` carries any
+/// inputs the declaration asked for up front.
+pub fn build_plugin_invoke(
+    plugin: &str,
+    action: &str,
+    ctx_ref: Option<String>,
+    params: Option<String>,
+) -> Result<String, String> {
+    weft_proto::Request::new(weft_proto::Command::PluginInvoke {
+        plugin: plugin.to_string(),
+        action: action.to_string(),
+        ctx_ref,
+        params,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `PLUGIN SUBMIT <view-id>` — send a form step's values.
+pub fn build_plugin_submit(view_id: &str, values: Option<String>) -> Result<String, String> {
+    weft_proto::Request::new(weft_proto::Command::PluginSubmit {
+        view_id: view_id.to_string(),
+        values,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `PLUGIN ACTION <view-id> <button>` — a control click, with the form's current
+/// values so a button can act on what is on screen.
+pub fn build_plugin_action(
+    view_id: &str,
+    button: &str,
+    values: Option<String>,
+) -> Result<String, String> {
+    weft_proto::Request::new(weft_proto::Command::PluginAction {
+        view_id: view_id.to_string(),
+        button: button.to_string(),
+        values,
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+/// `PLUGIN SUBSCRIBE|UNSUBSCRIBE <view-id>` — §11.3 panel liveness. A panel only
+/// receives patches while subscribed, so a client that hides one should say so
+/// rather than letting the plugin push into nothing.
+pub fn build_plugin_subscribe(view_id: &str, on: bool) -> Result<String, String> {
+    let cmd = if on {
+        weft_proto::Command::PluginSubscribe {
+            view_id: view_id.to_string(),
+        }
+    } else {
+        weft_proto::Command::PluginUnsubscribe {
+            view_id: view_id.to_string(),
+        }
+    };
+
+    weft_proto::Request::new(cmd)
+        .serialize()
+        .map_err(|e| e.to_string())
+}
+
+/// `PLUGIN CLOSE <view-id>` — the user dismissed it. Terminal: the flow is freed
+/// server-side, so nothing more will arrive for this view.
+pub fn build_plugin_close(view_id: &str) -> Result<String, String> {
+    weft_proto::Request::new(weft_proto::Command::PluginClose {
+        view_id: view_id.to_string(),
+    })
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
 // ---- §10.3 display profiles ----
 
 /// `PROFILE SET` — set your own display name + avatar (§10.3). Each arg is
@@ -2421,6 +2613,81 @@ mod tests {
             line,
         );
         sink.0.into_inner()
+    }
+
+    #[test]
+    fn a_plugin_view_reaches_the_frontend_as_json() {
+        // The wire carries plugin payloads as base64 CBOR. Decoding here means
+        // the frontend needs no CBOR decoder, and the label rides along so a
+        // client can match the view to the step that asked for it.
+        let view = weft_proto::plugin_to_b64(&weft_proto::View {
+            container: weft_proto::Container::Modal,
+            title: Some("Ban".into()),
+            panel_key: None,
+            submit_label: Some("Confirm".into()),
+            blocks: vec![],
+            widget: None,
+            params: vec![],
+        })
+        .unwrap();
+
+        let events = feed(&format!("@label=i1;view={view} PLUGIN-VIEW modq:1"));
+        let [ClientEvent::PluginView {
+            view_id,
+            view,
+            label,
+        }] = events.as_slice()
+        else {
+            panic!("expected exactly one PluginView");
+        };
+        assert_eq!(view_id, "modq:1");
+        assert_eq!(label.as_deref(), Some("i1"));
+        assert!(view.contains("\"title\":\"Ban\""), "{view}");
+        assert!(view.contains("modal"), "{view}");
+    }
+
+    #[test]
+    fn an_undecodable_plugin_payload_is_dropped_at_the_boundary() {
+        // A payload the codec cannot read must not reach a renderer that would
+        // have to guess what to do with it. Dropped here, where the types are.
+        assert!(feed("@view=not-base64-cbor PLUGIN-VIEW modq:1").is_empty());
+        assert!(feed("@patch=%%%% PLUGIN-PATCH modq:1").is_empty());
+    }
+
+    #[test]
+    fn plugin_verbs_build_the_lines_the_server_routes() {
+        assert_eq!(build_plugins().unwrap(), "PLUGINS");
+        assert_eq!(
+            build_plugin_invoke("modq", "open", None, None).unwrap(),
+            "PLUGIN INVOKE modq open"
+        );
+        assert_eq!(build_plugin_close("modq:1").unwrap(), "PLUGIN CLOSE modq:1");
+        // Subscribe and unsubscribe are one call with a flag — a panel toggling
+        // liveness should not be two spellings of the same thought.
+        assert!(build_plugin_subscribe("modq:1", true)
+            .unwrap()
+            .contains("SUBSCRIBE"));
+        assert!(build_plugin_subscribe("modq:1", false)
+            .unwrap()
+            .contains("UNSUBSCRIBE"));
+    }
+
+    #[test]
+    fn form_values_cross_the_json_to_cbor_boundary_here() {
+        // The UI speaks JSON, the wire speaks CBOR. Converting here keeps CBOR
+        // out of the frontend and rejects a bad payload before it is sent.
+        let encoded = plugin_values(Some(r#"{"reason":"spam","days":7}"#.into()))
+            .expect("valid values")
+            .expect("some");
+        let round_tripped: std::collections::BTreeMap<String, serde_json::Value> =
+            weft_proto::plugin_from_b64(&encoded).expect("decodes");
+        assert_eq!(round_tripped["reason"], "spam");
+        assert_eq!(round_tripped["days"], 7);
+
+        assert!(plugin_values(None).unwrap().is_none());
+        assert!(plugin_values(Some("not json".into())).is_err());
+        // A bare array is not `component-id → value`.
+        assert!(plugin_values(Some("[1,2]".into())).is_err());
     }
 
     #[test]

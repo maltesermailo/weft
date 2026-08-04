@@ -9,6 +9,7 @@
 // object built in the container (TypeScript enforces that the container
 // provides everything components consume).
 
+import type { NsTab } from "$lib/ui/ui.svelte";
 import { getContext, setContext } from "svelte";
 import type { Msg, Member, CtxItem, ThreadInfo, MentionOpt } from "$lib/types";
 import type { Account } from "$lib/profile/account.svelte";
@@ -134,7 +135,9 @@ export interface AppCtx {
   // ---- user settings (page overlay) ----
 
   // ---- server settings (ns overlay) ----
-  nsTab: "overview" | "roles" | "members" | "emoji" | "invites" | "bans" | "federation" | "recovery" | "danger";
+  /// A native tab, or `plugin:<id>:<action>` for a plugin-supplied settings
+  /// page (§13.1) — namespaced so a plugin can never shadow a native tab.
+  nsTab: NsTab;
   // §6.7 moderation deny-list (mutes + bans) for the active server.
   nsDelegSubject: string;
   /// Assign the role with this id to the typed delegation subject.

@@ -1,0 +1,198 @@
+// The SDUI tree a plugin sends (plugin-spec.md §10–§11).
+//
+// These mirror `weft_proto::plugin` exactly: internally tagged on `type`, kebab
+// case. The wire carries base64 CBOR; weft-client-core decodes it to JSON at the
+// boundary, so everything here is plain JSON and the renderer never sees CBOR.
+//
+// Forward compatibility is the point of `Unknown`: a component from a newer
+// server decodes rather than failing, and the renderer skips it. A plugin that
+// sends something we cannot draw loses that one block, not the whole dialog.
+
+export type ButtonStyle = "primary" | "default" | "danger";
+
+export type Button = {
+  id: string;
+  label: string;
+  style?: ButtonStyle;
+  /** Confirm-before-fire prompt. Shown before the click is sent. */
+  confirm?: string;
+};
+
+export type SelectOption = { value: string; label: string };
+export type KvRow = { key: string; value: string };
+
+export type Component =
+  // inputs (§10.1)
+  | {
+      type: "text";
+      id: string;
+      label: string;
+      required?: boolean;
+      default?: string;
+      placeholder?: string;
+      multiline?: boolean;
+      max_len?: number;
+      pattern?: string;
+    }
+  | {
+      type: "number";
+      id: string;
+      label: string;
+      required?: boolean;
+      default?: number;
+      min?: number;
+      max?: number;
+      step?: number;
+    }
+  | { type: "select"; id: string; label: string; required?: boolean; default?: string; options: SelectOption[] }
+  | {
+      type: "multiselect";
+      id: string;
+      label: string;
+      default?: string[];
+      options: SelectOption[];
+      min?: number;
+      max?: number;
+    }
+  | { type: "toggle"; id: string; label: string; default?: boolean }
+  | { type: "date"; id: string; label: string; required?: boolean; default?: string; min?: string; max?: string }
+  // display (§10.2)
+  | { type: "heading"; text: string; level?: number }
+  | { type: "markdown"; text: string }
+  | { type: "divider" }
+  | { type: "keyvalue"; rows: KvRow[] }
+  | { type: "table"; columns: string[]; rows: string[][]; dense?: boolean }
+  | { type: "image"; src: string; alt?: string; max_height?: number }
+  // controls (§10.3)
+  | { type: "button" } & Button
+  | { type: "action-row"; buttons: Button[] }
+  | { type: "submit"; label?: string; style?: ButtonStyle }
+  | { type: "unknown" };
+
+export type Container = "modal" | "panel" | "custom";
+
+export type View = {
+  container: Container;
+  title?: string;
+  /** A panel's stable push handle (§11.3) — the plugin patches by this. */
+  panel_key?: string;
+  submit_label?: string;
+  blocks?: Component[];
+  /** `custom` only: the client-bundle asset ref to mount (§11.6). */
+  widget?: string;
+  params?: string[];
+};
+
+export type PatchOp =
+  | { type: "replace"; view: View }
+  | { type: "set"; component_id: string; props: View }
+  | { type: "append"; container_id: string; blocks: Component[] }
+  | { type: "remove"; component_id: string }
+  | { type: "unknown" };
+
+export type ViewResult =
+  | { type: "toast"; kind: "ok" | "warn" | "error"; text: string }
+  | { type: "navigate"; target: string }
+  | { type: "close"; reason?: string }
+  | { type: "refresh"; scope?: string };
+
+/** Which surface an action appears on (§13.1). */
+export type Surface =
+  | "context-menu"
+  | "slash"
+  | "settings"
+  | "global"
+  | "server-menu"
+  | "channel-list"
+  | "admin";
+
+export type ActionDecl = {
+  id: string;
+  label: string;
+  icon?: string;
+  surface: Surface;
+  context: "message" | "channel" | "member" | "user" | "namespace" | "none";
+  description?: string;
+  visibility?: string;
+  input?: Component[];
+};
+
+export type CatalogEntry = { id: string; name: string; icon?: string; actions: ActionDecl[] };
+export type Catalog = { plugins: CatalogEntry[] };
+
+/** A component's form id, or `null` for the display-only ones. */
+export function fieldId(c: Component): string | null {
+  switch (c.type) {
+    case "text":
+    case "number":
+    case "select":
+    case "multiselect":
+    case "toggle":
+    case "date":
+      return c.id;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The initial form state for a view: every input's declared default.
+ *
+ * Seeded up front rather than on first edit, so an untouched form submits the
+ * defaults the plugin asked for instead of nothing — a plugin that pre-fills a
+ * ban reason should get that reason back if the user just hits Confirm.
+ */
+export function initialValues(blocks: Component[] | undefined): Record<string, unknown> {
+  const values: Record<string, unknown> = {};
+
+  for (const c of blocks ?? []) {
+    switch (c.type) {
+      case "text":
+      case "select":
+      case "date":
+        values[c.id] = c.default ?? "";
+        break;
+      case "number":
+        values[c.id] = c.default ?? null;
+        break;
+      case "multiselect":
+        values[c.id] = c.default ?? [];
+        break;
+      case "toggle":
+        values[c.id] = c.default ?? false;
+        break;
+    }
+  }
+
+  return values;
+}
+
+/** Apply one §11.4 patch op to a view, returning the updated view. */
+export function applyPatch(view: View, op: PatchOp): View {
+  switch (op.type) {
+    case "replace":
+      return op.view;
+
+    case "append":
+      return { ...view, blocks: [...(view.blocks ?? []), ...op.blocks] };
+
+    case "remove":
+      return { ...view, blocks: (view.blocks ?? []).filter((c) => fieldId(c) !== op.component_id) };
+
+    // `set` replaces one component's props. The wire types it as a `View` for
+    // reuse, but only its `blocks[0]` is the replacement component.
+    case "set": {
+      const replacement = op.props.blocks?.[0];
+      if (!replacement) return view;
+
+      return {
+        ...view,
+        blocks: (view.blocks ?? []).map((c) => (fieldId(c) === op.component_id ? replacement : c)),
+      };
+    }
+
+    // §10: an op from a newer server is skipped, not an error.
+    default:
+      return view;
+  }
+}

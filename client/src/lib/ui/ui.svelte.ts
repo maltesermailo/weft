@@ -16,7 +16,10 @@ export type NsTab =
   | "bans"
   | "federation"
   | "recovery"
-  | "danger";
+  | "danger"
+  /// §13.1 a plugin-supplied settings page, keyed `plugin:<id>:<action>`.
+  /// Namespaced so a plugin can never shadow a native tab by picking its name.
+  | `plugin:${string}`;
 
 export const ui = $state<{
   /// The channel whose ChannelSettings (permissions) modal is open, or null.

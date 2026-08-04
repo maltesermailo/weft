@@ -110,6 +110,14 @@ export type CoreMsg = {
 
 export type WeftEvent =
   | { kind: "connected"; network: string; account: string }
+  // §12 plugin surface. `catalog`/`view`/`patch`/`result` arrive as JSON strings:
+  // the wire carries base64 CBOR and weft-client-core decodes it at the boundary,
+  // so nothing here needs a CBOR decoder and a payload the codec cannot read
+  // never reaches a renderer.
+  | { kind: "plugin-manifest"; catalog: string }
+  | { kind: "plugin-view"; view_id: string; view: string; label: string | null }
+  | { kind: "plugin-patch"; view_id: string; patch: string }
+  | { kind: "plugin-result"; view_id: string; result: string; label: string | null }
   | { kind: "server-info"; network: string; email_required: boolean; email_available: boolean }
   | { kind: "auth-failed"; reason: string }
   | { kind: "media-token"; token: string }
@@ -236,6 +244,11 @@ export type WeftEvent =
       categories: string[];
       federation: boolean;
       welcome: string | null;
+      /// §7a.3 capability profile: how to render this namespace's authority
+      /// (`roles` | `levels` | `none`), and which native settings surfaces its
+      /// provider hides. Display gating only — it grants nothing.
+      authority: string | null;
+      settings_disabled: string[];
     }
   | {
       kind: "channel-layout";
@@ -492,6 +505,42 @@ export function voiceDesc(channel: string, sdp: string) {
 }
 export function voiceCand(channel: string, candidate: string) {
   return invoke("voice_cand", { channel, candidate });
+}
+
+// ---- §12 plugin surface (plugin-spec.md §11–§13) ----
+
+/** Fetch the action catalog: which plugins exist and what surfaces they declared. */
+export function plugins() {
+  return invoke("plugins", {});
+}
+
+/** Open a plugin flow. `ctxRef` names what it was invoked on (a msgid, a channel,
+ *  a member); the answer arrives as a `plugin-view` or a terminal `plugin-result`. */
+export function pluginInvoke(plugin: string, action: string, ctxRef?: string, params?: string) {
+  return invoke("plugin_invoke", { plugin, action, ctxRef, params });
+}
+
+/** Submit a form step. `values` is plain JSON — the CBOR encoding happens in
+ *  weft-client-core, so nothing here touches the wire format. */
+export function pluginSubmit(viewId: string, values?: unknown) {
+  return invoke("plugin_submit", { viewId, values: values && JSON.stringify(values) });
+}
+
+/** A control click, carrying the form's current values so a button acts on what
+ *  is on screen rather than on what was last submitted. */
+export function pluginAction(viewId: string, button: string, values?: unknown) {
+  return invoke("plugin_action", { viewId, button, values: values && JSON.stringify(values) });
+}
+
+/** §11.3 panel liveness. A panel only receives patches while subscribed, so a
+ *  hidden one should unsubscribe rather than let the plugin push into nothing. */
+export function pluginSubscribe(viewId: string, on: boolean) {
+  return invoke("plugin_subscribe", { viewId, on });
+}
+
+/** Dismiss a view. Terminal — the flow is freed server-side. */
+export function pluginClose(viewId: string) {
+  return invoke("plugin_close", { viewId });
 }
 
 /// Auto-join every visible channel in a namespace (§6.2 NS JOIN).

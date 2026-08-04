@@ -924,6 +924,8 @@ mod tests {
 
     fn ns_meta(id: &str, categories: &[&str]) -> ClientEvent {
         ClientEvent::NsMeta {
+            authority: None,
+            settings_disabled: Vec::new(),
             id: id.into(),
             name: id.into(),
             visibility: "public".into(),

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { NsTab } from "$lib/ui/ui.svelte";
   import "../app.css";
   import { onMount, untrack } from "svelte";
   import { goto } from "$app/navigation";
@@ -734,7 +735,7 @@ import { mkMsg, catchUpChannel } from "$lib/messages/messages.svelte";
     // user settings (page overlay)
     // server settings (ns overlay)
     get nsTab() { return ui.nsTab; },
-    set nsTab(v: "overview" | "roles" | "members" | "emoji" | "invites" | "bans" | "federation" | "recovery" | "danger") { ui.nsTab = v; },
+    set nsTab(v: NsTab) { ui.nsTab = v; },
     get nsDelegSubject() { return nsDelegSubject; },
     set nsDelegSubject(v: string) { nsDelegSubject = v; },
     federate,

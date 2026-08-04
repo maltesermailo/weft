@@ -9,6 +9,7 @@ import type { Msg } from "$lib/types";
 import { store } from "$lib/store/store.svelte";
 import { channelStore, Channel, nsOf } from "$lib/channels/channel.svelte";
 import { mkMsg, applyReaction, pinsHandlers, messageMirrorHandlers } from "$lib/messages/messages.svelte";
+import { pluginHandlers, plugins } from "$lib/plugins/plugins.svelte";
 import { rosterFetchTarget } from "$lib/namespaces/server.svelte";
 import { federationHandlers } from "$lib/federation/federation.svelte";
 import { socialHandlers } from "$lib/social/social.svelte";
@@ -99,6 +100,7 @@ const domainHandlers: HandlerMap = {
   ...invitesHandlers,
   ...accountHandlers,
   ...pinsHandlers,
+  ...pluginHandlers,
   ...profileHandlers,
   ...serverHandlers,
   ...reportsHandlers,
@@ -123,6 +125,9 @@ export function handle(e: weft.WeftEvent) {
       ui.reconnecting = false;
       conn.reconnectAttempts = 0;
       store.session.ensureCapsAt(account, "*"); // learn operator status (federation gating)
+      // §12.5 the action catalog: fetched once per connection, since it is what
+      // decides which plugin entries appear on menus and settings surfaces.
+      plugins.refresh();
       initVoice(account); // §16 wire the voice controller to the event stream
       profileStore.queryProfile(account); // §10.3 load our own profile
       // §10.5 (re)load our verification claims. Reset the cache + the "loaded"

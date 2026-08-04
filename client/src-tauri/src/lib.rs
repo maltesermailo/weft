@@ -133,6 +133,76 @@ fn join(conn: State<'_, Conn>, channel: String) -> Result<(), String> {
     conn.send(weft::build_join(&channel)?)
 }
 
+// ---- §12 plugin surface (plugin-spec.md §11–§13) ----
+
+/// Fetch the action catalog (§12.5) — which plugins exist and what surfaces they
+/// declared. The answer arrives as a `PluginManifest` event.
+#[tauri::command]
+fn plugins(conn: State<'_, Conn>) -> Result<(), String> {
+    conn.send(weft::build_plugins()?)
+}
+
+/// Open a plugin flow. `ctx_ref` names what it was invoked on (a msgid, a
+/// channel, a member); `params` carries any inputs the declaration asked for up
+/// front. The reply is a `PluginView` or a terminal `PluginResult`.
+#[tauri::command]
+fn plugin_invoke(
+    conn: State<'_, Conn>,
+    plugin: String,
+    action: String,
+    ctx_ref: Option<String>,
+    params: Option<String>,
+) -> Result<(), String> {
+    conn.send(weft::build_plugin_invoke(
+        &plugin, &action, ctx_ref, params,
+    )?)
+}
+
+/// Submit a form step. `values` is the form's JSON, encoded to the wire's CBOR
+/// here so the frontend never touches CBOR.
+#[tauri::command]
+fn plugin_submit(
+    conn: State<'_, Conn>,
+    view_id: String,
+    values: Option<String>,
+) -> Result<(), String> {
+    conn.send(weft::build_plugin_submit(
+        &view_id,
+        weft::plugin_values(values)?,
+    )?)
+}
+
+/// A control click, carrying the form's current values so a button can act on
+/// what is on screen rather than on what was last submitted.
+#[tauri::command]
+fn plugin_action(
+    conn: State<'_, Conn>,
+    view_id: String,
+    button: String,
+    values: Option<String>,
+) -> Result<(), String> {
+    conn.send(weft::build_plugin_action(
+        &view_id,
+        &button,
+        weft::plugin_values(values)?,
+    )?)
+}
+
+/// §11.3 panel liveness: a panel only receives patches while subscribed, so a
+/// client that hides one should say so rather than let the plugin push into
+/// nothing.
+#[tauri::command]
+fn plugin_subscribe(conn: State<'_, Conn>, view_id: String, on: bool) -> Result<(), String> {
+    conn.send(weft::build_plugin_subscribe(&view_id, on)?)
+}
+
+/// The user dismissed a view. Terminal — the flow is freed server-side, so
+/// nothing more arrives for it.
+#[tauri::command]
+fn plugin_close(conn: State<'_, Conn>, view_id: String) -> Result<(), String> {
+    conn.send(weft::build_plugin_close(&view_id)?)
+}
+
 /// Join every visible channel in a namespace (§6.2 `NS JOIN`).
 #[tauri::command]
 fn ns_join(conn: State<'_, Conn>, name: String) -> Result<(), String> {
@@ -1136,6 +1206,12 @@ pub fn run() {
             voice_leave,
             voice_desc,
             voice_cand,
+            plugins,
+            plugin_invoke,
+            plugin_submit,
+            plugin_action,
+            plugin_subscribe,
+            plugin_close,
             ns_join,
             ns_create,
             ns_meta,

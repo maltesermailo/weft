@@ -116,6 +116,10 @@ export interface RosterRow {
 /// The NS-META fields this model consumes (a structural subset of the wire
 /// event — kept here so the model stays decoupled from `$lib/weft`).
 export interface NsMetaFields {
+  /// §7a.3 capability profile — how to render authority, and which native
+  /// settings surfaces the provider hides. Absent = the native default.
+  authority?: string | null;
+  settings_disabled?: string[];
   name?: string | null;
   title?: string | null;
   description?: string | null;
@@ -149,6 +153,12 @@ export class Server {
   visibility = $state("public");
   federation = $state(false);
   welcome = $state<string | null>(null);
+  /// §7a.3 capability profile. `authority` is `roles` (default) | `levels` |
+  /// `none`; `settingsDisabled` lists native settings surfaces to hide.
+  /// **Display gating only** — the server decides what is actually permitted, so
+  /// this exists to avoid offering buttons that would be refused.
+  authority = $state<string | null>(null);
+  settingsDisabled = $state<string[]>([]);
   recoveryEta = $state<number | null>(null);
   recoveryRung = $state<number | null>(null);
   categories = $state<string[]>([]);
@@ -242,6 +252,8 @@ export class Server {
     this.visibility = e.visibility ?? "public";
     this.federation = e.federation ?? false;
     this.welcome = e.welcome ?? null;
+    this.authority = e.authority ?? null;
+    this.settingsDisabled = e.settings_disabled ?? [];
     this.recoveryEta = e.recovery_eta ?? null;
     this.recoveryRung = e.recovery_rung ?? null;
     // `categories` is model-owned now (client-core) — applied via the `cat-list`
