@@ -268,6 +268,30 @@ peer-federation machinery applies unchanged.
   `FEDERATE`, and name-keyed `NETBLOCK` treat `matrix.org` as a network. Guarding those paths is
   tracked as slice-4 follow-up work, not silently assumed safe.
 
+### 7a.0aa Who may claim a realm — the domain owner decides
+
+`§7a.0` puts realm names in the **same identity space as WEFT networks**: a realm called
+`hda.example` mints `alice@hda.example`, which is the very `UserRef` that network's own user has —
+same grant subject, same member key, same DM scope. And since DM routing prefers a provider over a
+peer, such a realm would quietly receive mail addressed to them. Claiming **our own** name is worse
+still: `member_key` collapses a user on our network to their bare account, so a realm `test.example`
+would let a provider act as the local account `ada`.
+
+**The arbiter is the domain owner, not our peer table.** Whoever controls `hda.example` chooses
+whether it runs a WEFT server or something a bridge reaches — you cannot have both — and a domain
+publishing `/.well-known/weft` has chosen WEFT. `REALM ASSERT` therefore consults the domain
+(`NetworkProbe`, implemented in weftd on the same TLS-verified, SSRF-guarded fetch auto-federation
+uses) and refuses a realm whose domain runs WEFT.
+
+**Only a positive answer refuses.** No well-known, NXDOMAIN, an unreachable host, or a realm that is
+not a domain at all (a Discord guild id) are all *inconclusive* and must bind — otherwise a DNS blip
+would lock out every legitimate bridge, and no non-DNS realm could ever exist.
+
+Three local checks stay as a fast path, covering what the probe cannot: **our own** network name, a
+network we already hold a **peer record** for (authoritative whatever DNS says today), and any
+**netblocked** name — invariant 7 is name-keyed, so it must bite a realm exactly as it bites a peer,
+or blocking a network would be evadable by re-entering as a bridge.
+
 ### 7a.0a Membership — the realm is the authority, so the directions follow federation
 
 Joining a namespace *is* access to its channels; there is no per-channel join in WEFT. For a bridge

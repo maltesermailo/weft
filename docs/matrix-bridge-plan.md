@@ -122,13 +122,22 @@ slices land.
 - [x] **4b. Realm-as-network guards** (S, from the §7a.0 amendment) — **DONE 2026-08-04.** A replica
       user *looks* federated but has no peer bridge, so the paths that assume otherwise are guarded.
       Scoping this turned up a **sharper issue than the one the slice named**:
-      * **Realm shadowing (the real find).** "A realm is a network" puts realm names in the *same
-        namespace* as real WEFT networks. A provider claiming one already spoken for could mint users
-        indistinguishable from that network's (`alice@hda.example`) and — since 4d's DM routing checks
-        `provider_for_realm` **before** the peer bridge — quietly receive mail addressed to them.
-        `REALM ASSERT` now refuses a realm that is **our own network**, a network we hold a **peer
-        record** for, a **netblocked** name, or one that isn't a valid `NetworkName` at all (it could
-        never mint valid users). Tested, including that an unclaimed realm still binds.
+      * **Identity-space collision (the real find — not namespaces, which are ULID-identified and
+        network-pinned).** "A realm is a network" puts realm names in the same **`user@network`**
+        space. A realm `hda.example` mints `alice@hda.example` — the same grant subject, member key
+        and DM scope as that network's own user — and since 4d's DM routing checks
+        `provider_for_realm` **before** the peer bridge, it would receive their mail. Our own name is
+        worse: `member_key` collapses a local user to their bare account, so a realm `test.example`
+        would let a provider act as the local account `ada`.
+      * **The domain owner arbitrates** (owner directive 2026-08-04: "network should be domain
+        validated … they can either have a matrix server or a WEFT server"). `REALM ASSERT` consults
+        the domain via a new `NetworkProbe` port — weftd implements it on the same TLS-verified,
+        SSRF-guarded `/.well-known/weft` fetch auto-federation uses, cached per process — and refuses
+        a realm whose domain runs WEFT. **Only a positive answer refuses:** no well-known, NXDOMAIN,
+        unreachable, or a realm that is no domain at all (a Discord guild id) must all still bind, or
+        a DNS blip would lock out every legitimate bridge. Local fast-path checks stay for what the
+        probe can't see: our own name, an existing **peer record**, a **netblocked** name, and a realm
+        that isn't a valid `NetworkName`. Tested (incl. Discord-style + non-WEFT domains binding).
       * **NETBLOCK is name-keyed, so it bites realms (invariant 7).** Blocking a network now stops a
         bound provider's ingestion **mid-session** (effect 3), refuses a fresh `REALM ASSERT` for it,
         and refuses DM routing to it — a network an operator shut out cannot re-enter as a bridge, or
