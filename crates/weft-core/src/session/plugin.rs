@@ -18,8 +18,10 @@ fn relay_line(event: Event, label: Option<String>) -> Result<String, weft_proto:
 }
 
 impl<S: ControlStream> Session<S> {
-    /// §4.2 remote-plugin PROOF verified: enter the plugin-service session bound to
-    /// `plugin_id`. The plugin then sends `PLUGIN-REGISTER`.
+    /// §4.2 provider PROOF verified: enter the provider session bound to
+    /// `plugin_id`, realm-unbound. The provider then registers (`PLUGIN-REGISTER`
+    /// and/or `REALM REGISTER`); a bridge data connection binds a realm via
+    /// `REALM ASSERT`.
     pub(super) async fn welcome_plugin_service(
         &mut self,
         label: Option<String>,
@@ -37,19 +39,54 @@ impl<S: ControlStream> Session<S> {
         )
         .await?;
 
-        self.state = State::PluginService { key, plugin_id };
+        self.state = State::PluginService {
+            key,
+            plugin_id,
+            realm: None,
+        };
         Ok(Flow::Continue)
     }
 
-    /// §12.3 route a line from a remote-plugin session: its `PLUGIN-REGISTER`
-    /// self-description, and the `PLUGIN-VIEW`/`-PATCH`/`-RESULT` responses that
-    /// weftd relays back to the client that invoked.
+    /// §12.3/§18 route a line from a provider session. Two families share it:
+    /// the **bridge verbs** (Commands: `REALM REGISTER/ASSERT/WITHDRAW`,
+    /// `PROVISION-OK|ERR`) and the **plugin events** (`PLUGIN-REGISTER` +
+    /// the `PLUGIN-VIEW`/`-PATCH`/`-RESULT` responses weftd relays to clients).
     pub(super) async fn on_plugin_service_line(
         &mut self,
-        _key: PublicKey,
+        key: PublicKey,
         plugin_id: String,
+        _realm: Option<ForeignUri>,
         line: &Line,
     ) -> io::Result<Flow> {
+        // Bridge-verb family first (they are Commands, not Events).
+        if let Ok(req) = Request::from_line(line) {
+            match req.command {
+                Command::RealmRegister { scheme } => {
+                    return self
+                        .on_realm_register(req.label, key, plugin_id, scheme)
+                        .await;
+                }
+                Command::RealmAssert { realm } => {
+                    return self
+                        .on_realm_assert(req.label, key, plugin_id, realm)
+                        .await;
+                }
+                Command::RealmWithdraw => {
+                    self.state = State::PluginService {
+                        key,
+                        plugin_id,
+                        realm: None,
+                    };
+                    return Ok(Flow::Continue);
+                }
+                Command::ProvisionOk { job } => return self.on_provision_result(job, true).await,
+                Command::ProvisionErr { job } => {
+                    return self.on_provision_result(job, false).await;
+                }
+                _ => {} // not a bridge verb — fall through to the event family
+            }
+        }
+
         let event = match Reply::from_line(line) {
             Ok(reply) => reply.event,
             Err(_) => return Ok(Flow::Continue), // tolerate noise on the session
@@ -57,7 +94,8 @@ impl<S: ControlStream> Session<S> {
 
         match event {
             Event::PluginRegister { registration } => {
-                self.on_plugin_register(&plugin_id, &registration)
+                self.on_plugin_register(&key, &plugin_id, &registration)
+                    .await
             }
             // Terminal: relay to the parked client, then drop the pending.
             Event::PluginResult { view_id, result } => {
@@ -89,18 +127,59 @@ impl<S: ControlStream> Session<S> {
         }
     }
 
-    /// §12.3 a plugin's self-description: decode + validate + register its actions.
-    fn on_plugin_register(&mut self, plugin_id: &str, registration: &str) -> io::Result<Flow> {
+    /// §12.3 a provider's self-description: decode + validate + register its
+    /// actions and schemes (§18 capability 6). A failed registration **refuses
+    /// the connection with a typed error** (spec §4.2) — a trusted,
+    /// operator-installed provider must fail loudly at the handshake, never sit
+    /// silently unregistered.
+    async fn on_plugin_register(
+        &mut self,
+        key: &PublicKey,
+        plugin_id: &str,
+        registration: &str,
+    ) -> io::Result<Flow> {
         let Ok(reg) = weft_proto::plugin_from_b64::<weft_proto::Registration>(registration) else {
-            debug!(%plugin_id, "malformed PLUGIN-REGISTER");
-            return Ok(Flow::Continue);
+            warn!(%plugin_id, "refusing provider: undecodable PLUGIN-REGISTER");
+            self.send_err(None, ErrCode::Malformed, None, "undecodable PLUGIN-REGISTER")
+                .await?;
+            return Ok(Flow::Close);
         };
 
-        // The registration must self-identify as the authenticated plugin (a plugin
-        // can only speak for its own id).
+        // The registration must self-identify as the authenticated provider (a
+        // provider can only speak for its own id).
         if reg.id != plugin_id {
-            debug!(%plugin_id, claimed = %reg.id, "plugin id mismatch in PLUGIN-REGISTER");
-            return Ok(Flow::Continue);
+            warn!(%plugin_id, claimed = %reg.id, "refusing provider: id mismatch in PLUGIN-REGISTER");
+            self.send_err(
+                None,
+                ErrCode::Forbidden,
+                None,
+                "registration id does not match the authenticated provider",
+            )
+            .await?;
+            return Ok(Flow::Close);
+        }
+
+        // Every declared scheme must be authorized by the provider's pinned
+        // config entry — an unauthorized one fails the whole registration
+        // (declaring a scheme you don't own must never silently succeed).
+        let mut schemes = Vec::new();
+
+        for s in &reg.schemes {
+            let Ok(scheme) = s.parse::<weft_proto::Scheme>() else {
+                warn!(%plugin_id, scheme = %s, "refusing provider: malformed scheme");
+                self.send_err(None, ErrCode::Malformed, None, "malformed scheme")
+                    .await?;
+                return Ok(Flow::Close);
+            };
+
+            if !self.ctx.scheme_authorized(key, &scheme) {
+                warn!(%plugin_id, %scheme, "refusing provider: scheme not authorized");
+                self.send_err(None, ErrCode::Forbidden, None, "scheme not authorized")
+                    .await?;
+                return Ok(Flow::Close);
+            }
+
+            schemes.push(scheme);
         }
 
         self.ctx.register_plugin(
@@ -109,8 +188,56 @@ impl<S: ControlStream> Session<S> {
             reg.name,
             reg.icon,
             reg.actions,
+            schemes,
         );
-        info!(%plugin_id, "remote plugin registered");
+        info!(%plugin_id, "provider registered");
+        Ok(Flow::Continue)
+    }
+
+    /// §3.3 REALM REGISTER: the provider declares a scheme it provisions. The
+    /// proven key must be authorized for that scheme; the scheme lands in the
+    /// unified provider registry (`NS JOIN <scheme>://…` routes here).
+    async fn on_realm_register(
+        &mut self,
+        label: Option<String>,
+        key: PublicKey,
+        plugin_id: String,
+        scheme: Scheme,
+    ) -> io::Result<Flow> {
+        if !self.ctx.scheme_authorized(&key, &scheme) {
+            return self
+                .unsupported(label, "provider key not pinned for that scheme")
+                .await;
+        }
+
+        self.ctx
+            .add_provider_scheme(&plugin_id, scheme.clone(), self.fed_out_tx.clone());
+        info!(%plugin_id, %scheme, "provider registered scheme");
+        Ok(Flow::Continue)
+    }
+
+    /// §3.1 REALM ASSERT: bind this provider connection to a single realm — the
+    /// bridge data-connection handshake. The proven key must be authorized for
+    /// the realm's scheme. Netblock gating arrives with the NETBLOCK slice.
+    async fn on_realm_assert(
+        &mut self,
+        label: Option<String>,
+        key: PublicKey,
+        plugin_id: String,
+        realm: ForeignUri,
+    ) -> io::Result<Flow> {
+        if !self.ctx.scheme_authorized(&key, realm.scheme()) {
+            return self
+                .unsupported(label, "provider key not pinned for that scheme")
+                .await;
+        }
+
+        info!(%realm, %plugin_id, "provider data connection bound to realm");
+        self.state = State::PluginService {
+            key,
+            plugin_id,
+            realm: Some(realm),
+        };
         Ok(Flow::Continue)
     }
 

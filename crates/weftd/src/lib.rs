@@ -398,12 +398,25 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         }
     }
 
-    // Plugin system (plugin-spec.md §4.2): pinned remote-plugin keys → their id
-    // (`[[plugin.remote]]`). Each proves its key at `AUTH ADAPTER`.
+    // Plugin system (plugin-spec.md §4.2/§18): pinned remote-plugin keys → their
+    // id + authorized schemes (`[[plugin.remote]]`). Proven at `AUTH ADAPTER`.
     let mut remote_plugins = Vec::new();
     for plugin in &config.plugin.remote {
         match weft_core::PublicKey::from_b64(&plugin.key) {
-            Ok(k) => remote_plugins.push((plugin.id.clone(), k)),
+            Ok(k) => {
+                let mut schemes = Vec::new();
+
+                for s in &plugin.schemes {
+                    match s.parse::<weft_proto::Scheme>() {
+                        Ok(scheme) => schemes.push(scheme),
+                        Err(_) => {
+                            warn!(plugin = %plugin.id, scheme = %s, "skipping invalid scheme in [[plugin.remote]]")
+                        }
+                    }
+                }
+
+                remote_plugins.push((plugin.id.clone(), k, schemes));
+            }
             Err(_) => warn!(plugin = %plugin.id, "skipping [[plugin.remote]] entry with invalid key"),
         }
     }
@@ -853,7 +866,7 @@ async fn boot<S>(
     banned_substrings: Vec<String>,
     banned_regexes: Vec<String>,
     foreign_adapters: Vec<(weft_proto::Scheme, weft_core::PublicKey)>,
-    remote_plugins: Vec<(String, weft_core::PublicKey)>,
+    remote_plugins: Vec<(String, weft_core::PublicKey, Vec<weft_proto::Scheme>)>,
 ) -> anyhow::Result<(
     Arc<ServerCtx>,
     Vec<(weft_proto::ChannelName, weft_proto::RetentionPolicy)>,

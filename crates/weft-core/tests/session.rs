@@ -4370,7 +4370,8 @@ async fn foreign_bridge_adapter_authenticates() {
     let Event::Welcome { features, .. } = c.recv().await.event else {
         panic!("expected WELCOME after adapter PROOF");
     };
-    assert!(features.iter().any(|f| f == "foreign-bridge"));
+    // Unified provider session (plugin-spec §18): a bridge adapter is a provider.
+    assert!(features.iter().any(|f| f == "plugin"));
 }
 
 #[tokio::test]
@@ -4393,7 +4394,11 @@ async fn foreign_bridge_unpinned_key_auth_fails() {
 
 /// A ctx pinning one remote plugin (`[[plugin.remote]]`) by id + key, open to
 /// client registration.
-fn ctx_plugin(plugin_id: &str, plugin_key: &weft_core::PublicKey) -> Arc<ServerCtx> {
+fn ctx_plugin_schemes(
+    plugin_id: &str,
+    plugin_key: &weft_core::PublicKey,
+    schemes: Vec<weft_proto::Scheme>,
+) -> Arc<ServerCtx> {
     let info = ServerInfo {
         network: "test.example".parse().unwrap(),
         motd: None,
@@ -4416,8 +4421,13 @@ fn ctx_plugin(plugin_id: &str, plugin_key: &weft_core::PublicKey) -> Arc<ServerC
             10,
             weft_core::FederationConfig::default(),
         )
-        .with_remote_plugins(vec![(plugin_id.to_string(), *plugin_key)]),
+        .with_remote_plugins(vec![(plugin_id.to_string(), *plugin_key, schemes)]),
     )
+}
+
+/// A ctx pinning one remote plugin with no scheme authorization.
+fn ctx_plugin(plugin_id: &str, plugin_key: &weft_core::PublicKey) -> Arc<ServerCtx> {
+    ctx_plugin_schemes(plugin_id, plugin_key, Vec::new())
 }
 
 /// Drive a session to `State::PluginService`, proving control of the plugin `key`;
@@ -4486,6 +4496,7 @@ async fn plugin_register_and_invoke() {
             input: vec![],
         }],
         hooks: vec![],
+        schemes: vec![],
     };
     plugin.send(&format!(
         "@reg={} PLUGIN-REGISTER",
@@ -4527,6 +4538,143 @@ async fn plugin_register_and_invoke() {
     assert_eq!(vid, view_id);
     let decoded: weft_proto::ViewResult = weft_proto::plugin_from_b64(&got).unwrap();
     assert!(matches!(decoded, weft_proto::ViewResult::Toast { .. }));
+}
+
+#[tokio::test]
+async fn plugin_scheme_registration_routes_provision() {
+    // §18 capability 6 (the "Instagram bridge is just a plugin" case): a remote
+    // plugin declares `schemes` in its Registration; a client's NS JOIN for that
+    // scheme routes a PROVISION push to the plugin's session.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_schemes("insta", &key.public(), vec!["instagram".parse().unwrap()]);
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    let reg = weft_proto::Registration {
+        api: 1,
+        id: "insta".into(),
+        name: "Instagram Bridge".into(),
+        icon: None,
+        actions: vec![],
+        hooks: vec![],
+        schemes: vec!["instagram".into()],
+    };
+    plugin.send(&format!(
+        "@reg={} PLUGIN-REGISTER",
+        weft_proto::plugin_to_b64(&reg).unwrap()
+    ));
+
+    // Barrier: poll until the registration landed (it's on another session).
+    let mut client = ready(&ctx, "ada").await;
+    for _ in 0..50 {
+        client.send("PLUGINS");
+        let Event::PluginManifest { catalog } = client.recv().await.event else {
+            panic!("expected PLUGIN-MANIFEST");
+        };
+        let cat: weft_proto::Catalog = weft_proto::plugin_from_b64(&catalog).unwrap();
+        if cat.plugins.iter().any(|p| p.plugin_id == "insta") {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    client.send("@label=j1 NS JOIN instagram://acme-corp");
+    let routed = plugin.recv_raw().await;
+    let reply = weft_proto::Reply::parse(&routed).expect("PROVISION parses");
+    let Event::Provision { uri, job } = reply.event else {
+        panic!("plugin expected PROVISION, got {routed}");
+    };
+    assert_eq!(uri.to_string(), "instagram://acme-corp");
+
+    // The plugin reports failure → the parked join completes NO-SUCH-TARGET.
+    plugin.send(&format!("PROVISION-ERR {job}"));
+    let reply = client.expect_err(ErrCode::NoSuchTarget).await;
+    assert_eq!(reply.label.as_deref(), Some("j1"));
+}
+
+#[tokio::test]
+async fn plugin_unauthorized_scheme_is_refused() {
+    // A provider declaring a scheme its pin does not authorize must fail the
+    // whole registration — refused LOUDLY with a typed error + close (spec
+    // §4.2), never silently tolerated; nothing lands in the registry.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin("modq", &key.public()); // no schemes authorized
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    let reg = weft_proto::Registration {
+        api: 1,
+        id: "modq".into(),
+        name: "Sneaky".into(),
+        icon: None,
+        actions: vec![],
+        hooks: vec![],
+        schemes: vec!["instagram".into()],
+    };
+    plugin.send(&format!(
+        "@reg={} PLUGIN-REGISTER",
+        weft_proto::plugin_to_b64(&reg).unwrap()
+    ));
+    plugin.expect_err(ErrCode::Forbidden).await;
+    assert!(plugin.closed().await);
+
+    // Nothing registered, so the scheme routes nowhere: a foreign join answers
+    // NO-SUCH-TARGET immediately.
+    let mut client = ready(&ctx, "ada").await;
+    client.send("@label=j1 NS JOIN instagram://acme-corp");
+    let reply = client.expect_err(ErrCode::NoSuchTarget).await;
+    assert_eq!(reply.label.as_deref(), Some("j1"));
+}
+
+#[tokio::test]
+async fn provider_death_fails_parked_requests_loudly() {
+    // A provider that dies with work in flight must FAIL its parked clients —
+    // silence is never the failure mode (§3.5). A parked foreign join answers
+    // NO-SUCH-TARGET; a parked invocation answers INTERNAL (spec §16).
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_schemes("insta", &key.public(), vec!["instagram".parse().unwrap()]);
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    let reg = weft_proto::Registration {
+        api: 1,
+        id: "insta".into(),
+        name: "Instagram Bridge".into(),
+        icon: None,
+        actions: vec![weft_proto::ActionDecl {
+            id: "open".into(),
+            label: "Open".into(),
+            icon: None,
+            surface: weft_proto::Surface::Global,
+            context: weft_proto::ContextType::None,
+            description: None,
+            visibility: None,
+            input: vec![],
+        }],
+        hooks: vec![],
+        schemes: vec!["instagram".into()],
+    };
+    plugin.send(&format!(
+        "@reg={} PLUGIN-REGISTER",
+        weft_proto::plugin_to_b64(&reg).unwrap()
+    ));
+
+    let mut joiner = ready(&ctx, "ada").await;
+    wait_for_action(&mut joiner, "insta", "open").await;
+    let mut invoker = ready(&ctx, "bob").await;
+
+    // Park a provision and an invocation on the provider.
+    joiner.send("@label=j1 NS JOIN instagram://acme-corp");
+    assert!(matches!(
+        weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap().event,
+        Event::Provision { .. }
+    ));
+    invoker.send("@label=i1 PLUGIN INVOKE insta open");
+    plugin.recv_raw().await; // the routed invoke arrived — both are now parked
+
+    // The provider dies. Both parked clients get loud, labeled completions.
+    drop(plugin);
+    let reply = joiner.expect_err(ErrCode::NoSuchTarget).await;
+    assert_eq!(reply.label.as_deref(), Some("j1"));
+    let reply = invoker.expect_err(ErrCode::Internal).await;
+    assert_eq!(reply.label.as_deref(), Some("i1"));
 }
 
 #[tokio::test]

@@ -446,6 +446,10 @@ pub struct PluginRemote {
     /// Optional bot account to provision + attribute (§9).
     #[serde(default)]
     pub bot: Option<String>,
+    /// Foreign-URI schemes this provider may provision (§18 capability 6) — e.g.
+    /// `["instagram"]` for a bridge-style plugin. Empty = none.
+    #[serde(default)]
+    pub schemes: Vec<String>,
     /// Config keys delivered to the plugin at connect; secrets as `"env:X"` or
     /// inline (redacted where weftd surfaces them, §14).
     #[serde(default)]

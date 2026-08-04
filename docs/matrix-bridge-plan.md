@@ -48,10 +48,14 @@ slices land.
       Native emit sites pass `None`. Workspace green (proto 134, core 204, conformance 39), clippy
       clean. *Deferred into slices 3/4: client-core `ClientEvent` pass-through + client badge UI
       (lands when real values exist); channel-level `origin` on layout rows (materialization).*
-- [ ] **2. Provider-session unification** (M) — merge `foreign_control` + `plugin_registry` into one
-      **provider registry**; fold `State::ForeignBridge` → `State::PluginService` (one session speaks
-      bridge verbs AND plugin protocol); `schemes` field in `Registration` → `PROVISION` routing.
-      (The former M-plug-11 fold, pulled forward so later slices land once.) *(plugin-spec §18)*
+- [x] **2. Provider-session unification** (M) — DONE 2026-08-04. `State::ForeignBridge` FOLDED into
+      `State::PluginService { key, plugin_id, realm }` (one session speaks bridge verbs AND plugin
+      protocol; a `[[foreign_bridge]]` pin's provider id = its scheme name). One **provider registry**
+      (`foreign_control` merged away; schemes live on the registry entry, union of `REALM REGISTER` +
+      `Registration.schemes`). `Registration.schemes` + `[[plugin.remote]] schemes` config →
+      `PROVISION` routing via `provider_for_scheme`; unauthorized scheme fails the whole registration.
+      Welcome feature is now uniformly `"plugin"`. Tests: scheme-registration routes PROVISION (the
+      Instagram case) + unauthorized-scheme refused. Workspace green (core 206), clippy clean.
 - [ ] **3. Materialization success path** (M–L) — sentinel account provisioning; `PROVISION-OK` +
       provider `NS-META`/`CHANNEL-LAYOUT` assertions → create origin-marked ns + channels; the
       owner-authority gate; join the requester + roster reply. **`NS JOIN matrix://…` succeeds.**

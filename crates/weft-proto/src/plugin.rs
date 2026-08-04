@@ -372,6 +372,11 @@ pub struct Registration {
     pub actions: Vec<ActionDecl>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<HookDecl>,
+    /// Foreign-URI schemes this provider handles (spec §18 capability 6): a
+    /// `NS JOIN <scheme>://…` for an unknown space routes a `PROVISION` push
+    /// here. Must be authorized by the provider's pinned config entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schemes: Vec<String>,
 }
 
 #[cfg(test)]
@@ -504,6 +509,7 @@ mod tests {
                 kind: HookKind::Veto,
                 fail: Some(FailPolicy::Open),
             }],
+            schemes: vec!["instagram".into()],
         });
     }
 

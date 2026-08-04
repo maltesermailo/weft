@@ -8,7 +8,7 @@ use weft_crypto::{
     Attestation, Capability, Grant, Keypair, Profile, PublicKey, SignedProfile, Subject, TokenScope,
 };
 use weft_proto::{
-    Account, CallMediaGrant, ChannelName, GroupId, MsgId, NamespaceName, NetworkName,
+    Account, CallMediaGrant, ChannelName, ErrCode, GroupId, MsgId, NamespaceName, NetworkName,
     RetentionPolicy, UserRef,
 };
 use weft_store::{
@@ -178,11 +178,6 @@ pub struct ServerCtx {
     /// `REALM ASSERT` then require the proven key to be pinned for the asserted
     /// scheme. A handful of entries — a linear scan, no hashing of keys.
     pub(crate) foreign_adapters: Vec<(weft_proto::Scheme, PublicKey)>,
-    /// Foreign-bridge framework (§3.3): the registered adapter **control link**
-    /// per scheme — the raw-line writer weftd pushes `PROVISION` onto. Registered
-    /// at `REALM REGISTER`, dropped when the control session ends.
-    foreign_control:
-        std::sync::Mutex<HashMap<weft_proto::Scheme, tokio::sync::mpsc::Sender<String>>>,
     /// Foreign-bridge framework (§3.3): parked `NS JOIN <uri>` requests awaiting a
     /// `PROVISION-OK` / `PROVISION-ERR`, keyed by job token.
     pending_provision: std::sync::Mutex<HashMap<String, PendingProvision>>,
@@ -190,9 +185,10 @@ pub struct ServerCtx {
     provision_seq: AtomicU64,
     /// Plugin system (`docs/architecture/plugin-spec.md` §4.2): pinned remote-plugin
     /// keys → their `[[plugin.remote]]` id. Proven at `AUTH ADAPTER`.
-    pub(crate) remote_plugins: Vec<(String, PublicKey)>,
-    /// Registered remote plugins: id → its writer + declared actions (§12.3).
-    /// Registered at `PLUGIN-REGISTER`, dropped when the session ends.
+    pub(crate) remote_plugins: Vec<(String, PublicKey, Vec<weft_proto::Scheme>)>,
+    /// The unified **provider registry** (plugin-spec §18): id → its writer,
+    /// declared actions, and the schemes it provisions. Populated by
+    /// `PLUGIN-REGISTER` and/or `REALM REGISTER`; dropped when the session ends.
     plugin_registry: std::sync::Mutex<HashMap<String, PluginReg>>,
     /// Parked client invocations awaiting a plugin's `PLUGIN-VIEW`/`-RESULT`,
     /// keyed by the minted view-id (§11.1) → the requester's writer + request label.
@@ -417,6 +413,9 @@ pub struct AutoBridgeRequest {
 struct PendingProvision {
     reply: tokio::sync::mpsc::Sender<String>,
     label: Option<String>,
+    /// The provider the PROVISION was routed to — so its death can fail this
+    /// parked join instead of leaving the client hanging (§3.5 label discipline).
+    provider: String,
 }
 
 /// A parked requester's raw-line writer + request label, for a cross-session
@@ -431,6 +430,8 @@ struct PluginReg {
     name: String,
     icon: Option<String>,
     actions: Vec<weft_proto::ActionDecl>,
+    /// Schemes this provider provisions (`NS JOIN <scheme>://…` routing, §18).
+    schemes: Vec<weft_proto::Scheme>,
 }
 
 /// Deliver a control line to a **peer network** (§11.14). Preferred path: the
@@ -553,7 +554,6 @@ impl ServerCtx {
             require_email: false,
             banned_regexes: Vec::new(),
             foreign_adapters: Vec::new(),
-            foreign_control: std::sync::Mutex::new(HashMap::new()),
             pending_provision: std::sync::Mutex::new(HashMap::new()),
             provision_seq: AtomicU64::new(1),
             remote_plugins: Vec::new(),
@@ -1196,54 +1196,36 @@ impl ServerCtx {
         self.federation.accept_any
     }
 
-    // ---- foreign-bridge framework (§3) ----
+    // ---- foreign-bridge framework (§3) / unified providers (plugin-spec §18) ----
 
-    /// A key presented at `AUTH ADAPTER` is a valid adapter iff it is pinned for
-    /// at least one scheme (`[[foreign_bridge]]`).
-    pub(crate) fn adapter_key_pinned(&self, key: &PublicKey) -> bool {
-        self.foreign_adapters.iter().any(|(_, k)| k == key)
+    /// The provider id a `[[foreign_bridge]]` pinned key authenticates as: the
+    /// (first) scheme it is pinned for. Post-unification a bridge adapter is a
+    /// provider like any plugin; its natural id is its scheme ("matrix").
+    pub(crate) fn foreign_adapter_id(&self, key: &PublicKey) -> Option<String> {
+        self.foreign_adapters
+            .iter()
+            .find(|(_, k)| k == key)
+            .map(|(s, _)| s.as_str().to_string())
     }
 
-    /// Whether a proven adapter key is authorized to speak for `scheme` — the
-    /// gate on `REALM REGISTER` / `REALM ASSERT` (§3.1).
-    pub(crate) fn adapter_authorized(&self, key: &PublicKey, scheme: &weft_proto::Scheme) -> bool {
+    /// Whether a proven provider key is authorized to speak for `scheme` — the
+    /// gate on `REALM REGISTER`/`REALM ASSERT` and `Registration.schemes` (§18
+    /// capability 6). Authorized by a `[[foreign_bridge]]` pin for the scheme, or
+    /// a `[[plugin.remote]]` entry carrying it in `schemes`.
+    pub(crate) fn scheme_authorized(&self, key: &PublicKey, scheme: &weft_proto::Scheme) -> bool {
         self.foreign_adapters
             .iter()
             .any(|(s, k)| s == scheme && k == key)
+            || self
+                .remote_plugins
+                .iter()
+                .any(|(_, k, schemes)| k == key && schemes.contains(scheme))
     }
 
-    /// §3.3 register an adapter's control link for `scheme` (at REALM REGISTER).
-    /// A second registration for the same scheme replaces the first (last writer
-    /// wins — a redeployed adapter takes over).
-    pub(crate) fn register_foreign_control(
-        &self,
-        scheme: weft_proto::Scheme,
-        tx: tokio::sync::mpsc::Sender<String>,
-    ) {
-        self.foreign_control
-            .lock()
-            .expect("foreign_control lock")
-            .insert(scheme, tx);
-    }
-
-    /// §3.3 drop a control link when its session ends — but only if `tx` still owns
-    /// the slot, so a newer adapter that took over the scheme is left in place.
-    pub(crate) fn unregister_foreign_control(
-        &self,
-        scheme: &weft_proto::Scheme,
-        tx: &tokio::sync::mpsc::Sender<String>,
-    ) {
-        let mut map = self.foreign_control.lock().expect("foreign_control lock");
-
-        if map.get(scheme).is_some_and(|t| t.same_channel(tx)) {
-            map.remove(scheme);
-        }
-    }
-
-    /// §3.3 first contact with a foreign space: if an adapter for `scheme` is
-    /// registered, mint a job, park the requester (`reply` = its raw-line writer,
-    /// `label` = the join's label), and push `PROVISION <uri> <job>` over the
-    /// control link. `false` if no adapter handles the scheme (→ the caller answers
+    /// §3.3 first contact with a foreign space: if a provider handles `scheme`,
+    /// mint a job, park the requester (`reply` = its raw-line writer, `label` =
+    /// the join's label), and push `PROVISION <uri> <job>` to that provider.
+    /// `false` if no provider handles the scheme (→ the caller answers
     /// NO-SUCH-TARGET, uniform with a nonexistent local namespace).
     pub(crate) fn begin_provision(
         &self,
@@ -1252,13 +1234,7 @@ impl ServerCtx {
         reply: tokio::sync::mpsc::Sender<String>,
         label: Option<String>,
     ) -> bool {
-        let control = self
-            .foreign_control
-            .lock()
-            .expect("foreign_control lock")
-            .get(&scheme)
-            .cloned();
-        let Some(control) = control else {
+        let Some((provider, control)) = self.provider_for_scheme(&scheme) else {
             return false;
         };
 
@@ -1279,10 +1255,14 @@ impl ServerCtx {
 
         // Park before sending so a fast PROVISION reply can never race ahead of
         // the pending entry; roll back if the control link is gone.
-        self.pending_provision
-            .lock()
-            .expect("pending_provision lock")
-            .insert(job.clone(), PendingProvision { reply, label });
+        self.pending_provision.lock().expect("pending_provision lock").insert(
+            job.clone(),
+            PendingProvision {
+                reply,
+                label,
+                provider,
+            },
+        );
 
         if control.try_send(line).is_err() {
             self.pending_provision
@@ -1308,10 +1288,64 @@ impl ServerCtx {
             .map(|p| (p.reply, p.label))
     }
 
+    /// A provider session died with work in flight: fail every request parked on
+    /// it, so no client hangs waiting on a reply that can never come (§3.5 label
+    /// discipline — silence must never be the failure mode). Parked provisions
+    /// answer `NO-SUCH-TARGET` (uniform with an unreachable space, invariant 1);
+    /// parked invocations answer `INTERNAL` (spec §16: disconnect mid-flow).
+    pub(crate) fn fail_provider_pending(&self, provider: &str) {
+        let err_line = |code: ErrCode, text: &str, label: Option<String>| {
+            let event = weft_proto::Event::Err(weft_proto::ErrEvent::new(code, text));
+            let reply = match label {
+                Some(label) => weft_proto::Reply::with_label(event, label),
+                None => weft_proto::Reply::new(event),
+            };
+            reply.serialize().ok()
+        };
+
+        let provisions: Vec<PendingProvision> = {
+            let mut map = self.pending_provision.lock().expect("pending_provision lock");
+            let jobs: Vec<String> = map
+                .iter()
+                .filter(|(_, p)| p.provider == provider)
+                .map(|(job, _)| job.clone())
+                .collect();
+            jobs.into_iter().filter_map(|j| map.remove(&j)).collect()
+        };
+
+        for p in provisions {
+            if let Some(line) = err_line(ErrCode::NoSuchTarget, "no such target", p.label) {
+                let _ = p.reply.try_send(line);
+            }
+        }
+
+        // Invocation view-ids are minted as `<provider>:<seq>` (§11.1).
+        let prefix = format!("{provider}:");
+        let invokes: Vec<PendingReply> = {
+            let mut map = self.pending_invoke.lock().expect("pending_invoke lock");
+            let keys: Vec<String> = map
+                .keys()
+                .filter(|k| k.starts_with(&prefix))
+                .cloned()
+                .collect();
+            keys.into_iter().filter_map(|k| map.remove(&k)).collect()
+        };
+
+        for (reply, label) in invokes {
+            if let Some(line) = err_line(ErrCode::Internal, "plugin disconnected mid-flow", label) {
+                let _ = reply.try_send(line);
+            }
+        }
+    }
+
     // ---- plugin system (plugin-spec.md §4.2, §11–§12) ----
 
-    /// weftd installs the pinned remote plugins from `[[plugin.remote]]` config.
-    pub fn with_remote_plugins(mut self, plugins: Vec<(String, PublicKey)>) -> Self {
+    /// weftd installs the pinned remote plugins from `[[plugin.remote]]` config:
+    /// `(id, key, authorized schemes)`.
+    pub fn with_remote_plugins(
+        mut self,
+        plugins: Vec<(String, PublicKey, Vec<weft_proto::Scheme>)>,
+    ) -> Self {
         self.remote_plugins = plugins;
         self
     }
@@ -1320,11 +1354,14 @@ impl ServerCtx {
     pub(crate) fn remote_plugin_key(&self, key: &PublicKey) -> Option<String> {
         self.remote_plugins
             .iter()
-            .find(|(_, k)| k == key)
-            .map(|(id, _)| id.clone())
+            .find(|(_, k, _)| k == key)
+            .map(|(id, _, _)| id.clone())
     }
 
-    /// §12.3 register a connected plugin's writer + declared actions.
+    /// §12.3 register a connected provider's writer + declared actions + schemes.
+    /// A `REALM REGISTER` that preceded the `PLUGIN-REGISTER` already recorded
+    /// schemes — those are merged (union), so ordering between the two never
+    /// drops a scheme.
     pub(crate) fn register_plugin(
         &self,
         id: String,
@@ -1332,16 +1369,64 @@ impl ServerCtx {
         name: String,
         icon: Option<String>,
         actions: Vec<weft_proto::ActionDecl>,
+        mut schemes: Vec<weft_proto::Scheme>,
     ) {
-        self.plugin_registry.lock().expect("plugin_registry lock").insert(
+        let mut map = self.plugin_registry.lock().expect("plugin_registry lock");
+
+        if let Some(prior) = map.get(&id) {
+            for s in &prior.schemes {
+                if !schemes.contains(s) {
+                    schemes.push(s.clone());
+                }
+            }
+        }
+
+        map.insert(
             id,
             PluginReg {
                 out,
                 name,
                 icon,
                 actions,
+                schemes,
             },
         );
+    }
+
+    /// `REALM REGISTER` (§3.3): add a scheme to a provider's registry entry,
+    /// creating a minimal entry (no actions yet) if the provider has not sent
+    /// `PLUGIN-REGISTER`.
+    pub(crate) fn add_provider_scheme(
+        &self,
+        id: &str,
+        scheme: weft_proto::Scheme,
+        out: tokio::sync::mpsc::Sender<String>,
+    ) {
+        let mut map = self.plugin_registry.lock().expect("plugin_registry lock");
+
+        let entry = map.entry(id.to_string()).or_insert_with(|| PluginReg {
+            out,
+            name: id.to_string(),
+            icon: None,
+            actions: Vec::new(),
+            schemes: Vec::new(),
+        });
+
+        if !entry.schemes.contains(&scheme) {
+            entry.schemes.push(scheme);
+        }
+    }
+
+    /// The id + writer of the provider handling `scheme`, if any (§18 cap. 6).
+    pub(crate) fn provider_for_scheme(
+        &self,
+        scheme: &weft_proto::Scheme,
+    ) -> Option<(String, tokio::sync::mpsc::Sender<String>)> {
+        let map = self.plugin_registry.lock().expect("plugin_registry lock");
+
+        map.iter()
+            .find(|(_, r)| r.schemes.contains(scheme))
+            .map(|(id, r)| (id.clone(), r.out.clone()))
     }
 
     /// Drop a plugin's registration when its session ends — only if `out` still
