@@ -1234,6 +1234,16 @@ impl ChannelStore for PgStore {
         Ok(())
     }
 
+    async fn set_channel_origin(&self, name: &ChannelName, origin: &str) -> Result<(), StoreError> {
+        sqlx::query("UPDATE weft_channels SET origin = $2 WHERE name = $1")
+            .bind(name.as_str())
+            .bind(origin)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(())
+    }
+
     async fn set_channel_view_gated(
         &self,
         name: &ChannelName,
@@ -1439,6 +1449,8 @@ fn channel_from_row(row: &sqlx::postgres::PgRow) -> Result<ChannelRecord, StoreE
             .get::<Option<String>, _>("kind")
             .and_then(|k| k.parse().ok())
             .unwrap_or(weft_proto::ChannelKind::Text),
+        // Pre-0053 rows predate the column; missing means "native channel".
+        origin: row.try_get("origin").unwrap_or(None),
     })
 }
 
@@ -1791,6 +1803,14 @@ impl NamespaceStore for PgStore {
             .await
             .map_err(backend_err)?;
         row.map(|row| namespace_from_row(&row)).transpose()
+    }
+
+    async fn namespaces_with_origin(&self) -> Result<Vec<NamespaceRecord>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM weft_namespaces WHERE origin IS NOT NULL")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        rows.iter().map(namespace_from_row).collect()
     }
 
     async fn namespace_by_id(&self, id: &str) -> Result<Option<NamespaceRecord>, StoreError> {

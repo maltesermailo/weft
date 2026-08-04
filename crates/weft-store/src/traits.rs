@@ -319,6 +319,14 @@ pub trait ChannelStore: Send + Sync {
         vanity: &str,
     ) -> Result<Option<ChannelName>, StoreError>;
 
+    /// Foreign-bridge framework (§7a.2): mark a channel as the replica of a
+    /// foreign room by its origin URI. Set once at materialization.
+    async fn set_channel_origin(
+        &self,
+        name: &ChannelName,
+        origin: &str,
+    ) -> Result<(), StoreError>;
+
     /// CHANNEL META topic (§6.3).
     async fn set_channel_topic(&self, name: &ChannelName, topic: &str) -> Result<(), StoreError>;
 
@@ -475,6 +483,10 @@ pub trait NamespaceStore: Send + Sync {
         &self,
         origin: &str,
     ) -> Result<Option<NamespaceRecord>, StoreError>;
+
+    /// Every provider-managed namespace (`origin` set) — the provider-liveness
+    /// fan-out surface (a handful of rows; providers manage few spaces).
+    async fn namespaces_with_origin(&self) -> Result<Vec<NamespaceRecord>, StoreError>;
 
     /// Is this vanity name admin-locked (§2.3)? A locked vanity can't be
     /// (re-)registered via NS CREATE without an operator lifting the lock.

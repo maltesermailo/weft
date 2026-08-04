@@ -9,6 +9,28 @@
 
 use super::*;
 
+/// The reserved account owning every provider-managed namespace (Phase-0
+/// decision, 2026-08-04). Registered suspended; confers no authority (the
+/// origin gate strips the owner shortcut, `context.rs`).
+const FOREIGN_SENTINEL: &str = "foreign";
+
+/// Reduce a foreign path segment / display name to the namespace/vanity charset
+/// (`[a-z0-9-_]{1,64}`), falling back to `"foreign"` when nothing survives.
+fn sanitize_vanity(raw: &str) -> String {
+    let mut out: String = raw
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| matches!(c, 'a'..='z' | '0'..='9' | '-' | '_'))
+        .take(58) // leave room for a dedupe suffix
+        .collect();
+
+    if out.is_empty() {
+        out = "foreign".to_string();
+    }
+
+    out
+}
+
 /// Serialize an event with an optional echoed label, for a cross-session relay.
 fn relay_line(event: Event, label: Option<String>) -> Result<String, weft_proto::SerializeError> {
     match label {
@@ -95,6 +117,28 @@ impl<S: ControlStream> Session<S> {
         match event {
             Event::PluginRegister { registration } => {
                 self.on_plugin_register(&key, &plugin_id, &registration)
+                    .await
+            }
+            // Framework §3.1: structure assertions — normal NS-META /
+            // CHANNEL-LAYOUT verbs with origin-URI targets (capability 4).
+            Event::NsMetaForeign {
+                uri,
+                visibility,
+                title,
+                description,
+                icon,
+            } => {
+                self.on_ns_assert(&key, uri, visibility, title, description, icon)
+                    .await
+            }
+            Event::ChannelLayoutForeign {
+                uri,
+                position,
+                kind,
+                vanity,
+                category,
+            } => {
+                self.on_channel_assert(&key, uri, position, kind, vanity, category)
                     .await
             }
             // Terminal: relay to the parked client, then drop the pending.
@@ -188,9 +232,14 @@ impl<S: ControlStream> Session<S> {
             reg.name,
             reg.icon,
             reg.actions,
-            schemes,
+            schemes.clone(),
         );
         info!(%plugin_id, "provider registered");
+
+        // Its virtual namespaces just came online — tell their members.
+        if !schemes.is_empty() {
+            self.push_provider_state(&schemes).await;
+        }
         Ok(Flow::Continue)
     }
 
@@ -213,7 +262,270 @@ impl<S: ControlStream> Session<S> {
         self.ctx
             .add_provider_scheme(&plugin_id, scheme.clone(), self.fed_out_tx.clone());
         info!(%plugin_id, %scheme, "provider registered scheme");
+        self.push_provider_state(&[scheme]).await;
         Ok(Flow::Continue)
+    }
+
+    /// Framework §3.3 / capability 4: a provider asserts a **virtual namespace**
+    /// (`NS-META <origin-uri> <visibility>`). weftd mints the replica id
+    /// (invariant 2), owner = the suspended sentinel (Phase-0 decision — local
+    /// owner authority is origin-gated away), and answers with the minted
+    /// `NS-META` (id form, `origin=`) so the provider learns its mapping.
+    /// Re-asserting an existing origin re-sends the mapping (structural *update*
+    /// sync is a later slice).
+    async fn on_ns_assert(
+        &mut self,
+        key: &PublicKey,
+        uri: ForeignUri,
+        visibility: weft_proto::Visibility,
+        title: Option<String>,
+        description: Option<String>,
+        icon: Option<String>,
+    ) -> io::Result<Flow> {
+        // A provider may only assert under schemes its pin authorizes.
+        if !self.ctx.scheme_authorized(key, uri.scheme()) {
+            return self
+                .unsupported(None, "provider key not pinned for that scheme")
+                .await;
+        }
+
+        // Idempotent re-assert: the namespace exists → re-send the mapping.
+        match self.ctx.namespaces.namespace_by_origin(&uri.to_string()).await {
+            Ok(Some(record)) => {
+                self.send_event(None, self.ns_meta_event(&record)).await?;
+                return Ok(Flow::Continue);
+            }
+            Ok(None) => {}
+            Err(e) => return self.internal(None, &e).await,
+        }
+
+        let Some(owner) = self.ensure_sentinel().await else {
+            return self.internal(None, &"sentinel account unavailable").await;
+        };
+
+        // Vanity: the URI's last segment, sanitized to the name charset, deduped
+        // with a short suffix on conflict (names are per-network unique).
+        let base = sanitize_vanity(uri.path().last().map(String::as_str).unwrap_or("foreign"));
+        let ns_id = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+        let mut record = weft_store::NamespaceRecord {
+            id: ns_id,
+            name: base.parse().expect("sanitized vanity is a valid name"),
+            owner,
+            root_key: String::new(), // never transferable/recoverable locally
+            visibility: match visibility {
+                weft_proto::Visibility::Public => "public".to_string(),
+                // `private` would be unreachable-by-design; clamp to unlisted.
+                _ => "unlisted".to_string(),
+            },
+            title,
+            description,
+            icon,
+            recovery_set: None,
+            pending_recovery: None,
+            categories: Vec::new(),
+            federation: false,
+            frozen: false,
+            welcome_channel: None,
+            origin: Some(uri.to_string()),
+        };
+
+        for attempt in 0..3u8 {
+            match self.ctx.namespaces.create_namespace(record.clone()).await {
+                Ok(true) => {
+                    info!(ns = %record.id, origin = %uri, "virtual namespace materialized");
+                    self.send_event(None, self.ns_meta_event(&record)).await?;
+                    return Ok(Flow::Continue);
+                }
+                Ok(false) => {
+                    // Vanity taken — retry with a short random suffix.
+                    let suffix = &weft_proto::Ulid::new().to_string().to_ascii_lowercase()
+                        [26 - 4 - attempt as usize..];
+                    record.name = format!("{base}-{suffix}")
+                        .parse()
+                        .expect("suffixed vanity is a valid name");
+                }
+                Err(e) => return self.internal(None, &e).await,
+            }
+        }
+
+        self.internal(None, &"could not allocate a namespace name")
+            .await
+    }
+
+    /// Framework §3.1: a provider asserts one channel of a virtual namespace
+    /// (`CHANNEL-LAYOUT <ns-origin>/<segment> <position>`). The parent namespace
+    /// (the URI minus its last segment) must have been asserted first; weftd
+    /// mints the channel id and answers with the canonical `CHANNEL-LAYOUT`
+    /// (`#<ns-id>/<chan-id>`, `origin=`) — the provider's mapping row.
+    async fn on_channel_assert(
+        &mut self,
+        key: &PublicKey,
+        uri: ForeignUri,
+        position: i64,
+        kind: weft_proto::ChannelKind,
+        vanity: String,
+        category: Option<String>,
+    ) -> io::Result<Flow> {
+        if !self.ctx.scheme_authorized(key, uri.scheme()) {
+            return self
+                .unsupported(None, "provider key not pinned for that scheme")
+                .await;
+        }
+
+        // The parent namespace = the URI minus its last segment.
+        let Some(segment) = uri.path().last().cloned() else {
+            return self
+                .unsupported(None, "a channel origin needs a path segment")
+                .await;
+        };
+        let parent = {
+            let full = uri.to_string();
+            full[..full.len() - segment.len() - 1].to_string()
+        };
+        let record = match self.ctx.namespaces.namespace_by_origin(&parent).await {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                debug!(%uri, "channel assertion before its namespace — dropped");
+                return self
+                    .unsupported(None, "assert the namespace before its channels")
+                    .await;
+            }
+            Err(e) => return self.internal(None, &e).await,
+        };
+
+        // Idempotent re-assert: the channel exists (by origin) → re-send its row.
+        let existing = self
+            .ctx
+            .channel_store
+            .channels_in_namespace(&record.id)
+            .await
+            .ok()
+            .and_then(|list| {
+                list.into_iter()
+                    .find(|(_, rec)| rec.origin.as_deref() == Some(uri.to_string().as_str()))
+            });
+
+        if let Some((channel, rec)) = existing {
+            self.send_event(
+                None,
+                Event::ChannelLayout {
+                    channel,
+                    category: rec.category,
+                    position: rec.position,
+                    kind: rec.kind,
+                    vanity: rec.vanity,
+                    origin: Some(uri),
+                },
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+
+        let vanity = if vanity.is_empty() {
+            sanitize_vanity(&segment)
+        } else {
+            sanitize_vanity(&vanity)
+        };
+        let policy: RetentionPolicy = "retained:90d".parse().expect("valid default");
+        let chan_id = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+        let canonical: ChannelName = format!("#{}/{chan_id}", record.id)
+            .parse()
+            .expect("a minted canonical channel name is valid");
+
+        if self.ctx.registry.create(canonical.clone(), policy).is_none() {
+            return self.internal(None, &"minted channel collided").await;
+        }
+        if let Err(e) = self
+            .ctx
+            .channel_store
+            .upsert_channel(&canonical, &vanity, policy, kind)
+            .await
+        {
+            return self.internal(None, &e).await;
+        }
+        if let Err(e) = self
+            .ctx
+            .channel_store
+            .set_channel_origin(&canonical, &uri.to_string())
+            .await
+        {
+            return self.internal(None, &e).await;
+        }
+        if category.is_some() || position != 0 {
+            let _ = self
+                .ctx
+                .channel_store
+                .set_channel_layout(&canonical, category.as_deref(), position)
+                .await;
+        }
+
+        info!(channel = %canonical, origin = %uri, "virtual channel materialized");
+        self.send_event(
+            None,
+            Event::ChannelLayout {
+                channel: canonical,
+                category,
+                position,
+                kind,
+                vanity,
+                origin: Some(uri),
+            },
+        )
+        .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// Owner directive 2026-08-04: push the provider-state transition (`NS-META`
+    /// with `provider=online|offline`) to every member of every virtual namespace
+    /// under `schemes` — the client's live "bridge online/offline" indicator.
+    /// Reads the registry's *current* state, so call it **after** the
+    /// register/unregister that changed it.
+    pub(super) async fn push_provider_state(&mut self, schemes: &[Scheme]) {
+        let Ok(namespaces) = self.ctx.namespaces.namespaces_with_origin().await else {
+            return;
+        };
+
+        for record in namespaces {
+            let scheme_matches = record
+                .origin
+                .as_deref()
+                .and_then(|o| o.parse::<ForeignUri>().ok())
+                .is_some_and(|uri| schemes.contains(uri.scheme()));
+
+            if !scheme_matches {
+                continue;
+            }
+
+            let event = self.ns_meta_event(&record);
+            if let Ok(members) = self.ctx.memberships.ns_members(&record.id).await {
+                for member in members {
+                    self.ctx.directory.notify(member, event.clone()).await;
+                }
+            }
+        }
+    }
+
+    /// Ensure the reserved, suspended **sentinel account** that owns every
+    /// provider-managed namespace (Phase-0 decision: it exists so records have a
+    /// valid owner; authority never derives from it — the origin gate strips the
+    /// owner shortcut). Registration is idempotent; the password is random and
+    /// never used (the account is suspended).
+    async fn ensure_sentinel(&self) -> Option<Account> {
+        let account: Account = FOREIGN_SENTINEL.parse().expect("sentinel name is valid");
+        let secret = weft_crypto::b64::encode(rand::random::<[u8; 32]>());
+
+        match self.ctx.accounts.register(&account, &secret).await {
+            Ok(crate::accounts::RegisterOutcome::Created) => {
+                let _ = self.ctx.accounts.set_suspended(&account, true).await;
+            }
+            Ok(crate::accounts::RegisterOutcome::Exists) => {}
+            Err(e) => {
+                warn!("sentinel account registration failed: {e}");
+                return None;
+            }
+        }
+
+        Some(account)
     }
 
     /// §3.1 REALM ASSERT: bind this provider connection to a single realm — the

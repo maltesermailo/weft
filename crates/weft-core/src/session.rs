@@ -570,11 +570,17 @@ impl<S: ControlStream> Session<S> {
         }
         // A provider session is going away: drop its registry entry (actions +
         // schemes) so weftd stops routing invocations/PROVISION to a dead session
-        // (plugin-spec §5.2 — a remote crash is a clean disconnect), and FAIL its
-        // in-flight work so no parked client hangs on a reply that can never come.
-        if let State::PluginService { plugin_id, .. } = &self.state {
+        // (plugin-spec §5.2 — a remote crash is a clean disconnect), FAIL its
+        // in-flight work so no parked client hangs, and tell its virtual
+        // namespaces' members the provider went offline (the client indicator).
+        if let State::PluginService { plugin_id, .. } = &self.state.clone() {
+            let schemes = self.ctx.provider_schemes(plugin_id);
             self.ctx.unregister_plugin(plugin_id, &self.fed_out_tx);
             self.ctx.fail_provider_pending(plugin_id);
+
+            if !schemes.is_empty() {
+                self.push_provider_state(&schemes).await;
+            }
         }
         if let Some(account) = self.registered.take() {
             self.ctx

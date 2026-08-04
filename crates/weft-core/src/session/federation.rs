@@ -151,12 +151,13 @@ impl<S: ControlStream> Session<S> {
             Err(e) => return self.internal(label, &e).await,
         }
 
-        // §3.3 branch 3 (first contact): park + push a PROVISION to the adapter.
+        // §3.3 branch 3 (first contact): park + push a PROVISION to the provider.
         let started = self.ctx.begin_provision(
             uri.scheme().clone(),
             &uri,
             self.fed_out_tx.clone(),
             label.clone(),
+            account,
         );
 
         if !started {
@@ -166,36 +167,124 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
-    /// §3.3 `PROVISION-OK`/`PROVISION-ERR`: the adapter finished (or failed)
-    /// provisioning the space for `job`. Deliver the outcome to the parked
-    /// `NS JOIN`'s session over its raw-line writer, echoing the join's label.
-    /// `ERR` → the uniform `NO-SUCH-TARGET` (invariant 4). `OK` → the space is
-    /// materialized and the requester joined — that completion needs the
-    /// foreign-namespace store (next slice); for now it is logged and the parked
-    /// request cleared.
+    /// §3.3 `PROVISION-OK`/`PROVISION-ERR`: the provider finished (or failed)
+    /// provisioning the space for `job`. `ERR` → the parked join answers the
+    /// uniform `NO-SUCH-TARGET` (invariant 4). `OK` → the provider has already
+    /// `NS-ASSERT`ed the namespace (same session, ordered): resolve it by origin,
+    /// add the requester's ns membership, and ack the parked join with the minted
+    /// `NS-META` + `CHANNEL-LAYOUT` rows + a labeled `NS-MEMBER`. (No asserted
+    /// namespace ⇒ a provider bug: the join still fails loudly, never silently.)
+    ///
+    /// The completion runs on the *provider's* session, so it is store + pushed
+    /// lines — the requester's channel subscriptions then flow through their own
+    /// ordinary `JOIN`s (a client joins channels as it opens them).
     pub(super) async fn on_provision_result(&mut self, job: String, ok: bool) -> io::Result<Flow> {
-        let Some((reply, label)) = self.ctx.complete_provision(&job) else {
+        let Some(pending) = self.ctx.complete_provision(&job) else {
             return Ok(Flow::Continue); // unknown/expired job — tolerate
         };
 
-        if ok {
-            info!(%job, "PROVISION-OK — space materialization lands with the store slice");
+        let push = |reply: &tokio::sync::mpsc::Sender<String>, r: Reply| {
+            if let Ok(line) = r.serialize() {
+                let _ = reply.try_send(line);
+            }
+        };
+        let fail = |reply: &tokio::sync::mpsc::Sender<String>, label: Option<String>| {
+            let event = Event::Err(weft_proto::ErrEvent::new(
+                ErrCode::NoSuchTarget,
+                "no such target",
+            ));
+            let completion = match label {
+                Some(label) => Reply::with_label(event, label),
+                None => Reply::new(event),
+            };
+            push(reply, completion);
+        };
+
+        if !ok {
+            fail(&pending.reply, pending.label);
             return Ok(Flow::Continue);
         }
 
-        let event = Event::Err(weft_proto::ErrEvent::new(
-            ErrCode::NoSuchTarget,
-            "no such target",
-        ));
-        let completion = match label {
-            Some(label) => Reply::with_label(event, label),
-            None => Reply::new(event),
+        // The asserted namespace, by origin. Absent = the provider skipped its
+        // NS-ASSERT — fail the join loudly and log the provider bug.
+        let record = match self
+            .ctx
+            .namespaces
+            .namespace_by_origin(&pending.uri.to_string())
+            .await
+        {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                warn!(%job, uri = %pending.uri, "PROVISION-OK without a prior NS-ASSERT (provider bug)");
+                fail(&pending.reply, pending.label);
+                return Ok(Flow::Continue);
+            }
+            Err(e) => {
+                error!("storage failure completing provision: {e}");
+                fail(&pending.reply, pending.label);
+                return Ok(Flow::Continue);
+            }
         };
 
-        if let Ok(line) = completion.serialize() {
-            let _ = reply.try_send(line);
+        if let Err(e) = self
+            .ctx
+            .memberships
+            .set_ns_membership(&pending.account, &record.id, unix_now() as i64)
+            .await
+        {
+            error!("storage failure writing ns membership: {e}");
+            fail(&pending.reply, pending.label);
+            return Ok(Flow::Continue);
         }
 
+        // Ack shape: NS-META (badged) + the channel layout (badged) + the labeled
+        // NS-MEMBER join — the §3.5 ack the client keyed its request on.
+        push(&pending.reply, Reply::new(self.ns_meta_event(&record)));
+
+        if let Ok(channels) = self.ctx.channel_store.channels_in_namespace(&record.id).await {
+            for (channel, rec) in channels {
+                push(
+                    &pending.reply,
+                    Reply::new(Event::ChannelLayout {
+                        channel,
+                        category: rec.category,
+                        position: rec.position,
+                        kind: rec.kind,
+                        vanity: rec.vanity,
+                        origin: rec.origin.as_deref().and_then(|o| o.parse().ok()),
+                    }),
+                );
+            }
+        }
+
+        let count = self
+            .ctx
+            .memberships
+            .ns_members(&record.id)
+            .await
+            .map(|m| m.len() as u64)
+            .ok();
+        let ns_id: weft_proto::NamespaceId = match record.id.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                fail(&pending.reply, pending.label);
+                return Ok(Flow::Continue);
+            }
+        };
+        let member = Event::NsMember {
+            namespace: ns_id,
+            user: UserRef::new(pending.account, self.ctx.info.network.clone()),
+            action: MemberAction::Join,
+            display: None,
+            count,
+        };
+        let completion = match pending.label {
+            Some(label) => Reply::with_label(member, label),
+            None => Reply::new(member),
+        };
+        push(&pending.reply, completion);
+
+        info!(%job, ns = %record.id, "foreign namespace provisioned + requester joined");
         Ok(Flow::Continue)
     }
 

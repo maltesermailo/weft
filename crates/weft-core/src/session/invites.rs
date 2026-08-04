@@ -221,7 +221,7 @@ impl<S: ControlStream> Session<S> {
                         if first_join {
                             self.post_ns_welcome(&ns_id, &account).await;
                         }
-                        self.send_event(label, Self::ns_meta_event(&record)).await?;
+                        self.send_event(label, self.ns_meta_event(&record)).await?;
                         // Subscribe to the channels the redeemer can now see so
                         // its client populates immediately (like NS JOIN).
                         let channels = self

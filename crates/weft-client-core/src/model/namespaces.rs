@@ -82,6 +82,8 @@ mod tests {
             recovery_rung: None,
             categories: vec!["Text".into()],
             federation: true,
+            origin: None,
+            provider_online: None,
         }
     }
 

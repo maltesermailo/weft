@@ -447,6 +447,11 @@ pub enum Event {
         /// (framework §7a.2). Absent ⇒ native. Also rides DISCOVER (which lists
         /// via NS-META).
         origin: Option<ForeignUri>,
+        /// `provider=online|offline` — a provider-managed namespace is **online
+        /// only while its provider is connected** (owner directive 2026-08-04):
+        /// offline ⇒ undiscoverable + unjoinable; members see this indicator.
+        /// Absent ⇒ a native namespace.
+        provider_online: Option<bool>,
     },
     /// `MORE <cursor>` — pagination continuation (DISCOVER, §6.2).
     More {
@@ -765,6 +770,31 @@ pub enum Event {
     /// `State::PluginService` session.
     PluginRegister {
         registration: String,
+    },
+    /// The **foreign-assertion form** of `NS-META` (framework §3.1/§3.3): the same
+    /// wire verb with a `<scheme>://` origin URI as the target — the parser routes
+    /// on the target shape, like `NS JOIN <uri>`. A provider asserts (creates) the
+    /// **virtual namespace** it manages (plugin-spec §18 capability 4); weftd mints
+    /// the replica ULID (invariant 2) and answers with the minted `NS-META`
+    /// (id form, `origin=`). Provider sessions only.
+    NsMetaForeign {
+        uri: ForeignUri,
+        visibility: Visibility,
+        title: Option<String>,
+        description: Option<String>,
+        icon: Option<String>,
+    },
+    /// The **foreign-assertion form** of `CHANNEL-LAYOUT` (framework §3.1): the
+    /// same wire verb with the channel's origin URI (`<ns-origin>/<segment>`) as
+    /// the target. Asserts one channel under an already-asserted namespace (its
+    /// parent = the URI minus the last segment). Provider sessions only.
+    ChannelLayoutForeign {
+        uri: ForeignUri,
+        position: i64,
+        kind: ChannelKind,
+        /// Display name (`vanity=`); empty falls back to the URI's last segment.
+        vanity: String,
+        category: Option<String>,
     },
     /// Any event outside the known set — MUST be ignored by clients.
     Unknown {
@@ -1268,6 +1298,21 @@ impl Event {
             "NS-META" => {
                 let mut args = Args::new(line, "NS-META");
                 let tag = |k: &str| line.tags.get(k).filter(|v| !v.is_empty()).cloned();
+
+                // Foreign-assertion form (framework §3.1): the target is an origin
+                // URI, not a namespace id — route on the shape, like NS JOIN.
+                let target = args.req("ns")?;
+
+                if target.contains("://") {
+                    return Ok(Event::NsMetaForeign {
+                        uri: target.parse()?,
+                        visibility: args.req("visibility")?.parse()?,
+                        title: tag("title"),
+                        description: tag("description"),
+                        icon: tag("icon"),
+                    });
+                }
+
                 let recovery_pending =
                     if line.tags.get("recovery").map(String::as_str) == Some("pending") {
                         let eta = u64_tag(line, "recovery-eta", "NS-META")?.unwrap_or(0);
@@ -1277,7 +1322,7 @@ impl Event {
                         None
                     };
                 Ok(Event::NsMeta {
-                    id: args.req("ns")?.parse()?,
+                    id: target.parse()?,
                     vanity: tag("vanity")
                         .ok_or(ParseError::MissingParam {
                             verb: "NS-META",
@@ -1304,6 +1349,11 @@ impl Event {
                     federation: line.tags.get("federation").map(String::as_str) == Some("yes"),
                     welcome: tag("welcome"),
                     origin: origin_tag(line)?,
+                    provider_online: match line.tags.get("provider").map(String::as_str) {
+                        Some("online") => Some(true),
+                        Some("offline") => Some(false),
+                        _ => None,
+                    },
                 })
             }
             "MORE" => {
@@ -1314,15 +1364,32 @@ impl Event {
             }
             "CHANNEL-LAYOUT" => {
                 let mut args = Args::new(line, "CHANNEL-LAYOUT");
-                let channel = args.req("channel")?.parse()?;
+                let target = args.req("channel")?;
                 let position = args.req("position")?;
                 let position = position.parse().map_err(|_| ParseError::BadParam {
                     verb: "CHANNEL-LAYOUT",
                     what: "position",
                     value: position.to_string(),
                 })?;
+
+                // Foreign-assertion form (framework §3.1): a URI target routes to
+                // the provider-assertion variant.
+                if target.contains("://") {
+                    return Ok(Event::ChannelLayoutForeign {
+                        uri: target.parse()?,
+                        position,
+                        kind: line
+                            .tags
+                            .get("kind")
+                            .and_then(|k| k.parse().ok())
+                            .unwrap_or(ChannelKind::Text),
+                        vanity: line.tags.get("vanity").cloned().unwrap_or_default(),
+                        category: line.tags.get("category").filter(|v| !v.is_empty()).cloned(),
+                    });
+                }
+
                 Ok(Event::ChannelLayout {
-                    channel,
+                    channel: target.parse()?,
                     category: line.tags.get("category").filter(|v| !v.is_empty()).cloned(),
                     position,
                     kind: line
@@ -2124,9 +2191,14 @@ impl Event {
                 federation,
                 welcome,
                 origin,
+                provider_online,
             } => {
                 if let Some(origin) = origin {
                     tags.insert("origin".to_string(), origin.to_string());
+                }
+                if let Some(online) = provider_online {
+                    let state = if *online { "online" } else { "offline" };
+                    tags.insert("provider".to_string(), state.to_string());
                 }
                 tags.insert("vanity".to_string(), vanity.to_string());
                 for (k, v) in [
@@ -2157,6 +2229,46 @@ impl Event {
                 (
                     "NS-META",
                     vec![id.to_string(), visibility.to_string()],
+                    None,
+                )
+            }
+            Event::NsMetaForeign {
+                uri,
+                visibility,
+                title,
+                description,
+                icon,
+            } => {
+                for (k, v) in [("title", title), ("description", description), ("icon", icon)] {
+                    if let Some(v) = v {
+                        tags.insert(k.to_string(), v.clone());
+                    }
+                }
+                (
+                    "NS-META",
+                    vec![uri.to_string(), visibility.to_string()],
+                    None,
+                )
+            }
+            Event::ChannelLayoutForeign {
+                uri,
+                position,
+                kind,
+                vanity,
+                category,
+            } => {
+                if let Some(category) = category {
+                    tags.insert("category".to_string(), category.clone());
+                }
+                if *kind != ChannelKind::Text {
+                    tags.insert("kind".to_string(), kind.to_string());
+                }
+                if !vanity.is_empty() {
+                    tags.insert("vanity".to_string(), vanity.clone());
+                }
+                (
+                    "CHANNEL-LAYOUT",
+                    vec![uri.to_string(), position.to_string()],
                     None,
                 )
             }
@@ -3367,8 +3479,10 @@ mod tests {
                 categories: vec!["Text".into(), "Voice".into()],
                 federation: true,
                 welcome: Some("#gaming/lobby".into()),
-                // §7a.2: a provider-managed replica advertises its foreign origin.
+                // §7a.2: a provider-managed replica advertises its foreign origin
+                // and its provider's liveness (offline ⇒ undiscoverable).
                 origin: Some("matrix://matrix.org/gaming".parse().unwrap()),
+                provider_online: Some(false),
             },
             "n1",
         ));
@@ -3387,6 +3501,7 @@ mod tests {
             federation: false,
             welcome: None,
             origin: None,
+            provider_online: None,
         }));
         round_trip(&Reply::new(Event::More {
             cursor: "next-page".into(),
@@ -3525,6 +3640,37 @@ mod tests {
 
         assert!(Reply::parse("PLUGIN-VIEW v:ab12:1").is_err()); // view payload required
         assert!(Reply::parse("PLUGIN-MANIFEST").is_err()); // catalog required
+    }
+
+    #[test]
+    fn foreign_assertion_forms_round_trip() {
+        // Framework §3.1: the SAME wire verbs, routed on the URI target shape —
+        // a provider asserts structure with normal NS-META / CHANNEL-LAYOUT.
+        let ns = Reply::new(Event::NsMetaForeign {
+            uri: "matrix://matrix.org/gaming".parse().unwrap(),
+            visibility: crate::types::Visibility::Public,
+            title: Some("Gaming".into()),
+            description: None,
+            icon: None,
+        });
+        assert!(ns
+            .serialize()
+            .unwrap()
+            .contains("NS-META matrix://matrix.org/gaming public"));
+        round_trip(&ns);
+
+        let chan = Reply::new(Event::ChannelLayoutForeign {
+            uri: "matrix://matrix.org/gaming/general".parse().unwrap(),
+            position: 0,
+            kind: ChannelKind::Text,
+            vanity: "general".into(),
+            category: None,
+        });
+        assert!(chan
+            .serialize()
+            .unwrap()
+            .contains("CHANNEL-LAYOUT matrix://matrix.org/gaming/general 0"));
+        round_trip(&chan);
     }
 
     #[test]

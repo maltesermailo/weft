@@ -4625,6 +4625,191 @@ async fn plugin_unauthorized_scheme_is_refused() {
 }
 
 #[tokio::test]
+async fn foreign_ns_join_succeeds_via_assertion() {
+    // The slice-3 vertical (framework §3.3): NS JOIN <uri> → PROVISION → the
+    // provider asserts structure with NORMAL verbs (NS-META / CHANNEL-LAYOUT,
+    // URI targets) → PROVISION-OK → the parked join completes with the minted,
+    // origin-badged replica. Then the known-local branch + the authority gate.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_schemes("insta", &key.public(), vec!["instagram".parse().unwrap()]);
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    let reg = weft_proto::Registration {
+        api: 1,
+        id: "insta".into(),
+        name: "Instagram Bridge".into(),
+        icon: None,
+        actions: vec![],
+        hooks: vec![],
+        schemes: vec!["instagram".into()],
+    };
+    plugin.send(&format!(
+        "@reg={} PLUGIN-REGISTER",
+        weft_proto::plugin_to_b64(&reg).unwrap()
+    ));
+
+    // Barrier: the registration landed (poll the catalog for the plugin entry).
+    let mut ada = ready(&ctx, "ada").await;
+    for _ in 0..50 {
+        ada.send("PLUGINS");
+        let Event::PluginManifest { catalog } = ada.recv().await.event else {
+            panic!("expected PLUGIN-MANIFEST");
+        };
+        let cat: weft_proto::Catalog = weft_proto::plugin_from_b64(&catalog).unwrap();
+        if cat.plugins.iter().any(|p| p.plugin_id == "insta") {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    // First contact: the join parks; the provider gets the PROVISION push.
+    ada.send("@label=j1 NS JOIN instagram://acme-corp/club");
+    let routed = weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap();
+    let Event::Provision { uri, job } = routed.event else {
+        panic!("expected PROVISION");
+    };
+    assert_eq!(uri.to_string(), "instagram://acme-corp/club");
+
+    // The provider asserts the space with NORMAL verbs on URI targets, learning
+    // its minted mapping from each reply.
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    let Event::NsMeta { id, origin, title, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META mapping");
+    };
+    let ns_id = id.to_string();
+    assert_eq!(
+        origin.map(|o| o.to_string()).as_deref(),
+        Some("instagram://acme-corp/club")
+    );
+    assert_eq!(title.as_deref(), Some("Club"));
+
+    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    let Event::ChannelLayout { channel, origin, vanity, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT mapping");
+    };
+    assert!(channel.as_str().starts_with(&format!("#{ns_id}/")));
+    assert_eq!(
+        origin.map(|o| o.to_string()).as_deref(),
+        Some("instagram://acme-corp/club/general")
+    );
+    assert_eq!(vanity, "general");
+
+    // The provider completes the job → the parked join acks: NS-META +
+    // CHANNEL-LAYOUT (both badged) + the labeled NS-MEMBER join.
+    plugin.send(&format!("PROVISION-OK {job}"));
+    let Event::NsMeta { origin, .. } = ada.recv().await.event else {
+        panic!("ada expected NS-META");
+    };
+    assert!(origin.is_some(), "the replica is badged");
+    assert!(matches!(ada.recv().await.event, Event::ChannelLayout { .. }));
+    let reply = ada.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("j1"));
+    let Event::NsMember { action: MemberAction::Join, count, .. } = reply.event else {
+        panic!("expected the labeled NS-MEMBER join ack, got {reply:?}");
+    };
+    assert_eq!(count, Some(1));
+
+    // Known-local branch: a second joiner takes the ordinary NS JOIN path
+    // (channel subscription burst + NS-MEMBER), no provisioning round-trip.
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send("@label=j2 NS JOIN instagram://acme-corp/club");
+    let count = drain_until_ns_member(&mut bob).await;
+    assert_eq!(count, Some(2));
+
+    // The authority gate: nobody local governs a provider-managed namespace —
+    // the sentinel owner confers nothing and members hold no ns-admin.
+    ada.send(&format!("@label=m1 NS META {ns_id} title :Hax"));
+    let reply = ada.expect_err(ErrCode::CapRequired).await;
+    assert_eq!(reply.label.as_deref(), Some("m1"));
+}
+
+#[tokio::test]
+async fn provider_offline_gates_virtual_namespace() {
+    // Owner directive 2026-08-04: a virtual namespace is online only while its
+    // provider is — offline ⇒ undiscoverable + unjoinable; members get live
+    // provider=offline/online NS-META pushes.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_schemes("insta", &key.public(), vec!["instagram".parse().unwrap()]);
+
+    let register = |c: &Client| {
+        let reg = weft_proto::Registration {
+            api: 1,
+            id: "insta".into(),
+            name: "Instagram Bridge".into(),
+            icon: None,
+            actions: vec![],
+            hooks: vec![],
+            schemes: vec!["instagram".into()],
+        };
+        c.send(&format!(
+            "@reg={} PLUGIN-REGISTER",
+            weft_proto::plugin_to_b64(&reg).unwrap()
+        ));
+    };
+
+    // Provider online: assert a public virtual namespace directly (capability 4 —
+    // no provisioning flow needed), then a member joins it.
+    let mut plugin = plugin_session(&ctx, &key).await;
+    register(&plugin);
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    let Event::NsMeta { id, provider_online, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META mapping");
+    };
+    assert_eq!(provider_online, Some(true));
+    let ns_id = id.to_string();
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::NsMember { action: MemberAction::Join, .. }
+    ));
+
+    // Online: DISCOVER lists the public replica.
+    ada.send("DISCOVER");
+    let Event::NsMeta { origin, .. } = ada.recv().await.event else {
+        panic!("expected the replica in DISCOVER while online");
+    };
+    assert!(origin.is_some());
+
+    // The provider dies → the member gets the live offline indicator.
+    drop(plugin);
+    let Event::NsMeta { provider_online, .. } = ada.recv().await.event else {
+        panic!("ada expected the provider-offline NS-META push");
+    };
+    assert_eq!(provider_online, Some(false));
+
+    // Offline: unjoinable (uniform NO-SUCH-TARGET) and undiscoverable (a DISCOVER
+    // yields nothing; the FIFO PING proves the silence).
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send(&format!("@label=j2 NS JOIN {ns_id}"));
+    let reply = bob.expect_err(ErrCode::NoSuchTarget).await;
+    assert_eq!(reply.label.as_deref(), Some("j2"));
+    bob.send("DISCOVER");
+    bob.send("PING probe");
+    assert!(matches!(
+        bob.recv().await.event,
+        Event::Pong { token: Some(t) } if t == "probe"
+    ));
+
+    // The provider reconnects + re-registers → members get the online push and
+    // the namespace is joinable + discoverable again.
+    let plugin2 = plugin_session(&ctx, &key).await;
+    register(&plugin2);
+    let Event::NsMeta { provider_online, .. } = ada.recv().await.event else {
+        panic!("ada expected the provider-online NS-META push");
+    };
+    assert_eq!(provider_online, Some(true));
+    bob.send(&format!("@label=j3 NS JOIN {ns_id}"));
+    let reply = bob.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("j3"));
+    assert!(matches!(
+        reply.event,
+        Event::NsMember { action: MemberAction::Join, .. }
+    ));
+}
+
+#[tokio::test]
 async fn provider_death_fails_parked_requests_loudly() {
     // A provider that dies with work in flight must FAIL its parked clients —
     // silence is never the failure mode (§3.5). A parked foreign join answers

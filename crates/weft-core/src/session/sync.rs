@@ -52,7 +52,7 @@ impl<S: ControlStream> Session<S> {
             .unwrap_or_default();
         for ns in namespaces {
             if let Ok(Some(record)) = self.ctx.namespaces.namespace_by_id(&ns).await {
-                self.send_event(label.clone(), Self::ns_meta_event(&record))
+                self.send_event(label.clone(), self.ns_meta_event(&record))
                     .await?;
             }
             // Convey the membership itself (not just the ns-meta) so the client
@@ -103,7 +103,7 @@ impl<S: ControlStream> Session<S> {
                         position: record.position,
                         kind: record.kind,
                         vanity: record.vanity.clone(),
-                        origin: None,
+                        origin: record.origin.as_deref().and_then(|o| o.parse().ok()),
                     },
                 )
                 .await?;
@@ -292,7 +292,7 @@ impl<S: ControlStream> Session<S> {
                         position: record.position,
                         kind: record.kind,
                         vanity: record.vanity.clone(),
-                        origin: None,
+                        origin: record.origin.as_deref().and_then(|o| o.parse().ok()),
                     },
                 )
                 .await?;
@@ -326,7 +326,7 @@ impl<S: ControlStream> Session<S> {
                     .await
                     .unwrap_or(false)
                 {
-                    self.send_event(label.clone(), Self::ns_meta_event(&record))
+                    self.send_event(label.clone(), self.ns_meta_event(&record))
                         .await?;
                 }
             }

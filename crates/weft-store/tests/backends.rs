@@ -957,9 +957,18 @@ where
     // -- channel metadata + delete (§6.3) --
     store.set_channel_topic(&name, "the topic").await.unwrap();
     store.set_channel_view_gated(&name, true).await.unwrap();
+    // Foreign-bridge §7a.2: a materialized replica records its origin URI.
+    store
+        .set_channel_origin(&name, "instagram://acme-corp/club/general")
+        .await
+        .unwrap();
     let record = store.channel(&name).await.unwrap().unwrap();
     assert_eq!(record.topic.as_deref(), Some("the topic"));
     assert!(record.view_gated);
+    assert_eq!(
+        record.origin.as_deref(),
+        Some("instagram://acme-corp/club/general")
+    );
     assert_eq!(record.policy.to_string(), "retained:7d");
     // WC7 freeze: independent of `restricted` — both can hold at once.
     assert!(!record.frozen && !record.restricted);

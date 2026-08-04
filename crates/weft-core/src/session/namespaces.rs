@@ -42,6 +42,12 @@ impl<S: ControlStream> Session<S> {
             Ok(None) => return self.no_such_target(label).await,
             Err(e) => return self.internal(label, &e).await,
         };
+        // A provider-managed namespace is joinable only while its provider is
+        // online (owner directive 2026-08-04) — the provider must relay the join
+        // foreign-side anyway. Uniform NO-SUCH-TARGET (invariant 1).
+        if self.ctx.origin_online(&record) == Some(false) {
+            return self.no_such_target(label).await;
+        }
         // From here on the immutable id is authoritative (scopes/channels).
         let ns_str = record.id.clone();
         let ns: weft_proto::NamespaceId = match ns_str.parse() {
@@ -194,8 +200,11 @@ impl<S: ControlStream> Session<S> {
 
         // The owner can't abandon their own namespace — leaving would orphan it.
         // They must TRANSFER ownership (§2.4 rung 1) or DELETE the namespace.
+        // A provider-managed namespace is exempt: its record owner is the
+        // sentinel (or a name-colliding user with no actual authority), and the
+        // provider — not any local account — governs it.
         if let Ok(Some(rec)) = self.ctx.namespaces.namespace_by_id(&ns_str).await {
-            if rec.owner == account {
+            if rec.origin.is_none() && rec.owner == account {
                 self.send_err(
                     label,
                     ErrCode::Policy,
@@ -363,8 +372,9 @@ impl<S: ControlStream> Session<S> {
     }
 
     /// Build the NS-META reply for a namespace record, including the §2.4
-    /// recovery announcement fields.
-    pub(super) fn ns_meta_event(record: &weft_store::NamespaceRecord) -> Event {
+    /// recovery announcement fields and — for a provider-managed namespace —
+    /// the live provider state (owner directive 2026-08-04).
+    pub(super) fn ns_meta_event(&self, record: &weft_store::NamespaceRecord) -> Event {
         Event::NsMeta {
             // Records always carry a valid id post-migration (0047 backfills legacy
             // rows; new namespaces mint at create).
@@ -391,6 +401,7 @@ impl<S: ControlStream> Session<S> {
             // clients badge it. Stored as a URI string; a malformed value (never
             // produced by our own writers) simply drops the badge.
             origin: record.origin.as_deref().and_then(|o| o.parse().ok()),
+            provider_online: self.ctx.origin_online(record),
         }
     }
 
@@ -554,7 +565,7 @@ impl<S: ControlStream> Session<S> {
                     error!("seed creator ns membership failed: {e}");
                 }
 
-                self.send_event(label, Self::ns_meta_event(&record)).await?;
+                self.send_event(label, self.ns_meta_event(&record)).await?;
                 Ok(Flow::Continue)
             }
             Ok(false) => {
@@ -757,7 +768,7 @@ impl<S: ControlStream> Session<S> {
                 return self.internal(label, &e).await;
             }
             record.welcome_channel = channel.map(str::to_string);
-            self.send_event(label, Self::ns_meta_event(&record)).await?;
+            self.send_event(label, self.ns_meta_event(&record)).await?;
             return Ok(Flow::Continue);
         }
         // §11.10 auto-federation reachability lives on its own column. It is off
@@ -776,7 +787,7 @@ impl<S: ControlStream> Session<S> {
                 return self.internal(label, &e).await;
             }
             record.federation = open;
-            self.send_event(label, Self::ns_meta_event(&record)).await?;
+            self.send_event(label, self.ns_meta_event(&record)).await?;
             return Ok(Flow::Continue);
         }
         if let Err(e) = self
@@ -800,7 +811,7 @@ impl<S: ControlStream> Session<S> {
             }
             _ => {}
         }
-        self.send_event(label, Self::ns_meta_event(&record)).await?;
+        self.send_event(label, self.ns_meta_event(&record)).await?;
         Ok(Flow::Continue)
     }
 
@@ -823,7 +834,7 @@ impl<S: ControlStream> Session<S> {
             return self.internal(label, &e).await;
         }
         record.visibility = visibility.to_string();
-        self.send_event(label, Self::ns_meta_event(&record)).await?;
+        self.send_event(label, self.ns_meta_event(&record)).await?;
         Ok(Flow::Continue)
     }
 
@@ -930,6 +941,7 @@ impl<S: ControlStream> Session<S> {
                 federation: false,
                 welcome: None,
                 origin: None,
+                provider_online: None,
             },
         )
         .await?;
@@ -955,7 +967,13 @@ impl<S: ControlStream> Session<S> {
             .then(|| public.last().map(|ns| ns.name.to_string()))
             .flatten();
         for record in &public {
-            self.send_event(label.clone(), Self::ns_meta_event(record))
+            // A provider-managed namespace whose provider is offline is
+            // undiscoverable (owner directive 2026-08-04) — same as absent.
+            if self.ctx.origin_online(record) == Some(false) {
+                continue;
+            }
+
+            self.send_event(label.clone(), self.ns_meta_event(record))
                 .await?;
         }
         if let Some(cursor) = next_cursor {
@@ -1036,8 +1054,8 @@ impl<S: ControlStream> Session<S> {
             .flatten();
         let event = updated
             .as_ref()
-            .map(Self::ns_meta_event)
-            .unwrap_or_else(|| Self::ns_meta_event(&record));
+            .map(|r| self.ns_meta_event(r))
+            .unwrap_or_else(|| self.ns_meta_event(&record));
         self.send_event(label, event).await?;
         Ok(Flow::Continue)
     }
@@ -1054,7 +1072,9 @@ impl<S: ControlStream> Session<S> {
         let Some(record) = self.ns_or_absent(label.clone(), &ns).await? else {
             return Ok(Flow::Continue);
         };
-        if record.owner != account {
+        // Owner-only, and never on a provider-managed namespace: its recovery
+        // machinery is meaningless (root_key is empty; the provider governs).
+        if record.origin.is_some() || record.owner != account {
             return self.cap_required(label, "ns-admin").await;
         }
         let key_list: Vec<String> = keys
@@ -1095,11 +1115,11 @@ impl<S: ControlStream> Session<S> {
             .flatten();
         let event = updated
             .as_ref()
-            .map(Self::ns_meta_event)
+            .map(|r| self.ns_meta_event(r))
             .unwrap_or_else(|| {
                 let mut r = record.clone();
                 r.recovery_set = Some((m, key_list));
-                Self::ns_meta_event(&r)
+                self.ns_meta_event(&r)
             });
         self.send_event(label, event).await?;
         Ok(Flow::Continue)
@@ -1200,7 +1220,7 @@ impl<S: ControlStream> Session<S> {
             info!(%name, rung, new_owner = %signed.record.new_owner, "namespace seized (§2.4 rung 3, immediate)");
             let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
             if let Some(record) = updated {
-                self.send_event(label, Self::ns_meta_event(&record)).await?;
+                self.send_event(label, self.ns_meta_event(&record)).await?;
             }
             return Ok(Flow::Continue);
         }
@@ -1225,7 +1245,7 @@ impl<S: ControlStream> Session<S> {
         // ns-member broadcast, a follow-up.)
         let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
         if let Some(record) = updated {
-            self.send_event(label, Self::ns_meta_event(&record)).await?;
+            self.send_event(label, self.ns_meta_event(&record)).await?;
         }
         Ok(Flow::Continue)
     }
@@ -1257,7 +1277,7 @@ impl<S: ControlStream> Session<S> {
         debug!(%name, "recovery cancelled by root veto");
         let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
         if let Some(record) = updated {
-            self.send_event(label, Self::ns_meta_event(&record)).await?;
+            self.send_event(label, self.ns_meta_event(&record)).await?;
         }
         Ok(Flow::Continue)
     }
@@ -1342,7 +1362,7 @@ impl<S: ControlStream> Session<S> {
         }
         // The layout fetch also carries the namespace meta (categories, title,
         // …) so the client renders category groups purely from server state.
-        self.send_event(label.clone(), Self::ns_meta_event(&record))
+        self.send_event(label.clone(), self.ns_meta_event(&record))
             .await?;
         let channels = match self.ctx.channel_store.channels_in_namespace(&ns_str).await {
             Ok(channels) => channels,
@@ -1358,7 +1378,7 @@ impl<S: ControlStream> Session<S> {
                     position: record.position,
                     kind,
                     vanity: record.vanity,
-                    origin: None, // channel-level origin lands with materialization
+                    origin: record.origin.as_deref().and_then(|o| o.parse().ok()),
                 },
             )
             .await?;

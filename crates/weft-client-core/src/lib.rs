@@ -279,6 +279,12 @@ pub enum ClientEvent {
         categories: Vec<String>,
         /// §11.10 auto-federation reachable (owner opened it to bridging).
         federation: bool,
+        /// Foreign-bridge §7a.2: the origin URI of a provider-managed replica
+        /// (badge "Matrix · matrix.org"); `None` = native.
+        origin: Option<String>,
+        /// Provider liveness for a replica (`None` = native): the client shows a
+        /// "bridge offline" indicator when `Some(false)`.
+        provider_online: Option<bool>,
     },
     /// `CHANNEL-LAYOUT <#chan> <position>` with optional `category=`/`kind=` (§7).
     /// `channel_kind` is `text` (default) or `voice` (§16 voice-only room) —
@@ -916,6 +922,8 @@ pub fn on_line<E: EventSink>(
             recovery_pending,
             categories,
             federation,
+            origin,
+            provider_online,
             ..
         } => sink.emit(ClientEvent::NsMeta {
             id: id.to_string(),
@@ -929,6 +937,8 @@ pub fn on_line<E: EventSink>(
             recovery_rung: recovery_pending.map(|(_, rung)| rung),
             categories,
             federation,
+            origin: origin.map(|o| o.to_string()),
+            provider_online,
         }),
         Event::ChannelLayout {
             channel,

@@ -56,9 +56,38 @@ slices land.
       `PROVISION` routing via `provider_for_scheme`; unauthorized scheme fails the whole registration.
       Welcome feature is now uniformly `"plugin"`. Tests: scheme-registration routes PROVISION (the
       Instagram case) + unauthorized-scheme refused. Workspace green (core 206), clippy clean.
-- [ ] **3. Materialization success path** (M–L) — sentinel account provisioning; `PROVISION-OK` +
-      provider `NS-META`/`CHANNEL-LAYOUT` assertions → create origin-marked ns + channels; the
-      owner-authority gate; join the requester + roster reply. **`NS JOIN matrix://…` succeeds.**
+- [x] **3. Materialization success path** (M–L) — DONE 2026-08-04. **`NS JOIN <uri>` succeeds.**
+      Providers assert structure with **normal verbs on URI targets** (owner call: no bespoke
+      assert verb) — `NS-META <uri> <vis>` / `CHANNEL-LAYOUT <uri> <pos>` parse to foreign-assertion
+      variants (the `NS JOIN` routing precedent); weftd mints ids, owner = suspended sentinel
+      (`foreign`), `root_key=""`, replies with the minted badged mapping. `PROVISION-OK <job>` stays
+      bare: resolves the pending URI by origin → ns membership → parked client gets NS-META +
+      CHANNEL-LAYOUT + labeled NS-MEMBER; missing assert = loud provider-bug failure. Authority:
+      the owner-shortcut cap gate + NS-LEAVE + RECOVERY-SET all origin-gated. `ChannelRecord.origin`
+      (migration 0053, `set_channel_origin`) flows into every layout emission (SYNC/CHANNELS/acks).
+      Tests: the full vertical (join → PROVISION → assert ns+channel → OK → badged ack, known-local
+      second joiner, cap-required on NS META) + store contract. Workspace green (core 208, proto
+      135), clippy clean. *Deferred: `POLICY <uri>` assertion (channels default `retained:90d`);
+      structural update-sync on re-assert (currently idempotent mapping re-send); DISCOVER of a
+      `public` replica is inherited free via `list_public` (untested).*
+- [~] **3b. Provider lifecycle & GC** (S–M, from the 2026-08-04 failure-path audit) —
+      - [x] **(e) Provider liveness gating + indicator (owner directive 2026-08-04):** a virtual
+            namespace is **online only while its provider is** — offline ⇒ excluded from DISCOVER
+            + `NS JOIN` refused (`NO-SUCH-TARGET`, uniform); members get live `NS-META`
+            `provider=online|offline` pushes on provider connect/disconnect (`push_provider_state`
+            via directory notify). Wire: `NsMeta.provider_online` (`provider=` tag);
+            `ctx.origin_online`/`scheme_online`; `ns_meta_event` is now a `self` method carrying
+            live state everywhere (SYNC/DISCOVER/acks). `namespaces_with_origin` store method
+            (mem+PG). client-core `ClientEvent::NsMeta` passes `origin` + `provider_online`
+            through. Full-cycle test (online→discover/join ✓ → death→offline push + join/discover
+            refused → reconnect→online push + join ✓). *Svelte badge UI = the client display slice.*
+      - [ ] (a) **operator escape hatch**: operator `NS DELETE` when `origin.is_some()` (orphaned
+            virtual namespaces are otherwise IMMORTAL — nobody holds ns-admin);
+      - [ ] (b) **`REALM WITHDRAW` real semantics** (framework §3.1 divergence): withdraw =
+            tombstone the realm's namespaces, not just clear the binding;
+      - [ ] (c) deterministic `provider_for_scheme` (two providers, one scheme — HashMap order today);
+      - [ ] (d) exclude `origin` namespaces from the owner-string's `NS CREATE` quota count.
+      *Offline-relay queueing stays an explicit slice-5 design decision.*
 - [ ] **4. Ingestion** (M) — provider `@as` `MSG`/`EDIT`/`DELETE`/`REACT`/`MEMBER` → replica channel
       actors mint events carrying `foreign=`. **Matrix → WEFT messages flow.**
 - [ ] **5. Outbound relay** (M) — local posts/edits/reacts/joins in origin-marked channels forward to

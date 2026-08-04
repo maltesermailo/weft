@@ -410,12 +410,16 @@ pub struct AutoBridgeRequest {
 /// A parked `NS JOIN <uri>` awaiting the adapter's `PROVISION-OK`/`PROVISION-ERR`
 /// (foreign-bridge framework §3.3). The completion (roster or NO-SUCH-TARGET) is
 /// pushed to the requester session's raw-line writer, echoing the join's label.
-struct PendingProvision {
-    reply: tokio::sync::mpsc::Sender<String>,
-    label: Option<String>,
+pub(crate) struct PendingProvision {
+    pub(crate) reply: tokio::sync::mpsc::Sender<String>,
+    pub(crate) label: Option<String>,
     /// The provider the PROVISION was routed to — so its death can fail this
     /// parked join instead of leaving the client hanging (§3.5 label discipline).
-    provider: String,
+    pub(crate) provider: String,
+    /// The joined URI + requester, for the PROVISION-OK completion (resolve the
+    /// asserted namespace by origin, add the membership, ack the join).
+    pub(crate) uri: weft_proto::ForeignUri,
+    pub(crate) account: Account,
 }
 
 /// A parked requester's raw-line writer + request label, for a cross-session
@@ -1233,6 +1237,7 @@ impl ServerCtx {
         uri: &weft_proto::ForeignUri,
         reply: tokio::sync::mpsc::Sender<String>,
         label: Option<String>,
+        account: Account,
     ) -> bool {
         let Some((provider, control)) = self.provider_for_scheme(&scheme) else {
             return false;
@@ -1261,6 +1266,8 @@ impl ServerCtx {
                 reply,
                 label,
                 provider,
+                uri: uri.clone(),
+                account,
             },
         );
 
@@ -1277,15 +1284,11 @@ impl ServerCtx {
 
     /// §3.3 remove + return a parked provisioning request by job token: its
     /// requester writer + the join's label. `None` for an unknown/expired job.
-    pub(crate) fn complete_provision(
-        &self,
-        job: &str,
-    ) -> Option<PendingReply> {
+    pub(crate) fn complete_provision(&self, job: &str) -> Option<PendingProvision> {
         self.pending_provision
             .lock()
             .expect("pending_provision lock")
             .remove(job)
-            .map(|p| (p.reply, p.label))
     }
 
     /// A provider session died with work in flight: fail every request parked on
@@ -1415,6 +1418,36 @@ impl ServerCtx {
         if !entry.schemes.contains(&scheme) {
             entry.schemes.push(scheme);
         }
+    }
+
+    /// Whether a provider currently serves `scheme` (connected + registered).
+    pub(crate) fn scheme_online(&self, scheme: &weft_proto::Scheme) -> bool {
+        let map = self.plugin_registry.lock().expect("plugin_registry lock");
+
+        map.values().any(|r| r.schemes.contains(scheme))
+    }
+
+    /// A namespace's provider liveness (owner directive 2026-08-04: a virtual
+    /// namespace is online only while its provider is): `None` for a native
+    /// namespace, else whether the origin's scheme has a live provider. An
+    /// unparseable stored origin reads as offline (never produced by our own
+    /// writers).
+    pub(crate) fn origin_online(&self, record: &weft_store::NamespaceRecord) -> Option<bool> {
+        let origin = record.origin.as_deref()?;
+        let online = origin
+            .parse::<weft_proto::ForeignUri>()
+            .map(|uri| self.scheme_online(uri.scheme()))
+            .unwrap_or(false);
+
+        Some(online)
+    }
+
+    /// The schemes a registered provider currently serves (for its liveness
+    /// fan-out on disconnect).
+    pub(crate) fn provider_schemes(&self, id: &str) -> Vec<weft_proto::Scheme> {
+        let map = self.plugin_registry.lock().expect("plugin_registry lock");
+
+        map.get(id).map(|r| r.schemes.clone()).unwrap_or_default()
     }
 
     /// The id + writer of the provider handling `scheme`, if any (§18 cap. 6).
@@ -1602,7 +1635,12 @@ impl ServerCtx {
             }
             if let Some(ns_id) = scope_namespace(scope) {
                 if let Some(ns) = self.namespaces.namespace_by_id(&ns_id).await? {
-                    if ns.owner == *account {
+                    // The owner-shortcut is GATED on a native namespace: a
+                    // provider-managed (origin-marked) replica is governed by its
+                    // provider, never by a local owner account — the sentinel
+                    // owner (or a name-colliding user) confers nothing (§7,
+                    // Phase-0 decision 2026-08-04).
+                    if ns.origin.is_none() && ns.owner == *account {
                         return Ok(true);
                     }
                 }

@@ -160,6 +160,11 @@ pub struct ChannelRecord {
     /// §16 channel kind — `Text` (default) or a voice-only `Voice` room. Set at
     /// creation, immutable after.
     pub kind: ChannelKind,
+    /// Foreign-bridge framework (§7a.2): the foreign room this channel
+    /// replicates (`<scheme>://<realm>/<space>/<segment>`), else `None` for a
+    /// native channel. Set at materialization; surfaced as the `origin=` tag on
+    /// `CHANNEL-LAYOUT` for client badging + provider mapping.
+    pub origin: Option<String>,
 }
 
 /// §10.3 a per-account display profile: an optional display name (nick) and an

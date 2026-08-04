@@ -956,6 +956,7 @@ impl ChannelStore for MemoryStore {
                 category: None,
                 position: 0,
                 kind,
+                origin: None,
             });
         inner.stamp_channel(name);
         Ok(())
@@ -1008,6 +1009,17 @@ impl ChannelStore for MemoryStore {
         if let Some(record) = inner.channels.get_mut(name) {
             record.topic = Some(topic.to_string());
         }
+        inner.stamp_channel(name);
+        Ok(())
+    }
+
+    async fn set_channel_origin(&self, name: &ChannelName, origin: &str) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+
+        if let Some(record) = inner.channels.get_mut(name) {
+            record.origin = Some(origin.to_string());
+        }
+
         inner.stamp_channel(name);
         Ok(())
     }
@@ -1455,6 +1467,16 @@ impl NamespaceStore for MemoryStore {
             .values()
             .find(|r| r.origin.as_deref() == Some(origin))
             .cloned())
+    }
+
+    async fn namespaces_with_origin(&self) -> Result<Vec<NamespaceRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .namespaces
+            .values()
+            .filter(|r| r.origin.is_some())
+            .cloned()
+            .collect())
     }
 
     async fn vanity_locked(&self, name: &NamespaceName) -> Result<bool, StoreError> {

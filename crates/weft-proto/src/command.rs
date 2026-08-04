@@ -558,8 +558,11 @@ pub enum Command {
     /// (framework §3.1): weftd withdraws that realm's foreign namespaces. Distinct
     /// from an operator `NETBLOCK REALM` (a block, not a disconnect).
     RealmWithdraw,
-    /// `PROVISION-OK <job>` — control-link: the adapter finished provisioning the
-    /// space for `job`, so the parked `NS JOIN` completes (framework §3.3).
+    /// `PROVISION-OK <job>` — the provider finished provisioning the space for
+    /// `job`: it has already `NS-ASSERT`ed the namespace (same session, ordered),
+    /// so weftd resolves the pending URI by origin and completes the parked
+    /// `NS JOIN` (framework §3.3). No asserted namespace ⇒ the join fails
+    /// `NO-SUCH-TARGET` (a provider bug, logged).
     ProvisionOk { job: String },
     /// `PROVISION-ERR <job>` — control-link: provisioning failed (absent / private
     /// / encrypted / unjoinable). weftd answers the parked join `NO-SUCH-TARGET`,
