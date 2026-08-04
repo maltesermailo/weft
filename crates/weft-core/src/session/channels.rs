@@ -93,7 +93,8 @@ impl<S: ControlStream> Session<S> {
         // push its layout + policy live so it appears without a reconnect.
         if let Some(ns) = canonical.namespace() {
             if let Ok(members) = self.ctx.memberships.ns_members(ns).await {
-                for member in members {
+                // Pushes reach local sessions; a bridged member has none (4c).
+                for member in members.iter().filter_map(|m| weft_store::local_member(m)) {
                     // The creator receives the labeled `POLICY` ack below — skip
                     // the redundant self-push (it would otherwise pollute their own
                     // CHANNEL CREATE response now that the ns owner is a member).

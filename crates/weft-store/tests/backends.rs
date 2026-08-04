@@ -2034,23 +2034,43 @@ where
     let ns_gen: weft_proto::ChannelName = format!("#{ns}/general").parse().unwrap();
     let ns_sec: weft_proto::ChannelName = format!("#{ns}/secret").parse().unwrap();
 
-    assert!(!store.is_ns_member(&nm_a, &ns).await.unwrap());
-    assert!(store.ns_memberships(&nm_a).await.unwrap().is_empty());
+    assert!(!store.is_ns_member(nm_a.as_str(), &ns).await.unwrap());
+    assert!(store.ns_memberships(nm_a.as_str()).await.unwrap().is_empty());
 
-    store.set_ns_membership(&nm_a, &ns, 100).await.unwrap();
-    store.set_ns_membership(&nm_b, &ns, 200).await.unwrap();
-    store.set_ns_membership(&nm_a, &ns, 999).await.unwrap(); // idempotent, keeps 100
-    assert!(store.is_ns_member(&nm_a, &ns).await.unwrap());
-    assert_eq!(store.ns_memberships(&nm_a).await.unwrap(), vec![ns.clone()]);
+    store.set_ns_membership(nm_a.as_str(), &ns, 100).await.unwrap();
+    store.set_ns_membership(nm_b.as_str(), &ns, 200).await.unwrap();
+    store.set_ns_membership(nm_a.as_str(), &ns, 999).await.unwrap(); // idempotent, keeps 100
+    assert!(store.is_ns_member(nm_a.as_str(), &ns).await.unwrap());
+    assert_eq!(
+        store.ns_memberships(nm_a.as_str()).await.unwrap(),
+        vec![ns.clone()]
+    );
     let mut ns_mem = store.ns_members(&ns).await.unwrap();
-    ns_mem.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    assert_eq!(ns_mem, vec![nm_a.clone(), nm_b.clone()]);
+    ns_mem.sort();
+    assert_eq!(ns_mem, vec![nm_a.to_string(), nm_b.to_string()]);
     // Join times ride along, ordered ascending — and the idempotent re-join
     // kept nm_a's original 100 (not 999).
     assert_eq!(
         store.ns_members_joined(&ns).await.unwrap(),
-        vec![(nm_a.clone(), 100), (nm_b.clone(), 200)]
+        vec![(nm_a.to_string(), 100), (nm_b.to_string(), 200)]
     );
+
+    // 4c: a **bridged** member key (`user@network`) lives in the same table — no
+    // migration needed — and `local_member` is what separates the two forms.
+    let foreign_key = "alice@matrix.org";
+    store.set_ns_membership(foreign_key, &ns, 300).await.unwrap();
+    assert!(store.is_ns_member(foreign_key, &ns).await.unwrap());
+    let mut mixed = store.ns_members(&ns).await.unwrap();
+    mixed.sort();
+    assert!(mixed.contains(&foreign_key.to_string()));
+    assert_eq!(mixed.len(), 3); // counted like any member
+    assert!(weft_store::local_member(foreign_key).is_none());
+    assert_eq!(
+        weft_store::local_member(nm_a.as_str()).as_ref(),
+        Some(&nm_a)
+    );
+    store.clear_ns_membership(foreign_key, &ns).await.unwrap();
+    assert!(!store.is_ns_member(foreign_key, &ns).await.unwrap());
 
     // Hide overrides: a PART of one channel while staying in the server.
     assert!(!store.is_hidden(&nm_a, &ns_gen).await.unwrap());
@@ -2072,10 +2092,10 @@ where
     );
 
     // NS LEAVE drops membership AND every remaining hide override for the ns.
-    store.clear_ns_membership(&nm_a, &ns).await.unwrap();
-    assert!(!store.is_ns_member(&nm_a, &ns).await.unwrap());
+    store.clear_ns_membership(nm_a.as_str(), &ns).await.unwrap();
+    assert!(!store.is_ns_member(nm_a.as_str(), &ns).await.unwrap());
     assert!(store.hidden_channels(&nm_a).await.unwrap().is_empty());
-    assert_eq!(store.ns_members(&ns).await.unwrap(), vec![nm_b.clone()]);
+    assert_eq!(store.ns_members(&ns).await.unwrap(), vec![nm_b.to_string()]);
 
     // ---- v0.12 sync cursor + delta feed ----
     let sync_scope: Scope = Scope::Channel(format!("#sync-{tag}").parse().unwrap());

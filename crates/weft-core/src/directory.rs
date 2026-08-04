@@ -647,7 +647,7 @@ impl Actor {
                 };
                 self.persist(record).await;
                 let event = Event::Message(Box::new(MessageEvent {
-                    target: Target::User(to.clone()),
+                    target: Target::User { account: to.clone(), network: None },
                     sender: self.user(&from),
                     msgid,
                     body,
@@ -815,7 +815,7 @@ impl Actor {
                 })
                 .await;
                 let event = Event::Edited {
-                    target: Target::User(peer.clone()),
+                    target: Target::User { account: peer.clone(), network: None },
                     user: self.user(&from),
                     msgid,
                     edit_of: root,
@@ -840,7 +840,7 @@ impl Actor {
                 })
                 .await;
                 let event = Event::Deleted {
-                    target: Target::User(peer.clone()),
+                    target: Target::User { account: peer.clone(), network: None },
                     msgid: root,
                     by: Some(self.user(&from)),
                 };
@@ -867,7 +867,7 @@ impl Actor {
                 })
                 .await;
                 let event = Event::Reaction {
-                    target: Target::User(peer.clone()),
+                    target: Target::User { account: peer.clone(), network: None },
                     msgid: root,
                     emoji,
                     op: if add {

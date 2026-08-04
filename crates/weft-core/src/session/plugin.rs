@@ -543,13 +543,32 @@ impl<S: ControlStream> Session<S> {
         foreign: String,
         cmd: Command,
     ) -> io::Result<Flow> {
-        let Command::Msg { target, body, meta } = cmd else {
-            debug!("unsupported provider-ingest verb — dropped");
-            return Ok(Flow::Continue);
+        // Every ingestable verb names its channel differently: MSG + JOIN/PART by
+        // target/channel, the mutations by the msgid's channel.
+        let cmd_kind = match &cmd {
+            Command::Part { .. } => MemberAction::Part,
+            _ => MemberAction::Join,
         };
-        let Target::Channel(channel) = target else {
-            debug!("provider ingest to a non-channel target — dropped");
-            return Ok(Flow::Continue);
+        let channel = match &cmd {
+            Command::Msg {
+                target: Target::Channel(channel),
+                ..
+            } => channel.clone(),
+            Command::Join { channel, .. } | Command::Part { channel, .. } => channel.clone(),
+            Command::Edit { msgid, .. }
+            | Command::Delete { msgid }
+            | Command::React { msgid, .. }
+            | Command::Unreact { msgid, .. } => match self.channel_of_msgid(msgid).await {
+                Some(channel) => channel,
+                None => {
+                    debug!("provider ingest for an unknown msgid — dropped");
+                    return Ok(Flow::Continue);
+                }
+            },
+            _ => {
+                debug!("unsupported provider-ingest verb — dropped");
+                return Ok(Flow::Continue);
+            }
         };
 
         // The channel must be a replica this provider may speak for.
@@ -585,10 +604,94 @@ impl<S: ControlStream> Session<S> {
         // while `foreign=` carries the exact native handle for display.
         let sender = puppet_user(&foreign, &origin, &self.ctx.info.network);
 
-        handle
-            .relay_publish_as(sender, body.unwrap_or_default(), meta, None, Some(foreign))
-            .await;
+        // Mutations reuse the §11.13 home-authoritative relay path, which already
+        // applies a (possibly foreign) sender's edit/delete/react and mints the
+        // bookkeeping msgid. Authorship was verified upstream: the provider owns
+        // the room, so it speaks for its users.
+        match cmd {
+            Command::Msg { body, meta, .. } => {
+                handle
+                    .relay_publish_as(sender, body.unwrap_or_default(), meta, None, Some(foreign))
+                    .await;
+            }
+            Command::Edit { msgid, body } => {
+                handle
+                    .relay_mutate_as(sender, msgid, "edit".into(), body, Some(foreign))
+                    .await;
+            }
+            Command::Delete { msgid } => {
+                handle
+                    .relay_mutate_as(sender, msgid, "delete".into(), String::new(), Some(foreign))
+                    .await;
+            }
+            Command::React { msgid, emoji } => {
+                handle
+                    .relay_mutate_as(sender, msgid, "react-add".into(), emoji, Some(foreign))
+                    .await;
+            }
+            Command::Unreact { msgid, emoji } => {
+                handle
+                    .relay_mutate_as(sender, msgid, "react-remove".into(), emoji, Some(foreign))
+                    .await;
+            }
+            // 4c: a foreign member's namespace membership persists under its
+            // member key, so it survives restarts and appears in every derived
+            // roster / member count. Announced to local members as an ordinary
+            // MEMBER carrying `foreign=`.
+            Command::Join { .. } | Command::Part { channel: _, .. } => {
+                let Some(ns) = channel.namespace() else {
+                    return Ok(Flow::Continue);
+                };
+                let joining = matches!(cmd_kind, MemberAction::Join);
+                let key = sender.to_string();
+
+                let wrote = if joining {
+                    self.ctx
+                        .memberships
+                        .set_ns_membership(&key, ns, unix_now() as i64)
+                        .await
+                } else {
+                    self.ctx.memberships.clear_ns_membership(&key, ns).await
+                };
+                if let Err(e) = wrote {
+                    error!("foreign membership write failed: {e}");
+                    return Ok(Flow::Continue);
+                }
+
+                let count = self
+                    .ctx
+                    .memberships
+                    .ns_members(ns)
+                    .await
+                    .map(|m| m.len() as u64)
+                    .ok();
+                handle
+                    .announce(Event::Member {
+                        channel: channel.clone(),
+                        user: sender,
+                        action: cmd_kind,
+                        display: None,
+                        count,
+                        foreign: Some(foreign),
+                    })
+                    .await;
+            }
+            _ => return Ok(Flow::Continue),
+        }
+
         Ok(Flow::Continue)
+    }
+
+    /// The channel a stored msgid belongs to — the mutation verbs name their
+    /// target by msgid, not channel (slice 4).
+    async fn channel_of_msgid(&self, msgid: &MsgId) -> Option<ChannelName> {
+        match self.ctx.events.find_root(msgid.ulid()).await {
+            Ok(Some(record)) => match record.scope {
+                Scope::Channel(channel) => Some(channel),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// §3.1 REALM WITHDRAW: the provider says the bound realm is **gone** (deleted
@@ -630,7 +733,8 @@ impl<S: ControlStream> Session<S> {
                     Ok(members) => {
                         let tombstone = Self::deletion_tombstone(&record);
 
-                        for member in members {
+                        // Local sessions only — a bridged member has none (4c).
+                        for member in members.iter().filter_map(|m| weft_store::local_member(m)) {
                             self.ctx.directory.notify(member, tombstone.clone()).await;
                         }
                         info!(ns = %record.id, %realm, "virtual namespace withdrawn");
@@ -666,7 +770,8 @@ impl<S: ControlStream> Session<S> {
 
             let event = self.ns_meta_event(&record);
             if let Ok(members) = self.ctx.memberships.ns_members(&record.id).await {
-                for member in members {
+                // Local sessions only — a bridged member has none (4c).
+                for member in members.iter().filter_map(|m| weft_store::local_member(m)) {
                     self.ctx.directory.notify(member, event.clone()).await;
                 }
             }

@@ -47,7 +47,7 @@ impl<S: ControlStream> Session<S> {
         let namespaces = self
             .ctx
             .memberships
-            .ns_memberships(&account)
+            .ns_memberships(account.as_str())
             .await
             .unwrap_or_default();
         for ns in namespaces {
@@ -220,7 +220,10 @@ impl<S: ControlStream> Session<S> {
         if let Ok(partners) = self.ctx.events.dm_partners(&account).await {
             for partner in partners {
                 let scope = Scope::dm(account.clone(), partner.clone());
-                target_by_scope.insert(scope.as_key(), Target::User(partner));
+                target_by_scope.insert(
+                    scope.as_key(),
+                    Target::User { account: partner, network: None },
+                );
                 scopes.push(scope);
             }
         }
@@ -322,7 +325,7 @@ impl<S: ControlStream> Session<S> {
                 if self
                     .ctx
                     .memberships
-                    .is_ns_member(&account, &record.id)
+                    .is_ns_member(account.as_str(), &record.id)
                     .await
                     .unwrap_or(false)
                 {

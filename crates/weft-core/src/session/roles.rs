@@ -522,7 +522,9 @@ impl<S: ControlStream> Session<S> {
                     }
                 }
                 if let Ok(members) = self.ctx.memberships.ns_members(&ns).await {
-                    for member in members {
+                    // Grant overrides key on a local account's ULID; a bridged
+                    // member holds none (4c).
+                    for member in members.iter().filter_map(|m| weft_store::local_member(m)) {
                         if role_covered.contains(member.as_str()) {
                             continue;
                         }

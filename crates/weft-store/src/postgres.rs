@@ -3349,7 +3349,7 @@ impl MembershipStore for PgStore {
 
     async fn set_ns_membership(
         &self,
-        account: &Account,
+        member: &str,
         namespace: &str,
         joined_ms: i64,
     ) -> Result<(), StoreError> {
@@ -3358,7 +3358,7 @@ impl MembershipStore for PgStore {
             "INSERT INTO weft_ns_membership (account, namespace, joined_ms) VALUES ($1,$2,$3) \
              ON CONFLICT (account, namespace) DO NOTHING",
         )
-        .bind(account.as_str())
+        .bind(member)
         .bind(namespace)
         .bind(joined_ms)
         .execute(&self.pool)
@@ -3367,14 +3367,10 @@ impl MembershipStore for PgStore {
         Ok(())
     }
 
-    async fn clear_ns_membership(
-        &self,
-        account: &Account,
-        namespace: &str,
-    ) -> Result<(), StoreError> {
+    async fn clear_ns_membership(&self, member: &str, namespace: &str) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await.map_err(backend_err)?;
         sqlx::query("DELETE FROM weft_ns_membership WHERE account = $1 AND namespace = $2")
-            .bind(account.as_str())
+            .bind(member)
             .bind(namespace)
             .execute(&mut *tx)
             .await
@@ -3385,7 +3381,7 @@ impl MembershipStore for PgStore {
             "DELETE FROM weft_channel_hide \
              WHERE account = $1 AND substring(channel from '#([^/]+)/') = $2",
         )
-        .bind(account.as_str())
+        .bind(member)
         .bind(namespace)
         .execute(&mut *tx)
         .await
@@ -3394,10 +3390,10 @@ impl MembershipStore for PgStore {
         Ok(())
     }
 
-    async fn is_ns_member(&self, account: &Account, namespace: &str) -> Result<bool, StoreError> {
+    async fn is_ns_member(&self, member: &str, namespace: &str) -> Result<bool, StoreError> {
         let row =
             sqlx::query("SELECT 1 FROM weft_ns_membership WHERE account = $1 AND namespace = $2")
-                .bind(account.as_str())
+                .bind(member)
                 .bind(namespace)
                 .fetch_optional(&self.pool)
                 .await
@@ -3405,9 +3401,9 @@ impl MembershipStore for PgStore {
         Ok(row.is_some())
     }
 
-    async fn ns_memberships(&self, account: &Account) -> Result<Vec<String>, StoreError> {
+    async fn ns_memberships(&self, member: &str) -> Result<Vec<String>, StoreError> {
         let rows = sqlx::query("SELECT namespace FROM weft_ns_membership WHERE account = $1")
-            .bind(account.as_str())
+            .bind(member)
             .fetch_all(&self.pool)
             .await
             .map_err(backend_err)?;
@@ -3417,22 +3413,16 @@ impl MembershipStore for PgStore {
             .collect())
     }
 
-    async fn ns_members(&self, namespace: &str) -> Result<Vec<Account>, StoreError> {
+    async fn ns_members(&self, namespace: &str) -> Result<Vec<String>, StoreError> {
         let rows = sqlx::query("SELECT account FROM weft_ns_membership WHERE namespace = $1")
             .bind(namespace)
             .fetch_all(&self.pool)
             .await
             .map_err(backend_err)?;
-        rows.iter()
-            .map(|r| {
-                r.get::<&str, _>("account")
-                    .parse()
-                    .map_err(|_| StoreError::Backend("corrupt ns membership account".to_string()))
-            })
-            .collect()
+        Ok(rows.iter().map(|r| r.get::<String, _>("account")).collect())
     }
 
-    async fn ns_members_joined(&self, namespace: &str) -> Result<Vec<(Account, i64)>, StoreError> {
+    async fn ns_members_joined(&self, namespace: &str) -> Result<Vec<(String, i64)>, StoreError> {
         let rows = sqlx::query(
             "SELECT account, joined_ms FROM weft_ns_membership WHERE namespace = $1 \
              ORDER BY joined_ms ASC, account ASC",
@@ -3441,14 +3431,10 @@ impl MembershipStore for PgStore {
         .fetch_all(&self.pool)
         .await
         .map_err(backend_err)?;
-        rows.iter()
-            .map(|r| {
-                let account = r.get::<&str, _>("account").parse().map_err(|_| {
-                    StoreError::Backend("corrupt ns membership account".to_string())
-                })?;
-                Ok((account, r.get::<i64, _>("joined_ms")))
-            })
-            .collect()
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<String, _>("account"), r.get::<i64, _>("joined_ms")))
+            .collect())
     }
 
     async fn set_hidden(&self, account: &Account, channel: &ChannelName) -> Result<(), StoreError> {

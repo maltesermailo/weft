@@ -207,13 +207,13 @@ impl<S: ControlStream> Session<S> {
                         let first_join = !self
                             .ctx
                             .memberships
-                            .is_ns_member(&account, &ns)
+                            .is_ns_member(account.as_str(), &ns)
                             .await
                             .unwrap_or(false);
                         if let Err(e) = self
                             .ctx
                             .memberships
-                            .set_ns_membership(&account, &ns, unix_now() as i64)
+                            .set_ns_membership(account.as_str(), &ns, unix_now() as i64)
                             .await
                         {
                             return self.internal(label, &e).await;

@@ -1651,7 +1651,7 @@ impl<S: ControlStream> Session<S> {
                 let is_ns = self
                     .ctx
                     .memberships
-                    .is_ns_member(account, ns)
+                    .is_ns_member(account.as_str(), ns)
                     .await
                     .unwrap_or(false);
                 if !is_ns {
@@ -1702,7 +1702,7 @@ impl<S: ControlStream> Session<S> {
         let namespaces = self
             .ctx
             .memberships
-            .ns_memberships(account)
+            .ns_memberships(account.as_str())
             .await
             .unwrap_or_default();
         for ns in namespaces {
@@ -1745,12 +1745,24 @@ impl<S: ControlStream> Session<S> {
     /// who hide it and those without `view` (Part 1.3). For a non-view-gated
     /// channel the view filter is a no-op, so only gated channels pay the
     /// per-member cap check.
+    /// Returns full `UserRef`s: local members on our network, plus **bridged
+    /// members** on their own foreign network (4c) — the provider's roster is
+    /// authoritative for those, so hide-overrides and local view-caps (both
+    /// local-client concepts) don't apply to them.
     pub(super) async fn channel_roster(
         &self,
         channel: &ChannelName,
-    ) -> Result<Vec<Account>, weft_store::StoreError> {
+    ) -> Result<Vec<UserRef>, weft_store::StoreError> {
+        let home = self.ctx.info.network.clone();
         let Some(ns) = channel.namespace() else {
-            return self.ctx.memberships.members(channel).await;
+            return Ok(self
+                .ctx
+                .memberships
+                .members(channel)
+                .await?
+                .into_iter()
+                .map(|a| UserRef::new(a, home.clone()))
+                .collect());
         };
         if ns.parse::<weft_proto::NamespaceId>().is_err() {
             return Ok(Vec::new());
@@ -1764,14 +1776,24 @@ impl<S: ControlStream> Session<S> {
             .into_iter()
             .collect();
         let mut out = Vec::with_capacity(members.len());
-        for m in members {
-            if hiders.contains(&m) {
-                continue;
+        for key in members {
+            match weft_store::local_member(&key) {
+                Some(account) => {
+                    if hiders.contains(&account) {
+                        continue;
+                    }
+                    if self.view_gated_denied(channel, &account).await {
+                        continue;
+                    }
+                    out.push(UserRef::new(account, home.clone()));
+                }
+                // A bridged member (4c): no local hide override or view cap.
+                None => {
+                    if let Ok(user) = key.parse::<UserRef>() {
+                        out.push(user);
+                    }
+                }
             }
-            if self.view_gated_denied(channel, &m).await {
-                continue;
-            }
-            out.push(m);
         }
         Ok(out)
     }

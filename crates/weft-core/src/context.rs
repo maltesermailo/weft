@@ -1701,7 +1701,7 @@ impl ServerCtx {
         // per-channel baseline set from the channel-permission editor.
         if let Actor::Local(account) = actor {
             if let Some(ns_name) = scope_namespace(scope) {
-                if self.memberships.is_ns_member(account, &ns_name).await? {
+                if self.memberships.is_ns_member(account.as_str(), &ns_name).await? {
                     // Widest first (`ns:`), then the channel's own baseline.
                     let mut baseline_scopes = vec![format!("ns:{ns_name}")];
                     if let TokenScope::Channel(chan) = scope {

@@ -229,7 +229,7 @@ impl<S: ControlStream> Session<S> {
         if let Err(e) = self
             .ctx
             .memberships
-            .set_ns_membership(&pending.account, &record.id, unix_now() as i64)
+            .set_ns_membership(pending.account.as_str(), &record.id, unix_now() as i64)
             .await
         {
             error!("storage failure writing ns membership: {e}");
@@ -1789,7 +1789,7 @@ impl<S: ControlStream> Session<S> {
                         self.on_group_relay(None, group, sender, None, body, meta, label)
                             .await
                     }
-                    Target::User(_) => Ok(Flow::Continue),
+                    Target::User { .. } => Ok(Flow::Continue),
                 }
             }
             // §11.14 a federated member's mutation. The spoke sends only the

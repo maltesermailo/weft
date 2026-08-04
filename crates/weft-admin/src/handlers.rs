@@ -1516,7 +1516,15 @@ async fn namespace_detail(State(st): State<AdminState>, Path(name): Path<String>
         // so the roster comes from the ns membership row, not per-channel. Each
         // member carries the roles they hold so the panel can (un)assign them.
         let ns_scope = format!("ns:{ns_id}");
-        let mut roster: Vec<Account> = st.memberships.ns_members(&ns_id).await?;
+        // 4c: ns members are member keys — the panel's role controls act on local
+        // accounts, so bridged members (`user@network`) are listed elsewhere.
+        let mut roster: Vec<Account> = st
+            .memberships
+            .ns_members(&ns_id)
+            .await?
+            .iter()
+            .filter_map(|m| weft_store::local_member(m))
+            .collect();
         roster.sort();
         roster.dedup();
         let mut members = Vec::with_capacity(roster.len());

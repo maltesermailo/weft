@@ -796,6 +796,19 @@ pub trait EmojiStore: Send + Sync {
     async fn emoji_media(&self) -> Result<Vec<String>, StoreError>;
 }
 
+/// A namespace **member key** is a bare local account name (`ada`) or a full
+/// `user@network` for a bridged/foreign member (`alice@matrix.org`,
+/// foreign-bridge framework §7a.0). This resolves the local form — `None` means
+/// "foreign", which local-only surfaces (per-session pushes, role assignment)
+/// skip while counts and rosters keep it.
+pub fn local_member(key: &str) -> Option<Account> {
+    if key.contains('@') {
+        return None; // a foreign `user@network` member
+    }
+
+    key.parse().ok()
+}
+
 /// §6.3 persistent channel membership. Unlike the live channel-actor roster
 /// (session-scoped), this survives reconnects: a client is auto-rejoined to
 /// these channels on auth, so its tiles reappear (the Discord model).
@@ -828,14 +841,23 @@ pub trait MembershipStore: Send + Sync {
     // --- is DERIVED: member(ns) ∧ can-view (caps, checked in core) ∧ ¬hidden.
     // --- These rows never exist for top-level channels.
 
-    /// Record `account` as a member of `namespace`. Idempotent (join time is
-    /// left untouched on a repeat).
+    // A member key is a bare local account name, or `user@network` for a bridged
+    // (foreign) member — see [`local_member`].
+
+    /// Record `member` in `namespace`. Idempotent (join time is left untouched on
+    /// a repeat).
+    ///
+    /// `member` is a **member key** ([`local_member`]): a bare local account name
+    /// (`ada`), or a full `user@network` for a **bridged/foreign** member
+    /// (`alice@matrix.org`, foreign-bridge framework §7a.0). No migration was
+    /// needed for the foreign form — the column has always been free text.
+    ///
     /// `namespace` is the namespace **ULID id** (v0.13, rename-safe) throughout
     /// the ns-membership methods; `clear_ns_membership`'s hide-override match
     /// lines up because channel names embed the same id (`#<ns-id>/…`).
     async fn set_ns_membership(
         &self,
-        account: &Account,
+        member: &str,
         namespace: &str,
         joined_ms: i64,
     ) -> Result<(), StoreError>;
@@ -843,26 +865,23 @@ pub trait MembershipStore: Send + Sync {
     /// Drop ns membership **and every hide override** for channels in that
     /// namespace (ns-scoped role assignments are cleared by the caller via
     /// [`RoleStore`]). Idempotent.
-    async fn clear_ns_membership(
-        &self,
-        account: &Account,
-        namespace: &str,
-    ) -> Result<(), StoreError>;
+    async fn clear_ns_membership(&self, member: &str, namespace: &str) -> Result<(), StoreError>;
 
-    /// Is `account` a member of `namespace` (by id)?
-    async fn is_ns_member(&self, account: &Account, namespace: &str) -> Result<bool, StoreError>;
+    /// Is `member` in `namespace` (by id)?
+    async fn is_ns_member(&self, member: &str, namespace: &str) -> Result<bool, StoreError>;
 
-    /// Namespace **ids** `account` belongs to — the auto-rejoin / skeleton base.
-    async fn ns_memberships(&self, account: &Account) -> Result<Vec<String>, StoreError>;
+    /// Namespace **ids** `member` belongs to — the auto-rejoin / skeleton base.
+    async fn ns_memberships(&self, member: &str) -> Result<Vec<String>, StoreError>;
 
-    /// Distinct accounts that are members of `namespace` (by id) — the derived-
-    /// roster base and the `members=` count source.
-    async fn ns_members(&self, namespace: &str) -> Result<Vec<Account>, StoreError>;
+    /// Distinct **member keys** in `namespace` (by id) — the derived-roster base
+    /// and the `members=` count source. May include foreign members; local-only
+    /// surfaces (session pushes) filter with [`local_member`].
+    async fn ns_members(&self, namespace: &str) -> Result<Vec<String>, StoreError>;
 
     /// Members of `namespace` (by id) paired with their Unix-ms join time (`0`
     /// when backfilled from the pre-v0.12 model). Powers the `NS INFO MEMBERS`
-    /// moderator roster; ordered by join time ascending, then account.
-    async fn ns_members_joined(&self, namespace: &str) -> Result<Vec<(Account, i64)>, StoreError>;
+    /// moderator roster; ordered by join time ascending, then member key.
+    async fn ns_members_joined(&self, namespace: &str) -> Result<Vec<(String, i64)>, StoreError>;
 
     /// Set a per-channel hide override for `account` (a `PART <#ns/chan>`).
     /// Idempotent.

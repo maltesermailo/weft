@@ -1206,7 +1206,7 @@ impl App {
             if msg.sender.account.as_str() == self.account {
                 self.last_sent = Some(msg.msgid.clone());
             }
-            if let Target::User(_) = &msg.target {
+            if let Target::User { .. } = &msg.target {
                 let peer = if msg.sender.account.as_str() == self.account {
                     msg.target.to_string()
                 } else {

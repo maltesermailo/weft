@@ -58,7 +58,7 @@ impl<S: ControlStream> Session<S> {
             let already = self
                 .ctx
                 .memberships
-                .is_ns_member(&account, &ns_str)
+                .is_ns_member(account.as_str(), &ns_str)
                 .await
                 .unwrap_or(false);
             let scope = TokenScope::Namespace(ns_str.clone());
@@ -93,7 +93,7 @@ impl<S: ControlStream> Session<S> {
         let first_join = !self
             .ctx
             .memberships
-            .is_ns_member(&account, &ns.to_string())
+            .is_ns_member(account.as_str(), &ns.to_string())
             .await
             .unwrap_or(false);
 
@@ -103,7 +103,7 @@ impl<S: ControlStream> Session<S> {
         if let Err(e) = self
             .ctx
             .memberships
-            .set_ns_membership(&account, &ns.to_string(), unix_now() as i64)
+            .set_ns_membership(account.as_str(), &ns.to_string(), unix_now() as i64)
             .await
         {
             return self.internal(label, &e).await;
@@ -191,7 +191,7 @@ impl<S: ControlStream> Session<S> {
         if !self
             .ctx
             .memberships
-            .is_ns_member(&account, &ns_str)
+            .is_ns_member(account.as_str(), &ns_str)
             .await
             .unwrap_or(false)
         {
@@ -236,7 +236,7 @@ impl<S: ControlStream> Session<S> {
         if let Err(e) = self
             .ctx
             .memberships
-            .clear_ns_membership(&account, &ns_str)
+            .clear_ns_membership(account.as_str(), &ns_str)
             .await
         {
             return self.internal(label, &e).await;
@@ -340,9 +340,16 @@ impl<S: ControlStream> Session<S> {
             .await?;
         for (member, joined_ms) in members {
             // v0.13: the roster carries role **ids** so the client addresses them
-            // unambiguously (names aren't unique).
-            let roles = self.assigned_role_ids(&scope_str, member.as_str()).await;
-            let user = UserRef::new(member, self.ctx.info.network.clone());
+            // unambiguously (names aren't unique). 4c: a bridged member appears
+            // with its own foreign network and holds no local role assignments.
+            let roles = self.assigned_role_ids(&scope_str, &member).await;
+            let user = match weft_store::local_member(&member) {
+                Some(account) => UserRef::new(account, self.ctx.info.network.clone()),
+                None => match member.parse::<UserRef>() {
+                    Ok(user) => user,
+                    Err(_) => continue,
+                },
+            };
             self.send_event(
                 None,
                 Event::NsMemberInfo {
@@ -559,7 +566,7 @@ impl<S: ControlStream> Session<S> {
                 if let Err(e) = self
                     .ctx
                     .memberships
-                    .set_ns_membership(&account, &ns_id, unix_now() as i64)
+                    .set_ns_membership(account.as_str(), &ns_id, unix_now() as i64)
                     .await
                 {
                     error!("seed creator ns membership failed: {e}");
@@ -845,7 +852,7 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn delete_namespace_cascade(
         &mut self,
         record: &weft_store::NamespaceRecord,
-    ) -> Result<Vec<Account>, weft_store::StoreError> {
+    ) -> Result<Vec<String>, weft_store::StoreError> {
         let ns_str = record.id.clone();
 
         // Cascade: a namespace owns its channels, memberships, roles and pending

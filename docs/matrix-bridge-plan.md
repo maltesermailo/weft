@@ -98,7 +98,11 @@ slices land.
       Tests: operator-delete (member refused / operator tombstones / gone), withdraw-tombstone,
       duplicate-claim refusal. 37 suites green, clippy clean.
       *Offline-relay queueing stays an explicit slice-5 design decision.*
-- [~] **4. Ingestion** (M) — **MSG done 2026-08-04; EDIT/DELETE/REACT/MEMBER next.**
+- [x] **4. Ingestion** (M) — **DONE 2026-08-04: MSG + EDIT/DELETE/REACT/UNREACT + MEMBER join/part.**
+      The mutation verbs name their target by **msgid** (not channel), resolved via
+      `events.find_root` → `Scope::Channel`, then applied through the §11.13 home-authoritative
+      `relay_mutate_as` (`edit`/`delete`/`react-add`/`react-remove`) carrying `foreign=`. Authorship is
+      the provider's to assert — it owns the room. Test covers all four + both puppet shapes.
       An `@as=<foreign-identity>` line on a provider session is ingestion (routed on the tag, before
       the bridge verbs). **Addressing:** the provider uses the **canonical channel name it learned**
       from the `CHANNEL-LAYOUT` mapping reply — so it's an ordinary `MSG`, no URI-target parsing
@@ -119,30 +123,40 @@ slices land.
       *looks* federated but has **no peer bridge**, so guard the paths that assume otherwise:
       `FEDERATE`/auto-bridge dialing toward a replica's "network", and name-keyed `NETBLOCK`
       semantics for a realm-as-network. (DM routing is now slice 4d, a feature not a guard.)
-- [ ] **4c. Foreign namespace membership** (M, owner directive 2026-08-04) — **Matrix users can join
-      WEFT namespaces.** The wire already supports it (`Event::Member.user`/`NsMember.user` are full
-      `UserRef`s); the work is the store + roster:
-      - widen `MembershipStore` ns-membership keys from `&Account` to a **member key string** —
-        bare name = local (`ada`), `user@network` = foreign (`alice@matrix.org`). **No data migration:**
-        `weft_ns_membership.account` is already plain `TEXT` with no FK (only the comment changes).
-        ~24 call sites adapt (roster, counts, SYNC skeleton, NS INFO, delete cascade, provider pushes).
-      - channel-actor rosters are **session-keyed**, so a memberless foreign participant needs the
-        derived roster to union stored foreign members with live sessions.
-      - provider `MEMBER` ingestion (the rest of slice 4) writes/clears those rows.
+- [x] **4c. Foreign namespace membership** (M) — DONE 2026-08-04. **Matrix users can join WEFT
+      namespaces.** Six `MembershipStore` ns-methods now take/return a **member key string** (bare =
+      local `ada`, `user@network` = bridged) — **no data migration** (the column was always free
+      text). `weft_store::local_member(key) -> Option<Account>` is the one convention helper; hide
+      overrides deliberately stayed on `Account` (a bridged member has no client hiding tiles).
+      `channel_roster` now returns `Vec<UserRef>` — local members on our network **plus bridged
+      members on their own** (their provider's roster is authoritative, so local hide/view-cap
+      filters don't apply); MEMBERS renders both, and a bridged member always reads offline (presence
+      is same-network-only, §6.1). ~28 call sites adapted: per-session pushes/role-grants/admin-panel
+      role controls filter local; counts, NS INFO MEMBERS, and the delete cascade include everyone.
+      Provider `MEMBER` ingestion writes/clears those rows (completing slice 4). Store contract test
+      covers the mixed local+foreign table. *(Original scoping said "migration: yes" — wrong.)*
 - [ ] **4d. DM a bridged (foreign) user** (owner directive 2026-08-04 — un-defers the CLAUDE.md item).
       **Correction to the original scoping:** cross-network *messaging* already works — **group DMs are
       federation-able** (`GroupStore` members are full `UserRef`s; `federated_group_roster_syncs_across_networks`
       passes) on the §11.13 home-authoritative relay (`RelayPublish`/`RelayMutate`), as are friends
       and calls. The only gap is the **1:1 `@user` target form** (`Target::User(Account)` has no
-      network slot). Two paths:
-      - **(i) Reuse federated groups (S, recommended):** a bridged 1:1 DM is a **2-member group**
-        containing the foreign user — existing, tested machinery; no L0 change. Work = let a group
-        member be a bridged user (already typed as `UserRef`), route its outbound mutations to the
-        **provider** rather than a peer bridge, and have the client present 2-member groups as DMs.
-      - **(ii) True `@user@network` DMs (M–L):** extend `Target::User` with an optional network — L0
-        change to a central type + a DM routing dispatch. Ergonomic sugar over (i)'s capability.
-      **Ordering (either path):** delivery *into* Matrix needs the outbound relay, so land the
-      routing with or after **slice 5**; before that a bridged DM stores locally and goes nowhere.
+      network slot).
+      **DECIDED (owner 2026-08-04): true 1:1 DMs — the group infrastructure is NOT reused. DMs stay
+      one-on-one.** So:
+      - **L0 (small — only 13 `Target::User` match sites):**
+        `Target::User { account: Account, network: Option<NetworkName> }`. A named struct variant, not
+        a tuple, so call sites read clearly. `None` = same-network (§9.5 semantics unchanged, `@ada`
+        parses/serializes exactly as today — wire-additive); `Some(net)` = `@alice@matrix.org`.
+        Parse: after the `@` sigil, a remainder containing `@` splits into account + network.
+        Round-trip tests first, per the workspace rule.
+      - **Routing:** the DM dispatch sends a foreign-target DM to the **provider** (bridged user) or
+        the **peer bridge** (a real WEFT cross-network DM — unblocked by the same change), instead of
+        the local account directory.
+      - **Store:** DM scopes/`dm_partners` key on the peer identity, so a foreign peer needs the same
+        widening as 4c's membership keys (bare = local, `user@network` = foreign).
+      **Ordering:** the L0 + parse/serialize half can land any time (additive). Delivery *into* Matrix
+      needs the outbound relay, so the routing half lands with or after **slice 5** — before that a
+      bridged DM would store locally and go nowhere.
 - [ ] **5. Outbound relay** (M) — local posts/edits/reacts/joins in origin-marked channels forward to
       the provider session (reuse the bridge-forwarder machinery). **WEFT → Matrix flows.**
 

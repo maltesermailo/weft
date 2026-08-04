@@ -4806,6 +4806,35 @@ async fn provider_ingests_foreign_messages() {
     assert_eq!(m.foreign.as_deref(), Some("@alice:instagram.example"));
     assert_eq!(m.sender.to_string(), "alice@instagram.example");
 
+    // The mutation verbs: the provider names the target by msgid (not channel),
+    // and each applies via the §11.13 home-authoritative relay carrying `foreign=`.
+    let root = m.msgid.clone();
+    plugin.send(&format!(
+        "@as=@alice:instagram.example EDIT {root} :fixed"
+    ));
+    let Event::Edited { foreign, body, .. } = ada.recv().await.event else {
+        panic!("ada expected the ingested EDITED");
+    };
+    assert_eq!(body, "fixed");
+    assert_eq!(foreign.as_deref(), Some("@alice:instagram.example"));
+
+    plugin.send(&format!(
+        "@as=@bob:instagram.example REACT {root} thumbsup"
+    ));
+    let Event::Reaction { foreign, by, op, .. } = ada.recv().await.event else {
+        panic!("ada expected the ingested REACTION");
+    };
+    assert_eq!(op, weft_proto::ReactionOp::Add);
+    assert_eq!(by.to_string(), "bob@instagram.example");
+    assert_eq!(foreign.as_deref(), Some("@bob:instagram.example"));
+
+    plugin.send(&format!("@as=@alice:instagram.example DELETE {root}"));
+    let Event::Deleted { msgid, by, .. } = ada.recv().await.event else {
+        panic!("ada expected the ingested DELETED");
+    };
+    assert_eq!(msgid, root);
+    assert_eq!(by.map(|u| u.to_string()).as_deref(), Some("alice@instagram.example"));
+
     // A bare identity (no domain — a Discord/Instagram handle) falls back to the
     // room's realm as its network, so it still looks federated.
     plugin.send(&format!("@as=bob MSG {channel} :bare handle"));
@@ -4814,6 +4843,31 @@ async fn provider_ingests_foreign_messages() {
     };
     assert_eq!(m.sender.to_string(), "bob@acme-corp");
     assert_eq!(m.foreign.as_deref(), Some("bob"));
+
+    // 4c: a Matrix user JOINS the namespace — membership persists under its
+    // foreign member key and shows in the derived roster + member count.
+    plugin.send(&format!("@as=@carol:instagram.example JOIN {channel}"));
+    let Event::Member { user, action, count, foreign, .. } = ada.recv().await.event else {
+        panic!("ada expected the ingested MEMBER join");
+    };
+    assert_eq!(action, MemberAction::Join);
+    assert_eq!(user.to_string(), "carol@instagram.example");
+    assert_eq!(foreign.as_deref(), Some("@carol:instagram.example"));
+    assert_eq!(count, Some(2)); // ada + carol
+
+    // The roster (MEMBERS) lists the bridged member alongside the local one.
+    ada.send(&format!("@label=mem MEMBERS {channel}"));
+    let roster = roster_names(&mut ada).await;
+    assert!(roster.contains("ada"), "{roster:?}");
+    assert!(roster.contains("carol"), "{roster:?}");
+
+    // …and PART clears it.
+    plugin.send(&format!("@as=@carol:instagram.example PART {channel}"));
+    let Event::Member { action, count, .. } = ada.recv().await.event else {
+        panic!("ada expected the ingested MEMBER part");
+    };
+    assert_eq!(action, MemberAction::Part);
+    assert_eq!(count, Some(1));
 
     // An ingest for a channel we don't mirror is dropped silently (a provider
     // replaying an unmirrored room is normal, and no user awaits a reply). The

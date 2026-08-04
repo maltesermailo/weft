@@ -34,13 +34,13 @@ impl<S: ControlStream> Session<S> {
                         let first_join = !self
                             .ctx
                             .memberships
-                            .is_ns_member(&account, ns_str)
+                            .is_ns_member(account.as_str(), ns_str)
                             .await
                             .unwrap_or(false);
                         if let Err(e) = self
                             .ctx
                             .memberships
-                            .set_ns_membership(&account, ns_str, unix_now() as i64)
+                            .set_ns_membership(account.as_str(), ns_str, unix_now() as i64)
                             .await
                         {
                             error!("ns membership on join failed: {e}");
@@ -386,10 +386,19 @@ impl<S: ControlStream> Session<S> {
                 }
             }
             // §9.5 same-network DM, routed through the account directory.
-            Target::User(to) => {
+            Target::User { account: to, network } => {
                 let State::Ready { account } = self.state.clone() else {
                     unreachable!("on_msg only dispatched in READY");
                 };
+                // A cross-network DM target (`@alice@matrix.org`) is expressible
+                // on the wire but not yet routable — delivery to a provider /
+                // peer bridge lands with the outbound relay (plan slice 4d).
+                // Refuse explicitly rather than silently DMing a local lookalike.
+                if network.is_some_and(|net| net != self.ctx.info.network) {
+                    return self
+                        .unsupported(label, "cross-network DMs are not routed yet")
+                        .await;
+                }
                 if !self
                     .ctx
                     .directory
@@ -856,14 +865,25 @@ impl<S: ControlStream> Session<S> {
                     Target::Channel(channel),
                 )
             }
-            Target::User(peer) => {
+            Target::User {
+                account: peer,
+                network,
+            } => {
                 let State::Ready { account } = self.state.clone() else {
                     unreachable!("on_history only dispatched in READY");
                 };
+                // Cross-network DM scopes land with the routing (slice 4d); a
+                // foreign peer has no local DM history to serve.
+                if network.as_ref().is_some_and(|net| *net != self.ctx.info.network) {
+                    return self.no_such_target(label).await;
+                }
                 (
                     Scope::dm(account, peer.clone()),
                     self.ctx.dm_policy,
-                    Target::User(peer),
+                    Target::User {
+                        account: peer,
+                        network,
+                    },
                 )
             }
             // Group DM history: membership-gated, served from `Scope::Group`.
@@ -1026,23 +1046,26 @@ impl<S: ControlStream> Session<S> {
         let id = format!("m{}", self.batches);
         self.send_event(label.clone(), Event::BatchStart { id: id.clone() })
             .await?;
-        for account in roster {
+        for user in roster {
             // Live in this channel ⇒ online (or the away/dnd they announced;
             // invisible reads as offline). No live session ⇒ offline (a grey
-            // dot, Discord-style).
-            let status = if live.contains(&account) {
-                let map = self.ctx.presence.lock().expect("presence lock");
-                match map.get(&account).copied() {
-                    None => weft_proto::PresenceStatus::Online,
-                    Some(weft_proto::PresenceStatus::Invisible) => {
-                        weft_proto::PresenceStatus::Offline
+            // dot, Discord-style). A **bridged** member (4c) holds no local
+            // session or presence, so it always reads offline — presence is
+            // same-network-only and never bridged (§6.1).
+            let local = (user.network == self.ctx.info.network).then(|| user.account.clone());
+            let status = match local.filter(|a| live.contains(a)) {
+                Some(account) => {
+                    let map = self.ctx.presence.lock().expect("presence lock");
+                    match map.get(&account).copied() {
+                        None => weft_proto::PresenceStatus::Online,
+                        Some(weft_proto::PresenceStatus::Invisible) => {
+                            weft_proto::PresenceStatus::Offline
+                        }
+                        Some(other) => other,
                     }
-                    Some(other) => other,
                 }
-            } else {
-                weft_proto::PresenceStatus::Offline
+                None => weft_proto::PresenceStatus::Offline,
             };
-            let user = UserRef::new(account, self.ctx.info.network.clone());
             self.send_event(
                 None,
                 Event::Member {

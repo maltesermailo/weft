@@ -379,7 +379,15 @@ impl fmt::Display for VanityName {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Target {
     Channel(ChannelName),
-    User(Account),
+    /// A DM peer. `network: None` is the same-network form (`@ada`, §9.5) — the
+    /// session layer resolves it against its own network. `Some(net)` is a
+    /// **cross-network** DM (`@alice@matrix.org`), which also addresses a bridged
+    /// (provider-managed) user; the wire form is additive, so `@ada` parses and
+    /// serializes exactly as before.
+    User {
+        account: Account,
+        network: Option<NetworkName>,
+    },
     Group(GroupId),
 }
 
@@ -390,7 +398,18 @@ impl FromStr for Target {
         if s.starts_with('#') {
             Ok(Target::Channel(s.parse()?))
         } else if let Some(user) = s.strip_prefix('@') {
-            Ok(Target::User(user.parse()?))
+            // After the sigil, a remaining `@` splits account from network:
+            // `@ada` = same-network, `@alice@matrix.org` = cross-network.
+            match user.split_once('@') {
+                Some((account, network)) => Ok(Target::User {
+                    account: account.parse()?,
+                    network: Some(network.parse()?),
+                }),
+                None => Ok(Target::User {
+                    account: user.parse()?,
+                    network: None,
+                }),
+            }
         } else if s.starts_with('&') {
             Ok(Target::Group(s.parse()?))
         } else {
@@ -403,7 +422,14 @@ impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Target::Channel(channel) => channel.fmt(f),
-            Target::User(account) => write!(f, "@{account}"),
+            Target::User {
+                account,
+                network: Some(network),
+            } => write!(f, "@{account}@{network}"),
+            Target::User {
+                account,
+                network: None,
+            } => write!(f, "@{account}"),
             Target::Group(group) => group.fmt(f), // GroupId already renders `&<ulid>`
         }
     }
@@ -429,6 +455,34 @@ mod tests {
         assert!("".parse::<NetworkName>().is_err());
         assert!("-bad.example".parse::<NetworkName>().is_err());
         assert!("double..dot".parse::<NetworkName>().is_err());
+    }
+
+    #[test]
+    fn dm_targets_round_trip_both_forms() {
+        // §9.5 same-network form — byte-identical to before the network field.
+        let local: Target = "@ada".parse().unwrap();
+        assert_eq!(
+            local,
+            Target::User {
+                account: "ada".parse().unwrap(),
+                network: None
+            }
+        );
+        assert_eq!(local.to_string(), "@ada");
+
+        // Cross-network / bridged form: the remainder after the sigil splits.
+        let foreign: Target = "@alice@matrix.org".parse().unwrap();
+        assert_eq!(
+            foreign,
+            Target::User {
+                account: "alice".parse().unwrap(),
+                network: Some("matrix.org".parse().unwrap())
+            }
+        );
+        assert_eq!(foreign.to_string(), "@alice@matrix.org");
+
+        assert!("@ada@".parse::<Target>().is_err()); // empty network
+        assert!("@@matrix.org".parse::<Target>().is_err()); // empty account
     }
 
     #[test]

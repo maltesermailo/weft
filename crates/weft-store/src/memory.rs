@@ -163,8 +163,9 @@ struct Inner {
     /// account → channels it's a member of (§6.3 persistent membership).
     /// Top-level channels only under v0.12; namespaced access is derived.
     memberships: HashMap<Account, std::collections::HashSet<ChannelName>>,
-    /// account → namespace → join time (ms) (v0.12 ns-level membership).
-    ns_memberships: HashMap<Account, std::collections::HashMap<String, i64>>,
+    /// member key → namespace → join time (ms) (v0.12 ns-level membership). The
+    /// key is a bare local account name, or `user@network` for a bridged member.
+    ns_memberships: HashMap<String, std::collections::HashMap<String, i64>>,
     /// account → channels it hides while still an ns member (v0.12 override).
     channel_hides: HashMap<Account, std::collections::HashSet<ChannelName>>,
     /// scope → role name → (color, caps) (§6.5 role definitions).
@@ -677,7 +678,7 @@ impl AccountStore for MemoryStore {
         // moderation + memberships key by the account name.
         let ulid = record.ulid;
         inner.memberships.remove(account);
-        inner.ns_memberships.remove(account);
+        inner.ns_memberships.remove(account.as_str()); // member key = bare local name
         inner.channel_hides.remove(account);
         inner.grants.retain(|(subject, _), _| subject != &ulid);
         inner.moderation.retain(|(_, acct, _), _| acct != account);
@@ -2056,7 +2057,7 @@ impl MembershipStore for MemoryStore {
 
     async fn set_ns_membership(
         &self,
-        account: &Account,
+        member: &str,
         namespace: &str,
         joined_ms: i64,
     ) -> Result<(), StoreError> {
@@ -2064,63 +2065,65 @@ impl MembershipStore for MemoryStore {
         // Idempotent: a repeat join leaves the original join time in place.
         inner
             .ns_memberships
-            .entry(account.clone())
+            .entry(member.to_string())
             .or_default()
             .entry(namespace.to_string())
             .or_insert(joined_ms);
         Ok(())
     }
 
-    async fn clear_ns_membership(
-        &self,
-        account: &Account,
-        namespace: &str,
-    ) -> Result<(), StoreError> {
+    async fn clear_ns_membership(&self, member: &str, namespace: &str) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
-        if let Some(map) = inner.ns_memberships.get_mut(account) {
+
+        if let Some(map) = inner.ns_memberships.get_mut(member) {
             map.remove(namespace);
         }
+
         // Drop every hide override for channels in this namespace — the channel's
-        // first segment is the ns id (v0.13), so this matches the id key.
-        if let Some(set) = inner.channel_hides.get_mut(account) {
-            set.retain(|chan| chan.namespace() != Some(namespace));
+        // first segment is the ns id (v0.13), so this matches the id key. Hide
+        // overrides are local-only (a foreign member has no client hiding tiles).
+        if let Some(account) = crate::traits::local_member(member) {
+            if let Some(set) = inner.channel_hides.get_mut(&account) {
+                set.retain(|chan| chan.namespace() != Some(namespace));
+            }
         }
+
         Ok(())
     }
 
-    async fn is_ns_member(&self, account: &Account, namespace: &str) -> Result<bool, StoreError> {
+    async fn is_ns_member(&self, member: &str, namespace: &str) -> Result<bool, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner
             .ns_memberships
-            .get(account)
+            .get(member)
             .is_some_and(|map| map.contains_key(namespace)))
     }
 
-    async fn ns_memberships(&self, account: &Account) -> Result<Vec<String>, StoreError> {
+    async fn ns_memberships(&self, member: &str) -> Result<Vec<String>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner
             .ns_memberships
-            .get(account)
+            .get(member)
             .map(|map| map.keys().cloned().collect())
             .unwrap_or_default())
     }
 
-    async fn ns_members(&self, namespace: &str) -> Result<Vec<Account>, StoreError> {
+    async fn ns_members(&self, namespace: &str) -> Result<Vec<String>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner
             .ns_memberships
             .iter()
             .filter(|(_, map)| map.contains_key(namespace))
-            .map(|(account, _)| account.clone())
+            .map(|(member, _)| member.clone())
             .collect())
     }
 
-    async fn ns_members_joined(&self, namespace: &str) -> Result<Vec<(Account, i64)>, StoreError> {
+    async fn ns_members_joined(&self, namespace: &str) -> Result<Vec<(String, i64)>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
-        let mut out: Vec<(Account, i64)> = inner
+        let mut out: Vec<(String, i64)> = inner
             .ns_memberships
             .iter()
-            .filter_map(|(account, map)| map.get(namespace).map(|ms| (account.clone(), *ms)))
+            .filter_map(|(member, map)| map.get(namespace).map(|ms| (member.clone(), *ms)))
             .collect();
         out.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         Ok(out)
