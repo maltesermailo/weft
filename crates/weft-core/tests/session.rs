@@ -4813,16 +4813,13 @@ async fn provider_ingests_foreign_messages() {
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
     drain_until_ns_member(&mut ada).await;
-    // Her join is mirrored to the provider (slice 5) — consume it so the
-    // assertions below read the provider's stream from a known point.
+    // Her join is relayed to the realm as a request (slice 5) — consume it so
+    // the assertions below read the provider's stream from a known point.
     assert!(matches!(
-        weft_proto::Reply::parse(&plugin.recv_raw().await)
+        weft_proto::Request::parse(&plugin.recv_raw().await)
             .unwrap()
-            .event,
-        Event::Member {
-            action: MemberAction::Join,
-            ..
-        }
+            .command,
+        weft_proto::Command::NsJoin { .. }
     ));
 
     // The provider ingests a foreign post, addressing the replica by the
@@ -4880,9 +4877,11 @@ async fn provider_ingests_foreign_messages() {
     plugin.send(&format!("@as=ada@test.example MSG {channel} :forged"));
     plugin.expect_err(ErrCode::Unsupported).await;
 
-    // 4c: a foreign user JOINS the namespace — membership persists under its
-    // member key and shows in the derived roster + member count.
-    plugin.send(&format!("@as=carol@acme-corp JOIN {channel}"));
+    // 4c: the realm states that one of its users is a member — it is the
+    // authority for its own space, so this is an NS-MEMBER *event*, not a
+    // request. Membership persists under the foreign member key and shows in the
+    // derived roster + member count.
+    plugin.send(&format!("NS-MEMBER {ns_id} carol@acme-corp join"));
     let Event::Member {
         user,
         action,
@@ -4902,8 +4901,8 @@ async fn provider_ingests_foreign_messages() {
     assert!(roster.contains("ada"), "{roster:?}");
     assert!(roster.contains("carol"), "{roster:?}");
 
-    // …and PART clears it.
-    plugin.send(&format!("@as=carol@acme-corp PART {channel}"));
+    // …and a part statement clears it.
+    plugin.send(&format!("NS-MEMBER {ns_id} carol@acme-corp part"));
     let Event::Member { action, count, .. } = ada.recv().await.event else {
         panic!("ada expected the ingested MEMBER part");
     };
@@ -5086,15 +5085,22 @@ async fn local_posts_relay_outward_without_looping() {
     ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
     drain_until_ns_member(&mut ada).await;
 
-    // A LOCAL member's JOIN is relayed outward, so the provider can put her in
-    // the foreign room. MEMBER carries no msgid, so the loop guard reads the
-    // *user's* network instead.
-    let relayed = weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap();
-    let Event::Member { user, action, .. } = relayed.event else {
-        panic!("provider expected the relayed MEMBER join");
+    // A LOCAL member's namespace JOIN is relayed to the realm as a **request**:
+    // a bridge behaves as a federation peer, so we send the command and the realm
+    // answers with the authoritative NS-MEMBER. Membership is namespace-level —
+    // channels are not joinable — so it names only the namespace; putting her
+    // into the foreign rooms is the adapter's job.
+    let raw = plugin.recv_raw().await;
+    let line = weft_proto::Line::parse(&raw).unwrap();
+    assert_eq!(
+        line.tags.get("as").map(String::as_str),
+        Some("ada@test.example")
+    );
+    let weft_proto::Command::NsJoin { ns } = weft_proto::Request::from_line(&line).unwrap().command
+    else {
+        panic!("provider expected the relayed NS JOIN, got {raw}");
     };
-    assert_eq!(action, MemberAction::Join);
-    assert_eq!(user.to_string(), "ada@test.example");
+    assert_eq!(ns.as_str(), ns_id.to_lowercase());
 
     // A LOCAL post is relayed outward to the provider.
     ada.send(&format!("@label=m1 MSG {channel} :hello matrix"));
@@ -5137,18 +5143,25 @@ async fn local_posts_relay_outward_without_looping() {
     };
     assert_eq!(msgid, root);
 
-    // …and the same for a local PART. A *bridged* member's join/part is not sent
-    // back (it is the echo of an ingested one): carol's JOIN below produces no
-    // outward line, so the next thing the provider reads is ada's PART.
-    plugin.send(&format!("@as=carol@acme-corp JOIN {channel}"));
+    // …and the same for a local LEAVE. The realm's own membership statement is
+    // not echoed back to it: the NS-MEMBER below produces no outward line, so the
+    // next thing the provider reads is ada's leave request.
+    plugin.send(&format!("NS-MEMBER {ns_id} carol@acme-corp join"));
     ada.send(&format!("@label=p1 NS LEAVE {ns_id}"));
 
-    let next = weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap();
-    let Event::Member { user, action, .. } = next.event else {
-        panic!("provider expected the local PART next — a bridged member's join looped back!");
-    };
-    assert_eq!(action, MemberAction::Part);
-    assert_eq!(user.to_string(), "ada@test.example");
+    let raw = plugin.recv_raw().await;
+    let line = weft_proto::Line::parse(&raw).unwrap();
+    assert_eq!(
+        line.tags.get("as").map(String::as_str),
+        Some("ada@test.example")
+    );
+    assert!(
+        matches!(
+            weft_proto::Request::from_line(&line).unwrap().command,
+            weft_proto::Command::NsLeave { .. }
+        ),
+        "expected the local leave next — the realm's NS-MEMBER echoed back! {raw}"
+    );
 }
 
 #[tokio::test]
@@ -5178,12 +5191,12 @@ async fn local_mutations_of_a_bridged_message_relay_to_the_provider() {
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
     drain_until_ns_member(&mut ada).await;
-    // Her join relays outward (slice 5) — consume it.
+    // Her join relays outward as a request (slice 5) — consume it.
     assert!(matches!(
-        weft_proto::Reply::parse(&plugin.recv_raw().await)
+        weft_proto::Request::parse(&plugin.recv_raw().await)
             .unwrap()
-            .event,
-        Event::Member { .. }
+            .command,
+        weft_proto::Command::NsJoin { .. }
     ));
 
     // The provider ingests a message of its own.
@@ -5219,10 +5232,10 @@ async fn local_mutations_of_a_bridged_message_relay_to_the_provider() {
     root_op.send(&format!("@label=j2 NS JOIN {ns_id}"));
     drain_until_ns_member(&mut root_op).await;
     assert!(matches!(
-        weft_proto::Reply::parse(&plugin.recv_raw().await)
+        weft_proto::Request::parse(&plugin.recv_raw().await)
             .unwrap()
-            .event,
-        Event::Member { .. }
+            .command,
+        weft_proto::Command::NsJoin { .. }
     ));
 
     root_op.send(&format!("@label=d1 DELETE {root}"));
@@ -5231,6 +5244,175 @@ async fn local_mutations_of_a_bridged_message_relay_to_the_provider() {
         panic!("provider expected the relayed DELETE");
     };
     assert_eq!(msgid, root);
+}
+
+#[tokio::test]
+async fn a_realm_resyncs_membership_by_restating_it() {
+    // Framework §7a.0a: a realm corrects drift by re-stating its whole
+    // membership inside the ordinary SYNC snapshot framing (§6.9) — the same one
+    // a client gets on login, with the roles swapped: here the realm holds the
+    // state and weftd conforms. Anyone not named by `SYNC END` is dropped.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    // Two foreign members, stated live.
+    plugin.send(&format!("NS-MEMBER {ns_id} carol@acme-corp join"));
+    plugin.send(&format!("NS-MEMBER {ns_id} dave@acme-corp join"));
+
+    // A local member joins too, so the resync is proven not to wipe our own
+    // users just because it is the realm speaking.
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+    assert!(matches!(
+        weft_proto::Request::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .command,
+        weft_proto::Command::NsJoin { .. }
+    ));
+
+    ada.send(&format!("@label=mem1 MEMBERS {channel}"));
+    let roster = roster_names(&mut ada).await;
+    assert!(roster.contains("carol"), "{roster:?}");
+    assert!(roster.contains("dave"), "{roster:?}");
+    assert!(roster.contains("ada"), "{roster:?}");
+
+    // Now the realm re-states: dave left while we weren't looking, and it never
+    // names him. Ada is named because the realm accepted her join.
+    plugin.send("SYNC START");
+    plugin.send(&format!("NS-MEMBER {ns_id} carol@acme-corp join"));
+    plugin.send(&format!("NS-MEMBER {ns_id} ada@test.example join"));
+    plugin.send("@cursor=c1 SYNC END");
+
+    // Dave is gone; the others survive. The MEMBERS reply is the FIFO barrier —
+    // it is answered after the whole statement was processed.
+    ada.send(&format!("@label=mem2 MEMBERS {channel}"));
+    let roster = roster_names(&mut ada).await;
+    assert!(
+        !roster.contains("dave"),
+        "dave should be pruned: {roster:?}"
+    );
+    assert!(roster.contains("carol"), "{roster:?}");
+    assert!(
+        roster.contains("ada"),
+        "a local member must survive: {roster:?}"
+    );
+
+    // A stray `SYNC END` names nobody — it must be ignored, not obeyed, or it
+    // would wipe the namespace.
+    plugin.send("@cursor=c2 SYNC END");
+    ada.send(&format!("@label=mem3 MEMBERS {channel}"));
+    let roster = roster_names(&mut ada).await;
+    assert!(
+        roster.contains("carol"),
+        "unopened SYNC END wiped it: {roster:?}"
+    );
+    assert!(roster.contains("ada"), "{roster:?}");
+}
+
+#[tokio::test]
+async fn authority_translates_both_ways_with_the_provider() {
+    // Owner directive 2026-08-04: a WEFT user must be able to be made a mod on a
+    // Matrix space and vice versa, so the bridge translates power levels. weftd
+    // stays free of any notion of a level — it speaks capabilities in both
+    // directions and the adapter owns the mapping.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &["root"],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    // INBOUND — a moderator on the foreign side becomes one here. The provider
+    // maps its power level to WEFT capabilities and grants them; the subject is
+    // a *foreign* user, keyed by `user@realm`.
+    plugin.send(&format!("GRANT carol@acme-corp ns:{ns_id} mute,ban"));
+
+    // …and it is real authority, not decoration: carol can mute, which needs the
+    // `mute` cap at a scope covering the channel.
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+    assert!(matches!(
+        weft_proto::Request::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .command,
+        weft_proto::Command::NsJoin { .. }
+    ));
+
+    // Carol mutes ada. `MODERATED` acks the moderator, so the proof that the
+    // authority is real is the *effect*: ada can no longer post.
+    plugin.send(&format!("@as=carol@acme-corp MUTE {channel} ada :spam"));
+    let Event::Moderated { account, by, .. } = weft_proto::Reply::parse(&plugin.recv_raw().await)
+        .unwrap()
+        .event
+    else {
+        panic!("the foreign moderator expected the MODERATED ack");
+    };
+    assert_eq!(account.to_string(), "ada");
+    assert_eq!(by.as_deref(), Some("carol@acme-corp"));
+
+    ada.send(&format!("@label=m1 MSG {channel} :am i muted"));
+    let reply = ada.expect_err(ErrCode::Forbidden).await;
+    assert_eq!(reply.label.as_deref(), Some("m1"));
+    assert_eq!(err_context(&reply).as_deref(), Some("muted"));
+
+    // And it is the *grant* that confers it, not merely being foreign: a foreign
+    // user the provider never granted anything is refused like anyone else.
+    plugin.send(&format!("@as=dave@acme-corp MUTE {channel} ada :no rights"));
+    plugin.expect_err(ErrCode::CapRequired).await;
+
+    // OUTBOUND — promoting a WEFT user here raises their foreign power level.
+    let root_op = ready(&ctx, "root").await;
+    root_op.send(&format!("@label=g1 GRANT ada ns:{ns_id} mute"));
+    let relayed = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    let weft_proto::Command::Grant {
+        subject,
+        scope,
+        caps,
+        ..
+    } = relayed.command
+    else {
+        panic!("provider expected the relayed GRANT");
+    };
+    assert_eq!(subject, "ada");
+    assert_eq!(scope, format!("ns:{ns_id}"));
+    assert_eq!(caps, "mute");
+
+    // …and demoting relays too.
+    root_op.send(&format!("@label=r1 REVOKE ada ns:{ns_id} caps=mute"));
+    let relayed = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    let weft_proto::Command::Revoke { subject, caps, .. } = relayed.command else {
+        panic!("provider expected the relayed REVOKE");
+    };
+    assert_eq!(subject, "ada");
+    assert_eq!(caps.as_deref(), Some("mute"));
 }
 
 #[tokio::test]

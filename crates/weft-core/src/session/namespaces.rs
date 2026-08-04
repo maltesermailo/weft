@@ -111,7 +111,6 @@ impl<S: ControlStream> Session<S> {
         if first_join {
             self.post_ns_welcome(&ns, &account).await;
         }
-        let mut subscribed = Vec::new();
         for channel in visible {
             // A channel the caller previously hid stays hidden — NS JOIN never
             // un-hides; that's a per-channel JOIN.
@@ -127,15 +126,13 @@ impl<S: ControlStream> Session<S> {
             // Unlabeled: a bulk subscription burst; the client folds each
             // MEMBER/POLICY as it arrives.
             self.join_one(&channel, &account, None).await?;
-            subscribed.push(channel);
         }
 
-        // Slice 5: the foreign room learns of the new member. The subscription
-        // above is deliberately silent locally, so the ordinary relay can't
-        // carry it — see `relay_ns_membership`.
+        // Slice 5: the provider learns of the new member and joins them to the
+        // foreign rooms it maps — see `relay_ns_membership`.
         self.relay_ns_membership(
             record.origin.as_deref(),
-            &subscribed,
+            ns,
             &UserRef::new(account.clone(), self.ctx.info.network.clone()),
             MemberAction::Join,
         );
@@ -237,18 +234,18 @@ impl<S: ControlStream> Session<S> {
             .filter(|c| c.namespace() == Some(ns_str.as_str()))
             .cloned()
             .collect();
-        for channel in &leaving {
-            if let Some(joined) = self.joined.remove(channel) {
+        for channel in leaving {
+            if let Some(joined) = self.joined.remove(&channel) {
                 joined.forwarder.abort();
                 joined.handle.part(self.id, false).await;
             }
         }
 
-        // Slice 5: mirror the leave into the foreign room (silent locally, as above).
+        // Slice 5: mirror the leave to the provider (as above).
         if let Ok(Some(rec)) = self.ctx.namespaces.namespace_by_id(&ns_str).await {
             self.relay_ns_membership(
                 rec.origin.as_deref(),
-                &leaving,
+                ns,
                 &UserRef::new(account.clone(), self.ctx.info.network.clone()),
                 MemberAction::Part,
             );

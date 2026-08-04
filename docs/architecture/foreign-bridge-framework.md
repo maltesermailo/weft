@@ -268,6 +268,63 @@ peer-federation machinery applies unchanged.
   `FEDERATE`, and name-keyed `NETBLOCK` treat `matrix.org` as a network. Guarding those paths is
   tracked as slice-4 follow-up work, not silently assumed safe.
 
+### 7a.0a Membership — the realm is the authority, so the directions follow federation
+
+Joining a namespace *is* access to its channels; there is no per-channel join in WEFT. For a bridge
+that means **having access implies joining the foreign room**, and the adapter is what performs it.
+
+Because a bridge behaves as a **federation peer**, the two directions are the ones federation uses,
+and they are not interchangeable:
+
+```
+weftd → realm   @as=ada@test.example NS JOIN <ns-id>     (a request: our user asks to join)
+weftd → realm   @as=ada@test.example NS LEAVE <ns-id>
+realm → weftd   NS-MEMBER <ns-id> <user> join|part       (the authority stating who is a member)
+```
+
+weftd **never asserts membership of a foreign space** — that would be claiming authority over
+someone else's realm. It relays the *request* and the realm answers with the authoritative
+`NS-MEMBER`, for its own users and for ours alike, once the foreign side actually has them. The
+inbound statement is what writes the membership row (keyed `user@realm` for a foreign member, the
+bare account for a local one), so it feeds every derived roster and member count, and weftd tells its
+own members with an ordinary channel `MEMBER` — local delivery, nothing asserted outward.
+
+The request is pushed straight down the provider's writer (the `PROVISION` route) rather than riding
+the event relay, because the namespace subscription is deliberately silent at the channel level — no
+per-channel `MEMBER` broadcast, so a bulk subscription doesn't spam local clients — which leaves the
+ordinary relay nothing to carry.
+
+### 7a.0c Resync — the realm re-states, using the ordinary `SYNC` snapshot
+
+A realm corrects drift (anything that changed while the link was down) by
+**re-stating its membership**, not by diffing against what we believe. It uses the *same snapshot
+framing a client gets on login* (spec §6.9) — only the roles are swapped: here the realm holds the
+state and weftd is the one conforming.
+
+```
+realm → weftd   SYNC START
+realm → weftd   NS-MEMBER <ns-id> <user> join     (× N, the complete set)
+realm → weftd   @cursor=<opaque> SYNC END
+```
+
+On `SYNC END`, every member of the namespaces that provider governs whom it did **not** name is
+dropped. Live `NS-MEMBER` statements outside a window still apply immediately; the window only adds
+the closing prune.
+
+*Why full-replace rather than letting the provider read our roster and send corrections:*
+
+- **The adapter already has the whole set** (a Matrix adapter reads room state). Diffing would make
+  it *also* track what WEFT believes — a durable shadow copy or a read-back — so the "smaller"
+  option is the one that needs more machinery, in every adapter.
+- **No read-modify-write across the link**, so no stale-read race: between a read and its
+  corrections a local user could join and be parted by a decision computed from older state.
+- **Idempotent**, so replaying after any gap is self-healing rather than needing exactly-once.
+- It is the shape federation already uses for a **manifest**: the authority states the whole truth,
+  the receiver conforms.
+
+`SYNC START` is what makes it safe. Without an opener a stray `SYNC END` would name nobody and
+delete everyone, so an unopened one is ignored rather than obeyed.
+
 ### 7a.0b Mutating a **bridged** message — `@as` in the outbound direction
 
 A local user reacting to (or a moderator deleting) a message the *provider* minted cannot be applied
@@ -335,8 +392,36 @@ match, and lets a provider disable surfaces even on a plugin-managed *native* ns
 ### 7a.4 Advisory member level — `level=`
 
 For `authority=levels`, `MEMBER` (and the roster) carry an optional **`level=<n>`** (+ optional
-`level-label=`) — the member's foreign power level, **advisory** (read-only, §7). The client shows it
-in place of role pills. For `authority=roles` it is absent.
+`level-label=`) — the member's foreign power level. The client shows it in place of role pills. For
+`authority=roles` it is absent.
+
+**AMENDED 2026-08-04 (owner directive): the level is no longer read-only.** Authority is
+**bidirectional** — a WEFT user can be made a moderator of a Matrix space and a Matrix moderator is a
+moderator here — so `level=` is a *rendering* of authority that can be changed from either side. See
+§7a.3b for the mechanism.
+
+### 7a.3b Authority translation — capabilities on the wire, power levels in the adapter
+
+Authority crosses the bridge in **both** directions, and weftd carries no notion of a power level:
+it speaks WEFT capabilities and the adapter owns the mapping, exactly as it owns the identity
+mapping (§7a.0). A Matrix bridge decides that level 50 means `mute`+`ban`+`delete-any`; weftd never
+learns the number.
+
+- **Inbound** (a Matrix moderator is a moderator here): the provider sends an ordinary
+  `GRANT <user@realm> ns:<ns-id> <caps>` / `REVOKE` on its session. Its authority to do so is the
+  same rule as ingestion — the scope must name a namespace whose scheme its key is pinned for. No
+  capability chain is consulted: for a provider-managed namespace the provider *is* the governing
+  authority (§7a.3), as an owner is for a native one. The subject may be a foreign `user@realm` or a
+  local account.
+- **Inbound enforcement**: a foreign moderator's `MUTE`/`BAN`/`KICK` arrives as an `@as` line and
+  runs through the **ordinary actor-aware handler** as `Actor::Foreign`, checked against those very
+  grants. A foreign user the provider never granted anything is refused exactly like a local one —
+  the grant is what confers authority, not being foreign.
+- **Outbound** (a WEFT moderator is a moderator there): a local `GRANT`/`REVOKE` at a replica's
+  `ns:` scope relays to the provider, which raises or lowers the corresponding foreign power level.
+
+`@everyone`/role-derived authority is **not** relayed — only explicit grants. Relaying a baseline
+that every member holds would map to "give everyone level 50", which is not what it means.
 
 ### 7a.5 Who supplies it, and the plugin connection
 

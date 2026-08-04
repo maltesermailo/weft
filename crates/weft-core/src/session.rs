@@ -345,6 +345,14 @@ struct VoiceRoom {
 }
 
 /// Where a msgid's mutations must be sent (each scope has one writer).
+/// The in-flight full-replace membership statement on a provider session
+/// (framework §7a.0a): the namespaces it covers, and the `(namespace, member)`
+/// pairs the realm has named so far.
+struct NsReplace {
+    namespaces: Vec<String>,
+    named: std::collections::HashSet<(String, String)>,
+}
+
 enum MessageRoute {
     Channel {
         handle: ChannelHandle,
@@ -426,6 +434,12 @@ struct Session<S> {
     /// peer to backfill, so repeated client scrolls over the same window fetch
     /// the peer only once.
     backfilled: std::collections::HashSet<(ChannelName, Option<String>)>,
+    /// Framework §7a.0a, provider sessions: the in-flight **full-replace**
+    /// statement opened by `SYNC` — the namespaces it covers, and the
+    /// `(namespace, member)` pairs named so far. At `SYNC END` every member of
+    /// those namespaces not in the set is dropped. `None` outside a statement,
+    /// which is what makes a stray `SYNC END` a no-op rather than a wipe.
+    ns_replace: Option<NsReplace>,
     /// §11.7 outbound bridge sessions: local clients' on-demand backfill needs
     /// (a HISTORY that ran out of local scrollback), drained in the run loop and
     /// turned into a HISTORY to the peer. Empty/unused on other sessions.
@@ -487,6 +501,7 @@ impl<S: ControlStream> Session<S> {
             fed_out_rx,
             request_accept: false,
             backfilled: std::collections::HashSet::new(),
+            ns_replace: None,
             backfill_demand_tx,
             backfill_demand_rx,
             batches: 0,

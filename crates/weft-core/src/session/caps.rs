@@ -103,6 +103,12 @@ impl<S: ControlStream> Session<S> {
             epoch,
             absolute_expiry.unwrap_or(u64::MAX),
         );
+        // Authority translation (owner directive 2026-08-04): in a replica
+        // namespace this becomes a foreign power level, so a WEFT moderator is a
+        // moderator on the Matrix side too.
+        self.relay_provider_grant(&scope, &subject, Some(caps), true)
+            .await;
+
         self.send_event(
             label,
             Event::Token {
@@ -198,6 +204,11 @@ impl<S: ControlStream> Session<S> {
         let token = self
             .ctx
             .mint_token(subj, token_scope, remaining, new_epoch, u64::MAX);
+
+        // Authority translation: lower the foreign power level to match.
+        self.relay_provider_grant(&scope, &subject, caps, false)
+            .await;
+
         self.send_event(
             label,
             Event::Token {

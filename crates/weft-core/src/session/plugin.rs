@@ -150,7 +150,7 @@ impl<S: ControlStream> Session<S> {
             };
             return match Request::from_line(line) {
                 Ok(req) => {
-                    self.on_provider_ingest(&key, sender, req.command, line)
+                    self.on_provider_acting(&key, sender, req.command, line)
                         .await
                 }
                 Err(_) => Ok(Flow::Continue), // tolerate noise
@@ -169,6 +169,28 @@ impl<S: ControlStream> Session<S> {
                     return self.on_realm_assert(req.label, key, plugin_id, realm).await;
                 }
                 Command::RealmWithdraw => return self.on_realm_withdraw().await,
+                // Authority translation: the provider governs its namespaces, so
+                // it may set capabilities in them (its power levels, mapped).
+                Command::Grant {
+                    subject,
+                    scope,
+                    caps,
+                    ..
+                } => {
+                    return self
+                        .on_provider_grant(&key, subject, scope, Some(caps), true)
+                        .await;
+                }
+                Command::Revoke {
+                    subject,
+                    scope,
+                    caps,
+                    ..
+                } => {
+                    return self
+                        .on_provider_grant(&key, subject, scope, caps, false)
+                        .await;
+                }
                 Command::ProvisionOk { job } => return self.on_provision_result(job, true).await,
                 Command::ProvisionErr { job } => {
                     return self.on_provision_result(job, false).await;
@@ -183,6 +205,21 @@ impl<S: ControlStream> Session<S> {
         };
 
         match event {
+            // Framework §7a.0a: a full-replace statement of the realm's state.
+            // `SYNC START` opens it, `SYNC END` closes it — anyone not named
+            // in between is no longer a member.
+            Event::SyncStart => self.on_provider_sync(&key, true).await,
+            Event::SyncEnd { .. } => self.on_provider_sync(&key, false).await,
+            // Membership: the realm states who belongs to a namespace it governs.
+            Event::NsMember {
+                namespace,
+                user,
+                action,
+                ..
+            } => {
+                self.on_provider_ns_member(&key, namespace, user, action)
+                    .await
+            }
             Event::PluginRegister { registration } => {
                 self.on_plugin_register(&key, &plugin_id, &registration)
                     .await
@@ -587,6 +624,265 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    /// **Membership, inbound — the full-replace window** (framework §7a.0a).
+    ///
+    /// A realm resyncs by re-stating, using the **same snapshot framing a client
+    /// gets on login** (§6.9): `SYNC START` opens the statement, the assertions
+    /// and `NS-MEMBER` events in between *are* the state, `SYNC END` closes it —
+    /// at which point every member of the provider's namespaces it did not name
+    /// is dropped. Only the roles are swapped: here the realm is the one holding
+    /// the state and weftd is the one conforming.
+    ///
+    /// Stating the whole set beats diffing against what we believe: the adapter
+    /// already has it (a Matrix adapter reads room state), there is no
+    /// read-modify-write across the link and so no stale-read race, and replaying
+    /// it is idempotent. It is the shape federation already uses for a manifest.
+    ///
+    /// The `SYNC START` opener is what makes it safe: without it a stray
+    /// `SYNC END` would name nobody and delete everyone, so an unopened one is
+    /// ignored.
+    async fn on_provider_sync(&mut self, key: &PublicKey, begin: bool) -> io::Result<Flow> {
+        // The namespaces this provider speaks for — the scope of the statement.
+        let governed = self.provider_namespaces(key).await;
+
+        if begin {
+            self.ns_replace = Some(NsReplace {
+                namespaces: governed,
+                named: std::collections::HashSet::new(),
+            });
+            return Ok(Flow::Continue);
+        }
+
+        let Some(statement) = self.ns_replace.take() else {
+            debug!("SYNC END without a SYNC START — ignored (it would name nobody)");
+            return Ok(Flow::Continue);
+        };
+
+        for ns in statement.namespaces {
+            let current = self
+                .ctx
+                .memberships
+                .ns_members(&ns)
+                .await
+                .unwrap_or_default();
+
+            for member in current {
+                if statement.named.contains(&(ns.clone(), member.clone())) {
+                    continue;
+                }
+                if let Err(e) = self.ctx.memberships.clear_ns_membership(&member, &ns).await {
+                    error!("full-replace membership prune failed: {e}");
+                    continue;
+                }
+
+                if let Some(user) = self.member_userref(&member) {
+                    self.announce_ns_member(&ns, user, MemberAction::Part).await;
+                }
+            }
+        }
+
+        Ok(Flow::Continue)
+    }
+
+    /// The namespace ids a provider governs — every `origin`-marked namespace
+    /// whose scheme its key is pinned for.
+    async fn provider_namespaces(&self, key: &PublicKey) -> Vec<String> {
+        self.ctx
+            .namespaces
+            .namespaces_with_origin()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|record| {
+                record
+                    .origin
+                    .as_deref()
+                    .and_then(|o| o.parse::<ForeignUri>().ok())
+                    .is_some_and(|uri| self.ctx.scheme_authorized(key, uri.scheme()))
+            })
+            .map(|record| record.id)
+            .collect()
+    }
+
+    /// **Membership, inbound**: the realm states who is a member of a namespace
+    /// it governs (`NS-MEMBER <ns> <user> join|part`).
+    ///
+    /// This is the authoritative direction. A bridge behaves as a federation
+    /// peer: weftd *asks* by relaying `NS JOIN`/`NS LEAVE`
+    /// ([`Self::relay_ns_membership`]) and the realm *answers* with this event —
+    /// for its own users and for ours alike, once the foreign side has them.
+    /// weftd never asserts membership of a foreign space itself.
+    ///
+    /// The membership row is keyed by the member key (`user@realm` for a foreign
+    /// member, the bare account for a local one), so it survives restarts and
+    /// feeds every derived roster and member count.
+    async fn on_provider_ns_member(
+        &mut self,
+        key: &PublicKey,
+        namespace: weft_proto::NamespaceId,
+        user: UserRef,
+        action: MemberAction,
+    ) -> io::Result<Flow> {
+        let ns = namespace.to_string();
+        let record = match self.ctx.namespaces.namespace_by_id(&ns).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return Ok(Flow::Continue),
+            Err(e) => return self.internal(None, &e).await,
+        };
+        let Some(uri) = record
+            .origin
+            .as_deref()
+            .and_then(|o| o.parse::<ForeignUri>().ok())
+        else {
+            debug!(%ns, "NS-MEMBER for a native namespace — refused");
+            return self
+                .unsupported(None, "not a provider-managed namespace")
+                .await;
+        };
+        if !self.ctx.scheme_authorized(key, uri.scheme()) {
+            return self
+                .unsupported(None, "provider key not pinned for that scheme")
+                .await;
+        }
+
+        // Our own users are keyed by their bare account, a foreign member by the
+        // full `user@realm` handle (`weft_store::local_member` is the inverse).
+        let member = if user.network == self.ctx.info.network {
+            user.account.to_string()
+        } else {
+            user.to_string()
+        };
+        // Inside a full-replace window, note who was named — anyone absent at
+        // `SYNC END` is dropped.
+        if let Some(statement) = &mut self.ns_replace {
+            if statement.namespaces.contains(&ns) {
+                statement.named.insert((ns.clone(), member.clone()));
+            }
+        }
+
+        let joining = matches!(action, MemberAction::Join);
+        let wrote = if joining {
+            self.ctx
+                .memberships
+                .set_ns_membership(&member, &ns, unix_now() as i64)
+                .await
+        } else {
+            self.ctx.memberships.clear_ns_membership(&member, &ns).await
+        };
+        if let Err(e) = wrote {
+            error!("provider membership write failed: {e}");
+            return Ok(Flow::Continue);
+        }
+
+        self.announce_ns_member(&ns, user, action).await;
+
+        Ok(Flow::Continue)
+    }
+
+    /// Tell **local** members that a namespace's roster changed, so live rosters
+    /// and counts follow. Channels are not joinable, so this is a roster notice
+    /// per channel of the namespace — local delivery only, nothing is asserted
+    /// outward.
+    async fn announce_ns_member(&self, ns: &str, user: UserRef, action: MemberAction) {
+        let count = self
+            .ctx
+            .memberships
+            .ns_members(ns)
+            .await
+            .map(|m| m.len() as u64)
+            .ok();
+        let channels = self
+            .ctx
+            .channel_store
+            .channels_in_namespace(ns)
+            .await
+            .unwrap_or_default();
+
+        for (channel, _) in channels {
+            if let Some(handle) = self.ctx.registry.get(&channel) {
+                handle
+                    .announce(Event::Member {
+                        channel: channel.clone(),
+                        user: user.clone(),
+                        action,
+                        display: None,
+                        count,
+                    })
+                    .await;
+            }
+        }
+    }
+
+    /// A stored member key back to the user it names: a bare account is one of
+    /// ours, anything else is the foreign `user@realm` handle.
+    fn member_userref(&self, member: &str) -> Option<UserRef> {
+        match weft_store::local_member(member) {
+            Some(account) => Some(UserRef::new(account, self.ctx.info.network.clone())),
+            None => member.parse().ok(),
+        }
+    }
+
+    /// A line the provider sends **on behalf of** one of its users (`@as`). Two
+    /// families: the message plane, which is *ingestion* (the foreign room's
+    /// traffic replayed here), and **moderation**, which is a foreign moderator
+    /// exercising authority.
+    ///
+    /// Moderation goes through the ordinary actor-aware handler as
+    /// `Actor::Foreign`, so it is enforced against the very grants the provider
+    /// issued (see [`Self::on_provider_grant`]) — a foreign user with no grant is
+    /// refused exactly like a local one. That is what makes "a Matrix moderator
+    /// is a moderator here" real rather than decorative, and it needs no
+    /// provider-specific authority path.
+    async fn on_provider_acting(
+        &mut self,
+        key: &PublicKey,
+        sender: UserRef,
+        cmd: Command,
+        line: &Line,
+    ) -> io::Result<Flow> {
+        let actor = Actor::Foreign(sender.to_string());
+
+        match cmd {
+            Command::Mute {
+                scope,
+                account: target,
+                reason,
+            } => {
+                self.on_moderate(None, scope, target, ModKind::Mute, true, reason, actor)
+                    .await
+            }
+            Command::Unmute {
+                scope,
+                account: target,
+            } => {
+                self.on_moderate(None, scope, target, ModKind::Mute, false, None, actor)
+                    .await
+            }
+            Command::Ban {
+                scope,
+                account: target,
+                reason,
+            } => {
+                self.on_moderate(None, scope, target, ModKind::Ban, true, reason, actor)
+                    .await
+            }
+            Command::Unban {
+                scope,
+                account: target,
+            } => {
+                self.on_moderate(None, scope, target, ModKind::Ban, false, None, actor)
+                    .await
+            }
+            Command::Kick {
+                channel,
+                account: target,
+                reason,
+            } => self.on_kick(None, channel, target, reason, actor).await,
+
+            cmd => self.on_provider_ingest(key, sender, cmd, line).await,
+        }
+    }
+
     /// Slice 4 — **provider ingestion** (framework §3.1): the provider replays a
     /// foreign room's traffic as ordinary verbs with `@as=<user@realm>`,
     /// addressing the replica by the **canonical channel name it learned** from
@@ -612,18 +908,13 @@ impl<S: ControlStream> Session<S> {
         cmd: Command,
         line: &Line,
     ) -> io::Result<Flow> {
-        // Every ingestable verb names its channel differently: MSG + JOIN/PART by
-        // target/channel, the mutations by the msgid's channel.
-        let cmd_kind = match &cmd {
-            Command::Part { .. } => MemberAction::Part,
-            _ => MemberAction::Join,
-        };
+        // Every ingestable verb names its channel differently: MSG by target,
+        // the mutations by the msgid's channel.
         let channel = match &cmd {
             Command::Msg {
                 target: Target::Channel(channel),
                 ..
             } => channel.clone(),
-            Command::Join { channel, .. } | Command::Part { channel, .. } => channel.clone(),
             Command::Edit { msgid, .. }
             | Command::Delete { msgid }
             | Command::React { msgid, .. }
@@ -682,67 +973,21 @@ impl<S: ControlStream> Session<S> {
                 .await;
         }
 
-        match cmd {
-            // 4c: a foreign member's namespace membership persists under its
-            // member key, so it survives restarts and appears in every derived
-            // roster / member count. Announced to local members as an ordinary
-            // MEMBER.
-            Command::Join { .. } | Command::Part { channel: _, .. } => {
-                let Some(ns) = channel.namespace() else {
-                    return Ok(Flow::Continue);
-                };
-                let joining = matches!(cmd_kind, MemberAction::Join);
-                let key = sender.to_string();
+        // The provider minted these, exactly as a peer network does, so they take
+        // the ordinary federated ingest path. `ingest_record` re-checks that every
+        // msgid originates on `realm` (invariant 2) and mints only the local
+        // bookkeeping ids that a delete/react row needs. Passing our own session
+        // id makes the loop guard structural — our forwarder skips the event it
+        // just ingested.
+        let Some(event) = provider_event(sender, channel, cmd, line) else {
+            return Ok(Flow::Continue);
+        };
+        let Some((_, record)) = super::federation::ingest_record(&realm, &event) else {
+            debug!("provider ingest with a msgid outside its realm — dropped");
+            return Ok(Flow::Continue);
+        };
 
-                let wrote = if joining {
-                    self.ctx
-                        .memberships
-                        .set_ns_membership(&key, ns, unix_now() as i64)
-                        .await
-                } else {
-                    self.ctx.memberships.clear_ns_membership(&key, ns).await
-                };
-                if let Err(e) = wrote {
-                    error!("foreign membership write failed: {e}");
-                    return Ok(Flow::Continue);
-                }
-
-                let count = self
-                    .ctx
-                    .memberships
-                    .ns_members(ns)
-                    .await
-                    .map(|m| m.len() as u64)
-                    .ok();
-                handle
-                    .announce(Event::Member {
-                        channel: channel.clone(),
-                        user: sender,
-                        action: cmd_kind,
-                        display: None,
-                        count,
-                    })
-                    .await;
-            }
-
-            // The message plane: the provider minted these, exactly as a peer
-            // network does, so they take the ordinary federated ingest path.
-            // `ingest_record` re-checks that every msgid originates on `realm`
-            // (invariant 2) and mints only the local bookkeeping ids that a
-            // delete/react row needs. Passing our own session id makes the loop
-            // guard structural — our forwarder skips the event it just ingested.
-            cmd => {
-                let Some(event) = provider_event(sender, channel, cmd, line) else {
-                    return Ok(Flow::Continue);
-                };
-                let Some((_, record)) = super::federation::ingest_record(&realm, &event) else {
-                    debug!("provider ingest with a msgid outside its realm — dropped");
-                    return Ok(Flow::Continue);
-                };
-
-                handle.ingest(self.id, record, event).await;
-            }
-        }
+        handle.ingest(self.id, record, event).await;
 
         Ok(Flow::Continue)
     }
@@ -898,6 +1143,142 @@ impl<S: ControlStream> Session<S> {
         Ok(())
     }
 
+    /// **Authority, inbound** (owner directive 2026-08-04): the provider grants or
+    /// revokes capabilities inside a namespace it governs, so a moderator on the
+    /// foreign side is a moderator here. A Matrix bridge translates its power
+    /// levels into WEFT capabilities and sends an ordinary `GRANT`/`REVOKE`;
+    /// weftd stays free of any notion of a power level — the adapter owns that
+    /// mapping, exactly as it owns the identity mapping (§7a.0).
+    ///
+    /// **Authority to do it** is the same rule as ingestion: the scope must name a
+    /// namespace this provider's key is pinned for. No capability chain is
+    /// consulted — for a provider-managed namespace the provider *is* the
+    /// governing authority (§7a.3), the way an owner is for a native one.
+    async fn on_provider_grant(
+        &mut self,
+        key: &PublicKey,
+        subject: String,
+        scope: String,
+        caps: Option<String>,
+        grant: bool,
+    ) -> io::Result<Flow> {
+        let Some(TokenScope::Namespace(ns)) = TokenScope::parse(&scope) else {
+            return self
+                .unsupported(None, "a provider grants at ns: scope")
+                .await;
+        };
+        let record = match self.ctx.namespaces.namespace_by_id(&ns).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return self.no_such_target(None).await,
+            Err(e) => return self.internal(None, &e).await,
+        };
+        let governs = record
+            .origin
+            .as_deref()
+            .and_then(|o| o.parse::<ForeignUri>().ok())
+            .is_some_and(|uri| self.ctx.scheme_authorized(key, uri.scheme()));
+        if !governs {
+            return self
+                .unsupported(None, "not a namespace this provider governs")
+                .await;
+        }
+
+        // The subject may be foreign (a Matrix user, keyed by `user@realm`) or a
+        // local account — `resolve_subject` handles both.
+        let store_key = match self.ctx.resolve_subject(&subject).await {
+            Ok(Some((_, store_key))) => store_key,
+            Ok(None) => return self.no_such_target(None).await,
+            Err(e) => return self.internal(None, &e).await,
+        };
+        let parsed = caps.as_deref().and_then(parse_caps);
+        if grant && parsed.is_none() {
+            return self.unsupported(None, "unknown capability").await;
+        }
+
+        let wrote = if grant {
+            let caps: Vec<String> = parsed
+                .unwrap_or_default()
+                .iter()
+                .map(Capability::to_string)
+                .collect();
+            let epoch = match self.ctx.caps.scope_epoch(&scope).await {
+                Ok(epoch) => epoch,
+                Err(e) => return self.internal(None, &e).await,
+            };
+
+            self.ctx
+                .caps
+                .record_grant(&store_key, &scope, &caps, epoch, None)
+                .await
+        } else {
+            let caps: Option<Vec<String>> =
+                parsed.map(|caps| caps.iter().map(Capability::to_string).collect());
+
+            self.ctx
+                .caps
+                .revoke_grants(&store_key, &scope, caps.as_deref())
+                .await
+                .map(|_| ())
+        };
+        if let Err(e) = wrote {
+            return self.internal(None, &e).await;
+        }
+
+        Ok(Flow::Continue)
+    }
+
+    /// **Authority, outbound**: a local `GRANT`/`REVOKE` inside a replica
+    /// namespace is relayed to the provider, which raises or lowers the
+    /// corresponding foreign power level — so promoting someone to moderator here
+    /// makes them one on the Matrix side too. The inverse of
+    /// [`Self::on_provider_grant`]; together they make authority bidirectional.
+    pub(super) async fn relay_provider_grant(
+        &self,
+        scope: &str,
+        subject: &str,
+        caps: Option<String>,
+        grant: bool,
+    ) {
+        let Some(TokenScope::Namespace(ns)) = TokenScope::parse(scope) else {
+            return; // only namespace authority maps onto a foreign space
+        };
+        let Ok(Some(record)) = self.ctx.namespaces.namespace_by_id(&ns).await else {
+            return;
+        };
+        let Some(uri) = record
+            .origin
+            .as_deref()
+            .and_then(|o| o.parse::<ForeignUri>().ok())
+        else {
+            return; // a native namespace has no provider to tell
+        };
+        let Some((_, out)) = self.ctx.provider_for_scheme(uri.scheme()) else {
+            return;
+        };
+
+        let cmd = if grant {
+            Command::Grant {
+                subject: subject.to_string(),
+                scope: scope.to_string(),
+                caps: caps.unwrap_or_default(),
+                expiry: None,
+            }
+        } else {
+            Command::Revoke {
+                subject: subject.to_string(),
+                scope: scope.to_string(),
+                caps,
+                epoch: None,
+            }
+        };
+
+        if let Ok(line) = Request::new(cmd).serialize() {
+            if out.try_send(line).is_err() {
+                warn!(%subject, "provider queue full — authority relay dropped");
+            }
+        }
+    }
+
     /// §11.4 relay a mutation of a **provider-minted** message back to its origin.
     ///
     /// The foreign side is authoritative for its own messages, so we never mint
@@ -970,40 +1351,46 @@ impl<S: ControlStream> Session<S> {
             .is_ok_and(|uri| self.ctx.scheme_online(uri.scheme()))
     }
 
-    /// Slice 5: mirror a **namespace-level** membership change into the replica's
-    /// provider, one `MEMBER` per affected channel.
+    /// Slice 5: a local user joined or left a replica namespace — **relay the
+    /// request to the realm**, which is its authority.
     ///
-    /// `NS JOIN`/`NS PART` subscribe to a namespace's channels *quietly* — no
-    /// channel `MEMBER` broadcast, deliberately, so a bulk subscription doesn't
-    /// spam local clients with a join line per channel. That means the ordinary
-    /// event relay ([`Self::on_provider_event`]) never sees them, yet the foreign
-    /// room's membership must still track ours. So this pushes them directly down
-    /// the provider's writer, the same route a `PROVISION` takes.
+    /// A bridge behaves as a federation peer, so the directions are the ones
+    /// federation uses: we send the realm a **command** (`NS JOIN`/`NS LEAVE`
+    /// carrying `@as=<the local user>` — "this user of ours asks to join"), and
+    /// the realm answers with the **`NS-MEMBER` event** that states who is a
+    /// member ([`Self::on_provider_ns_member`]). weftd never asserts membership
+    /// of a foreign space; only the realm may.
+    ///
+    /// Membership is namespace-level — channels are not joinable — so this names
+    /// only the namespace. Putting the user into the foreign rooms it maps
+    /// (including ones created later) is the adapter's job.
     pub(super) fn relay_ns_membership(
         &self,
         origin: Option<&str>,
-        channels: &[ChannelName],
+        namespace: weft_proto::NamespaceId,
         user: &UserRef,
         action: MemberAction,
     ) {
         let Some(uri) = origin.and_then(|o| o.parse::<ForeignUri>().ok()) else {
-            return; // a native namespace has no provider to tell
+            return; // a native namespace has no realm to ask
         };
         let Some((_, out)) = self.ctx.provider_for_scheme(uri.scheme()) else {
             return; // provider offline; it re-reads membership when it returns
         };
 
-        for channel in channels {
-            let event = Event::Member {
-                channel: channel.clone(),
-                user: user.clone(),
-                action,
-                display: None,
-                count: None,
-            };
-            if let Ok(line) = Reply::new(event).serialize() {
-                if out.try_send(line).is_err() {
-                    warn!(%channel, "provider queue full — membership relay dropped");
+        let cmd = match action {
+            MemberAction::Join => match namespace.to_string().parse() {
+                Ok(ns) => Command::NsJoin { ns },
+                Err(_) => return,
+            },
+            MemberAction::Part => Command::NsLeave { ns: namespace },
+        };
+
+        if let Ok(mut line) = Request::new(cmd).to_line() {
+            line.tags.insert("as".to_string(), user.to_string());
+            if let Ok(serialized) = line.serialize() {
+                if out.try_send(serialized).is_err() {
+                    warn!(%user, "provider queue full — membership relay dropped");
                 }
             }
         }

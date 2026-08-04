@@ -168,15 +168,46 @@ slices land.
       event carries the realm's origin and is structurally ineligible to go back.
       Test: local MSG/EDIT/REACT relay outward, then an ingested post is proven *not* to come back
       (the next line the provider reads is the local DELETE that followed it).
-      **JOIN/PART relay (owner directive 2026-08-04, done):** `MEMBER` carries no msgid, so its loop
-      guard reads the *user's* network instead — our members' joins/parts go out, a bridged member's
-      do not (that one is the echo of an ingested `JOIN`). One wrinkle drove the design: `NS JOIN`
-      subscribes to a namespace's channels **quietly** (`announce=false`, so a bulk subscription
-      doesn't spam local clients with a join line per channel), which means the ordinary event relay
-      never sees the common case. `relay_ns_membership` therefore pushes one `MEMBER` per affected
-      channel straight down the provider's writer — the same route a `PROVISION` takes — from both
-      `NS JOIN` and `NS LEAVE`. Local channel-level `JOIN`/`PART` (hide/unhide) still ride the
-      ordinary relay.
+      **JOIN/PART relay (owner directive 2026-08-04 — REVISED TWICE the same day):** membership is
+      **namespace-level; channels are not joinable**, and **a bridge behaves as a federation peer**,
+      so the two directions are federation's and are not interchangeable:
+      `weftd → realm  @as=<local user> NS JOIN|NS LEAVE <ns-id>` — a *request*; and
+      `realm → weftd  NS-MEMBER <ns-id> <user> join|part` — the authority *stating* membership.
+      weftd never asserts membership of a foreign space (my first two attempts did: one MEMBER per
+      channel, then an NS-MEMBER event sent *to* the realm — both had weftd claiming authority over
+      someone else's realm, and the second also inverted the event/command direction).
+      The inbound `NS-MEMBER` writes the membership row (keyed `user@realm` for a foreign member, the
+      bare account for a local one) and weftd tells its own members with a channel `MEMBER` — local
+      delivery only. The outbound request goes down the provider's writer (the `PROVISION` route)
+      because the ns subscription is deliberately silent at channel level, leaving the ordinary event
+      relay nothing to carry.
+- [x] **5e. Membership resync — the realm re-states** (owner decision 2026-08-04: full-replace, and
+      *drop* the "let the provider read our roster and diff" idea rather than ship both) — framework
+      §7a.0c. The realm re-states its membership inside the **ordinary `SYNC` snapshot framing**
+      (spec §6.9, the one a client gets on login), roles swapped: `SYNC START` → `NS-MEMBER …` × N →
+      `@cursor=<opaque> SYNC END`, at which point every member of that provider's namespaces it did
+      not name is dropped. **Zero proto changes** — `SYNC START`/`SYNC END`/`NS-MEMBER` all existed.
+      *Why full-replace:* the adapter already holds the whole set (Matrix room state), so diffing
+      would make it *also* track what WEFT believes; and read-modify-write across the link has a
+      stale-read race that can part a user who joined meanwhile. Full-replace is idempotent and
+      self-healing. `SYNC START` is the safety: an unopened `SYNC END` names nobody, so it is ignored
+      rather than obeyed (it would otherwise wipe the namespace) — tested.
+- [x] **5d. Authority translation — WEFT mods ↔ Matrix power levels** (owner directive 2026-08-04:
+      "it's important that WEFT users can be made mods on Matrix spaces and vice versa") — bidirectional,
+      with **weftd carrying no notion of a power level**: it speaks capabilities and the adapter owns
+      the mapping, exactly as it owns identity (§7a.0). Framework §7a.3b (new); §7a.4's "advisory,
+      read-only" level is amended.
+      * **Inbound**: the provider sends ordinary `GRANT <user@realm> ns:<id> <caps>` / `REVOKE` on its
+        session. Authority = the ingestion rule: the scope must name a namespace whose scheme its key
+        is pinned for; no capability chain (the provider *is* the governing authority, §7a.3).
+      * **Inbound enforcement**: a foreign moderator's `MUTE`/`BAN`/`KICK` arrives as an `@as` line and
+        runs through the **ordinary actor-aware handler** as `Actor::Foreign`, checked against those
+        grants — so a foreign user without a grant is refused like a local one. This is what makes the
+        inbound grant real rather than decorative; without it nothing a foreign user does reaches a
+        WEFT authority check at all.
+      * **Outbound**: a local `GRANT`/`REVOKE` at a replica's `ns:` scope relays to the provider.
+      * `@everyone`/role-derived authority is **not** relayed — only explicit grants (relaying a
+        baseline every member holds would mean "give everyone level 50").
 - [x] **5a. A realm IS a network — the adapter mints identity + msgids** (M, owner directive
       2026-08-04) — **DONE.** Replaces the earlier "weftd mints, `foreign=` displays" model.
       * `@as=<user@realm>` now carries the finished WEFT handle; weftd validates
