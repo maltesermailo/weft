@@ -100,6 +100,9 @@ enum Cmd {
         /// `(echo, origin-network)` — the transient reconcile token to echo back
         /// to the poster's network only (§11.13).
         echo: Option<(String, NetworkName)>,
+        /// Foreign-bridge §7a.1: the author's native foreign identity when a
+        /// provider ingested this post (`sender` stays the puppet handle).
+        foreign: Option<String>,
     },
     /// §11.13 home-authoritative apply of a **relayed** mutation from a
     /// (possibly foreign) `sender`: `op` ∈ `edit`|`delete`|`react-add`|
@@ -111,6 +114,9 @@ enum Cmd {
         root: MsgId,
         op: String,
         arg: String,
+        /// Foreign-bridge §7a.1: the actor's native foreign identity when a
+        /// provider ingested this mutation.
+        foreign: Option<String>,
     },
     /// Pre-validated by the session (author, not tombstoned).
     Edit {
@@ -254,6 +260,19 @@ impl ChannelHandle {
         meta: MsgMeta,
         echo: Option<(String, NetworkName)>,
     ) {
+        self.relay_publish_as(sender, body, meta, echo, None).await
+    }
+
+    /// [`Self::relay_publish`] carrying a foreign display identity (§7a.1) — the
+    /// provider-ingestion path.
+    pub async fn relay_publish_as(
+        &self,
+        sender: UserRef,
+        body: String,
+        meta: MsgMeta,
+        echo: Option<(String, NetworkName)>,
+        foreign: Option<String>,
+    ) {
         let _ = self
             .inbox
             .send(Cmd::RelayPublish {
@@ -261,12 +280,25 @@ impl ChannelHandle {
                 body,
                 meta,
                 echo,
+                foreign,
             })
             .await;
     }
 
     /// §11.13 home-authoritative apply of a relayed mutation (see [`Cmd::RelayMutate`]).
     pub async fn relay_mutate(&self, sender: UserRef, root: MsgId, op: String, arg: String) {
+        self.relay_mutate_as(sender, root, op, arg, None).await
+    }
+
+    /// [`Self::relay_mutate`] carrying a foreign display identity (§7a.1).
+    pub async fn relay_mutate_as(
+        &self,
+        sender: UserRef,
+        root: MsgId,
+        op: String,
+        arg: String,
+        foreign: Option<String>,
+    ) {
         let _ = self
             .inbox
             .send(Cmd::RelayMutate {
@@ -274,6 +306,7 @@ impl ChannelHandle {
                 root,
                 op,
                 arg,
+                foreign,
             })
             .await;
     }
@@ -561,6 +594,7 @@ impl Actor {
                 body,
                 meta,
                 echo,
+                foreign,
             } => {
                 let msgid = self.mint();
                 let record = EventRecord {
@@ -588,7 +622,7 @@ impl Actor {
                         meta,
                         edited: None,
                         edited_at: None,
-                        foreign: None,
+                        foreign,
                     })),
                     echo,
                 );
@@ -713,6 +747,7 @@ impl Actor {
                 root,
                 op,
                 arg,
+                foreign,
             } => {
                 // Home applies a spoke member's mutation, minting a home-origin
                 // bookkeeping msgid; the mirror fans the event out to the spokes.
@@ -735,7 +770,7 @@ impl Actor {
                                 msgid,
                                 edit_of: root,
                                 body: arg,
-                                foreign: None,
+                                foreign,
                             },
                         );
                     }
@@ -784,7 +819,7 @@ impl Actor {
                                     ReactionOp::Remove
                                 },
                                 by: sender,
-                                foreign: None,
+                                foreign,
                             },
                         );
                     }

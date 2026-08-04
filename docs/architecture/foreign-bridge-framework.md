@@ -36,7 +36,7 @@ daemon + an adapter-binding doc, with **no further core change**.
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Foreign identity | **Native, never remapped.** Foreign entities keep their own coordinates (`matrix.org`, an MXID, a Discord snowflake) and are addressed by a `<scheme>://<realm>/<path>` URI. No sanitization into WEFT network/account grammar. Supersedes `matrix.md` §5. |
+| 1 | Foreign identity | **Native, never remapped** — for **spaces/channels**: they keep their own coordinates and are addressed by a `<scheme>://<realm>/<path>` URI, never laundered into WEFT namespace grammar. Supersedes `matrix.md` §5. **AMENDED 2026-08-04 for *users*:** a replica *user* is attributed as a federated `UserRef` on their own foreign domain (`alice@matrix.org`) so replicas present as an ordinary federated network — see §7a.0; the exact native handle still rides `foreign=`. |
 | 2 | Protocol logic location | **Per-app adapter daemons only.** weftd core knows the generic contract + scheme routing; it never parses a foreign protocol. Restores the `matrix.md` §17 module boundary at the framework level. |
 | 3 | Trust / connection | **Two planes** (§3): a realm-agnostic **control link** per adapter (scheme registration + weftd→adapter provisioning pushes, §3.3) and **one data connection per realm** — pinned-key authed, bound to a single `(scheme, realm)` at connect via a `REALM ASSERT` handshake. **Multiple adapters may connect concurrently** (Matrix + Discord, or sharded per-realm instances). Per-realm binding of the data connection makes cross-realm spoofing structurally impossible and gives per-realm failure/NETBLOCK domains; the scope URI (`matrix://matrix.org/…`) and account (`@a:matrix.org`) are self-describing, so assertions carry no separate realm tag. |
 | 4 | Home authority (inbound) | **Home-authoritative replica.** weftd mints the WEFT-side ULIDs for the foreign replica; the foreign system remains the true social home. Order-divergence is an honest limit. |
@@ -240,6 +240,26 @@ properly, nor a way for a bridge/plugin to tell the client which native settings
 specs those additions. All are **additive wire fields** (proto, round-trip-tested first); the plugin
 system's SDUI/widgets can't help here, because the stock client renders the message stream + settings
 from these events, not from plugin UI.
+
+### 7a.0 Replica users are **federated-looking** (owner directive 2026-08-04)
+
+**This amends decision 1 (§1) for *users*.** A replica user is attributed to a `UserRef` whose
+**network is their own foreign domain** — `alice@matrix.org`, not a mangled local handle. Accessing
+`matrix.org` therefore makes its users *belong to* `matrix.org`, i.e. replicas present as an ordinary
+federated network.
+
+- **Network** = the identity's own domain (`@bob:other.org` in a `matrix.org` room belongs to
+  `other.org` — correct, and more federated-looking than using the room's realm); fallback = the
+  room's **realm** when the identity carries no domain (a Discord snowflake, an Instagram handle);
+  final fallback = our own network if neither parses as a `NetworkName`.
+- **Account** = the identity's localpart, sanitized to the WEFT account charset.
+- Decision 1 still holds for **namespaces/channels**: those stay `<scheme>://`-addressed and
+  `origin=`-badged; nothing is laundered into WEFT *namespace* grammar. Only user attribution changes.
+- The codebase already models this: `Actor::Foreign(user@network)`, foreign-keyed grants, and
+  `EventRecord.sender: UserRef` all accept a non-local network.
+- **Known consequence** (a replica user *looks* federated but has no peer bridge): DM routing,
+  `FEDERATE`, and name-keyed `NETBLOCK` treat `matrix.org` as a network. Guarding those paths is
+  tracked as slice-4 follow-up work, not silently assumed safe.
 
 ### 7a.1 Foreign identity on content — `foreign=`
 

@@ -4760,6 +4760,74 @@ fn ctx_plugin_full(
 }
 
 #[tokio::test]
+async fn provider_ingests_foreign_messages() {
+    // Slice 4: the provider replays a foreign room's traffic as ordinary verbs
+    // with a `<scheme>://` channel target + `@as=<foreign identity>`; weftd mints
+    // the WEFT-side event (home-authoritative) and stamps `foreign=` for display.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    // Binding the realm registers the scheme → its namespaces are online (3b-b).
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    // A local member joins the namespace — which auto-subscribes her to the
+    // replica's visible channels (v0.12 derived membership).
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+
+    // The provider ingests a foreign post, addressing the replica by the
+    // canonical name it learned from the CHANNEL-LAYOUT mapping reply.
+    plugin.send(&format!(
+        "@as=@alice:instagram.example MSG {channel} :hi from insta"
+    ));
+
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("ada expected the ingested MESSAGE");
+    };
+    // Home-authoritative: OUR network minted the msgid (invariant 2).
+    assert_eq!(m.msgid.origin().as_str(), "test.example");
+    assert_eq!(m.body, "hi from insta");
+    // §7a.1: a replica user looks **federated** — the identity's own domain is the
+    // network — while `foreign=` carries the exact native handle for display.
+    assert_eq!(m.foreign.as_deref(), Some("@alice:instagram.example"));
+    assert_eq!(m.sender.to_string(), "alice@instagram.example");
+
+    // A bare identity (no domain — a Discord/Instagram handle) falls back to the
+    // room's realm as its network, so it still looks federated.
+    plugin.send(&format!("@as=bob MSG {channel} :bare handle"));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("ada expected the second ingested MESSAGE");
+    };
+    assert_eq!(m.sender.to_string(), "bob@acme-corp");
+    assert_eq!(m.foreign.as_deref(), Some("bob"));
+
+    // An ingest for a channel we don't mirror is dropped silently (a provider
+    // replaying an unmirrored room is normal, and no user awaits a reply). The
+    // FIFO barrier: an unauthorized REALM REGISTER right after must be the next
+    // — and only — line we read.
+    plugin.send(&format!(
+        "@as=@bob:instagram.example MSG #{ns_id}/01bx5zzkbkactav9wevgemmvr0 :dropped"
+    ));
+    plugin.send("@label=probe REALM REGISTER discord");
+    let reply = plugin.expect_err(ErrCode::Unsupported).await;
+    assert_eq!(reply.label.as_deref(), Some("probe"));
+}
+
+#[tokio::test]
 async fn operator_deletes_virtual_namespace() {
     // 3b-a: the operator escape hatch — a provider-managed namespace has no
     // local owner, so operators (and only they) may govern + delete it.

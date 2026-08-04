@@ -14,6 +14,36 @@ use super::*;
 /// origin gate strips the owner shortcut, `context.rs`).
 const FOREIGN_SENTINEL: &str = "foreign";
 
+/// The **puppet identity** for a foreign user (§7a.1, owner directive
+/// 2026-08-04): a replica user looks like a *federated* user — `alice@matrix.org`
+/// — rather than a mangled local account. The network is the identity's **own**
+/// domain (`@bob:other.org` in a matrix.org room belongs to `other.org`), falling
+/// back to the room's realm when the identity carries no domain (a Discord
+/// snowflake), and finally to our own network if neither is a usable name.
+///
+/// Deterministic: the same foreign user always maps to the same puppet. The exact
+/// native identity still travels in `foreign=` (an MXID localpart may hold
+/// characters the WEFT account charset forbids, so this is a rendering, not a
+/// replacement).
+fn puppet_user(foreign: &str, origin: &ForeignUri, home: &NetworkName) -> UserRef {
+    // `@alice:matrix.org` → ("alice", Some("matrix.org")); a bare handle → no domain.
+    let bare = foreign.trim_start_matches('@');
+    let (local, domain) = match bare.split_once(':') {
+        Some((local, domain)) => (local, Some(domain)),
+        None => (bare, None),
+    };
+
+    let account: Account = sanitize_vanity(local)
+        .parse()
+        .expect("a sanitized handle is a valid account");
+    let network = domain
+        .and_then(|d| d.parse::<NetworkName>().ok())
+        .or_else(|| origin.realm().parse::<NetworkName>().ok())
+        .unwrap_or_else(|| home.clone());
+
+    UserRef::new(account, network)
+}
+
 /// Reduce a foreign path segment / display name to the namespace/vanity charset
 /// (`[a-z0-9-_]{1,64}`), falling back to `"foreign"` when nothing survives.
 fn sanitize_vanity(raw: &str) -> String {
@@ -80,6 +110,16 @@ impl<S: ControlStream> Session<S> {
         _realm: Option<ForeignUri>,
         line: &Line,
     ) -> io::Result<Flow> {
+        // Slice 4: an `@as=<foreign-identity>` line is **ingestion** — the
+        // provider replaying a foreign room's traffic (framework §3.1). Routed
+        // before the bridge verbs since it is identified by the tag, not the verb.
+        if let Some(foreign) = line.tags.get("as").filter(|v| !v.is_empty()).cloned() {
+            return match Request::from_line(line) {
+                Ok(req) => self.on_provider_ingest(&key, foreign, req.command).await,
+                Err(_) => Ok(Flow::Continue), // tolerate noise
+            };
+        }
+
         // Bridge-verb family first (they are Commands, not Events).
         if let Ok(req) = Request::from_line(line) {
             match req.command {
@@ -480,6 +520,74 @@ impl<S: ControlStream> Session<S> {
             },
         )
         .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// Slice 4 — **provider ingestion** (framework §3.1): the provider replays a
+    /// foreign room's traffic as ordinary verbs with `@as=<foreign-identity>`,
+    /// addressing the replica by the **canonical channel name it learned** from
+    /// the `CHANNEL-LAYOUT` mapping reply (§3.3) — so this is an ordinary `MSG`,
+    /// no URI-target parsing needed.
+    ///
+    /// weftd mints the WEFT-side event (home-authoritative — the provider never
+    /// mints, invariant 2), attributes it to a **puppet** `UserRef` derived from
+    /// the foreign identity, and stamps the native identity in `foreign=` for
+    /// display (§7a.1).
+    ///
+    /// **Authority:** the target channel must be an `origin`-marked replica whose
+    /// scheme this provider's key is pinned for — a provider can only speak into
+    /// rooms it owns. A native channel, or another provider's replica, is refused.
+    async fn on_provider_ingest(
+        &mut self,
+        key: &PublicKey,
+        foreign: String,
+        cmd: Command,
+    ) -> io::Result<Flow> {
+        let Command::Msg { target, body, meta } = cmd else {
+            debug!("unsupported provider-ingest verb — dropped");
+            return Ok(Flow::Continue);
+        };
+        let Target::Channel(channel) = target else {
+            debug!("provider ingest to a non-channel target — dropped");
+            return Ok(Flow::Continue);
+        };
+
+        // The channel must be a replica this provider may speak for.
+        let record = match self.ctx.channel_store.channel(&channel).await {
+            Ok(Some(record)) => record,
+            _ => {
+                debug!(%channel, "provider ingest for an unknown channel — dropped");
+                return Ok(Flow::Continue);
+            }
+        };
+        let origin = record
+            .origin
+            .as_deref()
+            .and_then(|o| o.parse::<ForeignUri>().ok());
+        let Some(origin) = origin else {
+            debug!(%channel, "provider ingest into a native channel — refused");
+            return self
+                .unsupported(None, "not a provider-managed channel")
+                .await;
+        };
+        if !self.ctx.scheme_authorized(key, origin.scheme()) {
+            return self
+                .unsupported(None, "provider key not pinned for that scheme")
+                .await;
+        }
+
+        let Some(handle) = self.ctx.registry.get(&channel) else {
+            debug!(%channel, "provider ingest for a channel with no live actor — dropped");
+            return Ok(Flow::Continue);
+        };
+
+        // The puppet identity: a replica user looks federated (`alice@matrix.org`),
+        // while `foreign=` carries the exact native handle for display.
+        let sender = puppet_user(&foreign, &origin, &self.ctx.info.network);
+
+        handle
+            .relay_publish_as(sender, body.unwrap_or_default(), meta, None, Some(foreign))
+            .await;
         Ok(Flow::Continue)
     }
 

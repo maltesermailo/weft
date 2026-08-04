@@ -112,7 +112,7 @@ Parked owner requests (need spec design before implementation — §18 territory
 
 ## Deliberately deferred — do not add
 
-openmls, SFU/voice, SQLite backend (the traits allow it; Postgres is the chosen engine — decision reversed 2026-07), Biscuit tokens, SRV discovery, cross-network DMs, per-message rate-limiter beyond THROTTLED plumbing, shared blocklists. If a task appears to need one, flag it instead of adding the dependency. Open questions live in spec §18 — decisions there belong to Jannik, not to a coding session.
+openmls, SFU/voice, SQLite backend (the traits allow it; Postgres is the chosen engine — decision reversed 2026-07), Biscuit tokens, SRV discovery, per-message rate-limiter beyond THROTTLED plumbing, shared blocklists. **(`cross-network DMs` UN-DEFERRED 2026-08-04**, owner directive — to DM bridged/foreign users. Note what the old entry actually meant: cross-network *messaging* is already implemented via **federation-able group DMs** (`GroupStore` members are full `UserRef`s; test `federated_group_roster_syncs_across_networks`) plus federated friends/calls. The gap is only the **1:1 `@user` target form** — `Target::User(Account)` has no network slot. Tracked in `docs/matrix-bridge-plan.md` slice 4d.) If a task appears to need one, flag it instead of adding the dependency. Open questions live in spec §18 — decisions there belong to Jannik, not to a coding session.
 
 # System Prompt: Software Development Agent
 

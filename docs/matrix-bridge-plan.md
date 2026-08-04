@@ -98,8 +98,51 @@ slices land.
       Tests: operator-delete (member refused / operator tombstones / gone), withdraw-tombstone,
       duplicate-claim refusal. 37 suites green, clippy clean.
       *Offline-relay queueing stays an explicit slice-5 design decision.*
-- [ ] **4. Ingestion** (M) — provider `@as` `MSG`/`EDIT`/`DELETE`/`REACT`/`MEMBER` → replica channel
-      actors mint events carrying `foreign=`. **Matrix → WEFT messages flow.**
+- [~] **4. Ingestion** (M) — **MSG done 2026-08-04; EDIT/DELETE/REACT/MEMBER next.**
+      An `@as=<foreign-identity>` line on a provider session is ingestion (routed on the tag, before
+      the bridge verbs). **Addressing:** the provider uses the **canonical channel name it learned**
+      from the `CHANNEL-LAYOUT` mapping reply — so it's an ordinary `MSG`, no URI-target parsing
+      (`Target` can't hold a `://` URI; discovered by the test). weftd verifies the target is an
+      `origin`-marked replica whose **scheme the provider's key is pinned for** (a native channel or
+      another provider's replica is refused `UNSUPPORTED`), then mints via
+      `relay_publish_as` — home-authoritative (invariant 2), attributed to a **federated-looking
+      puppet** `UserRef` (owner directive 2026-08-04, framework §7a.0 — amends decision 1 for users):
+      `puppet_user` = identity localpart @ its own domain (`alice@matrix.org`), falling back to the
+      room's realm for a bare handle (`bob@acme-corp`), with the exact native handle in `foreign=`
+      (§7a.1). `Cmd::RelayPublish`/
+      `RelayMutate` gained a `foreign` field (+ `relay_publish_as`/`relay_mutate_as`); the old
+      no-foreign methods delegate. Unmirrored channel ⇒ silent drop (normal for a provider).
+      Test: ingest → member sees `MESSAGE` with our-network msgid + `foreign=@alice:…` + puppet
+      sender; unmirrored drop proven by a FIFO barrier. *Remaining in slice 4: EDIT/DELETE/REACT via
+      `relay_mutate_as` (the field is already threaded), MEMBER (foreign roster), and `POLICY`.*
+- [ ] **4b. Federated-looking-puppet follow-ups** (S, from the §7a.0 amendment) — a replica user now
+      *looks* federated but has **no peer bridge**, so guard the paths that assume otherwise:
+      `FEDERATE`/auto-bridge dialing toward a replica's "network", and name-keyed `NETBLOCK`
+      semantics for a realm-as-network. (DM routing is now slice 4d, a feature not a guard.)
+- [ ] **4c. Foreign namespace membership** (M, owner directive 2026-08-04) — **Matrix users can join
+      WEFT namespaces.** The wire already supports it (`Event::Member.user`/`NsMember.user` are full
+      `UserRef`s); the work is the store + roster:
+      - widen `MembershipStore` ns-membership keys from `&Account` to a **member key string** —
+        bare name = local (`ada`), `user@network` = foreign (`alice@matrix.org`). **No data migration:**
+        `weft_ns_membership.account` is already plain `TEXT` with no FK (only the comment changes).
+        ~24 call sites adapt (roster, counts, SYNC skeleton, NS INFO, delete cascade, provider pushes).
+      - channel-actor rosters are **session-keyed**, so a memberless foreign participant needs the
+        derived roster to union stored foreign members with live sessions.
+      - provider `MEMBER` ingestion (the rest of slice 4) writes/clears those rows.
+- [ ] **4d. DM a bridged (foreign) user** (owner directive 2026-08-04 — un-defers the CLAUDE.md item).
+      **Correction to the original scoping:** cross-network *messaging* already works — **group DMs are
+      federation-able** (`GroupStore` members are full `UserRef`s; `federated_group_roster_syncs_across_networks`
+      passes) on the §11.13 home-authoritative relay (`RelayPublish`/`RelayMutate`), as are friends
+      and calls. The only gap is the **1:1 `@user` target form** (`Target::User(Account)` has no
+      network slot). Two paths:
+      - **(i) Reuse federated groups (S, recommended):** a bridged 1:1 DM is a **2-member group**
+        containing the foreign user — existing, tested machinery; no L0 change. Work = let a group
+        member be a bridged user (already typed as `UserRef`), route its outbound mutations to the
+        **provider** rather than a peer bridge, and have the client present 2-member groups as DMs.
+      - **(ii) True `@user@network` DMs (M–L):** extend `Target::User` with an optional network — L0
+        change to a central type + a DM routing dispatch. Ergonomic sugar over (i)'s capability.
+      **Ordering (either path):** delivery *into* Matrix needs the outbound relay, so land the
+      routing with or after **slice 5**; before that a bridged DM stores locally and goes nowhere.
 - [ ] **5. Outbound relay** (M) — local posts/edits/reacts/joins in origin-marked channels forward to
       the provider session (reuse the bridge-forwarder machinery). **WEFT → Matrix flows.**
 
@@ -126,6 +169,10 @@ slices land.
 - [ ] **10. Matrix daemon MVP** (L, external, on the SDK) — companion HS / AS-API, provisioning
       (resolve + join + enumerate a space), bidirectional message sync, structure assertion.
       *(Can start in parallel with #7 once #6 lands.)*
+      **Outbound projection (owner directive 2026-08-04):** the daemon models WEFT namespaces **as
+      Matrix Spaces** on the companion homeserver (`matrix.md` §3–16 — already designed), so Matrix
+      users join the Space/rooms natively and their participation arrives as slice-4c membership +
+      slice-4 ingestion. Pure daemon work: no weftd change beyond 4c/4d.
 - [ ] **11. Management actions in the daemon** — invite/kick/ban/create-room/create-subspace/
       room-settings/power-level actions as SDUI flows; profile supplied via `NS-META`.
 - [ ] **12. Track B — widgets + client-Rhai + CSP** (L) — the rich PL-matrix editor as a sandboxed
