@@ -1503,17 +1503,10 @@ impl<S: ControlStream> Session<S> {
         }
         // A replica channel takes no posts while its provider is offline (owner
         // directive 2026-08-04, the counterpart of the same rule on NS JOIN).
-        // Accepting one would split-brain the room: local members would see a
-        // message the foreign side never receives, and there is no reconciliation
-        // for it — the provider is the only route out, and a queue would have to
-        // replay into a room whose state moved on meanwhile.
-        if let Some(origin) = record.as_ref().and_then(|c| c.origin.as_deref()) {
-            let online = origin
-                .parse::<weft_proto::ForeignUri>()
-                .is_ok_and(|uri| self.ctx.scheme_online(uri.scheme()));
-            if !online {
-                return Ok(Some((ErrCode::Policy, "provider-offline")));
-            }
+        // See `origin_offline` for why; the mutation verbs are gated the same way
+        // in `resolve_message`.
+        if self.origin_offline(record.as_ref().and_then(|c| c.origin.as_deref())) {
+            return Ok(Some((ErrCode::Policy, "provider-offline")));
         }
 
         if record.map(|c| c.restricted).unwrap_or(false)

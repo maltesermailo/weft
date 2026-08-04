@@ -200,10 +200,24 @@ slices land.
       against later. Implemented in `can_post` (the §6.7 posting gate, which already loads the
       channel record — so the origin check is free), mirroring the same rule already enforced on
       `NS JOIN`. Tested in `provider_offline_gates_virtual_namespace`.
-      *Scope note:* this gates **posting**. `EDIT`/`DELETE`/`REACT` on an existing message do not go
-      through `can_post` and are still accepted while the provider is offline — the same split-brain
-      in miniature. Worth closing, but it is a separate decision (a delete that can't reach Matrix is
-      arguably still worth honouring locally) and was not part of this directive.
+      **Extended to every write (owner directive 2026-08-04: "Matrix is authoritative for its own
+      spaces"):** `EDIT`/`DELETE`/`REACT`/`UNREACT` are gated too, in `resolve_message`'s channel arm
+      — the single choke point all three verbs already share. Both gates call one predicate,
+      `origin_offline(origin)`. Tested per verb, asserting the `provider-offline` **context** so the
+      test proves *this* rule refused and not some other `POLICY` sharing the code.
+      *Note:* operator/admin delete (`SystemDelete`, the admin panel) is deliberately **not** gated —
+      it is the moderation/legal-removal path and must work whether or not a bridge is up.
+- [x] **5c. Mutating a BRIDGED message — relay to the provider** (owner directive 2026-08-04) —
+      the flip side the offline gate exposed: a local user could not react to a Matrix-originated
+      message *at all*, because `resolve_message` refuses a foreign-origin msgid with `FORBIDDEN
+      origin` (invariant 2). Correct for a native channel, wrong for a replica, where multi-origin is
+      the normal case. New `MessageRoute::ChannelProvider` — when the msgid's origin is the channel's
+      **realm**, the mutation relays to the provider as `@as=<local user> REACT|DELETE|EDIT …`
+      (framework §7a.0b); the adapter performs it foreign-side and its event returns via ingestion.
+      A foreign-origin msgid that does *not* match the channel's realm still gets `FORBIDDEN origin`.
+      **Also fixed here:** authorship compared only the bare account, so a local `alice` could edit
+      `alice@matrix.org`'s message — now the whole `user@network` is compared. Tested: ada's REACT
+      relays, her EDIT of someone else's message is still `CAP-REQUIRED`, an operator's DELETE relays.
 
 *Parallelism: 1 ‖ 2. After Phase 1 a mock provider gives a fully chatting Matrix-shaped namespace.*
 

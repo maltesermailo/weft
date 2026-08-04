@@ -898,6 +898,78 @@ impl<S: ControlStream> Session<S> {
         Ok(())
     }
 
+    /// §11.4 relay a mutation of a **provider-minted** message back to its origin.
+    ///
+    /// The foreign side is authoritative for its own messages, so we never mint
+    /// the `EDITED`/`DELETED`/`REACTION` ourselves — that would be authoring an
+    /// event under someone else's origin. Instead we ask the provider to perform
+    /// it (a redaction, a reaction) and the *resulting* foreign event arrives back
+    /// through ordinary ingestion, which is what local members then see.
+    ///
+    /// The wire form is the ordinary verb carrying `@as=<the acting local user>` —
+    /// the mirror image of ingestion (§3.1), where `@as` names a foreign user
+    /// acting on our side. In both directions it reads "on behalf of".
+    pub(super) fn relay_provider_mut(
+        &self,
+        origin: &str,
+        user: &UserRef,
+        root: MsgId,
+        op: &str,
+        arg: String,
+    ) {
+        let Ok(uri) = origin.parse::<ForeignUri>() else {
+            return;
+        };
+        let Some((_, out)) = self.ctx.provider_for_scheme(uri.scheme()) else {
+            return; // liveness is gated upstream; a race here just drops it
+        };
+
+        let cmd = match op {
+            "edit" => Command::Edit {
+                msgid: root,
+                body: arg,
+            },
+            "delete" => Command::Delete { msgid: root },
+            "react-add" => Command::React {
+                msgid: root,
+                emoji: arg,
+            },
+            "react-remove" => Command::Unreact {
+                msgid: root,
+                emoji: arg,
+            },
+            _ => return,
+        };
+
+        if let Ok(mut line) = Request::new(cmd).to_line() {
+            line.tags.insert("as".to_string(), user.to_string());
+            if let Ok(serialized) = line.serialize() {
+                if out.try_send(serialized).is_err() {
+                    warn!(%user, "provider queue full — mutation relay dropped");
+                }
+            }
+        }
+    }
+
+    /// Whether a channel/namespace `origin` names a replica whose provider is
+    /// currently offline (owner directive 2026-08-04). `false` for a native
+    /// object — it has no provider to be offline.
+    ///
+    /// **The foreign side is authoritative for its own spaces**, so while the
+    /// only route to it is down we accept no writes into it at all: not posts,
+    /// not edits, deletes or reactions. Taking one would leave local members
+    /// looking at state the foreign room never agreed to, with nothing to
+    /// reconcile against when the provider returns.
+    pub(super) fn origin_offline(&self, origin: Option<&str>) -> bool {
+        let Some(origin) = origin else {
+            return false;
+        };
+
+        !origin
+            .parse::<ForeignUri>()
+            .is_ok_and(|uri| self.ctx.scheme_online(uri.scheme()))
+    }
+
     /// Slice 5: mirror a **namespace-level** membership change into the replica's
     /// provider, one `MEMBER` per affected channel.
     ///

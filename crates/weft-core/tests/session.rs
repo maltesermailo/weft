@@ -317,6 +317,14 @@ async fn drain_until_ns_member(client: &mut Client) -> Option<u64> {
     }
 }
 
+/// The `context` of an `ERR` reply — which specific rule refused.
+fn err_context(reply: &Reply) -> Option<String> {
+    match &reply.event {
+        Event::Err(err) => err.context.clone(),
+        other => panic!("not an ERR: {other:?}"),
+    }
+}
+
 /// Send-and-collect a `MEMBERS` roster: skip anything before the batch, then
 /// gather the member account names until `BATCH END`.
 async fn roster_names(client: &mut Client) -> std::collections::HashSet<String> {
@@ -5144,6 +5152,88 @@ async fn local_posts_relay_outward_without_looping() {
 }
 
 #[tokio::test]
+async fn local_mutations_of_a_bridged_message_relay_to_the_provider() {
+    // Owner directive 2026-08-04: a WEFT user must be able to react to (and a
+    // moderator to delete) a *Matrix-originated* message. The foreign side owns
+    // those events, so we never mint them here — we ask the provider to perform
+    // them, and its resulting event arrives back through ordinary ingestion.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &["root"],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+    // Her join relays outward (slice 5) — consume it.
+    assert!(matches!(
+        weft_proto::Reply::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .event,
+        Event::Member { .. }
+    ));
+
+    // The provider ingests a message of its own.
+    let posted = format!("acme-corp/{}", ulid::Ulid::new());
+    plugin.send(&format!(
+        "@as=alice@acme-corp;msgid={posted} MSG {channel} :from insta"
+    ));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("ada expected the ingested MESSAGE");
+    };
+    let root = m.msgid.clone();
+    assert_eq!(root.origin().as_str(), "acme-corp");
+
+    // Ada reacts to it. Nothing is minted locally — the provider is asked to do
+    // it, carrying `@as` naming *her* (the mirror image of ingestion's `@as`).
+    ada.send(&format!("@label=r1 REACT {root} wave"));
+    let relayed = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    let weft_proto::Command::React { msgid, emoji } = relayed.command else {
+        panic!("provider expected the relayed REACT");
+    };
+    assert_eq!(msgid, root);
+    assert_eq!(emoji, "wave");
+
+    // Ada is not the author, so EDIT is still refused on authorship — the relay
+    // route does not weaken the ordinary checks.
+    ada.send(&format!("@label=e1 EDIT {root} :not mine"));
+    let reply = ada.expect_err(ErrCode::CapRequired).await;
+    assert_eq!(reply.label.as_deref(), Some("e1"));
+
+    // An operator's DELETE *is* relayed — decision 20-H: the adapter's bot
+    // performs the redaction foreign-side.
+    let mut root_op = ready(&ctx, "root").await;
+    root_op.send(&format!("@label=j2 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut root_op).await;
+    assert!(matches!(
+        weft_proto::Reply::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .event,
+        Event::Member { .. }
+    ));
+
+    root_op.send(&format!("@label=d1 DELETE {root}"));
+    let relayed = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    let weft_proto::Command::Delete { msgid } = relayed.command else {
+        panic!("provider expected the relayed DELETE");
+    };
+    assert_eq!(msgid, root);
+}
+
+#[tokio::test]
 async fn provider_offline_gates_virtual_namespace() {
     // Owner directive 2026-08-04: a virtual namespace is online only while its
     // provider is — offline ⇒ undiscoverable + unjoinable; members get live
@@ -5195,7 +5285,10 @@ async fn provider_offline_gates_virtual_namespace() {
     ada.send(&format!("@label=m0 MSG {channel} :while online"));
     let reply = ada.recv().await;
     assert_eq!(reply.label.as_deref(), Some("m0"));
-    assert!(matches!(reply.event, Event::Message(_)));
+    let Event::Message(posted) = reply.event else {
+        panic!("expected her own echo");
+    };
+    let root = posted.msgid.clone();
 
     // Online: DISCOVER lists the public replica.
     ada.send("DISCOVER");
@@ -5221,6 +5314,28 @@ async fn provider_offline_gates_virtual_namespace() {
     ada.send(&format!("@label=m1 MSG {channel} :into the void"));
     let reply = ada.expect_err(ErrCode::Policy).await;
     assert_eq!(reply.label.as_deref(), Some("m1"));
+    assert_eq!(err_context(&reply).as_deref(), Some("provider-offline"));
+
+    // The same for every mutation — the foreign side is authoritative for its
+    // own rooms, so we take no write we cannot deliver to it. Her own message,
+    // so authorship is not what refuses these.
+    for (label, cmd) in [
+        ("e1", format!("EDIT {root} :rewritten")),
+        ("r1", format!("REACT {root} wave")),
+        ("u1", format!("UNREACT {root} wave")),
+        ("d1", format!("DELETE {root}")),
+    ] {
+        ada.send(&format!("@label={label} {cmd}"));
+        let reply = ada.expect_err(ErrCode::Policy).await;
+        assert_eq!(reply.label.as_deref(), Some(label), "{cmd}");
+        // The context proves it is the bridge gate refusing, not some other
+        // POLICY rule that happens to share the code.
+        assert_eq!(
+            err_context(&reply).as_deref(),
+            Some("provider-offline"),
+            "{cmd}"
+        );
+    }
 
     // Offline: unjoinable (uniform NO-SUCH-TARGET) and undiscoverable (a DISCOVER
     // yields nothing; the FIFO PING proves the silence).

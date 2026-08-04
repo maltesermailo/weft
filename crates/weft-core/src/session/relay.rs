@@ -557,7 +557,11 @@ impl<S: ControlStream> Session<S> {
                     self.not_member_cap(label, &channel, cap).await?;
                     return Ok(None);
                 };
-                if must_be_author && root.sender.account != *account {
+                // Authorship compares the **whole** `user@network`, not the bare
+                // account: a replica channel is multi-origin, so a local `alice`
+                // must not pass as the foreign `alice@matrix.org`.
+                let me = UserRef::new(account.clone(), self.ctx.info.network.clone());
+                if must_be_author && root.sender != me {
                     // A moderator holding the override cap (delete-any) may act
                     // on another member's message; otherwise it isn't theirs.
                     let overridden = if let Some(over) = &author_override {
@@ -580,18 +584,57 @@ impl<S: ControlStream> Session<S> {
                 // ours. Otherwise relay the mutation to the home; the resulting
                 // EDITED/DELETED/REACTION returns over the event mirror.
                 if self.ctx.registry.is_home(&channel) {
-                    // §11.4: a home channel mints every message, so a foreign-origin
-                    // msgid here is a bridged message we must not author.
-                    if msgid.origin() != &self.ctx.info.network {
+                    // A replica's foreign side is authoritative for its own rooms,
+                    // so a write we cannot deliver there is refused rather than
+                    // applied locally (owner directive 2026-08-04) — the same rule
+                    // the posting gate applies. `origin` is `None` for a native
+                    // channel, which is the ordinary case below.
+                    let origin = match self.ctx.channel_store.channel(&channel).await {
+                        Ok(record) => record.and_then(|c| c.origin),
+                        Err(e) => {
+                            self.internal(label, &e).await?;
+                            return Ok(None);
+                        }
+                    };
+                    if self.origin_offline(origin.as_deref()) {
                         self.send_err(
                             label,
-                            ErrCode::Forbidden,
-                            Some("origin"),
-                            "not this message's origin",
+                            ErrCode::Policy,
+                            Some("provider-offline"),
+                            "the bridge for this channel is offline",
                         )
                         .await?;
                         return Ok(None);
                     }
+
+                    // §11.4: a home channel mints its own messages, so a
+                    // foreign-origin msgid here is one we must not author. In a
+                    // **replica** that is the normal case — the channel is
+                    // multi-origin, and a message the provider minted is mutated
+                    // by asking the provider to do it (a Matrix redaction or
+                    // reaction), not by minting under its origin ourselves.
+                    if msgid.origin() != &self.ctx.info.network {
+                        let relayable = origin.as_deref().and_then(|o| {
+                            let uri = o.parse::<weft_proto::ForeignUri>().ok()?;
+                            (uri.realm() == msgid.origin().as_str()).then(|| o.to_string())
+                        });
+                        let Some(origin) = relayable else {
+                            self.send_err(
+                                label,
+                                ErrCode::Forbidden,
+                                Some("origin"),
+                                "not this message's origin",
+                            )
+                            .await?;
+                            return Ok(None);
+                        };
+
+                        return Ok(Some(MessageRoute::ChannelProvider {
+                            origin,
+                            root: root.msgid,
+                        }));
+                    }
+
                     Ok(Some(MessageRoute::Channel {
                         handle: joined.handle.clone(),
                         channel,
@@ -711,6 +754,12 @@ impl<S: ControlStream> Session<S> {
                 let me = UserRef::new(account, self.ctx.info.network.clone());
                 self.relay_group_mut(home, group, &me, root, GroupMutKind::Edit(body));
             }
+            Some(MessageRoute::ChannelProvider { origin, root }) => {
+                // §11.4 the provider minted it, so the provider edits it; the
+                // resulting foreign EDITED comes back through ingestion.
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.relay_provider_mut(&origin, &me, root, "edit", body);
+            }
             Some(MessageRoute::ChannelRemote {
                 channel,
                 home,
@@ -767,6 +816,12 @@ impl<S: ControlStream> Session<S> {
                 let me = UserRef::new(account, self.ctx.info.network.clone());
                 self.relay_group_mut(home, group, &me, root, GroupMutKind::Delete);
             }
+            Some(MessageRoute::ChannelProvider { origin, root }) => {
+                // Decision 20-H: a moderator's delete of a bridged message is
+                // performed foreign-side by the adapter's bot (a redaction).
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                self.relay_provider_mut(&origin, &me, root, "delete", String::new());
+            }
             Some(MessageRoute::ChannelRemote {
                 channel,
                 home,
@@ -822,6 +877,13 @@ impl<S: ControlStream> Session<S> {
             Some(MessageRoute::GroupRemote { group, home, root }) => {
                 let me = UserRef::new(account, self.ctx.info.network.clone());
                 self.relay_group_mut(home, group, &me, root, GroupMutKind::React { emoji, add });
+            }
+            Some(MessageRoute::ChannelProvider { origin, root }) => {
+                // Reacting to a *bridged* message: the provider performs it
+                // foreign-side and the resulting REACTION arrives via ingestion.
+                let me = UserRef::new(account, self.ctx.info.network.clone());
+                let op = if add { "react-add" } else { "react-remove" };
+                self.relay_provider_mut(&origin, &me, root, op, emoji);
             }
             Some(MessageRoute::ChannelRemote {
                 channel,

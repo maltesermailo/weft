@@ -268,6 +268,30 @@ peer-federation machinery applies unchanged.
   `FEDERATE`, and name-keyed `NETBLOCK` treat `matrix.org` as a network. Guarding those paths is
   tracked as slice-4 follow-up work, not silently assumed safe.
 
+### 7a.0b Mutating a **bridged** message — `@as` in the outbound direction
+
+A local user reacting to (or a moderator deleting) a message the *provider* minted cannot be applied
+here: under §7a.0 that message originates on the realm, and minting an `EDITED`/`DELETED`/`REACTION`
+under someone else's origin violates invariant 2. The foreign side is authoritative for its own
+events. So weftd **relays the mutation to the provider** instead:
+
+```
+weftd → provider   @as=ada@test.example REACT acme-corp/01J… wave
+weftd → provider   @as=ada@test.example DELETE acme-corp/01J…
+```
+
+The adapter performs it foreign-side (a Matrix reaction, a redaction — by the acting user's puppet
+where it can, by the bridge bot where it must, plugin-spec decision 20-H), and the resulting *foreign*
+event comes back through ordinary ingestion (§7a.0), which is what local members then see. There is no
+local ack: the ingested event is the result, exactly as a spoke's mutation returns over the event
+mirror in §11.13.
+
+`@as` therefore reads the same in both directions — "on behalf of" — naming a foreign user inbound and
+a local user outbound. The ordinary authorization runs **before** the relay: EDIT still requires
+authorship, DELETE still requires authorship or `delete-any`, and both require the provider to be
+online. Authorship compares the whole `user@network`, not the bare account — a replica channel is
+multi-origin, so a local `alice` must not pass as `alice@matrix.org`.
+
 ### 7a.1 ~~Foreign identity on content — `foreign=`~~ (REMOVED 2026-08-04)
 
 A `foreign=<native-account>` tag on `MESSAGE`/`MEMBER`/`REACTION`/`EDITED` used to carry the exact

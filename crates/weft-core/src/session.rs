@@ -351,6 +351,14 @@ enum MessageRoute {
         channel: ChannelName,
         root: MsgId,
     },
+    /// §11.4 a **replica** channel's message that the *provider* minted: the
+    /// foreign side is authoritative for its own events, so the mutation is
+    /// relayed to the provider and the resulting foreign event arrives back
+    /// through ordinary ingestion. `origin` is the channel's foreign URI.
+    ChannelProvider {
+        origin: String,
+        root: MsgId,
+    },
     /// §11.13 a channel whose **home is another** network: the mutation is relayed
     /// there (only the home applies it, authored-by), and the resulting
     /// EDITED/DELETED/REACTION returns over the ordinary event mirror.
