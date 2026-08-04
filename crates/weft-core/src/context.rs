@@ -1427,6 +1427,16 @@ impl ServerCtx {
         map.values().any(|r| r.schemes.contains(scheme))
     }
 
+    /// Whether a *different* provider already serves `scheme` — first registrant
+    /// holds a scheme until it disconnects (3b-c: deterministic routing, never
+    /// HashMap-order luck between two claimants).
+    pub(crate) fn scheme_held_by_other(&self, scheme: &weft_proto::Scheme, id: &str) -> bool {
+        let map = self.plugin_registry.lock().expect("plugin_registry lock");
+
+        map.iter()
+            .any(|(other, r)| other != id && r.schemes.contains(scheme))
+    }
+
     /// A namespace's provider liveness (owner directive 2026-08-04: a virtual
     /// namespace is online only while its provider is): `None` for a native
     /// namespace, else whether the origin's scheme has a live provider. An
@@ -1641,6 +1651,17 @@ impl ServerCtx {
                     // owner (or a name-colliding user) confers nothing (§7,
                     // Phase-0 decision 2026-08-04).
                     if ns.origin.is_none() && ns.owner == *account {
+                        return Ok(true);
+                    }
+                    // The **operator escape hatch** (3b, 2026-08-04): a
+                    // provider-managed namespace has NO local owner, so the
+                    // "operator ≠ admin of someone else's server" principle does
+                    // not apply — it is server infrastructure, and without this
+                    // an orphaned replica would be undeletable by anyone.
+                    if ns.origin.is_some()
+                        && (self.operators.contains(account)
+                            || self.accounts.is_operator(account).await?)
+                    {
                         return Ok(true);
                     }
                 }

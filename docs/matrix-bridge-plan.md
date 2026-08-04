@@ -81,12 +81,22 @@ slices land.
             (mem+PG). client-core `ClientEvent::NsMeta` passes `origin` + `provider_online`
             through. Full-cycle test (online→discover/join ✓ → death→offline push + join/discover
             refused → reconnect→online push + join ✓). *Svelte badge UI = the client display slice.*
-      - [ ] (a) **operator escape hatch**: operator `NS DELETE` when `origin.is_some()` (orphaned
-            virtual namespaces are otherwise IMMORTAL — nobody holds ns-admin);
-      - [ ] (b) **`REALM WITHDRAW` real semantics** (framework §3.1 divergence): withdraw =
-            tombstone the realm's namespaces, not just clear the binding;
-      - [ ] (c) deterministic `provider_for_scheme` (two providers, one scheme — HashMap order today);
-      - [ ] (d) exclude `origin` namespaces from the owner-string's `NS CREATE` quota count.
+      - [x] (a) **operator escape hatch** — DONE 2026-08-04: operators hold every cap in an
+            `origin` namespace (ctx cap-check branch; "operator ≠ user-server admin" doesn't apply —
+            no user owns a replica). `NS DELETE` works over the wire; cascade extracted into
+            `delete_namespace_cascade` + `deletion_tombstone` helpers.
+      - [x] (b) **`REALM WITHDRAW` real semantics** — DONE 2026-08-04: withdraw = full deletion
+            cascade of the bound realm's namespaces + tombstone pushed to every member (distinct
+            from disconnect = offline). Bonus fix the test caught: **`REALM ASSERT` now registers
+            the scheme** (a bound data connection is definitionally serving → liveness + PROVISION
+            routing), with the same dup-guard.
+      - [x] (c) **deterministic scheme claims** — DONE 2026-08-04: first registrant holds a scheme;
+            a second claimant is refused loudly (`CONFLICT`; close on PLUGIN-REGISTER, err on
+            REALM REGISTER/ASSERT).
+      - [x] (d) **quota exclusion** — DONE 2026-08-04: `namespaces_owned` skips `origin` rows
+            (mem + PG + contract).
+      Tests: operator-delete (member refused / operator tombstones / gone), withdraw-tombstone,
+      duplicate-claim refusal. 37 suites green, clippy clean.
       *Offline-relay queueing stays an explicit slice-5 design decision.*
 - [ ] **4. Ingestion** (M) — provider `@as` `MSG`/`EDIT`/`DELETE`/`REACT`/`MEMBER` → replica channel
       actors mint events carrying `foreign=`. **Matrix → WEFT messages flow.**
@@ -122,6 +132,18 @@ slices land.
       widget. **Polish, not gating**: SDUI tables/forms carry the v1 levels view.
 
 ---
+
+## Admin panel additions (weft-admin — after the phases above)
+
+- [ ] **Namespace management page**: list ALL namespaces (store-direct `list_all`) with
+      visibility, member count, and **origin/provider badges** (foreign URI + live/offline state);
+      **DELETE any namespace** — the operator UI form of the 3b-a escape hatch, reusing the same
+      cascade (incl. orphaned virtual namespaces whose provider is long gone).
+- [ ] **Provider status page**: the `[[plugin.remote]]` / `[[foreign_bridge]]` pins with their
+      connection state (online/offline, registered schemes, declared actions), and each provider's
+      virtual namespaces.
+- [ ] Plugin lifecycle controls (enable/disable pins, view quarantine/refusal log) — overlaps
+      plugin-spec M-plug-13; reconcile when that lands.
 
 ## Explicitly deferred (not on the Matrix path)
 

@@ -838,6 +838,69 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    /// The full namespace-deletion cascade (channels + roles + memberships +
+    /// invites + grants, then the record), shared by `NS DELETE` and a
+    /// provider's `REALM WITHDRAW` (framework §3.1). Returns the cleared members
+    /// so a caller can push the deletion tombstone to them.
+    pub(super) async fn delete_namespace_cascade(
+        &mut self,
+        record: &weft_store::NamespaceRecord,
+    ) -> Result<Vec<Account>, weft_store::StoreError> {
+        let ns_str = record.id.clone();
+
+        // Cascade: a namespace owns its channels, memberships, roles and pending
+        // invites. Deleting only the record orphans them — the channels stay live
+        // and in the store, so clients auto-rejoin and keep posting, DISCOVER and
+        // the admin panel still surface them, and a namespace later recreated
+        // under the same name would inherit ghost members/roles. Tear the whole
+        // subtree down first, then drop the record.
+        let channels = self.ctx.channel_store.channels_in_namespace(&ns_str).await?;
+
+        for (channel, _) in &channels {
+            self.ctx.registry.remove(channel); // stop the live actor
+            self.ctx.channel_store.delete_channel(channel).await?;
+
+            // A channel's own roles live at its channel scope — drop them too.
+            let chan_scope = channel.to_string();
+            if let Ok(roles) = self.ctx.roles.roles(&chan_scope).await {
+                for role in roles {
+                    let _ = self.ctx.roles.delete_role(&chan_scope, &role.name).await;
+                }
+            }
+        }
+
+        // Clear namespace memberships (also drops hide overrides) so a same-name
+        // namespace can't auto-rejoin ghost members, then the ns-scope roles and
+        // any pending invites.
+        let members = self.ctx.memberships.ns_members(&ns_str).await.unwrap_or_default();
+
+        for member in &members {
+            let _ = self.ctx.memberships.clear_ns_membership(member, &ns_str).await;
+        }
+
+        // ns-scope roles are keyed by the id (matches on_ns_create's id-scope).
+        let ns_scope = format!("ns:{ns_str}");
+
+        if let Ok(roles) = self.ctx.roles.roles(&ns_scope).await {
+            for role in roles {
+                let _ = self.ctx.roles.delete_role(&ns_scope, &role.name).await;
+            }
+        }
+
+        // v0.13: invites + grants are scoped by the **id** (`ns:<id>` /
+        // `#<id>/…`), so the cascade must pass the id, not the vanity.
+        let _ = self.ctx.invites.revoke_invites_for_namespace(&ns_str).await;
+        // Grant records are the enforcement fast path (§10.4) and key by subject,
+        // not scope — so a role/direct grant at `ns:<id>` or `#<id>/<chan>`
+        // survives the role-definition delete above. Purge them by namespace so a
+        // recreated same-name namespace can't resurrect a former admin's caps.
+        let _ = self.ctx.caps.revoke_grants_for_namespace(&ns_str).await;
+
+        self.ctx.namespaces.delete_namespace(&record.name).await?;
+        debug!(name = %record.name, channels = channels.len(), "namespace deleted (cascade)");
+        Ok(members)
+    }
+
     pub(super) async fn on_ns_delete(
         &mut self,
         label: Option<String>,
@@ -861,91 +924,42 @@ impl<S: ControlStream> Session<S> {
         let Some(record) = self.ns_admin_gate(label.clone(), &ns, &actor).await? else {
             return Ok(Flow::Continue);
         };
-        let name = record.name.clone();
-        // Channels + ns-membership are keyed by the immutable id (v0.13); the
-        // record carries the current vanity only for name-keyed table ops.
-        let ns_str = ns.to_string();
-        // Cascade: a namespace owns its channels, memberships, roles and pending
-        // invites. Deleting only the record orphans them — the channels stay live
-        // and in the store, so clients auto-rejoin and keep posting, DISCOVER and
-        // the admin panel still surface them, and a namespace later recreated
-        // under the same name would inherit ghost members/roles. Tear the whole
-        // subtree down first, then drop the record.
-        let channels = match self.ctx.channel_store.channels_in_namespace(&ns_str).await {
-            Ok(channels) => channels,
-            Err(e) => return self.internal(label, &e).await,
-        };
-        for (channel, _) in &channels {
-            self.ctx.registry.remove(channel); // stop the live actor
-            if let Err(e) = self.ctx.channel_store.delete_channel(channel).await {
-                return self.internal(label, &e).await;
-            }
-            // A channel's own roles live at its channel scope — drop them too.
-            let chan_scope = channel.to_string();
-            if let Ok(roles) = self.ctx.roles.roles(&chan_scope).await {
-                for role in roles {
-                    let _ = self.ctx.roles.delete_role(&chan_scope, &role.name).await;
-                }
-            }
-        }
-
-        // Clear namespace memberships (also drops hide overrides) so a same-name
-        // namespace can't auto-rejoin ghost members, then the ns-scope roles and
-        // any pending invites.
-        if let Ok(members) = self.ctx.memberships.ns_members(&ns_str).await {
-            for member in members {
-                let _ = self
-                    .ctx
-                    .memberships
-                    .clear_ns_membership(&member, &ns_str)
-                    .await;
-            }
-        }
-        // ns-scope roles are keyed by the id (matches on_ns_create's id-scope).
-        let ns_scope = format!("ns:{ns}");
-        if let Ok(roles) = self.ctx.roles.roles(&ns_scope).await {
-            for role in roles {
-                let _ = self.ctx.roles.delete_role(&ns_scope, &role.name).await;
-            }
-        }
-        // v0.13: invites + grants are scoped by the **id** (`ns:<id>` /
-        // `#<id>/…`), so the cascade must pass the id, not the vanity.
-        let _ = self.ctx.invites.revoke_invites_for_namespace(&ns_str).await;
-        // Grant records are the enforcement fast path (§10.4) and key by subject,
-        // not scope — so a role/direct grant at `ns:<id>` or `#<id>/<chan>`
-        // survives the role-definition delete above. Purge them by namespace so a
-        // recreated same-name namespace can't resurrect a former admin's caps.
-        let _ = self.ctx.caps.revoke_grants_for_namespace(&ns_str).await;
-
-        if let Err(e) = self.ctx.namespaces.delete_namespace(&name).await {
+        if let Err(e) = self.delete_namespace_cascade(&record).await {
             return self.internal(label, &e).await;
         }
-        debug!(%name, channels = channels.len(), "namespace deleted (cascade)");
         // Reflect deletion as an NS-META marker (private + no owner).
-        self.send_event(
-            label,
-            Event::NsMeta {
-                id: ns,
-                vanity: name
-                    .as_str()
-                    .parse()
-                    .expect("namespace name is a valid vanity label"),
-                visibility: Visibility::Private,
-                owner: None,
-                title: None,
-                description: Some("deleted".to_string()),
-                icon: None,
-                recovery_set: false,
-                recovery_pending: None,
-                categories: Vec::new(),
-                federation: false,
-                welcome: None,
-                origin: None,
-                provider_online: None,
-            },
-        )
-        .await?;
+        self.send_event(label, Self::deletion_tombstone(&record))
+            .await?;
         Ok(Flow::Continue)
+    }
+
+    /// The §6.2 deletion marker (`private`, no owner, description `deleted`) —
+    /// sent to the deleting actor, and pushed to members on a provider's
+    /// `REALM WITHDRAW`.
+    pub(super) fn deletion_tombstone(record: &weft_store::NamespaceRecord) -> Event {
+        Event::NsMeta {
+            id: record
+                .id
+                .parse()
+                .expect("namespace record carries a valid ULID id"),
+            vanity: record
+                .name
+                .as_str()
+                .parse()
+                .expect("namespace name is a valid vanity label"),
+            visibility: Visibility::Private,
+            owner: None,
+            title: None,
+            description: Some("deleted".to_string()),
+            icon: None,
+            recovery_set: false,
+            recovery_pending: None,
+            categories: Vec::new(),
+            federation: false,
+            welcome: None,
+            origin: None,
+            provider_online: None,
+        }
     }
 
     pub(super) async fn on_discover(

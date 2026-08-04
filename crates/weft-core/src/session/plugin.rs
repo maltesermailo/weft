@@ -93,14 +93,7 @@ impl<S: ControlStream> Session<S> {
                         .on_realm_assert(req.label, key, plugin_id, realm)
                         .await;
                 }
-                Command::RealmWithdraw => {
-                    self.state = State::PluginService {
-                        key,
-                        plugin_id,
-                        realm: None,
-                    };
-                    return Ok(Flow::Continue);
-                }
+                Command::RealmWithdraw => return self.on_realm_withdraw().await,
                 Command::ProvisionOk { job } => return self.on_provision_result(job, true).await,
                 Command::ProvisionErr { job } => {
                     return self.on_provision_result(job, false).await;
@@ -223,6 +216,15 @@ impl<S: ControlStream> Session<S> {
                 return Ok(Flow::Close);
             }
 
+            // First registrant holds a scheme (3b-c) — a second claimant is a
+            // deployment error, refused loudly rather than routed by luck.
+            if self.ctx.scheme_held_by_other(&scheme, plugin_id) {
+                warn!(%plugin_id, %scheme, "refusing provider: scheme already served");
+                self.send_err(None, ErrCode::Conflict, None, "scheme already served")
+                    .await?;
+                return Ok(Flow::Close);
+            }
+
             schemes.push(scheme);
         }
 
@@ -257,6 +259,12 @@ impl<S: ControlStream> Session<S> {
             return self
                 .unsupported(label, "provider key not pinned for that scheme")
                 .await;
+        }
+        if self.ctx.scheme_held_by_other(&scheme, &plugin_id) {
+            return self
+                .send_err(label, ErrCode::Conflict, None, "scheme already served")
+                .await
+                .map(|_| Flow::Continue);
         }
 
         self.ctx
@@ -475,6 +483,58 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    /// §3.1 REALM WITHDRAW: the provider says the bound realm is **gone** (deleted
+    /// upstream) — distinct from a disconnect (which is only *offline*). weftd
+    /// withdraws the realm's virtual namespaces cleanly: the full deletion
+    /// cascade, with the tombstone pushed to every member. Unbound (no prior
+    /// `REALM ASSERT`) ⇒ nothing to withdraw; the binding clears either way.
+    async fn on_realm_withdraw(&mut self) -> io::Result<Flow> {
+        // Take the bound realm straight off the live session state — `take`
+        // clears the binding in place. Never *construct* provider state from
+        // copies: if the session isn't a provider session (unreachable via the
+        // on_line intercept, but load-bearing if dispatch ever changes), this
+        // must be a no-op, not a state overwrite.
+        let realm = match &mut self.state {
+            State::PluginService { realm, .. } => realm.take(),
+            _ => return Ok(Flow::Continue),
+        };
+
+        if let Some(realm) = realm {
+            let prefix = format!("{realm}/");
+            let namespaces = self
+                .ctx
+                .namespaces
+                .namespaces_with_origin()
+                .await
+                .unwrap_or_default();
+
+            for record in namespaces {
+                let in_realm = record
+                    .origin
+                    .as_deref()
+                    .is_some_and(|o| o == realm.to_string() || o.starts_with(&prefix));
+
+                if !in_realm {
+                    continue;
+                }
+
+                match self.delete_namespace_cascade(&record).await {
+                    Ok(members) => {
+                        let tombstone = Self::deletion_tombstone(&record);
+
+                        for member in members {
+                            self.ctx.directory.notify(member, tombstone.clone()).await;
+                        }
+                        info!(ns = %record.id, %realm, "virtual namespace withdrawn");
+                    }
+                    Err(e) => error!("withdraw cascade failed for {}: {e}", record.id),
+                }
+            }
+        }
+
+        Ok(Flow::Continue) // the binding was already cleared by `take`
+    }
+
     /// Owner directive 2026-08-04: push the provider-state transition (`NS-META`
     /// with `provider=online|offline`) to every member of every virtual namespace
     /// under `schemes` — the client's live "bridge online/offline" indicator.
@@ -543,13 +603,28 @@ impl<S: ControlStream> Session<S> {
                 .unsupported(label, "provider key not pinned for that scheme")
                 .await;
         }
+        if self.ctx.scheme_held_by_other(realm.scheme(), &plugin_id) {
+            return self
+                .send_err(label, ErrCode::Conflict, None, "scheme already served")
+                .await
+                .map(|_| Flow::Continue);
+        }
+
+        // A bound data connection is definitionally *serving* its scheme: it
+        // joins the provider registry (liveness + PROVISION routing) like a
+        // REALM REGISTER would, and its namespaces come online.
+        let scheme = realm.scheme().clone();
+        self.ctx
+            .add_provider_scheme(&plugin_id, scheme.clone(), self.fed_out_tx.clone());
 
         info!(%realm, %plugin_id, "provider data connection bound to realm");
-        self.state = State::PluginService {
-            key,
-            plugin_id,
-            realm: Some(realm),
-        };
+
+        // Bind in place — never reconstruct the session state from copies.
+        if let State::PluginService { realm: bound, .. } = &mut self.state {
+            *bound = Some(realm);
+        }
+
+        self.push_provider_state(&[scheme]).await;
         Ok(Flow::Continue)
     }
 

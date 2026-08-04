@@ -1512,10 +1512,13 @@ impl NamespaceStore for MemoryStore {
 
     async fn namespaces_owned(&self, owner: &str) -> Result<u64, StoreError> {
         let inner = self.inner.lock().expect("store lock");
+        // Provider-managed (origin) namespaces never count toward a user's
+        // NS CREATE quota — their record owner is the sentinel (or an unlucky
+        // name-collider), not a real creator (3b-d).
         Ok(inner
             .namespaces
             .values()
-            .filter(|ns| ns.owner.as_str() == owner)
+            .filter(|ns| ns.owner.as_str() == owner && ns.origin.is_none())
             .count() as u64)
     }
 

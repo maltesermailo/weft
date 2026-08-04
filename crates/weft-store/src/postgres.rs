@@ -1865,11 +1865,14 @@ impl NamespaceStore for PgStore {
     }
 
     async fn namespaces_owned(&self, owner: &str) -> Result<u64, StoreError> {
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM weft_namespaces WHERE owner = $1")
-            .bind(owner)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(backend_err)?;
+        // Origin namespaces are provider infrastructure, never quota (3b-d).
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM weft_namespaces WHERE owner = $1 AND origin IS NULL",
+        )
+        .bind(owner)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend_err)?;
         Ok(n as u64)
     }
 

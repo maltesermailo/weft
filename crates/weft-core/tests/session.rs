@@ -4723,6 +4723,171 @@ async fn foreign_ns_join_succeeds_via_assertion() {
     assert_eq!(reply.label.as_deref(), Some("m1"));
 }
 
+/// Like [`ctx_plugin_schemes`], with operator accounts and/or extra plugin pins.
+fn ctx_plugin_full(
+    plugins: Vec<(&str, weft_core::PublicKey, Vec<weft_proto::Scheme>)>,
+    operators: &[&str],
+) -> Arc<ServerCtx> {
+    let info = ServerInfo {
+        network: "test.example".parse().unwrap(),
+        motd: None,
+        features: Vec::new(),
+    };
+    let chans: Vec<(&str, &str)> = Vec::new();
+    Arc::new(
+        ServerCtx::new(
+            info,
+            chans
+                .iter()
+                .map(|(c, p)| (c.parse().unwrap(), p.parse::<RetentionPolicy>().unwrap())),
+            Keypair::generate(),
+            true,
+            Arc::new(MemoryStore::default()),
+            Arc::new(weft_core::MemBlobStore::default()),
+            "permanent".parse().unwrap(),
+            operators.iter().map(|o| o.parse().unwrap()),
+            true,
+            10,
+            weft_core::FederationConfig::default(),
+        )
+        .with_remote_plugins(
+            plugins
+                .into_iter()
+                .map(|(id, k, s)| (id.to_string(), k, s))
+                .collect(),
+        ),
+    )
+}
+
+#[tokio::test]
+async fn operator_deletes_virtual_namespace() {
+    // 3b-a: the operator escape hatch — a provider-managed namespace has no
+    // local owner, so operators (and only they) may govern + delete it.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &["op"],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+
+    // A plain member cannot delete it (the origin gate).
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=d1 NS DELETE {ns_id} {ns_id}"));
+    ada.expect_err(ErrCode::CapRequired).await;
+
+    // The operator can: full cascade + deletion tombstone.
+    let mut op = ready(&ctx, "op").await;
+    op.send(&format!("@label=d2 NS DELETE {ns_id} {ns_id}"));
+    let reply = op.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("d2"));
+    let Event::NsMeta { owner, description, .. } = reply.event else {
+        panic!("expected the deletion tombstone, got {reply:?}");
+    };
+    assert!(owner.is_none());
+    assert_eq!(description.as_deref(), Some("deleted"));
+
+    // Gone: further governance answers NO-SUCH-TARGET.
+    op.send(&format!("@label=d3 NS DELETE {ns_id} {ns_id}"));
+    op.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn realm_withdraw_tombstones_namespaces() {
+    // 3b-b (framework §3.1): WITHDRAW = the realm is GONE upstream — weftd
+    // deletes its virtual namespaces and pushes the tombstone to members.
+    // (Distinct from a disconnect, which is only *offline*.)
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    assert!(matches!(ada.recv().await.event, Event::NsMember { .. }));
+
+    plugin.send("REALM WITHDRAW");
+    let Event::NsMeta { owner, description, .. } = ada.recv().await.event else {
+        panic!("ada expected the withdrawal tombstone");
+    };
+    assert!(owner.is_none());
+    assert_eq!(description.as_deref(), Some("deleted"));
+
+    // The namespace is gone (not merely offline): joining by id is absent.
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send(&format!("@label=j2 NS JOIN {ns_id}"));
+    bob.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn duplicate_scheme_claim_is_refused() {
+    // 3b-c: the first registrant holds a scheme; a second claimant (a
+    // deployment error) is refused loudly — never routed by HashMap luck.
+    let key1 = Keypair::generate();
+    let key2 = Keypair::generate();
+    let scheme: weft_proto::Scheme = "instagram".parse().unwrap();
+    let ctx = ctx_plugin_full(
+        vec![
+            ("insta-a", key1.public(), vec![scheme.clone()]),
+            ("insta-b", key2.public(), vec![scheme]),
+        ],
+        &[],
+    );
+
+    let reg = |id: &str| weft_proto::Registration {
+        api: 1,
+        id: id.into(),
+        name: id.into(),
+        icon: None,
+        actions: vec![],
+        hooks: vec![],
+        schemes: vec!["instagram".into()],
+    };
+    let first = plugin_session(&ctx, &key1).await;
+    first.send(&format!(
+        "@reg={} PLUGIN-REGISTER",
+        weft_proto::plugin_to_b64(&reg("insta-a")).unwrap()
+    ));
+
+    let mut second = plugin_session(&ctx, &key2).await;
+    // Barrier: the first registration is on another session — poll until its
+    // scheme claim would collide, by retrying the second registration? No —
+    // registration is one-shot. Instead poll the catalog via a client.
+    let mut probe = ready(&ctx, "probe").await;
+    for _ in 0..50 {
+        probe.send("PLUGINS");
+        let Event::PluginManifest { catalog } = probe.recv().await.event else {
+            panic!("expected PLUGIN-MANIFEST");
+        };
+        let cat: weft_proto::Catalog = weft_proto::plugin_from_b64(&catalog).unwrap();
+        if cat.plugins.iter().any(|p| p.plugin_id == "insta-a") {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    second.send(&format!(
+        "@reg={} PLUGIN-REGISTER",
+        weft_proto::plugin_to_b64(&reg("insta-b")).unwrap()
+    ));
+    second.expect_err(ErrCode::Conflict).await;
+    assert!(second.closed().await);
+}
+
 #[tokio::test]
 async fn provider_offline_gates_virtual_namespace() {
     // Owner directive 2026-08-04: a virtual namespace is online only while its

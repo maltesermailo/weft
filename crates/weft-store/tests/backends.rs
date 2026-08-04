@@ -1330,6 +1330,15 @@ where
     let by_origin = store.namespace_by_origin(&origin).await.unwrap().unwrap();
     assert_eq!(by_origin.name, foreign);
     assert_eq!(by_origin.origin.as_deref(), Some(origin.as_str()));
+    // 3b-d: origin namespaces never count toward the record owner's quota, and
+    // the liveness fan-out surface lists them.
+    assert_eq!(store.namespaces_owned(&format!("fowner-{tag}")).await.unwrap(), 0);
+    assert!(store
+        .namespaces_with_origin()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.origin.as_deref() == Some(origin.as_str())));
 
     // Admin vanity lock (§2.3): a standalone reservation — default unlocked,
     // toggleable, and settable even for a name with no namespace.
