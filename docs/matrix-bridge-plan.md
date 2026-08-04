@@ -334,9 +334,23 @@ implements and the daemon is written against.*
       `recv_line()` — which is always — so nothing was ever sent. Now one task owns the stream and
       selects over read/write (`recv_line` is cancel-safe, so this loses nothing).
       *Not yet:* multi-step flows (`SUBMIT`/`ACTION`), hooks, per-space ban lists (slice 10b).
-- [ ] **7. M-plug-3 — flows + client SDUI renderer** (L, mostly client) — `SUBMIT`/`ACTION` routing
-      (weftd) + the client renderer: modals, forms, full component catalog, context-menu + global
-      surfaces. **Element's dialogs.**
+- [~] **7. M-plug-3 — flows + client SDUI renderer** (L, mostly client) — **server half DONE
+      2026-08-04.** `PLUGIN SUBMIT` / `ACTION` / `SUBSCRIBE` / `UNSUBSCRIBE` / `CLOSE` all route
+      through one `on_plugin_step`: they are the same routing problem (find the flow by view-id,
+      check it is the caller's, hand the step to the plugin that owns it). The view-id already
+      carries the plugin (`<plugin>:<seq>`), so no extra bookkeeping was needed to know where a step
+      goes. Each step **re-points the parked echo label** (`relabel_invoke`), so a step acks *itself*
+      rather than the invoke that opened the flow.
+      **Ownership check (the security-relevant part):** a view-id is a plugin name and a counter, so
+      it is guessable — without a check any session could drive, read or dismiss another user's
+      dialog. The parked writer *is* the requester's, so `Sender::same_channel` answers "is this
+      yours" with no new state. A view that is not yours is refused exactly as one that does not
+      exist (invariant 1). Tested for all five verbs.
+      **Terminal steps free the parking:** `PLUGIN-RESULT` (already) and `CLOSE` (new) — otherwise a
+      dismissed view would pin the requester's writer for the life of the session.
+      **Remaining (the "mostly client" part):** the Svelte SDUI renderer — modals, forms, the
+      component catalog, context-menu + global surfaces. Also unbuilt: `PLUGIN-PATCH` push semantics
+      beyond the existing relay (a panel that nobody is subscribed to should stop being pushed).
 - [~] **8. Capability-profile slice** (S–M) — **server half DONE 2026-08-04.**
       `authority=roles|levels|none` + `settings=<comma-list>` ride `NS-META` both ways: a provider
       declares them on its foreign assertion, they persist on the namespace record (migration 0054,
@@ -354,9 +368,19 @@ implements and the daemon is written against.*
       The *editing* surface is the plugin's own Power Levels action (slice 7's SDUI renderer): the
       client sends numbers as `PLUGIN INVOKE` params, never as wire verbs, and the adapter translates
       — caps→levels is lossy and the translation must sit where the pinned key is, not in a client.
-- [ ] **9. M-plug-6 subset — settings surfaces + live panels** (M) — `settings` surface actions,
-      panels + `SUBSCRIBE`/`PLUGIN-PATCH`, `server-menu` + `channel-list` surfaces. **Where "Room
-      Settings" / "Power Levels" live.**
+- [~] **9. M-plug-6 subset — settings surfaces + live panels** (M) — **server half DONE 2026-08-04.**
+      §11.3 implemented as specced: weftd maps `view-id → panel_key` (noted as a `PLUGIN-VIEW` passes
+      through) and tracks which views a client currently has open (`SUBSCRIBE`/`UNSUBSCRIBE`, cleared
+      by `CLOSE`/terminal result).
+      **A patch is addressed by view-id *or* panel key.** A plugin cannot know each open copy's
+      view-id, so it patches by the key it chose and weftd fans out to every subscribed copy —
+      **"a closed key is a no-op"** falls out of the subscription set, so a client that closed the
+      panel is not sent updates for it. Pushes are relayed **unlabelled** (§12.4: unsolicited).
+      *Design note:* the key/subscription state lives in `ServerCtx`, not on a session — the view is
+      sent on the **plugin's** session and subscribed on the **client's**, so a per-session map is
+      silently always empty (which is exactly how the first cut failed).
+      The `settings`/`server-menu`/`channel-list` surfaces already exist in `ActionDecl`; what makes
+      them appear is the client renderer (slice 7's remaining half).
 
 ## Phase 3 — the bridge itself
 

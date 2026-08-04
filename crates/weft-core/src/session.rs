@@ -1457,14 +1457,18 @@ impl<S: ControlStream> Session<S> {
                 self.on_plugin_invoke(label, plugin, action, ctx_ref, params)
                     .await
             }
-            // Multi-step flow + subscription routing lands in M-plug-3.
-            Command::PluginSubmit { .. }
-            | Command::PluginAction { .. }
-            | Command::PluginSubscribe { .. }
-            | Command::PluginUnsubscribe { .. }
-            | Command::PluginClose { .. } => {
-                self.unsupported(label, "plugin flows land in a later milestone")
-                    .await
+            // M-plug-3 multi-step flows. `CLOSE` is terminal — the view is gone;
+            // the rest continue it.
+            Command::PluginSubmit { ref view_id, .. }
+            | Command::PluginAction { ref view_id, .. }
+            | Command::PluginSubscribe { ref view_id }
+            | Command::PluginUnsubscribe { ref view_id } => {
+                let view_id = view_id.clone();
+                self.on_plugin_step(label, view_id, cmd, false).await
+            }
+            Command::PluginClose { ref view_id } => {
+                let view_id = view_id.clone();
+                self.on_plugin_step(label, view_id, cmd, true).await
             }
             Command::NetblockAdd { network, reason } => {
                 self.on_netblock_add(label, network, reason, account).await

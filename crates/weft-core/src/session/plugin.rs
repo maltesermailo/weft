@@ -111,6 +111,14 @@ struct NsProfile {
     settings_disabled: Vec<String>,
 }
 
+/// A view's `panel_key`, if it declared one (§11.3). Only panels have one —
+/// a modal is addressed by its view-id alone.
+fn panel_key_of(view: &str) -> Option<String> {
+    weft_proto::plugin_from_b64::<weft_proto::View>(view)
+        .ok()
+        .and_then(|v| v.panel_key)
+}
+
 /// Serialize an event with an optional echoed label, for a cross-session relay.
 fn relay_line(event: Event, label: Option<String>) -> Result<String, weft_proto::SerializeError> {
     match label {
@@ -349,15 +357,28 @@ impl<S: ControlStream> Session<S> {
             // Non-terminal: relay, keep the pending for the flow's next step.
             Event::PluginView { view_id, view } => {
                 if let Some((reply, label)) = self.ctx.peek_invoke(&view_id) {
+                    // §11.3: note the panel key while the view goes past, so a
+                    // later SUBSCRIBE can register under it — the plugin patches
+                    // by key, having no way to know each open copy's view-id.
+                    self.ctx.note_panel_key(&view_id, panel_key_of(&view));
+
                     if let Ok(line) = relay_line(Event::PluginView { view_id, view }, label) {
                         let _ = reply.try_send(line);
                     }
                 }
                 Ok(Flow::Continue)
             }
+            // §11.3 a patch is addressed by view-id **or** panel key, and reaches
+            // only views someone is subscribed to — patching a panel the client
+            // has closed is a no-op, not a delivery.
             Event::PluginPatch { view_id, patch } => {
-                if let Some((reply, label)) = self.ctx.peek_invoke(&view_id) {
-                    if let Ok(line) = relay_line(Event::PluginPatch { view_id, patch }, label) {
+                for (reply, _) in self.ctx.patch_targets(&view_id) {
+                    let event = Event::PluginPatch {
+                        view_id: view_id.clone(),
+                        patch: patch.clone(),
+                    };
+                    // Unsolicited: a push carries no label (§12.4).
+                    if let Ok(line) = relay_line(event, None) {
                         let _ = reply.try_send(line);
                     }
                 }
@@ -1830,6 +1851,69 @@ impl<S: ControlStream> Session<S> {
         }
 
         None
+    }
+
+    /// M-plug-3: drive a flow already in progress — `PLUGIN SUBMIT` (a form step),
+    /// `PLUGIN ACTION` (a control click), `SUBSCRIBE`/`UNSUBSCRIBE` (does anyone
+    /// still have this panel open), `CLOSE` (dismissed).
+    ///
+    /// All five are the same routing problem, so they share it: find the flow by
+    /// view-id, check it is the caller's, and hand the step to the plugin that
+    /// owns it. The view-id carries the plugin (`<plugin>:<seq>`), so no extra
+    /// bookkeeping is needed to know where a step goes.
+    ///
+    /// **Ownership matters here.** A view-id is guessable — it is a plugin name
+    /// and a counter — so without a check any session could drive, read, or
+    /// dismiss another user's dialog. The parked writer *is* the requester's, so
+    /// comparing channels answers "is this yours" without new state. A view that
+    /// is not yours is refused exactly as one that does not exist (invariant 1):
+    /// same code, no branch that reveals which.
+    pub(super) async fn on_plugin_step(
+        &mut self,
+        label: Option<String>,
+        view_id: String,
+        cmd: Command,
+        terminal: bool,
+    ) -> io::Result<Flow> {
+        let Some((reply, _)) = self.ctx.peek_invoke(&view_id) else {
+            return self.no_such_target(label).await;
+        };
+        if !reply.same_channel(&self.fed_out_tx) {
+            return self.no_such_target(label).await;
+        }
+        let Some(out) = view_id
+            .split_once(':')
+            .and_then(|(plugin, _)| self.ctx.plugin_out(plugin))
+        else {
+            return self.no_such_target(label).await; // the plugin went away
+        };
+
+        // The plugin's next response should ack *this* step.
+        self.ctx.relabel_invoke(&view_id, label.clone());
+
+        // §11.3 panel liveness. The plugin is routed the step either way, so it
+        // learns to stop pushing from the UNSUBSCRIBE itself.
+        match &cmd {
+            Command::PluginSubscribe { .. } => self.ctx.set_subscribed(&view_id, true),
+            Command::PluginUnsubscribe { .. } => self.ctx.set_subscribed(&view_id, false),
+            _ => {}
+        }
+
+        let Ok(line) = Request::with_label(cmd, view_id.clone()).serialize() else {
+            return self.no_such_target(label).await;
+        };
+        if out.try_send(line).is_err() {
+            self.ctx.complete_invoke(&view_id); // gone — nothing will answer
+            return self.no_such_target(label).await;
+        }
+
+        // A dismissed view frees its parking: nothing more will arrive for it,
+        // and leaving it would pin the requester's writer for the session's life.
+        if terminal {
+            self.ctx.complete_invoke(&view_id);
+        }
+
+        Ok(Flow::Continue)
     }
 
     /// §12.1 client `PLUGINS`: serve the action catalog of every registered plugin.

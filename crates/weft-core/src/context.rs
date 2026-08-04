@@ -203,6 +203,15 @@ pub struct ServerCtx {
     /// Parked client invocations awaiting a plugin's `PLUGIN-VIEW`/`-RESULT`,
     /// keyed by the minted view-id (§11.1) → the requester's writer + request label.
     pending_invoke: std::sync::Mutex<HashMap<String, PendingReply>>,
+    /// §11.3 live panels: `view-id → panel_key` (empty for a modal), noted as a
+    /// `PLUGIN-VIEW` passes through. It lives here rather than on a session
+    /// because the view is sent on the **plugin's** session and subscribed on the
+    /// **client's** — two different sessions, one flow.
+    view_panel_keys: std::sync::Mutex<HashMap<String, String>>,
+    /// §11.3 the view-ids a client currently has open. Membership *is* the
+    /// subscription: added on `PLUGIN SUBSCRIBE`, dropped on
+    /// `UNSUBSCRIBE`/`CLOSE`. "A closed key is a no-op" falls out of it.
+    panel_subs: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Monotonic source of view-ids (§11.1).
     view_seq: AtomicU64,
     /// §2.2 namespace creation: `open` (any account, up to `ns_quota`) or
@@ -576,6 +585,8 @@ impl ServerCtx {
             remote_plugins: Vec::new(),
             plugin_registry: std::sync::Mutex::new(HashMap::new()),
             pending_invoke: std::sync::Mutex::new(HashMap::new()),
+            view_panel_keys: std::sync::Mutex::new(HashMap::new()),
+            panel_subs: std::sync::Mutex::new(std::collections::HashSet::new()),
             view_seq: AtomicU64::new(1),
             peers,
             netblocks,
@@ -1615,6 +1626,80 @@ impl ServerCtx {
             .map(|r| r.out.clone())
     }
 
+    /// The writer of a registered plugin, whatever it declared. Used to route a
+    /// **continuation** of a flow already in progress, where the action was
+    /// checked when the flow opened and re-checking it would only forbid a plugin
+    /// from changing its own catalog mid-flow.
+    pub(crate) fn plugin_out(&self, plugin: &str) -> Option<tokio::sync::mpsc::Sender<String>> {
+        let map = self.plugin_registry.lock().expect("plugin_registry lock");
+
+        map.get(plugin).map(|r| r.out.clone())
+    }
+
+    /// §11.3 a client opened (or closed) a live panel. `panel_key` is whatever
+    /// the plugin put on the view — empty when it declared none, in which case
+    /// only the view-id can address it.
+    pub(crate) fn set_subscribed(&self, view_id: &str, on: bool) {
+        let mut subs = self.panel_subs.lock().expect("panel_subs lock");
+        if on {
+            subs.insert(view_id.to_string());
+        } else {
+            subs.remove(view_id);
+        }
+    }
+
+    /// Note a view's `panel_key` as it passes from plugin to client, so a later
+    /// `SUBSCRIBE` on the client's session can be resolved back to it.
+    pub(crate) fn note_panel_key(&self, view_id: &str, panel_key: Option<String>) {
+        self.view_panel_keys
+            .lock()
+            .expect("view_panel_keys lock")
+            .insert(view_id.to_string(), panel_key.unwrap_or_default());
+    }
+
+    /// §11.3 who should receive a patch addressed to `target` — a view-id, or a
+    /// `panel_key` naming every open copy of that panel.
+    ///
+    /// **Only subscribed views.** A patch to a panel nobody is watching is
+    /// dropped rather than delivered to a client that has closed it, which is
+    /// what "a closed key is a no-op" means. A plugin learns it should stop
+    /// pushing from the `UNSUBSCRIBE` it was routed.
+    pub(crate) fn patch_targets(&self, target: &str) -> Vec<PendingReply> {
+        let subs = self.panel_subs.lock().expect("panel_subs lock");
+        let view_ids: Vec<String> = if subs.contains(target) {
+            vec![target.to_string()]
+        } else {
+            let keys = self.view_panel_keys.lock().expect("view_panel_keys lock");
+            subs.iter()
+                .filter(|view_id| {
+                    keys.get(*view_id)
+                        .is_some_and(|key| !key.is_empty() && key == target)
+                })
+                .cloned()
+                .collect()
+        };
+        drop(subs);
+
+        view_ids
+            .iter()
+            .filter_map(|view_id| self.peek_invoke(view_id))
+            .collect()
+    }
+
+    /// Re-point a parked flow's echo label at the request now driving it, so the
+    /// plugin's next `PLUGIN-VIEW`/`-RESULT` acks *this* step rather than the
+    /// invoke that opened the flow.
+    pub(crate) fn relabel_invoke(&self, view_id: &str, label: Option<String>) {
+        if let Some((_, parked)) = self
+            .pending_invoke
+            .lock()
+            .expect("pending_invoke lock")
+            .get_mut(view_id)
+        {
+            *parked = label;
+        }
+    }
+
     /// Mint a per-session view-id for an invocation (§11.1).
     pub(crate) fn mint_view_id(&self, plugin: &str) -> String {
         format!(
@@ -1640,6 +1725,15 @@ impl ServerCtx {
     /// Remove + return a parked invocation's requester writer + label by view-id
     /// (a terminal `PLUGIN-RESULT`).
     pub(crate) fn complete_invoke(&self, view_id: &str) -> Option<PendingReply> {
+        self.panel_subs
+            .lock()
+            .expect("panel_subs lock")
+            .remove(view_id);
+        self.view_panel_keys
+            .lock()
+            .expect("view_panel_keys lock")
+            .remove(view_id);
+
         self.pending_invoke
             .lock()
             .expect("pending_invoke lock")

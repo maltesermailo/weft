@@ -6058,6 +6058,271 @@ async fn a_replicas_structure_belongs_to_its_realm() {
 }
 
 #[tokio::test]
+async fn a_multi_step_flow_routes_and_stays_the_callers_own() {
+    // M-plug-3: a flow is more than one round trip — the plugin answers an invoke
+    // with a *view*, the client submits it, and the plugin answers again. weftd
+    // routes each step by view-id and re-points the echo label so every step acks
+    // itself rather than the invoke that opened it.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin("modq", &key.public());
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    let reg = weft_proto::Registration {
+        api: 1,
+        id: "modq".into(),
+        name: "Mod Queue".into(),
+        icon: None,
+        actions: vec![weft_proto::ActionDecl {
+            id: "open".into(),
+            label: "Open".into(),
+            icon: None,
+            surface: weft_proto::Surface::Global,
+            context: weft_proto::ContextType::None,
+            description: None,
+            visibility: None,
+            input: vec![],
+        }],
+        hooks: vec![],
+        schemes: vec![],
+    };
+    plugin.send(&format!(
+        "@reg={} PLUGIN-REGISTER",
+        weft_proto::plugin_to_b64(&reg).unwrap()
+    ));
+
+    let mut ada = ready(&ctx, "ada").await;
+    wait_for_action(&mut ada, "modq", "open").await;
+
+    ada.send("@label=i1 PLUGIN INVOKE modq open");
+    let req = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    let view_id = req.label.expect("the view-id rides as the label");
+
+    // Step 1: the plugin shows a form, acked with the invoke's label.
+    let view = weft_proto::plugin_to_b64(&weft_proto::View {
+        container: weft_proto::Container::Modal,
+        title: Some("Ban".into()),
+        panel_key: None,
+        submit_label: None,
+        blocks: vec![],
+        widget: None,
+        params: vec![],
+    })
+    .unwrap();
+    plugin.send(&format!("@view={view} PLUGIN-VIEW {view_id}"));
+    let reply = ada.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("i1"));
+    assert!(matches!(reply.event, Event::PluginView { .. }));
+
+    // Step 2: ada submits it. weftd routes the step to the plugin, still keyed by
+    // view-id, and the plugin's next answer acks *this* label — not `i1`.
+    ada.send(&format!("@label=s1 PLUGIN SUBMIT {view_id}"));
+    let step = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    assert!(matches!(
+        step.command,
+        weft_proto::Command::PluginSubmit { .. }
+    ));
+    assert_eq!(step.label.as_deref(), Some(view_id.as_str()));
+
+    let result = weft_proto::plugin_to_b64(&weft_proto::ViewResult::Toast {
+        kind: weft_proto::ToastKind::Ok,
+        text: "banned".into(),
+    })
+    .unwrap();
+    plugin.send(&format!("@result={result} PLUGIN-RESULT {view_id}"));
+    let reply = ada.recv().await;
+    assert_eq!(
+        reply.label.as_deref(),
+        Some("s1"),
+        "each step acks itself, not the invoke that opened the flow"
+    );
+
+    // …and once the plugin answers terminally, the flow is over: its parking is
+    // freed, so a further step finds nothing rather than lingering forever.
+    ada.send(&format!("@label=s3 PLUGIN SUBMIT {view_id}"));
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn a_live_panel_is_patched_by_key_and_only_while_watched() {
+    // §11.3 (slice 9): a panel is persistent and the plugin pushes to it
+    // unsolicited. It cannot know each open copy's view-id, so it patches by the
+    // `panel_key` it chose — and weftd resolves that to whoever is actually
+    // subscribed. A closed panel is a no-op, not a delivery to a client that
+    // isn't showing it.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin("modq", &key.public());
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    let reg = weft_proto::Registration {
+        api: 1,
+        id: "modq".into(),
+        name: "Mod Queue".into(),
+        icon: None,
+        actions: vec![weft_proto::ActionDecl {
+            id: "queue".into(),
+            label: "Queue".into(),
+            icon: None,
+            surface: weft_proto::Surface::Settings,
+            context: weft_proto::ContextType::Namespace,
+            description: None,
+            visibility: None,
+            input: vec![],
+        }],
+        hooks: vec![],
+        schemes: vec![],
+    };
+    plugin.send(&format!(
+        "@reg={} PLUGIN-REGISTER",
+        weft_proto::plugin_to_b64(&reg).unwrap()
+    ));
+
+    // Two clients open the same panel — same key, different view-ids.
+    let mut ada = ready(&ctx, "ada").await;
+    let mut bob = ready(&ctx, "bob").await;
+    wait_for_action(&mut ada, "modq", "queue").await;
+    wait_for_action(&mut bob, "modq", "queue").await;
+
+    let panel = weft_proto::plugin_to_b64(&weft_proto::View {
+        container: weft_proto::Container::Panel,
+        title: Some("Reports".into()),
+        panel_key: Some("reports".into()),
+        submit_label: None,
+        blocks: vec![],
+        widget: None,
+        params: vec![],
+    })
+    .unwrap();
+
+    let mut views = Vec::new();
+    for client in [&mut ada, &mut bob] {
+        client.send("@label=i1 PLUGIN INVOKE modq queue");
+        let view_id = weft_proto::Request::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .label
+            .expect("the view-id rides as the label");
+        plugin.send(&format!("@view={panel} PLUGIN-VIEW {view_id}"));
+        assert!(matches!(
+            client.recv().await.event,
+            Event::PluginView { .. }
+        ));
+
+        client.send(&format!("@label=sub PLUGIN SUBSCRIBE {view_id}"));
+        assert!(matches!(
+            weft_proto::Request::parse(&plugin.recv_raw().await)
+                .unwrap()
+                .command,
+            weft_proto::Command::PluginSubscribe { .. }
+        ));
+        views.push(view_id);
+    }
+
+    // One patch addressed to the KEY reaches both open copies, unlabelled — a
+    // push is unsolicited, so it acks nothing (§12.4).
+    let patch = weft_proto::plugin_to_b64(&vec![weft_proto::PatchOp::Remove {
+        component_id: "row-1".into(),
+    }])
+    .unwrap();
+    plugin.send(&format!("@patch={patch} PLUGIN-PATCH reports"));
+
+    for client in [&mut ada, &mut bob] {
+        let reply = client.recv().await;
+        assert_eq!(reply.label, None, "an unsolicited push carries no label");
+        assert!(matches!(reply.event, Event::PluginPatch { .. }));
+    }
+
+    // Bob closes his panel. A patch to the same key now reaches only ada — a
+    // closed key is a no-op for the client that closed it.
+    bob.send(&format!("@label=un PLUGIN UNSUBSCRIBE {}", views[1]));
+    assert!(matches!(
+        weft_proto::Request::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .command,
+        weft_proto::Command::PluginUnsubscribe { .. }
+    ));
+
+    plugin.send(&format!("@patch={patch} PLUGIN-PATCH reports"));
+    assert!(matches!(ada.recv().await.event, Event::PluginPatch { .. }));
+
+    // The FIFO barrier: bob's next line is his own PONG, not a stray patch.
+    bob.send("@label=p PING probe");
+    assert!(matches!(
+        bob.recv().await.event,
+        Event::Pong { token: Some(t) } if t == "probe"
+    ));
+}
+
+#[tokio::test]
+async fn a_flow_cannot_be_driven_by_anyone_but_its_caller() {
+    // A view-id is a plugin name and a counter, so it is guessable. Without an
+    // ownership check any session could drive, read or dismiss another user's
+    // dialog. A view that is not yours is refused exactly as one that does not
+    // exist (invariant 1) — same code, no branch revealing which.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin("modq", &key.public());
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    let reg = weft_proto::Registration {
+        api: 1,
+        id: "modq".into(),
+        name: "Mod Queue".into(),
+        icon: None,
+        actions: vec![weft_proto::ActionDecl {
+            id: "open".into(),
+            label: "Open".into(),
+            icon: None,
+            surface: weft_proto::Surface::Global,
+            context: weft_proto::ContextType::None,
+            description: None,
+            visibility: None,
+            input: vec![],
+        }],
+        hooks: vec![],
+        schemes: vec![],
+    };
+    plugin.send(&format!(
+        "@reg={} PLUGIN-REGISTER",
+        weft_proto::plugin_to_b64(&reg).unwrap()
+    ));
+
+    let mut ada = ready(&ctx, "ada").await;
+    wait_for_action(&mut ada, "modq", "open").await;
+    ada.send("@label=i1 PLUGIN INVOKE modq open");
+    let view_id = weft_proto::Request::parse(&plugin.recv_raw().await)
+        .unwrap()
+        .label
+        .expect("the view-id rides as the label");
+
+    let mut mallory = ready(&ctx, "mallory").await;
+    for (label, line) in [
+        ("x1", format!("PLUGIN SUBMIT {view_id}")),
+        ("x2", format!("PLUGIN ACTION {view_id} confirm")),
+        ("x3", format!("PLUGIN SUBSCRIBE {view_id}")),
+        ("x4", format!("PLUGIN CLOSE {view_id}")),
+    ] {
+        mallory.send(&format!("@label={label} {line}"));
+        let reply = mallory.expect_err(ErrCode::NoSuchTarget).await;
+        assert_eq!(reply.label.as_deref(), Some(label), "{line}");
+    }
+
+    // The owner's flow is untouched by the attempts: her next step still routes.
+    ada.send(&format!("@label=s1 PLUGIN SUBMIT {view_id}"));
+    let step = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    assert_eq!(step.label.as_deref(), Some(view_id.as_str()));
+
+    // CLOSE is terminal for the owner too — a dismissed view stops existing,
+    // rather than pinning her writer for the life of the session.
+    ada.send(&format!("@label=c1 PLUGIN CLOSE {view_id}"));
+    let closed = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    assert!(matches!(
+        closed.command,
+        weft_proto::Command::PluginClose { .. }
+    ));
+
+    ada.send(&format!("@label=s2 PLUGIN SUBMIT {view_id}"));
+    ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
 async fn authority_translates_both_ways_with_the_provider() {
     // Owner directive 2026-08-04: a WEFT user must be able to be made a mod on a
     // Matrix space and vice versa, so the bridge translates power levels. weftd
