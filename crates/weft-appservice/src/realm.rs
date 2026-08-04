@@ -1,0 +1,427 @@
+//! Driving bridge traffic: the outbound half of a provider session.
+//!
+//! Everything here exists because getting it wrong is easy and silent. The rules
+//! it encodes are in `docs/protocol/bridge-session-protocol.md`:
+//!
+//! - **The realm mints.** Namespace, channel and message ids are ours; weftd
+//!   pins them. So we know an object's canonical name *before* asserting it, and
+//!   the whole startup burst pipelines instead of assert-wait-remember per item.
+//! - **`@as` names the actor, `@msgid` names the event.** A message-bearing line
+//!   without `@msgid` is dropped by weftd with no error, so these methods take
+//!   the id rather than letting a caller forget it.
+//! - **Membership is stated, joins are requested.** We send `NS-MEMBER` as an
+//!   authority; weftd sends us `NS JOIN` as a request. Not interchangeable.
+//! - **Bans are ours to store and enforce.** weftd sends
+//!   [`weft_proto::Event::Bridging`] once, when an operator bans a space in the
+//!   admin panel, and keeps no record of it — so persist it, apply it on
+//!   reconnect, and never expect a reminder. What "stop bridging" means is the
+//!   adapter's to decide: leaving a Matrix room, ignoring a Discord guild,
+//!   dropping a feed. That is why the instruction is generic.
+
+use anyhow::anyhow;
+use tokio::sync::mpsc;
+use weft_proto::{Event, MemberAction, MsgId, Reply, Target};
+
+/// A handle for speaking as the realm on an authenticated provider session.
+///
+/// Cheap to clone — every clone writes to the same session.
+#[derive(Clone)]
+pub struct Realm {
+    out: mpsc::Sender<String>,
+    /// The **WEFT** network we are connected to, so [`Realm::is_ours`] can tell
+    /// its users from the realm's.
+    network: String,
+}
+
+impl Realm {
+    pub(crate) fn new(out: mpsc::Sender<String>, network: String) -> Self {
+        Self { out, network }
+    }
+
+    /// The WEFT network this session is connected to.
+    pub fn network(&self) -> &str {
+        &self.network
+    }
+
+    /// Is this user one of the connected network's, rather than one of ours?
+    /// Membership statements cover both, so the distinction matters when
+    /// deciding whether to mirror somebody into the foreign system.
+    pub fn is_ours(&self, user: &weft_proto::UserRef) -> bool {
+        user.network.as_str() != self.network
+    }
+
+    /// Bind this session to a realm (`REALM ASSERT`). Everything afterwards is
+    /// scoped by it: the realm's name is the network its users live on and its
+    /// events originate from, so it must be one weftd will accept — not its own
+    /// name, not a peer's, and not a domain that publishes `/.well-known/weft`.
+    pub async fn assert(&self, uri: &str) -> anyhow::Result<()> {
+        self.send(
+            weft_proto::Request::new(weft_proto::Command::RealmAssert {
+                realm: uri.parse()?,
+            })
+            .serialize()?,
+        )
+        .await
+    }
+
+    /// Mint an id for something in this realm.
+    ///
+    /// A random ULID is fine, but deriving one deterministically from the foreign
+    /// id is better: re-asserting after a weftd restore then reproduces the same
+    /// namespace and channels instead of orphaning every stored reference.
+    pub fn mint() -> String {
+        weft_proto::Ulid::new().to_string().to_ascii_lowercase()
+    }
+
+    /// Assert a space (`NS-META`), or update one already asserted.
+    ///
+    /// Re-asserting is the **only** way to change a namespace you govern: weftd
+    /// refuses local edits to it. Absent fields clear, so an assertion is the
+    /// whole truth rather than a patch.
+    pub async fn assert_namespace(&self, ns: &NamespaceAssertion<'_>) -> anyhow::Result<()> {
+        let line = Reply::new(Event::NsMetaForeign {
+            uri: ns.uri.parse()?,
+            id: ns.id.parse()?,
+            authority: ns.authority,
+            settings_disabled: ns.settings_disabled.iter().map(|s| s.to_string()).collect(),
+            visibility: ns.visibility,
+            title: ns.title.map(str::to_string),
+            description: ns.description.map(str::to_string),
+            icon: ns.icon.map(str::to_string),
+        })
+        .to_line()?;
+
+        self.send(line.serialize()?).await
+    }
+
+    /// Assert a room under an already-asserted space (`CHANNEL-LAYOUT`).
+    ///
+    /// Returns the canonical channel name — `#<ns-id>/<chan-id>` — which is how
+    /// everything afterwards addresses it. It is computable here precisely
+    /// because we minted both ids.
+    pub async fn assert_channel(&self, chan: &ChannelAssertion<'_>) -> anyhow::Result<String> {
+        let line = Reply::new(Event::ChannelLayoutForeign {
+            uri: chan.uri.parse()?,
+            id: chan.id.parse()?,
+            position: chan.position,
+            kind: chan.kind,
+            vanity: chan.vanity.to_string(),
+            category: chan.category.map(str::to_string),
+        })
+        .serialize()?;
+        self.send(line).await?;
+
+        Ok(format!("#{}/{}", chan.namespace_id, chan.id))
+    }
+
+    /// Replay a message from one of the realm's users.
+    ///
+    /// `msgid` is ours to mint (`<realm>/<ulid>`) and weftd pins it, so edits and
+    /// reactions can reference it later. `sender` must live on this realm.
+    pub async fn message(
+        &self,
+        sender: &str,
+        msgid: &str,
+        channel: &str,
+        body: &str,
+    ) -> anyhow::Result<()> {
+        let mut line = weft_proto::Request::new(weft_proto::Command::Msg {
+            target: Target::Channel(channel.parse()?),
+            body: Some(body.to_string()),
+            meta: weft_proto::MsgMeta::default(),
+        })
+        .to_line()?;
+        line.tags.insert("as".to_string(), sender.to_string());
+        line.tags.insert("msgid".to_string(), msgid.to_string());
+
+        self.send(line.serialize()?).await
+    }
+
+    /// Replay an edit. Carries its **own** minted id, since the edit is itself a
+    /// stored event; `root` is the message being edited.
+    pub async fn edit(
+        &self,
+        sender: &str,
+        msgid: &str,
+        root: &MsgId,
+        body: &str,
+    ) -> anyhow::Result<()> {
+        let mut line = weft_proto::Request::new(weft_proto::Command::Edit {
+            msgid: root.clone(),
+            body: body.to_string(),
+        })
+        .to_line()?;
+        line.tags.insert("as".to_string(), sender.to_string());
+        line.tags.insert("msgid".to_string(), msgid.to_string());
+
+        self.send(line.serialize()?).await
+    }
+
+    /// Replay a redaction. No id of its own — a tombstone is keyed on its root.
+    pub async fn delete(&self, sender: &str, root: &MsgId) -> anyhow::Result<()> {
+        let mut line = weft_proto::Request::new(weft_proto::Command::Delete {
+            msgid: root.clone(),
+        })
+        .to_line()?;
+        line.tags.insert("as".to_string(), sender.to_string());
+
+        self.send(line.serialize()?).await
+    }
+
+    /// Replay a reaction (or its removal). No id of its own, as with a delete.
+    pub async fn react(
+        &self,
+        sender: &str,
+        root: &MsgId,
+        emoji: &str,
+        add: bool,
+    ) -> anyhow::Result<()> {
+        let cmd = if add {
+            weft_proto::Command::React {
+                msgid: root.clone(),
+                emoji: emoji.to_string(),
+            }
+        } else {
+            weft_proto::Command::Unreact {
+                msgid: root.clone(),
+                emoji: emoji.to_string(),
+            }
+        };
+        let mut line = weft_proto::Request::new(cmd).to_line()?;
+        line.tags.insert("as".to_string(), sender.to_string());
+
+        self.send(line.serialize()?).await
+    }
+
+    /// State that a user is (or is no longer) a member of a namespace we govern.
+    ///
+    /// This is an **authoritative statement**, and it covers the connected
+    /// network's users too — say so once weftd's `NS JOIN` request has actually
+    /// been honoured foreign-side, since that is what makes it true.
+    pub async fn member(
+        &self,
+        namespace: &str,
+        user: &str,
+        action: MemberAction,
+    ) -> anyhow::Result<()> {
+        let line = Reply::new(Event::NsMember {
+            namespace: namespace.parse()?,
+            user: user.parse()?,
+            action,
+            display: None,
+            count: None,
+        })
+        .serialize()?;
+
+        self.send(line).await
+    }
+
+    /// Begin a **full-replace** membership statement.
+    ///
+    /// Between this and [`Realm::end_sync`], state the complete membership of
+    /// every namespace you govern; at the end weftd drops anyone unnamed. This is
+    /// how to correct drift after any gap — you already hold the whole set, so
+    /// stating it beats diffing, and replaying it is idempotent.
+    ///
+    /// The opener is what makes it safe: without one, a stray end would name
+    /// nobody and weftd ignores it rather than emptying your namespaces.
+    pub async fn begin_sync(&self) -> anyhow::Result<()> {
+        self.send(Reply::new(Event::SyncStart).serialize()?).await
+    }
+
+    /// Close a full-replace statement. Anyone not named since [`Realm::begin_sync`]
+    /// stops being a member.
+    pub async fn end_sync(&self, cursor: &str) -> anyhow::Result<()> {
+        let mut line = Reply::new(Event::SyncEnd {
+            cursor: cursor.to_string(),
+        })
+        .to_line()?;
+        line.tags.insert("cursor".to_string(), cursor.to_string());
+
+        self.send(line.serialize()?).await
+    }
+
+    /// Grant capabilities in a namespace we govern — how a foreign moderator
+    /// becomes one here. Translate the foreign model (a Matrix power level, a
+    /// Discord role) into capabilities yourself: weftd has no notion of a level.
+    pub async fn grant(&self, subject: &str, scope: &str, caps: &str) -> anyhow::Result<()> {
+        self.send(
+            weft_proto::Request::new(weft_proto::Command::Grant {
+                subject: subject.to_string(),
+                scope: scope.to_string(),
+                caps: caps.to_string(),
+                expiry: None,
+            })
+            .serialize()?,
+        )
+        .await
+    }
+
+    /// Revoke capabilities. `caps = None` removes everything at the scope.
+    pub async fn revoke(
+        &self,
+        subject: &str,
+        scope: &str,
+        caps: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.send(
+            weft_proto::Request::new(weft_proto::Command::Revoke {
+                subject: subject.to_string(),
+                scope: scope.to_string(),
+                caps: caps.map(str::to_string),
+                epoch: None,
+            })
+            .serialize()?,
+        )
+        .await
+    }
+
+    /// Answer a `PROVISION` push: the space now exists (assert it first), or it
+    /// cannot be provided. A waiting client is parked on `job` either way.
+    pub async fn provisioned(&self, job: &str, ok: bool) -> anyhow::Result<()> {
+        let cmd = if ok {
+            weft_proto::Command::ProvisionOk {
+                job: job.to_string(),
+            }
+        } else {
+            weft_proto::Command::ProvisionErr {
+                job: job.to_string(),
+            }
+        };
+
+        self.send(weft_proto::Request::new(cmd).serialize()?).await
+    }
+
+    async fn send(&self, line: String) -> anyhow::Result<()> {
+        self.out
+            .send(line)
+            .await
+            .map_err(|_| anyhow!("connection closed"))
+    }
+}
+
+/// A space to assert. Absent fields **clear** on re-assertion.
+pub struct NamespaceAssertion<'a> {
+    /// `<scheme>://<realm>/<space>`.
+    pub uri: &'a str,
+    /// The ULID we mint for it ([`Realm::mint`]).
+    pub id: &'a str,
+    pub visibility: weft_proto::Visibility,
+    pub title: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub icon: Option<&'a str>,
+    /// How a client should render authority here. `Levels` (Matrix) hides the
+    /// native roles editor in favour of a surface you supply.
+    pub authority: Option<weft_proto::Authority>,
+    /// Native settings surfaces to hide: `roles`, `permissions`, `channels`,
+    /// `invites`, `moderation`, `ns-edit`, `recovery`.
+    pub settings_disabled: &'a [&'a str],
+}
+
+/// A room to assert under an already-asserted space.
+pub struct ChannelAssertion<'a> {
+    /// `<scheme>://<realm>/<space>/<room>` — its parent is this minus the last
+    /// segment, so assert the space first.
+    pub uri: &'a str,
+    /// The ULID we mint for the channel.
+    pub id: &'a str,
+    /// The parent's id, so the canonical name can be returned.
+    pub namespace_id: &'a str,
+    pub vanity: &'a str,
+    pub position: i64,
+    pub kind: weft_proto::ChannelKind,
+    pub category: Option<&'a str>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn realm() -> (Realm, mpsc::Receiver<String>) {
+        let (tx, rx) = mpsc::channel(16);
+        (Realm::new(tx, "test.example".into()), rx)
+    }
+
+    #[tokio::test]
+    async fn a_channel_name_is_known_before_the_reply_arrives() {
+        // The point of minting: no assert-wait-remember round-trip.
+        let (realm, mut rx) = realm();
+        let ns = Realm::mint();
+        let chan = Realm::mint();
+
+        let name = realm
+            .assert_channel(&ChannelAssertion {
+                uri: "matrix://matrix.org/gaming/general",
+                id: &chan,
+                namespace_id: &ns,
+                vanity: "general",
+                position: 0,
+                kind: weft_proto::ChannelKind::Text,
+                category: None,
+            })
+            .await
+            .expect("asserted");
+
+        assert_eq!(name, format!("#{ns}/{chan}"));
+        let line = rx.try_recv().expect("a line");
+        assert!(line.contains(&format!("id={chan}")), "{line}");
+        assert!(
+            line.contains("CHANNEL-LAYOUT matrix://matrix.org/gaming/general 0"),
+            "{line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_message_carries_both_attribution_and_its_id() {
+        // Missing `@msgid` is dropped by weftd with no error, so the API takes it.
+        let (realm, mut rx) = realm();
+        realm
+            .message(
+                "alice@matrix.org",
+                "matrix.org/01arz3ndektsv4rrffq69g5fav",
+                "#01arz3ndektsv4rrffq69g5fav/01arz3ndektsv4rrffq69g5faw",
+                "hi",
+            )
+            .await
+            .expect("sent");
+
+        let line = rx.try_recv().expect("a line");
+        assert!(line.contains("as=alice@matrix.org"), "{line}");
+        assert!(
+            line.contains("msgid=matrix.org/01arz3ndektsv4rrffq69g5fav"),
+            "{line}"
+        );
+        // One tag group, semicolon-separated: a second `@` would parse as the
+        // verb, which is the mistake this API exists to make impossible.
+        assert!(line.starts_with('@'), "{line}");
+        assert!(!line.contains(" @"), "tags must be one group: {line}");
+    }
+
+    #[tokio::test]
+    async fn a_full_replace_window_is_framed() {
+        let (realm, mut rx) = realm();
+        realm.begin_sync().await.expect("began");
+        realm
+            .member(
+                "01arz3ndektsv4rrffq69g5fav",
+                "alice@matrix.org",
+                MemberAction::Join,
+            )
+            .await
+            .expect("stated");
+        realm.end_sync("cursor-1").await.expect("ended");
+
+        assert_eq!(rx.try_recv().unwrap(), "SYNC START");
+        assert!(rx.try_recv().unwrap().contains("NS-MEMBER"));
+        let end = rx.try_recv().unwrap();
+        assert!(end.contains("cursor=cursor-1"), "{end}");
+        assert!(end.contains("SYNC END"), "{end}");
+    }
+
+    #[test]
+    fn our_users_are_told_apart_from_the_realms() {
+        let (realm, _rx) = realm();
+        assert!(realm.is_ours(&"alice@matrix.org".parse().unwrap()));
+        assert!(!realm.is_ours(&"ada@test.example".parse().unwrap()));
+    }
+}

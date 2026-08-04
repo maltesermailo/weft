@@ -821,6 +821,10 @@ impl weft_admin::Live for LiveRegistry {
         }
     }
 
+    async fn set_bridging(&self, namespace: &weft_proto::NamespaceId, banned: bool) -> bool {
+        self.ctx.tell_provider_bridging(namespace, banned).await
+    }
+
     async fn delete_message(&self, msgid: &weft_proto::MsgId, by: &weft_proto::Account) -> bool {
         // Resolve which channel owns the message, then tell its actor to
         // tombstone it (the actor is the single ULID writer, §9.1).
@@ -972,8 +976,14 @@ where
         .with_banned_words(banned_substrings, banned_regexes)
         .with_require_email(require_email)
         .with_foreign_adapters(foreign_adapters)
-        .with_remote_plugins(remote_plugins),
+        .with_remote_plugins(remote_plugins.clone()),
     );
+    // Which providers are still pinned — the panel refuses to delete a namespace
+    // whose provider is still enabled (removing the pin is what unlocks it).
+    let configured_schemes: Vec<String> = remote_plugins
+        .iter()
+        .flat_map(|(_, _, schemes)| schemes.iter().map(|s| s.to_string()))
+        .collect();
     let admin_router = admin_ingredients.map(|(secret, ops, network)| {
         let auth = weft_admin::auth::config(secret, ops);
         let live: Arc<dyn weft_admin::Live> = Arc::new(LiveRegistry {
@@ -986,6 +996,7 @@ where
                 .with_live(live)
                 .with_blobs(Arc::clone(&blobs))
                 .with_support_account(support_account.clone())
+                .with_configured_schemes(configured_schemes.clone())
                 .with_live_connections(Arc::clone(&ctx.connections)),
         )
     });

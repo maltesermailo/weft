@@ -36,6 +36,15 @@ pub enum Actor {
     Local(Account),
     /// `account@network`.
     Foreign(String),
+    /// A **provider** acting as itself (not on behalf of one of its users): the
+    /// governing authority of every namespace it bridges, the way an owner is of
+    /// a native one (framework §7a.3). Carries the scheme its key is pinned for,
+    /// which is what bounds that authority.
+    ///
+    /// This is the bridge's analogue of [`Actor::Foreign`] — expressing "who is
+    /// acting" once, so every actor-aware verb (grants, roles, moderation) works
+    /// for a provider without a bypass per verb.
+    Provider(weft_proto::Scheme),
 }
 
 impl Actor {
@@ -44,7 +53,7 @@ impl Actor {
     pub fn local(&self) -> Option<&Account> {
         match self {
             Actor::Local(account) => Some(account),
-            Actor::Foreign(_) => None,
+            Actor::Foreign(_) | Actor::Provider(_) => None,
         }
     }
 }
@@ -54,6 +63,7 @@ impl std::fmt::Display for Actor {
         match self {
             Actor::Local(account) => write!(f, "{account}"),
             Actor::Foreign(user) => write!(f, "{user}"),
+            Actor::Provider(scheme) => write!(f, "{scheme}:provider"),
         }
     }
 }
@@ -1485,6 +1495,52 @@ impl ServerCtx {
         map.get(id).map(|r| r.schemes.clone()).unwrap_or_default()
     }
 
+    /// Framework §7a.0f: tell the provider that governs `namespace` whether to
+    /// keep bridging it. **The bridge stores and enforces this** — we carry the
+    /// operator's decision across once and keep nothing, which is why there is no
+    /// column for it and nothing is re-sent on reconnect.
+    ///
+    /// `false` when no live provider governs that namespace, so the caller can
+    /// report that rather than implying the instruction landed.
+    pub async fn tell_provider_bridging(
+        &self,
+        namespace: &weft_proto::NamespaceId,
+        banned: bool,
+    ) -> bool {
+        let Ok(Some(record)) = self
+            .namespaces
+            .namespace_by_id(&namespace.to_string())
+            .await
+        else {
+            return false;
+        };
+        let Some(uri) = record
+            .origin
+            .as_deref()
+            .and_then(|o| o.parse::<weft_proto::ForeignUri>().ok())
+        else {
+            return false; // a native namespace has no bridge to tell
+        };
+        let Some((_, out)) = self.provider_for_scheme(uri.scheme()) else {
+            return false; // not connected
+        };
+
+        let state = if banned {
+            weft_proto::BridgingState::Banned
+        } else {
+            weft_proto::BridgingState::Allowed
+        };
+        let Ok(line) = weft_proto::Reply::new(weft_proto::Event::Bridging {
+            namespace: *namespace,
+            state,
+        })
+        .serialize() else {
+            return false;
+        };
+
+        out.try_send(line).is_ok()
+    }
+
     /// The writer of the provider that bridges `realm`, if any — a realm is a
     /// network (framework §7a.0), so this answers "is this 'network' actually a
     /// bridged realm?" and is what routes a DM to a provider rather than to a
@@ -1650,6 +1706,9 @@ impl ServerCtx {
         match actor {
             Actor::Local(account) => self.accounts.account_ulid(account).await,
             Actor::Foreign(user) => Ok(Some(user.clone())),
+            // A provider holds no grants — its authority is structural (below),
+            // not something anyone granted it.
+            Actor::Provider(_) => Ok(None),
         }
     }
 
@@ -1692,20 +1751,35 @@ impl ServerCtx {
                     if ns.origin.is_none() && ns.owner == *account {
                         return Ok(true);
                     }
-                    // The **operator escape hatch** (3b, 2026-08-04): a
-                    // provider-managed namespace has NO local owner, so the
-                    // "operator ≠ admin of someone else's server" principle does
-                    // not apply — it is server infrastructure, and without this
-                    // an orphaned replica would be undeletable by anyone.
-                    if ns.origin.is_some()
-                        && (self.operators.contains(account)
-                            || self.accounts.is_operator(account).await?)
-                    {
-                        return Ok(true);
-                    }
+                    // No operator escape hatch here (removed 2026-08-04, owner
+                    // directive). Operator authority is network-level and acts
+                    // **through the web admin panel** (store-direct), never as
+                    // wire capability inside a namespace — and that holds for a
+                    // provider-managed one too. An orphaned replica is deleted
+                    // via `DELETE /api/v1/namespaces/:name` (`AdminScope::Destroy`),
+                    // which is the same out-of-band path used for every other
+                    // cross-namespace intervention.
                 }
             }
         }
+        // A **provider** governs every namespace it bridges, the way an owner
+        // governs a native one (§7a.3) — bounded by the scheme its key is pinned
+        // for, so it holds nothing outside its own realms. Stated once here
+        // rather than bypassed per verb, so roles, moderation and grants all
+        // follow the same rule.
+        if let Actor::Provider(scheme) = actor {
+            let Some(ns_id) = scope_namespace(scope) else {
+                return Ok(false); // network-wide scope is never a provider's
+            };
+            return Ok(self
+                .namespaces
+                .namespace_by_id(&ns_id)
+                .await?
+                .and_then(|ns| ns.origin)
+                .and_then(|o| o.parse::<weft_proto::ForeignUri>().ok())
+                .is_some_and(|uri| uri.scheme() == scheme));
+        }
+
         let Some(key) = self.actor_store_key(actor).await? else {
             return Ok(false);
         };

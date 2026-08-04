@@ -428,6 +428,8 @@ impl<S: ControlStream> Session<S> {
             // produced by our own writers) simply drops the badge.
             origin: record.origin.as_deref().and_then(|o| o.parse().ok()),
             provider_online: self.ctx.origin_online(record),
+            authority: record.authority.as_deref().and_then(|a| a.parse().ok()),
+            settings_disabled: record.settings_disabled.clone(),
         }
     }
 
@@ -523,6 +525,9 @@ impl<S: ControlStream> Session<S> {
             name: name.clone(),
             owner: account.clone(),
             root_key,
+            // Native: the default profile (roles authority, nothing disabled).
+            authority: None,
+            settings_disabled: Vec::new(),
             visibility: visibility.to_string(),
             title: None,
             description: None,
@@ -605,6 +610,38 @@ impl<S: ControlStream> Session<S> {
 
     /// Shared owner/ns-admin gate for NS META/VISIBILITY/DELETE.
     /// `Ok(Some(record))` = authorized; `Ok(None)` = refused/answered.
+    /// A namespace's **structure belongs to its realm** (framework §7a.0e): a
+    /// provider-managed namespace is described by what the realm asserts, so
+    /// editing it here would diverge with nothing to reconcile against — the
+    /// same split-brain the offline gate refuses for messages, and worse,
+    /// silent: a re-assert would not correct it.
+    ///
+    /// Refused for **everyone**, operators included. Their escape hatch exists so
+    /// an orphaned replica stays *deletable*, not so it can be edited into
+    /// disagreement with the system it mirrors. `NS DELETE` is deliberately not
+    /// gated here.
+    ///
+    /// The realm changes these by re-asserting (`on_ns_assert` applies the new
+    /// values), which is the only path that keeps both sides equal.
+    pub(super) async fn provider_managed_refusal(
+        &mut self,
+        label: Option<String>,
+        record: &weft_store::NamespaceRecord,
+    ) -> io::Result<bool> {
+        if record.origin.is_none() {
+            return Ok(false);
+        }
+
+        self.send_err(
+            label,
+            ErrCode::Forbidden,
+            Some("provider-managed"),
+            "this namespace is described by its realm",
+        )
+        .await?;
+        Ok(true)
+    }
+
     pub(super) async fn ns_admin_gate(
         &mut self,
         label: Option<String>,
@@ -776,6 +813,12 @@ impl<S: ControlStream> Session<S> {
         let Some(mut record) = self.ns_admin_gate(label.clone(), &ns, &actor).await? else {
             return Ok(Flow::Continue);
         };
+        if self
+            .provider_managed_refusal(label.clone(), &record)
+            .await?
+        {
+            return Ok(Flow::Continue);
+        }
         // The namespace table is keyed by the (mutable) vanity name; the record
         // found by id carries the current one for these name-keyed mutations.
         let name = record.name.clone();
@@ -851,6 +894,12 @@ impl<S: ControlStream> Session<S> {
         let Some(mut record) = self.ns_admin_gate(label.clone(), &ns, &actor).await? else {
             return Ok(Flow::Continue);
         };
+        if self
+            .provider_managed_refusal(label.clone(), &record)
+            .await?
+        {
+            return Ok(Flow::Continue);
+        }
         if let Err(e) = self
             .ctx
             .namespaces
@@ -991,6 +1040,8 @@ impl<S: ControlStream> Session<S> {
             title: None,
             description: Some("deleted".to_string()),
             icon: None,
+            authority: None,
+            settings_disabled: Vec::new(),
             recovery_set: false,
             recovery_pending: None,
             categories: Vec::new(),

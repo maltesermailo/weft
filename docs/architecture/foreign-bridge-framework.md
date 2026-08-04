@@ -17,6 +17,9 @@ protocol. This doc is the framework; each adapter (`matrix.md`, future `discord.
 shipped) — hide overrides drive membership mapping; the home-authoritative replica model
 (`home-authoritative-channels.md`) is reused for the foreign replica.
 
+> **Wire reference:** the mechanical contract a provider speaks — every command, event, tag and failure mode of a bridge session — is
+> [`docs/protocol/bridge-session-protocol.md`](../protocol/bridge-session-protocol.md). This document is the *why*; that one is the *what*.
+
 ## 0. Why a framework (not per-app bridges)
 
 The Matrix concept doc (`matrix.md` §5) originally laundered a remote homeserver into a
@@ -292,6 +295,108 @@ network we already hold a **peer record** for (authoritative whatever DNS says t
 **netblocked** name — invariant 7 is name-keyed, so it must bite a realm exactly as it bites a peer,
 or blocking a network would be evadable by re-entering as a bridge.
 
+### 7a.0d The realm mints its own ids
+
+Federation **never re-mints** a peer's ULIDs: a signed manifest names `<network>/<ns-id>` and
+`provision_replica` takes the channel name verbatim. Under §7a.0 a bridge is a peer, so the same rule
+holds — the **adapter mints** namespace, channel and role ids and weftd **pins** them, arriving as
+`@id=` on the assertions.
+
+It also matches who already owns identity here: the adapter mints user handles and msgids, so
+structure was the one inconsistent exception.
+
+Three consequences:
+
+- **The ids survive our store.** Re-asserting after a restore, or provisioning the same space on a
+  second server, reproduces the same objects — deterministically, if the adapter derives them from
+  the foreign id.
+- **No round-trip.** The adapter knows `#<ns-id>/<chan-id>` before it asserts, so its startup burst
+  pipelines instead of assert-wait-remember per object.
+- **A takeover guard is required.** An id already in use answers `ERR CONFLICT` (context `id`) rather
+  than being adopted — otherwise a provider could assert a native namespace's ULID and claim it.
+
+An adapter-minted ULID is not authoritative in any cryptographic sense — Matrix has no ULIDs, so
+someone invents it either way. The gain is consistency and stability, not proof.
+
+### 7a.0d-bis Who holds authority in a replica
+
+**Owner directive 2026-08-04, correcting an earlier design.** Operator/admin power lives in a
+**separate permission table** and acts **only through the web admin panel**. `*` does not confer power
+inside a namespace — only `ns-admin` does — and that is true of a provider-managed namespace too.
+
+The old **operator escape hatch** (operators held every capability on an `origin` namespace, so an
+orphaned replica stayed deletable) is **removed**. It was redundant as well as wrong: the panel
+already deletes namespaces store-direct (`DELETE /api/v1/namespaces/:name`, `AdminScope::Destroy`),
+which is the same out-of-band path used for every other cross-namespace intervention.
+
+So inside a replica:
+
+- a plain member holds nothing — the sentinel owner confers no authority, so the owner shortcut never
+  fires;
+- a **network operator** holds nothing *over the wire*;
+- authority is whatever the **realm grants** (§7), because the realm governs what it bridges.
+
+The bridge, for its part, does not need weftd to pre-authorize anything: there is always a backing
+foreign user, so the adapter checks permissions against what the foreign server returns and reports
+the outcome.
+
+**Deleting a replica is gated on the provider being disabled** (owner directive 2026-08-04). The admin
+panel refuses `DELETE /api/v1/namespaces/:name` for an `origin` namespace while that provider's scheme
+is still pinned in `[[plugin.remote]]`: it is the realm's space, and dropping it out from under a live
+bridge orphans the foreign side with no way to notice. Deletion is the **garbage-collection** path for
+a provider that has been turned off, so removing the pin is the deliberate act that unlocks it.
+
+"Disabled" deliberately means *the pin is gone*, not *currently disconnected* — a bridge restarts, and
+that must not open a window in which its spaces can be destroyed. A panel running **standalone**
+cannot see the config at all, and refuses on that ignorance rather than guessing.
+
+### 7a.0f Banning a space from bridging — weftd tells, the bridge enforces
+
+**Owner directive 2026-08-04.** An operator can stop an individual space being bridged, without
+severing the whole realm (`NETBLOCK` remains the instrument for that). Two decisions shape it:
+
+**The bridge is run by the same operator as the server.** So a bridge-enforced ban is not a weaker
+guarantee than a server-enforced one — there is no separate trust domain to defend against.
+
+**So weftd tells, and keeps nothing.** An admin bans a space in the web panel; weftd pushes
+`BRIDGING <ns-id> banned|allowed` to the governing provider and stores no flag of its own. The
+adapter persists it, enforces it, and re-applies it on reconnect. There is no column here to drift
+out of step with the bridge's own list, and nothing is re-sent — weftd has genuinely forgotten.
+
+That is also what makes it **generic across platforms**: leaving a Matrix room, ignoring a Discord
+guild and dropping an Instagram feed have nothing in common except "stop", so "stop" is all the
+protocol says. Everything platform-specific stays in the adapter.
+
+`POST /api/v1/namespaces/:name/bridging {"banned": …}` is the panel's route (embedded only — a
+standalone panel has no session to push on). A provider that is not connected answers `409` rather
+than a success that carried nowhere.
+
+### 7a.0e A replica's structure belongs to its realm — and weftd stays thin
+
+**Owner directive 2026-08-04:** *"Don't create much logic about replicated namespaces in weftd since
+most of it will be handled by the bridge. The bridge will be like a federated weftd. The bridge SDK
+will provide utilities to ensure a smooth operation like a federation."*
+
+That is the governing constraint for everything in this section. weftd should hold the **rule**, not
+the machinery: complexity that keeps a replica agreeing with its realm belongs in the adapter, and
+the reusable parts of it belong in the SDK — not in per-replica special cases here.
+
+So weftd does exactly two things, and they are a pair:
+
+1. **It refuses local structure edits** on a provider-managed namespace — `NS META`,
+   `NS VISIBILITY`, `CHANNEL CREATE` — even for an `ns-admin` the realm itself appointed. `NS DELETE`
+   is deliberately still allowed: structure is the realm's to *describe*, but the namespace is still
+   ours to drop.
+2. **It applies a re-assertion.** Re-asserting is now how a realm *updates* what it governs; absent
+   fields clear, so an assertion is the whole truth rather than a patch.
+
+Neither works without the other: refusing edits without applying re-assertions would freeze a
+replica's metadata forever, and applying re-assertions without refusing edits would leave a local
+change silently overwritten (or worse, silently kept).
+
+Everything beyond that — reconciling foreign state, deciding when to re-assert, batching a startup
+burst — is the adapter's, with the SDK supplying the shared parts.
+
 ### 7a.0a Membership — the realm is the authority, so the directions follow federation
 
 Joining a namespace *is* access to its channels; there is no per-channel join in WEFT. For a bridge
@@ -409,9 +514,20 @@ plugin that owns a namespace) supplies a profile — carried as tags on `NS-META
   read-only or provider-driven. **This is "plugins can disable certain server settings"** — a general
   mechanism any provider supplies, not Matrix-specific.
 
-A gated setting the client hides is also **refused server-side** for a foreign ns (the §5-slice
-authority gating already refuses NS META/DELETE/etc. on `origin=Some`); the profile makes the *client*
-match, and lets a provider disable surfaces even on a plugin-managed *native* ns.
+The profile is a **hint, not a mirror** of server behaviour, and it is worth being exact about what
+the server does. It does not refuse verbs by `origin` — only `NS RECOVERY SET` is gated that way
+(a replica's `root_key` is empty, so recovery is meaningless). What it withholds is **authority**: the
+owner shortcut in `actor_has_cap` is gated on the namespace being native, so nobody holds `ns-admin`
+by owning a replica and every `ns:`-scoped verb fails `CAP-REQUIRED`. Two paths still succeed —
+**operators** (the escape hatch that keeps an orphaned replica deletable) and **anyone holding an
+explicit grant**, including one the provider issued — and the profile hides those surfaces from them
+too. That is the safe direction (hiding something that would work, rather than offering something
+that fails), but it is not "the client matches the server". It also lets a provider disable surfaces
+on a plugin-managed *native* namespace, where no authority gating applies at all.
+
+**Status (2026-08-04):** the profile itself is **implemented** — `authority=` and `settings=` ride
+`NS-META` in both directions, persist on the namespace record, and are carried everywhere a namespace
+is described. `level=` (§7a.4) and the client-side gating are the remaining halves.
 
 ### 7a.4 Advisory member level — `level=`
 
@@ -444,8 +560,27 @@ learns the number.
 - **Outbound** (a WEFT moderator is a moderator there): a local `GRANT`/`REVOKE` at a replica's
   `ns:` scope relays to the provider, which raises or lowers the corresponding foreign power level.
 
-`@everyone`/role-derived authority is **not** relayed — only explicit grants. Relaying a baseline
-that every member holds would map to "give everyone level 50", which is not what it means.
+**Role assignment relays.** A WEFT role is a labelled bundle that *materializes into grants*
+(`ROLE ASSIGN` records the membership, then grants the role's caps at that scope — plus any same-named
+channel role's caps across the namespace), so promoting someone to a role in a replica namespace emits
+the outbound `GRANT` and raises their foreign level. Only **`@everyone`** does not: it is resolved
+live at check time and never becomes a grant, and relaying a baseline every member holds would map to
+"give everyone level 50", which is not what it means.
+
+**Two shapes of authority, because foreign systems differ** (owner directive 2026-08-04):
+
+- **Levels** (Matrix): the provider sends bare `GRANT`/`REVOKE`, advertises `authority=levels`, and
+  the client disables its native roles screen while the plugin supplies a **Power Levels** settings
+  surface (§7a.3–§7a.4). No WEFT role is created — a synthetic role named for a power level would
+  model a concept the foreign side does not have.
+- **Roles** (Discord): the provider mirrors its real roles with the ordinary `ROLE CREATE` /
+  `ROLE ASSIGN` / `ROLE UNASSIGN` verbs, and they behave as WEFT roles throughout.
+
+A provider speaks those verbs as **`Actor::Provider(scheme)`** — the governing authority of the
+namespaces it bridges, the way an owner is of a native one, bounded by the scheme its key is pinned
+for. It is the bridge's analogue of `Actor::Foreign`: authority is expressed once, in
+`actor_has_cap`, so grants, roles and moderation all follow the same rule rather than each needing a
+bypass.
 
 ### 7a.5 Who supplies it, and the plugin connection
 

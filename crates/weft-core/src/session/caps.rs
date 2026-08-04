@@ -106,7 +106,7 @@ impl<S: ControlStream> Session<S> {
         // Authority translation (owner directive 2026-08-04): in a replica
         // namespace this becomes a foreign power level, so a WEFT moderator is a
         // moderator on the Matrix side too.
-        self.relay_provider_grant(&scope, &subject, Some(caps), true)
+        self.relay_provider_grant(&scope, &subject, Some(caps), true, &actor)
             .await;
 
         self.send_event(
@@ -206,7 +206,7 @@ impl<S: ControlStream> Session<S> {
             .mint_token(subj, token_scope, remaining, new_epoch, u64::MAX);
 
         // Authority translation: lower the foreign power level to match.
-        self.relay_provider_grant(&scope, &subject, caps, false)
+        self.relay_provider_grant(&scope, &subject, caps, false, &actor)
             .await;
 
         self.send_event(

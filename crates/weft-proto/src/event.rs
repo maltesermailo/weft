@@ -6,12 +6,14 @@ use crate::error::{ParseError, SerializeError};
 use crate::foreign::ForeignUri;
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
-use crate::name::{Account, ChannelName, GroupId, NetworkName, Target, UserRef};
+use crate::name::{
+    Account, ChannelId, ChannelName, GroupId, NamespaceId, NetworkName, Target, UserRef,
+};
 use crate::policy::RetentionPolicy;
 use crate::types::{
-    BridgeState, CallState, ChannelKind, ContentState, FriendState, HistoryMode, MediaMode,
-    MemberAction, ModAction, MsgMeta, PresenceStatus, ReactionOp, ReportScope, ResolveAction,
-    TypingState, VerifyState, Visibility, VoiceAction, VoiceTransport,
+    Authority, BridgeState, BridgingState, CallState, ChannelKind, ContentState, FriendState,
+    HistoryMode, MediaMode, MemberAction, ModAction, MsgMeta, PresenceStatus, ReactionOp,
+    ReportScope, ResolveAction, TypingState, VerifyState, Visibility, VoiceAction, VoiceTransport,
 };
 
 /// A required, non-empty tag value (for the plugin b64-CBOR payloads, §12.2).
@@ -293,6 +295,17 @@ pub enum Event {
         count: u64,
         by: Vec<UserRef>,
     },
+    /// `BRIDGING <ns-id> <banned|allowed>` — weftd telling a **provider** whether
+    /// to keep bridging a namespace it governs (framework §7a.0f).
+    ///
+    /// weftd stores the operator's decision and pushes it (on change, and again
+    /// for everything banned when the provider reconnects, so a restart cannot
+    /// quietly resume a banned space). Enforcement is the bridge's: only it knows
+    /// what "stop" means on its platform.
+    Bridging {
+        namespace: NamespaceId,
+        state: BridgingState,
+    },
     /// `BATCH START` with `id=` — opens a HISTORY page (§7).
     BatchStart {
         id: String,
@@ -440,6 +453,17 @@ pub enum Event {
         /// offline ⇒ undiscoverable + unjoinable; members see this indicator.
         /// Absent ⇒ a native namespace.
         provider_online: Option<bool>,
+        /// `authority=roles|levels|none` — the capability profile's **authority
+        /// rendering** (framework §7a.3). Absent ⇒ `roles`, the native default.
+        authority: Option<Authority>,
+        /// `settings=<comma-list>` — native settings surfaces this namespace's
+        /// provider **disables** (`roles`, `permissions`, `channels`, `invites`,
+        /// `moderation`, `ns-edit`, `recovery`). Empty ⇒ nothing disabled.
+        ///
+        /// Display gating only: the server already refuses those verbs on a
+        /// provider-managed namespace, so this makes the *client* match rather
+        /// than offering buttons that will be rejected.
+        settings_disabled: Vec<String>,
     },
     /// `MORE <cursor>` — pagination continuation (DISCOVER, §6.2).
     More {
@@ -767,6 +791,16 @@ pub enum Event {
     /// (id form, `origin=`). Provider sessions only.
     NsMetaForeign {
         uri: ForeignUri,
+        /// `id=` — the namespace ULID, **minted by the realm** (framework §7a.0d).
+        /// Federation pins the origin's ids rather than re-minting; a bridge is
+        /// no different, so the adapter supplies it and weftd pins it.
+        id: NamespaceId,
+        /// `authority=` + `settings=` — the capability profile (§7a.3): how the
+        /// client should render this namespace's authority, and which native
+        /// settings surfaces to hide. A Matrix realm sends `authority=levels`
+        /// and disables `roles`.
+        authority: Option<Authority>,
+        settings_disabled: Vec<String>,
         visibility: Visibility,
         title: Option<String>,
         description: Option<String>,
@@ -778,6 +812,9 @@ pub enum Event {
     /// parent = the URI minus the last segment). Provider sessions only.
     ChannelLayoutForeign {
         uri: ForeignUri,
+        /// `id=` — the channel ULID, **minted by the realm** (framework §7a.0d),
+        /// as with the namespace above.
+        id: ChannelId,
         position: i64,
         kind: ChannelKind,
         /// Display name (`vanity=`); empty falls back to the URI's last segment.
@@ -1288,9 +1325,28 @@ impl Event {
                 let target = args.req("ns")?;
 
                 if target.contains("://") {
+                    let uri = target.parse()?;
+                    let visibility = args.req("visibility")?.parse()?;
+                    let id = tag("id")
+                        .ok_or(ParseError::MissingParam {
+                            verb: "NS-META",
+                            what: "id tag",
+                        })?
+                        .parse()?;
+
                     return Ok(Event::NsMetaForeign {
-                        uri: target.parse()?,
-                        visibility: args.req("visibility")?.parse()?,
+                        uri,
+                        id,
+                        authority: tag("authority").map(|a| a.parse()).transpose()?,
+                        settings_disabled: tag("settings")
+                            .map(|s| {
+                                s.split(',')
+                                    .filter(|k| !k.is_empty())
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        visibility,
                         title: tag("title"),
                         description: tag("description"),
                         icon: tag("icon"),
@@ -1338,6 +1394,15 @@ impl Event {
                         Some("offline") => Some(false),
                         _ => None,
                     },
+                    authority: tag("authority").map(|a| a.parse()).transpose()?,
+                    settings_disabled: tag("settings")
+                        .map(|s| {
+                            s.split(',')
+                                .filter(|k| !k.is_empty())
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 })
             }
             "MORE" => {
@@ -1359,8 +1424,19 @@ impl Event {
                 // Foreign-assertion form (framework §3.1): a URI target routes to
                 // the provider-assertion variant.
                 if target.contains("://") {
+                    let id = line
+                        .tags
+                        .get("id")
+                        .filter(|v| !v.is_empty())
+                        .ok_or(ParseError::MissingParam {
+                            verb: "CHANNEL-LAYOUT",
+                            what: "id tag",
+                        })?
+                        .parse()?;
+
                     return Ok(Event::ChannelLayoutForeign {
                         uri: target.parse()?,
+                        id,
                         position,
                         kind: line
                             .tags
@@ -1390,6 +1466,13 @@ impl Event {
                 Ok(Event::ChannelRenamed {
                     old: args.req("old")?.parse()?,
                     new: args.req("new")?.parse()?,
+                })
+            }
+            "BRIDGING" => {
+                let mut args = Args::new(line, "BRIDGING");
+                Ok(Event::Bridging {
+                    namespace: args.req("namespace")?.parse()?,
+                    state: args.req("state")?.parse()?,
                 })
             }
             "NS-MEMBER" => {
@@ -2161,6 +2244,8 @@ impl Event {
                 welcome,
                 origin,
                 provider_online,
+                authority,
+                settings_disabled,
             } => {
                 if let Some(origin) = origin {
                     tags.insert("origin".to_string(), origin.to_string());
@@ -2168,6 +2253,12 @@ impl Event {
                 if let Some(online) = provider_online {
                     let state = if *online { "online" } else { "offline" };
                     tags.insert("provider".to_string(), state.to_string());
+                }
+                if let Some(authority) = authority {
+                    tags.insert("authority".to_string(), authority.to_string());
+                }
+                if !settings_disabled.is_empty() {
+                    tags.insert("settings".to_string(), settings_disabled.join(","));
                 }
                 tags.insert("vanity".to_string(), vanity.to_string());
                 for (k, v) in [
@@ -2203,11 +2294,21 @@ impl Event {
             }
             Event::NsMetaForeign {
                 uri,
+                id,
+                authority,
+                settings_disabled,
                 visibility,
                 title,
                 description,
                 icon,
             } => {
+                tags.insert("id".to_string(), id.to_string());
+                if let Some(authority) = authority {
+                    tags.insert("authority".to_string(), authority.to_string());
+                }
+                if !settings_disabled.is_empty() {
+                    tags.insert("settings".to_string(), settings_disabled.join(","));
+                }
                 for (k, v) in [
                     ("title", title),
                     ("description", description),
@@ -2225,11 +2326,13 @@ impl Event {
             }
             Event::ChannelLayoutForeign {
                 uri,
+                id,
                 position,
                 kind,
                 vanity,
                 category,
             } => {
+                tags.insert("id".to_string(), id.to_string());
                 if let Some(category) = category {
                     tags.insert("category".to_string(), category.clone());
                 }
@@ -2275,6 +2378,11 @@ impl Event {
             Event::ChannelRenamed { old, new } => (
                 "CHANNEL-RENAMED",
                 vec![old.to_string(), new.to_string()],
+                None,
+            ),
+            Event::Bridging { namespace, state } => (
+                "BRIDGING",
+                vec![namespace.to_string(), state.to_string()],
                 None,
             ),
             Event::NsMember {
@@ -3416,6 +3524,9 @@ mod tests {
                 // and its provider's liveness (offline ⇒ undiscoverable).
                 origin: Some("matrix://matrix.org/gaming".parse().unwrap()),
                 provider_online: Some(false),
+                // §7a.3: …and how the client should render its authority.
+                authority: Some(crate::types::Authority::Levels),
+                settings_disabled: vec!["roles".into(), "ns-edit".into()],
             },
             "n1",
         ));
@@ -3435,6 +3546,8 @@ mod tests {
             welcome: None,
             origin: None,
             provider_online: None,
+            authority: None,
+            settings_disabled: Vec::new(),
         }));
         round_trip(&Reply::new(Event::More {
             cursor: "next-page".into(),
@@ -3576,11 +3689,38 @@ mod tests {
     }
 
     #[test]
+    fn bridging_state_round_trips() {
+        // §7a.0f: weftd tells a provider to stop (or resume) bridging a namespace
+        // it governs. Enforcement is the bridge's; this is the instruction.
+        for state in [BridgingState::Banned, BridgingState::Allowed] {
+            round_trip(&Reply::new(Event::Bridging {
+                namespace: "01arz3ndektsv4rrffq69g5fav".parse().unwrap(),
+                state,
+            }));
+        }
+        assert_eq!(
+            Reply::new(Event::Bridging {
+                namespace: "01arz3ndektsv4rrffq69g5fav".parse().unwrap(),
+                state: BridgingState::Banned,
+            })
+            .serialize()
+            .unwrap(),
+            "BRIDGING 01arz3ndektsv4rrffq69g5fav banned"
+        );
+    }
+
+    #[test]
     fn foreign_assertion_forms_round_trip() {
         // Framework §3.1: the SAME wire verbs, routed on the URI target shape —
         // a provider asserts structure with normal NS-META / CHANNEL-LAYOUT.
+        // §7a.0d: the realm mints the ids and weftd pins them, exactly as
+        // federation pins a peer's — so they ride the assertion as `id=`.
         let ns = Reply::new(Event::NsMetaForeign {
             uri: "matrix://matrix.org/gaming".parse().unwrap(),
+            id: "01arz3ndektsv4rrffq69g5fav".parse().unwrap(),
+            // §7a.3: Matrix renders levels, so its roles editor is hidden.
+            authority: Some(crate::types::Authority::Levels),
+            settings_disabled: vec!["roles".into(), "permissions".into()],
             visibility: crate::types::Visibility::Public,
             title: Some("Gaming".into()),
             description: None,
@@ -3594,6 +3734,7 @@ mod tests {
 
         let chan = Reply::new(Event::ChannelLayoutForeign {
             uri: "matrix://matrix.org/gaming/general".parse().unwrap(),
+            id: "01arz3ndektsv4rrffq69g5faw".parse().unwrap(),
             position: 0,
             kind: ChannelKind::Text,
             vanity: "general".into(),

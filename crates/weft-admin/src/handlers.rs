@@ -76,6 +76,7 @@ pub fn routes() -> Router<AdminState> {
             "/api/v1/namespaces/:name/federation",
             post(set_ns_federation),
         )
+        .route("/api/v1/namespaces/:name/bridging", post(set_ns_bridging))
         .route(
             "/api/v1/namespaces/:name/takeover",
             post(takeover_namespace),
@@ -1603,6 +1604,75 @@ async fn account_dms(State(st): State<AdminState>, Path(name): Path<String>) -> 
 /// actor (embedded) + drop its row + channel-scope roles, clear memberships, drop
 /// ns-scope roles, revoke its invites + grants (all id-scoped, v0.13), then the
 /// record. A destroy-level operator action.
+/// Why a provider-managed namespace may not be deleted yet, or `None` if it may.
+///
+/// A namespace with no `origin` is native and always deletable. Otherwise the
+/// provider must be **disabled** — its scheme gone from `[[plugin.remote]]`,
+/// which is durable and operator-set, rather than merely disconnected (a bridge
+/// restarts; that must not open a destruction window). When the panel runs
+/// standalone it cannot see the config at all, and then it refuses: better to
+/// decline than to destroy a live bridge's space on a guess.
+fn provider_still_enabled(
+    st: &AdminState,
+    record: &weft_store::NamespaceRecord,
+) -> Option<&'static str> {
+    let origin = record.origin.as_deref()?;
+    let scheme = origin.split("://").next().unwrap_or_default().to_string();
+
+    match &st.configured_schemes {
+        Some(schemes) if !schemes.contains(&scheme) => None,
+        Some(_) => Some("this namespace's provider is still enabled — remove its plugin pin first"),
+        None => Some("cannot verify the provider is disabled (panel is running standalone)"),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct BridgingBody {
+    banned: bool,
+}
+
+/// `POST /namespaces/:name/bridging` `{"banned": true|false}` — framework §7a.0f.
+///
+/// Tells the provider that governs this namespace to stop (or resume) bridging
+/// it. **The bridge stores and enforces it**; weftd carries the decision across
+/// once and keeps nothing, so there is no state here to drift. Banning one space
+/// this way does not sever the realm — `NETBLOCK` is the instrument for that.
+async fn set_ns_bridging(
+    State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(name): Path<String>,
+    Json(body): Json<BridgingBody>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Ok(ns) = name.parse::<weft_proto::NamespaceName>() else {
+        return (StatusCode::BAD_REQUEST, "bad namespace name").into_response();
+    };
+    let record = match st.namespaces.namespace(&ns).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such namespace").into_response(),
+        Err(e) => return internal(e),
+    };
+    if record.origin.is_none() {
+        return (StatusCode::CONFLICT, "not a bridged namespace").into_response();
+    }
+    let Ok(id) = record.id.parse::<weft_proto::NamespaceId>() else {
+        return internal("namespace record carries no valid id");
+    };
+    let Some(live) = st.live.as_ref() else {
+        return (StatusCode::NOT_IMPLEMENTED, "requires the embedded server").into_response();
+    };
+
+    // A bridge that is not connected cannot be told, and saying otherwise would
+    // imply a ban took effect when nothing received it.
+    if !live.set_bridging(&id, body.banned).await {
+        return (StatusCode::CONFLICT, "the bridge is not connected").into_response();
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
 async fn delete_namespace_admin(
     State(st): State<AdminState>,
     Extension(who): Extension<Account>,
@@ -1620,6 +1690,15 @@ async fn delete_namespace_admin(
         Ok(None) => return (StatusCode::NOT_FOUND, "no such namespace").into_response(),
         Err(e) => return internal(e),
     };
+    // Owner directive 2026-08-04: a provider-managed namespace may not be deleted
+    // while its provider is still configured. It is the realm's space — dropping
+    // it out from under a live bridge orphans the foreign side with no way to
+    // notice. Deletion is the **garbage-collection** path for a provider that has
+    // been turned off, so removing its `[[plugin.remote]]` pin is the deliberate
+    // act that unlocks it.
+    if let Some(refusal) = provider_still_enabled(&st, &record) {
+        return (StatusCode::CONFLICT, refusal).into_response();
+    }
     let ns_id = record.id.clone();
 
     let result = async {

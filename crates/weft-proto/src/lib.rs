@@ -52,10 +52,10 @@ pub use plugin::{
 };
 pub use policy::{RetainedFor, RetentionPolicy, RetentionUnit};
 pub use types::{
-    report_category_ok, BridgeState, CallState, ChannelKind, ContentState, FriendState,
-    HistoryMode, MediaMode, MemberAction, ModAction, MsgMeta, PresenceStatus, ReactionOp,
-    ReportScope, ReportStatus, ResolveAction, StreamMode, TypingState, VerifyState, Visibility,
-    VoiceAction, VoiceTransport,
+    report_category_ok, Authority, BridgeState, BridgingState, CallState, ChannelKind,
+    ContentState, FriendState, HistoryMode, MediaMode, MemberAction, ModAction, MsgMeta,
+    PresenceStatus, ReactionOp, ReportScope, ReportStatus, ResolveAction, StreamMode, TypingState,
+    VerifyState, Visibility, VoiceAction, VoiceTransport,
 };
 
 // Re-exported so consumers (weft-core mints ULIDs in channel actors) share

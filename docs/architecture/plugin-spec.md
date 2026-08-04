@@ -986,3 +986,55 @@ fn register(reg) {
     });
 }
 ```
+
+## §22 Admin-panel surfaces (owner requirement 2026-08-04)
+
+A plugin may declare actions on the **`admin` surface**: pages in the operator admin panel rather than
+in the client. This is where a provider puts what only an operator should see or do — a bridge's
+per-space ban list (§10b of the Matrix plan), a connection-health view, a re-sync button.
+
+It fits the permission model rather than bending it: operator authority lives in a separate table and
+acts **through the panel**, never as wire capability inside a namespace. An operator-facing plugin
+surface therefore belongs in the panel by construction.
+
+**Routing.** The panel is store-direct and speaks no wire protocol, so it invokes through weftd via
+the existing embedded-only `Live` port — the same seam already used for kick/eject/force-logout.
+`PLUGIN INVOKE` then follows its ordinary parked-and-correlated path. A **standalone** panel has no
+weftd session to route on and shows these pages as unavailable, exactly as it already does for other
+live-only actions.
+
+**Status:** the declaration (`Surface::Admin`) and the SDK's `admin_action(...)` exist. The `Live`
+routing method and the panel's renderer land with the SDUI work (slices 7 + 9), which is what makes
+any plugin-supplied page drawable.
+
+## §23 Privileged plugins — signed manifests (owner requirement 2026-08-04, DESIGN OPEN)
+
+Today a plugin's authority is narrow and structural: a pinned key plus declared schemes makes it the
+governing authority of *its own* namespaces (`Actor::Provider`) and nothing else. Some plugins should
+be able to do more — "access the entire app" — authorized by a **signed manifest** rather than by
+widening the config pin.
+
+The precedent is federation's `SignedManifest` (deterministic CBOR, scope-authority-signed,
+version + revocation epoch). Applied here, an operator signs a manifest enumerating what a plugin may
+do; weftd verifies it against the network key at `AUTH ADAPTER`, and the plugin's `Actor` carries that
+grant instead of the bare scheme.
+
+**Why a manifest rather than more config:** it is issuable out-of-band (a plugin ships with one), it
+is *enumerated* rather than unbounded, it can expire, and it is revocable by epoch without a config
+edit and restart. That matters as soon as plugins are distributed rather than hand-installed.
+
+**Open questions — none of these should be guessed at:**
+
+1. **What is "the entire app"?** A manifest that lists capabilities and scopes (`*`, `ns:…`, verb
+   families) stays auditable; an unbounded "trusted" bit does not. Strong preference for the former —
+   "entire app" then means *a manifest that happens to list everything*, not an absence of checks.
+2. **Who signs?** The network key is the obvious authority, but that key also signs attestations and
+   manifests for federation; a dedicated plugin-authority key would keep blast radii apart.
+3. **Revocation.** Epoch bump (as capability tokens do), or presence in a store the operator edits?
+   The first composes with what exists.
+4. **Does it grant *namespace* authority?** A privileged plugin acting inside someone's namespace
+   collides with "operators are not day-to-day power on another's server". Probably it must not —
+   which means "entire app" excludes governing other people's namespaces, and that limit should be
+   explicit rather than discovered later.
+5. **User consent.** Nothing today tells a member that a plugin can read their DMs. If a manifest can
+   grant that, the *absence* of a disclosure surface becomes a real gap.

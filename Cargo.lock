@@ -9466,7 +9466,12 @@ name = "weft-appservice"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "quinn",
+ "tokio",
+ "tracing",
  "weft-crypto",
+ "weft-proto",
+ "weft-transport",
 ]
 
 [[package]]
@@ -9637,6 +9642,7 @@ dependencies = [
  "tracing-subscriber",
  "webpki-roots 0.26.11",
  "weft-admin",
+ "weft-appservice",
  "weft-core",
  "weft-crypto",
  "weft-irc",

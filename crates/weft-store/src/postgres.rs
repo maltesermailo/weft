@@ -1724,8 +1724,8 @@ impl NamespaceStore for PgStore {
     async fn create_namespace(&self, record: NamespaceRecord) -> Result<bool, StoreError> {
         let result = sqlx::query(
             r#"
-            INSERT INTO weft_namespaces (name, owner, root_key, visibility, title, description, icon, federation, id, origin)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            INSERT INTO weft_namespaces (name, owner, root_key, visibility, title, description, icon, federation, id, origin, authority, settings_disabled)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
             ON CONFLICT (name) DO NOTHING
             "#,
         )
@@ -1740,6 +1740,10 @@ impl NamespaceStore for PgStore {
         // Empty id → NULL (lazy backfill); new namespaces arrive with a minted id.
         .bind(Some(record.id.as_str()).filter(|s| !s.is_empty()))
         .bind(&record.origin)
+        .bind(&record.authority)
+        // Stored as a comma list; empty → NULL, so "nothing disabled" is absent
+        // rather than an empty string that has to be special-cased on read.
+        .bind(Some(record.settings_disabled.join(",")).filter(|s| !s.is_empty()))
         .execute(&self.pool)
         .await
         .map_err(backend_err)?;
@@ -2195,6 +2199,16 @@ fn namespace_from_row(row: &sqlx::postgres::PgRow) -> Result<NamespaceRecord, St
             .map(str::to_string)
             .collect(),
         federation: row.get("federation"),
+        // Pre-0054 rows predate the profile; missing means the native default.
+        authority: row.try_get("authority").unwrap_or(None),
+        settings_disabled: row
+            .try_get::<Option<String>, _>("settings_disabled")
+            .unwrap_or(None)
+            .unwrap_or_default()
+            .split(',')
+            .filter(|k| !k.is_empty())
+            .map(str::to_string)
+            .collect(),
         // Pre-0030 rows predate the column; missing means "not frozen".
         frozen: row.try_get("frozen").unwrap_or(false),
         // Pre-0044 rows predate the column; missing means "no welcome channel".

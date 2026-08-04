@@ -1249,6 +1249,8 @@ where
     let ns: weft_proto::NamespaceName = format!("gaming{tag}").parse().unwrap();
     assert!(store
         .create_namespace(NamespaceRecord {
+            authority: None,
+            settings_disabled: Vec::new(),
             id: String::new(), // empty ⇒ lazily backfilled by namespace_id
             name: ns.clone(),
             owner: format!("owner-{tag}").parse().unwrap(),
@@ -1270,6 +1272,8 @@ where
     // Name taken → false (CONFLICT).
     assert!(!store
         .create_namespace(NamespaceRecord {
+            authority: None,
+            settings_disabled: Vec::new(),
             id: String::new(), // empty ⇒ lazily backfilled by namespace_id
             name: ns.clone(),
             owner: format!("someone-{tag}").parse().unwrap(),
@@ -1322,6 +1326,8 @@ where
     let origin = format!("matrix://matrix.org/{tag}");
     assert!(store
         .create_namespace(NamespaceRecord {
+            authority: None,
+            settings_disabled: Vec::new(),
             id: String::new(), // empty ⇒ lazily backfilled, like a native ns
             name: foreign.clone(),
             owner: format!("fowner-{tag}").parse().unwrap(),
@@ -1548,6 +1554,8 @@ where
     let rns: weft_proto::NamespaceName = format!("recov{tag}").parse().unwrap();
     store
         .create_namespace(NamespaceRecord {
+            authority: None,
+            settings_disabled: Vec::new(),
             id: String::new(),
             name: rns.clone(),
             owner: format!("owner-{tag}").parse().unwrap(),

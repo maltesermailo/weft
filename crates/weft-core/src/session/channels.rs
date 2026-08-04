@@ -37,6 +37,22 @@ impl<S: ControlStream> Session<S> {
             Ok(false) => return self.cap_required(label, "chan-create").await,
             Err(e) => return self.internal(label, &e).await,
         }
+        // §7a.0e: a replica's channels are whatever its realm asserts. One created
+        // here would have no foreign room behind it, so posts into it would relay
+        // to a provider with no mapping and vanish. The provider itself asserts
+        // channels rather than creating them, so this refuses only local callers.
+        if !matches!(actor, Actor::Provider(_)) {
+            if let Some(ns) = channel.namespace() {
+                if let Ok(Some(record)) = self.ctx.namespaces.namespace_by_id(ns).await {
+                    if self
+                        .provider_managed_refusal(label.clone(), &record)
+                        .await?
+                    {
+                        return Ok(Flow::Continue);
+                    }
+                }
+            }
+        }
         // The incoming local segment is the desired human vanity ("general").
         let body = &channel.as_str()[1..];
         let vanity = body

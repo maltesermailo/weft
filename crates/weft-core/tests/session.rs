@@ -4698,7 +4698,10 @@ async fn foreign_ns_join_succeeds_via_assertion() {
 
     // The provider asserts the space with NORMAL verbs on URI targets, learning
     // its minted mapping from each reply.
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::NsMeta {
         id, origin, title, ..
     } = plugin.recv().await.event
@@ -4712,7 +4715,10 @@ async fn foreign_ns_join_succeeds_via_assertion() {
     );
     assert_eq!(title.as_deref(), Some("Club"));
 
-    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::ChannelLayout {
         channel,
         origin,
@@ -4828,12 +4834,18 @@ async fn provider_ingests_foreign_messages() {
     let mut plugin = plugin_session(&ctx, &key).await;
     // Binding the realm registers the scheme → its namespaces are online (3b-b).
     plugin.send("REALM ASSERT instagram://acme-corp");
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::NsMeta { id, .. } = plugin.recv().await.event else {
         panic!("expected the minted NS-META");
     };
     let ns_id = id.to_string();
-    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
         panic!("expected the minted CHANNEL-LAYOUT");
     };
@@ -4953,9 +4965,12 @@ async fn provider_ingests_foreign_messages() {
 }
 
 #[tokio::test]
-async fn operator_deletes_virtual_namespace() {
-    // 3b-a: the operator escape hatch — a provider-managed namespace has no
-    // local owner, so operators (and only they) may govern + delete it.
+async fn no_wire_authority_over_a_replica_not_even_for_an_operator() {
+    // Owner directive 2026-08-04: operator/admin authority lives in a **separate
+    // permission table** and acts only through the web admin panel. `*` no longer
+    // confers power inside a namespace — only `ns-admin` does — and that holds
+    // for a provider-managed namespace too. (This replaces the old "operator
+    // escape hatch", which granted operators every cap on a replica.)
     let key = Keypair::generate();
     let ctx = ctx_plugin_full(
         vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
@@ -4963,22 +4978,42 @@ async fn operator_deletes_virtual_namespace() {
     );
 
     let mut plugin = plugin_session(&ctx, &key).await;
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    // Bound to its realm: that binding is what its authority is scoped by.
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::NsMeta { id, .. } = plugin.recv().await.event else {
         panic!("expected the minted NS-META");
     };
     let ns_id = id.to_string();
 
-    // A plain member cannot delete it (the origin gate).
+    // A plain member holds nothing here — the replica's sentinel owner confers
+    // no authority, so the owner shortcut never fires.
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@label=d1 NS DELETE {ns_id} {ns_id}"));
     ada.expect_err(ErrCode::CapRequired).await;
 
-    // The operator can: full cascade + deletion tombstone.
+    // …and neither does an operator, over the wire. Deleting an orphaned replica
+    // is the admin panel's job (`DELETE /api/v1/namespaces/:name`, store-direct
+    // under `AdminScope::Destroy`), which is the same out-of-band path used for
+    // every other cross-namespace intervention.
     let mut op = ready(&ctx, "op").await;
     op.send(&format!("@label=d2 NS DELETE {ns_id} {ns_id}"));
-    let reply = op.recv().await;
-    assert_eq!(reply.label.as_deref(), Some("d2"));
+    op.expect_err(ErrCode::CapRequired).await;
+
+    // The realm may appoint a local admin, and *that* authority is real.
+    plugin.send(&format!("GRANT ada ns:{ns_id} ns-admin"));
+    let ack = weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap();
+    assert!(
+        matches!(ack.event, Event::Token { .. }),
+        "the realm may appoint an admin, got {ack:?}"
+    );
+
+    ada.send(&format!("@label=d3 NS DELETE {ns_id} {ns_id}"));
+    let reply = ada.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("d3"));
     let Event::NsMeta {
         owner, description, ..
     } = reply.event
@@ -4987,10 +5022,6 @@ async fn operator_deletes_virtual_namespace() {
     };
     assert!(owner.is_none());
     assert_eq!(description.as_deref(), Some("deleted"));
-
-    // Gone: further governance answers NO-SUCH-TARGET.
-    op.send(&format!("@label=d3 NS DELETE {ns_id} {ns_id}"));
-    op.expect_err(ErrCode::NoSuchTarget).await;
 }
 
 #[tokio::test]
@@ -5006,7 +5037,10 @@ async fn realm_withdraw_tombstones_namespaces() {
 
     let mut plugin = plugin_session(&ctx, &key).await;
     plugin.send("REALM ASSERT instagram://acme-corp");
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::NsMeta { id, .. } = plugin.recv().await.event else {
         panic!("expected the minted NS-META");
     };
@@ -5101,12 +5135,18 @@ async fn local_posts_relay_outward_without_looping() {
 
     let mut plugin = plugin_session(&ctx, &key).await;
     plugin.send("REALM ASSERT instagram://acme-corp");
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::NsMeta { id, .. } = plugin.recv().await.event else {
         panic!("expected the minted NS-META");
     };
     let ns_id = id.to_string();
-    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
         panic!("expected the minted CHANNEL-LAYOUT");
     };
@@ -5208,12 +5248,18 @@ async fn local_mutations_of_a_bridged_message_relay_to_the_provider() {
 
     let mut plugin = plugin_session(&ctx, &key).await;
     plugin.send("REALM ASSERT instagram://acme-corp");
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::NsMeta { id, .. } = plugin.recv().await.event else {
         panic!("expected the minted NS-META");
     };
     let ns_id = id.to_string();
-    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
         panic!("expected the minted CHANNEL-LAYOUT");
     };
@@ -5256,17 +5302,24 @@ async fn local_mutations_of_a_bridged_message_relay_to_the_provider() {
     let reply = ada.expect_err(ErrCode::CapRequired).await;
     assert_eq!(reply.label.as_deref(), Some("e1"));
 
-    // An operator's DELETE *is* relayed — decision 20-H: the adapter's bot
-    // performs the redaction foreign-side.
+    // A moderator's DELETE *is* relayed — decision 20-H: the adapter's bot
+    // performs the redaction foreign-side. The realm grants that authority:
+    // being a network operator confers nothing inside a namespace (operators act
+    // through the web admin panel, never as wire capability).
     let mut root_op = ready(&ctx, "root").await;
+    plugin.send(&format!("GRANT root ns:{ns_id} delete-any"));
     root_op.send(&format!("@label=j2 NS JOIN {ns_id}"));
     drain_until_ns_member(&mut root_op).await;
-    assert!(matches!(
-        weft_proto::Request::parse(&plugin.recv_raw().await)
-            .unwrap()
-            .command,
-        weft_proto::Command::NsJoin { .. }
-    ));
+    // Skip the GRANT's Token ack, then take the join request.
+    loop {
+        let raw = plugin.recv_raw().await;
+        if matches!(
+            weft_proto::Request::parse(&raw).map(|r| r.command),
+            Ok(weft_proto::Command::NsJoin { .. })
+        ) {
+            break;
+        }
+    }
 
     root_op.send(&format!("@label=d1 DELETE {root}"));
     let relayed = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
@@ -5290,12 +5343,18 @@ async fn a_realm_resyncs_membership_by_restating_it() {
 
     let mut plugin = plugin_session(&ctx, &key).await;
     plugin.send("REALM ASSERT instagram://acme-corp");
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::NsMeta { id, .. } = plugin.recv().await.event else {
         panic!("expected the minted NS-META");
     };
     let ns_id = id.to_string();
-    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
         panic!("expected the minted CHANNEL-LAYOUT");
     };
@@ -5370,7 +5429,10 @@ async fn dm_with_a_bridged_user_flows_both_ways() {
     // namespace assertion establishes.
     let mut plugin = plugin_session(&ctx, &key).await;
     plugin.send("REALM ASSERT instagram://acme-corp");
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     assert!(matches!(plugin.recv().await.event, Event::NsMeta { .. }));
 
     let mut ada = ready(&ctx, "ada").await;
@@ -5447,12 +5509,18 @@ async fn scrolling_past_a_replicas_history_asks_the_realm() {
 
     let mut plugin = plugin_session(&ctx, &key).await;
     plugin.send("REALM ASSERT instagram://acme-corp");
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::NsMeta { id, .. } = plugin.recv().await.event else {
         panic!("expected the minted NS-META");
     };
     let ns_id = id.to_string();
-    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
         panic!("expected the minted CHANNEL-LAYOUT");
     };
@@ -5579,7 +5647,10 @@ async fn a_realm_may_not_shadow_a_network_we_already_know() {
     // An unclaimed realm binds normally — the guard is narrow.
     let mut plugin = plugin_session(&ctx, &key).await;
     plugin.send("REALM ASSERT instagram://acme-corp");
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     assert!(matches!(plugin.recv().await.event, Event::NsMeta { .. }));
 }
 
@@ -5617,7 +5688,10 @@ async fn the_domain_owner_decides_whether_a_realm_may_be_claimed() {
     // normal case, and the whole point of asking the domain rather than guessing.
     let mut plugin = plugin_session(&ctx, &key).await;
     plugin.send("REALM ASSERT instagram://matrix.example");
-    plugin.send("@title=Club NS-META instagram://matrix.example/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://matrix.example/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     assert!(matches!(plugin.recv().await.event, Event::NsMeta { .. }));
 
     // …and so is a realm that is no domain at all (a Discord guild id): the probe
@@ -5625,7 +5699,10 @@ async fn the_domain_owner_decides_whether_a_realm_may_be_claimed() {
     // legitimate bridge out.
     let mut plugin = plugin_session(&ctx, &key).await;
     plugin.send("REALM ASSERT instagram://123456789");
-    plugin.send("@title=Guild NS-META instagram://123456789/general public");
+    plugin.send(&format!(
+        "@title=Guild;id={} NS-META instagram://123456789/general public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     assert!(matches!(plugin.recv().await.event, Event::NsMeta { .. }));
 }
 
@@ -5643,12 +5720,18 @@ async fn netblocking_a_realm_stops_its_traffic_mid_session() {
 
     let mut plugin = plugin_session(&ctx, &key).await;
     plugin.send("REALM ASSERT instagram://acme-corp");
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::NsMeta { id, .. } = plugin.recv().await.event else {
         panic!("expected the minted NS-META");
     };
     let ns_id = id.to_string();
-    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
         panic!("expected the minted CHANNEL-LAYOUT");
     };
@@ -5705,6 +5788,276 @@ async fn netblocking_a_realm_stops_its_traffic_mid_session() {
 }
 
 #[tokio::test]
+async fn the_realm_mints_its_ids_and_weftd_pins_them() {
+    // §7a.0d (owner directive 2026-08-04: "fix the minting that the bridge mints
+    // everything… mirror federation as much as possible"). Federation pins a
+    // peer's ULIDs — `provision_replica` takes the manifest's channel name
+    // verbatim — and never re-mints. A bridge is no different: the realm supplies
+    // the ids, we pin them, so they survive our store and cost no round-trip.
+    let key = Keypair::generate();
+    let (ctx, _store) = ctx_plugin_store(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let ns_id = ulid::Ulid::new().to_string().to_lowercase();
+    let chan_id = ulid::Ulid::new().to_string().to_lowercase();
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={ns_id} NS-META instagram://acme-corp/club public"
+    ));
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the NS-META mapping");
+    };
+    assert_eq!(id.to_string(), ns_id, "weftd must pin, not re-mint");
+
+    plugin.send(&format!(
+        "@vanity=general;id={chan_id} CHANNEL-LAYOUT instagram://acme-corp/club/general 0"
+    ));
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the CHANNEL-LAYOUT mapping");
+    };
+    assert_eq!(
+        channel.to_string(),
+        format!("#{ns_id}/{chan_id}"),
+        "the canonical name is built from the realm's own ids"
+    );
+
+    // …so the adapter can address the channel it just asserted **without** having
+    // waited for the mapping — the point of minting locally.
+    let posted = format!("acme-corp/{}", ulid::Ulid::new());
+    plugin.send(&format!(
+        "@as=alice@acme-corp;msgid={posted} MSG #{ns_id}/{chan_id} :addressed by an id I minted"
+    ));
+
+    // An id already in use is refused rather than adopted — otherwise a provider
+    // could assert a native namespace's ULID and take it over.
+    plugin.send(&format!(
+        "@title=Takeover;id={ns_id} NS-META instagram://acme-corp/other public"
+    ));
+    let reply = plugin.expect_err(ErrCode::Conflict).await;
+    assert_eq!(err_context(&reply).as_deref(), Some("id"));
+}
+
+#[tokio::test]
+async fn a_provider_mirrors_its_own_roles() {
+    // Owner directive 2026-08-04: "For Discord the bridge should mirror roles.
+    // For Matrix we implement custom power levels." So a realm whose foreign
+    // system really has roles speaks the ordinary ROLE verbs as
+    // `Actor::Provider` — the governing authority of its own namespaces —
+    // while a levels-based realm uses bare GRANTs and `authority=levels`.
+    let key = Keypair::generate();
+    let (ctx, _store) = ctx_plugin_store(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let ns_id = ulid::Ulid::new().to_string().to_lowercase();
+    let chan_id = ulid::Ulid::new().to_string().to_lowercase();
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={ns_id} NS-META instagram://acme-corp/club public"
+    ));
+    assert!(matches!(plugin.recv().await.event, Event::NsMeta { .. }));
+    plugin.send(&format!(
+        "@vanity=general;id={chan_id} CHANNEL-LAYOUT instagram://acme-corp/club/general 0"
+    ));
+    assert!(matches!(
+        plugin.recv().await.event,
+        Event::ChannelLayout { .. }
+    ));
+    let channel = format!("#{ns_id}/{chan_id}");
+
+    // The realm mirrors one of its own roles, with no local account behind it.
+    plugin.send(&format!(
+        "@label=rc ROLE CREATE ns:{ns_id} #5865f2 mute,ban :Moderator"
+    ));
+    let role = loop {
+        match plugin.recv().await.event {
+            Event::Role {
+                role, name, caps, ..
+            } => {
+                assert_eq!(name, "Moderator");
+                assert_eq!(caps, "mute,ban");
+                break role;
+            }
+            Event::BatchStart { .. } | Event::BatchEnd { .. } => {}
+            other => panic!("unexpected while awaiting ROLE: {other:?}"),
+        }
+    };
+
+    // …and wears it on one of its own users. The role materializes into grants,
+    // so the authority is real, not decorative.
+    plugin.send(&format!(
+        "@label=ra ROLE ASSIGN ns:{ns_id} carol@acme-corp {role}"
+    ));
+    loop {
+        match plugin.recv().await.event {
+            // Assignment materializes into grants — the Token is that ack.
+            Event::Token { .. } => break,
+            Event::BatchStart { .. } | Event::BatchEnd { .. } | Event::Role { .. } => {}
+            other => panic!("unexpected while awaiting the grant ack: {other:?}"),
+        }
+    }
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+    // Skip the role-batch acks still queued for the provider, then its join
+    // request.
+    loop {
+        let raw = plugin.recv_raw().await;
+        if matches!(
+            weft_proto::Request::parse(&raw).map(|r| r.command),
+            Ok(weft_proto::Command::NsJoin { .. })
+        ) {
+            break;
+        }
+    }
+
+    plugin.send(&format!("@as=carol@acme-corp MUTE {channel} ada :spam"));
+    let Event::Moderated { account, by, .. } = weft_proto::Reply::parse(&plugin.recv_raw().await)
+        .unwrap()
+        .event
+    else {
+        panic!("the role-wearing foreign moderator expected the MODERATED ack");
+    };
+    assert_eq!(account.to_string(), "ada");
+    assert_eq!(by.as_deref(), Some("carol@acme-corp"));
+
+    // A provider's authority stops at its own realms: it may not touch a scope
+    // outside them, so network-wide roles are refused.
+    plugin.send("@label=rx ROLE CREATE * #5865f2 mute :Global");
+    let reply = plugin.expect_err(ErrCode::CapRequired).await;
+    assert_eq!(reply.label.as_deref(), Some("rx"));
+}
+
+#[tokio::test]
+async fn a_realm_declares_how_its_authority_should_be_rendered() {
+    // §7a.3 (slice 8): a realm supplies a **capability profile** — how the client
+    // should render its authority, and which native settings surfaces to hide.
+    // Matrix sends `authority=levels` and disables the roles editor, because the
+    // caps→levels direction is lossy: Matrix-side editing belongs to the
+    // adapter's own Power Levels surface, not to a WEFT roles screen.
+    let key = Keypair::generate();
+    let (ctx, _store) = ctx_plugin_store(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let ns_id = ulid::Ulid::new().to_string().to_lowercase();
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={ns_id};authority=levels;settings=roles,permissions          NS-META instagram://acme-corp/club public"
+    ));
+    let Event::NsMeta {
+        authority,
+        settings_disabled,
+        ..
+    } = plugin.recv().await.event
+    else {
+        panic!("expected the NS-META mapping");
+    };
+    assert_eq!(authority, Some(weft_proto::Authority::Levels));
+    assert_eq!(settings_disabled, vec!["roles", "permissions"]);
+
+    // It is stored, not just echoed — a member joining later sees it, which is
+    // what actually gates their client's UI.
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+
+    ada.send("@label=d1 DISCOVER");
+    let Event::NsMeta {
+        authority,
+        settings_disabled,
+        ..
+    } = ada.recv().await.event
+    else {
+        panic!("expected the replica in DISCOVER");
+    };
+    assert_eq!(authority, Some(weft_proto::Authority::Levels));
+    assert!(settings_disabled.iter().any(|k| k == "roles"));
+
+    // (A native namespace carries no profile at all — absent means the default,
+    // roles authority with every surface enabled. Every other test in this suite
+    // exercises that path, so nothing changes for ordinary servers.)
+}
+
+#[tokio::test]
+async fn a_replicas_structure_belongs_to_its_realm() {
+    // §7a.0e (owner directive 2026-08-04: every verb should route through the
+    // bridge, so a local edit should fail anyway). Editing a replica here would
+    // diverge with nothing to reconcile against, and silently — a re-assert
+    // would not correct it. So local edits are refused, and re-asserting is how
+    // the realm updates. The two are a pair: without the second, the first would
+    // freeze a replica's metadata forever.
+    let key = Keypair::generate();
+    let (ctx, _store) = ctx_plugin_store(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &["root"],
+    );
+
+    let ns_id = ulid::Ulid::new().to_string().to_lowercase();
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={ns_id} NS-META instagram://acme-corp/club public"
+    ));
+    let Event::NsMeta { title, .. } = plugin.recv().await.event else {
+        panic!("expected the NS-META mapping");
+    };
+    assert_eq!(title.as_deref(), Some("Club"));
+
+    // The realm appoints a local admin — real authority, granted by the only
+    // party that governs a replica. (A network operator would hold nothing here:
+    // operator power lives in a separate table and acts through the web admin
+    // panel, never as wire capability inside a namespace.)
+    let mut root = ready(&ctx, "root").await;
+    plugin.send(&format!("GRANT root ns:{ns_id} ns-admin,chan-create"));
+    let ack = weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap();
+    assert!(matches!(ack.event, Event::Token { .. }), "got {ack:?}");
+
+    // …and even *they* may not edit its structure: that belongs to the realm, and
+    // a local edit would diverge with nothing to reconcile against.
+    root.send(&format!("@label=m1 NS META {ns_id} title :Renamed By Hand"));
+    let reply = root.expect_err(ErrCode::Forbidden).await;
+    assert_eq!(err_context(&reply).as_deref(), Some("provider-managed"));
+
+    root.send(&format!("@label=v1 NS VISIBILITY {ns_id} unlisted"));
+    let reply = root.expect_err(ErrCode::Forbidden).await;
+    assert_eq!(err_context(&reply).as_deref(), Some("provider-managed"));
+
+    root.send(&format!("@label=c1 CHANNEL CREATE #{ns_id}/handmade"));
+    let reply = root.expect_err(ErrCode::Forbidden).await;
+    assert_eq!(err_context(&reply).as_deref(), Some("provider-managed"));
+
+    // …but the realm renames it by re-asserting, which keeps both sides equal.
+    plugin.send(&format!(
+        "@title=RenamedUpstream;id={ns_id} NS-META instagram://acme-corp/club public"
+    ));
+    let Event::NsMeta { title, .. } = plugin.recv().await.event else {
+        panic!("expected the updated NS-META");
+    };
+    assert_eq!(title.as_deref(), Some("RenamedUpstream"));
+
+    // Deleting still works — that is the whole point of the operator hatch.
+    // NS DELETE takes the id twice as its confirmation.
+    root.send(&format!("@label=d1 NS DELETE {ns_id} {ns_id}"));
+    let reply = root.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("d1"));
+    assert!(
+        matches!(reply.event, Event::NsMeta { .. }),
+        "an orphaned replica must stay deletable, got {reply:?}"
+    );
+}
+
+#[tokio::test]
 async fn authority_translates_both_ways_with_the_provider() {
     // Owner directive 2026-08-04: a WEFT user must be able to be made a mod on a
     // Matrix space and vice versa, so the bridge translates power levels. weftd
@@ -5718,12 +6071,18 @@ async fn authority_translates_both_ways_with_the_provider() {
 
     let mut plugin = plugin_session(&ctx, &key).await;
     plugin.send("REALM ASSERT instagram://acme-corp");
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::NsMeta { id, .. } = plugin.recv().await.event else {
         panic!("expected the minted NS-META");
     };
     let ns_id = id.to_string();
-    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
         panic!("expected the minted CHANNEL-LAYOUT");
     };
@@ -5738,12 +6097,17 @@ async fn authority_translates_both_ways_with_the_provider() {
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
     drain_until_ns_member(&mut ada).await;
-    assert!(matches!(
-        weft_proto::Request::parse(&plugin.recv_raw().await)
-            .unwrap()
-            .command,
-        weft_proto::Command::NsJoin { .. }
-    ));
+    // The inbound GRANT went through the *ordinary* handler, so it acked with a
+    // Token like any other; skip it, then take the join request.
+    loop {
+        let raw = plugin.recv_raw().await;
+        if matches!(
+            weft_proto::Request::parse(&raw).map(|r| r.command),
+            Ok(weft_proto::Command::NsJoin { .. })
+        ) {
+            break;
+        }
+    }
 
     // Carol mutes ada. `MODERATED` acks the moderator, so the proof that the
     // authority is real is the *effect*: ada can no longer post.
@@ -5768,7 +6132,22 @@ async fn authority_translates_both_ways_with_the_provider() {
     plugin.expect_err(ErrCode::CapRequired).await;
 
     // OUTBOUND — promoting a WEFT user here raises their foreign power level.
-    let root_op = ready(&ctx, "root").await;
+    // The realm grants the local admin their authority first: being a network
+    // operator confers nothing inside a namespace (operators act through the web
+    // admin panel), so a replica's local admins are the realm's to appoint.
+    let mut root_op = ready(&ctx, "root").await;
+    plugin.send(&format!(
+        "GRANT root ns:{ns_id} ns-admin,grant:mute,grant:ban"
+    ));
+    // The Token acks the *granting* session — read it so the grant is applied
+    // before root acts on it.
+    loop {
+        match weft_proto::Reply::parse(&plugin.recv_raw().await).map(|r| r.event) {
+            Ok(Event::Token { .. }) => break,
+            _ => continue,
+        }
+    }
+
     root_op.send(&format!("@label=g1 GRANT ada ns:{ns_id} mute"));
     let relayed = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
     let weft_proto::Command::Grant {
@@ -5792,6 +6171,30 @@ async fn authority_translates_both_ways_with_the_provider() {
     };
     assert_eq!(subject, "ada");
     assert_eq!(caps.as_deref(), Some("mute"));
+
+    // A **role** relays too, because a role is a labelled bundle that
+    // materializes into grants (`ROLE ASSIGN` → `on_grant`) — promoting someone
+    // to Moderator here must raise their level there. Only `@everyone` doesn't,
+    // since it is resolved live and never becomes a grant.
+    root_op.send(&format!(
+        "@label=rc ROLE CREATE ns:{ns_id} #e8b93d mute,ban :Moderator"
+    ));
+    let role = loop {
+        match root_op.recv().await.event {
+            Event::Role { role, .. } => break role,
+            // The GRANT/REVOKE above each acked with a re-minted Token.
+            Event::BatchStart { .. } | Event::BatchEnd { .. } | Event::Token { .. } => {}
+            other => panic!("unexpected while awaiting ROLE: {other:?}"),
+        }
+    };
+    root_op.send(&format!("@label=ra ROLE ASSIGN ns:{ns_id} ada {role}"));
+
+    let relayed = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    let weft_proto::Command::Grant { subject, caps, .. } = relayed.command else {
+        panic!("provider expected the role's caps relayed as a GRANT");
+    };
+    assert_eq!(subject, "ada");
+    assert_eq!(caps, "mute,ban");
 }
 
 #[tokio::test]
@@ -5822,7 +6225,10 @@ async fn provider_offline_gates_virtual_namespace() {
     // no provisioning flow needed), then a member joins it.
     let mut plugin = plugin_session(&ctx, &key).await;
     register(&plugin);
-    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::NsMeta {
         id,
         provider_online,
@@ -5833,7 +6239,10 @@ async fn provider_offline_gates_virtual_namespace() {
     };
     assert_eq!(provider_online, Some(true));
     let ns_id = id.to_string();
-    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
     let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
         panic!("expected the minted CHANNEL-LAYOUT");
     };

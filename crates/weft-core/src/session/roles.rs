@@ -14,7 +14,7 @@ impl<S: ControlStream> Session<S> {
         pingable: bool,
         position: i32,
         name: String,
-        account: Account,
+        actor: Actor,
     ) -> io::Result<Flow> {
         let Some(token_scope) = TokenScope::parse(&scope) else {
             return self.bad_scope(label).await;
@@ -27,7 +27,7 @@ impl<S: ControlStream> Session<S> {
         let now = unix_now();
         match self
             .ctx
-            .account_has_cap(&account, &Capability::NsAdmin, &token_scope, now)
+            .actor_has_cap(&actor, &Capability::NsAdmin, &token_scope, now)
             .await
         {
             Ok(true) => {}
@@ -61,7 +61,7 @@ impl<S: ControlStream> Session<S> {
         // everyone who currently holds the same-named namespace role, so the
         // permission applies immediately — no re-assignment needed.
         if let Some((ns, _)) = scope.strip_prefix('#').and_then(|s| s.split_once('/')) {
-            self.propagate_channel_role(ns, &scope, &name, &cap_strings, &account)
+            self.propagate_channel_role(ns, &scope, &name, &cap_strings, &actor)
                 .await?;
         }
         self.on_roles_list(label, scope).await
@@ -76,7 +76,7 @@ impl<S: ControlStream> Session<S> {
         channel_scope: &str,
         role_name: &str,
         caps: &[String],
-        actor: &Account,
+        actor: &Actor,
     ) -> io::Result<()> {
         let ns_scope = format!("ns:{ns}");
         let members = self
@@ -93,7 +93,7 @@ impl<S: ControlStream> Session<S> {
                 channel_scope.to_string(),
                 caps_csv.clone(),
                 None,
-                Actor::Local(actor.clone()),
+                actor.clone(),
             )
             .await?;
         }
@@ -216,7 +216,7 @@ impl<S: ControlStream> Session<S> {
         }
         // §6.5 always-propagate a channel role-permission edit to holders.
         if let Some((ns, _)) = scope.strip_prefix('#').and_then(|s| s.split_once('/')) {
-            self.propagate_channel_role(ns, &scope, &name, &cap_strings, &account)
+            self.propagate_channel_role(ns, &scope, &name, &cap_strings, &Actor::Local(account))
                 .await?;
         }
         self.on_roles_list(label, scope).await

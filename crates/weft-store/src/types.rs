@@ -279,6 +279,14 @@ pub struct NamespaceRecord {
     /// `ns-admin` cannot talk through it (or lift it). For "the whole community
     /// stops while we deal with this".
     pub frozen: bool,
+    /// Framework §7a.3 capability profile — how a client should render this
+    /// namespace's authority (`roles` | `levels` | `none`). `None` = the native
+    /// default (`roles`). Supplied by the provider for a namespace it governs;
+    /// **display only**, never what weftd enforces.
+    pub authority: Option<String>,
+    /// Framework §7a.3 — native settings surfaces this namespace's provider
+    /// disables, so the client hides what the server would refuse anyway.
+    pub settings_disabled: Vec<String>,
     /// §6.2 welcome channel: the channel (`#<ns>/<chan>`) that receives a
     /// system "welcome" line when a new member joins the namespace. `None` = no
     /// welcome message. Set via `NS META <name> welcome :<#chan>` (empty clears).

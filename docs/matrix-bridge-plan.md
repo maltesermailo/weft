@@ -81,10 +81,13 @@ slices land.
             (mem+PG). client-core `ClientEvent::NsMeta` passes `origin` + `provider_online`
             through. Full-cycle test (online→discover/join ✓ → death→offline push + join/discover
             refused → reconnect→online push + join ✓). *Svelte badge UI = the client display slice.*
-      - [x] (a) **operator escape hatch** — DONE 2026-08-04: operators hold every cap in an
-            `origin` namespace (ctx cap-check branch; "operator ≠ user-server admin" doesn't apply —
-            no user owns a replica). `NS DELETE` works over the wire; cascade extracted into
-            `delete_namespace_cascade` + `deletion_tombstone` helpers.
+      - [x] (a) ~~operator escape hatch~~ **REVERSED 2026-08-04 (owner directive).** Operator/admin
+            power lives in a **separate permission table** and acts **only through the web admin
+            panel**; `*` confers nothing inside a namespace, only `ns-admin` does, replica included.
+            The hatch is removed — it was redundant as well as wrong, since the panel already deletes
+            namespaces store-direct (`DELETE /api/v1/namespaces/:name`, `AdminScope::Destroy`).
+            Authority in a replica is whatever **the realm grants**. The `delete_namespace_cascade` +
+            `deletion_tombstone` helpers stay.
       - [x] (b) **`REALM WITHDRAW` real semantics** — DONE 2026-08-04: withdraw = full deletion
             cascade of the bound realm's namespaces + tombstone pushed to every member (distinct
             from disconnect = offline). Bonus fix the test caught: **`REALM ASSERT` now registers
@@ -254,8 +257,14 @@ slices land.
         inbound grant real rather than decorative; without it nothing a foreign user does reaches a
         WEFT authority check at all.
       * **Outbound**: a local `GRANT`/`REVOKE` at a replica's `ns:` scope relays to the provider.
-      * `@everyone`/role-derived authority is **not** relayed — only explicit grants (relaying a
-        baseline every member holds would mean "give everyone level 50").
+      * **Role assignment relays** — a WEFT role is a labelled bundle that *materializes into grants*
+        (`ROLE ASSIGN` → `on_grant`), so promoting someone in a replica ns raises their foreign level.
+        Only **`@everyone`** does not: it is resolved live at check time and never becomes a grant
+        (relaying a baseline every member holds would mean "give everyone level 50"). Inbound grants
+        carry **no role record** — a Matrix ns is `authority=levels` (§7a.3), so the client renders a
+        number, and a synthetic WEFT role named for a power level would model a concept Matrix lacks.
+        *(Corrected 2026-08-04: an earlier note here claimed role-derived authority was not relayed —
+        wrong, since `ROLE ASSIGN` goes through `on_grant`.)*
 - [x] **5a. A realm IS a network — the adapter mints identity + msgids** (M, owner directive
       2026-08-04) — **DONE.** Replaces the earlier "weftd mints, `foreign=` displays" model.
       * `@as=<user@realm>` now carries the finished WEFT handle; weftd validates
@@ -302,16 +311,49 @@ slices land.
 
 ## Phase 2 — SDK + management surface
 
-- [ ] **6. M-plug-2b — `weft-appservice` dispatch loop** (M) — connect, `AUTH ADAPTER` handshake,
-      `PLUGIN-REGISTER`, routed-invoke → handler → `PLUGIN-RESULT`, async `Ctx`; the `bridge`-feature
-      verb helpers (realm/assert/ingest); two-live-endpoint QUIC conformance test. **The daemon can
-      now be written.**
+*The provider wire contract slices 1–5 built is written up as
+[`bridge-session-protocol.md`](protocol/bridge-session-protocol.md) — the reference the SDK below
+implements and the daemon is written against.*
+
+- [x] **6. M-plug-2b — `weft-appservice` dispatch loop** (M) — **DONE 2026-08-04. The daemon can now
+      be written.** Connect → `AUTH ADAPTER` handshake → `PLUGIN-REGISTER` → dispatch loop, with
+      `AppService::builder(...).name/.bot/.scheme/.action/.on_action`. `connect()` returns a
+      `Connected { session, realm, events }`: the loop to drive, a [`Realm`] to speak as, and the
+      stream of everything weftd says (mapping acks, `PROVISION`, `NS JOIN` requests, relayed events,
+      backfill). `run()` is the no-bridge shortcut.
+      **`Realm` is where the SDK earns its keep** — it owns the things every adapter would otherwise
+      reimplement and get subtly wrong: minting (`Realm::mint`, and `assert_channel` returns the
+      canonical `#<ns-id>/<chan-id>` *without a round-trip*), attribution (`@as` always, `@msgid`
+      where required — the API won't let you omit it), the full-replace `begin_sync`/`end_sync`
+      window, grants, and `PROVISION` answers. Nothing hand-builds a line.
+      **Two-live-endpoint conformance test** (`weftd/tests/conformance`): the real SDK against a real
+      weftd over real QUIC — authenticate, register, bind a realm, assert a space + room with
+      self-minted ids, replay a message, and a local member receives it with the realm's msgid
+      intact. **It immediately caught a deadlock**: the first design shared the stream between a
+      reader task and a writer task behind a mutex, and the reader holds the lock across
+      `recv_line()` — which is always — so nothing was ever sent. Now one task owns the stream and
+      selects over read/write (`recv_line` is cancel-safe, so this loses nothing).
+      *Not yet:* multi-step flows (`SUBMIT`/`ACTION`), hooks, per-space ban lists (slice 10b).
 - [ ] **7. M-plug-3 — flows + client SDUI renderer** (L, mostly client) — `SUBMIT`/`ACTION` routing
       (weftd) + the client renderer: modals, forms, full component catalog, context-menu + global
       surfaces. **Element's dialogs.**
-- [ ] **8. Capability-profile slice** (S–M) — `authority=roles|levels|none` + `settings=<disabled>`
-      on `NS-META`; `level=` on `MEMBER`/roster; client gating (hide native roles editor, show
-      levels). *(framework §7a.3–7a.4)*
+- [~] **8. Capability-profile slice** (S–M) — **server half DONE 2026-08-04.**
+      `authority=roles|levels|none` + `settings=<comma-list>` ride `NS-META` both ways: a provider
+      declares them on its foreign assertion, they persist on the namespace record (migration 0054,
+      mem+PG), and `ns_meta_event` carries them everywhere a namespace is described (SYNC, DISCOVER,
+      join acks, provider-state pushes). Absent ⇒ the native default (roles authority, every surface
+      enabled), so nothing changes for ordinary servers. New `Authority` wire enum.
+      **Display gating only** — a *hint*, not a mirror: the server refuses no verb by `origin` except
+      `NS RECOVERY SET`; it withholds **authority** (the owner shortcut is gated on the ns being
+      native, so `ns:`-scoped verbs fail `CAP-REQUIRED`). Operators and explicit-grant holders still
+      succeed, and the profile hides those surfaces from them too — safe direction, but not a mirror.
+      Tested: a realm declares `authority=levels` + `settings=roles,permissions`, and a member who
+      joins later sees it via DISCOVER (so it is stored, not just echoed).
+      **Remaining:** (a) `level=<n>` on `MEMBER`/roster — needs per-(ns, member) storage, so a
+      membership-row migration; (b) the client half — hide the native roles editor, render levels.
+      The *editing* surface is the plugin's own Power Levels action (slice 7's SDUI renderer): the
+      client sends numbers as `PLUGIN INVOKE` params, never as wire verbs, and the adapter translates
+      — caps→levels is lossy and the translation must sit where the pinned key is, not in a client.
 - [ ] **9. M-plug-6 subset — settings surfaces + live panels** (M) — `settings` surface actions,
       panels + `SUBSCRIBE`/`PLUGIN-PATCH`, `server-menu` + `channel-list` surfaces. **Where "Room
       Settings" / "Power Levels" live.**
@@ -325,6 +367,31 @@ slices land.
       Matrix Spaces** on the companion homeserver (`matrix.md` §3–16 — already designed), so Matrix
       users join the Space/rooms natively and their participation arrives as slice-4c membership +
       slice-4 ingestion. Pure daemon work: no weftd change beyond 4c/4d.
+- [ ] **10b. Per-space bridging bans** (owner requirement 2026-08-04) — an admin page where
+      **individual foreign spaces** can be banned from bridging, finer-grained than `NETBLOCK` (which
+      is name-keyed and takes out a whole realm). Banning `matrix://matrix.org/#abusive-space` must
+      not require severing `matrix.org`.
+      **BUILT 2026-08-04 as a generic, platform-agnostic mechanism (framework §7a.0f):**
+      `BRIDGING <ns-id> banned|allowed`, pushed to the governing provider when an admin bans a space
+      via `POST /api/v1/namespaces/:name/bridging`. **weftd stores nothing** — no column, nothing
+      re-sent on reconnect — because the bridge stores and enforces it. Generic because "stop
+      bridging" is all that Matrix rooms, Discord guilds and Instagram feeds have in common. A
+      disconnected provider answers 409 rather than a success that carried nowhere. `Live::set_bridging`
+      is the panel→weftd seam (embedded only), tested with the whole path.
+      **DECIDED (owner 2026-08-04): the plugin enforces.** It owns the page and the list, and simply
+      declines to assert or provision a banned space. **No weftd state, no new server surface** — the
+      "keep weftd thin" directive applied to its own case. weftd already has `NETBLOCK` for the
+      blunter, name-keyed instrument when a whole realm must go.
+      *Accepted trade-off:* the ban is enforced by the party that also does the bridging, so it does
+      not survive a compromised adapter. That is tolerable because the adapter is pinned-key
+      authenticated and is not the adversary here — the abusive **space** is — and because an operator
+      who does not trust the adapter can pull its pin (which now also unlocks deleting its
+      namespaces).
+      *Depends on:* the SDUI settings surfaces (slices 7 + 9) for the page.
+      **SDK:** the ban list and its enforcement points (refuse assert, refuse provision, refuse
+      ingest for a banned space) belong in `weft-appservice`, not in each adapter — this is exactly
+      the "utilities to ensure smooth operation like a federation" the SDK is for, so every adapter
+      gets one consistent implementation.
 - [ ] **11. Management actions in the daemon** — invite/kick/ban/create-room/create-subspace/
       room-settings/power-level actions as SDUI flows; profile supplied via `NS-META`.
 - [ ] **12. Track B — widgets + client-Rhai + CSP** (L) — the rich PL-matrix editor as a sandboxed
@@ -334,6 +401,12 @@ slices land.
 
 ## Admin panel additions (weft-admin — after the phases above)
 
+- [x] **Replica deletion is gated on the provider being disabled** (owner directive 2026-08-04) —
+      `DELETE /api/v1/namespaces/:name` refuses an `origin` namespace while that provider's scheme is
+      still pinned in `[[plugin.remote]]` (409). "Disabled" = the pin is gone, **not** merely
+      disconnected: a bridge restart must not open a destruction window. A **standalone** panel can't
+      see the config and refuses rather than guessing. `AdminState::with_configured_schemes`, wired
+      from weftd. Tested all three states (pinned → 409, standalone → 409, unpinned → 204).
 - [ ] **Namespace management page**: list ALL namespaces (store-direct `list_all`) with
       visibility, member count, and **origin/provider badges** (foreign URI + live/offline state);
       **DELETE any namespace** — the operator UI form of the 3b-a escape hatch, reusing the same
@@ -341,6 +414,15 @@ slices land.
 - [ ] **Provider status page**: the `[[plugin.remote]]` / `[[foreign_bridge]]` pins with their
       connection state (online/offline, registered schemes, declared actions), and each provider's
       virtual namespaces.
+- [~] **Plugin-supplied admin pages** (owner requirement 2026-08-04) — a plugin declares actions on
+      the **`admin` surface**, rendered in the operator panel rather than the client: a bridge's own
+      per-space ban list (10b), a health view, a re-sync button. Fits the permission model rather than
+      bending it — operators act through the panel, so an operator-facing plugin surface belongs
+      there. **Done:** `Surface::Admin` in the codec, `AppService::admin_action(...)` in the SDK.
+      **Remaining:** a `Live` routing method (the panel is store-direct and speaks no wire protocol,
+      so it invokes through weftd via the same embedded-only seam as kick/eject) + the panel's
+      renderer, both of which ride the SDUI work (slices 7 + 9). Standalone panels show them
+      unavailable, as they already do for other live-only actions. Spec: plugin-spec §22.
 - [ ] Plugin lifecycle controls (enable/disable pins, view quarantine/refusal log) — overlaps
       plugin-spec M-plug-13; reconcile when that lands.
 

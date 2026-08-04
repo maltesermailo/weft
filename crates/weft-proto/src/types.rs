@@ -73,6 +73,39 @@ wire_enum!(
 );
 
 wire_enum!(
+    /// `BRIDGING <ns-id> banned|allowed` — whether a provider should keep
+    /// bridging a namespace it governs (foreign-bridge framework §7a.0f).
+    ///
+    /// Enforced **at the bridge**, not here: the operator's decision is stored
+    /// and pushed, and the provider stops mirroring. That is not a weaker
+    /// guarantee, because the bridge is run by the same operator as the server.
+    /// It also keeps the mechanism platform-agnostic — leaving a Matrix room,
+    /// dropping a Discord guild and ignoring an Instagram feed have nothing in
+    /// common except "stop".
+    BridgingState, "bridging state", {
+        Banned => "banned",
+        Allowed => "allowed",
+    }
+);
+
+wire_enum!(
+    /// `NS-META ... authority=roles|levels|none` — how a namespace's authority is
+    /// **rendered**, part of the capability profile a provider supplies
+    /// (foreign-bridge framework §7a.3).
+    ///
+    /// Display only: it never changes what weftd enforces, which is always
+    /// capabilities. `Levels` says "this realm's model is numeric" (Matrix power
+    /// levels), so the client hides its roles editor and shows the provider's
+    /// own surface instead — the caps→levels direction is lossy, so Matrix-side
+    /// editing belongs to the adapter, not to a WEFT roles screen.
+    Authority, "authority", {
+        Roles => "roles",
+        Levels => "levels",
+        None => "none",
+    }
+);
+
+wire_enum!(
     /// `REACTION ... op=add|remove` (§7) — live reaction increments.
     ReactionOp, "reaction op", {
         Add => "add",

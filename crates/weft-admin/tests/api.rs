@@ -77,6 +77,7 @@ struct MockLive {
     deletes: Arc<std::sync::Mutex<Vec<String>>>,
     disconnects: Arc<std::sync::Mutex<Vec<String>>>,
     removed: Arc<std::sync::Mutex<Vec<String>>>,
+    bridging: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
 }
 
 #[async_trait::async_trait]
@@ -86,6 +87,13 @@ impl weft_admin::Live for MockLive {
             .lock()
             .unwrap()
             .push((channel.to_string(), account.to_string()));
+    }
+    async fn set_bridging(&self, namespace: &weft_proto::NamespaceId, banned: bool) -> bool {
+        self.bridging
+            .lock()
+            .unwrap()
+            .push((namespace.to_string(), banned));
+        true
     }
     async fn delete_message(&self, msgid: &weft_proto::MsgId, _by: &weft_proto::Account) -> bool {
         self.deletes.lock().unwrap().push(msgid.to_string());
@@ -1618,6 +1626,8 @@ async fn namespace_detail_and_operator_takeover() {
     let ns_id = "01arz3ndektsv4rrffq69g5fav";
     store
         .create_namespace(NamespaceRecord {
+            authority: None,
+            settings_disabled: Vec::new(),
             id: ns_id.to_string(),
             name: ns.clone(),
             owner: "owner".parse().unwrap(),
@@ -1803,6 +1813,8 @@ async fn admin_deletes_a_namespace_and_cascades() {
     let chan: weft_proto::ChannelName = format!("#{ns_id}/general").parse().unwrap();
     store
         .create_namespace(NamespaceRecord {
+            authority: None,
+            settings_disabled: Vec::new(),
             id: ns_id.to_string(),
             name: ns.clone(),
             owner: "owner".parse().unwrap(),
@@ -1885,6 +1897,8 @@ async fn seize_to_support_transfers_ownership() {
     let ns: weft_proto::NamespaceName = "gaming".parse().unwrap();
     store
         .create_namespace(NamespaceRecord {
+            authority: None,
+            settings_disabled: Vec::new(),
             id: "01arz3ndektsv4rrffq69g5fav".to_string(),
             name: ns.clone(),
             owner: "owner".parse().unwrap(),
@@ -1997,6 +2011,8 @@ async fn seize_to_support_is_501_when_unconfigured() {
         .unwrap();
     store
         .create_namespace(NamespaceRecord {
+            authority: None,
+            settings_disabled: Vec::new(),
             id: "01arz3ndektsv4rrffq69g5fav".to_string(),
             name: "gaming".parse().unwrap(),
             owner: "owner".parse().unwrap(),
@@ -2049,6 +2065,8 @@ async fn admin_assigns_and_unassigns_a_namespace_role() {
     let ns_scope = format!("ns:{ns_id}");
     store
         .create_namespace(NamespaceRecord {
+            authority: None,
+            settings_disabled: Vec::new(),
             id: ns_id.to_string(),
             name: ns.clone(),
             owner: "owner".parse().unwrap(),
@@ -2375,4 +2393,204 @@ async fn a_message_resolves_by_full_id_or_bare_ulid() {
         .status(),
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn a_replica_is_deletable_only_once_its_provider_is_disabled() {
+    use weft_store::{NamespaceRecord, NamespaceStore};
+
+    // Owner directive 2026-08-04: an admin may not delete a provider-managed
+    // namespace while its provider is still enabled — it is the realm's space,
+    // and dropping it out from under a live bridge orphans the foreign side with
+    // no way to notice. Deletion is the GC path for a provider that has been
+    // turned **off**, so removing its `[[plugin.remote]]` pin is the deliberate
+    // act that unlocks it. "Disabled" is the pin being gone, not a transient
+    // disconnect — a bridge restart must not open a destruction window.
+    let store = Arc::new(MemoryStore::default());
+    store
+        .register(
+            &"admin".parse().unwrap(),
+            PasswordHash::new(PASSWORD).as_phc(),
+        )
+        .await
+        .unwrap();
+
+    let ns: weft_proto::NamespaceName = "club".parse().unwrap();
+    let ns_id = "01arz3ndektsv4rrffq69g5fbb";
+    store
+        .create_namespace(NamespaceRecord {
+            authority: None,
+            settings_disabled: Vec::new(),
+            id: ns_id.to_string(),
+            name: ns.clone(),
+            owner: "foreign".parse().unwrap(),
+            root_key: String::new(),
+            visibility: "public".into(),
+            title: None,
+            description: None,
+            icon: None,
+            recovery_set: None,
+            pending_recovery: None,
+            categories: Vec::new(),
+            federation: false,
+            frozen: false,
+            welcome_channel: None,
+            origin: Some("instagram://acme-corp/club".into()),
+        })
+        .await
+        .unwrap();
+
+    let auth = || {
+        auth::config(
+            b"a-test-session-secret".to_vec(),
+            ["admin".parse().unwrap()],
+        )
+    };
+
+    // Provider still pinned → refused.
+    let app = weft_admin::router(
+        AdminState::from_store(Arc::clone(&store), auth(), "test.net".into())
+            .with_configured_schemes(vec!["instagram".to_string()]),
+    );
+    let cookie = session(&app).await;
+    let res = app
+        .clone()
+        .oneshot(del("/admin/api/v1/namespaces/club", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert!(store.namespace_by_id(ns_id).await.unwrap().is_some());
+
+    // Standalone panel: it cannot see the config, so it refuses rather than
+    // guessing — declining beats destroying a live bridge's space.
+    let blind = weft_admin::router(AdminState::from_store(
+        Arc::clone(&store),
+        auth(),
+        "test.net".into(),
+    ));
+    let cookie_blind = session(&blind).await;
+    let res = blind
+        .clone()
+        .oneshot(del("/admin/api/v1/namespaces/club", &cookie_blind))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+
+    // Pin removed → the provider is disabled, and the orphan can be collected.
+    let app = weft_admin::router(
+        AdminState::from_store(Arc::clone(&store), auth(), "test.net".into())
+            .with_configured_schemes(vec!["discord".to_string()]),
+    );
+    let cookie = session(&app).await;
+    let res = app
+        .clone()
+        .oneshot(del("/admin/api/v1/namespaces/club", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert!(store.namespace_by_id(ns_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn banning_a_bridged_space_tells_the_bridge_and_keeps_nothing() {
+    use weft_store::{NamespaceRecord, NamespaceStore};
+
+    // Owner directive 2026-08-04: "the bridge stores the bans and enforces it,
+    // weftd just tells it once an admin bans it in the web admin." So this
+    // endpoint carries a decision across and keeps no state — there is no column
+    // to drift, and nothing is re-sent on reconnect because weftd has forgotten
+    // by design. Generic across platforms: only the bridge knows what "stop"
+    // means for a Matrix room vs a Discord guild.
+    let store = Arc::new(MemoryStore::default());
+    store
+        .register(
+            &"admin".parse().unwrap(),
+            PasswordHash::new(PASSWORD).as_phc(),
+        )
+        .await
+        .unwrap();
+
+    let ns_id = "01arz3ndektsv4rrffq69g5fcc";
+    for (name, origin) in [
+        ("club", Some("instagram://acme-corp/club".to_string())),
+        ("native", None),
+    ] {
+        store
+            .create_namespace(NamespaceRecord {
+                authority: None,
+                settings_disabled: Vec::new(),
+                id: if name == "club" {
+                    ns_id.to_string()
+                } else {
+                    "01arz3ndektsv4rrffq69g5fdd".to_string()
+                },
+                name: name.parse().unwrap(),
+                owner: "admin".parse().unwrap(),
+                root_key: String::new(),
+                visibility: "public".into(),
+                title: None,
+                description: None,
+                icon: None,
+                recovery_set: None,
+                pending_recovery: None,
+                categories: Vec::new(),
+                federation: false,
+                frozen: false,
+                welcome_channel: None,
+                origin,
+            })
+            .await
+            .unwrap();
+    }
+
+    let live = MockLive::default();
+    let auth = auth::config(
+        b"a-test-session-secret".to_vec(),
+        ["admin".parse().unwrap()],
+    );
+    let app = weft_admin::router(
+        AdminState::from_store(Arc::clone(&store), auth, "test.net".into())
+            .with_live(Arc::new(live.clone())),
+    );
+    let cookie = session(&app).await;
+
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/club/bridging",
+            &cookie,
+            r#"{"banned":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        live.bridging.lock().unwrap().as_slice(),
+        [(ns_id.to_string(), true)],
+        "the bridge is told exactly once"
+    );
+
+    // Lifting it is the same instruction inverted — again, only told.
+    app.clone()
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/club/bridging",
+            &cookie,
+            r#"{"banned":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(live.bridging.lock().unwrap().len(), 2);
+
+    // A native namespace has no bridge to tell.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/namespaces/native/bridging",
+            &cookie,
+            r#"{"banned":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert_eq!(live.bridging.lock().unwrap().len(), 2, "unchanged");
 }

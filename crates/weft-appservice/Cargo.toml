@@ -8,12 +8,16 @@ rust-version.workspace = true
 license.workspace = true
 description = "WEFT App-Service SDK: the base for building a `remote` plugin (and the Matrix bridge). Connection + AUTH ADAPTER handshake + registration + dispatch loop + Ctx. See docs/architecture/plugin-spec.md §3.5. A client library, not part of the server."
 
-# M-plug-0: skeleton — the builder shape only. The wire types (weft-proto, M-plug-1)
-# and the transport/dispatch loop (weft-transport, tokio, M-plug-2) wire in then.
-# The `bridge` feature (realm/provisioning helpers, §18) arrives with M-plug-11.
-[features]
-bridge = []
-
 [dependencies]
+weft-proto = { path = "../weft-proto" }
 weft-crypto = { path = "../weft-crypto" }
+# `insecure-client` mirrors weft-tui: an adapter is a dev/ops-side client, and
+# verified-TLS dialing is the weftd-side concern (see `weftd::dialer`).
+weft-transport = { path = "../weft-transport", features = ["insecure-client"] }
+tokio = { workspace = true }
+quinn = { workspace = true }
+tracing = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

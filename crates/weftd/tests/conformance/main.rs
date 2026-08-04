@@ -2548,3 +2548,132 @@ async fn voice_livekit_refuses_non_voice_channel() {
 
     server.shutdown().await;
 }
+
+// ---- M-plug-2b: the App-Service SDK against a live weftd ----
+
+/// The SDK's whole job, end to end against a real server over real QUIC:
+/// authenticate with a pinned key, register, bind a realm, assert a space and a
+/// room with **ids it minted itself**, and replay a message into it — which a
+/// local member then receives as an ordinary WEFT message.
+///
+/// This is the milestone that makes the Matrix daemon writable: everything below
+/// is the adapter's domain logic, not protocol plumbing.
+#[tokio::test]
+async fn appservice_sdk_bridges_a_space_end_to_end() {
+    use weft_appservice::{AppService, ChannelAssertion, NamespaceAssertion, Realm};
+
+    let key = weft_crypto::Keypair::generate();
+    let pinned = key.public().to_b64();
+    let server = start_with(&[], |c| {
+        c.plugin.remote.push(weftd::config::PluginRemote {
+            id: "insta".to_string(),
+            key: pinned,
+            bot: None,
+            schemes: vec!["instagram".to_string()],
+            config: Default::default(),
+        });
+    })
+    .await;
+
+    // The SDK connects, proves the pinned key, and registers — all of §2–§3.
+    let connected = AppService::builder(server.quic_addr.to_string(), key, "insta")
+        .name("Instagram Bridge")
+        .scheme("instagram")
+        .connect()
+        .await
+        .expect("the SDK should authenticate and register");
+    let realm = connected.realm.clone();
+    let mut events = connected.events;
+    tokio::spawn(connected.session);
+
+    realm
+        .assert("instagram://acme-corp")
+        .await
+        .expect("bind the realm");
+
+    // Ids are ours; weftd pins them. So the channel's canonical name is known
+    // here without waiting for any reply — the point of minting.
+    let ns_id = Realm::mint();
+    let chan_id = Realm::mint();
+    realm
+        .assert_namespace(&NamespaceAssertion {
+            uri: "instagram://acme-corp/club",
+            id: &ns_id,
+            visibility: weft_proto::Visibility::Public,
+            title: Some("Club"),
+            description: None,
+            icon: None,
+            // A levels-model realm hides the native roles editor (§7a.3).
+            authority: Some(weft_proto::Authority::Levels),
+            settings_disabled: &["roles"],
+        })
+        .await
+        .expect("assert the space");
+
+    // weftd acks with the mapping, pinning the id we minted — and it is the
+    // barrier that says the space exists before anyone tries to join it.
+    let acked = loop {
+        match events.recv().await.expect("the session should stay up") {
+            Event::NsMeta { id, .. } => break id.to_string(),
+            _ => continue,
+        }
+    };
+    assert_eq!(
+        acked, ns_id,
+        "weftd pins our id rather than minting its own"
+    );
+
+    let channel = realm
+        .assert_channel(&ChannelAssertion {
+            uri: "instagram://acme-corp/club/general",
+            id: &chan_id,
+            namespace_id: &ns_id,
+            vanity: "general",
+            position: 0,
+            kind: weft_proto::ChannelKind::Text,
+            category: None,
+        })
+        .await
+        .expect("assert the room");
+    assert_eq!(channel, format!("#{ns_id}/{chan_id}"));
+
+    // A local user joins the replica the bridge just published.
+    let mut ada = QuicClient::connect(server.quic_addr).await;
+    ada.ready("ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}")).await;
+    loop {
+        match ada.recv().await.event {
+            Event::NsMember { .. } => break,
+            Event::Err(e) => panic!("join refused: {} {}", e.code, e.text),
+            _ => continue,
+        }
+    }
+
+    // The realm replays one of its users' messages…
+    let msgid: weft_proto::MsgId = format!("acme-corp/{}", Realm::mint())
+        .parse()
+        .expect("a realm-origin msgid");
+    realm
+        .message(
+            "alice@acme-corp",
+            &msgid.to_string(),
+            &channel,
+            "hi from instagram",
+        )
+        .await
+        .expect("replay a message");
+
+    // …and ada receives it as an ordinary WEFT message, attributed to a user of
+    // the realm, carrying the id the realm minted (invariant 2: never re-minted).
+    let message = loop {
+        if let Event::Message(m) = ada.recv().await.event {
+            break m;
+        }
+    };
+    assert_eq!(message.body, "hi from instagram");
+    assert_eq!(message.sender.to_string(), "alice@acme-corp");
+    assert_eq!(
+        message.msgid, msgid,
+        "the realm's id is pinned, never re-minted"
+    );
+}

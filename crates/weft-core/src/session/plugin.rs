@@ -92,6 +92,25 @@ fn provider_event(
     }
 }
 
+/// The scheme a provider session speaks for — the bound realm's, else the one it
+/// registered. An unbound, unregistered session gets a scheme that matches
+/// nothing, so its authority is empty rather than accidental.
+fn realm_scheme(state: &State) -> weft_proto::Scheme {
+    match state {
+        State::PluginService {
+            realm: Some(uri), ..
+        } => uri.scheme().clone(),
+        _ => "none".parse().expect("a valid placeholder scheme"),
+    }
+}
+
+/// The §7a.3 capability profile carried on a namespace assertion — kept together
+/// so it travels as one thing rather than two more positional arguments.
+struct NsProfile {
+    authority: Option<weft_proto::Authority>,
+    settings_disabled: Vec<String>,
+}
+
 /// Serialize an event with an optional echoed label, for a cross-session relay.
 fn relay_line(event: Event, label: Option<String>) -> Result<String, weft_proto::SerializeError> {
     match label {
@@ -171,24 +190,80 @@ impl<S: ControlStream> Session<S> {
                 Command::RealmWithdraw => return self.on_realm_withdraw().await,
                 // Authority translation: the provider governs its namespaces, so
                 // it may set capabilities in them (its power levels, mapped).
+                // The ordinary handlers, with the ordinary authority check —
+                // `Actor::Provider` is what makes that work.
                 Command::Grant {
                     subject,
                     scope,
                     caps,
-                    ..
+                    expiry,
                 } => {
+                    let actor = Actor::Provider(realm_scheme(&self.state));
                     return self
-                        .on_provider_grant(&key, subject, scope, Some(caps), true)
+                        .on_grant(req.label, subject, scope, caps, expiry, actor)
                         .await;
                 }
                 Command::Revoke {
                     subject,
                     scope,
                     caps,
-                    ..
+                    epoch,
                 } => {
+                    let actor = Actor::Provider(realm_scheme(&self.state));
                     return self
-                        .on_provider_grant(&key, subject, scope, caps, false)
+                        .on_revoke(req.label, subject, scope, caps, epoch, actor)
+                        .await;
+                }
+                // Framework §7a.3: a provider whose foreign system really has
+                // **roles** (Discord) mirrors them as WEFT roles, so it speaks
+                // the ordinary ROLE verbs as `Actor::Provider` — the governing
+                // authority of its own namespaces. A levels-based realm (Matrix)
+                // uses bare GRANTs instead and advertises `authority=levels`.
+                Command::RoleCreate {
+                    scope,
+                    color,
+                    caps,
+                    hoist,
+                    pingable,
+                    position,
+                    name,
+                } => {
+                    let actor = Actor::Provider(realm_scheme(&self.state));
+                    return self
+                        .on_role_create(
+                            req.label, scope, color, caps, hoist, pingable, position, name, actor,
+                        )
+                        .await;
+                }
+                // Both resolve the role **id** to its name first, exactly as the
+                // client dispatch does — the wire carries ids (v0.13), the
+                // handlers key on names.
+                Command::RoleAssign {
+                    scope,
+                    account,
+                    role,
+                } => {
+                    let Some(name) = self.role_name(&role.to_string()).await else {
+                        return self.no_such_target(req.label).await;
+                    };
+                    let actor = Actor::Provider(realm_scheme(&self.state));
+
+                    return self
+                        .on_role_assign(req.label, scope, account, name, actor)
+                        .await;
+                }
+                Command::RoleUnassign {
+                    scope,
+                    account,
+                    role,
+                } => {
+                    let Some(name) = self.role_name(&role.to_string()).await else {
+                        return self.no_such_target(req.label).await;
+                    };
+                    let actor = Actor::Provider(realm_scheme(&self.state));
+
+                    return self
+                        .on_role_unassign(req.label, scope, account, name, actor)
                         .await;
                 }
                 Command::ProvisionOk { job } => return self.on_provision_result(job, true).await,
@@ -228,22 +303,38 @@ impl<S: ControlStream> Session<S> {
             // CHANNEL-LAYOUT verbs with origin-URI targets (capability 4).
             Event::NsMetaForeign {
                 uri,
+                id,
+                authority,
+                settings_disabled,
                 visibility,
                 title,
                 description,
                 icon,
             } => {
-                self.on_ns_assert(&key, uri, visibility, title, description, icon)
-                    .await
+                self.on_ns_assert(
+                    &key,
+                    uri,
+                    id,
+                    NsProfile {
+                        authority,
+                        settings_disabled,
+                    },
+                    visibility,
+                    title,
+                    description,
+                    icon,
+                )
+                .await
             }
             Event::ChannelLayoutForeign {
                 uri,
+                id,
                 position,
                 kind,
                 vanity,
                 category,
             } => {
-                self.on_channel_assert(&key, uri, position, kind, vanity, category)
+                self.on_channel_assert(&key, uri, id, position, kind, vanity, category)
                     .await
             }
             // Terminal: relay to the parked client, then drop the pending.
@@ -402,10 +493,13 @@ impl<S: ControlStream> Session<S> {
     /// `NS-META` (id form, `origin=`) so the provider learns its mapping.
     /// Re-asserting an existing origin re-sends the mapping (structural *update*
     /// sync is a later slice).
+    #[allow(clippy::too_many_arguments)] // the fields of one asserted namespace
     async fn on_ns_assert(
         &mut self,
         key: &PublicKey,
         uri: ForeignUri,
+        id: weft_proto::NamespaceId,
+        profile: NsProfile,
         visibility: weft_proto::Visibility,
         title: Option<String>,
         description: Option<String>,
@@ -425,7 +519,47 @@ impl<S: ControlStream> Session<S> {
             .namespace_by_origin(&uri.to_string())
             .await
         {
-            Ok(Some(record)) => {
+            Ok(Some(mut record)) => {
+                // §7a.0e: re-asserting is how a realm **updates** a namespace it
+                // governs — local edits are refused precisely so this is the one
+                // path, and a realm that renames a space upstream must be able to
+                // say so. Absent fields clear, so the assertion is the whole
+                // truth rather than a patch.
+                for (key, value) in [
+                    ("title", title.as_deref()),
+                    ("description", description.as_deref()),
+                    ("icon", icon.as_deref()),
+                ] {
+                    let value = value.unwrap_or_default();
+                    if let Err(e) = self
+                        .ctx
+                        .namespaces
+                        .set_namespace_meta(&record.name, key, value)
+                        .await
+                    {
+                        return self.internal(None, &e).await;
+                    }
+                }
+                let visibility = match visibility {
+                    weft_proto::Visibility::Public => "public",
+                    _ => "unlisted", // `private` is unreachable-by-design here
+                };
+                if let Err(e) = self
+                    .ctx
+                    .namespaces
+                    .set_namespace_visibility(&record.name, visibility)
+                    .await
+                {
+                    return self.internal(None, &e).await;
+                }
+
+                record.title = title;
+                record.description = description;
+                record.icon = icon;
+                record.visibility = visibility.to_string();
+                record.authority = profile.authority.map(|a| a.to_string());
+                record.settings_disabled = profile.settings_disabled;
+
                 self.send_event(None, self.ns_meta_event(&record)).await?;
                 return Ok(Flow::Continue);
             }
@@ -440,9 +574,25 @@ impl<S: ControlStream> Session<S> {
         // Vanity: the URI's last segment, sanitized to the name charset, deduped
         // with a short suffix on conflict (names are per-network unique).
         let base = sanitize_vanity(uri.path().last().map(String::as_str).unwrap_or("foreign"));
-        let ns_id = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+        // §7a.0d: the realm minted the id; we pin it, as federation pins a peer's.
+        // An id already taken by anything that is not this realm's own replica is
+        // a takeover attempt (or a genuine collision) — refuse rather than adopt.
+        let ns_id = id.to_string();
+        if matches!(
+            self.ctx.namespaces.namespace_by_id(&ns_id).await,
+            Ok(Some(_))
+        ) {
+            return self
+                .send_err(None, ErrCode::Conflict, Some("id"), "namespace id in use")
+                .await
+                .map(|_| Flow::Continue);
+        }
         let mut record = weft_store::NamespaceRecord {
             id: ns_id,
+            // §7a.3: the realm says how its authority should be rendered and
+            // which native settings surfaces to hide.
+            authority: profile.authority.map(|a| a.to_string()),
+            settings_disabled: profile.settings_disabled,
             name: base.parse().expect("sanitized vanity is a valid name"),
             owner,
             root_key: String::new(), // never transferable/recoverable locally
@@ -491,10 +641,12 @@ impl<S: ControlStream> Session<S> {
     /// (the URI minus its last segment) must have been asserted first; weftd
     /// mints the channel id and answers with the canonical `CHANNEL-LAYOUT`
     /// (`#<ns-id>/<chan-id>`, `origin=`) — the provider's mapping row.
+    #[allow(clippy::too_many_arguments)] // the fields of one asserted channel
     async fn on_channel_assert(
         &mut self,
         key: &PublicKey,
         uri: ForeignUri,
+        id: weft_proto::ChannelId,
         position: i64,
         kind: weft_proto::ChannelKind,
         vanity: String,
@@ -561,10 +713,13 @@ impl<S: ControlStream> Session<S> {
             sanitize_vanity(&vanity)
         };
         let policy: RetentionPolicy = "retained:90d".parse().expect("valid default");
-        let chan_id = weft_proto::Ulid::new().to_string().to_ascii_lowercase();
+        // §7a.0d: the realm minted the id, we pin it. `registry.create` returning
+        // `None` now means the id is already taken — a takeover attempt or a
+        // genuine collision, either way refused rather than adopted.
+        let chan_id = id.to_string().to_ascii_lowercase();
         let canonical: ChannelName = format!("#{}/{chan_id}", record.id)
             .parse()
-            .expect("a minted canonical channel name is valid");
+            .expect("a canonical channel name from two ULIDs is valid");
 
         if self
             .ctx
@@ -572,7 +727,10 @@ impl<S: ControlStream> Session<S> {
             .create(canonical.clone(), policy)
             .is_none()
         {
-            return self.internal(None, &"minted channel collided").await;
+            return self
+                .send_err(None, ErrCode::Conflict, Some("id"), "channel id in use")
+                .await
+                .map(|_| Flow::Continue);
         }
         if let Err(e) = self
             .ctx
@@ -1199,90 +1357,6 @@ impl<S: ControlStream> Session<S> {
         Ok(())
     }
 
-    /// **Authority, inbound** (owner directive 2026-08-04): the provider grants or
-    /// revokes capabilities inside a namespace it governs, so a moderator on the
-    /// foreign side is a moderator here. A Matrix bridge translates its power
-    /// levels into WEFT capabilities and sends an ordinary `GRANT`/`REVOKE`;
-    /// weftd stays free of any notion of a power level — the adapter owns that
-    /// mapping, exactly as it owns the identity mapping (§7a.0).
-    ///
-    /// **Authority to do it** is the same rule as ingestion: the scope must name a
-    /// namespace this provider's key is pinned for. No capability chain is
-    /// consulted — for a provider-managed namespace the provider *is* the
-    /// governing authority (§7a.3), the way an owner is for a native one.
-    async fn on_provider_grant(
-        &mut self,
-        key: &PublicKey,
-        subject: String,
-        scope: String,
-        caps: Option<String>,
-        grant: bool,
-    ) -> io::Result<Flow> {
-        let Some(TokenScope::Namespace(ns)) = TokenScope::parse(&scope) else {
-            return self
-                .unsupported(None, "a provider grants at ns: scope")
-                .await;
-        };
-        let record = match self.ctx.namespaces.namespace_by_id(&ns).await {
-            Ok(Some(record)) => record,
-            Ok(None) => return self.no_such_target(None).await,
-            Err(e) => return self.internal(None, &e).await,
-        };
-        let governs = record
-            .origin
-            .as_deref()
-            .and_then(|o| o.parse::<ForeignUri>().ok())
-            .is_some_and(|uri| self.ctx.scheme_authorized(key, uri.scheme()));
-        if !governs {
-            return self
-                .unsupported(None, "not a namespace this provider governs")
-                .await;
-        }
-
-        // The subject may be foreign (a Matrix user, keyed by `user@realm`) or a
-        // local account — `resolve_subject` handles both.
-        let store_key = match self.ctx.resolve_subject(&subject).await {
-            Ok(Some((_, store_key))) => store_key,
-            Ok(None) => return self.no_such_target(None).await,
-            Err(e) => return self.internal(None, &e).await,
-        };
-        let parsed = caps.as_deref().and_then(parse_caps);
-        if grant && parsed.is_none() {
-            return self.unsupported(None, "unknown capability").await;
-        }
-
-        let wrote = if grant {
-            let caps: Vec<String> = parsed
-                .unwrap_or_default()
-                .iter()
-                .map(Capability::to_string)
-                .collect();
-            let epoch = match self.ctx.caps.scope_epoch(&scope).await {
-                Ok(epoch) => epoch,
-                Err(e) => return self.internal(None, &e).await,
-            };
-
-            self.ctx
-                .caps
-                .record_grant(&store_key, &scope, &caps, epoch, None)
-                .await
-        } else {
-            let caps: Option<Vec<String>> =
-                parsed.map(|caps| caps.iter().map(Capability::to_string).collect());
-
-            self.ctx
-                .caps
-                .revoke_grants(&store_key, &scope, caps.as_deref())
-                .await
-                .map(|_| ())
-        };
-        if let Err(e) = wrote {
-            return self.internal(None, &e).await;
-        }
-
-        Ok(Flow::Continue)
-    }
-
     /// **Authority, outbound**: a local `GRANT`/`REVOKE` inside a replica
     /// namespace is relayed to the provider, which raises or lowers the
     /// corresponding foreign power level — so promoting someone to moderator here
@@ -1294,7 +1368,12 @@ impl<S: ControlStream> Session<S> {
         subject: &str,
         caps: Option<String>,
         grant: bool,
+        actor: &Actor,
     ) {
+        if matches!(actor, Actor::Provider(_)) {
+            return; // the provider told *us* — echoing it back would loop
+        }
+
         let Some(TokenScope::Namespace(ns)) = TokenScope::parse(scope) else {
             return; // only namespace authority maps onto a foreign space
         };
@@ -1690,6 +1769,17 @@ impl<S: ControlStream> Session<S> {
             .await;
         self.sync_provider_forwarders(&[scheme]).await;
         Ok(Flow::Continue)
+    }
+
+    /// A role id → its name (the handlers key on names, the wire on ids).
+    async fn role_name(&self, role_id: &str) -> Option<String> {
+        self.ctx
+            .roles
+            .role_by_id(role_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, def)| def.name)
     }
 
     /// Why a realm may not be bound (4b) — `None` means it is fine.

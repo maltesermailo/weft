@@ -72,6 +72,7 @@ livekit = { version = "0.7.53", features = ["native-tls"], optional = true }
 lettre = { version = "0.11.19", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls", "builder", "hostname"] }
 
 [dev-dependencies]
+weft-appservice = { path = "../weft-appservice" } # M-plug-2b: the SDK against a live server
 weft-transport = { path = "../weft-transport", features = ["insecure-client"] }
 weft-crypto = { path = "../weft-crypto" }
 rcgen = { workspace = true, features = ["pem"] }

@@ -42,6 +42,15 @@ pub trait Live: Send + Sync {
     /// Returns false if the message or its channel can't be found live.
     async fn delete_message(&self, msgid: &weft_proto::MsgId, by: &weft_proto::Account) -> bool;
 
+    /// Framework §7a.0f: tell the provider that governs `namespace` to stop (or
+    /// resume) bridging it. **The bridge stores and enforces this** — weftd only
+    /// carries the operator's decision across, once. Not a weaker guarantee: the
+    /// bridge is run by the same operator as the server.
+    ///
+    /// Returns false if no live provider governs that namespace, so the panel can
+    /// say "the bridge is not connected" rather than implying it took effect.
+    async fn set_bridging(&self, namespace: &weft_proto::NamespaceId, banned: bool) -> bool;
+
     /// WC7 forced logout: cut every live session of `account`, returning how
     /// many were closed. Suspend only blocks *new* logins — this ends the
     /// already-connected ones. Each session runs its ordinary cleanup, so
@@ -97,6 +106,15 @@ pub struct AdminState {
     /// namespace, transferring ownership to this (login-disabled) account for
     /// moderation. `None` = the feature is unconfigured.
     pub(crate) support_account: Option<String>,
+    /// The foreign-URI schemes still configured in `[[plugin.remote]]`. A
+    /// provider counts as **disabled** once its scheme is gone from there —
+    /// durable and operator-set, unlike a transient disconnect. Gates deleting a
+    /// namespace that provider governs.
+    ///
+    /// `None` = we cannot know (the panel is running standalone, without the
+    /// server's config), and then *no* provider-managed namespace may be
+    /// deleted — refusing on ignorance beats destroying a live bridge's space.
+    pub(crate) configured_schemes: Option<Vec<String>>,
 }
 
 /// Default WC3 soft-delete grace window: 7 days.
@@ -143,6 +161,7 @@ impl AdminState {
             auth: Arc::new(auth),
             network,
             delete_grace_ms: DEFAULT_DELETE_GRACE_MS,
+            configured_schemes: None,
             dm_policy: weft_proto::RetentionPolicy::Ephemeral,
             live_connections: None,
             live: None,
@@ -152,6 +171,13 @@ impl AdminState {
     }
 
     /// §6.7 configure the network's support account for "seize to support".
+    /// The schemes still pinned in `[[plugin.remote]]` (embedded only) — see
+    /// [`AdminState::configured_schemes`].
+    pub fn with_configured_schemes(mut self, schemes: Vec<String>) -> Self {
+        self.configured_schemes = Some(schemes);
+        self
+    }
+
     pub fn with_support_account(mut self, account: Option<String>) -> Self {
         self.support_account = account;
         self

@@ -51,6 +51,15 @@ pub enum Surface {
     Global,
     ServerMenu,
     ChannelList,
+    /// A page in the **operator admin panel** rather than the client — where a
+    /// provider puts what only an operator should see or do (a bridge's own
+    /// per-space ban list, a connection health page).
+    ///
+    /// Operator-facing by construction, which matches the permission model:
+    /// operators act through the panel, never as wire capability inside a
+    /// namespace. The panel invokes it through weftd (embedded only — a
+    /// standalone panel has no session to route on).
+    Admin,
 }
 
 /// The object an action targets (spec §13.2).

@@ -314,16 +314,21 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    fn unknown_user(&self) -> weft_proto::UserRef {
+        weft_proto::UserRef::new(
+            "unknown".parse().expect("valid account"),
+            self.ctx.info.network.clone(),
+        )
+    }
+
     /// The acting user as a `UserRef` (for stamping the invite creator).
     fn actor_ref(&self, actor: &Actor) -> weft_proto::UserRef {
         match actor {
             Actor::Local(a) => weft_proto::UserRef::new(a.clone(), self.ctx.info.network.clone()),
-            Actor::Foreign(u) => u.parse().unwrap_or_else(|_| {
-                weft_proto::UserRef::new(
-                    "unknown".parse().expect("valid account"),
-                    self.ctx.info.network.clone(),
-                )
-            }),
+            // A provider mints no invites of its own — but the fallback keeps
+            // the stamp well-formed rather than panicking on an impossible case.
+            Actor::Foreign(u) => u.parse().unwrap_or_else(|_| self.unknown_user()),
+            Actor::Provider(_) => self.unknown_user(),
         }
     }
 }

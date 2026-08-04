@@ -1085,7 +1085,15 @@ impl<S: ControlStream> Session<S> {
                 name,
             } => {
                 self.on_role_create(
-                    label, scope, color, caps, hoist, pingable, position, name, account,
+                    label,
+                    scope,
+                    color,
+                    caps,
+                    hoist,
+                    pingable,
+                    position,
+                    name,
+                    Actor::Local(account),
                 )
                 .await
             }
