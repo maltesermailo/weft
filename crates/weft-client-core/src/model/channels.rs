@@ -787,6 +787,8 @@ mod tests {
             recovery_rung: None,
             categories: categories.iter().map(|s| s.to_string()).collect(),
             federation: false,
+            origin: None,
+            provider_online: None,
         }
     }
     fn cat_list(d: &ChanDiff) -> Option<(&str, Vec<&str>)> {
