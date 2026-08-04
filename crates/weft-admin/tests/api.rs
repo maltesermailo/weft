@@ -565,7 +565,7 @@ async fn dm_thread_browse_reads_non_e2ee_and_gates_e2ee() {
         .unwrap();
     // A DM message from ada → bob (scope normalizes participant order).
     let ada: weft_proto::UserRef = "ada@test.net".parse().unwrap();
-    let scope = Scope::dm("ada".parse().unwrap(), "bob".parse().unwrap());
+    let scope = Scope::dm("ada", "bob");
     let ulid = weft_proto::Ulid::new();
     let msgid = weft_proto::MsgId::new("test.net".parse().unwrap(), ulid);
     store

@@ -347,6 +347,24 @@ async fn roster_names(client: &mut Client) -> std::collections::HashSet<String> 
     names
 }
 
+/// Collect a `HISTORY` batch's message bodies, oldest first.
+async fn history_bodies(client: &mut Client) -> Vec<String> {
+    loop {
+        if matches!(client.recv().await.event, Event::BatchStart { .. }) {
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    loop {
+        match client.recv().await.event {
+            Event::Message(m) => out.push(m.body.clone()),
+            Event::BatchEnd { .. } => break,
+            other => panic!("unexpected in history batch: {other:?}"),
+        }
+    }
+    out
+}
+
 /// Send-and-collect a `GRANTS` batch → the `(subject, caps)` member overrides.
 async fn grant_infos(client: &mut Client) -> Vec<(String, String)> {
     loop {
@@ -5323,6 +5341,179 @@ async fn a_realm_resyncs_membership_by_restating_it() {
         "unopened SYNC END wiped it: {roster:?}"
     );
     assert!(roster.contains("ada"), "{roster:?}");
+}
+
+#[tokio::test]
+async fn dm_with_a_bridged_user_flows_both_ways() {
+    // Slice 4d: a WEFT user can DM a bridged (Matrix) user and be DMed back. The
+    // conversation is an ordinary `Scope::Dm` keyed by member keys — first-class,
+    // not a second table — with the outbound copy carried to the provider.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    // The realm has to be reachable for a DM to route to it, which is what the
+    // namespace assertion establishes.
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    assert!(matches!(plugin.recv().await.event, Event::NsMeta { .. }));
+
+    let mut ada = ready(&ctx, "ada").await;
+
+    // OUTBOUND: ada DMs a bridged user. She gets her own echo locally…
+    ada.send("@label=d1 MSG @alice@acme-corp :hey from weft");
+    let reply = ada.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("d1"));
+    let Event::Message(m) = reply.event else {
+        panic!("ada expected her own DM echo");
+    };
+    let outbound = m.msgid.clone();
+    assert_eq!(m.body, "hey from weft");
+    assert_eq!(
+        m.target.to_string(),
+        "@alice@acme-corp",
+        "the echo names the qualified peer"
+    );
+
+    // …and the provider gets the copy to carry into the foreign system, acting
+    // on her behalf.
+    let raw = plugin.recv_raw().await;
+    let line = weft_proto::Line::parse(&raw).unwrap();
+    assert_eq!(
+        line.tags.get("as").map(String::as_str),
+        Some("ada@test.example")
+    );
+    let weft_proto::Command::Msg { target, body, .. } =
+        weft_proto::Request::from_line(&line).unwrap().command
+    else {
+        panic!("provider expected the relayed DM, got {raw}");
+    };
+    assert_eq!(target.to_string(), "@alice@acme-corp");
+    assert_eq!(body.as_deref(), Some("hey from weft"));
+
+    // INBOUND: alice replies through the bridge. The realm minted it, so the
+    // msgid keeps its origin (invariant 2). Stamped a millisecond after the
+    // outbound one: ULIDs are only ordered to the millisecond, so two ids minted
+    // by independent generators inside the same tick would sort at random.
+    let minted = format!(
+        "acme-corp/{}",
+        ulid::Ulid::from_parts(outbound.timestamp_ms() + 1, 0)
+    );
+    plugin.send(&format!(
+        "@as=alice@acme-corp;msgid={minted} MSG @ada :hey back"
+    ));
+
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("ada expected the inbound bridged DM");
+    };
+    assert_eq!(m.body, "hey back");
+    assert_eq!(m.sender.to_string(), "alice@acme-corp");
+    assert_eq!(m.msgid.to_string(), minted);
+    assert_eq!(m.target.to_string(), "@alice@acme-corp");
+
+    // Both directions are one conversation: HISTORY on the qualified peer serves
+    // it, so the DM is genuinely first-class storage.
+    ada.send("@label=h1 HISTORY @alice@acme-corp");
+    let bodies = history_bodies(&mut ada).await;
+    assert_eq!(bodies, vec!["hey from weft", "hey back"], "{bodies:?}");
+}
+
+#[tokio::test]
+async fn scrolling_past_a_replicas_history_asks_the_realm() {
+    // §11.7 for bridges (owner directive 2026-08-04: "bridges should do the same
+    // as federation"). Federation stores what it ingests and pulls *deeper*
+    // scrollback on demand; a replica now does the same, asking its realm rather
+    // than serving a short page and stopping there.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+    assert!(matches!(
+        weft_proto::Request::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .command,
+        weft_proto::Command::NsJoin { .. }
+    ));
+
+    // The channel holds one ingested message — less than the page asked for, so
+    // the client has run out of local scrollback.
+    let seed = format!("acme-corp/{}", ulid::Ulid::new());
+    plugin.send(&format!(
+        "@as=alice@acme-corp;msgid={seed} MSG {channel} :the only one we hold"
+    ));
+    assert!(matches!(ada.recv().await.event, Event::Message(_)));
+
+    ada.send(&format!("@label=h1 HISTORY {channel} limit=50"));
+    let bodies = history_bodies(&mut ada).await;
+    assert_eq!(bodies, vec!["the only one we hold"]);
+
+    // …so the realm is asked for the deeper window.
+    let raw = plugin.recv_raw().await;
+    let weft_proto::Command::History { target, .. } =
+        weft_proto::Request::parse(&raw).unwrap().command
+    else {
+        panic!("provider expected the backfill HISTORY, got {raw}");
+    };
+    assert_eq!(target.to_string(), channel.to_string());
+
+    // The realm answers by replaying the window as ordinary ingestion — there is
+    // no separate backfill ingress to secure.
+    let older = format!(
+        "acme-corp/{}",
+        ulid::Ulid::from_parts(
+            seed.parse::<weft_proto::MsgId>().unwrap().timestamp_ms() - 1,
+            0
+        )
+    );
+    plugin.send(&format!(
+        "@as=alice@acme-corp;msgid={older} MSG {channel} :from before"
+    ));
+    assert!(matches!(ada.recv().await.event, Event::Message(_)));
+
+    ada.send(&format!("@label=h2 HISTORY {channel} limit=50"));
+    let bodies = history_bodies(&mut ada).await;
+    assert_eq!(bodies, vec!["from before", "the only one we hold"]);
+
+    // The same window is not asked for twice — a repeated scroll is deduped, so
+    // the next line the realm reads is a fresh request, not a duplicate.
+    ada.send(&format!("@label=h3 HISTORY {channel} limit=50"));
+    let _ = history_bodies(&mut ada).await;
+    ada.send(&format!(
+        "@label=h4 HISTORY {channel} limit=50 before={seed}"
+    ));
+    let _ = history_bodies(&mut ada).await;
+
+    let raw = plugin.recv_raw().await;
+    let weft_proto::Command::History { before, .. } =
+        weft_proto::Request::parse(&raw).unwrap().command
+    else {
+        panic!("provider expected the next backfill window, got {raw}");
+    };
+    assert_eq!(
+        before.map(|m| m.to_string()),
+        Some(seed),
+        "the un-deduped window is the new one"
+    );
 }
 
 #[tokio::test]

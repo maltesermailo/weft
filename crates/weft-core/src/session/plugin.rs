@@ -815,7 +815,16 @@ impl<S: ControlStream> Session<S> {
 
     /// A stored member key back to the user it names: a bare account is one of
     /// ours, anything else is the foreign `user@realm` handle.
-    fn member_userref(&self, member: &str) -> Option<UserRef> {
+    /// The wire target naming a DM peer: bare `@ada` on our own network, the
+    /// qualified `@alice@matrix.org` otherwise (§9.5 + framework §7a.0).
+    pub(super) fn dm_target(&self, peer: &UserRef) -> Target {
+        Target::User {
+            account: peer.account.clone(),
+            network: (peer.network != self.ctx.info.network).then(|| peer.network.clone()),
+        }
+    }
+
+    pub(super) fn member_userref(&self, member: &str) -> Option<UserRef> {
         match weft_store::local_member(member) {
             Some(account) => Some(UserRef::new(account, self.ctx.info.network.clone())),
             None => member.parse().ok(),
@@ -910,6 +919,40 @@ impl<S: ControlStream> Session<S> {
     ) -> io::Result<Flow> {
         // Every ingestable verb names its channel differently: MSG by target,
         // the mutations by the msgid's channel.
+        // A DM has no channel: it is a 1:1 conversation with one of our users,
+        // stored in the ordinary `Scope::Dm` keyed by the sender's member key.
+        if let Command::Msg {
+            target: Target::User { account, network },
+            body,
+            meta,
+        } = &cmd
+        {
+            if network
+                .as_ref()
+                .map_or(true, |net| *net == self.ctx.info.network)
+            {
+                let Some(msgid) = line
+                    .tags
+                    .get("msgid")
+                    .and_then(|id| id.parse::<MsgId>().ok())
+                else {
+                    debug!("provider DM without a minted msgid — dropped");
+                    return Ok(Flow::Continue);
+                };
+                if msgid.origin().as_str() != sender.network.as_str() {
+                    debug!("provider DM minted outside its realm — dropped");
+                    return Ok(Flow::Continue);
+                }
+
+                return self
+                    .on_provider_dm(&sender, account.clone(), msgid, body.clone(), meta.clone())
+                    .await;
+            }
+
+            debug!("provider ingest of a DM to another network — dropped");
+            return Ok(Flow::Continue);
+        }
+
         let channel = match &cmd {
             Command::Msg {
                 target: Target::Channel(channel),
@@ -1276,6 +1319,134 @@ impl<S: ControlStream> Session<S> {
             if out.try_send(line).is_err() {
                 warn!(%subject, "provider queue full — authority relay dropped");
             }
+        }
+    }
+
+    /// Slice 4d, inbound: a bridged user DMs one of ours.
+    ///
+    /// The provider replays it as `@as=<their user> MSG @<our account>`, and it
+    /// lands in the ordinary `Scope::Dm` — a bridged conversation is a
+    /// first-class DM, not a second table. The realm minted the message, so the
+    /// msgid keeps its origin (invariant 2); only the local delivery is ours.
+    ///
+    /// The `@as` sender was already checked to live on this provider's realm, so
+    /// it cannot forge a DM from a local account.
+    async fn on_provider_dm(
+        &mut self,
+        sender: &UserRef,
+        to: Account,
+        msgid: MsgId,
+        body: Option<String>,
+        meta: MsgMeta,
+    ) -> io::Result<Flow> {
+        self.ctx
+            .directory
+            .ingest_dm(sender.clone(), to, msgid, body.unwrap_or_default(), meta)
+            .await;
+
+        Ok(Flow::Continue)
+    }
+
+    /// §11.7 for bridges: a local client scrolled past what we hold of a replica
+    /// channel, so ask the **realm** for that window.
+    ///
+    /// The same shape peer federation uses (`on_backfill_demand`): demand-driven,
+    /// never an eager pull of a whole foreign scrollback, and deduped per
+    /// `(channel, before)` so repeated scrolls over one window ask once. The
+    /// realm answers by replaying the window as ordinary `@as` ingestion, which
+    /// is already origin-checked — so there is no separate backfill ingress and
+    /// no way for a provider to smuggle events in under cover of an answer.
+    pub(super) async fn request_provider_backfill(
+        &mut self,
+        channel: &ChannelName,
+        before: Option<&MsgId>,
+    ) {
+        let window = (channel.clone(), before.map(|m| m.to_string()));
+        if !self.backfilled.insert(window) {
+            return; // already asked for this window
+        }
+
+        let origin = match self.ctx.channel_store.channel(channel).await {
+            Ok(Some(record)) => record.origin,
+            _ => return,
+        };
+        let Some(uri) = origin.as_deref().and_then(|o| o.parse::<ForeignUri>().ok()) else {
+            return; // a native channel has no realm to ask
+        };
+        let Some((_, out)) = self.ctx.provider_for_scheme(uri.scheme()) else {
+            return; // offline; the client just sees the short page
+        };
+
+        let cmd = Command::History {
+            target: Target::Channel(channel.clone()),
+            before: before.cloned(),
+            after: None,
+            limit: Some(weft_proto::MAX_HISTORY_LIMIT),
+            thread: None,
+        };
+        if let Ok(line) = Request::new(cmd).serialize() {
+            let _ = out.try_send(line);
+        }
+    }
+
+    /// Slice 4d: carry a DM to a peer on **another network**.
+    ///
+    /// The conversation is stored and echoed locally either way — a bridged DM is
+    /// an ordinary `Scope::Dm` keyed by the peer's member key, not a second table
+    /// — but a foreign peer can only be reached over their network's link, so the
+    /// copy goes there too:
+    ///
+    /// - a **bridged** peer (`alice@matrix.org`, a realm we hold a provider for)
+    ///   gets it down the provider's writer as `@as=<our user> MSG @<peer>`;
+    /// - a **federated** peer (another WEFT network) rides the ordinary peer
+    ///   bridge, the same route friends and group DMs already use.
+    ///
+    /// A local peer needs neither — `deliver_dm` already reached their sessions.
+    pub(super) async fn relay_foreign_dm(
+        &self,
+        from: &Account,
+        peer: &UserRef,
+        body: String,
+        meta: MsgMeta,
+    ) {
+        if peer.network == self.ctx.info.network {
+            return;
+        }
+
+        let cmd = Command::Msg {
+            target: Target::User {
+                account: peer.account.clone(),
+                network: Some(peer.network.clone()),
+            },
+            body: Some(body),
+            meta,
+        };
+        let Ok(line) = Request::new(cmd).to_line() else {
+            return;
+        };
+
+        // A realm we bridge is served by its provider; anything else is a peer
+        // WEFT network and takes the federation path.
+        if let Some(out) = self.ctx.provider_for_realm(peer.network.as_str()).await {
+            let mut line = line;
+            line.tags.insert(
+                "as".to_string(),
+                UserRef::new(from.clone(), self.ctx.info.network.clone()).to_string(),
+            );
+            if let Ok(serialized) = line.serialize() {
+                if out.try_send(serialized).is_err() {
+                    warn!(%peer, "provider queue full — DM relay dropped");
+                }
+            }
+            return;
+        }
+
+        if let Ok(serialized) = line.serialize() {
+            self.ctx.request_friend_deliver(crate::FriendDeliver {
+                peer: peer.network.clone(),
+                from: Some(from.clone()),
+                line: serialized,
+            });
         }
     }
 

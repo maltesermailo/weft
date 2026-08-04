@@ -376,7 +376,7 @@ enum MessageRoute {
         root: MsgId,
     },
     Dm {
-        peer: Account,
+        peer: UserRef,
         root: MsgId,
     },
     /// Group DM whose **home is this network**: the directory mints the mutation

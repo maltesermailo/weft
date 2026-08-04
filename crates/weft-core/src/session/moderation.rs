@@ -51,7 +51,7 @@ impl<S: ControlStream> Session<S> {
                 }
             }
             Scope::Dm(a, b) => {
-                if account != *a && account != *b {
+                if account.as_str() != a && account.as_str() != b {
                     return self.no_such_target(label).await;
                 }
             }

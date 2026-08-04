@@ -1585,7 +1585,7 @@ async fn account_dms(State(st): State<AdminState>, Path(name): Path<String>) -> 
     let Ok(account) = name.parse::<Account>() else {
         return (StatusCode::BAD_REQUEST, "bad account").into_response();
     };
-    match st.events.dm_partners(&account).await {
+    match st.events.dm_partners(account.as_str()).await {
         Ok(list) => Json(
             list.into_iter()
                 .map(|a| dto::DmPartner {
@@ -2247,7 +2247,7 @@ async fn browse_dm(
     let (Ok(a), Ok(b)) = (a.parse::<Account>(), b.parse::<Account>()) else {
         return (StatusCode::BAD_REQUEST, "bad account").into_response();
     };
-    let scope = Scope::dm(a.clone(), b.clone());
+    let scope = Scope::dm(a.to_string(), b.to_string());
     let policy = st.dm_policy.to_string();
 
     if matches!(st.dm_policy, weft_proto::RetentionPolicy::E2ee) {

@@ -21,7 +21,10 @@ use crate::types::{EventKind, EventRecord};
 /// `root_family` = the root row plus all its children, any order.
 pub fn compaction_plan(root_family: &[EventRecord], cutoff_ms: u64) -> Vec<Ulid> {
     let mut rows: Vec<&EventRecord> = root_family.iter().collect();
-    rows.sort_by(|a, b| a.msgid.cmp(&b.msgid));
+    // Event order, not msgid order — see `materialize::event_order`: a
+    // multi-origin scope (a bridged replica) would otherwise decide which edit
+    // survives compaction by origin name rather than by time.
+    rows.sort_by(|a, b| crate::materialize::event_order(a, b));
 
     // Deleted, and the deletion has left the audit window: tombstone only —
     // drop everything else, content is gone for good (§12.1).

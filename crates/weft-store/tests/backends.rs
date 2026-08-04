@@ -218,7 +218,7 @@ where
     assert_eq!(store.purged_before(&chan).await.unwrap(), Some(2_500));
 
     // -- DM scopes + global DM purge --
-    let dm = Scope::dm(ada.clone(), bob.clone());
+    let dm = Scope::dm(ada.to_string(), bob.to_string());
     store.append(message(&dm, 1_000, "old dm")).await.unwrap();
     store.append(message(&dm, 9_000, "new dm")).await.unwrap();
     assert_eq!(store.purge_dms_before(5_000).await.unwrap(), 1);
@@ -2233,12 +2233,33 @@ where
     // ---- §9.5 DM correspondents (admin surface only) ----
     let dm_a: Account = format!("dma-{tag}").parse().unwrap();
     let dm_b: Account = format!("dmb-{tag}").parse().unwrap();
-    assert!(store.dm_partners(&dm_a).await.unwrap().is_empty());
-    let dm_scope = Scope::dm(dm_a.clone(), dm_b.clone());
+    assert!(store.dm_partners(dm_a.as_str()).await.unwrap().is_empty());
+    let dm_scope = Scope::dm(dm_a.to_string(), dm_b.to_string());
     store.append(message(&dm_scope, 1, "hi")).await.unwrap();
     // Both sides see each other, whichever way the pair sorted.
-    assert_eq!(store.dm_partners(&dm_a).await.unwrap(), vec![dm_b.clone()]);
-    assert_eq!(store.dm_partners(&dm_b).await.unwrap(), vec![dm_a.clone()]);
+    assert_eq!(
+        store.dm_partners(dm_a.as_str()).await.unwrap(),
+        vec![dm_b.to_string()]
+    );
+    assert_eq!(
+        store.dm_partners(dm_b.as_str()).await.unwrap(),
+        vec![dm_a.to_string()]
+    );
+
+    // 4d: a bridged peer is an ordinary DM scope keyed by their member key, so
+    // the conversation is first-class rather than a second table.
+    let bridged = format!("alice@bridged-{tag}.example");
+    let foreign_scope = Scope::dm(dm_a.to_string(), bridged.clone());
+    store
+        .append(message(&foreign_scope, 2, "hi"))
+        .await
+        .unwrap();
+    let partners = store.dm_partners(dm_a.as_str()).await.unwrap();
+    assert!(partners.contains(&bridged), "{partners:?}");
+    assert_eq!(
+        store.dm_partners(&bridged).await.unwrap(),
+        vec![dm_a.to_string()]
+    );
 
     // ---- §6.5 role definitions ----
     let rscope = format!("ns:roles-{tag}");

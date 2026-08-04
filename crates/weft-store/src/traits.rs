@@ -96,10 +96,11 @@ pub trait EventStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<EventRecord>, StoreError>;
 
-    /// The accounts `account` has an existing DM conversation with (§9.5),
-    /// name-sorted. The operator admin surface only — the wire protocol never
+    /// The **member keys** `member` has an existing DM conversation with (§9.5),
+    /// sorted — bare account for one of ours, `user@network` for a bridged or
+    /// federated peer. The operator admin surface only — the wire protocol never
     /// enumerates a user's correspondents, so this must stay off it.
-    async fn dm_partners(&self, account: &Account) -> Result<Vec<Account>, StoreError>;
+    async fn dm_partners(&self, member: &str) -> Result<Vec<String>, StoreError>;
 
     /// Whether a root already carries a tombstone.
     async fn is_deleted(&self, scope: &Scope, root: Ulid) -> Result<bool, StoreError>;
@@ -803,6 +804,16 @@ pub fn local_member(key: &str) -> Option<Account> {
     }
 
     key.parse().ok()
+}
+
+/// The member key for a fully-qualified user: the bare account when they are on
+/// `home`, the full `user@network` otherwise. Inverse of [`local_member`].
+pub fn member_key(user: &UserRef, home: &NetworkName) -> String {
+    if user.network == *home {
+        user.account.to_string()
+    } else {
+        user.to_string()
+    }
 }
 
 /// §6.3 persistent channel membership. Unlike the live channel-actor roster

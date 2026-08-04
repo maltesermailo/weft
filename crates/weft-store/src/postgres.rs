@@ -543,7 +543,7 @@ impl EventStore for PgStore {
         rows.iter().map(Self::record_from_row).collect()
     }
 
-    async fn dm_partners(&self, account: &Account) -> Result<Vec<Account>, StoreError> {
+    async fn dm_partners(&self, member: &str) -> Result<Vec<String>, StoreError> {
         // DM scope keys are `dm:<a>:<b>` with the pair already sorted, so a
         // prefix match plus the two positional forms finds every conversation.
         let keys: Vec<String> =
@@ -551,11 +551,11 @@ impl EventStore for PgStore {
                 .fetch_all(&self.pool)
                 .await
                 .map_err(backend_err)?;
-        let mut out: Vec<Account> = keys
+        let mut out: Vec<String> = keys
             .iter()
             .filter_map(|key| match Scope::from_key(key) {
-                Some(Scope::Dm(a, b)) if &a == account => Some(b),
-                Some(Scope::Dm(a, b)) if &b == account => Some(a),
+                Some(Scope::Dm(a, b)) if a == member => Some(b),
+                Some(Scope::Dm(a, b)) if b == member => Some(a),
                 _ => None,
             })
             .collect();

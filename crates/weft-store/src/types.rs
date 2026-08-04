@@ -12,14 +12,20 @@ pub enum Scope {
     Channel(ChannelName),
     /// Participants in sorted order — `Scope::dm` normalizes, so
     /// (ada, bob) and (bob, ada) are the same conversation.
-    Dm(Account, Account),
+    ///
+    /// Each side is a **member key** (the 4c convention): a bare account for one
+    /// of ours (`ada`), `user@network` for a bridged or federated peer
+    /// (`alice@matrix.org`). A member key never contains `:`, so the `dm:<a>:<b>`
+    /// storage key stays unambiguous.
+    Dm(String, String),
     /// A group DM, keyed by its server-minted id. Membership lives in a
     /// `GroupStore` (it changes over time), not in the scope.
     Group(GroupId),
 }
 
 impl Scope {
-    pub fn dm(a: Account, b: Account) -> Self {
+    pub fn dm(a: impl Into<String>, b: impl Into<String>) -> Self {
+        let (a, b) = (a.into(), b.into());
         if a <= b {
             Scope::Dm(a, b)
         } else {
@@ -46,7 +52,7 @@ impl Scope {
             return key.parse().ok().map(Scope::Group);
         }
         let (a, b) = key.strip_prefix("dm:")?.split_once(':')?;
-        Some(Scope::dm(a.parse().ok()?, b.parse().ok()?))
+        Some(Scope::dm(a, b))
     }
 }
 

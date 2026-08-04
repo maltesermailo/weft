@@ -1466,6 +1466,26 @@ impl ServerCtx {
         map.get(id).map(|r| r.schemes.clone()).unwrap_or_default()
     }
 
+    /// The writer of the provider that bridges `realm`, if any — a realm is a
+    /// network (framework §7a.0), so this answers "is this 'network' actually a
+    /// bridged realm?" and is what routes a DM to a provider rather than to a
+    /// peer WEFT network.
+    pub(crate) async fn provider_for_realm(
+        &self,
+        realm: &str,
+    ) -> Option<tokio::sync::mpsc::Sender<String>> {
+        let namespaces = self.namespaces.namespaces_with_origin().await.ok()?;
+        let uri = namespaces.iter().find_map(|record| {
+            record
+                .origin
+                .as_deref()
+                .and_then(|o| o.parse::<weft_proto::ForeignUri>().ok())
+                .filter(|uri| uri.realm() == realm)
+        })?;
+
+        self.provider_for_scheme(uri.scheme()).map(|(_, out)| out)
+    }
+
     /// The id + writer of the provider handling `scheme`, if any (§18 cap. 6).
     pub(crate) fn provider_for_scheme(
         &self,
@@ -1930,7 +1950,7 @@ impl ServerCtx {
             .unwrap_or_default();
         scopes.iter().any(|scope| match scope {
             weft_store::Scope::Channel(channel) => mine.contains(channel),
-            weft_store::Scope::Dm(a, b) => a == account || b == account,
+            weft_store::Scope::Dm(a, b) => a == account.as_str() || b == account.as_str(),
             // Group membership is answered by the GroupStore, not this
             // channel-membership index (group messaging = next increment).
             weft_store::Scope::Group(_) => false,

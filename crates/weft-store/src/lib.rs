@@ -32,10 +32,10 @@ pub use modseq::ModSeq;
 #[cfg(feature = "postgres")]
 pub use postgres::PgStore;
 pub use traits::{
-    local_member, AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventStore,
-    FriendOutcome, FriendStore, GroupStore, InviteStore, MediaBlocklistStore, MediaStore,
-    MembershipStore, ModerationStore, NamespaceStore, NetblockStore, NickStore, PeerStore,
-    PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
+    local_member, member_key, AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore,
+    EventStore, FriendOutcome, FriendStore, GroupStore, InviteStore, MediaBlocklistStore,
+    MediaStore, MembershipStore, ModerationStore, NamespaceStore, NetblockStore, NickStore,
+    PeerStore, PinStore, ProfileStore, ReportStore, RoleStore, HOLD_RADIUS,
 };
 pub use types::{
     audit_hash, AuditEntry, AuditRecord, ChannelRecord, EventKind, EventRecord, GrantRecord,

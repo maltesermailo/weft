@@ -391,24 +391,32 @@ impl<S: ControlStream> Session<S> {
                 let State::Ready { account } = self.state.clone() else {
                     unreachable!("on_msg only dispatched in READY");
                 };
-                // A cross-network DM target (`@alice@matrix.org`) is expressible
-                // on the wire but not yet routable — delivery to a provider /
-                // peer bridge lands with the outbound relay (plan slice 4d).
-                // Refuse explicitly rather than silently DMing a local lookalike.
-                if network.is_some_and(|net| net != self.ctx.info.network) {
-                    return self
-                        .unsupported(label, "cross-network DMs are not routed yet")
-                        .await;
-                }
+                // §9.5 + framework §7a.0: an unqualified target is one of ours;
+                // `@alice@matrix.org` names a peer on another network — bridged
+                // (a provider serves it) or federated (a peer bridge does).
+                let peer =
+                    UserRef::new(to, network.unwrap_or_else(|| self.ctx.info.network.clone()));
                 if !self
                     .ctx
                     .directory
-                    .dm(self.id, account, to, body, meta)
+                    .dm(
+                        self.id,
+                        account.clone(),
+                        peer.clone(),
+                        body.clone(),
+                        meta.clone(),
+                    )
                     .await
                 {
                     // Unknown account — one code for everything hidden (§2.2).
                     return self.no_such_target(label).await;
                 }
+
+                // The conversation is stored and echoed locally either way; a
+                // foreign peer additionally needs the copy carried to their
+                // network, which is the only route it can reach them by.
+                self.relay_foreign_dm(&account, &peer, body, meta).await;
+
                 self.pending_direct.push_back(label);
             }
             // Group DM: membership-gated; the directory mints the ULID (single
@@ -650,9 +658,12 @@ impl<S: ControlStream> Session<S> {
                 }
             }
             Scope::Dm(a, b) => {
+                // The scope names member keys (bare = ours, `user@network` =
+                // foreign), so compare against ours and take the other side.
+                let me = account.as_str();
                 // Not your conversation → indistinguishable from
                 // nonexistent (§2.2) — never CAP-REQUIRED here.
-                if *account != a && *account != b {
+                if me != a && me != b {
                     self.no_such_target(label).await?;
                     return Ok(None);
                 }
@@ -661,7 +672,12 @@ impl<S: ControlStream> Session<S> {
                         .await?;
                     return Ok(None);
                 }
-                let peer = if *account == a { b } else { a };
+                let peer = if me == a { b } else { a };
+                let Some(peer) = self.member_userref(&peer) else {
+                    self.no_such_target(label).await?;
+                    return Ok(None);
+                };
+
                 Ok(Some(MessageRoute::Dm {
                     peer,
                     root: root.msgid,
@@ -935,16 +951,19 @@ impl<S: ControlStream> Session<S> {
                 let State::Ready { account } = self.state.clone() else {
                     unreachable!("on_history only dispatched in READY");
                 };
-                // Cross-network DM scopes land with the routing (slice 4d); a
-                // foreign peer has no local DM history to serve.
-                if network
-                    .as_ref()
-                    .is_some_and(|net| *net != self.ctx.info.network)
-                {
-                    return self.no_such_target(label).await;
-                }
+                // A bridged conversation is an ordinary DM scope keyed by the
+                // peer's member key, so its history serves the same way.
+                let peer_ref = UserRef::new(
+                    peer.clone(),
+                    network
+                        .clone()
+                        .unwrap_or_else(|| self.ctx.info.network.clone()),
+                );
                 (
-                    Scope::dm(account, peer.clone()),
+                    Scope::dm(
+                        account.to_string(),
+                        weft_store::member_key(&peer_ref, &self.ctx.info.network),
+                    ),
                     self.ctx.dm_policy,
                     Target::User {
                         account: peer,
@@ -1035,9 +1054,13 @@ impl<S: ControlStream> Session<S> {
                 if !self.ctx.registry.is_home(&channel) {
                     self.request_channel_home_backfill(channel.clone()).await;
                 }
-                // §11.7 M5c lazy federated backfill for deeper scrollback when the
-                // local page ran out (fire-and-forget; gated + deduped downstream).
+                // §11.7 lazy backfill for deeper scrollback when the local page
+                // ran out. A **replica**'s deeper history lives in its realm, so
+                // that one is asked directly; anything else goes to the peer that
+                // bridges it (fire-and-forget; gated + deduped downstream).
                 if ran_out {
+                    self.request_provider_backfill(&channel, before.as_ref())
+                        .await;
                     self.ctx
                         .request_channel_backfill(crate::BackfillReq { channel, before });
                 }

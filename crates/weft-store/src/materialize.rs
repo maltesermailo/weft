@@ -47,10 +47,27 @@ pub enum HistoryItem {
 }
 
 /// Materialize a page. `roots` ascending; `children` in any order (sorted
-/// here by msgid = event order, which decides which edit is "final" and
-/// whether a reaction ends net-added).
+/// here into event order, which decides which edit is "final" and whether a
+/// reaction ends net-added).
+///
+/// Event order is the **ULID**, not the full msgid: `MsgId` orders by
+/// `(origin, ulid)`, which is meaningless across origins. A **multi-origin**
+/// scope — a bridged replica, where our members mint under our origin and the
+/// realm's under theirs, or a DM with a foreign peer — would otherwise resolve
+/// "final" by origin *name*, so an older edit from `acme-corp` would beat a
+/// newer one from `test.example` on every read.
+/// Chronological order for two events in one scope: the ULID (timestamp then
+/// its monotonic tail), with the full msgid only as a tie-break so equal ULIDs
+/// from different origins still sort deterministically.
+pub(crate) fn event_order(a: &EventRecord, b: &EventRecord) -> std::cmp::Ordering {
+    a.msgid
+        .ulid()
+        .cmp(&b.msgid.ulid())
+        .then_with(|| a.msgid.cmp(&b.msgid))
+}
+
 pub fn materialize(roots: Vec<EventRecord>, mut children: Vec<EventRecord>) -> Vec<HistoryItem> {
-    children.sort_by(|a, b| a.msgid.cmp(&b.msgid));
+    children.sort_by(event_order);
     let mut by_root: HashMap<Ulid, Vec<EventRecord>> = HashMap::new();
     for child in children {
         by_root.entry(child.root.ulid()).or_default().push(child);
@@ -206,6 +223,36 @@ mod tests {
                 add,
             },
         )
+    }
+
+    #[test]
+    fn a_multi_origin_edit_chain_resolves_by_time_not_by_origin() {
+        // A bridged replica is multi-origin: our members mint under our origin,
+        // the realm's under theirs. `MsgId` orders by `(origin, ulid)`, so
+        // sorting by it would let `acme-corp` always precede `test.example` —
+        // the older edit would win "final" on every read. Event order is the
+        // ULID, so the *later* edit wins whichever origin minted it.
+        let root_rec = root(1, "original");
+        let mut newer_from_earlier_origin = edit(2, 1, "edited by the realm");
+        newer_from_earlier_origin.msgid = format!(
+            "acme-corp/{}",
+            Ulid::from_parts(1_009, 9) // later in time than seq 3 below
+        )
+        .parse()
+        .unwrap();
+        let older_local = edit(3, 1, "edited locally");
+        assert!(
+            older_local.msgid.ulid() < newer_from_earlier_origin.msgid.ulid(),
+            "the realm's edit must be the later one for this test to mean anything"
+        );
+
+        // Fed in the order that would fool a msgid sort.
+        let items = materialize(vec![root_rec], vec![newer_from_earlier_origin, older_local]);
+        let HistoryItem::Message { body, edited, .. } = &items[0] else {
+            panic!("expected a message");
+        };
+        assert_eq!(body, "edited by the realm");
+        assert_eq!(edited.map(|(count, _)| count), Some(2));
     }
 
     #[test]

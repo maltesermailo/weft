@@ -217,16 +217,15 @@ impl<S: ControlStream> Session<S> {
             target_by_scope.insert(scope.as_key(), Target::Channel(channel));
             scopes.push(scope);
         }
-        if let Ok(partners) = self.ctx.events.dm_partners(&account).await {
+        if let Ok(partners) = self.ctx.events.dm_partners(account.as_str()).await {
             for partner in partners {
-                let scope = Scope::dm(account.clone(), partner.clone());
-                target_by_scope.insert(
-                    scope.as_key(),
-                    Target::User {
-                        account: partner,
-                        network: None,
-                    },
-                );
+                // A partner key is bare for one of ours, `user@network` for a
+                // bridged or federated peer — the target has to say which.
+                let Some(peer) = self.member_userref(&partner) else {
+                    continue;
+                };
+                let scope = Scope::dm(account.to_string(), partner);
+                target_by_scope.insert(scope.as_key(), self.dm_target(&peer));
                 scopes.push(scope);
             }
         }

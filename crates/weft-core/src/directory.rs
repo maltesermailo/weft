@@ -116,10 +116,19 @@ enum Cmd {
     /// Pre-validated except recipient existence (the directory owns that
     /// check — anti-enumeration: the reply is a plain bool the session
     /// turns into NO-SUCH-TARGET).
+    /// A foreign user's DM to one of ours (slice 4d): already minted by their
+    /// network, so it is stored and delivered without a fresh msgid.
+    DmIngest {
+        from: UserRef,
+        to: Account,
+        msgid: MsgId,
+        body: String,
+        meta: MsgMeta,
+    },
     Dm {
         origin: SessionId,
         from: Account,
-        to: Account,
+        to: UserRef,
         body: String,
         meta: MsgMeta,
         delivered: oneshot::Sender<bool>,
@@ -188,20 +197,20 @@ enum Cmd {
     Edit {
         origin: SessionId,
         from: Account,
-        peer: Account,
+        peer: UserRef,
         root: MsgId,
         body: String,
     },
     Delete {
         origin: SessionId,
         from: Account,
-        peer: Account,
+        peer: UserRef,
         root: MsgId,
     },
     React {
         origin: SessionId,
         from: Account,
-        peer: Account,
+        peer: UserRef,
         root: MsgId,
         emoji: String,
         add: bool,
@@ -417,11 +426,35 @@ impl Directory {
             .await;
     }
 
+    /// §11.4 / slice 4d: a DM a **foreign** user sent one of ours, arriving over
+    /// their network's link. The far side minted it, so `msgid` is preserved
+    /// (invariant 2 — we never re-mint for a foreign origin); only the storage
+    /// and local delivery happen here.
+    pub(crate) async fn ingest_dm(
+        &self,
+        from: UserRef,
+        to: Account,
+        msgid: MsgId,
+        body: String,
+        meta: MsgMeta,
+    ) {
+        let _ = self
+            .inbox
+            .send(Cmd::DmIngest {
+                from,
+                to,
+                msgid,
+                body,
+                meta,
+            })
+            .await;
+    }
+
     pub(crate) async fn dm(
         &self,
         origin: SessionId,
         from: Account,
-        to: Account,
+        to: UserRef,
         body: String,
         meta: MsgMeta,
     ) -> bool {
@@ -448,7 +481,7 @@ impl Directory {
         &self,
         origin: SessionId,
         from: Account,
-        peer: Account,
+        peer: UserRef,
         root: MsgId,
         body: String,
     ) {
@@ -468,7 +501,7 @@ impl Directory {
         &self,
         origin: SessionId,
         from: Account,
-        peer: Account,
+        peer: UserRef,
         root: MsgId,
     ) {
         let _ = self
@@ -486,7 +519,7 @@ impl Directory {
         &self,
         origin: SessionId,
         from: Account,
-        peer: Account,
+        peer: UserRef,
         root: MsgId,
         emoji: String,
         add: bool,
@@ -619,22 +652,27 @@ impl Actor {
                 meta,
                 delivered,
             } => {
-                // Existence check lives here so unknown recipients get the
-                // same NO-SUCH-TARGET as everything hidden (§2.2).
-                let exists = match self.accounts.password_phc(&to).await {
-                    Ok(record) => record.is_some(),
-                    Err(e) => {
-                        error!("account lookup failed: {e}");
-                        false
+                // Existence is only ours to check for a local recipient; a
+                // foreign one lives on their own network, and the far side
+                // refuses if the handle is wrong. Unknown local recipients get
+                // the same NO-SUCH-TARGET as everything hidden (§2.2).
+                if let Some(local) = self.local_peer(&to) {
+                    let exists = match self.accounts.password_phc(&local).await {
+                        Ok(record) => record.is_some(),
+                        Err(e) => {
+                            error!("account lookup failed: {e}");
+                            false
+                        }
+                    };
+                    if !exists {
+                        let _ = delivered.send(false);
+                        return;
                     }
-                };
-                if !exists {
-                    let _ = delivered.send(false);
-                    return;
                 }
+
                 let msgid = self.mint();
                 let record = EventRecord {
-                    scope: Scope::dm(from.clone(), to.clone()),
+                    scope: self.dm_scope(&from, &to),
                     msgid: msgid.clone(),
                     root: msgid.clone(),
                     sender: self.user(&from),
@@ -645,10 +683,7 @@ impl Actor {
                 };
                 self.persist(record).await;
                 let event = Event::Message(Box::new(MessageEvent {
-                    target: Target::User {
-                        account: to.clone(),
-                        network: None,
-                    },
+                    target: self.dm_target(&to),
                     sender: self.user(&from),
                     msgid,
                     body,
@@ -656,8 +691,42 @@ impl Actor {
                     edited: None,
                     edited_at: None,
                 }));
-                self.deliver(&from, &to, origin, event);
+                self.deliver_dm(&from, &to, origin, event);
                 let _ = delivered.send(true);
+            }
+            Cmd::DmIngest {
+                from,
+                to,
+                msgid,
+                body,
+                meta,
+            } => {
+                // Their network minted it, so the msgid keeps its origin.
+                let record = EventRecord {
+                    scope: self.dm_scope(&to, &from),
+                    msgid: msgid.clone(),
+                    root: msgid.clone(),
+                    sender: from.clone(),
+                    kind: EventKind::Message {
+                        body: body.clone(),
+                        meta: meta.clone(),
+                    },
+                };
+                self.persist(record).await;
+
+                // Addressed to the recipient as coming *from* the foreign peer,
+                // so their client opens the conversation under that handle.
+                let event = Event::Message(Box::new(MessageEvent {
+                    target: self.dm_target(&from),
+                    sender: from,
+                    msgid,
+                    body,
+                    meta,
+                    edited: None,
+                    edited_at: None,
+                }));
+                // No originating local session, so nothing is echo-suppressed.
+                self.deliver(&to, &to, SessionId::MAX, event);
             }
             Cmd::GroupMsg {
                 origin,
@@ -804,7 +873,7 @@ impl Actor {
             } => {
                 let msgid = self.mint();
                 self.persist(EventRecord {
-                    scope: Scope::dm(from.clone(), peer.clone()),
+                    scope: self.dm_scope(&from, &peer),
                     msgid: msgid.clone(),
                     root: root.clone(),
                     sender: self.user(&from),
@@ -812,16 +881,13 @@ impl Actor {
                 })
                 .await;
                 let event = Event::Edited {
-                    target: Target::User {
-                        account: peer.clone(),
-                        network: None,
-                    },
+                    target: self.dm_target(&peer),
                     user: self.user(&from),
                     msgid,
                     edit_of: root,
                     body,
                 };
-                self.deliver(&from, &peer, origin, event);
+                self.deliver_dm(&from, &peer, origin, event);
             }
             Cmd::Delete {
                 origin,
@@ -831,7 +897,7 @@ impl Actor {
             } => {
                 let msgid = self.mint();
                 self.persist(EventRecord {
-                    scope: Scope::dm(from.clone(), peer.clone()),
+                    scope: self.dm_scope(&from, &peer),
                     msgid,
                     root: root.clone(),
                     sender: self.user(&from),
@@ -839,14 +905,11 @@ impl Actor {
                 })
                 .await;
                 let event = Event::Deleted {
-                    target: Target::User {
-                        account: peer.clone(),
-                        network: None,
-                    },
+                    target: self.dm_target(&peer),
                     msgid: root,
                     by: Some(self.user(&from)),
                 };
-                self.deliver(&from, &peer, origin, event);
+                self.deliver_dm(&from, &peer, origin, event);
             }
             Cmd::React {
                 origin,
@@ -858,7 +921,7 @@ impl Actor {
             } => {
                 let msgid = self.mint();
                 self.persist(EventRecord {
-                    scope: Scope::dm(from.clone(), peer.clone()),
+                    scope: self.dm_scope(&from, &peer),
                     msgid,
                     root: root.clone(),
                     sender: self.user(&from),
@@ -869,10 +932,7 @@ impl Actor {
                 })
                 .await;
                 let event = Event::Reaction {
-                    target: Target::User {
-                        account: peer.clone(),
-                        network: None,
-                    },
+                    target: self.dm_target(&peer),
                     msgid: root,
                     emoji,
                     op: if add {
@@ -882,7 +942,7 @@ impl Actor {
                     },
                     by: self.user(&from),
                 };
-                self.deliver(&from, &peer, origin, event);
+                self.deliver_dm(&from, &peer, origin, event);
             }
             Cmd::MarkSync {
                 origin,
@@ -976,6 +1036,45 @@ impl Actor {
 
     fn user(&self, account: &Account) -> UserRef {
         UserRef::new(account.clone(), self.network.clone())
+    }
+
+    /// The local account behind a DM peer, or `None` when they are foreign
+    /// (bridged or on a peer network) — the surfaces that only make sense
+    /// locally (existence checks, session delivery) key off this.
+    fn local_peer(&self, peer: &UserRef) -> Option<Account> {
+        (peer.network == self.network).then(|| peer.account.clone())
+    }
+
+    /// The stored scope of a 1:1 conversation, keyed by member keys (bare
+    /// account for one of ours, `user@network` for a foreign peer) so a bridged
+    /// conversation is a first-class DM rather than a second table.
+    fn dm_scope(&self, from: &Account, peer: &UserRef) -> Scope {
+        Scope::dm(
+            from.to_string(),
+            weft_store::member_key(peer, &self.network),
+        )
+    }
+
+    /// The wire target naming a DM peer: bare `@ada` on our own network, the
+    /// qualified `@alice@matrix.org` otherwise (§9.5 + framework §7a.0).
+    fn dm_target(&self, peer: &UserRef) -> Target {
+        Target::User {
+            account: peer.account.clone(),
+            network: self
+                .local_peer(peer)
+                .is_none()
+                .then(|| peer.network.clone()),
+        }
+    }
+
+    /// Deliver a DM event to both parties' live sessions. A foreign peer has no
+    /// sessions here — their copy travels over the bridge — so only the local
+    /// side is served.
+    fn deliver_dm(&self, from: &Account, peer: &UserRef, origin: SessionId, event: Event) {
+        match self.local_peer(peer) {
+            Some(local) => self.deliver(from, &local, origin, event),
+            None => self.deliver(from, from, origin, event),
+        }
     }
 
     fn mint(&mut self) -> MsgId {

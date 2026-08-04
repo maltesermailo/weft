@@ -432,15 +432,15 @@ impl EventStore for MemoryStore {
         Ok(hits)
     }
 
-    async fn dm_partners(&self, account: &Account) -> Result<Vec<Account>, StoreError> {
+    async fn dm_partners(&self, member: &str) -> Result<Vec<String>, StoreError> {
         let inner = self.inner.lock().expect("store lock");
-        let mut out: Vec<Account> = inner
+        let mut out: Vec<String> = inner
             .events
             .keys()
             .filter_map(|(key, _)| match Scope::from_key(key) {
                 // The scope names both participants; the partner is the other.
-                Some(Scope::Dm(a, b)) if &a == account => Some(b),
-                Some(Scope::Dm(a, b)) if &b == account => Some(a),
+                Some(Scope::Dm(a, b)) if a == member => Some(b),
+                Some(Scope::Dm(a, b)) if b == member => Some(a),
                 _ => None,
             })
             .collect();
@@ -3008,8 +3008,8 @@ mod tests {
         let ada: Account = "ada".parse().unwrap();
         let bob: Account = "bob".parse().unwrap();
         assert_eq!(
-            Scope::dm(ada.clone(), bob.clone()).as_key(),
-            Scope::dm(bob, ada).as_key()
+            Scope::dm(ada.to_string(), bob.to_string()).as_key(),
+            Scope::dm(bob.to_string(), ada.to_string()).as_key()
         );
     }
 }

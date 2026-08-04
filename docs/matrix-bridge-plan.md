@@ -135,28 +135,55 @@ slices land.
       role controls filter local; counts, NS INFO MEMBERS, and the delete cascade include everyone.
       Provider `MEMBER` ingestion writes/clears those rows (completing slice 4). Store contract test
       covers the mixed local+foreign table. *(Original scoping said "migration: yes" — wrong.)*
-- [ ] **4d. DM a bridged (foreign) user** (owner directive 2026-08-04 — un-defers the CLAUDE.md item).
-      **Correction to the original scoping:** cross-network *messaging* already works — **group DMs are
-      federation-able** (`GroupStore` members are full `UserRef`s; `federated_group_roster_syncs_across_networks`
-      passes) on the §11.13 home-authoritative relay (`RelayPublish`/`RelayMutate`), as are friends
-      and calls. The only gap is the **1:1 `@user` target form** (`Target::User(Account)` has no
-      network slot).
-      **DECIDED (owner 2026-08-04): true 1:1 DMs — the group infrastructure is NOT reused. DMs stay
-      one-on-one.** So:
-      - **L0 (small — only 13 `Target::User` match sites):**
-        `Target::User { account: Account, network: Option<NetworkName> }`. A named struct variant, not
-        a tuple, so call sites read clearly. `None` = same-network (§9.5 semantics unchanged, `@ada`
-        parses/serializes exactly as today — wire-additive); `Some(net)` = `@alice@matrix.org`.
-        Parse: after the `@` sigil, a remainder containing `@` splits into account + network.
-        Round-trip tests first, per the workspace rule.
-      - **Routing:** the DM dispatch sends a foreign-target DM to the **provider** (bridged user) or
-        the **peer bridge** (a real WEFT cross-network DM — unblocked by the same change), instead of
-        the local account directory.
-      - **Store:** DM scopes/`dm_partners` key on the peer identity, so a foreign peer needs the same
-        widening as 4c's membership keys (bare = local, `user@network` = foreign).
-      **Ordering:** the L0 + parse/serialize half can land any time (additive). Delivery *into* Matrix
-      needs the outbound relay, so the routing half lands with or after **slice 5** — before that a
-      bridged DM would store locally and go nowhere.
+- [x] **4d. DM a bridged (foreign) user** — **DONE 2026-08-04** (L0 half shipped earlier; the
+      routing half landed now that slice 5 exists). **DECIDED (owner): true 1:1 DMs — the group
+      infrastructure is NOT reused.**
+      * **Store:** `Scope::Dm(Account, Account)` → `Scope::Dm(String, String)` **member keys**, the
+        same 4c convention (bare = ours, `user@network` = foreign). `dm_partners` widened to
+        `&str -> Vec<String>`. The `dm:<a>:<b>` storage key stays unambiguous because a member key
+        never contains `:`. New `weft_store::member_key(user, home)` — the inverse of `local_member`.
+      * **Directory:** the DM peer is a `UserRef` throughout (`dm`/`edit`/`delete`/`react`), with
+        `local_peer` / `dm_scope` / `dm_target` / `deliver_dm` deriving the local-vs-foreign
+        behaviour. Existence is checked only for a **local** recipient — a foreign handle lives on
+        their own network and the far side refuses it.
+      * **Outbound:** `relay_foreign_dm` routes by network — a **bridged** realm goes to its provider
+        (`ctx.provider_for_realm`) as `@as=<our user> MSG @<peer>`, anything else takes the ordinary
+        peer bridge (`request_friend_deliver`, the route friends/group DMs already use). Stored and
+        echoed locally either way.
+      * **Inbound:** `@as=<their user>;msgid=<realm>/<ulid> MSG @<our account>` → `Cmd::DmIngest` →
+        stored under the same `Scope::Dm` **preserving the realm's msgid** (invariant 2) and
+        delivered to the local user. A bridged conversation is a first-class DM, not a second table —
+        `HISTORY @alice@acme-corp` serves both directions interleaved.
+      * Test: outbound echo + provider copy, inbound delivery, and one interleaved `HISTORY`.
+        **Flake caught + fixed:** the two msgids come from independent generators, so inside one
+        millisecond ULID order is decided by random bits (4/10 failures). The test now stamps the
+        inbound id 1 ms after the outbound one — 10/10.
+      *Remaining for a later slice:* DM **mutations** (edit/delete/react) on a bridged conversation
+      still apply locally only — `MessageRoute::Dm` carries the `UserRef` now, so the relay hook is
+      the same shape as the channel one (§7a.0b), but it is not wired.
+- [x] **4e. Multi-origin event ordering** (S, bug found 2026-08-04) — `materialize` and
+      `compaction_plan` sorted a root's children by **`MsgId`**, whose `Ord` is `(origin, ulid)`.
+      In a **multi-origin** scope that resolves "which edit is final" / "does this reaction end
+      net-added" by *origin name*: an older `acme-corp` edit beat a newer `test.example` one on
+      every read, and compaction then deleted the winner. Now ordered by ULID (`event_order`, with
+      the full msgid only as a tie-break).
+      *Why it was dormant:* since the home-authoritative pivot a peer-federated channel is
+      **single-origin** (the home mints everything), as are groups. The only multi-origin scopes are
+      the two bridge-touching ones — a **replica channel** and a **DM with a foreign peer** — so this
+      went live exactly when bridges did. Not a compaction-only bug: `materialize` runs on every
+      `HISTORY`, so it was wrong on reads; compaction only made it permanent.
+- [x] **4f. Bridge backfill — §11.7 for realms** (owner directive 2026-08-04: "bridges should do the
+      same as federation") — **DONE.** *Correcting an earlier mis-framing of mine:* federation does
+      **not** fetch state on read. It ingests + **stores** live traffic, serves `HISTORY` locally, and
+      pulls a deeper window from the peer **only when the local page ran out**, deduped per
+      `(channel, before)`. Replicas already matched on the storing half; what they lacked was that
+      second leg (`on_backfill_demand` is gated on `State::Bridge`, so it only ever talks to a peer).
+      `request_provider_backfill` now asks the **realm** for the window when a client scrolls past
+      what we hold. The realm answers by replaying it as ordinary `@as` ingestion — already
+      origin-checked — so there is **no separate backfill ingress** and no way to smuggle events in
+      under cover of an answer. Deduped via the session's existing `backfilled` set.
+      Tested: short page → realm asked; replayed older message appears in the next page, correctly
+      interleaved; a repeated scroll is deduped while a genuinely new window is asked for.
 - [x] **5. Outbound relay** (M) — **DONE 2026-08-04. WEFT → Matrix flows.**
       `sync_provider_forwarders(schemes)` subscribes the provider session to every replica channel of
       its namespaces (reusing `spawn_forwarder`/`self.bridged`), wired at all three registration
