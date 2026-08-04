@@ -615,14 +615,15 @@ New verbs under the `PLUGIN` family (client→server) and `PLUGIN-*` events (ser
 | Grammar | Meaning |
 |---|---|
 | `@catalog=<b64> PLUGIN-MANIFEST` | the declared actions/surfaces (reply to `PLUGINS`; pushed on change). |
-| `@view=<b64> PLUGIN-VIEW <view-id> <container>` | render/replace a view. `container ∈ modal\|panel\|custom`; a `custom` payload carries `{widget,params}` (a client-bundle asset ref, §11.6). |
+| `@view=<b64> PLUGIN-VIEW <view-id>` | render/replace a view. The `container` (`modal\|panel\|custom`) lives **inside** the `@view` payload (a `View`, §10.4) — single source of truth, not a positional param; a `custom` payload carries `{widget,params}` (a client-bundle asset ref, §11.6). |
 | `@patch=<b64> PLUGIN-PATCH <view-id>` | update a live panel/widget. |
 | `@result=<b64> PLUGIN-RESULT <view-id>` | terminal outcome. |
 
 ### 12.3 Provider (adapter/remote) side
 A `remote` plugin / bridge on `State::PluginService` sends:
-- `@catalog=<b64> PLUGIN-REGISTER` — its self-description (id, api, actions, hooks; §4.2). weftd validates
-  + merges into the client catalog.
+- `@reg=<b64> PLUGIN-REGISTER` — its self-description: a `Registration` (`{api, id, name, icon?, actions,
+  hooks}`, §4.2). weftd validates + merges the actions into the client catalog. (The `@reg` payload is a
+  `Registration`, distinct from the `@catalog` payload of `PLUGIN-MANIFEST`, which is a `Catalog`.)
 - `PLUGIN-VIEW`/`PLUGIN-PATCH`/`PLUGIN-RESULT` — in response to invocations weftd routed to it.
 weftd → provider: routed `PLUGIN INVOKE/SUBMIT/ACTION/CLOSE` frames + event pushes (`PLUGIN-EVENT`, §8).
 
@@ -764,12 +765,41 @@ No new plugin error code (§20-C: **reuse** the existing registry).
 12. **CSP present.** The shipped Tauri CSP is non-null and constrains `script-src`/`frame-src` (§3.6).
     (Test the built config.)
 
-## 18. Foreign-bridge integration
+## 18. Provider-managed namespaces & bridges (unification, owner directive 2026-08-03)
 
-The foreign-bridge adapter is **the first `remote` plugin** — an App Service (built on `weft-appservice`'s
-`bridge` feature) *plus* the realm/provisioning verbs (`foreign-bridge-framework.md`). It is not a bespoke
-server path: `State::ForeignBridge` generalizes to `State::PluginService`, and the bridge's client-facing
-actions are ordinary plugin actions.
+**The plugin system and the foreign-bridge framework are one provider model.** A provider (a plugin, any
+hosting mode) may use any subset of six capabilities — the first three already specced above, the last
+three generalized here from the foreign-bridge framework:
+
+1. **Actions + SDUI/widgets** (§6–§13) — management UI.
+2. **Hooks** (§8) — observe server events.
+3. **Act-as-service** (§7.3–7.5) — post, create channels, moderate.
+4. **Provider-managed ("virtual") namespaces** — create/own a namespace marked with an **`origin` URI**
+   (`instagram://acme_corp`, `matrix://matrix.org/gaming`; the slice-5 store marker), supply its
+   **capability profile** (`authority=`/`settings=`, framework §7a.3), and assert its structure. Owner =
+   the system sentinel; local owner-authority is gated by `origin` — a virtual namespace is governed by
+   its provider, displayed badged, and its native settings surfaces are profile-gated. This is how an
+   **Instagram bridge** (or any service with no federation protocol) exists as *just a plugin*.
+5. **Foreign attribution** — the generalized `@as`: a provider may act **as a foreign identity**
+   (`@alice:matrix.org`, an Instagram handle), producing events that carry the `foreign=` display tag
+   (framework §7a.1). Trusted, server-authoritative; the `sender` stays the home-minted puppet handle.
+6. **Scheme registration + provisioning** — a provider lists `schemes` in its `Registration`; a user's
+   `NS JOIN <scheme>://…` for an unknown space routes a `PROVISION` push to that provider (the framework
+   §3.3 machinery, no longer adapter-only), which materializes the namespace and completes the join.
+
+**What stays behind the `bridge` feature** (federation-grade extras a simple bridge never needs):
+`REALM ASSERT` per-realm data connections (spoof-isolation for multi-realm bridges), realm-keyed
+`NETBLOCK`, and federated backfill semantics. A Matrix bridge opts in; an Instagram bridge uses only 1–6.
+
+**Infrastructure consequence:** the scheme→session registry (`foreign_control`) and the plugin registry
+merge into one **provider registry**; `State::ForeignBridge` folds into `State::PluginService` (the
+M-plug-11 fold, confirmed by this directive). The materialization model (sentinel owner, empty root key,
+origin-gated authority) applies to every provider-managed namespace — it was never Matrix-specific.
+
+### 18.1 The Matrix bridge on this model
+
+The Matrix bridge is a `remote` plugin using **all six capabilities plus the `bridge` feature**. It is not
+a bespoke server path: its client-facing actions are ordinary plugin actions.
 
 - **Declare actions:** the bridge `PLUGIN-REGISTER`s its actions (`Create channel`, `Create subspace`, …)
   scoped to its realm's namespaces, merged into the client catalog like any provider's.
@@ -791,12 +821,25 @@ actions are ordinary plugin actions.
   `State::PluginService` change — it's a *restructure* (the `realm` field is bridge-specific), not a
   rename, and doing it before the plugin-service session logic exists would churn green foreign-bridge
   code for no consumer (YAGNI). It lands with the remote transport that needs it.
-- **M-plug-1 — SDUI codec (L0).** weft-proto: the component/view/patch/result/widget types, the
-  `PLUGIN*`/`PLUGIN-*` verbs+events (incl. `PLUGIN-REGISTER`, `container=custom`), base64-CBOR. **Round-trip
-  tests first.**
-- **M-plug-2 — remote transport + SDK + a trivial action.** weftd `State::PluginService` routing **and**
-  the `weft-appservice` SDK (builder, `AUTH ADAPTER`, `PLUGIN-REGISTER`, dispatch, `Ctx`), validated by a
-  trivial App Service that registers a `global` action → `INVOKE` → `PLUGIN-RESULT toast`. End-to-end.
+- **M-plug-1 — SDUI codec (L0). ✅ (2026-08-03)** weft-proto `plugin` module: the component catalog +
+  `View`/`PatchOp`/`ViewResult`/`ActionDecl`/`Catalog`/`Registration` types (serde + ciborium + base64,
+  `to_b64`/`from_b64`, unknown-variant skip for forward-compat) — round-trip tested. `PLUGIN` commands
+  (`PLUGINS`/`INVOKE`/`SUBMIT`/`ACTION`/`SUBSCRIBE`/`UNSUBSCRIBE`/`CLOSE`) + `PLUGIN-*` events
+  (`MANIFEST`/`VIEW`/`PATCH`/`RESULT`/`REGISTER`) carry the structured parts as opaque b64 tags (the host
+  decodes). proto 133 tests, clippy clean. **Deferred to M-plug-5:** the `PLUGIN-EVENT` hook-push verb +
+  the per-event payload types (a hooks concern). weft-core `on_ready` rejects the PLUGIN verbs (`unsupported`)
+  until the M-plug-2 router.
+- **M-plug-2a — remote transport, weftd side. ✅ (2026-08-03)** `State::PluginService { key, plugin_id }`
+  + `ChallengeSubject::Plugin`; `AUTH ADAPTER` resolves a `[[plugin.remote]]` key → plugin session
+  (alongside foreign-bridge adapters — `State::ForeignBridge` kept separate, folded at M-plug-11).
+  `[[plugin.remote]]` config → `ctx.remote_plugins`. `PLUGIN-REGISTER` → catalog registry; client `PLUGINS`
+  → `PLUGIN-MANIFEST`; client `PLUGIN INVOKE` → mint view-id + park + route to the plugin's session + relay
+  its `PLUGIN-VIEW`/`-RESULT` (unknown plugin/action → `NO-SUCH-TARGET`). Cleanup unregisters on disconnect.
+  Mock-harness tests (register → catalog → invoke → relayed toast; no-such-action). core 204, proto 133,
+  clippy clean.
+- **M-plug-2b — the `weft-appservice` SDK.** The real dispatch loop (connect, `AUTH ADAPTER` handshake,
+  `PLUGIN-REGISTER`, routed-invoke → handler → `PLUGIN-RESULT`, `Ctx`) + a two-live-endpoint conformance
+  test over real QUIC. *(next)*
 - **M-plug-3 — modal flows + full SDUI rendering.** `SUBMIT`/`ACTION`, multi-step flows, the full catalog
   in the client renderer.
 - **M-plug-4 — act-as-service + identity.** The act-as callback (messages/channels/moderation/query),

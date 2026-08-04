@@ -14,6 +14,15 @@ use crate::types::{
     TypingState, VerifyState, Visibility, VoiceAction, VoiceTransport,
 };
 
+/// A required, non-empty tag value (for the plugin b64-CBOR payloads, §12.2).
+fn req_tag(line: &Line, verb: &'static str, key: &'static str) -> Result<String, ParseError> {
+    line.tags
+        .get(key)
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .ok_or(ParseError::MissingParam { verb, what: key })
+}
+
 /// An event plus its optional `label` echo (§3.5). Only direct responses
 /// carry a label; broadcast copies never do — that distinction is the
 /// session layer's job, the codec just (de)serializes it.
@@ -698,6 +707,36 @@ pub enum Event {
         ttl: u64,
     },
     Err(ErrEvent),
+    /// Plugin system (`docs/architecture/plugin-spec.md` §12.2). `PLUGIN-MANIFEST`
+    /// with `@catalog=<b64cbor>` — the declared action catalog (reply to `PLUGINS`;
+    /// also pushed on change). The payload decodes to [`crate::Catalog`].
+    PluginManifest {
+        catalog: String,
+    },
+    /// `PLUGIN-VIEW <view-id>` with `@view=<b64cbor>` — render/replace a view. The
+    /// container (modal/panel/custom) lives inside the payload ([`crate::View`]).
+    PluginView {
+        view_id: String,
+        view: String,
+    },
+    /// `PLUGIN-PATCH <view-id>` with `@patch=<b64cbor>` — a live update to an open
+    /// panel/widget. The payload decodes to a `Vec<`[`crate::PatchOp`]`>`.
+    PluginPatch {
+        view_id: String,
+        patch: String,
+    },
+    /// `PLUGIN-RESULT <view-id>` with `@result=<b64cbor>` — a flow's terminal
+    /// outcome ([`crate::ViewResult`]).
+    PluginResult {
+        view_id: String,
+        result: String,
+    },
+    /// `PLUGIN-REGISTER` with `@reg=<b64cbor>` — a remote provider's self-description
+    /// (§12.3, §4.2): its [`crate::Registration`]. Parsed by weftd on a
+    /// `State::PluginService` session.
+    PluginRegister {
+        registration: String,
+    },
     /// Any event outside the known set — MUST be ignored by clients.
     Unknown {
         verb: String,
@@ -1662,6 +1701,24 @@ impl Event {
                     }),
                 }
             }
+            "PLUGIN-MANIFEST" => Ok(Event::PluginManifest {
+                catalog: req_tag(line, "PLUGIN-MANIFEST", "catalog")?,
+            }),
+            "PLUGIN-VIEW" => Ok(Event::PluginView {
+                view_id: Args::new(line, "PLUGIN-VIEW").req("view-id")?.to_string(),
+                view: req_tag(line, "PLUGIN-VIEW", "view")?,
+            }),
+            "PLUGIN-PATCH" => Ok(Event::PluginPatch {
+                view_id: Args::new(line, "PLUGIN-PATCH").req("view-id")?.to_string(),
+                patch: req_tag(line, "PLUGIN-PATCH", "patch")?,
+            }),
+            "PLUGIN-RESULT" => Ok(Event::PluginResult {
+                view_id: Args::new(line, "PLUGIN-RESULT").req("view-id")?.to_string(),
+                result: req_tag(line, "PLUGIN-RESULT", "result")?,
+            }),
+            "PLUGIN-REGISTER" => Ok(Event::PluginRegister {
+                registration: req_tag(line, "PLUGIN-REGISTER", "reg")?,
+            }),
             verb => Ok(Event::Unknown {
                 verb: verb.to_string(),
             }),
@@ -2444,6 +2501,26 @@ impl Event {
                 vec![group.to_string(), user.to_string(), state.to_string()],
                 None,
             ),
+            Event::PluginManifest { catalog } => {
+                tags.insert("catalog".to_string(), catalog.clone());
+                ("PLUGIN-MANIFEST", vec![], None)
+            }
+            Event::PluginView { view_id, view } => {
+                tags.insert("view".to_string(), view.clone());
+                ("PLUGIN-VIEW", vec![view_id.clone()], None)
+            }
+            Event::PluginPatch { view_id, patch } => {
+                tags.insert("patch".to_string(), patch.clone());
+                ("PLUGIN-PATCH", vec![view_id.clone()], None)
+            }
+            Event::PluginResult { view_id, result } => {
+                tags.insert("result".to_string(), result.clone());
+                ("PLUGIN-RESULT", vec![view_id.clone()], None)
+            }
+            Event::PluginRegister { registration } => {
+                tags.insert("reg".to_string(), registration.clone());
+                ("PLUGIN-REGISTER", vec![], None)
+            }
             Event::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown event"));
             }
@@ -3314,6 +3391,34 @@ mod tests {
             network: "evil.example".parse().unwrap(),
             reason: None,
         }));
+    }
+
+    #[test]
+    fn plugin_events_round_trip() {
+        round_trip(&Reply::with_label(
+            Event::PluginManifest {
+                catalog: "Zm9vYmFy".into(),
+            },
+            "m1",
+        ));
+        round_trip(&Reply::new(Event::PluginView {
+            view_id: "translate:ab12:1".into(),
+            view: "Zm9v".into(),
+        }));
+        round_trip(&Reply::new(Event::PluginPatch {
+            view_id: "modq:ab12:4".into(),
+            patch: "Zm9v".into(),
+        }));
+        round_trip(&Reply::new(Event::PluginResult {
+            view_id: "v:ab12:2".into(),
+            result: "Zm9v".into(),
+        }));
+        round_trip(&Reply::new(Event::PluginRegister {
+            registration: "Zm9v".into(),
+        }));
+
+        assert!(Reply::parse("PLUGIN-VIEW v:ab12:1").is_err()); // view payload required
+        assert!(Reply::parse("PLUGIN-MANIFEST").is_err()); // catalog required
     }
 
     #[test]

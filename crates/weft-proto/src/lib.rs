@@ -26,6 +26,7 @@ mod foreign;
 mod id;
 mod line;
 mod name;
+mod plugin;
 mod policy;
 mod types;
 
@@ -43,6 +44,11 @@ pub use line::{
 pub use name::{
     Account, ChannelId, ChannelName, GroupId, NamespaceId, NamespaceName, NamespaceRef,
     NetworkName, RoleId, Target, UserRef, VanityName,
+};
+pub use plugin::{
+    from_b64 as plugin_from_b64, to_b64 as plugin_to_b64, ActionDecl, Button, ButtonStyle, Catalog,
+    CatalogEntry, Component, Container, ContextType, FailPolicy, HookDecl, HookKind, KvRow, PatchOp,
+    Registration, SelectOption, Surface, ToastKind, View, ViewResult,
 };
 pub use policy::{RetainedFor, RetentionPolicy, RetentionUnit};
 pub use types::{

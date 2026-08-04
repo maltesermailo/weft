@@ -1,8 +1,14 @@
 # WEFT Foreign-Realm Bridging Framework
 
-**Status:** design concept (owner directive 2026-07-27). The generalization of the Matrix
-bridge concept (`matrix.md`) into a **pluggable framework** for bridging external chat
-systems — Matrix first, Discord and others later. Protocol logic lives in per-app **adapter
+**Status:** design concept (owner directive 2026-07-27). **UNIFIED with the plugin system
+(owner directive 2026-08-03, `plugin-spec.md` §18):** this framework's capabilities — virtual
+namespaces with an `origin` marker, foreign attribution (`@as`/`foreign=`), scheme registration +
+provisioning — are now **general provider capabilities** any plugin can use (an Instagram bridge is
+just a plugin); only the federation-grade extras (`REALM ASSERT` per-realm connections, realm-keyed
+NETBLOCK, federated backfill) stay bridge-specific behind the SDK's `bridge` feature. This doc remains
+the deep spec for those, and for the realm/provisioning machinery the unified model absorbs.
+The generalization of the Matrix bridge concept (`matrix.md`) into a **pluggable framework** for
+bridging external chat systems — Matrix first, Discord and others later. Protocol logic lives in per-app **adapter
 daemons**; weftd core learns only the generic concept of a *foreign realm*, never any single
 protocol. This doc is the framework; each adapter (`matrix.md`, future `discord.md`) is a
 *binding* that fills the framework's slots.
@@ -226,6 +232,76 @@ adapter documents its exact authority mapping; the framework only guarantees the
 the NETBLOCK escape hatch. (For **outbound-projected** WEFT namespaces the reverse holds — WEFT is
 home and authoritative; see `matrix.md` §10.)
 
+## 7a. Foreign display & the namespace capability profile (owner directive 2026-08-03)
+
+The framework so far maps foreign **structure** (namespaces/channels/messages), but the wire does not
+yet carry the foreign **identity + authority metadata** the client needs to render Matrix things
+properly, nor a way for a bridge/plugin to tell the client which native settings apply. This section
+specs those additions. All are **additive wire fields** (proto, round-trip-tested first); the plugin
+system's SDUI/widgets can't help here, because the stock client renders the message stream + settings
+from these events, not from plugin UI.
+
+### 7a.1 Foreign identity on content — `foreign=`
+
+`MESSAGE`/`MEMBER`/`REACTION`/`EDITED`/`TYPING` gain an optional **`foreign=<native-account>`** tag.
+When present, the actor is a **foreign identity** (an MXID `@alice:matrix.org`, a Discord snowflake),
+and the client renders it with the native handle **badged** by the channel/namespace `origin`
+(§7a.2) — "alice · Matrix · matrix.org". The event's own `sender: UserRef` is the home-authoritative
+puppet handle (weftd mints the replica, §4/invariant 2); the `foreign=` tag is the *display* identity.
+This is the outbound face of the inbound **`@as=`** attribution (§3.1): the adapter's
+`@as=@alice:matrix.org MSG matrix://…/general :hi` becomes a replica `MESSAGE … foreign=@alice:matrix.org`.
+
+### 7a.2 Origin on namespaces/channels — `origin=`
+
+`NS-META`, `CHANNEL-LAYOUT`, and `DISCOVER` entries gain an optional **`origin=<scheme>://<realm>/<path>`**
+tag (the store marker of slice 5, now surfaced on the wire). The client badges the namespace/channel
+**foreign** and reads scheme+realm for the badge label. Absent ⇒ native.
+
+### 7a.3 The namespace capability profile — power levels instead of roles, and settings gating
+
+A namespace carries a **capability profile** the client uses to choose its **authority rendering** and
+which **native settings surfaces** to show. A native WEFT namespace has the implicit default profile
+(roles authority, all settings enabled). A **provider-managed** namespace (a foreign bridge, or a
+plugin that owns a namespace) supplies a profile — carried as tags on `NS-META`:
+
+- **`authority=roles|levels|none`** — how the client renders the ns's authority.
+  - `roles` (default): the native WEFT roles editor + role pills.
+  - **`levels`**: a numeric/threshold model — **Matrix power levels**. Members show a **level**
+    (§7a.4); the client renders a *levels* view (or the provider's own, §7a.5) **instead of** the roles
+    editor. This is the "for Matrix, show power levels, not roles."
+  - `none`: no local authority UI.
+- **`settings=<disabled-keys>`** — a set of native settings surfaces to **disable/hide** for this ns.
+  Gate-able keys (fixed, extensible): `roles` · `permissions` · `channels` (create/delete) · `invites`
+  · `moderation` · `ns-edit` (title/visibility/etc.) · `recovery`. For a Matrix ns the bridge disables
+  `roles`/`permissions`/`ns-edit`/`recovery` (Matrix-governed; §7 honest limit) and keeps the rest
+  read-only or provider-driven. **This is "plugins can disable certain server settings"** — a general
+  mechanism any provider supplies, not Matrix-specific.
+
+A gated setting the client hides is also **refused server-side** for a foreign ns (the §5-slice
+authority gating already refuses NS META/DELETE/etc. on `origin=Some`); the profile makes the *client*
+match, and lets a provider disable surfaces even on a plugin-managed *native* ns.
+
+### 7a.4 Advisory member level — `level=`
+
+For `authority=levels`, `MEMBER` (and the roster) carry an optional **`level=<n>`** (+ optional
+`level-label=`) — the member's foreign power level, **advisory** (read-only, §7). The client shows it
+in place of role pills. For `authority=roles` it is absent.
+
+### 7a.5 Who supplies it, and the plugin connection
+
+For a **foreign** namespace, the bridge asserts the profile as part of its `NS-META` structure
+assertion (§3.1) — `origin` + `authority=levels` + the disabled `settings`. The **custom "power
+levels" view** itself is a **provider settings-surface action/widget** (`plugin-spec.md` §13.1
+`settings` surface) — so the profile *disables* the native roles editor and the provider *supplies*
+the levels view. The two mechanisms compose: the capability profile is declarative gating; the SDUI/
+widget is the replacement UI.
+
+### 7a.6 Honest limits
+
+Read receipts, Matrix presence, and typing fidelity are **not** bridged (§7, same-network-only);
+`m.emote`/`m.notice` map to WEFT message forms (lossy); pills/mentions to foreign users render as
+plain badged handles unless an adapter does more. Each adapter documents its exact mapping (§10).
+
 ## 8. Security invariants (framework additions — implement AS TESTS)
 
 1. **Trusted-context authority:** only a pinned `State::ForeignBridge` connection may assert foreign
@@ -260,6 +336,13 @@ home and authoritative; see `matrix.md` §10.)
    URI marker on the namespace record (mem + PG, shared contract; migration 0052) — reuse +
    discriminator, not a parallel table set (owner call 2026-08-03).
 6. Realm-keyed `NETBLOCK`.
+7. **Foreign display + capability profile (§7a, owner directive 2026-08-03):** additive wire fields
+   (proto, round-trip-first) — `foreign=` on `MESSAGE`/`MEMBER`/`REACTION`/`EDITED` (foreign author,
+   §7a.1); `origin=` on `NS-META`/`CHANNEL-LAYOUT`/`DISCOVER` (badging, §7a.2); the ns capability
+   profile `authority=roles|levels|none` + `settings=<disabled-keys>` on `NS-META` (§7a.3); `level=` on
+   `MEMBER`/roster (advisory PL, §7a.4). weftd emits them on the replica; the client renders badges +
+   the levels view + gated settings. The general **settings-gating** mechanism is shared with the
+   plugin system (a plugin owning a namespace can supply the same profile).
 
 That is the entire core change. **Adding an adapter afterwards touches none of it** — it is a new
 daemon + a config stanza + an adapter-binding doc.

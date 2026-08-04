@@ -4386,6 +4386,158 @@ async fn foreign_bridge_unpinned_key_auth_fails() {
     c.expect_err(ErrCode::AuthFailed).await;
 }
 
+// ---- plugin system (plugin-spec.md §12): remote plugin register + invoke ----
+
+/// A ctx pinning one remote plugin (`[[plugin.remote]]`) by id + key, open to
+/// client registration.
+fn ctx_plugin(plugin_id: &str, plugin_key: &weft_core::PublicKey) -> Arc<ServerCtx> {
+    let info = ServerInfo {
+        network: "test.example".parse().unwrap(),
+        motd: None,
+        features: Vec::new(),
+    };
+    let chans: Vec<(&str, &str)> = Vec::new();
+    Arc::new(
+        ServerCtx::new(
+            info,
+            chans
+                .iter()
+                .map(|(c, p)| (c.parse().unwrap(), p.parse::<RetentionPolicy>().unwrap())),
+            Keypair::generate(),
+            true,
+            Arc::new(MemoryStore::default()),
+            Arc::new(weft_core::MemBlobStore::default()),
+            "permanent".parse().unwrap(),
+            std::iter::empty::<weft_proto::Account>(),
+            true,
+            10,
+            weft_core::FederationConfig::default(),
+        )
+        .with_remote_plugins(vec![(plugin_id.to_string(), *plugin_key)]),
+    )
+}
+
+/// Drive a session to `State::PluginService`, proving control of the plugin `key`;
+/// consumes the WELCOME.
+async fn plugin_session(ctx: &Arc<ServerCtx>, key: &Keypair) -> Client {
+    let mut c = connect(ctx);
+    c.send("HELLO weft/1");
+    assert!(matches!(c.recv().await.event, Event::Welcome { .. }));
+
+    c.send(&format!("AUTH ADAPTER {}", key.public().to_b64()));
+    let Event::Challenge { nonce } = c.recv().await.event else {
+        panic!("expected CHALLENGE");
+    };
+    let nonce = weft_crypto::b64::decode(&nonce).unwrap();
+    let sig = weft_crypto::sign_challenge(key, &nonce, "test.example");
+    c.send(&format!("AUTH PROOF {}", weft_crypto::signature_to_b64(&sig)));
+
+    let Event::Welcome { features, .. } = c.recv().await.event else {
+        panic!("expected WELCOME after plugin PROOF");
+    };
+    assert!(features.iter().any(|f| f == "plugin"));
+    c
+}
+
+/// Poll the catalog until `plugin/action` appears (the register is on a *different*
+/// session than the querying client, so this is the cross-session barrier).
+async fn wait_for_action(client: &mut Client, plugin: &str, action: &str) {
+    for _ in 0..50 {
+        client.send("PLUGINS");
+        let Event::PluginManifest { catalog } = client.recv().await.event else {
+            panic!("expected PLUGIN-MANIFEST");
+        };
+        let cat: weft_proto::Catalog = weft_proto::plugin_from_b64(&catalog).unwrap();
+        if cat
+            .plugins
+            .iter()
+            .any(|p| p.plugin_id == plugin && p.actions.iter().any(|a| a.id == action))
+        {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("plugin '{plugin}' action '{action}' never registered");
+}
+
+#[tokio::test]
+async fn plugin_register_and_invoke() {
+    let key = Keypair::generate();
+    let ctx = ctx_plugin("modq", &key.public());
+
+    // The plugin authenticates and registers a `global` action.
+    let mut plugin = plugin_session(&ctx, &key).await;
+    let reg = weft_proto::Registration {
+        api: 1,
+        id: "modq".into(),
+        name: "Mod Queue".into(),
+        icon: None,
+        actions: vec![weft_proto::ActionDecl {
+            id: "open".into(),
+            label: "Open".into(),
+            icon: None,
+            surface: weft_proto::Surface::Global,
+            context: weft_proto::ContextType::None,
+            description: None,
+            visibility: None,
+            input: vec![],
+        }],
+        hooks: vec![],
+    };
+    plugin.send(&format!(
+        "@reg={} PLUGIN-REGISTER",
+        weft_proto::plugin_to_b64(&reg).unwrap()
+    ));
+
+    // A client sees the action in the catalog (barrier: register is processed).
+    let mut client = ready(&ctx, "ada").await;
+    wait_for_action(&mut client, "modq", "open").await;
+
+    // The client invokes it; weftd routes the invoke to the plugin's session.
+    client.send("@label=i1 PLUGIN INVOKE modq open");
+    let routed = plugin.recv_raw().await;
+    let req = weft_proto::Request::parse(&routed).expect("routed invoke parses");
+    let weft_proto::Command::PluginInvoke { action, .. } = req.command else {
+        panic!("plugin expected a routed PLUGIN INVOKE, got {routed}");
+    };
+    assert_eq!(action, "open");
+    let view_id = req.label.expect("invoke carries the view-id as its label");
+
+    // The plugin returns a terminal toast; weftd relays it to the client with the
+    // client's original label.
+    let result = weft_proto::plugin_to_b64(&weft_proto::ViewResult::Toast {
+        kind: weft_proto::ToastKind::Ok,
+        text: "done".into(),
+    })
+    .unwrap();
+    plugin.send(&format!("@result={result} PLUGIN-RESULT {view_id}"));
+
+    let reply = client.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("i1"));
+    let Event::PluginResult {
+        view_id: vid,
+        result: got,
+    } = reply.event
+    else {
+        panic!("client expected the relayed PLUGIN-RESULT, got {reply:?}");
+    };
+    assert_eq!(vid, view_id);
+    let decoded: weft_proto::ViewResult = weft_proto::plugin_from_b64(&got).unwrap();
+    assert!(matches!(decoded, weft_proto::ViewResult::Toast { .. }));
+}
+
+#[tokio::test]
+async fn plugin_invoke_unknown_action_is_no_such_target() {
+    let key = Keypair::generate();
+    let ctx = ctx_plugin("modq", &key.public());
+    let _plugin = plugin_session(&ctx, &key).await; // registered nothing
+
+    let mut client = ready(&ctx, "ada").await;
+    client.send("@label=i1 PLUGIN INVOKE modq nope");
+    let reply = client.expect_err(ErrCode::NoSuchTarget).await;
+    assert_eq!(reply.label.as_deref(), Some("i1"));
+}
+
 #[tokio::test]
 async fn foreign_bridge_realm_scheme_authorization() {
     let key = Keypair::generate();

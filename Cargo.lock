@@ -9544,6 +9544,9 @@ version = "0.1.0"
 name = "weft-proto"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "ciborium",
+ "serde",
  "thiserror 1.0.69",
  "ulid",
 ]

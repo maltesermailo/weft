@@ -188,6 +188,17 @@ pub struct ServerCtx {
     pending_provision: std::sync::Mutex<HashMap<String, PendingProvision>>,
     /// Monotonic source of provisioning job tokens (§3.3).
     provision_seq: AtomicU64,
+    /// Plugin system (`docs/architecture/plugin-spec.md` §4.2): pinned remote-plugin
+    /// keys → their `[[plugin.remote]]` id. Proven at `AUTH ADAPTER`.
+    pub(crate) remote_plugins: Vec<(String, PublicKey)>,
+    /// Registered remote plugins: id → its writer + declared actions (§12.3).
+    /// Registered at `PLUGIN-REGISTER`, dropped when the session ends.
+    plugin_registry: std::sync::Mutex<HashMap<String, PluginReg>>,
+    /// Parked client invocations awaiting a plugin's `PLUGIN-VIEW`/`-RESULT`,
+    /// keyed by the minted view-id (§11.1) → the requester's writer + request label.
+    pending_invoke: std::sync::Mutex<HashMap<String, PendingReply>>,
+    /// Monotonic source of view-ids (§11.1).
+    view_seq: AtomicU64,
     /// §2.2 namespace creation: `open` (any account, up to `ns_quota`) or
     /// gated (needs the `ns-create` cap).
     pub(crate) ns_creation_open: bool,
@@ -408,6 +419,20 @@ struct PendingProvision {
     label: Option<String>,
 }
 
+/// A parked requester's raw-line writer + request label, for a cross-session
+/// completion (foreign-bridge provisioning §3.3; plugin invocation §11.1).
+type PendingReply = (tokio::sync::mpsc::Sender<String>, Option<String>);
+
+/// A registered remote plugin (App Service, plugin-spec.md §12.3): the writer
+/// weftd pushes routed invocations to, plus the plugin's declared actions (the
+/// catalog it serves to clients) and display metadata.
+struct PluginReg {
+    out: tokio::sync::mpsc::Sender<String>,
+    name: String,
+    icon: Option<String>,
+    actions: Vec<weft_proto::ActionDecl>,
+}
+
 /// Deliver a control line to a **peer network** (§11.14). Preferred path: the
 /// peer's persistent bridge (see [`ServerCtx::request_friend_deliver`]); the
 /// ephemeral tunnel driver is the fallback for a never-bridged peer. A user
@@ -531,6 +556,10 @@ impl ServerCtx {
             foreign_control: std::sync::Mutex::new(HashMap::new()),
             pending_provision: std::sync::Mutex::new(HashMap::new()),
             provision_seq: AtomicU64::new(1),
+            remote_plugins: Vec::new(),
+            plugin_registry: std::sync::Mutex::new(HashMap::new()),
+            pending_invoke: std::sync::Mutex::new(HashMap::new()),
+            view_seq: AtomicU64::new(1),
             peers,
             netblocks,
             moderation,
@@ -1271,12 +1300,137 @@ impl ServerCtx {
     pub(crate) fn complete_provision(
         &self,
         job: &str,
-    ) -> Option<(tokio::sync::mpsc::Sender<String>, Option<String>)> {
+    ) -> Option<PendingReply> {
         self.pending_provision
             .lock()
             .expect("pending_provision lock")
             .remove(job)
             .map(|p| (p.reply, p.label))
+    }
+
+    // ---- plugin system (plugin-spec.md §4.2, §11–§12) ----
+
+    /// weftd installs the pinned remote plugins from `[[plugin.remote]]` config.
+    pub fn with_remote_plugins(mut self, plugins: Vec<(String, PublicKey)>) -> Self {
+        self.remote_plugins = plugins;
+        self
+    }
+
+    /// The `[[plugin.remote]]` id a pinned key authenticates as, if any (§4.2).
+    pub(crate) fn remote_plugin_key(&self, key: &PublicKey) -> Option<String> {
+        self.remote_plugins
+            .iter()
+            .find(|(_, k)| k == key)
+            .map(|(id, _)| id.clone())
+    }
+
+    /// §12.3 register a connected plugin's writer + declared actions.
+    pub(crate) fn register_plugin(
+        &self,
+        id: String,
+        out: tokio::sync::mpsc::Sender<String>,
+        name: String,
+        icon: Option<String>,
+        actions: Vec<weft_proto::ActionDecl>,
+    ) {
+        self.plugin_registry.lock().expect("plugin_registry lock").insert(
+            id,
+            PluginReg {
+                out,
+                name,
+                icon,
+                actions,
+            },
+        );
+    }
+
+    /// Drop a plugin's registration when its session ends — only if `out` still
+    /// owns the slot (a reconnected plugin that took over is left in place).
+    pub(crate) fn unregister_plugin(&self, id: &str, out: &tokio::sync::mpsc::Sender<String>) {
+        let mut map = self.plugin_registry.lock().expect("plugin_registry lock");
+
+        if map.get(id).is_some_and(|r| r.out.same_channel(out)) {
+            map.remove(id);
+        }
+    }
+
+    /// The client-facing action catalog of every registered plugin (§12.5).
+    pub(crate) fn plugin_catalog(&self) -> weft_proto::Catalog {
+        let map = self.plugin_registry.lock().expect("plugin_registry lock");
+
+        weft_proto::Catalog {
+            plugins: map
+                .iter()
+                .map(|(id, r)| weft_proto::CatalogEntry {
+                    plugin_id: id.clone(),
+                    name: r.name.clone(),
+                    icon: r.icon.clone(),
+                    actions: r.actions.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// A registered plugin's writer, if it declares `action` (§12.4 routing). A
+    /// client `PLUGIN INVOKE` names the plugin, so this both routes and validates
+    /// the action exists — `None` ⇒ NO-SUCH-TARGET (anti-enumeration).
+    pub(crate) fn plugin_out_for(
+        &self,
+        plugin: &str,
+        action: &str,
+    ) -> Option<tokio::sync::mpsc::Sender<String>> {
+        let map = self.plugin_registry.lock().expect("plugin_registry lock");
+
+        map.get(plugin)
+            .filter(|r| r.actions.iter().any(|a| a.id == action))
+            .map(|r| r.out.clone())
+    }
+
+    /// Mint a per-session view-id for an invocation (§11.1).
+    pub(crate) fn mint_view_id(&self, plugin: &str) -> String {
+        format!(
+            "{plugin}:{}",
+            self.view_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )
+    }
+
+    /// Park a client invocation awaiting the plugin's response, keyed by view-id.
+    pub(crate) fn park_invoke(
+        &self,
+        view_id: String,
+        reply: tokio::sync::mpsc::Sender<String>,
+        label: Option<String>,
+    ) {
+        self.pending_invoke
+            .lock()
+            .expect("pending_invoke lock")
+            .insert(view_id, (reply, label));
+    }
+
+    /// Remove + return a parked invocation's requester writer + label by view-id
+    /// (a terminal `PLUGIN-RESULT`).
+    pub(crate) fn complete_invoke(
+        &self,
+        view_id: &str,
+    ) -> Option<PendingReply> {
+        self.pending_invoke
+            .lock()
+            .expect("pending_invoke lock")
+            .remove(view_id)
+    }
+
+    /// Clone (but keep) a parked invocation's requester writer + label — for a
+    /// non-terminal `PLUGIN-VIEW`/`PLUGIN-PATCH` that continues the flow (§11.2).
+    pub(crate) fn peek_invoke(
+        &self,
+        view_id: &str,
+    ) -> Option<PendingReply> {
+        self.pending_invoke
+            .lock()
+            .expect("pending_invoke lock")
+            .get(view_id)
+            .map(|(tx, label)| (tx.clone(), label.clone()))
     }
 
     /// Sign a manifest with this network's key (§11.3). The §11.3 authority

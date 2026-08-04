@@ -398,6 +398,16 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         }
     }
 
+    // Plugin system (plugin-spec.md §4.2): pinned remote-plugin keys → their id
+    // (`[[plugin.remote]]`). Each proves its key at `AUTH ADAPTER`.
+    let mut remote_plugins = Vec::new();
+    for plugin in &config.plugin.remote {
+        match weft_core::PublicKey::from_b64(&plugin.key) {
+            Ok(k) => remote_plugins.push((plugin.id.clone(), k)),
+            Err(_) => warn!(plugin = %plugin.id, "skipping [[plugin.remote]] entry with invalid key"),
+        }
+    }
+
     // §6.7 banned-word filter for new usernames + namespace vanities.
     let (banned_substrings, banned_regexes) =
         load_banned_words(config.banned_words_file.as_deref());
@@ -423,6 +433,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 banned_substrings.clone(),
                 banned_regexes.clone(),
                 foreign_adapters.clone(),
+                remote_plugins.clone(),
             )
             .await?
         }
@@ -456,6 +467,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 banned_substrings.clone(),
                 banned_regexes.clone(),
                 foreign_adapters.clone(),
+                remote_plugins.clone(),
             )
             .await?
         }
@@ -841,6 +853,7 @@ async fn boot<S>(
     banned_substrings: Vec<String>,
     banned_regexes: Vec<String>,
     foreign_adapters: Vec<(weft_proto::Scheme, weft_core::PublicKey)>,
+    remote_plugins: Vec<(String, weft_core::PublicKey)>,
 ) -> anyhow::Result<(
     Arc<ServerCtx>,
     Vec<(weft_proto::ChannelName, weft_proto::RetentionPolicy)>,
@@ -938,7 +951,8 @@ where
         )
         .with_banned_words(banned_substrings, banned_regexes)
         .with_require_email(require_email)
-        .with_foreign_adapters(foreign_adapters),
+        .with_foreign_adapters(foreign_adapters)
+        .with_remote_plugins(remote_plugins),
     );
     let admin_router = admin_ingredients.map(|(secret, ops, network)| {
         let auth = weft_admin::auth::config(secret, ops);

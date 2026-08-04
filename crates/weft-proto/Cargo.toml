@@ -11,3 +11,8 @@ description = "WEFT wire codec (L0): line grammar, verbs, events, error registry
 [dependencies]
 thiserror.workspace = true
 ulid.workspace = true
+# Plugin SDUI codec (M-plug-1): the component/view/patch types ride as base64-CBOR
+# in a tag. Pure (no I/O), so L0-safe; already workspace deps (crypto/store).
+serde = { workspace = true }
+ciborium = { workspace = true }
+base64 = { workspace = true }

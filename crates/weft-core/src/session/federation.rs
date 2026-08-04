@@ -80,19 +80,24 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
-    /// §3 AUTH ADAPTER: a foreign-bridge adapter proves control of a pinned
-    /// `[[foreign_bridge]]` key. An unpinned key funnels to the uniform
-    /// AUTH-FAILED (no adapter-existence oracle, invariant 1 discipline).
+    /// §3 / plugin-spec §4.2 AUTH ADAPTER: a pinned external daemon proves control
+    /// of its key. The key resolves to a **remote plugin** (`[[plugin.remote]]`) or
+    /// a **foreign-bridge adapter** (`[[foreign_bridge]]`); an unpinned key funnels
+    /// to the uniform AUTH-FAILED (no existence oracle, invariant 1 discipline).
     pub(super) async fn on_auth_adapter(
         &mut self,
         label: Option<String>,
         pubkey: String,
     ) -> io::Result<Flow> {
-        let device = PublicKey::from_b64(&pubkey)
-            .ok()
-            .filter(|k| self.ctx.adapter_key_pinned(k));
+        let Some(device) = PublicKey::from_b64(&pubkey).ok() else {
+            return self.auth_failed(label).await;
+        };
 
-        let Some(device) = device else {
+        let subject = if let Some(id) = self.ctx.remote_plugin_key(&device) {
+            ChallengeSubject::Plugin { id }
+        } else if self.ctx.adapter_key_pinned(&device) {
+            ChallengeSubject::Adapter
+        } else {
             return self.auth_failed(label).await;
         };
 
@@ -109,7 +114,7 @@ impl<S: ControlStream> Session<S> {
             challenge: Some(PendingChallenge {
                 device,
                 nonce,
-                subject: ChallengeSubject::Adapter,
+                subject,
             }),
         };
         Ok(Flow::Continue)

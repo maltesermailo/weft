@@ -757,6 +757,35 @@ pub enum Command {
     CallDecline { user: UserRef },
     /// `CALL END <user@net>` — hang up / cancel a call with `user`.
     CallEnd { user: UserRef },
+    /// Plugin system (`docs/architecture/plugin-spec.md` §12.1). `PLUGINS` — ask
+    /// for the action catalog.
+    Plugins,
+    /// `PLUGIN INVOKE <plugin> <action> [<ctx-ref>]` with `@params=<b64cbor>`
+    /// (§12.1). `params` is the input-schema values, carried opaque here (a
+    /// base64-CBOR blob the plugin host decodes via [`crate::plugin_from_b64`]).
+    PluginInvoke {
+        plugin: String,
+        action: String,
+        ctx_ref: Option<String>,
+        params: Option<String>,
+    },
+    /// `PLUGIN SUBMIT <view-id>` with `@values=<b64cbor>` — submit a form step.
+    PluginSubmit {
+        view_id: String,
+        values: Option<String>,
+    },
+    /// `PLUGIN ACTION <view-id> <button-id>` (optional `@values=`) — a control click.
+    PluginAction {
+        view_id: String,
+        button: String,
+        values: Option<String>,
+    },
+    /// `PLUGIN SUBSCRIBE <view-id>` — panel/widget liveness (§12.1).
+    PluginSubscribe { view_id: String },
+    /// `PLUGIN UNSUBSCRIBE <view-id>`.
+    PluginUnsubscribe { view_id: String },
+    /// `PLUGIN CLOSE <view-id>` — user dismissed a view.
+    PluginClose { view_id: String },
     /// Any verb outside the known set. Servers ignore it silently (§4).
     Unknown { verb: String },
 }
@@ -2062,6 +2091,45 @@ impl Command {
                     }),
                 }
             }
+            "PLUGINS" => Ok(Command::Plugins),
+            "PLUGIN" => {
+                let mut args = Args::new(line, "PLUGIN");
+                let sub = args.req("subcommand")?.to_ascii_uppercase();
+                // Structured payloads (`params`/`values`) ride opaque in b64-CBOR
+                // tags; the plugin host decodes them (plugin-spec.md §12.1).
+                let tag = |k: &str| line.tags.get(k).filter(|v| !v.is_empty()).cloned();
+                match sub.as_str() {
+                    "INVOKE" => Ok(Command::PluginInvoke {
+                        plugin: args.req("plugin")?.to_string(),
+                        action: args.req("action")?.to_string(),
+                        ctx_ref: args.opt().map(str::to_string),
+                        params: tag("params"),
+                    }),
+                    "SUBMIT" => Ok(Command::PluginSubmit {
+                        view_id: args.req("view-id")?.to_string(),
+                        values: tag("values"),
+                    }),
+                    "ACTION" => Ok(Command::PluginAction {
+                        view_id: args.req("view-id")?.to_string(),
+                        button: args.req("button-id")?.to_string(),
+                        values: tag("values"),
+                    }),
+                    "SUBSCRIBE" => Ok(Command::PluginSubscribe {
+                        view_id: args.req("view-id")?.to_string(),
+                    }),
+                    "UNSUBSCRIBE" => Ok(Command::PluginUnsubscribe {
+                        view_id: args.req("view-id")?.to_string(),
+                    }),
+                    "CLOSE" => Ok(Command::PluginClose {
+                        view_id: args.req("view-id")?.to_string(),
+                    }),
+                    _ => Err(ParseError::BadParam {
+                        verb: "PLUGIN",
+                        what: "subcommand",
+                        value: sub,
+                    }),
+                }
+            }
             _ => Ok(Command::Unknown {
                 verb: verb.to_string(),
             }),
@@ -2930,6 +2998,57 @@ impl Command {
                 ("CALL", vec!["DECLINE".to_string(), user.to_string()], None)
             }
             Command::CallEnd { user } => ("CALL", vec!["END".to_string(), user.to_string()], None),
+            Command::Plugins => ("PLUGINS", vec![], None),
+            Command::PluginInvoke {
+                plugin,
+                action,
+                ctx_ref,
+                params,
+            } => {
+                if let Some(params) = params {
+                    tags.insert("params".to_string(), params.clone());
+                }
+
+                let mut v = vec!["INVOKE".to_string(), plugin.clone(), action.clone()];
+                if let Some(ctx_ref) = ctx_ref {
+                    v.push(ctx_ref.clone());
+                }
+
+                ("PLUGIN", v, None)
+            }
+            Command::PluginSubmit { view_id, values } => {
+                if let Some(values) = values {
+                    tags.insert("values".to_string(), values.clone());
+                }
+                ("PLUGIN", vec!["SUBMIT".to_string(), view_id.clone()], None)
+            }
+            Command::PluginAction {
+                view_id,
+                button,
+                values,
+            } => {
+                if let Some(values) = values {
+                    tags.insert("values".to_string(), values.clone());
+                }
+                (
+                    "PLUGIN",
+                    vec!["ACTION".to_string(), view_id.clone(), button.clone()],
+                    None,
+                )
+            }
+            Command::PluginSubscribe { view_id } => (
+                "PLUGIN",
+                vec!["SUBSCRIBE".to_string(), view_id.clone()],
+                None,
+            ),
+            Command::PluginUnsubscribe { view_id } => (
+                "PLUGIN",
+                vec!["UNSUBSCRIBE".to_string(), view_id.clone()],
+                None,
+            ),
+            Command::PluginClose { view_id } => {
+                ("PLUGIN", vec!["CLOSE".to_string(), view_id.clone()], None)
+            }
             Command::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown command"));
             }
@@ -4068,6 +4187,52 @@ mod tests {
         assert!(Request::parse("REALM ASSERT matrix://matrix.org/gaming").is_err());
         assert!(Request::parse("REALM FROB matrix").is_err());
         assert!(Request::parse("PROVISION-OK").is_err()); // job required
+    }
+
+    #[test]
+    fn plugin_verbs_round_trip() {
+        round_trip(&Request::new(Command::Plugins));
+        round_trip(&Request::with_label(
+            Command::PluginInvoke {
+                plugin: "translate".into(),
+                action: "translate".into(),
+                ctx_ref: Some("net.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".into()),
+                params: Some("Zm9vYmFy".into()),
+            },
+            "i1",
+        ));
+        // No ctx-ref, no params (a global action).
+        round_trip(&Request::new(Command::PluginInvoke {
+            plugin: "modq".into(),
+            action: "open".into(),
+            ctx_ref: None,
+            params: None,
+        }));
+        round_trip(&Request::new(Command::PluginSubmit {
+            view_id: "translate:ab12:1".into(),
+            values: Some("Zm9v".into()),
+        }));
+        round_trip(&Request::new(Command::PluginAction {
+            view_id: "v:ab12:2".into(),
+            button: "save".into(),
+            values: None,
+        }));
+        round_trip(&Request::new(Command::PluginSubscribe {
+            view_id: "v:ab12:3".into(),
+        }));
+        round_trip(&Request::new(Command::PluginUnsubscribe {
+            view_id: "v:ab12:3".into(),
+        }));
+        round_trip(&Request::new(Command::PluginClose {
+            view_id: "v:ab12:3".into(),
+        }));
+
+        assert!(matches!(
+            Request::parse("@params=Zm9v PLUGIN INVOKE p a").unwrap().command,
+            Command::PluginInvoke { params: Some(p), ctx_ref: None, .. } if p == "Zm9v"
+        ));
+        assert!(Request::parse("PLUGIN FROB x").is_err());
+        assert!(Request::parse("PLUGIN SUBMIT").is_err()); // view-id required
     }
 
     #[test]

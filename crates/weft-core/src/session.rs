@@ -49,6 +49,7 @@ mod groups;
 mod invites;
 mod moderation;
 mod namespaces;
+mod plugin;
 mod profile;
 mod relay;
 mod reset;
@@ -256,6 +257,9 @@ enum ChallengeSubject {
     /// daemon, identified only by its key (scheme authorization is checked later
     /// at `REALM REGISTER`/`REALM ASSERT`).
     Adapter,
+    /// Plugin-spec §4.2 remote-plugin auth: the connecting party is a pinned
+    /// `[[plugin.remote]]` App Service, resolved to `id` by its key.
+    Plugin { id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +287,16 @@ enum State {
     ForeignBridge {
         key: PublicKey,
         realm: Option<ForeignUri>,
+    },
+    /// Plugin system (`docs/architecture/plugin-spec.md` §3.1/§4.2): a pinned
+    /// **remote plugin** (App Service) session. `key` is the plugin key proved at
+    /// `AUTH ADAPTER`; `plugin_id` is the `[[plugin.remote]]` id it authenticated
+    /// as. It sends `PLUGIN-REGISTER` (its actions/hooks) + `PLUGIN-VIEW`/`-RESULT`
+    /// in response to routed invocations. (The foreign-bridge session is folded
+    /// into this at M-plug-11; kept separate until then.)
+    PluginService {
+        key: PublicKey,
+        plugin_id: String,
     },
 }
 
@@ -575,6 +589,12 @@ impl<S: ControlStream> Session<S> {
             self.ctx
                 .unregister_foreign_control(&scheme, &self.fed_out_tx);
         }
+        // A remote-plugin session is going away: drop its catalog registration so
+        // weftd stops routing invocations to a dead session (plugin-spec §5.2 — a
+        // remote crash is a clean disconnect).
+        if let State::PluginService { plugin_id, .. } = &self.state {
+            self.ctx.unregister_plugin(plugin_id, &self.fed_out_tx);
+        }
         if let Some(account) = self.registered.take() {
             self.ctx
                 .directory
@@ -611,6 +631,11 @@ impl<S: ControlStream> Session<S> {
         // Command dispatch, like an ordinary bridge session.
         if let State::ForeignBridge { key, realm } = self.state.clone() {
             return self.on_foreign_bridge_line(key, realm, &line).await;
+        }
+        // A remote-plugin (App Service) session speaks PLUGIN-REGISTER + the
+        // PLUGIN-VIEW/-RESULT responses — route it before the client dispatch.
+        if let State::PluginService { key, plugin_id } = self.state.clone() {
+            return self.on_plugin_service_line(key, plugin_id, &line).await;
         }
         let request = match Request::from_line(&line) {
             Ok(request) => request,
@@ -657,9 +682,11 @@ impl<S: ControlStream> Session<S> {
             State::Negotiating => self.on_negotiating(label, cmd).await,
             State::Unauthed { challenge } => self.on_unauthed(label, cmd, challenge).await,
             State::Ready { account } => self.on_ready(label, cmd, account).await,
-            // Bridge and foreign-bridge lines are intercepted in `on_line` before
-            // Command decode.
-            State::Bridge { .. } | State::ForeignBridge { .. } => Ok(Flow::Continue),
+            // Bridge, foreign-bridge, and plugin-service lines are intercepted in
+            // `on_line` before Command decode.
+            State::Bridge { .. } | State::ForeignBridge { .. } | State::PluginService { .. } => {
+                Ok(Flow::Continue)
+            }
         }
     }
 
@@ -874,6 +901,18 @@ impl<S: ControlStream> Session<S> {
                             self.welcome_foreign_bridge(label, pending.device).await
                         } else {
                             debug!("adapter auth rejected");
+                            self.auth_failed(label).await
+                        }
+                    }
+                    // Plugin-spec §4.2 remote-plugin PROOF: the key resolved to a
+                    // `[[plugin.remote]]` id at AUTH ADAPTER; a valid proof enters
+                    // the plugin-service session bound to that id.
+                    ChallengeSubject::Plugin { id } => {
+                        if proof_ok {
+                            info!(%id, "remote plugin authenticated");
+                            self.welcome_plugin_service(label, pending.device, id).await
+                        } else {
+                            debug!(%id, "plugin auth rejected");
                             self.auth_failed(label).await
                         }
                     }
@@ -1396,6 +1435,26 @@ impl<S: ControlStream> Session<S> {
             | Command::ProvisionOk { .. }
             | Command::ProvisionErr { .. } => {
                 self.unsupported(label, "foreign-bridge verb requires an adapter session")
+                    .await
+            }
+            // Plugin system (plugin-spec.md §12). M-plug-2: catalog + invoke routing.
+            Command::Plugins => self.on_plugins(label).await,
+            Command::PluginInvoke {
+                plugin,
+                action,
+                ctx_ref,
+                params,
+            } => {
+                self.on_plugin_invoke(label, plugin, action, ctx_ref, params)
+                    .await
+            }
+            // Multi-step flow + subscription routing lands in M-plug-3.
+            Command::PluginSubmit { .. }
+            | Command::PluginAction { .. }
+            | Command::PluginSubscribe { .. }
+            | Command::PluginUnsubscribe { .. }
+            | Command::PluginClose { .. } => {
+                self.unsupported(label, "plugin flows land in a later milestone")
                     .await
             }
             Command::NetblockAdd { network, reason } => {
