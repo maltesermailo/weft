@@ -23,6 +23,16 @@ fn req_tag(line: &Line, verb: &'static str, key: &'static str) -> Result<String,
         .ok_or(ParseError::MissingParam { verb, what: key })
 }
 
+/// An optional, non-empty tag value.
+fn opt_tag(line: &Line, key: &str) -> Option<String> {
+    line.tags.get(key).filter(|v| !v.is_empty()).cloned()
+}
+
+/// An optional `origin=` foreign-URI tag (framework §7a.2).
+fn origin_tag(line: &Line) -> Result<Option<ForeignUri>, ParseError> {
+    opt_tag(line, "origin").map(|v| v.parse()).transpose()
+}
+
 /// An event plus its optional `label` echo (§3.5). Only direct responses
 /// carry a label; broadcast copies never do — that distinction is the
 /// session layer's job, the codec just (de)serializes it.
@@ -80,6 +90,10 @@ pub struct MessageEvent {
     pub edited: Option<u64>,
     /// Batch form only: unix ms of the final edit (`edited-at=`).
     pub edited_at: Option<u64>,
+    /// `foreign=` — the author's native foreign identity (an MXID, a snowflake)
+    /// on a provider-managed channel; `sender` stays the home-minted puppet
+    /// handle (framework §7a.1). Absent ⇒ a native author.
+    pub foreign: Option<String>,
 }
 
 /// `ERR <CODE> [context] :text` (§8).
@@ -133,6 +147,10 @@ pub enum Event {
         action: MemberAction,
         display: Option<String>,
         count: Option<u64>,
+        /// `foreign=` — the actor's native foreign identity (an MXID, a
+        /// snowflake) on a provider-managed channel; `user` stays the
+        /// home-minted puppet handle (framework §7a.1).
+        foreign: Option<String>,
     },
     /// `TYPING <#chan> <user@net> <start|stop>` — never stored.
     Typing {
@@ -259,6 +277,8 @@ pub enum Event {
         msgid: MsgId,
         edit_of: MsgId,
         body: String,
+        /// `foreign=` — the editor's native foreign identity (framework §7a.1).
+        foreign: Option<String>,
     },
     /// `DELETED <target> <msgid>` — the tombstone (§7); `by=` optional.
     Deleted {
@@ -273,6 +293,8 @@ pub enum Event {
         emoji: String,
         op: ReactionOp,
         by: UserRef,
+        /// `foreign=` — the reactor's native foreign identity (framework §7a.1).
+        foreign: Option<String>,
     },
     /// `REACTIONS <target> <msgid> <emoji> <count>` — batch summary form
     /// (§12.1); `by=` lists the first ≤20 actors, count is authoritative.
@@ -421,6 +443,10 @@ pub enum Event {
         /// §6.2 welcome channel (`welcome=#ns/chan`), or `None` — the channel
         /// that receives a system "welcome" line when a member joins the ns.
         welcome: Option<String>,
+        /// `origin=` — the foreign space this namespace replicates, for badging
+        /// (framework §7a.2). Absent ⇒ native. Also rides DISCOVER (which lists
+        /// via NS-META).
+        origin: Option<ForeignUri>,
     },
     /// `MORE <cursor>` — pagination continuation (DISCOVER, §6.2).
     More {
@@ -439,6 +465,9 @@ pub enum Event {
         /// Human display name for the channel (v0.13). Empty for a legacy /
         /// top-level channel with no separate vanity.
         vanity: String,
+        /// `origin=` — the foreign space this channel replicates, for badging
+        /// (framework §7a.2). Absent ⇒ native.
+        origin: Option<ForeignUri>,
     },
     /// `CHANNEL-RENAMED <#old> <#new>` — a channel changed identity (§6.3);
     /// announced to members so clients re-key their local channel state.
@@ -816,6 +845,7 @@ impl Event {
                     meta: MsgMeta::from_tags(&line.tags)?,
                     edited: u64_tag(line, "edited", "MESSAGE")?,
                     edited_at: u64_tag(line, "edited-at", "MESSAGE")?,
+                    foreign: opt_tag(line, "foreign"),
                 })))
             }
             "MEMBER" => {
@@ -824,8 +854,9 @@ impl Event {
                     channel: args.req("channel")?.parse()?,
                     user: args.req("user")?.parse()?,
                     action: args.req("action")?.parse()?,
-                    display: line.tags.get("display").filter(|v| !v.is_empty()).cloned(),
+                    display: opt_tag(line, "display"),
                     count: u64_tag(line, "count", "MEMBER")?,
+                    foreign: opt_tag(line, "foreign"),
                 })
             }
             "TYPING" => {
@@ -1050,6 +1081,7 @@ impl Event {
                     msgid: tag_msgid("msgid")?,
                     edit_of: tag_msgid("edit-of")?,
                     body: args.trailing_req("new body")?.to_string(),
+                    foreign: opt_tag(line, "foreign"),
                 })
             }
             "DELETED" => {
@@ -1082,6 +1114,7 @@ impl Event {
                             what: "by tag",
                         })?
                         .parse()?,
+                    foreign: opt_tag(line, "foreign"),
                 })
             }
             "REACTIONS" => {
@@ -1270,6 +1303,7 @@ impl Event {
                         .unwrap_or_default(),
                     federation: line.tags.get("federation").map(String::as_str) == Some("yes"),
                     welcome: tag("welcome"),
+                    origin: origin_tag(line)?,
                 })
             }
             "MORE" => {
@@ -1297,6 +1331,7 @@ impl Event {
                         .and_then(|k| k.parse().ok())
                         .unwrap_or(ChannelKind::Text),
                     vanity: line.tags.get("vanity").cloned().unwrap_or_default(),
+                    origin: origin_tag(line)?,
                 })
             }
             "CHANNEL-RENAMED" => {
@@ -1758,6 +1793,9 @@ impl Event {
                 if let Some(edited_at) = message.edited_at {
                     tags.insert("edited-at".to_string(), edited_at.to_string());
                 }
+                if let Some(foreign) = &message.foreign {
+                    tags.insert("foreign".to_string(), foreign.clone());
+                }
                 (
                     "MESSAGE",
                     vec![message.target.to_string(), message.sender.to_string()],
@@ -1770,12 +1808,16 @@ impl Event {
                 action,
                 display,
                 count,
+                foreign,
             } => {
                 if let Some(display) = display {
                     tags.insert("display".to_string(), display.clone());
                 }
                 if let Some(count) = count {
                     tags.insert("count".to_string(), count.to_string());
+                }
+                if let Some(foreign) = foreign {
+                    tags.insert("foreign".to_string(), foreign.clone());
                 }
                 (
                     "MEMBER",
@@ -1934,9 +1976,13 @@ impl Event {
                 msgid,
                 edit_of,
                 body,
+                foreign,
             } => {
                 tags.insert("msgid".to_string(), msgid.to_string());
                 tags.insert("edit-of".to_string(), edit_of.to_string());
+                if let Some(foreign) = foreign {
+                    tags.insert("foreign".to_string(), foreign.clone());
+                }
                 (
                     "EDITED",
                     vec![target.to_string(), user.to_string()],
@@ -1955,9 +2001,13 @@ impl Event {
                 emoji,
                 op,
                 by,
+                foreign,
             } => {
                 tags.insert("op".to_string(), op.to_string());
                 tags.insert("by".to_string(), by.to_string());
+                if let Some(foreign) = foreign {
+                    tags.insert("foreign".to_string(), foreign.clone());
+                }
                 (
                     "REACTION",
                     vec![target.to_string(), msgid.to_string(), emoji.clone()],
@@ -2073,7 +2123,11 @@ impl Event {
                 categories,
                 federation,
                 welcome,
+                origin,
             } => {
+                if let Some(origin) = origin {
+                    tags.insert("origin".to_string(), origin.to_string());
+                }
                 tags.insert("vanity".to_string(), vanity.to_string());
                 for (k, v) in [
                     ("owner", owner),
@@ -2113,6 +2167,7 @@ impl Event {
                 position,
                 kind,
                 vanity,
+                origin,
             } => {
                 if let Some(category) = category {
                     tags.insert("category".to_string(), category.clone());
@@ -2122,6 +2177,9 @@ impl Event {
                 }
                 if !vanity.is_empty() {
                     tags.insert("vanity".to_string(), vanity.clone());
+                }
+                if let Some(origin) = origin {
+                    tags.insert("origin".to_string(), origin.to_string());
                 }
                 (
                     "CHANNEL-LAYOUT",
@@ -2662,6 +2720,7 @@ mod tests {
                 },
                 edited: None,
                 edited_at: None,
+                foreign: None,
             })),
             "req-1", // echo copy carries the sender's label = the ack (§9.2)
         ));
@@ -2677,6 +2736,7 @@ mod tests {
             },
             edited: None,
             edited_at: None,
+            foreign: None,
         }))));
         assert_eq!(
             Reply::parse("MESSAGE #general ada@hda.example :hi"),
@@ -2697,6 +2757,7 @@ mod tests {
                 action: MemberAction::Join,
                 display: Some("Ada L.".into()),
                 count: Some(3),
+                foreign: None,
             },
             "j1",
         );
@@ -2712,6 +2773,7 @@ mod tests {
             action: MemberAction::Part,
             display: None,
             count: None,
+            foreign: None,
         }));
         round_trip(&Reply::new(Event::Typing {
             channel: "#general".parse().unwrap(),
@@ -2888,11 +2950,47 @@ mod tests {
             meta: MsgMeta::default(),
             edited: Some(3),
             edited_at: Some(1_700_000_000_000),
+            foreign: None,
         })));
         let wire = reply.serialize().unwrap();
         assert!(wire.contains("edited=3"), "{wire}");
         assert!(wire.contains("edited-at=1700000000000"), "{wire}");
         round_trip(&reply);
+    }
+
+    #[test]
+    fn foreign_identity_tags_round_trip() {
+        // §7a.1: a provider-managed channel's events carry the author's native
+        // foreign identity; `sender`/`user`/`by` stay the home puppet handle.
+        let msg = Reply::new(Event::Message(Box::new(MessageEvent {
+            target: "#general".parse().unwrap(),
+            sender: "mx-alice@test.example".parse().unwrap(),
+            msgid: MSGID.parse().unwrap(),
+            body: "hi from matrix".into(),
+            meta: MsgMeta::default(),
+            edited: None,
+            edited_at: None,
+            foreign: Some("@alice:matrix.org".into()),
+        })));
+        assert!(msg.serialize().unwrap().contains("foreign=@alice:matrix.org"));
+        round_trip(&msg);
+
+        round_trip(&Reply::new(Event::Member {
+            channel: "#general".parse().unwrap(),
+            user: "mx-alice@test.example".parse().unwrap(),
+            action: MemberAction::Join,
+            display: None,
+            count: None,
+            foreign: Some("@alice:matrix.org".into()),
+        }));
+        round_trip(&Reply::new(Event::Reaction {
+            target: "#general".parse().unwrap(),
+            msgid: MSGID.parse().unwrap(),
+            emoji: "👍".into(),
+            op: ReactionOp::Add,
+            by: "mx-alice@test.example".parse().unwrap(),
+            foreign: Some("@alice:matrix.org".into()),
+        }));
     }
 
     #[test]
@@ -2903,6 +3001,7 @@ mod tests {
             msgid: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap(),
             edit_of: MSGID.parse().unwrap(),
             body: "corrected".into(),
+            foreign: None,
         }));
         // Both msgid= and edit-of= are required.
         assert!(Reply::parse(
@@ -2933,6 +3032,7 @@ mod tests {
             emoji: "🦀".into(),
             op: ReactionOp::Add,
             by: "ada@hda.example".parse().unwrap(),
+            foreign: None,
         }));
         // Batch summary (§12.1): count authoritative, actors capped upstream.
         // Shortcodes travel bare — `:ferris:` would collide with the §4
@@ -3214,6 +3314,7 @@ mod tests {
                 position: 3,
                 kind: ChannelKind::Text,
                 vanity: "general".into(),
+                origin: None,
             },
             "c1",
         ));
@@ -3224,6 +3325,7 @@ mod tests {
             position: 0,
             kind: ChannelKind::Text,
             vanity: String::new(),
+            origin: None,
         }));
         // A voice channel advertises `kind=voice`.
         let voice = Reply::new(Event::ChannelLayout {
@@ -3232,6 +3334,7 @@ mod tests {
             position: 1,
             kind: ChannelKind::Voice,
             vanity: "lounge".into(),
+            origin: None,
         });
         assert!(voice.serialize().unwrap().contains("kind=voice"));
         round_trip(&voice);
@@ -3264,6 +3367,8 @@ mod tests {
                 categories: vec!["Text".into(), "Voice".into()],
                 federation: true,
                 welcome: Some("#gaming/lobby".into()),
+                // §7a.2: a provider-managed replica advertises its foreign origin.
+                origin: Some("matrix://matrix.org/gaming".parse().unwrap()),
             },
             "n1",
         ));
@@ -3281,6 +3386,7 @@ mod tests {
             categories: Vec::new(),
             federation: false,
             welcome: None,
+            origin: None,
         }));
         round_trip(&Reply::new(Event::More {
             cursor: "next-page".into(),

@@ -35,15 +35,19 @@ slices land.
 
 ## Phase 0 — sign-off (no code)
 
-- [ ] **0. Materialization decisions** — ratify: owner = reserved suspended **sentinel account** ·
-      `root_key = ""` · the single **owner-shortcut gate** on `origin.is_some()` (context.rs cap
-      check). Everything in Phase 1 assumes these.
+- [x] **0. Materialization decisions — SIGNED OFF (owner, 2026-08-04):** owner = reserved suspended
+      **sentinel account** · `root_key = ""` · the single **owner-shortcut gate** on
+      `origin.is_some()` (context.rs cap check).
 
 ## Phase 1 — server content path (weftd/core; mock-provider-testable, no daemon needed)
 
-- [ ] **1. Foreign-display proto fields** (S) — `foreign=` tag on `MESSAGE`/`MEMBER`/`REACTION`/
-      `EDITED`; `origin=` on `NS-META`/`CHANNEL-LAYOUT`/`DISCOVER`. Round-trip tests FIRST.
-      Do before ingestion so ingested events are legible from day one. *(framework §7a.1–7a.2)*
+- [x] **1. Foreign-display proto fields** (S) — DONE 2026-08-04. `foreign: Option<String>` on
+      `MESSAGE`/`MEMBER`/`REACTION`/`EDITED`; `origin: Option<ForeignUri>` on `NS-META`/
+      `CHANNEL-LAYOUT` (DISCOVER lists via NS-META → covered). Round-trip + `foreign=`-tag tests;
+      `ns_meta_event` already wires `record.origin` → the badge flows the moment a replica exists.
+      Native emit sites pass `None`. Workspace green (proto 134, core 204, conformance 39), clippy
+      clean. *Deferred into slices 3/4: client-core `ClientEvent` pass-through + client badge UI
+      (lands when real values exist); channel-level `origin` on layout rows (materialization).*
 - [ ] **2. Provider-session unification** (M) — merge `foreign_control` + `plugin_registry` into one
       **provider registry**; fold `State::ForeignBridge` → `State::PluginService` (one session speaks
       bridge verbs AND plugin protocol); `schemes` field in `Registration` → `PROVISION` routing.

@@ -936,6 +936,7 @@ pub fn on_line<E: EventSink>(
             position,
             kind,
             vanity,
+            ..
         } => sink.emit(ClientEvent::ChannelLayout {
             channel: channel.to_string(),
             category,
@@ -1024,6 +1025,7 @@ pub fn on_line<E: EventSink>(
             emoji,
             op,
             by,
+            ..
         } => sink.emit(ClientEvent::Reaction {
             target: target.to_string(),
             msgid: msgid.to_string(),

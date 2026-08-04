@@ -103,6 +103,7 @@ impl<S: ControlStream> Session<S> {
                         position: record.position,
                         kind: record.kind,
                         vanity: record.vanity.clone(),
+                        origin: None,
                     },
                 )
                 .await?;
@@ -291,6 +292,7 @@ impl<S: ControlStream> Session<S> {
                         position: record.position,
                         kind: record.kind,
                         vanity: record.vanity.clone(),
+                        origin: None,
                     },
                 )
                 .await?;
@@ -365,6 +367,7 @@ impl<S: ControlStream> Session<S> {
                             meta,
                             edited: edited.map(|(count, _)| count),
                             edited_at: edited.map(|(_, at)| at),
+                            foreign: None,
                         })),
                     )
                     .await?;

@@ -552,6 +552,7 @@ impl Actor {
                         meta,
                         edited: None,
                         edited_at: None,
+                        foreign: None,
                     })),
                 );
             }
@@ -587,6 +588,7 @@ impl Actor {
                         meta,
                         edited: None,
                         edited_at: None,
+                        foreign: None,
                     })),
                     echo,
                 );
@@ -616,6 +618,7 @@ impl Actor {
                         msgid,
                         edit_of: root,
                         body,
+                        foreign: None,
                     },
                 );
             }
@@ -701,6 +704,7 @@ impl Actor {
                             ReactionOp::Remove
                         },
                         by: user,
+                        foreign: None,
                     },
                 );
             }
@@ -731,6 +735,7 @@ impl Actor {
                                 msgid,
                                 edit_of: root,
                                 body: arg,
+                                foreign: None,
                             },
                         );
                     }
@@ -779,6 +784,7 @@ impl Actor {
                                     ReactionOp::Remove
                                 },
                                 by: sender,
+                                foreign: None,
                             },
                         );
                     }
@@ -937,6 +943,7 @@ impl Actor {
                 meta,
                 edited: None,
                 edited_at: None,
+                foreign: None,
             })),
         );
     }
@@ -1010,5 +1017,6 @@ fn member_event(channel: &ChannelName, user: UserRef, action: MemberAction, coun
         action,
         display: None, // display profiles land with identity profiles
         count: Some(count),
+        foreign: None,
     }
 }

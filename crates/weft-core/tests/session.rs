@@ -2699,6 +2699,7 @@ async fn cross_network_group_attachment_is_mirrored() {
             },
             edited: None,
             edited_at: None,
+            foreign: None,
         },
     )))
     .to_line()
@@ -2828,6 +2829,7 @@ async fn cross_network_group_mutation_spoke_ingests_and_relays() {
         msgid: "peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB4".parse().unwrap(),
         edit_of: MID.parse().unwrap(),
         body: "home-fixed".to_string(),
+        foreign: None,
     })
     .to_line()
     .unwrap()
@@ -2898,6 +2900,7 @@ async fn cross_network_group_message_spoke_ingests() {
             },
             edited: None,
             edited_at: None,
+            foreign: None,
         },
     )))
     .to_line()

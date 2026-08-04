@@ -110,6 +110,7 @@ impl<S: ControlStream> Session<S> {
                                 position: 0,
                                 kind,
                                 vanity: vanity.clone(),
+                                origin: None,
                             },
                         )
                         .await;
@@ -141,6 +142,7 @@ impl<S: ControlStream> Session<S> {
                     position: 0,
                     kind,
                     vanity: vanity.clone(),
+                    origin: None,
                 },
             )
             .await?;
@@ -306,6 +308,7 @@ impl<S: ControlStream> Session<S> {
                         position: rec.position,
                         kind: rec.kind,
                         vanity: rec.vanity,
+                        origin: None,
                     })
                     .await;
             }
@@ -517,6 +520,7 @@ impl<S: ControlStream> Session<S> {
                         meta: meta.clone(),
                         edited: None,
                         edited_at: None,
+                        foreign: None,
                     }));
                     let record = EventRecord {
                         scope: Scope::Channel(channel),
@@ -719,6 +723,7 @@ impl<S: ControlStream> Session<S> {
                 meta,
                 edited: None,
                 edited_at: None,
+                foreign: None,
             }));
             if let Ok(line) = Reply::new(event).to_line() {
                 if let Ok(serialized) = line.serialize() {

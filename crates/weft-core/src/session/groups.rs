@@ -535,6 +535,7 @@ impl<S: ControlStream> Session<S> {
                 meta,
                 edited: None,
                 edited_at: None,
+                foreign: None,
             }));
             if let Ok(wire) = Reply::new(event).to_line() {
                 if let Ok(line) = wire.serialize() {

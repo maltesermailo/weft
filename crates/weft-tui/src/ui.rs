@@ -250,6 +250,7 @@ pub fn reply_entry(raw: String, reply: &Reply, me: &str) -> LogEntry {
             emoji,
             op,
             by,
+            ..
         } => {
             let verb = match op {
                 weft_proto::ReactionOp::Add => "reacted",

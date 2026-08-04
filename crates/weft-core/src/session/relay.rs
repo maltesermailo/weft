@@ -134,6 +134,7 @@ impl<S: ControlStream> Session<S> {
                 action: MemberAction::Join,
                 display: None,
                 count: Some(ack.count),
+                foreign: None,
             },
         )
         .await?;
@@ -227,6 +228,7 @@ impl<S: ControlStream> Session<S> {
                         action: MemberAction::Part,
                         display: None,
                         count: None,
+                        foreign: None,
                     },
                 )
                 .await?;
@@ -1049,6 +1051,7 @@ impl<S: ControlStream> Session<S> {
                     action: MemberAction::Join,
                     display: None,
                     count: Some(count),
+                    foreign: None,
                 },
             )
             .await?;
@@ -1152,6 +1155,7 @@ impl<S: ControlStream> Session<S> {
                             meta,
                             edited: None,
                             edited_at: None,
+                            foreign: None,
                         })),
                     )
                     .await?;
@@ -1214,6 +1218,7 @@ impl<S: ControlStream> Session<S> {
                         meta,
                         edited: None,
                         edited_at: None,
+                        foreign: None,
                     })),
                 )
                 .await?;
@@ -1466,6 +1471,7 @@ pub(super) fn batch_events(
                     meta,
                     edited: edited.map(|(count, _)| count),
                     edited_at: edited.map(|(_, at)| at),
+                    foreign: None,
                 })));
                 for summary in reactions {
                     events.push(Event::Reactions {

@@ -61,6 +61,7 @@ impl GroupMutKind {
                 msgid: mut_msgid,
                 edit_of: root,
                 body,
+                foreign: None,
             },
             GroupMutKind::Delete => Event::Deleted {
                 target: Target::Group(group),
@@ -77,6 +78,7 @@ impl GroupMutKind {
                     ReactionOp::Remove
                 },
                 by: sender,
+                foreign: None,
             },
         }
     }
@@ -652,6 +654,7 @@ impl Actor {
                     meta,
                     edited: None,
                     edited_at: None,
+                    foreign: None,
                 }));
                 self.deliver(&from, &to, origin, event);
                 let _ = delivered.send(true);
@@ -684,6 +687,7 @@ impl Actor {
                     meta,
                     edited: None,
                     edited_at: None,
+                    foreign: None,
                 }));
                 self.deliver_many(&members, origin, event);
             }
@@ -705,6 +709,7 @@ impl Actor {
                     meta: meta.clone(),
                     edited: None,
                     edited_at: None,
+                    foreign: None,
                 };
                 self.persist(EventRecord {
                     scope: Scope::Group(group),
@@ -745,6 +750,7 @@ impl Actor {
                     meta,
                     edited: None,
                     edited_at: None,
+                    foreign: None,
                 }));
                 // `origin` = the spoke poster's session for their own echo (its
                 // pending label attaches), else `SessionId::MAX` (a fresh ingest,
@@ -814,6 +820,7 @@ impl Actor {
                     msgid,
                     edit_of: root,
                     body,
+                    foreign: None,
                 };
                 self.deliver(&from, &peer, origin, event);
             }
@@ -869,6 +876,7 @@ impl Actor {
                         ReactionOp::Remove
                     },
                     by: self.user(&from),
+                    foreign: None,
                 };
                 self.deliver(&from, &peer, origin, event);
             }

@@ -1941,6 +1941,7 @@ fn ingest_record(peer: &NetworkName, event: &Event) -> Option<(ChannelName, Even
             msgid,
             edit_of,
             body,
+            ..
         } => {
             let channel = channel_of(target)?;
             // The edit and the message it edits both belong to the origin.
@@ -1982,6 +1983,7 @@ fn ingest_record(peer: &NetworkName, event: &Event) -> Option<(ChannelName, Even
             emoji,
             op,
             by,
+            ..
         } => {
             let channel = channel_of(target)?;
             if !from_peer(msgid) {

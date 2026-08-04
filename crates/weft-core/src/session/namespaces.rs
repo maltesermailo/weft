@@ -387,6 +387,10 @@ impl<S: ControlStream> Session<S> {
             categories: record.categories.clone(),
             federation: record.federation,
             welcome: record.welcome_channel.clone(),
+            // §7a.2: a provider-managed replica advertises its foreign origin so
+            // clients badge it. Stored as a URI string; a malformed value (never
+            // produced by our own writers) simply drops the badge.
+            origin: record.origin.as_deref().and_then(|o| o.parse().ok()),
         }
     }
 
@@ -925,6 +929,7 @@ impl<S: ControlStream> Session<S> {
                 categories: Vec::new(),
                 federation: false,
                 welcome: None,
+                origin: None,
             },
         )
         .await?;
@@ -1353,6 +1358,7 @@ impl<S: ControlStream> Session<S> {
                     position: record.position,
                     kind,
                     vanity: record.vanity,
+                    origin: None, // channel-level origin lands with materialization
                 },
             )
             .await?;
