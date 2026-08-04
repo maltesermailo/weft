@@ -119,10 +119,22 @@ slices land.
       Test: ingest → member sees `MESSAGE` with our-network msgid + `foreign=@alice:…` + puppet
       sender; unmirrored drop proven by a FIFO barrier. *Remaining in slice 4: EDIT/DELETE/REACT via
       `relay_mutate_as` (the field is already threaded), MEMBER (foreign roster), and `POLICY`.*
-- [ ] **4b. Federated-looking-puppet follow-ups** (S, from the §7a.0 amendment) — a replica user now
-      *looks* federated but has **no peer bridge**, so guard the paths that assume otherwise:
-      `FEDERATE`/auto-bridge dialing toward a replica's "network", and name-keyed `NETBLOCK`
-      semantics for a realm-as-network. (DM routing is now slice 4d, a feature not a guard.)
+- [x] **4b. Realm-as-network guards** (S, from the §7a.0 amendment) — **DONE 2026-08-04.** A replica
+      user *looks* federated but has no peer bridge, so the paths that assume otherwise are guarded.
+      Scoping this turned up a **sharper issue than the one the slice named**:
+      * **Realm shadowing (the real find).** "A realm is a network" puts realm names in the *same
+        namespace* as real WEFT networks. A provider claiming one already spoken for could mint users
+        indistinguishable from that network's (`alice@hda.example`) and — since 4d's DM routing checks
+        `provider_for_realm` **before** the peer bridge — quietly receive mail addressed to them.
+        `REALM ASSERT` now refuses a realm that is **our own network**, a network we hold a **peer
+        record** for, a **netblocked** name, or one that isn't a valid `NetworkName` at all (it could
+        never mint valid users). Tested, including that an unclaimed realm still binds.
+      * **NETBLOCK is name-keyed, so it bites realms (invariant 7).** Blocking a network now stops a
+        bound provider's ingestion **mid-session** (effect 3), refuses a fresh `REALM ASSERT` for it,
+        and refuses DM routing to it — a network an operator shut out cannot re-enter as a bridge, or
+        keep talking on an already-bound session. Tested end-to-end.
+      * **`FEDERATE` toward a bridged realm** answers "that network is bridged, not federated" instead
+        of spending a well-known fetch + connect attempt to discover there is no WEFT server there.
 - [x] **4c. Foreign namespace membership** (M) — DONE 2026-08-04. **Matrix users can join WEFT
       namespaces.** Six `MembershipStore` ns-methods now take/return a **member key string** (bare =
       local `ada`, `user@network` = bridged) — **no data migration** (the column was always free

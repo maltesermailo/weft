@@ -1110,6 +1110,20 @@ impl<S: ControlStream> Session<S> {
                 .await?;
             return Ok(Flow::Continue);
         }
+        // 4b: a bridged realm looks like a network but has no WEFT server behind
+        // it — dialing it would spend a well-known fetch and a connect attempt to
+        // learn that. Its spaces arrive through the provider, not through
+        // federation, so say so rather than failing slowly.
+        if self
+            .ctx
+            .provider_for_realm(network.as_str())
+            .await
+            .is_some()
+        {
+            return self
+                .unsupported(label, "that network is bridged, not federated")
+                .await;
+        }
         if !self.ctx.federate_allowed(&account) {
             self.send_err(
                 label,

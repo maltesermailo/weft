@@ -1015,6 +1015,19 @@ impl<S: ControlStream> Session<S> {
                 .unsupported(None, "@as is not a user of this realm")
                 .await;
         }
+        // Invariant 7 effect 3, name-keyed: a realm blocked mid-session stops
+        // being ingested at once, exactly as a blocked peer does — a bridge is
+        // not a way back in for a network an operator has shut out.
+        if self
+            .ctx
+            .netblocks
+            .is_netblocked(&realm)
+            .await
+            .unwrap_or(false)
+        {
+            debug!(%realm, "ingestion from a netblocked realm — dropped");
+            return Ok(Flow::Continue);
+        }
 
         // The provider minted these, exactly as a peer network does, so they take
         // the ordinary federated ingest path. `ingest_record` re-checks that every
@@ -1427,6 +1440,16 @@ impl<S: ControlStream> Session<S> {
 
         // A realm we bridge is served by its provider; anything else is a peer
         // WEFT network and takes the federation path.
+        if self
+            .ctx
+            .netblocks
+            .is_netblocked(&peer.network)
+            .await
+            .unwrap_or(false)
+        {
+            return; // blocked either way — bridged realm or peer network
+        }
+
         if let Some(out) = self.ctx.provider_for_realm(peer.network.as_str()).await {
             let mut line = line;
             line.tags.insert(
@@ -1642,6 +1665,12 @@ impl<S: ControlStream> Session<S> {
                 .await
                 .map(|_| Flow::Continue);
         }
+        if let Some(refusal) = self.realm_refusal(realm.realm()).await {
+            return self
+                .send_err(label, ErrCode::Forbidden, Some(refusal), "realm refused")
+                .await
+                .map(|_| Flow::Continue);
+        }
 
         // A bound data connection is definitionally *serving* its scheme: it
         // joins the provider registry (liveness + PROVISION routing) like a
@@ -1661,6 +1690,43 @@ impl<S: ControlStream> Session<S> {
             .await;
         self.sync_provider_forwarders(&[scheme]).await;
         Ok(Flow::Continue)
+    }
+
+    /// Why a realm may not be bound (4b) — `None` means it is fine.
+    ///
+    /// **A realm is a network** (§7a.0), which is what makes replicas behave like
+    /// federation — but it also means a realm name lands in the *same namespace*
+    /// as real WEFT networks. So a provider must not claim one that is already
+    /// spoken for, or it could mint users indistinguishable from that network's
+    /// (`alice@hda.example`) and — since DM routing prefers a provider over a
+    /// peer — quietly receive mail addressed to them.
+    ///
+    /// Refused: **our own** network name, any network we hold a **peer record**
+    /// for, and any **netblocked** name (invariant 7 is name-keyed, so it has to
+    /// bite a realm exactly as it bites a peer — otherwise blocking a network
+    /// would be evadable by re-entering as a bridge).
+    async fn realm_refusal(&self, realm: &str) -> Option<&'static str> {
+        if realm == self.ctx.network_name() {
+            return Some("own-network");
+        }
+
+        let Ok(name) = realm.parse::<NetworkName>() else {
+            return Some("not-a-network-name"); // it could never mint valid users
+        };
+        if matches!(self.ctx.peers.peer(&name).await, Ok(Some(_))) {
+            return Some("peer-network");
+        }
+        if self
+            .ctx
+            .netblocks
+            .is_netblocked(&name)
+            .await
+            .unwrap_or(false)
+        {
+            return Some("netblocked");
+        }
+
+        None
     }
 
     /// §12.1 client `PLUGINS`: serve the action catalog of every registered plugin.

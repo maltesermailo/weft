@@ -16,7 +16,7 @@ use weft_proto::RetentionPolicy;
 use weft_proto::{
     CallState, ChannelName, ErrCode, Event, FriendState, MemberAction, Reply, VoiceAction,
 };
-use weft_store::{ChannelStore, NamespaceStore};
+use weft_store::{ChannelStore, NamespaceStore, NetblockStore, PeerStore};
 
 struct MockStream {
     from_client: mpsc::UnboundedReceiver<String>,
@@ -4771,13 +4771,23 @@ fn ctx_plugin_full(
     plugins: Vec<(&str, weft_core::PublicKey, Vec<weft_proto::Scheme>)>,
     operators: &[&str],
 ) -> Arc<ServerCtx> {
+    ctx_plugin_store(plugins, operators).0
+}
+
+/// [`ctx_plugin_full`] keeping the store, for tests that seed peer/netblock rows
+/// the wire has no path to.
+fn ctx_plugin_store(
+    plugins: Vec<(&str, weft_core::PublicKey, Vec<weft_proto::Scheme>)>,
+    operators: &[&str],
+) -> (Arc<ServerCtx>, Arc<MemoryStore>) {
     let info = ServerInfo {
         network: "test.example".parse().unwrap(),
         motd: None,
         features: Vec::new(),
     };
     let chans: Vec<(&str, &str)> = Vec::new();
-    Arc::new(
+    let store = Arc::new(MemoryStore::default());
+    let ctx = Arc::new(
         ServerCtx::new(
             info,
             chans
@@ -4785,7 +4795,7 @@ fn ctx_plugin_full(
                 .map(|(c, p)| (c.parse().unwrap(), p.parse::<RetentionPolicy>().unwrap())),
             Keypair::generate(),
             true,
-            Arc::new(MemoryStore::default()),
+            store.clone(),
             Arc::new(weft_core::MemBlobStore::default()),
             "permanent".parse().unwrap(),
             operators.iter().map(|o| o.parse().unwrap()),
@@ -4799,7 +4809,9 @@ fn ctx_plugin_full(
                 .map(|(id, k, s)| (id.to_string(), k, s))
                 .collect(),
         ),
-    )
+    );
+
+    (ctx, store)
 }
 
 #[tokio::test]
@@ -5514,6 +5526,136 @@ async fn scrolling_past_a_replicas_history_asks_the_realm() {
         Some(seed),
         "the un-deduped window is the new one"
     );
+}
+
+#[tokio::test]
+async fn a_realm_may_not_shadow_a_network_we_already_know() {
+    // 4b: "a realm is a network" (§7a.0) is what makes replicas behave like
+    // federation — but it puts realm names in the *same namespace* as real WEFT
+    // networks. A provider claiming one that is already spoken for could mint
+    // users indistinguishable from that network's, and since DM routing prefers
+    // a provider over a peer, quietly receive mail addressed to them.
+    let key = Keypair::generate();
+    let (ctx, store) = ctx_plugin_store(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    // A peer network we federate with, and a network an operator has blocked.
+    store
+        .upsert_peer(weft_store::PeerRecord {
+            peer: "hda.example".parse().unwrap(),
+            scope: "*".into(),
+            manifest: String::new(),
+            version: 1,
+            acked_manifest: None,
+            severed: false,
+            created_ms: 0,
+            updated_ms: 0,
+        })
+        .await
+        .unwrap();
+    store
+        .add_netblock(weft_store::NetblockRecord {
+            network: "evil.example".parse().unwrap(),
+            reason: None,
+            added_ms: 0,
+            actor: "root".into(),
+        })
+        .await
+        .unwrap();
+
+    for (realm, why) in [
+        ("test.example", "our own network"),
+        ("hda.example", "a peer we federate with"),
+        ("evil.example", "a netblocked network"),
+    ] {
+        let mut plugin = plugin_session(&ctx, &key).await;
+        plugin.send(&format!("@label=r1 REALM ASSERT instagram://{realm}"));
+        let reply = plugin.expect_err(ErrCode::Forbidden).await;
+        assert_eq!(reply.label.as_deref(), Some("r1"), "{why}");
+    }
+
+    // An unclaimed realm binds normally — the guard is narrow.
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    assert!(matches!(plugin.recv().await.event, Event::NsMeta { .. }));
+}
+
+#[tokio::test]
+async fn netblocking_a_realm_stops_its_traffic_mid_session() {
+    // 4b + invariant 7 (name-keyed): blocking a network must bite a **realm**
+    // exactly as it bites a peer, and take effect at once — otherwise a network
+    // an operator shut out could re-enter as a bridge, or simply keep talking on
+    // an already-bound session.
+    let key = Keypair::generate();
+    let (ctx, store) = ctx_plugin_store(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+    assert!(matches!(
+        weft_proto::Request::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .command,
+        weft_proto::Command::NsJoin { .. }
+    ));
+
+    // Ingestion works before the block.
+    let before = format!("acme-corp/{}", ulid::Ulid::new());
+    plugin.send(&format!(
+        "@as=alice@acme-corp;msgid={before} MSG {channel} :before the block"
+    ));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("ada expected the pre-block message");
+    };
+    assert_eq!(m.body, "before the block");
+
+    // The operator blocks the realm on an already-bound session.
+    store
+        .add_netblock(weft_store::NetblockRecord {
+            network: "acme-corp".parse().unwrap(),
+            reason: None,
+            added_ms: 0,
+            actor: "root".into(),
+        })
+        .await
+        .unwrap();
+
+    // Its traffic stops at once. The FIFO barrier: an unauthorized REALM REGISTER
+    // right after must be the next — and only — thing we hear about.
+    let after = format!("acme-corp/{}", ulid::Ulid::new());
+    plugin.send(&format!(
+        "@as=alice@acme-corp;msgid={after} MSG {channel} :after the block"
+    ));
+    ada.send("@label=p1 PING probe");
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::Pong { token: Some(t) } if t == "probe"
+    ));
+
+    // …and a fresh bind of the same realm is refused, so the block cannot be
+    // shrugged off by reconnecting.
+    let mut again = plugin_session(&ctx, &key).await;
+    again.send("@label=r1 REALM ASSERT instagram://acme-corp");
+    let reply = again.expect_err(ErrCode::Forbidden).await;
+    assert_eq!(reply.label.as_deref(), Some("r1"));
 }
 
 #[tokio::test]
