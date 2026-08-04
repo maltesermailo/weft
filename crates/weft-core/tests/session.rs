@@ -5583,6 +5583,52 @@ async fn a_realm_may_not_shadow_a_network_we_already_know() {
     assert!(matches!(plugin.recv().await.event, Event::NsMeta { .. }));
 }
 
+/// A `NetworkProbe` that answers for exactly the domains it was told about —
+/// standing in for the `/.well-known/weft` fetch weftd does.
+struct StubProbe(Vec<String>);
+
+#[async_trait::async_trait]
+impl weft_core::NetworkProbe for StubProbe {
+    async fn is_weft_network(&self, host: &str) -> bool {
+        self.0.iter().any(|h| h == host)
+    }
+}
+
+#[tokio::test]
+async fn the_domain_owner_decides_whether_a_realm_may_be_claimed() {
+    // Owner directive 2026-08-04: "network should be domain validated. The person
+    // who owns the domain chooses. They can either have a matrix server or a WEFT
+    // server." Our peer table is local bookkeeping; the arbiter is the domain.
+    let key = Keypair::generate();
+    let (ctx, _store) = ctx_plugin_store(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+    // `weft.example` runs a WEFT server; nothing else does. Note we hold **no**
+    // peer record for it — the local checks would let it through.
+    ctx.set_network_probe(Arc::new(StubProbe(vec!["weft.example".to_string()])));
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("@label=r1 REALM ASSERT instagram://weft.example");
+    let reply = plugin.expect_err(ErrCode::Forbidden).await;
+    assert_eq!(reply.label.as_deref(), Some("r1"));
+
+    // A domain whose owner did *not* choose WEFT is bridgeable — that is the
+    // normal case, and the whole point of asking the domain rather than guessing.
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://matrix.example");
+    plugin.send("@title=Club NS-META instagram://matrix.example/club public");
+    assert!(matches!(plugin.recv().await.event, Event::NsMeta { .. }));
+
+    // …and so is a realm that is no domain at all (a Discord guild id): the probe
+    // can only answer *positively*, so an inconclusive one must never lock a
+    // legitimate bridge out.
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://123456789");
+    plugin.send("@title=Guild NS-META instagram://123456789/general public");
+    assert!(matches!(plugin.recv().await.event, Event::NsMeta { .. }));
+}
+
 #[tokio::test]
 async fn netblocking_a_realm_stops_its_traffic_mid_session() {
     // 4b + invariant 7 (name-keyed): blocking a network must bite a **realm**

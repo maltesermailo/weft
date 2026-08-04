@@ -532,6 +532,9 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
         ctx.set_mailer(Arc::new(mailer::LogMailer));
     }
 
+    // Framework §7a.0a: let the domain owner arbitrate realm claims.
+    ctx.set_network_probe(Arc::new(dialer::WellKnownProbe::default()));
+
     // TLS: one hot-swappable resolver, fed from ACME / a PEM file / self-signed.
     let challenges = tls::Challenges::default();
     let (cert_resolver, tls_task) = tls::setup(&config, &network, Arc::clone(&challenges)).await?;

@@ -18,6 +18,7 @@ mod directory;
 mod mailer;
 mod maintenance;
 mod media;
+mod probe;
 mod registry;
 mod session;
 mod stream;
@@ -35,6 +36,7 @@ pub use maintenance::{
     MaintenanceConfig,
 };
 pub use media::{parse_media_uri, UploadGrant, MEDIA_MAX_BYTES};
+pub use probe::NetworkProbe;
 pub use registry::Registry;
 pub use session::{run_bridge_client, run_bridge_requester, run_session, SessionId};
 pub use stream::ControlStream;

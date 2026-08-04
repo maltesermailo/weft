@@ -1695,16 +1695,26 @@ impl<S: ControlStream> Session<S> {
     /// Why a realm may not be bound (4b) — `None` means it is fine.
     ///
     /// **A realm is a network** (§7a.0), which is what makes replicas behave like
-    /// federation — but it also means a realm name lands in the *same namespace*
-    /// as real WEFT networks. So a provider must not claim one that is already
-    /// spoken for, or it could mint users indistinguishable from that network's
-    /// (`alice@hda.example`) and — since DM routing prefers a provider over a
-    /// peer — quietly receive mail addressed to them.
+    /// federation — but it also means a realm name lands in the *same identity
+    /// space* as real WEFT networks. A realm called `hda.example` mints
+    /// `alice@hda.example`, which is the very `UserRef` that network's own user
+    /// has: same grant subject, same member key, same DM scope — and since DM
+    /// routing prefers a provider over a peer, the realm would quietly receive
+    /// mail addressed to them. Worse for **our own** name: `member_key` collapses
+    /// a user on our network to their bare account, so a realm `test.example`
+    /// would let a provider act as the local account `ada`.
     ///
-    /// Refused: **our own** network name, any network we hold a **peer record**
-    /// for, and any **netblocked** name (invariant 7 is name-keyed, so it has to
-    /// bite a realm exactly as it bites a peer — otherwise blocking a network
-    /// would be evadable by re-entering as a bridge).
+    /// **The arbiter is the domain owner**, not our peer table: whoever controls
+    /// `hda.example` chooses whether it runs a WEFT server or something a bridge
+    /// reaches, and a domain publishing `/.well-known/weft` has chosen WEFT. Only
+    /// a *positive* answer refuses — an unreachable domain, or a realm that is no
+    /// domain at all (a Discord guild id), still binds (see [`crate::NetworkProbe`]).
+    ///
+    /// The local checks stay as a fast path and cover what the probe cannot: our
+    /// own name, a peer we already hold a record for (authoritative regardless of
+    /// what DNS says today), and any **netblocked** name — invariant 7 is
+    /// name-keyed, so it must bite a realm exactly as it bites a peer, or
+    /// blocking a network would be evadable by re-entering as a bridge.
     async fn realm_refusal(&self, realm: &str) -> Option<&'static str> {
         if realm == self.ctx.network_name() {
             return Some("own-network");
@@ -1724,6 +1734,9 @@ impl<S: ControlStream> Session<S> {
             .unwrap_or(false)
         {
             return Some("netblocked");
+        }
+        if self.ctx.host_runs_weft(realm).await {
+            return Some("domain-runs-weft");
         }
 
         None

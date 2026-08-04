@@ -885,3 +885,42 @@ mod tests {
         assert!(err.to_string().contains("SSRF guard"), "{err}");
     }
 }
+
+/// Framework §7a.0a: the domain-owner check behind `REALM ASSERT`.
+///
+/// A domain that publishes `/.well-known/weft` has been given to WEFT by its
+/// owner, so no bridge may claim it as a realm and mint users in that network's
+/// identity space. Reuses [`fetch_signing_key`] — same TLS verification, same
+/// SSRF guard (invariant 13), same bounds.
+///
+/// Answers are cached for the process lifetime: binds are rare, but a wrong
+/// `true` locks a legitimate bridge out, so we never re-probe a domain we have
+/// already cleared and never hammer one we haven't.
+#[derive(Default)]
+pub struct WellKnownProbe {
+    seen: std::sync::Mutex<std::collections::HashMap<String, bool>>,
+}
+
+#[async_trait::async_trait]
+impl weft_core::NetworkProbe for WellKnownProbe {
+    async fn is_weft_network(&self, host: &str) -> bool {
+        if let Some(known) = self.seen.lock().expect("probe cache").get(host) {
+            return *known;
+        }
+
+        // Only a *successful* fetch is conclusive. A realm that is not a domain
+        // (a Discord guild id), an unreachable one, or one simply not running
+        // WEFT all land here as "not a WEFT network" — see `NetworkProbe`.
+        let runs_weft = fetch_signing_key(host).await.is_ok();
+        if runs_weft {
+            tracing::warn!(%host, "realm refused: the domain publishes /.well-known/weft");
+        }
+
+        self.seen
+            .lock()
+            .expect("probe cache")
+            .insert(host.to_string(), runs_weft);
+
+        runs_weft
+    }
+}

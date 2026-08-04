@@ -288,6 +288,9 @@ pub struct ServerCtx {
     voice_relays: std::sync::Mutex<HashMap<(NetworkName, String), usize>>,
     /// §10.5 the email sender weftd installs (SMTP, or a dev log-mailer).
     mailer: std::sync::OnceLock<Arc<dyn crate::mailer::Mailer>>,
+    /// Framework §7a.0a: answers whether a domain runs a WEFT network, so a
+    /// bridge cannot claim a realm its owner has already given to WEFT.
+    probe: std::sync::OnceLock<Arc<dyn crate::probe::NetworkProbe>>,
     /// §10.5 pending email verification codes: `(account, kind) → (code,
     /// expiry-ms)`. In-memory + short-lived — a restart just means re-request.
     verify_codes: std::sync::Mutex<HashMap<(Account, String), (String, u64)>>,
@@ -601,6 +604,7 @@ impl ServerCtx {
             voice_relay: std::sync::OnceLock::new(),
             voice_relays: std::sync::Mutex::new(HashMap::new()),
             mailer: std::sync::OnceLock::new(),
+            probe: std::sync::OnceLock::new(),
             verify_codes: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -627,6 +631,21 @@ impl ServerCtx {
     /// weftd installs the §10.5 email sender.
     pub fn set_mailer(&self, mailer: Arc<dyn crate::mailer::Mailer>) {
         let _ = self.mailer.set(mailer);
+    }
+
+    pub fn set_network_probe(&self, probe: Arc<dyn crate::probe::NetworkProbe>) {
+        let _ = self.probe.set(probe);
+    }
+
+    /// Whether `host`'s owner has already chosen to run a **WEFT network**
+    /// there. With no probe installed this reads `false` — the local checks in
+    /// `realm_refusal` still stand, and a server with no outbound HTTP simply
+    /// can't consult the domain.
+    pub(crate) async fn host_runs_weft(&self, host: &str) -> bool {
+        match self.probe.get() {
+            Some(probe) => probe.is_weft_network(host).await,
+            None => false,
+        }
     }
 
     /// §10.5 record a pending verification code (replacing any prior one for the
