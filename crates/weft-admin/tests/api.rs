@@ -1830,10 +1830,7 @@ async fn admin_deletes_a_namespace_and_cascades() {
         )
         .await
         .unwrap();
-    store
-        .set_ns_membership("bob", ns_id, 0)
-        .await
-        .unwrap();
+    store.set_ns_membership("bob", ns_id, 0).await.unwrap();
     store
         .set_role(
             &ns_scope,
@@ -2072,10 +2069,7 @@ async fn admin_assigns_and_unassigns_a_namespace_role() {
         .unwrap();
     // bob is a member; a "mod" role grants `ban`. Membership + role scope are
     // keyed by the ns id (v0.13).
-    store
-        .set_ns_membership("bob", ns_id, 0)
-        .await
-        .unwrap();
+    store.set_ns_membership("bob", ns_id, 0).await.unwrap();
     store
         .set_role(
             &ns_scope,

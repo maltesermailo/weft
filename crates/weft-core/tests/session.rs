@@ -2699,7 +2699,6 @@ async fn cross_network_group_attachment_is_mirrored() {
             },
             edited: None,
             edited_at: None,
-            foreign: None,
         },
     )))
     .to_line()
@@ -2829,7 +2828,6 @@ async fn cross_network_group_mutation_spoke_ingests_and_relays() {
         msgid: "peer.example/01ARZ3NDEKTSV4RRFFQ69G5FB4".parse().unwrap(),
         edit_of: MID.parse().unwrap(),
         body: "home-fixed".to_string(),
-        foreign: None,
     })
     .to_line()
     .unwrap()
@@ -2900,7 +2898,6 @@ async fn cross_network_group_message_spoke_ingests() {
             },
             edited: None,
             edited_at: None,
-            foreign: None,
         },
     )))
     .to_line()
@@ -4443,7 +4440,10 @@ async fn plugin_session(ctx: &Arc<ServerCtx>, key: &Keypair) -> Client {
     };
     let nonce = weft_crypto::b64::decode(&nonce).unwrap();
     let sig = weft_crypto::sign_challenge(key, &nonce, "test.example");
-    c.send(&format!("AUTH PROOF {}", weft_crypto::signature_to_b64(&sig)));
+    c.send(&format!(
+        "AUTH PROOF {}",
+        weft_crypto::signature_to_b64(&sig)
+    ));
 
     let Event::Welcome { features, .. } = c.recv().await.event else {
         panic!("expected WELCOME after plugin PROOF");
@@ -4673,7 +4673,10 @@ async fn foreign_ns_join_succeeds_via_assertion() {
     // The provider asserts the space with NORMAL verbs on URI targets, learning
     // its minted mapping from each reply.
     plugin.send("@title=Club NS-META instagram://acme-corp/club public");
-    let Event::NsMeta { id, origin, title, .. } = plugin.recv().await.event else {
+    let Event::NsMeta {
+        id, origin, title, ..
+    } = plugin.recv().await.event
+    else {
         panic!("expected the minted NS-META mapping");
     };
     let ns_id = id.to_string();
@@ -4684,7 +4687,13 @@ async fn foreign_ns_join_succeeds_via_assertion() {
     assert_eq!(title.as_deref(), Some("Club"));
 
     plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
-    let Event::ChannelLayout { channel, origin, vanity, .. } = plugin.recv().await.event else {
+    let Event::ChannelLayout {
+        channel,
+        origin,
+        vanity,
+        ..
+    } = plugin.recv().await.event
+    else {
         panic!("expected the minted CHANNEL-LAYOUT mapping");
     };
     assert!(channel.as_str().starts_with(&format!("#{ns_id}/")));
@@ -4701,10 +4710,18 @@ async fn foreign_ns_join_succeeds_via_assertion() {
         panic!("ada expected NS-META");
     };
     assert!(origin.is_some(), "the replica is badged");
-    assert!(matches!(ada.recv().await.event, Event::ChannelLayout { .. }));
+    assert!(matches!(
+        ada.recv().await.event,
+        Event::ChannelLayout { .. }
+    ));
     let reply = ada.recv().await;
     assert_eq!(reply.label.as_deref(), Some("j1"));
-    let Event::NsMember { action: MemberAction::Join, count, .. } = reply.event else {
+    let Event::NsMember {
+        action: MemberAction::Join,
+        count,
+        ..
+    } = reply.event
+    else {
         panic!("expected the labeled NS-MEMBER join ack, got {reply:?}");
     };
     assert_eq!(count, Some(1));
@@ -4788,71 +4805,87 @@ async fn provider_ingests_foreign_messages() {
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
     drain_until_ns_member(&mut ada).await;
+    // Her join is mirrored to the provider (slice 5) — consume it so the
+    // assertions below read the provider's stream from a known point.
+    assert!(matches!(
+        weft_proto::Reply::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .event,
+        Event::Member {
+            action: MemberAction::Join,
+            ..
+        }
+    ));
 
     // The provider ingests a foreign post, addressing the replica by the
-    // canonical name it learned from the CHANNEL-LAYOUT mapping reply.
+    // canonical name it learned from the CHANNEL-LAYOUT mapping reply. **A realm
+    // is a network**: the provider names its users on the realm and mints their
+    // msgids under it, exactly as a peer WEFT network does. `alice=bob` is a
+    // Matrix localpart that survives verbatim — a lossy mapping would collide it
+    // with `@alicebob`, merging two people into one identity.
+    let posted = format!("acme-corp/{}", ulid::Ulid::new());
     plugin.send(&format!(
-        "@as=@alice:instagram.example MSG {channel} :hi from insta"
+        "@as=alice=bob@acme-corp;msgid={posted} MSG {channel} :hi from insta"
     ));
 
     let Event::Message(m) = ada.recv().await.event else {
         panic!("ada expected the ingested MESSAGE");
     };
-    // Home-authoritative: OUR network minted the msgid (invariant 2).
-    assert_eq!(m.msgid.origin().as_str(), "test.example");
+    // The bridge minted it, so the realm is the origin (invariant 2) — the
+    // replica is indistinguishable from a federated peer's channel.
+    assert_eq!(m.msgid.to_string(), posted);
     assert_eq!(m.body, "hi from insta");
-    // §7a.1: a replica user looks **federated** — the identity's own domain is the
-    // network — while `foreign=` carries the exact native handle for display.
-    assert_eq!(m.foreign.as_deref(), Some("@alice:instagram.example"));
-    assert_eq!(m.sender.to_string(), "alice@instagram.example");
+    assert_eq!(m.sender.to_string(), "alice=bob@acme-corp");
 
-    // The mutation verbs: the provider names the target by msgid (not channel),
-    // and each applies via the §11.13 home-authoritative relay carrying `foreign=`.
+    // The mutation verbs: the provider names the target by msgid (not channel).
+    // EDIT carries its own minted id; DELETE/REACT name only the root they act on.
     let root = m.msgid.clone();
     plugin.send(&format!(
-        "@as=@alice:instagram.example EDIT {root} :fixed"
+        "@as=alice=bob@acme-corp;msgid=acme-corp/{} EDIT {root} :fixed",
+        ulid::Ulid::new()
     ));
-    let Event::Edited { foreign, body, .. } = ada.recv().await.event else {
+    let Event::Edited { body, user, .. } = ada.recv().await.event else {
         panic!("ada expected the ingested EDITED");
     };
     assert_eq!(body, "fixed");
-    assert_eq!(foreign.as_deref(), Some("@alice:instagram.example"));
+    assert_eq!(user.to_string(), "alice=bob@acme-corp");
 
-    plugin.send(&format!(
-        "@as=@bob:instagram.example REACT {root} thumbsup"
-    ));
-    let Event::Reaction { foreign, by, op, .. } = ada.recv().await.event else {
+    plugin.send(&format!("@as=bob@acme-corp REACT {root} thumbsup"));
+    let Event::Reaction { by, op, .. } = ada.recv().await.event else {
         panic!("ada expected the ingested REACTION");
     };
     assert_eq!(op, weft_proto::ReactionOp::Add);
-    assert_eq!(by.to_string(), "bob@instagram.example");
-    assert_eq!(foreign.as_deref(), Some("@bob:instagram.example"));
+    assert_eq!(by.to_string(), "bob@acme-corp");
 
-    plugin.send(&format!("@as=@alice:instagram.example DELETE {root}"));
+    plugin.send(&format!("@as=alice=bob@acme-corp DELETE {root}"));
     let Event::Deleted { msgid, by, .. } = ada.recv().await.event else {
         panic!("ada expected the ingested DELETED");
     };
     assert_eq!(msgid, root);
-    assert_eq!(by.map(|u| u.to_string()).as_deref(), Some("alice@instagram.example"));
+    assert_eq!(
+        by.map(|u| u.to_string()).as_deref(),
+        Some("alice=bob@acme-corp")
+    );
 
-    // A bare identity (no domain — a Discord/Instagram handle) falls back to the
-    // room's realm as its network, so it still looks federated.
-    plugin.send(&format!("@as=bob MSG {channel} :bare handle"));
-    let Event::Message(m) = ada.recv().await.event else {
-        panic!("ada expected the second ingested MESSAGE");
-    };
-    assert_eq!(m.sender.to_string(), "bob@acme-corp");
-    assert_eq!(m.foreign.as_deref(), Some("bob"));
+    // A provider may not attribute an event to a user outside its own realm —
+    // that is how it would otherwise forge a post by a local account.
+    plugin.send(&format!("@as=ada@test.example MSG {channel} :forged"));
+    plugin.expect_err(ErrCode::Unsupported).await;
 
-    // 4c: a Matrix user JOINS the namespace — membership persists under its
-    // foreign member key and shows in the derived roster + member count.
-    plugin.send(&format!("@as=@carol:instagram.example JOIN {channel}"));
-    let Event::Member { user, action, count, foreign, .. } = ada.recv().await.event else {
+    // 4c: a foreign user JOINS the namespace — membership persists under its
+    // member key and shows in the derived roster + member count.
+    plugin.send(&format!("@as=carol@acme-corp JOIN {channel}"));
+    let Event::Member {
+        user,
+        action,
+        count,
+        ..
+    } = ada.recv().await.event
+    else {
         panic!("ada expected the ingested MEMBER join");
     };
     assert_eq!(action, MemberAction::Join);
-    assert_eq!(user.to_string(), "carol@instagram.example");
-    assert_eq!(foreign.as_deref(), Some("@carol:instagram.example"));
+    assert_eq!(user.to_string(), "carol@acme-corp");
     assert_eq!(count, Some(2)); // ada + carol
 
     // The roster (MEMBERS) lists the bridged member alongside the local one.
@@ -4862,7 +4895,7 @@ async fn provider_ingests_foreign_messages() {
     assert!(roster.contains("carol"), "{roster:?}");
 
     // …and PART clears it.
-    plugin.send(&format!("@as=@carol:instagram.example PART {channel}"));
+    plugin.send(&format!("@as=carol@acme-corp PART {channel}"));
     let Event::Member { action, count, .. } = ada.recv().await.event else {
         panic!("ada expected the ingested MEMBER part");
     };
@@ -4874,7 +4907,8 @@ async fn provider_ingests_foreign_messages() {
     // FIFO barrier: an unauthorized REALM REGISTER right after must be the next
     // — and only — line we read.
     plugin.send(&format!(
-        "@as=@bob:instagram.example MSG #{ns_id}/01bx5zzkbkactav9wevgemmvr0 :dropped"
+        "@as=bob@acme-corp;msgid=acme-corp/{} MSG #{ns_id}/01bx5zzkbkactav9wevgemmvr0 :dropped",
+        ulid::Ulid::new()
     ));
     plugin.send("@label=probe REALM REGISTER discord");
     let reply = plugin.expect_err(ErrCode::Unsupported).await;
@@ -4908,7 +4942,10 @@ async fn operator_deletes_virtual_namespace() {
     op.send(&format!("@label=d2 NS DELETE {ns_id} {ns_id}"));
     let reply = op.recv().await;
     assert_eq!(reply.label.as_deref(), Some("d2"));
-    let Event::NsMeta { owner, description, .. } = reply.event else {
+    let Event::NsMeta {
+        owner, description, ..
+    } = reply.event
+    else {
         panic!("expected the deletion tombstone, got {reply:?}");
     };
     assert!(owner.is_none());
@@ -4943,7 +4980,10 @@ async fn realm_withdraw_tombstones_namespaces() {
     assert!(matches!(ada.recv().await.event, Event::NsMember { .. }));
 
     plugin.send("REALM WITHDRAW");
-    let Event::NsMeta { owner, description, .. } = ada.recv().await.event else {
+    let Event::NsMeta {
+        owner, description, ..
+    } = ada.recv().await.event
+    else {
         panic!("ada expected the withdrawal tombstone");
     };
     assert!(owner.is_none());
@@ -5011,6 +5051,99 @@ async fn duplicate_scheme_claim_is_refused() {
 }
 
 #[tokio::test]
+async fn local_posts_relay_outward_without_looping() {
+    // Slice 5: a local user's traffic in a replica channel is forwarded to the
+    // provider (to puppet into the foreign system), while an event the provider
+    // itself ingested is NEVER sent back — the `foreign=` tag is the loop guard
+    // (msgid origin can't distinguish them: a replica is home-authoritative).
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send("@title=Club NS-META instagram://acme-corp/club public");
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+
+    // A LOCAL member's JOIN is relayed outward, so the provider can put her in
+    // the foreign room. MEMBER carries no msgid, so the loop guard reads the
+    // *user's* network instead.
+    let relayed = weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap();
+    let Event::Member { user, action, .. } = relayed.event else {
+        panic!("provider expected the relayed MEMBER join");
+    };
+    assert_eq!(action, MemberAction::Join);
+    assert_eq!(user.to_string(), "ada@test.example");
+
+    // A LOCAL post is relayed outward to the provider.
+    ada.send(&format!("@label=m1 MSG {channel} :hello matrix"));
+    let relayed = weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap();
+    let Event::Message(m) = relayed.event else {
+        panic!("provider expected the relayed MESSAGE");
+    };
+    assert_eq!(m.body, "hello matrix");
+    assert_eq!(m.sender.to_string(), "ada@test.example");
+
+    // A local EDIT + REACT + DELETE relay too.
+    let root = m.msgid.clone();
+    ada.send(&format!("@label=e1 EDIT {root} :hello again"));
+    assert!(matches!(
+        weft_proto::Reply::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .event,
+        Event::Edited { .. }
+    ));
+    ada.send(&format!("@label=r1 REACT {root} wave"));
+    assert!(matches!(
+        weft_proto::Reply::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .event,
+        Event::Reaction { .. }
+    ));
+
+    // THE LOOP GUARD: the provider ingests a foreign post; the resulting event
+    // must NOT come back to it. The next line it reads is the local delete that
+    // follows — proving the ingested one was never relayed.
+    plugin.send(&format!(
+        "@as=alice@acme-corp;msgid=acme-corp/{} MSG {channel} :from matrix",
+        ulid::Ulid::new()
+    ));
+    ada.send(&format!("@label=d1 DELETE {root}"));
+
+    let next = weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap();
+    let Event::Deleted { msgid, .. } = next.event else {
+        panic!("provider expected the local DELETE next — an ingested event looped back!");
+    };
+    assert_eq!(msgid, root);
+
+    // …and the same for a local PART. A *bridged* member's join/part is not sent
+    // back (it is the echo of an ingested one): carol's JOIN below produces no
+    // outward line, so the next thing the provider reads is ada's PART.
+    plugin.send(&format!("@as=carol@acme-corp JOIN {channel}"));
+    ada.send(&format!("@label=p1 NS LEAVE {ns_id}"));
+
+    let next = weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap();
+    let Event::Member { user, action, .. } = next.event else {
+        panic!("provider expected the local PART next — a bridged member's join looped back!");
+    };
+    assert_eq!(action, MemberAction::Part);
+    assert_eq!(user.to_string(), "ada@test.example");
+}
+
+#[tokio::test]
 async fn provider_offline_gates_virtual_namespace() {
     // Owner directive 2026-08-04: a virtual namespace is online only while its
     // provider is — offline ⇒ undiscoverable + unjoinable; members get live
@@ -5039,18 +5172,30 @@ async fn provider_offline_gates_virtual_namespace() {
     let mut plugin = plugin_session(&ctx, &key).await;
     register(&plugin);
     plugin.send("@title=Club NS-META instagram://acme-corp/club public");
-    let Event::NsMeta { id, provider_online, .. } = plugin.recv().await.event else {
+    let Event::NsMeta {
+        id,
+        provider_online,
+        ..
+    } = plugin.recv().await.event
+    else {
         panic!("expected the minted NS-META mapping");
     };
     assert_eq!(provider_online, Some(true));
     let ns_id = id.to_string();
+    plugin.send("@vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0");
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
 
     let mut ada = ready(&ctx, "ada").await;
     ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
-    assert!(matches!(
-        ada.recv().await.event,
-        Event::NsMember { action: MemberAction::Join, .. }
-    ));
+    drain_until_ns_member(&mut ada).await;
+
+    // Online: she can post into the replica.
+    ada.send(&format!("@label=m0 MSG {channel} :while online"));
+    let reply = ada.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("m0"));
+    assert!(matches!(reply.event, Event::Message(_)));
 
     // Online: DISCOVER lists the public replica.
     ada.send("DISCOVER");
@@ -5061,10 +5206,21 @@ async fn provider_offline_gates_virtual_namespace() {
 
     // The provider dies → the member gets the live offline indicator.
     drop(plugin);
-    let Event::NsMeta { provider_online, .. } = ada.recv().await.event else {
+    let Event::NsMeta {
+        provider_online, ..
+    } = ada.recv().await.event
+    else {
         panic!("ada expected the provider-offline NS-META push");
     };
     assert_eq!(provider_online, Some(false));
+
+    // 5b (owner decision 2026-08-04): **posting is refused while the provider is
+    // offline** rather than accepted-and-dropped. Accepting it would split-brain
+    // the room — local members would see a message the foreign side never gets,
+    // with no route out and nothing to reconcile against later.
+    ada.send(&format!("@label=m1 MSG {channel} :into the void"));
+    let reply = ada.expect_err(ErrCode::Policy).await;
+    assert_eq!(reply.label.as_deref(), Some("m1"));
 
     // Offline: unjoinable (uniform NO-SUCH-TARGET) and undiscoverable (a DISCOVER
     // yields nothing; the FIFO PING proves the silence).
@@ -5083,17 +5239,29 @@ async fn provider_offline_gates_virtual_namespace() {
     // the namespace is joinable + discoverable again.
     let plugin2 = plugin_session(&ctx, &key).await;
     register(&plugin2);
-    let Event::NsMeta { provider_online, .. } = ada.recv().await.event else {
+    let Event::NsMeta {
+        provider_online, ..
+    } = ada.recv().await.event
+    else {
         panic!("ada expected the provider-online NS-META push");
     };
     assert_eq!(provider_online, Some(true));
     bob.send(&format!("@label=j3 NS JOIN {ns_id}"));
-    let reply = bob.recv().await;
-    assert_eq!(reply.label.as_deref(), Some("j3"));
-    assert!(matches!(
-        reply.event,
-        Event::NsMember { action: MemberAction::Join, .. }
-    ));
+    loop {
+        let reply = bob.recv().await;
+        match reply.event {
+            Event::NsMember {
+                action: MemberAction::Join,
+                ..
+            } => {
+                assert_eq!(reply.label.as_deref(), Some("j3"));
+                break;
+            }
+            // The bulk channel subscription burst precedes the ns-level ack.
+            Event::Member { .. } | Event::Policy { .. } => {}
+            other => panic!("unexpected before NS-MEMBER: {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -5135,7 +5303,9 @@ async fn provider_death_fails_parked_requests_loudly() {
     // Park a provision and an invocation on the provider.
     joiner.send("@label=j1 NS JOIN instagram://acme-corp");
     assert!(matches!(
-        weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap().event,
+        weft_proto::Reply::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .event,
         Event::Provision { .. }
     ));
     invoker.send("@label=i1 PLUGIN INVOKE insta open");

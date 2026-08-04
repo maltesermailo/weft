@@ -14,36 +14,6 @@ use super::*;
 /// origin gate strips the owner shortcut, `context.rs`).
 const FOREIGN_SENTINEL: &str = "foreign";
 
-/// The **puppet identity** for a foreign user (§7a.1, owner directive
-/// 2026-08-04): a replica user looks like a *federated* user — `alice@matrix.org`
-/// — rather than a mangled local account. The network is the identity's **own**
-/// domain (`@bob:other.org` in a matrix.org room belongs to `other.org`), falling
-/// back to the room's realm when the identity carries no domain (a Discord
-/// snowflake), and finally to our own network if neither is a usable name.
-///
-/// Deterministic: the same foreign user always maps to the same puppet. The exact
-/// native identity still travels in `foreign=` (an MXID localpart may hold
-/// characters the WEFT account charset forbids, so this is a rendering, not a
-/// replacement).
-fn puppet_user(foreign: &str, origin: &ForeignUri, home: &NetworkName) -> UserRef {
-    // `@alice:matrix.org` → ("alice", Some("matrix.org")); a bare handle → no domain.
-    let bare = foreign.trim_start_matches('@');
-    let (local, domain) = match bare.split_once(':') {
-        Some((local, domain)) => (local, Some(domain)),
-        None => (bare, None),
-    };
-
-    let account: Account = sanitize_vanity(local)
-        .parse()
-        .expect("a sanitized handle is a valid account");
-    let network = domain
-        .and_then(|d| d.parse::<NetworkName>().ok())
-        .or_else(|| origin.realm().parse::<NetworkName>().ok())
-        .unwrap_or_else(|| home.clone());
-
-    UserRef::new(account, network)
-}
-
 /// Reduce a foreign path segment / display name to the namespace/vanity charset
 /// (`[a-z0-9-_]{1,64}`), falling back to `"foreign"` when nothing survives.
 fn sanitize_vanity(raw: &str) -> String {
@@ -59,6 +29,67 @@ fn sanitize_vanity(raw: &str) -> String {
     }
 
     out
+}
+
+/// Build the wire event a provider's ingested command stands for (slice 5).
+///
+/// The provider mints the ids, so `MSG` and `EDIT` — the two verbs whose row is
+/// keyed by its own id — carry `@msgid=<realm>/<ulid>`; `DELETE`/`REACT` name
+/// only the root they act on and get a local bookkeeping id in `ingest_record`,
+/// the same as on the peer-federation path. A missing or unparsable `@msgid`
+/// drops the line rather than inventing one (invariant 2: we never mint for a
+/// foreign origin).
+fn provider_event(
+    sender: UserRef,
+    channel: ChannelName,
+    cmd: Command,
+    line: &Line,
+) -> Option<Event> {
+    let minted = || {
+        line.tags
+            .get("msgid")
+            .and_then(|id| id.parse::<MsgId>().ok())
+    };
+    let target = Target::Channel(channel);
+
+    match cmd {
+        Command::Msg { body, meta, .. } => Some(Event::Message(Box::new(MessageEvent {
+            target,
+            sender,
+            msgid: minted()?,
+            body: body.unwrap_or_default(),
+            meta,
+            edited: None,
+            edited_at: None,
+        }))),
+        Command::Edit { msgid, body } => Some(Event::Edited {
+            target,
+            user: sender,
+            msgid: minted()?,
+            edit_of: msgid,
+            body,
+        }),
+        Command::Delete { msgid } => Some(Event::Deleted {
+            target,
+            msgid,
+            by: Some(sender),
+        }),
+        Command::React { msgid, emoji } => Some(Event::Reaction {
+            target,
+            msgid,
+            emoji,
+            op: weft_proto::ReactionOp::Add,
+            by: sender,
+        }),
+        Command::Unreact { msgid, emoji } => Some(Event::Reaction {
+            target,
+            msgid,
+            emoji,
+            op: weft_proto::ReactionOp::Remove,
+            by: sender,
+        }),
+        _ => None,
+    }
 }
 
 /// Serialize an event with an optional echoed label, for a cross-session relay.
@@ -110,12 +141,18 @@ impl<S: ControlStream> Session<S> {
         _realm: Option<ForeignUri>,
         line: &Line,
     ) -> io::Result<Flow> {
-        // Slice 4: an `@as=<foreign-identity>` line is **ingestion** — the
-        // provider replaying a foreign room's traffic (framework §3.1). Routed
-        // before the bridge verbs since it is identified by the tag, not the verb.
-        if let Some(foreign) = line.tags.get("as").filter(|v| !v.is_empty()).cloned() {
+        // Slice 4: an `@as=<user@realm>` line is **ingestion** — the provider
+        // replaying a foreign room's traffic (framework §3.1). Routed before the
+        // bridge verbs since it is identified by the tag, not the verb.
+        if let Some(as_tag) = line.tags.get("as").filter(|v| !v.is_empty()) {
+            let Ok(sender) = as_tag.parse::<UserRef>() else {
+                return self.unsupported(None, "@as is not a user@network").await;
+            };
             return match Request::from_line(line) {
-                Ok(req) => self.on_provider_ingest(&key, foreign, req.command).await,
+                Ok(req) => {
+                    self.on_provider_ingest(&key, sender, req.command, line)
+                        .await
+                }
                 Err(_) => Ok(Flow::Continue), // tolerate noise
             };
         }
@@ -129,9 +166,7 @@ impl<S: ControlStream> Session<S> {
                         .await;
                 }
                 Command::RealmAssert { realm } => {
-                    return self
-                        .on_realm_assert(req.label, key, plugin_id, realm)
-                        .await;
+                    return self.on_realm_assert(req.label, key, plugin_id, realm).await;
                 }
                 Command::RealmWithdraw => return self.on_realm_withdraw().await,
                 Command::ProvisionOk { job } => return self.on_provision_result(job, true).await,
@@ -217,8 +252,13 @@ impl<S: ControlStream> Session<S> {
     ) -> io::Result<Flow> {
         let Ok(reg) = weft_proto::plugin_from_b64::<weft_proto::Registration>(registration) else {
             warn!(%plugin_id, "refusing provider: undecodable PLUGIN-REGISTER");
-            self.send_err(None, ErrCode::Malformed, None, "undecodable PLUGIN-REGISTER")
-                .await?;
+            self.send_err(
+                None,
+                ErrCode::Malformed,
+                None,
+                "undecodable PLUGIN-REGISTER",
+            )
+            .await?;
             return Ok(Flow::Close);
         };
 
@@ -278,9 +318,11 @@ impl<S: ControlStream> Session<S> {
         );
         info!(%plugin_id, "provider registered");
 
-        // Its virtual namespaces just came online — tell their members.
+        // Its virtual namespaces just came online — tell their members, and
+        // start relaying their channels' local traffic outward (slice 5).
         if !schemes.is_empty() {
             self.push_provider_state(&schemes).await;
+            self.sync_provider_forwarders(&schemes).await;
         }
         Ok(Flow::Continue)
     }
@@ -310,7 +352,9 @@ impl<S: ControlStream> Session<S> {
         self.ctx
             .add_provider_scheme(&plugin_id, scheme.clone(), self.fed_out_tx.clone());
         info!(%plugin_id, %scheme, "provider registered scheme");
-        self.push_provider_state(&[scheme]).await;
+        self.push_provider_state(std::slice::from_ref(&scheme))
+            .await;
+        self.sync_provider_forwarders(&[scheme]).await;
         Ok(Flow::Continue)
     }
 
@@ -338,7 +382,12 @@ impl<S: ControlStream> Session<S> {
         }
 
         // Idempotent re-assert: the namespace exists → re-send the mapping.
-        match self.ctx.namespaces.namespace_by_origin(&uri.to_string()).await {
+        match self
+            .ctx
+            .namespaces
+            .namespace_by_origin(&uri.to_string())
+            .await
+        {
             Ok(Some(record)) => {
                 self.send_event(None, self.ns_meta_event(&record)).await?;
                 return Ok(Flow::Continue);
@@ -480,7 +529,12 @@ impl<S: ControlStream> Session<S> {
             .parse()
             .expect("a minted canonical channel name is valid");
 
-        if self.ctx.registry.create(canonical.clone(), policy).is_none() {
+        if self
+            .ctx
+            .registry
+            .create(canonical.clone(), policy)
+            .is_none()
+        {
             return self.internal(None, &"minted channel collided").await;
         }
         if let Err(e) = self
@@ -508,6 +562,16 @@ impl<S: ControlStream> Session<S> {
         }
 
         info!(channel = %canonical, origin = %uri, "virtual channel materialized");
+
+        // Slice 5: relay this fresh channel's local traffic outward too — it was
+        // created after the provider's scheme registration, so the initial
+        // forwarder sweep couldn't have seen it.
+        if let Some(handle) = self.ctx.registry.get(&canonical) {
+            if let Some(rx) = handle.subscribe().await {
+                let forwarder = spawn_forwarder(canonical.clone(), rx, self.events_tx.clone());
+                self.bridged.insert(canonical.clone(), forwarder);
+            }
+        }
         self.send_event(
             None,
             Event::ChannelLayout {
@@ -524,24 +588,29 @@ impl<S: ControlStream> Session<S> {
     }
 
     /// Slice 4 — **provider ingestion** (framework §3.1): the provider replays a
-    /// foreign room's traffic as ordinary verbs with `@as=<foreign-identity>`,
+    /// foreign room's traffic as ordinary verbs with `@as=<user@realm>`,
     /// addressing the replica by the **canonical channel name it learned** from
     /// the `CHANNEL-LAYOUT` mapping reply (§3.3) — so this is an ordinary `MSG`,
     /// no URI-target parsing needed.
     ///
-    /// weftd mints the WEFT-side event (home-authoritative — the provider never
-    /// mints, invariant 2), attributes it to a **puppet** `UserRef` derived from
-    /// the foreign identity, and stamps the native identity in `foreign=` for
-    /// display (§7a.1).
+    /// **A realm is a network.** The provider names its users by their WEFT
+    /// handle on the realm (`alice=bob@matrix.org`) and mints their msgids under
+    /// it (`@msgid=matrix.org/<ulid>`), so a replica is indistinguishable from a
+    /// federated peer's channel: the adapter owns the foreign→WEFT mapping (only
+    /// it knows its escaping rules), and weftd ingests exactly as it does for a
+    /// peer network — same `ingest_record`, same origin authority (invariant 2),
+    /// same one-hop forwarding.
     ///
     /// **Authority:** the target channel must be an `origin`-marked replica whose
     /// scheme this provider's key is pinned for — a provider can only speak into
-    /// rooms it owns. A native channel, or another provider's replica, is refused.
+    /// rooms it owns — and `@as`/`@msgid` must both name that channel's realm, so
+    /// a provider cannot forge a local user or another realm's event.
     async fn on_provider_ingest(
         &mut self,
         key: &PublicKey,
-        foreign: String,
+        sender: UserRef,
         cmd: Command,
+        line: &Line,
     ) -> io::Result<Flow> {
         // Every ingestable verb names its channel differently: MSG + JOIN/PART by
         // target/channel, the mutations by the msgid's channel.
@@ -600,44 +669,24 @@ impl<S: ControlStream> Session<S> {
             return Ok(Flow::Continue);
         };
 
-        // The puppet identity: a replica user looks federated (`alice@matrix.org`),
-        // while `foreign=` carries the exact native handle for display.
-        let sender = puppet_user(&foreign, &origin, &self.ctx.info.network);
+        // A realm is a network: the sender must live on the one this channel
+        // replicates, so a provider can never attribute an event to a local
+        // account (or to another realm's user).
+        let Ok(realm) = origin.realm().parse::<NetworkName>() else {
+            debug!(realm = origin.realm(), "realm is not a usable network name");
+            return self.unsupported(None, "realm is not a network name").await;
+        };
+        if sender.network != realm {
+            return self
+                .unsupported(None, "@as is not a user of this realm")
+                .await;
+        }
 
-        // Mutations reuse the §11.13 home-authoritative relay path, which already
-        // applies a (possibly foreign) sender's edit/delete/react and mints the
-        // bookkeeping msgid. Authorship was verified upstream: the provider owns
-        // the room, so it speaks for its users.
         match cmd {
-            Command::Msg { body, meta, .. } => {
-                handle
-                    .relay_publish_as(sender, body.unwrap_or_default(), meta, None, Some(foreign))
-                    .await;
-            }
-            Command::Edit { msgid, body } => {
-                handle
-                    .relay_mutate_as(sender, msgid, "edit".into(), body, Some(foreign))
-                    .await;
-            }
-            Command::Delete { msgid } => {
-                handle
-                    .relay_mutate_as(sender, msgid, "delete".into(), String::new(), Some(foreign))
-                    .await;
-            }
-            Command::React { msgid, emoji } => {
-                handle
-                    .relay_mutate_as(sender, msgid, "react-add".into(), emoji, Some(foreign))
-                    .await;
-            }
-            Command::Unreact { msgid, emoji } => {
-                handle
-                    .relay_mutate_as(sender, msgid, "react-remove".into(), emoji, Some(foreign))
-                    .await;
-            }
             // 4c: a foreign member's namespace membership persists under its
             // member key, so it survives restarts and appears in every derived
             // roster / member count. Announced to local members as an ordinary
-            // MEMBER carrying `foreign=`.
+            // MEMBER.
             Command::Join { .. } | Command::Part { channel: _, .. } => {
                 let Some(ns) = channel.namespace() else {
                     return Ok(Flow::Continue);
@@ -672,11 +721,27 @@ impl<S: ControlStream> Session<S> {
                         action: cmd_kind,
                         display: None,
                         count,
-                        foreign: Some(foreign),
                     })
                     .await;
             }
-            _ => return Ok(Flow::Continue),
+
+            // The message plane: the provider minted these, exactly as a peer
+            // network does, so they take the ordinary federated ingest path.
+            // `ingest_record` re-checks that every msgid originates on `realm`
+            // (invariant 2) and mints only the local bookkeeping ids that a
+            // delete/react row needs. Passing our own session id makes the loop
+            // guard structural — our forwarder skips the event it just ingested.
+            cmd => {
+                let Some(event) = provider_event(sender, channel, cmd, line) else {
+                    return Ok(Flow::Continue);
+                };
+                let Some((_, record)) = super::federation::ingest_record(&realm, &event) else {
+                    debug!("provider ingest with a msgid outside its realm — dropped");
+                    return Ok(Flow::Continue);
+                };
+
+                handle.ingest(self.id, record, event).await;
+            }
         }
 
         Ok(Flow::Continue)
@@ -745,6 +810,131 @@ impl<S: ControlStream> Session<S> {
         }
 
         Ok(Flow::Continue) // the binding was already cleared by `take`
+    }
+
+    /// Slice 5 — **outbound relay**: subscribe this provider session to every
+    /// replica channel under `schemes`, so a local user's post/edit/delete/react
+    /// is forwarded to the provider to puppet into the foreign system
+    /// (framework §3.2). Idempotent; called whenever the provider's scheme set
+    /// grows (`PLUGIN-REGISTER` / `REALM REGISTER` / `REALM ASSERT`).
+    pub(super) async fn sync_provider_forwarders(&mut self, schemes: &[Scheme]) {
+        let Ok(namespaces) = self.ctx.namespaces.namespaces_with_origin().await else {
+            return;
+        };
+
+        for record in namespaces {
+            let serves = record
+                .origin
+                .as_deref()
+                .and_then(|o| o.parse::<ForeignUri>().ok())
+                .is_some_and(|uri| schemes.contains(uri.scheme()));
+
+            if !serves {
+                continue;
+            }
+
+            let Ok(channels) = self
+                .ctx
+                .channel_store
+                .channels_in_namespace(&record.id)
+                .await
+            else {
+                continue;
+            };
+
+            for (channel, _) in channels {
+                if self.bridged.contains_key(&channel) {
+                    continue;
+                }
+                let Some(handle) = self.ctx.registry.get(&channel) else {
+                    continue;
+                };
+                let Some(rx) = handle.subscribe().await else {
+                    continue;
+                };
+
+                let forwarder = spawn_forwarder(channel.clone(), rx, self.events_tx.clone());
+                self.bridged.insert(channel, forwarder);
+            }
+        }
+    }
+
+    /// Slice 5: a replica channel's event reached this provider session — forward
+    /// the **local-origin** ones so the provider can puppet them outward.
+    ///
+    /// **Loop guard:** the same one-hop rule as a peer bridge (§11.4) — only
+    /// events *this* network minted cross the link. A replica is multi-origin
+    /// (our members post under our origin, the provider's users under their
+    /// realm), so an event we ingested is never sent back to the provider that
+    /// produced it — which would ping-pong into the foreign system.
+    pub(super) async fn on_provider_event(&mut self, event: SessionEvent) -> io::Result<()> {
+        let SessionEvent::Channel { event, .. } = event else {
+            return Ok(()); // Lagged: the provider re-syncs via HISTORY
+        };
+
+        let ours = |id: &MsgId| id.origin().as_str() == self.ctx.network_name();
+        let forward = match &event.event {
+            // System lines (join/part notices) are local channel noise.
+            Event::Message(m) if m.meta.system.is_some() => false,
+            Event::Message(m) => ours(&m.msgid),
+            Event::Edited { msgid, .. }
+            | Event::Deleted { msgid, .. }
+            | Event::Reaction { msgid, .. } => ours(msgid),
+            // MEMBER carries no msgid, so membership uses the same rule against
+            // the *user*: our own members' joins/parts go out (the provider
+            // mirrors them into the foreign room), a bridged member's do not —
+            // that one is the echo of an ingested JOIN/PART.
+            Event::Member { user, .. } => user.network.as_str() == self.ctx.network_name(),
+            // TYPING/POLICY are not relayed outward.
+            _ => false,
+        };
+
+        if forward {
+            if let Ok(line) = Reply::new(event.event).serialize() {
+                self.stream.send_line(&line).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Slice 5: mirror a **namespace-level** membership change into the replica's
+    /// provider, one `MEMBER` per affected channel.
+    ///
+    /// `NS JOIN`/`NS PART` subscribe to a namespace's channels *quietly* — no
+    /// channel `MEMBER` broadcast, deliberately, so a bulk subscription doesn't
+    /// spam local clients with a join line per channel. That means the ordinary
+    /// event relay ([`Self::on_provider_event`]) never sees them, yet the foreign
+    /// room's membership must still track ours. So this pushes them directly down
+    /// the provider's writer, the same route a `PROVISION` takes.
+    pub(super) fn relay_ns_membership(
+        &self,
+        origin: Option<&str>,
+        channels: &[ChannelName],
+        user: &UserRef,
+        action: MemberAction,
+    ) {
+        let Some(uri) = origin.and_then(|o| o.parse::<ForeignUri>().ok()) else {
+            return; // a native namespace has no provider to tell
+        };
+        let Some((_, out)) = self.ctx.provider_for_scheme(uri.scheme()) else {
+            return; // provider offline; it re-reads membership when it returns
+        };
+
+        for channel in channels {
+            let event = Event::Member {
+                channel: channel.clone(),
+                user: user.clone(),
+                action,
+                display: None,
+                count: None,
+            };
+            if let Ok(line) = Reply::new(event).serialize() {
+                if out.try_send(line).is_err() {
+                    warn!(%channel, "provider queue full — membership relay dropped");
+                }
+            }
+        }
     }
 
     /// Owner directive 2026-08-04: push the provider-state transition (`NS-META`
@@ -837,7 +1027,9 @@ impl<S: ControlStream> Session<S> {
             *bound = Some(realm);
         }
 
-        self.push_provider_state(&[scheme]).await;
+        self.push_provider_state(std::slice::from_ref(&scheme))
+            .await;
+        self.sync_provider_forwarders(&[scheme]).await;
         Ok(Flow::Continue)
     }
 
@@ -848,7 +1040,8 @@ impl<S: ControlStream> Session<S> {
             Err(e) => return self.internal(label, &e).await,
         };
 
-        self.send_event(label, Event::PluginManifest { catalog }).await?;
+        self.send_event(label, Event::PluginManifest { catalog })
+            .await?;
         Ok(Flow::Continue)
     }
 

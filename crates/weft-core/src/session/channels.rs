@@ -521,7 +521,6 @@ impl<S: ControlStream> Session<S> {
                         meta: meta.clone(),
                         edited: None,
                         edited_at: None,
-                        foreign: None,
                     }));
                     let record = EventRecord {
                         scope: Scope::Channel(channel),
@@ -724,7 +723,6 @@ impl<S: ControlStream> Session<S> {
                 meta,
                 edited: None,
                 edited_at: None,
-                foreign: None,
             }));
             if let Ok(line) = Reply::new(event).to_line() {
                 if let Ok(serialized) = line.serialize() {

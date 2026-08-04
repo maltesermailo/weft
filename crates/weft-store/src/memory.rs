@@ -876,7 +876,9 @@ impl AccountStore for MemoryStore {
         let mut inner = self.inner.lock().expect("store lock");
         if let Some(record) = inner.accounts.get_mut(account) {
             let prefix = format!("#{ns_id}/");
-            record.marks.retain(|target, _| !target.starts_with(&prefix));
+            record
+                .marks
+                .retain(|target, _| !target.starts_with(&prefix));
         }
         Ok(())
     }

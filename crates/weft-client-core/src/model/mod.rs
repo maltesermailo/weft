@@ -91,15 +91,45 @@ impl AppState {
     pub fn reduce(&mut self, event: &ClientEvent) -> Vec<StateDiff> {
         let mut out = Vec::new();
         out.extend(self.channels.handle(event).into_iter().map(StateDiff::Chan));
-        out.extend(self.presence.handle(event).into_iter().map(StateDiff::Presence));
-        out.extend(self.moderation.handle(event).into_iter().map(StateDiff::Mod));
-        out.extend(self.reports.handle(event).into_iter().map(StateDiff::Report));
+        out.extend(
+            self.presence
+                .handle(event)
+                .into_iter()
+                .map(StateDiff::Presence),
+        );
+        out.extend(
+            self.moderation
+                .handle(event)
+                .into_iter()
+                .map(StateDiff::Mod),
+        );
+        out.extend(
+            self.reports
+                .handle(event)
+                .into_iter()
+                .map(StateDiff::Report),
+        );
         out.extend(self.emoji.handle(event).into_iter().map(StateDiff::Emoji));
         out.extend(self.roles.handle(event).into_iter().map(StateDiff::Role));
-        out.extend(self.invites.handle(event).into_iter().map(StateDiff::Invite));
-        out.extend(self.federation.handle(event).into_iter().map(StateDiff::Federation));
+        out.extend(
+            self.invites
+                .handle(event)
+                .into_iter()
+                .map(StateDiff::Invite),
+        );
+        out.extend(
+            self.federation
+                .handle(event)
+                .into_iter()
+                .map(StateDiff::Federation),
+        );
         out.extend(self.social.handle(event).into_iter().map(StateDiff::Social));
-        out.extend(self.threads.handle(event).into_iter().map(StateDiff::Thread));
+        out.extend(
+            self.threads
+                .handle(event)
+                .into_iter()
+                .map(StateDiff::Thread),
+        );
         out.extend(self.namespaces.handle(event).into_iter().map(StateDiff::Ns));
 
         // Messages (capstone store): non-cross-domain mutations via `handle`; a
@@ -112,7 +142,14 @@ impl AppState {
         // history (and search / pins / thread views) is owned by the pull path /
         // the frontend's own backfill, and ingesting it here would pollute the
         // live buffer + falsely bump unread.
-        if let ClientEvent::Message { target, body, own, history: false, .. } = event {
+        if let ClientEvent::Message {
+            target,
+            body,
+            own,
+            history: false,
+            ..
+        } = event
+        {
             let me = self.messages.me().to_string();
             let mentioned = !*own && self.roles.mentions_me(&me, body, channel_ns(target));
 
@@ -148,7 +185,11 @@ impl AppState {
     /// Restore the persisted channel layout on connect; returns diffs the host
     /// emits so the mirror paints the cached order instantly.
     pub fn seed_layout(&mut self, blob: &str) -> Vec<StateDiff> {
-        self.channels.seed(blob).into_iter().map(StateDiff::Chan).collect()
+        self.channels
+            .seed(blob)
+            .into_iter()
+            .map(StateDiff::Chan)
+            .collect()
     }
 
     /// The serialized layout iff it changed since the last call — the host saves
@@ -168,7 +209,9 @@ impl AppState {
         anchor: Option<&str>,
         after: bool,
     ) -> (Vec<StateDiff>, Vec<(String, String, String)>) {
-        let r = self.channels.move_channel(ns, drag, target_cat, anchor, after);
+        let r = self
+            .channels
+            .move_channel(ns, drag, target_cat, anchor, after);
         (r.diffs.into_iter().map(StateDiff::Chan).collect(), r.sends)
     }
 
@@ -188,19 +231,31 @@ impl AppState {
     /// §4 remove a typer whose fallback-expiry timer fired host-side (its `stop`
     /// was lost). Local only — no server write; returns the diff to emit.
     pub fn typing_stop(&mut self, channel: &str, user: &str) -> Vec<StateDiff> {
-        self.channels.typing(channel, user, "stop").into_iter().map(StateDiff::Chan).collect()
+        self.channels
+            .typing(channel, user, "stop")
+            .into_iter()
+            .map(StateDiff::Chan)
+            .collect()
     }
 
     /// §6.7 clear a scope's deny list ahead of a `MOD LIST` re-fetch (the
     /// `refreshBans` reset). Local only — the batch response repopulates it.
     pub fn mod_refresh(&mut self, scope: &str) -> Vec<StateDiff> {
-        self.moderation.clear(scope).into_iter().map(StateDiff::Mod).collect()
+        self.moderation
+            .clear(scope)
+            .into_iter()
+            .map(StateDiff::Mod)
+            .collect()
     }
 
     /// §6.7 clear the report queue ahead of an on-demand re-fetch (the reports
     /// modal's open reset). Local only.
     pub fn reports_clear(&mut self) -> Vec<StateDiff> {
-        self.reports.clear().into_iter().map(StateDiff::Report).collect()
+        self.reports
+            .clear()
+            .into_iter()
+            .map(StateDiff::Report)
+            .collect()
     }
 
     // ---- messages: the two-tier IPC surface (subscription + local echo + pull) ----
@@ -216,7 +271,13 @@ impl AppState {
     /// §9 optimistic send: insert a `pending` local echo and return its diff for an
     /// instant render. The server echo (own + matching label) reconciles it to the
     /// server id on ingest; the host still builds + sends the wire `MSG` itself.
-    pub fn send_message(&mut self, channel: &str, label: &str, body: &str, md: bool) -> Vec<StateDiff> {
+    pub fn send_message(
+        &mut self,
+        channel: &str,
+        label: &str,
+        body: &str,
+        md: bool,
+    ) -> Vec<StateDiff> {
         let (_id, diffs) = self.messages.insert_pending(channel, label, body, md);
 
         self.scope_msgs(diffs)
@@ -225,7 +286,12 @@ impl AppState {
     /// The **pull** half of the two-tier IPC: up to `limit` messages in `channel`
     /// ending before `before` (exclusive, else newest). The frontend's window cache
     /// fills from this — bulk bodies never stream over the push path.
-    pub fn messages_range(&self, channel: &str, before: Option<&str>, limit: usize) -> Vec<messages::Msg> {
+    pub fn messages_range(
+        &self,
+        channel: &str,
+        before: Option<&str>,
+        limit: usize,
+    ) -> Vec<messages::Msg> {
         self.messages.range(channel, before, limit)
     }
 }
@@ -264,22 +330,38 @@ mod tests {
         assert!(matches!(diffs.as_slice(), [StateDiff::Presence(_)]));
 
         // An event no migrated domain owns produces nothing (TS still gets it raw).
-        let diffs = st.reduce(&ClientEvent::Closed { reason: "bye".into() });
+        let diffs = st.reduce(&ClientEvent::Closed {
+            reason: "bye".into(),
+        });
         assert!(diffs.is_empty());
     }
 
     fn msg(target: &str, sender: &str, msgid: &str, body: &str, own: bool) -> ClientEvent {
         ClientEvent::Message {
-            target: target.into(), sender: sender.into(), network: "home".into(), msgid: msgid.into(),
-            body: body.into(), attachments: Vec::new(), system: None, own, history: false, edited: false,
-            reply_to: None, thread: None, md: false, label: None,
+            target: target.into(),
+            sender: sender.into(),
+            network: "home".into(),
+            msgid: msgid.into(),
+            body: body.into(),
+            attachments: Vec::new(),
+            system: None,
+            own,
+            history: false,
+            edited: false,
+            reply_to: None,
+            thread: None,
+            md: false,
+            label: None,
         }
     }
 
     #[test]
     fn message_scopes_body_to_open_channels_and_derives_mentions() {
         let mut st = AppState::new();
-        st.reduce(&ClientEvent::Connected { network: "home".into(), account: "me".into() });
+        st.reduce(&ClientEvent::Connected {
+            network: "home".into(),
+            account: "me".into(),
+        });
 
         // A background (not-open) channel: only the cheap UnreadChanged flows.
         let diffs = st.reduce(&msg("#n/c", "alice", "01a", "hi", false));
@@ -290,7 +372,9 @@ mod tests {
         // Open it → the next message carries the body diff too, and `@me` mentions.
         st.set_open_channels(vec!["#n/c".into()]);
         let diffs = st.reduce(&msg("#n/c", "alice", "01b", "@me hi", false));
-        assert!(diffs.iter().any(|d| matches!(d, StateDiff::Msg(messages::MsgDiff::MsgAppended { .. }))));
+        assert!(diffs
+            .iter()
+            .any(|d| matches!(d, StateDiff::Msg(messages::MsgDiff::MsgAppended { .. }))));
         assert!(diffs.iter().any(|d| matches!(d,
             StateDiff::Msg(messages::MsgDiff::UnreadChanged { mentions, .. }) if *mentions == 1)));
     }
@@ -298,7 +382,10 @@ mod tests {
     #[test]
     fn send_message_echoes_and_range_reads_the_buffer() {
         let mut st = AppState::new();
-        st.reduce(&ClientEvent::Connected { network: "home".into(), account: "me".into() });
+        st.reduce(&ClientEvent::Connected {
+            network: "home".into(),
+            account: "me".into(),
+        });
         st.set_open_channels(vec!["#n/c".into()]);
 
         let diffs = st.send_message("#n/c", "L1", "hey", false);
@@ -308,9 +395,20 @@ mod tests {
         // The pull path sees the echo; a server ack (own + label) reconciles it.
         assert_eq!(st.messages_range("#n/c", None, 50).len(), 1);
         st.reduce(&ClientEvent::Message {
-            target: "#n/c".into(), sender: "me".into(), network: "home".into(), msgid: "01srv".into(),
-            body: "hey".into(), attachments: Vec::new(), system: None, own: true, history: false,
-            edited: false, reply_to: None, thread: None, md: false, label: Some("L1".into()),
+            target: "#n/c".into(),
+            sender: "me".into(),
+            network: "home".into(),
+            msgid: "01srv".into(),
+            body: "hey".into(),
+            attachments: Vec::new(),
+            system: None,
+            own: true,
+            history: false,
+            edited: false,
+            reply_to: None,
+            thread: None,
+            md: false,
+            label: Some("L1".into()),
         });
 
         let range = st.messages_range("#n/c", None, 50);
@@ -321,15 +419,29 @@ mod tests {
     #[test]
     fn history_messages_are_not_ingested() {
         let mut st = AppState::new();
-        st.reduce(&ClientEvent::Connected { network: "home".into(), account: "me".into() });
+        st.reduce(&ClientEvent::Connected {
+            network: "home".into(),
+            account: "me".into(),
+        });
         st.set_open_channels(vec!["*".into()]);
 
         // A history-batch message (search / pins / thread / backfill) must not
         // enter the live buffer or bump unread — the frontend owns older history.
         let hist = ClientEvent::Message {
-            target: "#n/c".into(), sender: "alice".into(), network: "home".into(), msgid: "01a".into(),
-            body: "old".into(), attachments: Vec::new(), system: None, own: false, history: true,
-            edited: false, reply_to: None, thread: None, md: false, label: None,
+            target: "#n/c".into(),
+            sender: "alice".into(),
+            network: "home".into(),
+            msgid: "01a".into(),
+            body: "old".into(),
+            attachments: Vec::new(),
+            system: None,
+            own: false,
+            history: true,
+            edited: false,
+            reply_to: None,
+            thread: None,
+            md: false,
+            label: None,
         };
         assert!(st.reduce(&hist).is_empty());
         assert!(st.messages_range("#n/c", None, 50).is_empty());
@@ -338,11 +450,16 @@ mod tests {
     #[test]
     fn open_star_emits_body_for_every_channel() {
         let mut st = AppState::new();
-        st.reduce(&ClientEvent::Connected { network: "home".into(), account: "me".into() });
+        st.reduce(&ClientEvent::Connected {
+            network: "home".into(),
+            account: "me".into(),
+        });
         st.set_open_channels(vec!["*".into()]); // emit-all
 
         // A channel never individually opened still gets the body diff.
         let diffs = st.reduce(&msg("#n/other", "alice", "01a", "hi", false));
-        assert!(diffs.iter().any(|d| matches!(d, StateDiff::Msg(messages::MsgDiff::MsgAppended { .. }))));
+        assert!(diffs
+            .iter()
+            .any(|d| matches!(d, StateDiff::Msg(messages::MsgDiff::MsgAppended { .. }))));
     }
 }

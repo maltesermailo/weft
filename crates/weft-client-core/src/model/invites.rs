@@ -41,7 +41,14 @@ pub struct Invites {
 impl Invites {
     pub fn handle(&mut self, event: &ClientEvent) -> Vec<InviteDiff> {
         match event {
-            ClientEvent::InviteInfo { scope, invite_id, creator, uses_left, used, expiry } => {
+            ClientEvent::InviteInfo {
+                scope,
+                invite_id,
+                creator,
+                uses_left,
+                used,
+                expiry,
+            } => {
                 self.buf.push(InviteInfo {
                     scope: scope.clone(),
                     invite_id: invite_id.clone(),
@@ -62,9 +69,11 @@ impl Invites {
             }
             ClientEvent::BatchEnd { .. } => self.flush(),
             // §6.5 a revoke echo (INVITED … max-uses=0) drops the invite from the list.
-            ClientEvent::Invited { invite_id, max_uses, .. } if *max_uses == Some(0) => {
-                self.revoke(invite_id)
-            }
+            ClientEvent::Invited {
+                invite_id,
+                max_uses,
+                ..
+            } if *max_uses == Some(0) => self.revoke(invite_id),
             _ => Vec::new(),
         }
     }
@@ -77,7 +86,9 @@ impl Invites {
         self.in_batch = false;
         self.list = std::mem::take(&mut self.buf);
 
-        vec![InviteDiff::InviteList { invites: self.list.clone() }]
+        vec![InviteDiff::InviteList {
+            invites: self.list.clone(),
+        }]
     }
 
     fn revoke(&mut self, invite_id: &str) -> Vec<InviteDiff> {
@@ -88,7 +99,9 @@ impl Invites {
             return Vec::new();
         }
 
-        vec![InviteDiff::InviteList { invites: self.list.clone() }]
+        vec![InviteDiff::InviteList {
+            invites: self.list.clone(),
+        }]
     }
 }
 
@@ -110,10 +123,18 @@ mod tests {
         ClientEvent::BatchStart { id: id.into() }
     }
     fn batch_end() -> ClientEvent {
-        ClientEvent::BatchEnd { id: "il1".into(), truncated: false }
+        ClientEvent::BatchEnd {
+            id: "il1".into(),
+            truncated: false,
+        }
     }
     fn revoked(id: &str) -> ClientEvent {
-        ClientEvent::Invited { scope: "ns:x".into(), invite_id: id.into(), link: None, max_uses: Some(0) }
+        ClientEvent::Invited {
+            scope: "ns:x".into(),
+            invite_id: id.into(),
+            link: None,
+            max_uses: Some(0),
+        }
     }
     fn ids(diffs: &[InviteDiff]) -> Vec<&str> {
         let InviteDiff::InviteList { invites } = &diffs[0];
@@ -133,7 +154,12 @@ mod tests {
     fn non_invite_batch_end_does_not_flush() {
         let mut inv = Invites::default();
         // A roles batch end (no `il` start) must not flush an empty invite list.
-        assert!(inv.handle(&ClientEvent::BatchEnd { id: "r1".into(), truncated: false }).is_empty());
+        assert!(inv
+            .handle(&ClientEvent::BatchEnd {
+                id: "r1".into(),
+                truncated: false
+            })
+            .is_empty());
     }
 
     #[test]
@@ -164,7 +190,10 @@ mod tests {
         assert!(inv.handle(&revoked("ghost")).is_empty());
         // A mint echo (max-uses > 0) doesn't touch the list.
         let mint = ClientEvent::Invited {
-            scope: "ns:x".into(), invite_id: "i9".into(), link: Some("weft://x".into()), max_uses: Some(1),
+            scope: "ns:x".into(),
+            invite_id: "i9".into(),
+            link: Some("weft://x".into()),
+            max_uses: Some(1),
         };
         assert!(inv.handle(&mint).is_empty());
     }

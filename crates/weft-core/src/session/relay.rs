@@ -134,7 +134,6 @@ impl<S: ControlStream> Session<S> {
                 action: MemberAction::Join,
                 display: None,
                 count: Some(ack.count),
-                foreign: None,
             },
         )
         .await?;
@@ -228,7 +227,6 @@ impl<S: ControlStream> Session<S> {
                         action: MemberAction::Part,
                         display: None,
                         count: None,
-                        foreign: None,
                     },
                 )
                 .await?;
@@ -386,7 +384,10 @@ impl<S: ControlStream> Session<S> {
                 }
             }
             // §9.5 same-network DM, routed through the account directory.
-            Target::User { account: to, network } => {
+            Target::User {
+                account: to,
+                network,
+            } => {
                 let State::Ready { account } = self.state.clone() else {
                     unreachable!("on_msg only dispatched in READY");
                 };
@@ -874,7 +875,10 @@ impl<S: ControlStream> Session<S> {
                 };
                 // Cross-network DM scopes land with the routing (slice 4d); a
                 // foreign peer has no local DM history to serve.
-                if network.as_ref().is_some_and(|net| *net != self.ctx.info.network) {
+                if network
+                    .as_ref()
+                    .is_some_and(|net| *net != self.ctx.info.network)
+                {
                     return self.no_such_target(label).await;
                 }
                 (
@@ -1074,7 +1078,6 @@ impl<S: ControlStream> Session<S> {
                     action: MemberAction::Join,
                     display: None,
                     count: Some(count),
-                    foreign: None,
                 },
             )
             .await?;
@@ -1178,7 +1181,6 @@ impl<S: ControlStream> Session<S> {
                             meta,
                             edited: None,
                             edited_at: None,
-                            foreign: None,
                         })),
                     )
                     .await?;
@@ -1241,7 +1243,6 @@ impl<S: ControlStream> Session<S> {
                         meta,
                         edited: None,
                         edited_at: None,
-                        foreign: None,
                     })),
                 )
                 .await?;
@@ -1494,7 +1495,6 @@ pub(super) fn batch_events(
                     meta,
                     edited: edited.map(|(count, _)| count),
                     edited_at: edited.map(|(_, at)| at),
-                    foreign: None,
                 })));
                 for summary in reactions {
                     events.push(Event::Reactions {

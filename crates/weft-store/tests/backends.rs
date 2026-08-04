@@ -433,9 +433,15 @@ where
 
     // NS LEAVE prunes an account's markers for that namespace's channels only
     // (`#<ns-id>/…`) — top-level and other-namespace markers are untouched.
-    store.set_mark(&ada, "#nsx/general", &msgid(1)).await.unwrap();
+    store
+        .set_mark(&ada, "#nsx/general", &msgid(1))
+        .await
+        .unwrap();
     store.set_mark(&ada, "#nsx/dev", &msgid(2)).await.unwrap();
-    store.set_mark(&ada, "#nsy/general", &msgid(3)).await.unwrap();
+    store
+        .set_mark(&ada, "#nsy/general", &msgid(3))
+        .await
+        .unwrap();
     store.clear_marks_in_namespace(&ada, "nsx").await.unwrap();
     let after = store.marks(&ada).await.unwrap();
     assert!(
@@ -994,7 +1000,10 @@ where
     // A read marker must not outlive its channel — otherwise the login snapshot
     // (§6.3) emits UNREAD-COUNTS for a target that no longer exists (a phantom
     // channel client-side). `delete_channel` prunes the channel's markers.
-    store.set_mark(&ada, name.as_str(), &msgid(9_000)).await.unwrap();
+    store
+        .set_mark(&ada, name.as_str(), &msgid(9_000))
+        .await
+        .unwrap();
     assert!(store
         .marks(&ada)
         .await
@@ -1304,7 +1313,11 @@ where
 
     // Foreign-bridge framework (§3): a replica namespace is looked up by its
     // origin URI; a native namespace (origin NULL) is never found that way.
-    assert!(store.namespace_by_origin("matrix://matrix.org/gaming").await.unwrap().is_none());
+    assert!(store
+        .namespace_by_origin("matrix://matrix.org/gaming")
+        .await
+        .unwrap()
+        .is_none());
     let foreign: weft_proto::NamespaceName = format!("foreign{tag}").parse().unwrap();
     let origin = format!("matrix://matrix.org/{tag}");
     assert!(store
@@ -1332,7 +1345,13 @@ where
     assert_eq!(by_origin.origin.as_deref(), Some(origin.as_str()));
     // 3b-d: origin namespaces never count toward the record owner's quota, and
     // the liveness fan-out surface lists them.
-    assert_eq!(store.namespaces_owned(&format!("fowner-{tag}")).await.unwrap(), 0);
+    assert_eq!(
+        store
+            .namespaces_owned(&format!("fowner-{tag}"))
+            .await
+            .unwrap(),
+        0
+    );
     assert!(store
         .namespaces_with_origin()
         .await
@@ -2035,11 +2054,24 @@ where
     let ns_sec: weft_proto::ChannelName = format!("#{ns}/secret").parse().unwrap();
 
     assert!(!store.is_ns_member(nm_a.as_str(), &ns).await.unwrap());
-    assert!(store.ns_memberships(nm_a.as_str()).await.unwrap().is_empty());
+    assert!(store
+        .ns_memberships(nm_a.as_str())
+        .await
+        .unwrap()
+        .is_empty());
 
-    store.set_ns_membership(nm_a.as_str(), &ns, 100).await.unwrap();
-    store.set_ns_membership(nm_b.as_str(), &ns, 200).await.unwrap();
-    store.set_ns_membership(nm_a.as_str(), &ns, 999).await.unwrap(); // idempotent, keeps 100
+    store
+        .set_ns_membership(nm_a.as_str(), &ns, 100)
+        .await
+        .unwrap();
+    store
+        .set_ns_membership(nm_b.as_str(), &ns, 200)
+        .await
+        .unwrap();
+    store
+        .set_ns_membership(nm_a.as_str(), &ns, 999)
+        .await
+        .unwrap(); // idempotent, keeps 100
     assert!(store.is_ns_member(nm_a.as_str(), &ns).await.unwrap());
     assert_eq!(
         store.ns_memberships(nm_a.as_str()).await.unwrap(),
@@ -2058,7 +2090,10 @@ where
     // 4c: a **bridged** member key (`user@network`) lives in the same table — no
     // migration needed — and `local_member` is what separates the two forms.
     let foreign_key = "alice@matrix.org";
-    store.set_ns_membership(foreign_key, &ns, 300).await.unwrap();
+    store
+        .set_ns_membership(foreign_key, &ns, 300)
+        .await
+        .unwrap();
     assert!(store.is_ns_member(foreign_key, &ns).await.unwrap());
     let mut mixed = store.ns_members(&ns).await.unwrap();
     mixed.sort();

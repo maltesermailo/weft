@@ -61,7 +61,6 @@ impl GroupMutKind {
                 msgid: mut_msgid,
                 edit_of: root,
                 body,
-                foreign: None,
             },
             GroupMutKind::Delete => Event::Deleted {
                 target: Target::Group(group),
@@ -78,7 +77,6 @@ impl GroupMutKind {
                     ReactionOp::Remove
                 },
                 by: sender,
-                foreign: None,
             },
         }
     }
@@ -647,14 +645,16 @@ impl Actor {
                 };
                 self.persist(record).await;
                 let event = Event::Message(Box::new(MessageEvent {
-                    target: Target::User { account: to.clone(), network: None },
+                    target: Target::User {
+                        account: to.clone(),
+                        network: None,
+                    },
                     sender: self.user(&from),
                     msgid,
                     body,
                     meta,
                     edited: None,
                     edited_at: None,
-                    foreign: None,
                 }));
                 self.deliver(&from, &to, origin, event);
                 let _ = delivered.send(true);
@@ -687,7 +687,6 @@ impl Actor {
                     meta,
                     edited: None,
                     edited_at: None,
-                    foreign: None,
                 }));
                 self.deliver_many(&members, origin, event);
             }
@@ -709,7 +708,6 @@ impl Actor {
                     meta: meta.clone(),
                     edited: None,
                     edited_at: None,
-                    foreign: None,
                 };
                 self.persist(EventRecord {
                     scope: Scope::Group(group),
@@ -750,7 +748,6 @@ impl Actor {
                     meta,
                     edited: None,
                     edited_at: None,
-                    foreign: None,
                 }));
                 // `origin` = the spoke poster's session for their own echo (its
                 // pending label attaches), else `SessionId::MAX` (a fresh ingest,
@@ -815,12 +812,14 @@ impl Actor {
                 })
                 .await;
                 let event = Event::Edited {
-                    target: Target::User { account: peer.clone(), network: None },
+                    target: Target::User {
+                        account: peer.clone(),
+                        network: None,
+                    },
                     user: self.user(&from),
                     msgid,
                     edit_of: root,
                     body,
-                    foreign: None,
                 };
                 self.deliver(&from, &peer, origin, event);
             }
@@ -840,7 +839,10 @@ impl Actor {
                 })
                 .await;
                 let event = Event::Deleted {
-                    target: Target::User { account: peer.clone(), network: None },
+                    target: Target::User {
+                        account: peer.clone(),
+                        network: None,
+                    },
                     msgid: root,
                     by: Some(self.user(&from)),
                 };
@@ -867,7 +869,10 @@ impl Actor {
                 })
                 .await;
                 let event = Event::Reaction {
-                    target: Target::User { account: peer.clone(), network: None },
+                    target: Target::User {
+                        account: peer.clone(),
+                        network: None,
+                    },
                     msgid: root,
                     emoji,
                     op: if add {
@@ -876,7 +881,6 @@ impl Actor {
                         ReactionOp::Remove
                     },
                     by: self.user(&from),
-                    foreign: None,
                 };
                 self.deliver(&from, &peer, origin, event);
             }

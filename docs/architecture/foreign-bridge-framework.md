@@ -2,7 +2,7 @@
 
 **Status:** design concept (owner directive 2026-07-27). **UNIFIED with the plugin system
 (owner directive 2026-08-03, `plugin-spec.md` §18):** this framework's capabilities — virtual
-namespaces with an `origin` marker, foreign attribution (`@as`/`foreign=`), scheme registration +
+namespaces with an `origin` marker, foreign attribution (`@as`), scheme registration +
 provisioning — are now **general provider capabilities** any plugin can use (an Instagram bridge is
 just a plugin); only the federation-grade extras (`REALM ASSERT` per-realm connections, realm-keyed
 NETBLOCK, federated backfill) stay bridge-specific behind the SDK's `bridge` feature. This doc remains
@@ -36,7 +36,7 @@ daemon + an adapter-binding doc, with **no further core change**.
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Foreign identity | **Native, never remapped** — for **spaces/channels**: they keep their own coordinates and are addressed by a `<scheme>://<realm>/<path>` URI, never laundered into WEFT namespace grammar. Supersedes `matrix.md` §5. **AMENDED 2026-08-04 for *users*:** a replica *user* is attributed as a federated `UserRef` on their own foreign domain (`alice@matrix.org`) so replicas present as an ordinary federated network — see §7a.0; the exact native handle still rides `foreign=`. |
+| 1 | Foreign identity | **Native, never remapped** — for **spaces/channels**: they keep their own coordinates and are addressed by a `<scheme>://<realm>/<path>` URI, never laundered into WEFT namespace grammar. Supersedes `matrix.md` §5. **AMENDED 2026-08-04 for *users*:** a replica *user* is attributed as a federated `UserRef` on the realm (`alice@matrix.org`) so replicas present as an ordinary federated network — see §7a.0. |
 | 2 | Protocol logic location | **Per-app adapter daemons only.** weftd core knows the generic contract + scheme routing; it never parses a foreign protocol. Restores the `matrix.md` §17 module boundary at the framework level. |
 | 3 | Trust / connection | **Two planes** (§3): a realm-agnostic **control link** per adapter (scheme registration + weftd→adapter provisioning pushes, §3.3) and **one data connection per realm** — pinned-key authed, bound to a single `(scheme, realm)` at connect via a `REALM ASSERT` handshake. **Multiple adapters may connect concurrently** (Matrix + Discord, or sharded per-realm instances). Per-realm binding of the data connection makes cross-realm spoofing structurally impossible and gives per-realm failure/NETBLOCK domains; the scope URI (`matrix://matrix.org/…`) and account (`@a:matrix.org`) are self-describing, so assertions carry no separate realm tag. |
 | 4 | Home authority (inbound) | **Home-authoritative replica.** weftd mints the WEFT-side ULIDs for the foreign replica; the foreign system remains the true social home. Order-divergence is an honest limit. |
@@ -241,35 +241,42 @@ specs those additions. All are **additive wire fields** (proto, round-trip-teste
 system's SDUI/widgets can't help here, because the stock client renders the message stream + settings
 from these events, not from plugin UI.
 
-### 7a.0 Replica users are **federated-looking** (owner directive 2026-08-04)
+### 7a.0 A realm **is a network** (owner directive 2026-08-04, refined 2026-08-04)
 
-**This amends decision 1 (§1) for *users*.** A replica user is attributed to a `UserRef` whose
-**network is their own foreign domain** — `alice@matrix.org`, not a mangled local handle. Accessing
-`matrix.org` therefore makes its users *belong to* `matrix.org`, i.e. replicas present as an ordinary
-federated network.
+**This amends decision 1 (§1) for *users* and for event minting.** A bridged realm is modeled as a
+network, so accessing `matrix.org` makes its users *belong to* `matrix.org` and its events *originate
+on* `matrix.org`. A replica is then indistinguishable from a peer-federated channel, and the whole
+peer-federation machinery applies unchanged.
 
-- **Network** = the identity's own domain (`@bob:other.org` in a `matrix.org` room belongs to
-  `other.org` — correct, and more federated-looking than using the room's realm); fallback = the
-  room's **realm** when the identity carries no domain (a Discord snowflake, an Instagram handle);
-  final fallback = our own network if neither parses as a `NetworkName`.
-- **Account** = the identity's localpart, sanitized to the WEFT account charset.
+- **The adapter owns identity.** `@as=<user@realm>` carries the finished WEFT handle
+  (`alice=bob@matrix.org`), not a native identifier for weftd to mangle. Only the adapter knows its
+  realm's escaping rules, so only the adapter can keep the mapping **injective** — which it must:
+  a lossy mapping merges two foreign users into one WEFT identity (their messages, roster entry, and
+  mentions all collide). To make that achievable the account grammar admits `=` and `+`
+  (spec §2.3, decision (3)), covering Matrix localparts except `/`, WEFT's own path separator.
+- **The adapter mints msgids.** `MSG` and `EDIT` carry `@msgid=<realm>/<ulid>`; `DELETE`/`REACT`
+  name only their root and get a local bookkeeping id, exactly as on the peer path. weftd never
+  mints for a foreign origin (invariant 2).
+- **weftd enforces one thing:** `@as` *and* `@msgid` must both name the realm whose scheme this
+  provider's key is pinned for. A provider cannot forge a local account or another realm's event.
+- **Ingestion is the federated path**, verbatim: `ingest_record` re-checks origin, and the outbound
+  relay forwards iff `msgid.origin == our network` — so an event we ingested is never sent back to
+  the provider that produced it.
 - Decision 1 still holds for **namespaces/channels**: those stay `<scheme>://`-addressed and
-  `origin=`-badged; nothing is laundered into WEFT *namespace* grammar. Only user attribution changes.
-- The codebase already models this: `Actor::Foreign(user@network)`, foreign-keyed grants, and
-  `EventRecord.sender: UserRef` all accept a non-local network.
+  `origin=`-badged; nothing is laundered into WEFT *namespace* grammar.
 - **Known consequence** (a replica user *looks* federated but has no peer bridge): DM routing,
   `FEDERATE`, and name-keyed `NETBLOCK` treat `matrix.org` as a network. Guarding those paths is
   tracked as slice-4 follow-up work, not silently assumed safe.
 
-### 7a.1 Foreign identity on content — `foreign=`
+### 7a.1 ~~Foreign identity on content — `foreign=`~~ (REMOVED 2026-08-04)
 
-`MESSAGE`/`MEMBER`/`REACTION`/`EDITED`/`TYPING` gain an optional **`foreign=<native-account>`** tag.
-When present, the actor is a **foreign identity** (an MXID `@alice:matrix.org`, a Discord snowflake),
-and the client renders it with the native handle **badged** by the channel/namespace `origin`
-(§7a.2) — "alice · Matrix · matrix.org". The event's own `sender: UserRef` is the home-authoritative
-puppet handle (weftd mints the replica, §4/invariant 2); the `foreign=` tag is the *display* identity.
-This is the outbound face of the inbound **`@as=`** attribution (§3.1): the adapter's
-`@as=@alice:matrix.org MSG matrix://…/general :hi` becomes a replica `MESSAGE … foreign=@alice:matrix.org`.
+A `foreign=<native-account>` tag on `MESSAGE`/`MEMBER`/`REACTION`/`EDITED` used to carry the exact
+native handle for display beside a locally-minted event. It is **gone**. Under §7a.0 the sender
+`user@realm` *is* the identity — the same way `ada@hda.example` is on a peer network — so the tag
+duplicated it. Worse, it concealed a defect: because it made the WEFT handle merely cosmetic, that
+handle was derived lossily, and two distinct foreign users could collide onto one account. Making the
+identity authoritative forces the mapping to be injective. Clients badge a bridged user from the
+channel/namespace `origin=` (§7a.2) plus the network suffix they already render for federated users.
 
 ### 7a.2 Origin on namespaces/channels — `origin=`
 
@@ -357,8 +364,8 @@ plain badged handles unless an adapter does more. Each adapter documents its exa
    discriminator, not a parallel table set (owner call 2026-08-03).
 6. Realm-keyed `NETBLOCK`.
 7. **Foreign display + capability profile (§7a, owner directive 2026-08-03):** additive wire fields
-   (proto, round-trip-first) — `foreign=` on `MESSAGE`/`MEMBER`/`REACTION`/`EDITED` (foreign author,
-   §7a.1); `origin=` on `NS-META`/`CHANNEL-LAYOUT`/`DISCOVER` (badging, §7a.2); the ns capability
+   (proto, round-trip-first) — `origin=` on `NS-META`/`CHANNEL-LAYOUT`/`DISCOVER` (badging, §7a.2);
+   `@msgid=` on provider ingestion (the adapter mints, §7a.0); the ns capability
    profile `authority=roles|levels|none` + `settings=<disabled-keys>` on `NS-META` (§7a.3); `level=` on
    `MEMBER`/roster (advisory PL, §7a.4). weftd emits them on the replica; the client renders badges +
    the levels view + gated settings. The general **settings-gating** mechanism is shared with the

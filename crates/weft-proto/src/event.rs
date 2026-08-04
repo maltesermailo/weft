@@ -90,10 +90,6 @@ pub struct MessageEvent {
     pub edited: Option<u64>,
     /// Batch form only: unix ms of the final edit (`edited-at=`).
     pub edited_at: Option<u64>,
-    /// `foreign=` — the author's native foreign identity (an MXID, a snowflake)
-    /// on a provider-managed channel; `sender` stays the home-minted puppet
-    /// handle (framework §7a.1). Absent ⇒ a native author.
-    pub foreign: Option<String>,
 }
 
 /// `ERR <CODE> [context] :text` (§8).
@@ -147,10 +143,6 @@ pub enum Event {
         action: MemberAction,
         display: Option<String>,
         count: Option<u64>,
-        /// `foreign=` — the actor's native foreign identity (an MXID, a
-        /// snowflake) on a provider-managed channel; `user` stays the
-        /// home-minted puppet handle (framework §7a.1).
-        foreign: Option<String>,
     },
     /// `TYPING <#chan> <user@net> <start|stop>` — never stored.
     Typing {
@@ -277,8 +269,6 @@ pub enum Event {
         msgid: MsgId,
         edit_of: MsgId,
         body: String,
-        /// `foreign=` — the editor's native foreign identity (framework §7a.1).
-        foreign: Option<String>,
     },
     /// `DELETED <target> <msgid>` — the tombstone (§7); `by=` optional.
     Deleted {
@@ -293,8 +283,6 @@ pub enum Event {
         emoji: String,
         op: ReactionOp,
         by: UserRef,
-        /// `foreign=` — the reactor's native foreign identity (framework §7a.1).
-        foreign: Option<String>,
     },
     /// `REACTIONS <target> <msgid> <emoji> <count>` — batch summary form
     /// (§12.1); `by=` lists the first ≤20 actors, count is authoritative.
@@ -875,7 +863,6 @@ impl Event {
                     meta: MsgMeta::from_tags(&line.tags)?,
                     edited: u64_tag(line, "edited", "MESSAGE")?,
                     edited_at: u64_tag(line, "edited-at", "MESSAGE")?,
-                    foreign: opt_tag(line, "foreign"),
                 })))
             }
             "MEMBER" => {
@@ -886,7 +873,6 @@ impl Event {
                     action: args.req("action")?.parse()?,
                     display: opt_tag(line, "display"),
                     count: u64_tag(line, "count", "MEMBER")?,
-                    foreign: opt_tag(line, "foreign"),
                 })
             }
             "TYPING" => {
@@ -1111,7 +1097,6 @@ impl Event {
                     msgid: tag_msgid("msgid")?,
                     edit_of: tag_msgid("edit-of")?,
                     body: args.trailing_req("new body")?.to_string(),
-                    foreign: opt_tag(line, "foreign"),
                 })
             }
             "DELETED" => {
@@ -1144,7 +1129,6 @@ impl Event {
                             what: "by tag",
                         })?
                         .parse()?,
-                    foreign: opt_tag(line, "foreign"),
                 })
             }
             "REACTIONS" => {
@@ -1860,9 +1844,6 @@ impl Event {
                 if let Some(edited_at) = message.edited_at {
                     tags.insert("edited-at".to_string(), edited_at.to_string());
                 }
-                if let Some(foreign) = &message.foreign {
-                    tags.insert("foreign".to_string(), foreign.clone());
-                }
                 (
                     "MESSAGE",
                     vec![message.target.to_string(), message.sender.to_string()],
@@ -1875,16 +1856,12 @@ impl Event {
                 action,
                 display,
                 count,
-                foreign,
             } => {
                 if let Some(display) = display {
                     tags.insert("display".to_string(), display.clone());
                 }
                 if let Some(count) = count {
                     tags.insert("count".to_string(), count.to_string());
-                }
-                if let Some(foreign) = foreign {
-                    tags.insert("foreign".to_string(), foreign.clone());
                 }
                 (
                     "MEMBER",
@@ -2043,13 +2020,9 @@ impl Event {
                 msgid,
                 edit_of,
                 body,
-                foreign,
             } => {
                 tags.insert("msgid".to_string(), msgid.to_string());
                 tags.insert("edit-of".to_string(), edit_of.to_string());
-                if let Some(foreign) = foreign {
-                    tags.insert("foreign".to_string(), foreign.clone());
-                }
                 (
                     "EDITED",
                     vec![target.to_string(), user.to_string()],
@@ -2068,13 +2041,9 @@ impl Event {
                 emoji,
                 op,
                 by,
-                foreign,
             } => {
                 tags.insert("op".to_string(), op.to_string());
                 tags.insert("by".to_string(), by.to_string());
-                if let Some(foreign) = foreign {
-                    tags.insert("foreign".to_string(), foreign.clone());
-                }
                 (
                     "REACTION",
                     vec![target.to_string(), msgid.to_string(), emoji.clone()],
@@ -2239,7 +2208,11 @@ impl Event {
                 description,
                 icon,
             } => {
-                for (k, v) in [("title", title), ("description", description), ("icon", icon)] {
+                for (k, v) in [
+                    ("title", title),
+                    ("description", description),
+                    ("icon", icon),
+                ] {
                     if let Some(v) = v {
                         tags.insert(k.to_string(), v.clone());
                     }
@@ -2446,7 +2419,9 @@ impl Event {
             Event::Provision { uri, job } => {
                 ("PROVISION", vec![uri.to_string(), job.clone()], None)
             }
-            Event::NetblockRemoved { network } => ("NETBLOCK-REMOVED", vec![network.to_string()], None),
+            Event::NetblockRemoved { network } => {
+                ("NETBLOCK-REMOVED", vec![network.to_string()], None)
+            }
             Event::MediaBlocked { hash, reason } => {
                 ("MEDIA-BLOCKED", vec![hash.clone()], reason.clone())
             }
@@ -2832,7 +2807,6 @@ mod tests {
                 },
                 edited: None,
                 edited_at: None,
-                foreign: None,
             })),
             "req-1", // echo copy carries the sender's label = the ack (§9.2)
         ));
@@ -2848,7 +2822,6 @@ mod tests {
             },
             edited: None,
             edited_at: None,
-            foreign: None,
         }))));
         assert_eq!(
             Reply::parse("MESSAGE #general ada@hda.example :hi"),
@@ -2869,7 +2842,6 @@ mod tests {
                 action: MemberAction::Join,
                 display: Some("Ada L.".into()),
                 count: Some(3),
-                foreign: None,
             },
             "j1",
         );
@@ -2885,7 +2857,6 @@ mod tests {
             action: MemberAction::Part,
             display: None,
             count: None,
-            foreign: None,
         }));
         round_trip(&Reply::new(Event::Typing {
             channel: "#general".parse().unwrap(),
@@ -3062,47 +3033,11 @@ mod tests {
             meta: MsgMeta::default(),
             edited: Some(3),
             edited_at: Some(1_700_000_000_000),
-            foreign: None,
         })));
         let wire = reply.serialize().unwrap();
         assert!(wire.contains("edited=3"), "{wire}");
         assert!(wire.contains("edited-at=1700000000000"), "{wire}");
         round_trip(&reply);
-    }
-
-    #[test]
-    fn foreign_identity_tags_round_trip() {
-        // §7a.1: a provider-managed channel's events carry the author's native
-        // foreign identity; `sender`/`user`/`by` stay the home puppet handle.
-        let msg = Reply::new(Event::Message(Box::new(MessageEvent {
-            target: "#general".parse().unwrap(),
-            sender: "mx-alice@test.example".parse().unwrap(),
-            msgid: MSGID.parse().unwrap(),
-            body: "hi from matrix".into(),
-            meta: MsgMeta::default(),
-            edited: None,
-            edited_at: None,
-            foreign: Some("@alice:matrix.org".into()),
-        })));
-        assert!(msg.serialize().unwrap().contains("foreign=@alice:matrix.org"));
-        round_trip(&msg);
-
-        round_trip(&Reply::new(Event::Member {
-            channel: "#general".parse().unwrap(),
-            user: "mx-alice@test.example".parse().unwrap(),
-            action: MemberAction::Join,
-            display: None,
-            count: None,
-            foreign: Some("@alice:matrix.org".into()),
-        }));
-        round_trip(&Reply::new(Event::Reaction {
-            target: "#general".parse().unwrap(),
-            msgid: MSGID.parse().unwrap(),
-            emoji: "👍".into(),
-            op: ReactionOp::Add,
-            by: "mx-alice@test.example".parse().unwrap(),
-            foreign: Some("@alice:matrix.org".into()),
-        }));
     }
 
     #[test]
@@ -3113,7 +3048,6 @@ mod tests {
             msgid: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap(),
             edit_of: MSGID.parse().unwrap(),
             body: "corrected".into(),
-            foreign: None,
         }));
         // Both msgid= and edit-of= are required.
         assert!(Reply::parse(
@@ -3144,7 +3078,6 @@ mod tests {
             emoji: "🦀".into(),
             op: ReactionOp::Add,
             by: "ada@hda.example".parse().unwrap(),
-            foreign: None,
         }));
         // Batch summary (§12.1): count authoritative, actors capped upstream.
         // Shortcodes travel bare — `:ferris:` would collide with the §4
@@ -3697,7 +3630,9 @@ mod tests {
     #[test]
     fn netblock_removed_event_round_trips() {
         round_trip(&Reply::with_label(
-            Event::NetblockRemoved { network: "evil.example".parse().unwrap() },
+            Event::NetblockRemoved {
+                network: "evil.example".parse().unwrap(),
+            },
             "nb2",
         ));
         assert!(matches!(

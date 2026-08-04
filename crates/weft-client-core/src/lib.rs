@@ -1166,9 +1166,9 @@ pub fn on_line<E: EventSink>(
             network: network.to_string(),
             reason,
         }),
-        Event::NetblockRemoved { network } => {
-            sink.emit(ClientEvent::NetblockRemoved { network: network.to_string() })
-        }
+        Event::NetblockRemoved { network } => sink.emit(ClientEvent::NetblockRemoved {
+            network: network.to_string(),
+        }),
         // Keepalive answers are internal — never shown.
         Event::Pong { .. } => {}
         // Batches, reactions, presence, etc. — surfaced raw for now.

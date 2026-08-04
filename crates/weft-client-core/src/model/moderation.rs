@@ -39,9 +39,13 @@ pub struct Moderation {
 impl Moderation {
     pub fn handle(&mut self, event: &ClientEvent) -> Vec<ModDiff> {
         match event {
-            ClientEvent::Moderated { scope, account, action, by, reason } => {
-                self.moderated(scope, account, action, by.clone(), reason.clone())
-            }
+            ClientEvent::Moderated {
+                scope,
+                account,
+                action,
+                by,
+                reason,
+            } => self.moderated(scope, account, action, by.clone(), reason.clone()),
             _ => Vec::new(),
         }
     }
@@ -57,19 +61,32 @@ impl Moderation {
         match action {
             "mute" | "ban" => {
                 let rows = self.deny.entry(scope.to_string()).or_default();
-                let rec = DenyRow { account: account.to_string(), kind: action.to_string(), by, reason };
+                let rec = DenyRow {
+                    account: account.to_string(),
+                    kind: action.to_string(),
+                    by,
+                    reason,
+                };
 
                 // Re-mute/ban updates `by`/`reason` in place; a new one appends.
-                match rows.iter_mut().find(|r| r.account == account && r.kind == action) {
+                match rows
+                    .iter_mut()
+                    .find(|r| r.account == account && r.kind == action)
+                {
                     Some(existing) => *existing = rec,
                     None => rows.push(rec),
                 }
 
-                vec![ModDiff::Deny { scope: scope.to_string(), rows: rows.clone() }]
+                vec![ModDiff::Deny {
+                    scope: scope.to_string(),
+                    rows: rows.clone(),
+                }]
             }
             "unmute" | "unban" => {
                 let kind = if action == "unmute" { "mute" } else { "ban" };
-                let Some(rows) = self.deny.get_mut(scope) else { return Vec::new() };
+                let Some(rows) = self.deny.get_mut(scope) else {
+                    return Vec::new();
+                };
 
                 let before = rows.len();
                 rows.retain(|r| !(r.account == account && r.kind == kind));
@@ -78,7 +95,10 @@ impl Moderation {
                     return Vec::new(); // nothing matched → no diff
                 }
 
-                vec![ModDiff::Deny { scope: scope.to_string(), rows: rows.clone() }]
+                vec![ModDiff::Deny {
+                    scope: scope.to_string(),
+                    rows: rows.clone(),
+                }]
             }
             // `kick` (and anything else) is transient — no deny-list entry.
             _ => Vec::new(),
@@ -89,7 +109,10 @@ impl Moderation {
     /// reset). Emits the now-empty list; the batch response repopulates it.
     pub(super) fn clear(&mut self, scope: &str) -> Vec<ModDiff> {
         self.deny.insert(scope.to_string(), Vec::new());
-        vec![ModDiff::Deny { scope: scope.to_string(), rows: Vec::new() }]
+        vec![ModDiff::Deny {
+            scope: scope.to_string(),
+            rows: Vec::new(),
+        }]
     }
 }
 
@@ -108,17 +131,27 @@ mod tests {
     }
     fn rows_of(d: &ModDiff) -> Vec<(&str, &str)> {
         let ModDiff::Deny { rows, .. } = d;
-        rows.iter().map(|r| (r.account.as_str(), r.kind.as_str())).collect()
+        rows.iter()
+            .map(|r| (r.account.as_str(), r.kind.as_str()))
+            .collect()
     }
 
     #[test]
     fn mute_ban_add_and_lift_remove() {
         let mut m = Moderation::default();
-        assert_eq!(rows_of(&m.handle(&moderated("ns:x", "alice", "mute"))[0]), vec![("alice", "mute")]);
-        assert_eq!(rows_of(&m.handle(&moderated("ns:x", "bob", "ban"))[0]),
-                   vec![("alice", "mute"), ("bob", "ban")]);
+        assert_eq!(
+            rows_of(&m.handle(&moderated("ns:x", "alice", "mute"))[0]),
+            vec![("alice", "mute")]
+        );
+        assert_eq!(
+            rows_of(&m.handle(&moderated("ns:x", "bob", "ban"))[0]),
+            vec![("alice", "mute"), ("bob", "ban")]
+        );
         // Unmute removes just the matching (account, kind).
-        assert_eq!(rows_of(&m.handle(&moderated("ns:x", "alice", "unmute"))[0]), vec![("bob", "ban")]);
+        assert_eq!(
+            rows_of(&m.handle(&moderated("ns:x", "alice", "unmute"))[0]),
+            vec![("bob", "ban")]
+        );
     }
 
     #[test]

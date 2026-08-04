@@ -304,7 +304,11 @@ impl WeftClient {
             // §4 typing fallback-expiry (local only): the host timer fired, so drop
             // the typer from the model and emit the diff. No server write.
             "typing_stop" => {
-                let diffs = self.sink.state.borrow_mut().typing_stop(&arg("channel"), &arg("user"));
+                let diffs = self
+                    .sink
+                    .state
+                    .borrow_mut()
+                    .typing_stop(&arg("channel"), &arg("user"));
                 for d in &diffs {
                     self.sink.call(d);
                 }

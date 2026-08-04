@@ -19,10 +19,10 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use weft_crypto::{Capability, PublicKey, SignedManifest, TokenScope};
 use weft_proto::{
     Account, BridgeState, ChannelKind, ChannelName, Command, ContentState, ErrCode, ErrEvent,
-    Event, ForeignUri, GroupId, HistoryMode, Line, MediaMode, MemberAction, MessageEvent, ModAction,
-    MsgId, MsgMeta, NamespaceName, NetworkName, NsInfoKind, ParseError, Reply, ReportScope,
-    ReportStatus, Request, ResolveAction, RetentionPolicy, Scheme, StreamMode, Target, Ulid, UserRef,
-    VerifyState, Visibility, MAX_LABEL_BYTES,
+    Event, ForeignUri, GroupId, HistoryMode, Line, MediaMode, MemberAction, MessageEvent,
+    ModAction, MsgId, MsgMeta, NamespaceName, NetworkName, NsInfoKind, ParseError, Reply,
+    ReportScope, ReportStatus, Request, ResolveAction, RetentionPolicy, Scheme, StreamMode, Target,
+    Ulid, UserRef, VerifyState, Visibility, MAX_LABEL_BYTES,
 };
 
 use weft_store::{
@@ -1820,6 +1820,11 @@ impl<S: ControlStream> Session<S> {
     async fn on_event(&mut self, event: SessionEvent) -> io::Result<()> {
         if let State::Bridge { peer, .. } = self.state.clone() {
             return self.on_bridge_event(peer, event).await;
+        }
+        // Slice 5: a replica channel's event on a provider session is relayed
+        // outward (local-origin only — `on_provider_event` holds the loop guard).
+        if matches!(self.state, State::PluginService { .. }) {
+            return self.on_provider_event(event).await;
         }
         match event {
             SessionEvent::Lagged { channel } => {

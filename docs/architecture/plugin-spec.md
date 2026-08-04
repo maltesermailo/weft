@@ -780,9 +780,12 @@ three generalized here from the foreign-bridge framework:
    the system sentinel; local owner-authority is gated by `origin` — a virtual namespace is governed by
    its provider, displayed badged, and its native settings surfaces are profile-gated. This is how an
    **Instagram bridge** (or any service with no federation protocol) exists as *just a plugin*.
-5. **Foreign attribution** — the generalized `@as`: a provider may act **as a foreign identity**
-   (`@alice:matrix.org`, an Instagram handle), producing events that carry the `foreign=` display tag
-   (framework §7a.1). Trusted, server-authoritative; the `sender` stays the home-minted puppet handle.
+5. **Foreign attribution** — the generalized `@as`: a provider acts **as a user of its realm**
+   (`@as=alice=bob@matrix.org`) and mints that user's msgids under the realm (`@msgid=matrix.org/…`),
+   because **a realm is a network** (framework §7a.0). Trusted, server-authoritative; weftd validates
+   only that `@as` and `@msgid` both name a realm this provider's key is pinned for, and ingests
+   through the ordinary federated path. The provider owns the foreign→WEFT identity mapping and must
+   keep it **injective** — two foreign users may never collide onto one WEFT account.
 6. **Scheme registration + provisioning** — a provider lists `schemes` in its `Registration`; a user's
    `NS JOIN <scheme>://…` for an unknown space routes a `PROVISION` push to that provider (the framework
    §3.3 machinery, no longer adapter-only), which materializes the namespace and completes the join.

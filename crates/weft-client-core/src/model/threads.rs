@@ -42,7 +42,13 @@ impl Threads {
         match event {
             // §9.4 a THREADS-list row: set/clear its name, and buffer the row while
             // a list batch streams (the `t` batch below).
-            ClientEvent::Thread { root, name, replies, last, .. } => {
+            ClientEvent::Thread {
+                root,
+                name,
+                replies,
+                last,
+                ..
+            } => {
                 if self.in_batch {
                     self.buf.push(ThreadInfo {
                         root: root.clone(),
@@ -74,7 +80,10 @@ impl Threads {
             None => self.names.remove(root),
         };
 
-        ThreadDiff::ThreadName { root: root.to_string(), name: name.clone() }
+        ThreadDiff::ThreadName {
+            root: root.to_string(),
+            name: name.clone(),
+        }
     }
 
     fn rename(&mut self, root: &str, name: &Option<String>) -> Vec<ThreadDiff> {
@@ -83,7 +92,9 @@ impl Threads {
         // Reflect the rename in the loaded list too, if the root is in it.
         if let Some(t) = self.list.iter_mut().find(|t| t.root == root) {
             t.name = name.clone();
-            out.push(ThreadDiff::ThreadList { threads: self.list.clone() });
+            out.push(ThreadDiff::ThreadList {
+                threads: self.list.clone(),
+            });
         }
 
         out
@@ -98,9 +109,16 @@ impl Threads {
         self.list = std::mem::take(&mut self.buf);
         // Newest activity first (last-activity msgid sorts by its ULID; a nameless
         // `None` sorts as "" — matches the TS `(b.last ?? "").localeCompare(...)`).
-        self.list.sort_by(|a, b| b.last.as_deref().unwrap_or("").cmp(a.last.as_deref().unwrap_or("")));
+        self.list.sort_by(|a, b| {
+            b.last
+                .as_deref()
+                .unwrap_or("")
+                .cmp(a.last.as_deref().unwrap_or(""))
+        });
 
-        vec![ThreadDiff::ThreadList { threads: self.list.clone() }]
+        vec![ThreadDiff::ThreadList {
+            threads: self.list.clone(),
+        }]
     }
 }
 
@@ -121,7 +139,10 @@ mod tests {
         ClientEvent::BatchStart { id: id.into() }
     }
     fn batch_end() -> ClientEvent {
-        ClientEvent::BatchEnd { id: "t1".into(), truncated: false }
+        ClientEvent::BatchEnd {
+            id: "t1".into(),
+            truncated: false,
+        }
     }
     fn roots(diffs: &[ThreadDiff]) -> Vec<&str> {
         let d = diffs.iter().find_map(|d| match d {
@@ -149,7 +170,12 @@ mod tests {
         // Flush sorts newest-activity first.
         assert_eq!(roots(&t.handle(&batch_end())), vec!["r2", "r3", "r1"]);
         // A non-thread batch end (no `t` start) doesn't re-flush.
-        assert!(t.handle(&ClientEvent::BatchEnd { id: "r9".into(), truncated: false }).is_empty());
+        assert!(t
+            .handle(&ClientEvent::BatchEnd {
+                id: "r9".into(),
+                truncated: false
+            })
+            .is_empty());
     }
 
     #[test]
@@ -160,9 +186,17 @@ mod tests {
         t.handle(&batch_end());
 
         // A live rename updates names + the loaded list entry.
-        let d = t.handle(&ClientEvent::ThreadNamed { channel: "#n/c".into(), root: "r1".into(), name: Some("Design".into()) });
-        assert!(matches!(&d[0], ThreadDiff::ThreadName { name, .. } if name.as_deref() == Some("Design")));
-        let ThreadDiff::ThreadList { threads } = &d[1] else { panic!("expected a list update") };
+        let d = t.handle(&ClientEvent::ThreadNamed {
+            channel: "#n/c".into(),
+            root: "r1".into(),
+            name: Some("Design".into()),
+        });
+        assert!(
+            matches!(&d[0], ThreadDiff::ThreadName { name, .. } if name.as_deref() == Some("Design"))
+        );
+        let ThreadDiff::ThreadList { threads } = &d[1] else {
+            panic!("expected a list update")
+        };
         assert_eq!(threads[0].name.as_deref(), Some("Design"));
     }
 }

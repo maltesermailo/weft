@@ -16,7 +16,15 @@ fn invalid(what: &'static str, value: &str) -> ParseError {
     }
 }
 
-/// Local account name: `[a-z0-9-_.]{1,64}` (§2.3).
+/// Local account name: `[a-z0-9-_.=+]{1,64}` (§2.3).
+///
+/// `=` and `+` are here for **Matrix parity**: a bridge adapter mints its
+/// puppets' handles from foreign identifiers, and an MXID localpart may contain
+/// them (`@alice=bob:matrix.org` → `alice=bob@matrix.org`). A lossy mapping
+/// would let two distinct foreign users collide onto one WEFT identity, so the
+/// charset covers Matrix's grammar except `/`, which is WEFT's own path
+/// separator (`#<ns>/<chan>`, `<origin>/<ulid>`, admin REST paths) — adapters
+/// escape that one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Account(String);
 
@@ -34,7 +42,7 @@ impl FromStr for Account {
         let ok = (1..=64).contains(&folded.len())
             && folded
                 .bytes()
-                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.'));
+                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'=' | b'+'));
         if ok {
             Ok(Account(folded))
         } else {
@@ -446,6 +454,27 @@ mod tests {
         assert!("has space".parse::<Account>().is_err());
         assert!("ümläut".parse::<Account>().is_err());
         assert!("x".repeat(65).parse::<Account>().is_err());
+    }
+
+    #[test]
+    fn account_covers_matrix_localparts() {
+        // A bridge puppet keeps the foreign localpart verbatim, so distinct
+        // MXIDs stay distinct accounts (no lossy collision).
+        assert_eq!(
+            "alice=bob".parse::<Account>().unwrap().as_str(),
+            "alice=bob"
+        );
+        assert_eq!(
+            "a+b.c_d-e".parse::<Account>().unwrap().as_str(),
+            "a+b.c_d-e"
+        );
+        assert_ne!(
+            "alice=bob".parse::<Account>().unwrap(),
+            "alicebob".parse::<Account>().unwrap()
+        );
+
+        // `/` stays out — it is WEFT's own path separator.
+        assert!("alice/bob".parse::<Account>().is_err());
     }
 
     #[test]

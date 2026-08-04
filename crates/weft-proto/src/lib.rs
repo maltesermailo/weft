@@ -47,8 +47,8 @@ pub use name::{
 };
 pub use plugin::{
     from_b64 as plugin_from_b64, to_b64 as plugin_to_b64, ActionDecl, Button, ButtonStyle, Catalog,
-    CatalogEntry, Component, Container, ContextType, FailPolicy, HookDecl, HookKind, KvRow, PatchOp,
-    Registration, SelectOption, Surface, ToastKind, View, ViewResult,
+    CatalogEntry, Component, Container, ContextType, FailPolicy, HookDecl, HookKind, KvRow,
+    PatchOp, Registration, SelectOption, Surface, ToastKind, View, ViewResult,
 };
 pub use policy::{RetainedFor, RetentionPolicy, RetentionUnit};
 pub use types::{

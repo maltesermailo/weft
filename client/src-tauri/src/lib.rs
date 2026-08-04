@@ -322,13 +322,25 @@ fn send_message(
 ) -> Result<(), String> {
     // Build the wire line first so a rejected send (e.g. over-long body) never
     // leaves an orphaned optimistic echo in the store.
-    let line = weft::build_msg(&target, &body, reply_to, attachments.unwrap_or_default(), thread, label.clone())?;
+    let line = weft::build_msg(
+        &target,
+        &body,
+        reply_to,
+        attachments.unwrap_or_default(),
+        thread,
+        label.clone(),
+    )?;
 
     // §9 optimistic local echo (model store): render instantly; the ack (own MSG +
     // same label) reconciles to the server id on ingest. Only with a reconcile
     // label — else there's nothing to swap the echo against.
     if let Some(label) = &label {
-        for d in model.0.lock().unwrap().send_message(&target, label, &body, md.unwrap_or(false)) {
+        for d in model
+            .0
+            .lock()
+            .unwrap()
+            .send_message(&target, label, &body, md.unwrap_or(false))
+        {
             let _ = app.emit("weft", d);
         }
     }
@@ -892,11 +904,12 @@ fn move_channel(
     anchor: Option<String>,
     after: bool,
 ) -> Result<(), String> {
-    let (diffs, sends) = model
-        .0
-        .lock()
-        .unwrap()
-        .move_channel(&ns, &drag, &target, anchor.as_deref(), after);
+    let (diffs, sends) =
+        model
+            .0
+            .lock()
+            .unwrap()
+            .move_channel(&ns, &drag, &target, anchor.as_deref(), after);
     for d in diffs {
         let _ = app.emit("weft", d);
     }

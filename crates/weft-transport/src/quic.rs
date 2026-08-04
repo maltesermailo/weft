@@ -39,7 +39,10 @@ const CLIENT_KEEP_ALIVE: Duration = Duration::from_secs(15);
 /// Shared transport tuning. `keep_alive`: §3.4 lets QUIC keepalives
 /// substitute for *sending* PINGs — clients want one; the server does not
 /// (liveness is the client's burden).
-pub(crate) fn transport_config(keep_alive: Option<Duration>, max_idle: Duration) -> TransportConfig {
+pub(crate) fn transport_config(
+    keep_alive: Option<Duration>,
+    max_idle: Duration,
+) -> TransportConfig {
     let mut transport = TransportConfig::default();
     transport.max_idle_timeout(Some(
         IdleTimeout::try_from(max_idle).expect("well below the VarInt bound"),

@@ -222,7 +222,10 @@ impl<S: ControlStream> Session<S> {
                 let scope = Scope::dm(account.clone(), partner.clone());
                 target_by_scope.insert(
                     scope.as_key(),
-                    Target::User { account: partner, network: None },
+                    Target::User {
+                        account: partner,
+                        network: None,
+                    },
                 );
                 scopes.push(scope);
             }
@@ -370,7 +373,6 @@ impl<S: ControlStream> Session<S> {
                             meta,
                             edited: edited.map(|(count, _)| count),
                             edited_at: edited.map(|(_, at)| at),
-                            foreign: None,
                         })),
                     )
                     .await?;

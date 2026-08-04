@@ -394,7 +394,9 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
             weft_core::PublicKey::from_b64(&adapter.key),
         ) {
             (Ok(s), Ok(k)) => foreign_adapters.push((s, k)),
-            _ => warn!(scheme = %adapter.scheme, "skipping [[foreign_bridge]] entry with invalid scheme/key"),
+            _ => {
+                warn!(scheme = %adapter.scheme, "skipping [[foreign_bridge]] entry with invalid scheme/key")
+            }
         }
     }
 
@@ -417,7 +419,9 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
 
                 remote_plugins.push((plugin.id.clone(), k, schemes));
             }
-            Err(_) => warn!(plugin = %plugin.id, "skipping [[plugin.remote]] entry with invalid key"),
+            Err(_) => {
+                warn!(plugin = %plugin.id, "skipping [[plugin.remote]] entry with invalid key")
+            }
         }
     }
 

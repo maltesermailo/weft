@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use weft_crypto::Keypair;
 use weft_transport::QuicControlStream;
 
-pub use weft_client_core::*;
 use weft_client_core::model::AppState;
+pub use weft_client_core::*;
 
 /// A Tauri `EventSink`: runs each wire event through the client-core `AppState`
 /// and pushes the raw event + resulting model `StateDiff`s to the webview on the
@@ -52,7 +52,10 @@ pub async fn resolve(host: &str) -> Result<(SocketAddr, String), String> {
 /// The client-core channel-layout cache file (model-owned; the flip removes the
 /// legacy TS `weft:layout` localStorage entry on the web side).
 fn layout_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_data_dir().ok().map(|d| d.join("chan-layout.json"))
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join("chan-layout.json"))
 }
 fn save_layout(app: &AppHandle, blob: &str) {
     if let Some(p) = layout_path(app) {
@@ -89,7 +92,10 @@ pub async fn run_connection(
     // linger as a ghost (the reason the seed was disabled before this slice).
     let model = app.state::<Model>().0.clone();
     *model.lock().unwrap() = AppState::new();
-    let sink = TauriSink { app: app.clone(), state: model };
+    let sink = TauriSink {
+        app: app.clone(),
+        state: model,
+    };
     if let Some(blob) = load_layout(&app) {
         for diff in sink.state.lock().unwrap().seed_layout(&blob) {
             let _ = app.emit("weft", diff);

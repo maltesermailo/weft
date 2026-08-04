@@ -22,4 +22,5 @@ ulid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+ulid = { workspace = true } # provider-minted msgids in the ingestion tests
 async-trait = { workspace = true } # mock VoiceBackend in the session tests

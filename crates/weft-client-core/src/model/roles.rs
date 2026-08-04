@@ -43,8 +43,15 @@ pub struct Role {
 #[derive(Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum RoleDiff {
-    RoleList { scope: String, roles: Vec<Role> },
-    MemberRoles { scope: String, account: String, roles: Vec<String> },
+    RoleList {
+        scope: String,
+        roles: Vec<Role>,
+    },
+    MemberRoles {
+        scope: String,
+        account: String,
+        roles: Vec<String>,
+    },
 }
 
 /// The roles sub-model — the streaming-batch state (buffer + window flag) plus a
@@ -76,7 +83,16 @@ fn split_list(s: &str) -> Vec<String> {
 impl Roles {
     pub fn handle(&mut self, event: &ClientEvent) -> Vec<RoleDiff> {
         match event {
-            ClientEvent::Role { scope, role, color, caps, hoist, pingable, position, name } => {
+            ClientEvent::Role {
+                scope,
+                role,
+                color,
+                caps,
+                hoist,
+                pingable,
+                position,
+                name,
+            } => {
                 self.role_buf.entry(scope.clone()).or_default().push(Role {
                     id: role.clone(),
                     name: name.clone(),
@@ -89,9 +105,14 @@ impl Roles {
 
                 Vec::new() // buffered; the diff is emitted at the batch's end
             }
-            ClientEvent::RoleMember { scope, account, roles } => {
+            ClientEvent::RoleMember {
+                scope,
+                account,
+                roles,
+            } => {
                 let ids = split_list(roles);
-                self.member_roles.insert(format!("{account}|{scope}"), ids.clone());
+                self.member_roles
+                    .insert(format!("{account}|{scope}"), ids.clone());
 
                 vec![RoleDiff::MemberRoles {
                     scope: scope.clone(),
@@ -122,7 +143,11 @@ impl Roles {
             .into_iter()
             .map(|(scope, mut roles)| {
                 // Keep position order (the server sorts, but be safe).
-                roles.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.name.cmp(&b.name)));
+                roles.sort_by(|a, b| {
+                    a.position
+                        .cmp(&b.position)
+                        .then_with(|| a.name.cmp(&b.name))
+                });
 
                 self.roles.insert(scope.clone(), roles.clone());
 
@@ -140,18 +165,27 @@ impl Roles {
             return false;
         }
 
-        if mentions_token(body, me) || mentions_token(body, "everyone") || mentions_token(body, "here") {
+        if mentions_token(body, me)
+            || mentions_token(body, "everyone")
+            || mentions_token(body, "here")
+        {
             return true;
         }
 
-        let scope = if ns.is_empty() { "*".to_string() } else { format!("ns:{ns}") };
+        let scope = if ns.is_empty() {
+            "*".to_string()
+        } else {
+            format!("ns:{ns}")
+        };
         let Some(mine) = self.member_roles.get(&format!("{me}|{scope}")) else {
             return false;
         };
 
-        self.roles
-            .get(&scope)
-            .is_some_and(|roles| roles.iter().any(|r| r.pingable && mine.contains(&r.id) && mentions_token(body, &r.name)))
+        self.roles.get(&scope).is_some_and(|roles| {
+            roles
+                .iter()
+                .any(|r| r.pingable && mine.contains(&r.id) && mentions_token(body, &r.name))
+        })
     }
 }
 
@@ -201,13 +235,20 @@ mod tests {
         }
     }
     fn member(scope: &str, account: &str, roles: &str) -> ClientEvent {
-        ClientEvent::RoleMember { scope: scope.into(), account: account.into(), roles: roles.into() }
+        ClientEvent::RoleMember {
+            scope: scope.into(),
+            account: account.into(),
+            roles: roles.into(),
+        }
     }
     fn batch_start(id: &str) -> ClientEvent {
         ClientEvent::BatchStart { id: id.into() }
     }
     fn batch_end() -> ClientEvent {
-        ClientEvent::BatchEnd { id: "r1".into(), truncated: false }
+        ClientEvent::BatchEnd {
+            id: "r1".into(),
+            truncated: false,
+        }
     }
     fn role_list<'a>(diffs: &'a [RoleDiff], scope: &str) -> Option<Vec<&'a str>> {
         diffs.iter().find_map(|d| match d {
@@ -225,7 +266,10 @@ mod tests {
         // Out-of-order positions — the flush sorts them.
         assert!(r.handle(&role("ns:x", "id-b", "Mods", 1)).is_empty()); // buffered, no diff
         assert!(r.handle(&role("ns:x", "id-a", "Admins", 0)).is_empty());
-        assert_eq!(role_list(&r.handle(&batch_end()), "ns:x"), Some(vec!["Admins", "Mods"]));
+        assert_eq!(
+            role_list(&r.handle(&batch_end()), "ns:x"),
+            Some(vec!["Admins", "Mods"])
+        );
     }
 
     #[test]
@@ -240,7 +284,9 @@ mod tests {
         r.handle(&role("ns:x", "id-a", "Admins", 0));
         let diffs = r.handle(&batch_end());
         assert_eq!(role_list(&diffs, "ns:x"), Some(vec!["Admins"]));
-        let RoleDiff::RoleList { roles, .. } = &diffs[0] else { panic!() };
+        let RoleDiff::RoleList { roles, .. } = &diffs[0] else {
+            panic!()
+        };
         assert_eq!(roles[0].caps, vec!["send", "react"]); // comma list parsed
     }
 
@@ -257,7 +303,9 @@ mod tests {
         assert!(matches!(&diffs[0],
             RoleDiff::MemberRoles { account, roles, .. } if account == "alice" && roles == &["id-a", "id-b"]));
         // Empty → cleared list.
-        let RoleDiff::MemberRoles { roles, .. } = &r.handle(&member("ns:x", "alice", ""))[0] else { panic!() };
+        let RoleDiff::MemberRoles { roles, .. } = &r.handle(&member("ns:x", "alice", ""))[0] else {
+            panic!()
+        };
         assert!(roles.is_empty());
     }
 
@@ -282,12 +330,24 @@ mod tests {
         // Two roles at ns:x — Mods pingable, Muted not.
         r.handle(&batch_start("r1"));
         r.handle(&ClientEvent::Role {
-            scope: "ns:x".into(), role: "id-mods".into(), color: "#fff".into(), caps: "".into(),
-            hoist: false, pingable: true, position: 0, name: "Mods".into(),
+            scope: "ns:x".into(),
+            role: "id-mods".into(),
+            color: "#fff".into(),
+            caps: "".into(),
+            hoist: false,
+            pingable: true,
+            position: 0,
+            name: "Mods".into(),
         });
         r.handle(&ClientEvent::Role {
-            scope: "ns:x".into(), role: "id-muted".into(), color: "#fff".into(), caps: "".into(),
-            hoist: false, pingable: false, position: 1, name: "Muted".into(),
+            scope: "ns:x".into(),
+            role: "id-muted".into(),
+            color: "#fff".into(),
+            caps: "".into(),
+            hoist: false,
+            pingable: false,
+            position: 1,
+            name: "Muted".into(),
         });
         r.handle(&batch_end());
         r.handle(&member("ns:x", "alice", "id-mods"));

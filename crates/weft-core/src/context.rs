@@ -1260,16 +1260,19 @@ impl ServerCtx {
 
         // Park before sending so a fast PROVISION reply can never race ahead of
         // the pending entry; roll back if the control link is gone.
-        self.pending_provision.lock().expect("pending_provision lock").insert(
-            job.clone(),
-            PendingProvision {
-                reply,
-                label,
-                provider,
-                uri: uri.clone(),
-                account,
-            },
-        );
+        self.pending_provision
+            .lock()
+            .expect("pending_provision lock")
+            .insert(
+                job.clone(),
+                PendingProvision {
+                    reply,
+                    label,
+                    provider,
+                    uri: uri.clone(),
+                    account,
+                },
+            );
 
         if control.try_send(line).is_err() {
             self.pending_provision
@@ -1307,7 +1310,10 @@ impl ServerCtx {
         };
 
         let provisions: Vec<PendingProvision> = {
-            let mut map = self.pending_provision.lock().expect("pending_provision lock");
+            let mut map = self
+                .pending_provision
+                .lock()
+                .expect("pending_provision lock");
             let jobs: Vec<String> = map
                 .iter()
                 .filter(|(_, p)| p.provider == provider)
@@ -1538,10 +1544,7 @@ impl ServerCtx {
 
     /// Remove + return a parked invocation's requester writer + label by view-id
     /// (a terminal `PLUGIN-RESULT`).
-    pub(crate) fn complete_invoke(
-        &self,
-        view_id: &str,
-    ) -> Option<PendingReply> {
+    pub(crate) fn complete_invoke(&self, view_id: &str) -> Option<PendingReply> {
         self.pending_invoke
             .lock()
             .expect("pending_invoke lock")
@@ -1550,10 +1553,7 @@ impl ServerCtx {
 
     /// Clone (but keep) a parked invocation's requester writer + label — for a
     /// non-terminal `PLUGIN-VIEW`/`PLUGIN-PATCH` that continues the flow (§11.2).
-    pub(crate) fn peek_invoke(
-        &self,
-        view_id: &str,
-    ) -> Option<PendingReply> {
+    pub(crate) fn peek_invoke(&self, view_id: &str) -> Option<PendingReply> {
         self.pending_invoke
             .lock()
             .expect("pending_invoke lock")
@@ -1701,7 +1701,11 @@ impl ServerCtx {
         // per-channel baseline set from the channel-permission editor.
         if let Actor::Local(account) = actor {
             if let Some(ns_name) = scope_namespace(scope) {
-                if self.memberships.is_ns_member(account.as_str(), &ns_name).await? {
+                if self
+                    .memberships
+                    .is_ns_member(account.as_str(), &ns_name)
+                    .await?
+                {
                     // Widest first (`ns:`), then the channel's own baseline.
                     let mut baseline_scopes = vec![format!("ns:{ns_name}")];
                     if let TokenScope::Channel(chan) = scope {

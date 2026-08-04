@@ -141,7 +141,12 @@ impl<S: ControlStream> Session<S> {
     ) -> io::Result<Flow> {
         // §3.3 branch 2 (known-local): a space someone already provisioned is an
         // ordinary namespace join, addressed by its replica id.
-        match self.ctx.namespaces.namespace_by_origin(&uri.to_string()).await {
+        match self
+            .ctx
+            .namespaces
+            .namespace_by_origin(&uri.to_string())
+            .await
+        {
             Ok(Some(record)) => {
                 if let Ok(ns) = record.id.parse::<weft_proto::NamespaceRef>() {
                     return self.on_ns_join(label, ns, account).await;
@@ -241,7 +246,12 @@ impl<S: ControlStream> Session<S> {
         // NS-MEMBER join — the §3.5 ack the client keyed its request on.
         push(&pending.reply, Reply::new(self.ns_meta_event(&record)));
 
-        if let Ok(channels) = self.ctx.channel_store.channels_in_namespace(&record.id).await {
+        if let Ok(channels) = self
+            .ctx
+            .channel_store
+            .channels_in_namespace(&record.id)
+            .await
+        {
             for (channel, rec) in channels {
                 push(
                     &pending.reply,
@@ -1374,7 +1384,10 @@ impl<S: ControlStream> Session<S> {
         match self.ctx.netblocks.remove_netblock(&network).await {
             // §11.6 a distinct verb so the client removes the entry (a bare
             // `NETBLOCKED` here used to re-add it — the netblock quirk).
-            Ok(true) => self.send_event(label, Event::NetblockRemoved { network }).await?,
+            Ok(true) => {
+                self.send_event(label, Event::NetblockRemoved { network })
+                    .await?
+            }
             Ok(false) => return self.no_such_target(label).await,
             Err(e) => return self.internal(label, &e).await,
         }
@@ -1488,6 +1501,21 @@ impl<S: ControlStream> Session<S> {
         {
             return Ok(Some((ErrCode::Forbidden, "frozen")));
         }
+        // A replica channel takes no posts while its provider is offline (owner
+        // directive 2026-08-04, the counterpart of the same rule on NS JOIN).
+        // Accepting one would split-brain the room: local members would see a
+        // message the foreign side never receives, and there is no reconciliation
+        // for it — the provider is the only route out, and a queue would have to
+        // replay into a room whose state moved on meanwhile.
+        if let Some(origin) = record.as_ref().and_then(|c| c.origin.as_deref()) {
+            let online = origin
+                .parse::<weft_proto::ForeignUri>()
+                .is_ok_and(|uri| self.ctx.scheme_online(uri.scheme()));
+            if !online {
+                return Ok(Some((ErrCode::Policy, "provider-offline")));
+            }
+        }
+
         if record.map(|c| c.restricted).unwrap_or(false)
             && !self
                 .ctx
@@ -1887,7 +1915,10 @@ impl<S: ControlStream> Session<S> {
 
 /// Map a bridged event to its storage record, enforcing origin authority
 /// (invariant 2): the event and its root must originate on `peer`.
-fn ingest_record(peer: &NetworkName, event: &Event) -> Option<(ChannelName, EventRecord)> {
+pub(super) fn ingest_record(
+    peer: &NetworkName,
+    event: &Event,
+) -> Option<(ChannelName, EventRecord)> {
     let channel_of = |t: &Target| match t {
         Target::Channel(c) => Some(c.clone()),
         _ => None, // DMs never bridge (§9.5)
@@ -1938,7 +1969,9 @@ fn ingest_record(peer: &NetworkName, event: &Event) -> Option<(ChannelName, Even
             };
             Some((channel, record))
         }
-        Event::Deleted { target, msgid, by } => {
+        Event::Deleted {
+            target, msgid, by, ..
+        } => {
             let channel = channel_of(target)?;
             if !from_peer(msgid) {
                 return None;

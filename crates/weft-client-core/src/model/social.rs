@@ -22,10 +22,21 @@ pub struct GroupInfo {
 #[derive(Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum SocialDiff {
-    FriendSet { user: String, state: String },
-    FriendDrop { user: String },
-    GroupSet { id: String, name: Option<String>, members: Vec<String> },
-    GroupDrop { id: String },
+    FriendSet {
+        user: String,
+        state: String,
+    },
+    FriendDrop {
+        user: String,
+    },
+    GroupSet {
+        id: String,
+        name: Option<String>,
+        members: Vec<String>,
+    },
+    GroupDrop {
+        id: String,
+    },
 }
 
 /// The social sub-model: the friend graph + group DMs, plus the session ref (for
@@ -48,7 +59,10 @@ impl Social {
             ClientEvent::Friend { user, state } => {
                 self.friends.insert(user.clone(), state.clone());
 
-                vec![SocialDiff::FriendSet { user: user.clone(), state: state.clone() }]
+                vec![SocialDiff::FriendSet {
+                    user: user.clone(),
+                    state: state.clone(),
+                }]
             }
             ClientEvent::FriendRemoved { user } => {
                 self.friends.remove(user);
@@ -56,11 +70,25 @@ impl Social {
                 vec![SocialDiff::FriendDrop { user: user.clone() }]
             }
             ClientEvent::Group { id, name, members } => {
-                self.groups.insert(id.clone(), GroupInfo { name: name.clone(), members: members.clone() });
+                self.groups.insert(
+                    id.clone(),
+                    GroupInfo {
+                        name: name.clone(),
+                        members: members.clone(),
+                    },
+                );
 
-                vec![SocialDiff::GroupSet { id: id.clone(), name: name.clone(), members: members.clone() }]
+                vec![SocialDiff::GroupSet {
+                    id: id.clone(),
+                    name: name.clone(),
+                    members: members.clone(),
+                }]
             }
-            ClientEvent::GroupMember { group, user, action } => self.group_member(group, user, action),
+            ClientEvent::GroupMember {
+                group,
+                user,
+                action,
+            } => self.group_member(group, user, action),
             _ => Vec::new(),
         }
     }
@@ -76,7 +104,9 @@ impl Social {
         if action != "join" && user == self.me {
             self.groups.remove(group);
 
-            return vec![SocialDiff::GroupDrop { id: group.to_string() }];
+            return vec![SocialDiff::GroupDrop {
+                id: group.to_string(),
+            }];
         }
 
         let g = self.groups.get_mut(group).unwrap();
@@ -98,7 +128,11 @@ impl Social {
             return Vec::new();
         }
 
-        vec![SocialDiff::GroupSet { id: group.to_string(), name: g.name.clone(), members: g.members.clone() }]
+        vec![SocialDiff::GroupSet {
+            id: group.to_string(),
+            name: g.name.clone(),
+            members: g.members.clone(),
+        }]
     }
 }
 
@@ -107,40 +141,67 @@ mod tests {
     use super::*;
 
     fn connected() -> ClientEvent {
-        ClientEvent::Connected { network: "home".into(), account: "me".into() }
+        ClientEvent::Connected {
+            network: "home".into(),
+            account: "me".into(),
+        }
     }
     fn group_member(group: &str, user: &str, action: &str) -> ClientEvent {
-        ClientEvent::GroupMember { group: group.into(), user: user.into(), action: action.into() }
+        ClientEvent::GroupMember {
+            group: group.into(),
+            user: user.into(),
+            action: action.into(),
+        }
     }
     fn members(d: &SocialDiff) -> Vec<&str> {
-        let SocialDiff::GroupSet { members, .. } = d else { panic!("expected GroupSet") };
+        let SocialDiff::GroupSet { members, .. } = d else {
+            panic!("expected GroupSet")
+        };
         members.iter().map(String::as_str).collect()
     }
 
     #[test]
     fn friend_set_and_removed() {
         let mut s = Social::default();
-        assert!(matches!(&s.handle(&ClientEvent::Friend { user: "a@n".into(), state: "incoming".into() })[0],
-            SocialDiff::FriendSet { user, state } if user == "a@n" && state == "incoming"));
-        assert!(matches!(&s.handle(&ClientEvent::FriendRemoved { user: "a@n".into() })[0],
-            SocialDiff::FriendDrop { user } if user == "a@n"));
+        assert!(
+            matches!(&s.handle(&ClientEvent::Friend { user: "a@n".into(), state: "incoming".into() })[0],
+            SocialDiff::FriendSet { user, state } if user == "a@n" && state == "incoming")
+        );
+        assert!(
+            matches!(&s.handle(&ClientEvent::FriendRemoved { user: "a@n".into() })[0],
+            SocialDiff::FriendDrop { user } if user == "a@n")
+        );
     }
 
     #[test]
     fn group_member_join_part_and_self_leave() {
         let mut s = Social::default();
         s.handle(&connected());
-        s.handle(&ClientEvent::Group { id: "&g".into(), name: None, members: vec!["me@home".into()] });
+        s.handle(&ClientEvent::Group {
+            id: "&g".into(),
+            name: None,
+            members: vec!["me@home".into()],
+        });
 
         // Join adds (deduped); a duplicate join → no diff.
-        assert_eq!(members(&s.handle(&group_member("&g", "bob@home", "join"))[0]), vec!["me@home", "bob@home"]);
+        assert_eq!(
+            members(&s.handle(&group_member("&g", "bob@home", "join"))[0]),
+            vec!["me@home", "bob@home"]
+        );
         assert!(s.handle(&group_member("&g", "bob@home", "join")).is_empty());
         // Another member's part removes just them.
-        assert_eq!(members(&s.handle(&group_member("&g", "bob@home", "part"))[0]), vec!["me@home"]);
+        assert_eq!(
+            members(&s.handle(&group_member("&g", "bob@home", "part"))[0]),
+            vec!["me@home"]
+        );
         // *My* part drops the whole group.
-        assert!(matches!(&s.handle(&group_member("&g", "me@home", "part"))[0],
-            SocialDiff::GroupDrop { id } if id == "&g"));
+        assert!(
+            matches!(&s.handle(&group_member("&g", "me@home", "part"))[0],
+            SocialDiff::GroupDrop { id } if id == "&g")
+        );
         // A part in an unknown group → no diff.
-        assert!(s.handle(&group_member("&gone", "x@home", "part")).is_empty());
+        assert!(s
+            .handle(&group_member("&gone", "x@home", "part"))
+            .is_empty());
     }
 }

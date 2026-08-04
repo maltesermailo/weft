@@ -111,6 +111,7 @@ impl<S: ControlStream> Session<S> {
         if first_join {
             self.post_ns_welcome(&ns, &account).await;
         }
+        let mut subscribed = Vec::new();
         for channel in visible {
             // A channel the caller previously hid stays hidden — NS JOIN never
             // un-hides; that's a per-channel JOIN.
@@ -126,7 +127,18 @@ impl<S: ControlStream> Session<S> {
             // Unlabeled: a bulk subscription burst; the client folds each
             // MEMBER/POLICY as it arrives.
             self.join_one(&channel, &account, None).await?;
+            subscribed.push(channel);
         }
+
+        // Slice 5: the foreign room learns of the new member. The subscription
+        // above is deliberately silent locally, so the ordinary relay can't
+        // carry it — see `relay_ns_membership`.
+        self.relay_ns_membership(
+            record.origin.as_deref(),
+            &subscribed,
+            &UserRef::new(account.clone(), self.ctx.info.network.clone()),
+            MemberAction::Join,
+        );
 
         // Announce the ns-level membership once (client expands to the derived
         // roster), carrying the distinct-account member count after the join.
@@ -225,11 +237,21 @@ impl<S: ControlStream> Session<S> {
             .filter(|c| c.namespace() == Some(ns_str.as_str()))
             .cloned()
             .collect();
-        for channel in leaving {
-            if let Some(joined) = self.joined.remove(&channel) {
+        for channel in &leaving {
+            if let Some(joined) = self.joined.remove(channel) {
                 joined.forwarder.abort();
                 joined.handle.part(self.id, false).await;
             }
+        }
+
+        // Slice 5: mirror the leave into the foreign room (silent locally, as above).
+        if let Ok(Some(rec)) = self.ctx.namespaces.namespace_by_id(&ns_str).await {
+            self.relay_ns_membership(
+                rec.origin.as_deref(),
+                &leaving,
+                &UserRef::new(account.clone(), self.ctx.info.network.clone()),
+                MemberAction::Part,
+            );
         }
 
         // Drop the membership row + all hide overrides for the namespace.
@@ -861,7 +883,11 @@ impl<S: ControlStream> Session<S> {
         // the admin panel still surface them, and a namespace later recreated
         // under the same name would inherit ghost members/roles. Tear the whole
         // subtree down first, then drop the record.
-        let channels = self.ctx.channel_store.channels_in_namespace(&ns_str).await?;
+        let channels = self
+            .ctx
+            .channel_store
+            .channels_in_namespace(&ns_str)
+            .await?;
 
         for (channel, _) in &channels {
             self.ctx.registry.remove(channel); // stop the live actor
@@ -879,10 +905,19 @@ impl<S: ControlStream> Session<S> {
         // Clear namespace memberships (also drops hide overrides) so a same-name
         // namespace can't auto-rejoin ghost members, then the ns-scope roles and
         // any pending invites.
-        let members = self.ctx.memberships.ns_members(&ns_str).await.unwrap_or_default();
+        let members = self
+            .ctx
+            .memberships
+            .ns_members(&ns_str)
+            .await
+            .unwrap_or_default();
 
         for member in &members {
-            let _ = self.ctx.memberships.clear_ns_membership(member, &ns_str).await;
+            let _ = self
+                .ctx
+                .memberships
+                .clear_ns_membership(member, &ns_str)
+                .await;
         }
 
         // ns-scope roles are keyed by the id (matches on_ns_create's id-scope).

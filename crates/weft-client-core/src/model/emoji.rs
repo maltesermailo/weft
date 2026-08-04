@@ -15,8 +15,15 @@ use crate::ClientEvent;
 #[derive(Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum EmojiDiff {
-    EmojiSet { namespace: String, name: String, media: String },
-    EmojiDrop { namespace: String, name: String },
+    EmojiSet {
+        namespace: String,
+        name: String,
+        media: String,
+    },
+    EmojiDrop {
+        namespace: String,
+        name: String,
+    },
 }
 
 /// The emoji sub-model: ns id → (`:name:` → media). Transient (rebuilt from
@@ -29,7 +36,11 @@ pub struct Emoji {
 impl Emoji {
     pub fn handle(&mut self, event: &ClientEvent) -> Vec<EmojiDiff> {
         match event {
-            ClientEvent::Emoji { namespace, name, media } => self.set(namespace, name, media),
+            ClientEvent::Emoji {
+                namespace,
+                name,
+                media,
+            } => self.set(namespace, name, media),
             ClientEvent::EmojiRemoved { namespace, name } => self.drop(namespace, name),
             _ => Vec::new(),
         }
@@ -51,13 +62,18 @@ impl Emoji {
     }
 
     fn drop(&mut self, namespace: &str, name: &str) -> Vec<EmojiDiff> {
-        let Some(entry) = self.map.get_mut(namespace) else { return Vec::new() };
+        let Some(entry) = self.map.get_mut(namespace) else {
+            return Vec::new();
+        };
 
         if entry.remove(name).is_none() {
             return Vec::new();
         }
 
-        vec![EmojiDiff::EmojiDrop { namespace: namespace.to_string(), name: name.to_string() }]
+        vec![EmojiDiff::EmojiDrop {
+            namespace: namespace.to_string(),
+            name: name.to_string(),
+        }]
     }
 }
 
@@ -66,10 +82,17 @@ mod tests {
     use super::*;
 
     fn emoji(ns: &str, name: &str, media: &str) -> ClientEvent {
-        ClientEvent::Emoji { namespace: ns.into(), name: name.into(), media: media.into() }
+        ClientEvent::Emoji {
+            namespace: ns.into(),
+            name: name.into(),
+            media: media.into(),
+        }
     }
     fn removed(ns: &str, name: &str) -> ClientEvent {
-        ClientEvent::EmojiRemoved { namespace: ns.into(), name: name.into() }
+        ClientEvent::EmojiRemoved {
+            namespace: ns.into(),
+            name: name.into(),
+        }
     }
 
     #[test]
@@ -80,7 +103,10 @@ mod tests {
         // Re-announce with the same media → no diff.
         assert!(e.handle(&emoji("n", "party", "blob1")).is_empty());
         // Changed media → a fresh set.
-        assert!(matches!(&e.handle(&emoji("n", "party", "blob2"))[0], EmojiDiff::EmojiSet { .. }));
+        assert!(matches!(
+            &e.handle(&emoji("n", "party", "blob2"))[0],
+            EmojiDiff::EmojiSet { .. }
+        ));
         // Drop it → a drop diff; dropping again → no diff.
         assert!(matches!(&e.handle(&removed("n", "party"))[0],
             EmojiDiff::EmojiDrop { namespace, name } if namespace == "n" && name == "party"));

@@ -116,7 +116,9 @@ impl FromStr for ForeignUri {
             return Err(invalid("foreign uri", s));
         }
 
-        let (scheme_str, rest) = s.split_once("://").ok_or_else(|| invalid("foreign uri", s))?;
+        let (scheme_str, rest) = s
+            .split_once("://")
+            .ok_or_else(|| invalid("foreign uri", s))?;
         let scheme: Scheme = scheme_str.parse()?;
 
         // The realm is the first `/`-delimited element; the remainder are the
@@ -208,7 +210,9 @@ mod tests {
         assert!("matrix://".parse::<ForeignUri>().is_err()); // empty realm
         assert!("matrix:///gaming".parse::<ForeignUri>().is_err()); // empty realm before path
         assert!("matrix://matrix.org/".parse::<ForeignUri>().is_err()); // trailing slash
-        assert!("matrix://matrix.org//general".parse::<ForeignUri>().is_err()); // doubled slash
+        assert!("matrix://matrix.org//general"
+            .parse::<ForeignUri>()
+            .is_err()); // doubled slash
         assert!("matrix://mat rix.org".parse::<ForeignUri>().is_err()); // space in realm
         assert!("matrix://matrix.org/a b".parse::<ForeignUri>().is_err()); // space in segment
     }

@@ -30,10 +30,19 @@ pub struct ManifestInfo {
 #[derive(Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum FederationDiff {
-    NetblockSet { network: String, reason: Option<String> },
-    NetblockDrop { network: String },
-    ManifestSet { manifest: ManifestInfo },
-    ManifestDrop { peer: String },
+    NetblockSet {
+        network: String,
+        reason: Option<String>,
+    },
+    NetblockDrop {
+        network: String,
+    },
+    ManifestSet {
+        manifest: ManifestInfo,
+    },
+    ManifestDrop {
+        peer: String,
+    },
 }
 
 /// The federation sub-model — stateless (the mirror holds the maps).
@@ -45,17 +54,33 @@ impl Federation {
         match event {
             // §11.6 a blocked network + reason.
             ClientEvent::Netblocked { network, reason } => {
-                vec![FederationDiff::NetblockSet { network: network.clone(), reason: reason.clone() }]
+                vec![FederationDiff::NetblockSet {
+                    network: network.clone(),
+                    reason: reason.clone(),
+                }]
             }
             // §11.6 an un-blocked network → drop it (distinct from a block now).
             ClientEvent::NetblockRemoved { network } => {
-                vec![FederationDiff::NetblockDrop { network: network.clone() }]
+                vec![FederationDiff::NetblockDrop {
+                    network: network.clone(),
+                }]
             }
             // §11 a bridge's manifest: `severed`/`removed` drops it, any other state sets it.
-            ClientEvent::Manifest { peer, state, .. } if state == "severed" || state == "removed" => {
+            ClientEvent::Manifest { peer, state, .. }
+                if state == "severed" || state == "removed" =>
+            {
                 vec![FederationDiff::ManifestDrop { peer: peer.clone() }]
             }
-            ClientEvent::Manifest { peer, version, state, channels, history, media, typing, .. } => {
+            ClientEvent::Manifest {
+                peer,
+                version,
+                state,
+                channels,
+                history,
+                media,
+                typing,
+                ..
+            } => {
                 vec![FederationDiff::ManifestSet {
                     manifest: ManifestInfo {
                         peer: peer.clone(),
@@ -93,7 +118,10 @@ mod tests {
     #[test]
     fn netblocked_maps_to_set() {
         let mut f = Federation;
-        let d = f.handle(&ClientEvent::Netblocked { network: "evil.example".into(), reason: Some("spam".into()) });
+        let d = f.handle(&ClientEvent::Netblocked {
+            network: "evil.example".into(),
+            reason: Some("spam".into()),
+        });
         assert!(matches!(&d[0],
             FederationDiff::NetblockSet { network, reason } if network == "evil.example" && reason.as_deref() == Some("spam")));
     }
@@ -101,8 +129,12 @@ mod tests {
     #[test]
     fn netblock_removed_maps_to_drop() {
         let mut f = Federation;
-        let d = f.handle(&ClientEvent::NetblockRemoved { network: "evil.example".into() });
-        assert!(matches!(&d[0], FederationDiff::NetblockDrop { network } if network == "evil.example"));
+        let d = f.handle(&ClientEvent::NetblockRemoved {
+            network: "evil.example".into(),
+        });
+        assert!(
+            matches!(&d[0], FederationDiff::NetblockDrop { network } if network == "evil.example")
+        );
     }
 
     #[test]
@@ -113,7 +145,12 @@ mod tests {
         assert!(matches!(&d[0],
             FederationDiff::ManifestSet { manifest } if manifest.peer == "peer.net" && manifest.channels == ["#n/c"] && manifest.typing));
         // `severed` and `removed` both drop it.
-        assert!(matches!(&f.handle(&manifest("peer.net", "severed"))[0], FederationDiff::ManifestDrop { peer } if peer == "peer.net"));
-        assert!(matches!(&f.handle(&manifest("peer.net", "removed"))[0], FederationDiff::ManifestDrop { .. }));
+        assert!(
+            matches!(&f.handle(&manifest("peer.net", "severed"))[0], FederationDiff::ManifestDrop { peer } if peer == "peer.net")
+        );
+        assert!(matches!(
+            &f.handle(&manifest("peer.net", "removed"))[0],
+            FederationDiff::ManifestDrop { .. }
+        ));
     }
 }

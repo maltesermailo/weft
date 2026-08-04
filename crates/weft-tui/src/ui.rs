@@ -234,7 +234,9 @@ pub fn reply_entry(raw: String, reply: &Reply, me: &str) -> LogEntry {
             Span::raw(format!(" {body}")),
             Span::styled(format!(" ✎ edited {}{label}", short(edit_of)), DIM),
         ]),
-        Event::Deleted { target, msgid, by } => {
+        Event::Deleted {
+            target, msgid, by, ..
+        } => {
             let by = by
                 .as_ref()
                 .map(|u| format!(" by {}", u.account))

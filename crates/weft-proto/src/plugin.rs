@@ -19,13 +19,16 @@ use crate::error::{ParseError, SerializeError};
 /// Encode any SDUI payload to the wire form: deterministic CBOR, then base64.
 pub fn to_b64<T: Serialize>(value: &T) -> Result<String, SerializeError> {
     let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes).map_err(|_| SerializeError::Unrepresentable("cbor"))?;
+    ciborium::into_writer(value, &mut bytes)
+        .map_err(|_| SerializeError::Unrepresentable("cbor"))?;
     Ok(BASE64_STANDARD.encode(bytes))
 }
 
 /// Decode an SDUI payload from a `@key=<b64cbor>` tag value.
 pub fn from_b64<T: DeserializeOwned>(s: &str) -> Result<T, ParseError> {
-    let bytes = BASE64_STANDARD.decode(s).map_err(|_| invalid("plugin payload", s))?;
+    let bytes = BASE64_STANDARD
+        .decode(s)
+        .map_err(|_| invalid("plugin payload", s))?;
     ciborium::from_reader(&bytes[..]).map_err(|_| invalid("plugin payload", s))
 }
 
@@ -284,10 +287,20 @@ pub struct View {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum PatchOp {
-    Replace { view: Box<View> },
-    Set { component_id: String, props: View },
-    Append { container_id: String, blocks: Vec<Component> },
-    Remove { component_id: String },
+    Replace {
+        view: Box<View>,
+    },
+    Set {
+        component_id: String,
+        props: View,
+    },
+    Append {
+        container_id: String,
+        blocks: Vec<Component>,
+    },
+    Remove {
+        component_id: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -297,8 +310,13 @@ pub enum PatchOp {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "kebab-case")]
 pub enum ViewResult {
-    Toast { kind: ToastKind, text: String },
-    Navigate { target: String },
+    Toast {
+        kind: ToastKind,
+        text: String,
+    },
+    Navigate {
+        target: String,
+    },
     Close {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
@@ -409,7 +427,10 @@ mod tests {
             label: "Language".into(),
             required: Some(true),
             default: Some("en".into()),
-            options: vec![SelectOption { value: "en".into(), label: "English".into() }],
+            options: vec![SelectOption {
+                value: "en".into(),
+                label: "English".into(),
+            }],
         });
         round_trip(&Component::Divider);
         round_trip(&Component::Table {
@@ -424,7 +445,12 @@ mod tests {
             confirm: None,
         }));
         round_trip(&Component::ActionRow {
-            buttons: vec![Button { id: "ok".into(), label: "OK".into(), style: None, confirm: None }],
+            buttons: vec![Button {
+                id: "ok".into(),
+                label: "OK".into(),
+                style: None,
+                confirm: None,
+            }],
         });
     }
 
@@ -435,7 +461,13 @@ mod tests {
             title: Some("Translate".into()),
             panel_key: None,
             submit_label: None,
-            blocks: vec![Component::Heading { text: "Result".into(), level: None }, Component::Markdown { text: "hi".into() }],
+            blocks: vec![
+                Component::Heading {
+                    text: "Result".into(),
+                    level: None,
+                },
+                Component::Markdown { text: "hi".into() },
+            ],
             widget: None,
             params: vec![],
         });
@@ -446,7 +478,10 @@ mod tests {
             submit_label: None,
             blocks: vec![],
             widget: Some("role-editor".into()),
-            params: vec![KvRow { key: "ns".into(), value: "ns:01h".into() }],
+            params: vec![KvRow {
+                key: "ns".into(),
+                value: "ns:01h".into(),
+            }],
         });
     }
 
@@ -464,12 +499,22 @@ mod tests {
                 params: vec![],
             },
         });
-        round_trip(&ViewResult::Toast { kind: ToastKind::Error, text: "nope".into() });
-        round_trip(&ViewResult::Close { reason: Some("reloaded".into()) });
+        round_trip(&ViewResult::Toast {
+            kind: ToastKind::Error,
+            text: "nope".into(),
+        });
+        round_trip(&ViewResult::Close {
+            reason: Some("reloaded".into()),
+        });
         // A PLUGIN-PATCH carries a Vec of ops.
         round_trip(&vec![
-            PatchOp::Remove { component_id: "x".into() },
-            PatchOp::Append { container_id: "list".into(), blocks: vec![Component::Divider] },
+            PatchOp::Remove {
+                component_id: "x".into(),
+            },
+            PatchOp::Append {
+                container_id: "list".into(),
+                blocks: vec![Component::Divider],
+            },
         ]);
         round_trip(&Catalog {
             plugins: vec![CatalogEntry {
@@ -489,7 +534,10 @@ mod tests {
                         label: "Language".into(),
                         required: Some(true),
                         default: None,
-                        options: vec![SelectOption { value: "en".into(), label: "English".into() }],
+                        options: vec![SelectOption {
+                            value: "en".into(),
+                            label: "English".into(),
+                        }],
                     }],
                 }],
             }],

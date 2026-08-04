@@ -157,8 +157,53 @@ slices land.
       **Ordering:** the L0 + parse/serialize half can land any time (additive). Delivery *into* Matrix
       needs the outbound relay, so the routing half lands with or after **slice 5** — before that a
       bridged DM would store locally and go nowhere.
-- [ ] **5. Outbound relay** (M) — local posts/edits/reacts/joins in origin-marked channels forward to
-      the provider session (reuse the bridge-forwarder machinery). **WEFT → Matrix flows.**
+- [x] **5. Outbound relay** (M) — **DONE 2026-08-04. WEFT → Matrix flows.**
+      `sync_provider_forwarders(schemes)` subscribes the provider session to every replica channel of
+      its namespaces (reusing `spawn_forwarder`/`self.bridged`), wired at all three registration
+      points (`PLUGIN-REGISTER`, `REALM REGISTER`, `REALM ASSERT`) **and** on each newly asserted
+      channel. `on_provider_event` forwards local-origin message-plane events verbatim; the provider
+      maps channel → foreign room via the mapping it learned at assert time.
+      **Loop guard** = the peer-bridge rule, unchanged: forward iff `msgid.origin == our network`.
+      That works because of the identity pivot below — a replica is *multi-origin*, so an ingested
+      event carries the realm's origin and is structurally ineligible to go back.
+      Test: local MSG/EDIT/REACT relay outward, then an ingested post is proven *not* to come back
+      (the next line the provider reads is the local DELETE that followed it).
+      **JOIN/PART relay (owner directive 2026-08-04, done):** `MEMBER` carries no msgid, so its loop
+      guard reads the *user's* network instead — our members' joins/parts go out, a bridged member's
+      do not (that one is the echo of an ingested `JOIN`). One wrinkle drove the design: `NS JOIN`
+      subscribes to a namespace's channels **quietly** (`announce=false`, so a bulk subscription
+      doesn't spam local clients with a join line per channel), which means the ordinary event relay
+      never sees the common case. `relay_ns_membership` therefore pushes one `MEMBER` per affected
+      channel straight down the provider's writer — the same route a `PROVISION` takes — from both
+      `NS JOIN` and `NS LEAVE`. Local channel-level `JOIN`/`PART` (hide/unhide) still ride the
+      ordinary relay.
+- [x] **5a. A realm IS a network — the adapter mints identity + msgids** (M, owner directive
+      2026-08-04) — **DONE.** Replaces the earlier "weftd mints, `foreign=` displays" model.
+      * `@as=<user@realm>` now carries the finished WEFT handle; weftd validates
+        `sender.network == realm` instead of deriving a puppet (`puppet_user` deleted).
+      * The adapter mints msgids: `MSG`/`EDIT` carry `@msgid=<realm>/<ulid>`; `DELETE`/`REACT` get a
+        local bookkeeping id, exactly as on the peer path.
+      * Ingestion **converged onto the federated path** — `federation::ingest_record` + `Cmd::Ingest`,
+        replacing `RelayPublish`/`RelayMutate` (whose now-redundant `_as` variants were collapsed).
+      * **`foreign=` removed** from `MESSAGE`/`MEMBER`/`EDITED`/`DELETED`/`REACTION` (framework §7a.1
+        struck).
+      * **Account grammar widened to `[a-z0-9-_.=+]`** (spec §2.3 amended + Appendix A decision (3))
+        so a Matrix localpart survives verbatim. *This was the real motivation:* the old mapping
+        stripped `.`/`=`/`+`, so `@alice.smith` and `@alicesmith` collided onto one WEFT identity.
+        `/` stays excluded — it is WEFT's own path separator — so adapters escape that one.
+      * Authority: `@as` and `@msgid` must both name the provider's realm, so a provider cannot forge
+        a local account or another realm's event (tested).
+- [x] **5b. Posting while the provider is offline — REFUSE** (owner decision 2026-08-04) — a post
+      into a replica channel while its provider is down answers `ERR POLICY provider-offline` rather
+      than being accepted-and-dropped. Accepting it would split-brain the room: local members would
+      see a message the foreign side never receives, with no route out and nothing to reconcile
+      against later. Implemented in `can_post` (the §6.7 posting gate, which already loads the
+      channel record — so the origin check is free), mirroring the same rule already enforced on
+      `NS JOIN`. Tested in `provider_offline_gates_virtual_namespace`.
+      *Scope note:* this gates **posting**. `EDIT`/`DELETE`/`REACT` on an existing message do not go
+      through `can_post` and are still accepted while the provider is offline — the same split-brain
+      in miniature. Worth closing, but it is a separate decision (a delete that can't reach Matrix is
+      arguably still worth honouring locally) and was not part of this directive.
 
 *Parallelism: 1 ‖ 2. After Phase 1 a mock provider gives a fully chatting Matrix-shaped namespace.*
 

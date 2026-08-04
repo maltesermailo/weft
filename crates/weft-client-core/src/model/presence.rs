@@ -54,7 +54,10 @@ mod tests {
     use super::*;
 
     fn presence(user: &str, status: &str) -> ClientEvent {
-        ClientEvent::Presence { user: user.into(), status: status.into() }
+        ClientEvent::Presence {
+            user: user.into(),
+            status: status.into(),
+        }
     }
 
     #[test]
@@ -74,6 +77,8 @@ mod tests {
     #[test]
     fn ignores_other_events() {
         let mut p = Presence::default();
-        assert!(p.handle(&ClientEvent::Closed { reason: "x".into() }).is_empty());
+        assert!(p
+            .handle(&ClientEvent::Closed { reason: "x".into() })
+            .is_empty());
     }
 }

@@ -621,6 +621,9 @@ mod tests {
         let remote = &cfg.plugin.remote[0];
         assert_eq!(remote.id, "jira-bot");
         assert_eq!(remote.bot.as_deref(), Some("jira"));
-        assert_eq!(remote.config.get("api_key").map(String::as_str), Some("env:JIRA_TOKEN"));
+        assert_eq!(
+            remote.config.get("api_key").map(String::as_str),
+            Some("env:JIRA_TOKEN")
+        );
     }
 }

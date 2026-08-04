@@ -321,11 +321,7 @@ pub trait ChannelStore: Send + Sync {
 
     /// Foreign-bridge framework (§7a.2): mark a channel as the replica of a
     /// foreign room by its origin URI. Set once at materialization.
-    async fn set_channel_origin(
-        &self,
-        name: &ChannelName,
-        origin: &str,
-    ) -> Result<(), StoreError>;
+    async fn set_channel_origin(&self, name: &ChannelName, origin: &str) -> Result<(), StoreError>;
 
     /// CHANNEL META topic (§6.3).
     async fn set_channel_topic(&self, name: &ChannelName, topic: &str) -> Result<(), StoreError>;

@@ -40,7 +40,14 @@ pub struct Reports {
 impl Reports {
     pub fn handle(&mut self, event: &ClientEvent) -> Vec<ReportDiff> {
         match event {
-            ClientEvent::ReportFiled { report_id, msgid, category, state, reporter, .. } => {
+            ClientEvent::ReportFiled {
+                report_id,
+                msgid,
+                category,
+                state,
+                reporter,
+                ..
+            } => {
                 self.queue.insert(
                     report_id.clone(),
                     ReportInfo {
@@ -72,7 +79,9 @@ impl Reports {
     }
 
     fn snapshot(&self) -> Vec<ReportDiff> {
-        vec![ReportDiff::Reports { reports: self.queue.values().cloned().collect() }]
+        vec![ReportDiff::Reports {
+            reports: self.queue.values().cloned().collect(),
+        }]
     }
 }
 
@@ -91,7 +100,11 @@ mod tests {
         }
     }
     fn resolved(report_id: &str) -> ClientEvent {
-        ClientEvent::ReportResolved { report_id: report_id.into(), action: "dismissed".into(), note: None }
+        ClientEvent::ReportResolved {
+            report_id: report_id.into(),
+            action: "dismissed".into(),
+            note: None,
+        }
     }
     fn ids(d: &ReportDiff) -> Vec<&str> {
         let ReportDiff::Reports { reports } = d;

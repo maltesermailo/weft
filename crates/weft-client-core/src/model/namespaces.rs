@@ -39,7 +39,16 @@ pub struct Namespaces;
 impl Namespaces {
     pub fn handle(&mut self, event: &ClientEvent) -> Vec<NsDiff> {
         let ClientEvent::NsMeta {
-            id, name, visibility, owner, title, description, recovery_eta, recovery_rung, federation, ..
+            id,
+            name,
+            visibility,
+            owner,
+            title,
+            description,
+            recovery_eta,
+            recovery_rung,
+            federation,
+            ..
         } = event
         else {
             return Vec::new();
@@ -101,8 +110,12 @@ mod tests {
     fn deletion_marker_emits_nothing() {
         let mut ns = Namespaces;
         // Owner cleared + description "deleted" is a tombstone → no descriptor.
-        assert!(ns.handle(&ns_meta("01ns", None, Some("deleted"))).is_empty());
+        assert!(ns
+            .handle(&ns_meta("01ns", None, Some("deleted")))
+            .is_empty());
         // But owner-cleared with a *different* description is a normal update.
-        assert!(!ns.handle(&ns_meta("01ns", None, Some("still here"))).is_empty());
+        assert!(!ns
+            .handle(&ns_meta("01ns", None, Some("still here")))
+            .is_empty());
     }
 }

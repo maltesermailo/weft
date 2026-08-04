@@ -72,7 +72,10 @@ pub enum ChanDiff {
     /// The channel's full member roster — the mirror sets `Channel.members` (it
     /// resolves each member's local/federated origin from its `network`). Sent as
     /// the whole list (idempotent → a reconnect's re-sync replaces cleanly).
-    Roster { channel: String, members: Vec<RosterMember> },
+    Roster {
+        channel: String,
+        members: Vec<RosterMember>,
+    },
     /// The channel's "currently typing" set — the mirror sets `Channel.typers`.
     Typers { channel: String, users: Vec<String> },
 }
@@ -145,20 +148,40 @@ impl Channels {
     /// Mirrors `channel-handlers.ts`.
     pub fn handle(&mut self, event: &ClientEvent) -> Vec<ChanDiff> {
         match event {
-            ClientEvent::Chanmeta { channel, key, value } => self.chanmeta(channel, key, value),
-            ClientEvent::ChannelLayout { channel, category, position, channel_kind, vanity } => {
+            ClientEvent::Chanmeta {
+                channel,
+                key,
+                value,
+            } => self.chanmeta(channel, key, value),
+            ClientEvent::ChannelLayout {
+                channel,
+                category,
+                position,
+                channel_kind,
+                vanity,
+            } => {
                 vec![self.layout(channel, category.clone(), *position, channel_kind, vanity)]
             }
             ClientEvent::ChannelRenamed { old, new } => self.renamed(old, new),
             // §6.3 channel roster: MEMBER join/part (incl. the MEMBERS batch).
-            ClientEvent::Member { channel, user, network, action, .. } => {
-                self.member(channel, user, network, action)
-            }
+            ClientEvent::Member {
+                channel,
+                user,
+                network,
+                action,
+                ..
+            } => self.member(channel, user, network, action),
             // §4 typing set (the host owns the fallback-expiry timer).
-            ClientEvent::Typing { channel, user, state } => self.typing(channel, user, state),
+            ClientEvent::Typing {
+                channel,
+                user,
+                state,
+            } => self.typing(channel, user, state),
             // §6.3 the namespace's category list rides NS-META (server-authoritative);
             // adopt it (the other NS-META fields stay TS-owned via the raw event).
-            ClientEvent::NsMeta { id, categories, .. } => self.set_categories(id, categories.clone()),
+            ClientEvent::NsMeta { id, categories, .. } => {
+                self.set_categories(id, categories.clone())
+            }
             // SYNC end = the server has finished enumerating the visible channels
             // (a CHANNEL-LAYOUT per one). Any cache-seeded channel still provisional
             // is gone server-side → prune it.
@@ -180,7 +203,10 @@ impl Channels {
             if members.iter().any(|m| m.account == user) {
                 false
             } else {
-                members.push(RosterMember { account: user.to_string(), network: network.to_string() });
+                members.push(RosterMember {
+                    account: user.to_string(),
+                    network: network.to_string(),
+                });
                 true
             }
         } else {
@@ -193,7 +219,10 @@ impl Channels {
             return Vec::new();
         }
 
-        vec![ChanDiff::Roster { channel: channel.to_string(), members: members.clone() }]
+        vec![ChanDiff::Roster {
+            channel: channel.to_string(),
+            members: members.clone(),
+        }]
     }
 
     // §4 maintain a channel's typing set. `start` adds (deduped), anything else
@@ -219,7 +248,10 @@ impl Channels {
             return Vec::new();
         }
 
-        vec![ChanDiff::Typers { channel: channel.to_string(), users: users.clone() }]
+        vec![ChanDiff::Typers {
+            channel: channel.to_string(),
+            users: users.clone(),
+        }]
     }
 
     // §6.3 adopt the server-authoritative category list for a namespace. A no-op
@@ -233,7 +265,10 @@ impl Channels {
         self.categories.insert(ns.to_string(), categories.clone());
         self.dirty = true;
 
-        vec![ChanDiff::CatList { ns: ns.to_string(), categories }]
+        vec![ChanDiff::CatList {
+            ns: ns.to_string(),
+            categories,
+        }]
     }
 
     /// Drag-reorder a namespace's category list: move `drag` to `target`'s slot
@@ -241,7 +276,10 @@ impl Channels {
     /// via the mirror) + the `NS META <ns> categories <list>` write. Mirrors the TS
     /// `moveCategory`.
     pub fn move_category(&mut self, ns: &str, drag: &str, target: &str) -> MoveResult {
-        let empty = MoveResult { diffs: Vec::new(), sends: Vec::new() };
+        let empty = MoveResult {
+            diffs: Vec::new(),
+            sends: Vec::new(),
+        };
 
         if drag == target || drag.is_empty() {
             return empty;
@@ -261,7 +299,10 @@ impl Channels {
         self.dirty = true;
 
         MoveResult {
-            diffs: vec![ChanDiff::CatList { ns: ns.to_string(), categories: cats.clone() }],
+            diffs: vec![ChanDiff::CatList {
+                ns: ns.to_string(),
+                categories: cats.clone(),
+            }],
             sends: vec![(ns.to_string(), "categories".into(), cats.join(","))],
         }
     }
@@ -281,7 +322,13 @@ impl Channels {
             "topic" => ch.topic = Some(value.to_string()),
             "posting" => ch.restricted = value == "restricted",
             "view-gated" => ch.view_gated = value == "true",
-            "category" => ch.category = if value.is_empty() { None } else { Some(value.to_string()) },
+            "category" => {
+                ch.category = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                }
+            }
             "position" => ch.position = value.parse().unwrap_or(0), // parse failure → 0
             _ => return Vec::new(),
         }
@@ -341,7 +388,10 @@ impl Channels {
         self.provisional.remove(old);
         self.provisional.remove(new);
 
-        vec![ChanDiff::ChanRenamed { old: old.to_string(), new: new.to_string() }]
+        vec![ChanDiff::ChanRenamed {
+            old: old.to_string(),
+            new: new.to_string(),
+        }]
     }
 
     // §6.3 CHANNEL DELETE — drop the channel from the model. Always tells the
@@ -356,7 +406,9 @@ impl Channels {
             self.dirty = true; // the persisted layout set shrank → re-save
         }
 
-        vec![ChanDiff::ChanRemoved { name: channel.to_string() }]
+        vec![ChanDiff::ChanRemoved {
+            name: channel.to_string(),
+        }]
     }
 
     // SYNC-end reconciliation: every channel still `provisional` was cache-seeded
@@ -390,9 +442,20 @@ impl Channels {
             .map
             .iter()
             .filter(|(name, _)| !ns_of(name).is_empty())
-            .map(|(name, ch)| (name.clone(), LayoutEntry { category: ch.category.clone(), position: ch.position }))
+            .map(|(name, ch)| {
+                (
+                    name.clone(),
+                    LayoutEntry {
+                        category: ch.category.clone(),
+                        position: ch.position,
+                    },
+                )
+            })
             .collect();
-        let blob = LayoutBlob { channels, categories: self.categories.clone() };
+        let blob = LayoutBlob {
+            channels,
+            categories: self.categories.clone(),
+        };
 
         serde_json::to_string(&blob).unwrap_or_default()
     }
@@ -453,15 +516,21 @@ impl Channels {
         after: bool,
     ) -> MoveResult {
         if !self.map.contains_key(drag) {
-            return MoveResult { diffs: Vec::new(), sends: Vec::new() };
+            return MoveResult {
+                diffs: Vec::new(),
+                sends: Vec::new(),
+            };
         }
 
         let mut sends = Vec::new();
         let mut changed = vec![drag.to_string()]; // drag always re-snapshotted
 
         // Set the dragged channel's category (optimistic) + queue the write.
-        self.map.get_mut(drag).unwrap().category =
-            if target_cat.is_empty() { None } else { Some(target_cat.to_string()) };
+        self.map.get_mut(drag).unwrap().category = if target_cat.is_empty() {
+            None
+        } else {
+            Some(target_cat.to_string())
+        };
         sends.push((drag.to_string(), "category".into(), target_cat.to_string()));
         self.dirty = true; // layout changed → re-persist
 
@@ -477,7 +546,12 @@ impl Channels {
             })
             .map(|(name, _)| name.clone())
             .collect();
-        list.sort_by(|a, b| self.map[a].position.cmp(&self.map[b].position).then_with(|| a.cmp(b)));
+        list.sort_by(|a, b| {
+            self.map[a]
+                .position
+                .cmp(&self.map[b].position)
+                .then_with(|| a.cmp(b))
+        });
 
         // Insert drag at the anchor (default: end; `after` → past the anchor).
         let mut at = anchor
@@ -507,7 +581,10 @@ impl Channels {
             }
         }
 
-        MoveResult { diffs: changed.iter().map(|n| self.snapshot(n)).collect(), sends }
+        MoveResult {
+            diffs: changed.iter().map(|n| self.snapshot(n)).collect(),
+            sends,
+        }
     }
 
     fn snapshot(&self, channel: &str) -> ChanDiff {
@@ -530,9 +607,19 @@ mod tests {
     use super::*;
 
     fn chanmeta(channel: &str, key: &str, value: &str) -> ClientEvent {
-        ClientEvent::Chanmeta { channel: channel.into(), key: key.into(), value: value.into() }
+        ClientEvent::Chanmeta {
+            channel: channel.into(),
+            key: key.into(),
+            value: value.into(),
+        }
     }
-    fn layout(channel: &str, category: Option<&str>, position: i64, kind: &str, vanity: &str) -> ClientEvent {
+    fn layout(
+        channel: &str,
+        category: Option<&str>,
+        position: i64,
+        kind: &str,
+        vanity: &str,
+    ) -> ClientEvent {
         ClientEvent::ChannelLayout {
             channel: channel.into(),
             category: category.map(Into::into),
@@ -546,20 +633,34 @@ mod tests {
         diffs.into_iter().next().unwrap()
     }
     fn renamed(old: &str, new: &str) -> ClientEvent {
-        ClientEvent::ChannelRenamed { old: old.into(), new: new.into() }
+        ClientEvent::ChannelRenamed {
+            old: old.into(),
+            new: new.into(),
+        }
     }
     fn sync_end() -> ClientEvent {
-        ClientEvent::SyncEnd { cursor: "c1".into() }
+        ClientEvent::SyncEnd {
+            cursor: "c1".into(),
+        }
     }
     fn removed_names(diffs: &[ChanDiff]) -> Vec<&str> {
-        diffs.iter().filter_map(|d| match d {
-            ChanDiff::ChanRemoved { name } => Some(name.as_str()),
-            _ => None,
-        }).collect()
+        diffs
+            .iter()
+            .filter_map(|d| match d {
+                ChanDiff::ChanRemoved { name } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
     }
     // (name, category, position) for a snapshot diff.
     fn cat_pos(d: &ChanDiff) -> (&str, Option<&str>, i64) {
-        let ChanDiff::ChanState { name, category, position, .. } = d else {
+        let ChanDiff::ChanState {
+            name,
+            category,
+            position,
+            ..
+        } = d
+        else {
             panic!("expected a ChanState diff");
         };
         (name, category.as_deref(), *position)
@@ -568,11 +669,29 @@ mod tests {
     #[test]
     fn chanmeta_and_layout_set_category_and_position() {
         let mut ch = Channels::default();
-        assert_eq!(cat_pos(&one(ch.handle(&chanmeta("#n/c", "category", "Text")))), ("#n/c", Some("Text"), 0));
-        assert_eq!(cat_pos(&one(ch.handle(&chanmeta("#n/c", "position", "4")))), ("#n/c", Some("Text"), 4));
+        assert_eq!(
+            cat_pos(&one(ch.handle(&chanmeta("#n/c", "category", "Text")))),
+            ("#n/c", Some("Text"), 0)
+        );
+        assert_eq!(
+            cat_pos(&one(ch.handle(&chanmeta("#n/c", "position", "4")))),
+            ("#n/c", Some("Text"), 4)
+        );
         // empty category clears to None; layout overwrites both.
-        assert_eq!(cat_pos(&one(ch.handle(&chanmeta("#n/c", "category", "")))), ("#n/c", None, 4));
-        assert_eq!(cat_pos(&one(ch.handle(&layout("#n/c", Some("Voice"), 2, "voice", "")))), ("#n/c", Some("Voice"), 2));
+        assert_eq!(
+            cat_pos(&one(ch.handle(&chanmeta("#n/c", "category", "")))),
+            ("#n/c", None, 4)
+        );
+        assert_eq!(
+            cat_pos(&one(ch.handle(&layout(
+                "#n/c",
+                Some("Voice"),
+                2,
+                "voice",
+                ""
+            )))),
+            ("#n/c", Some("Voice"), 2)
+        );
     }
 
     #[test]
@@ -587,7 +706,9 @@ mod tests {
         // New order a,b get bumped to 1,2; c → 0.
         let pos = |name: &str| {
             r.diffs.iter().find_map(|d| match d {
-                ChanDiff::ChanState { name: n, position, .. } if n == name => Some(*position),
+                ChanDiff::ChanState {
+                    name: n, position, ..
+                } if n == name => Some(*position),
                 _ => None,
             })
         };
@@ -595,10 +716,18 @@ mod tests {
         assert_eq!(pos("#n/a"), Some(1));
         assert_eq!(pos("#n/b"), Some(2));
         // Sends: c category (unchanged "General") + the three position writes.
-        assert!(r.sends.contains(&("#n/c".into(), "category".into(), "General".into())));
-        assert!(r.sends.contains(&("#n/c".into(), "position".into(), "0".into())));
-        assert!(r.sends.contains(&("#n/a".into(), "position".into(), "1".into())));
-        assert!(r.sends.contains(&("#n/b".into(), "position".into(), "2".into())));
+        assert!(r
+            .sends
+            .contains(&("#n/c".into(), "category".into(), "General".into())));
+        assert!(r
+            .sends
+            .contains(&("#n/c".into(), "position".into(), "0".into())));
+        assert!(r
+            .sends
+            .contains(&("#n/a".into(), "position".into(), "1".into())));
+        assert!(r
+            .sends
+            .contains(&("#n/b".into(), "position".into(), "2".into())));
     }
 
     #[test]
@@ -608,14 +737,21 @@ mod tests {
         ch.handle(&layout("#n/b", Some("B"), 0, "text", ""));
         // Move `a` into category B (no anchor → append at end).
         let r = ch.move_channel("n", "#n/a", "B", None, false);
-        let ChanDiff::ChanState { category, position, .. } =
-            r.diffs.iter().find(|d| matches!(d, ChanDiff::ChanState { name, .. } if name == "#n/a")).unwrap()
+        let ChanDiff::ChanState {
+            category, position, ..
+        } = r
+            .diffs
+            .iter()
+            .find(|d| matches!(d, ChanDiff::ChanState { name, .. } if name == "#n/a"))
+            .unwrap()
         else {
             panic!("expected a ChanState diff");
         };
         assert_eq!(category.as_deref(), Some("B"));
         assert_eq!(*position, 1); // after b (which is at 0)
-        assert!(r.sends.contains(&("#n/a".into(), "category".into(), "B".into())));
+        assert!(r
+            .sends
+            .contains(&("#n/a".into(), "category".into(), "B".into())));
     }
 
     #[test]
@@ -626,7 +762,10 @@ mod tests {
         // "Move" b after a — it's already there; positions don't change.
         let r = ch.move_channel("n", "#n/b", "G", Some("#n/a"), true);
         // Only b's category write is guaranteed; no position write for a (unchanged).
-        assert!(!r.sends.iter().any(|(c, k, _)| c == "#n/a" && k == "position"));
+        assert!(!r
+            .sends
+            .iter()
+            .any(|(c, k, _)| c == "#n/a" && k == "position"));
     }
 
     #[test]
@@ -686,10 +825,19 @@ mod tests {
         let mut ch = Channels::default();
         ch.handle(&layout("#n/old", Some("G"), 3, "voice", "General"));
         let diff = one(ch.handle(&renamed("#n/old", "#n/new")));
-        assert!(matches!(&diff, ChanDiff::ChanRenamed { old, new } if old == "#n/old" && new == "#n/new"));
+        assert!(
+            matches!(&diff, ChanDiff::ChanRenamed { old, new } if old == "#n/old" && new == "#n/new")
+        );
 
         // The state moved to the new key, keeping layout/kind but dropping vanity.
-        let ChanDiff::ChanState { vanity, category, position, voice, .. } = ch.snapshot("#n/new") else {
+        let ChanDiff::ChanState {
+            vanity,
+            category,
+            position,
+            voice,
+            ..
+        } = ch.snapshot("#n/new")
+        else {
             panic!("expected a ChanState diff");
         };
         assert_eq!(vanity, ""); // stale vanity cleared → display falls back to the slug
@@ -818,7 +966,10 @@ mod tests {
         // Drag C before B.
         let r = ch.move_category("n", "C", "B");
         assert_eq!(cat_list(&r.diffs[0]), Some(("n", vec!["A", "C", "B"])));
-        assert_eq!(r.sends, vec![("n".into(), "categories".into(), "A,C,B".into())]);
+        assert_eq!(
+            r.sends,
+            vec![("n".into(), "categories".into(), "A,C,B".into())]
+        );
     }
 
     #[test]
@@ -843,7 +994,9 @@ mod tests {
         let mut fresh = Channels::default();
         let diffs = fresh.seed(&blob);
         // One channel snapshot + one category list restored for instant paint.
-        assert!(diffs.iter().any(|d| cat_list(d) == Some(("n", vec!["A", "B"]))));
+        assert!(diffs
+            .iter()
+            .any(|d| cat_list(d) == Some(("n", vec!["A", "B"]))));
         // A matching NS-META afterward is a no-op (already seeded).
         assert!(fresh.handle(&ns_meta("n", &["A", "B"])).is_empty());
     }
@@ -860,9 +1013,12 @@ mod tests {
     // (account, network) pairs of a roster diff.
     fn roster_of(d: &ChanDiff) -> Option<Vec<(&str, &str)>> {
         match d {
-            ChanDiff::Roster { members, .. } => {
-                Some(members.iter().map(|m| (m.account.as_str(), m.network.as_str())).collect())
-            }
+            ChanDiff::Roster { members, .. } => Some(
+                members
+                    .iter()
+                    .map(|m| (m.account.as_str(), m.network.as_str()))
+                    .collect(),
+            ),
             _ => None,
         }
     }
@@ -870,13 +1026,19 @@ mod tests {
     #[test]
     fn member_join_and_part_maintain_the_roster() {
         let mut ch = Channels::default();
-        assert_eq!(roster_of(&one(ch.handle(&member("#n/c", "alice", "home", "join")))),
-                   Some(vec![("alice", "home")]));
-        assert_eq!(roster_of(&one(ch.handle(&member("#n/c", "bob", "peer", "join")))),
-                   Some(vec![("alice", "home"), ("bob", "peer")]));
+        assert_eq!(
+            roster_of(&one(ch.handle(&member("#n/c", "alice", "home", "join")))),
+            Some(vec![("alice", "home")])
+        );
+        assert_eq!(
+            roster_of(&one(ch.handle(&member("#n/c", "bob", "peer", "join")))),
+            Some(vec![("alice", "home"), ("bob", "peer")])
+        );
         // A part removes just that member.
-        assert_eq!(roster_of(&one(ch.handle(&member("#n/c", "alice", "home", "part")))),
-                   Some(vec![("bob", "peer")]));
+        assert_eq!(
+            roster_of(&one(ch.handle(&member("#n/c", "alice", "home", "part")))),
+            Some(vec![("bob", "peer")])
+        );
     }
 
     #[test]
@@ -884,9 +1046,13 @@ mod tests {
         let mut ch = Channels::default();
         ch.handle(&member("#n/c", "alice", "home", "join"));
         // MEMBERS re-fetch re-announces alice → deduped, no diff.
-        assert!(ch.handle(&member("#n/c", "alice", "home", "join")).is_empty());
+        assert!(ch
+            .handle(&member("#n/c", "alice", "home", "join"))
+            .is_empty());
         // Parting someone who isn't here → no diff.
-        assert!(ch.handle(&member("#n/c", "ghost", "home", "part")).is_empty());
+        assert!(ch
+            .handle(&member("#n/c", "ghost", "home", "part"))
+            .is_empty());
     }
 
     #[test]
@@ -895,17 +1061,26 @@ mod tests {
         ch.handle(&member("#n/old", "alice", "home", "join"));
         ch.handle(&renamed("#n/old", "#n/new"));
         // A part under the new name works → the roster moved with the re-key.
-        assert_eq!(roster_of(&one(ch.handle(&member("#n/new", "alice", "home", "part")))), Some(vec![]));
+        assert_eq!(
+            roster_of(&one(ch.handle(&member("#n/new", "alice", "home", "part")))),
+            Some(vec![])
+        );
 
         ch.handle(&member("#n/x", "bob", "home", "join"));
         ch.handle(&chanmeta("#n/x", "deleted", ""));
         // After delete, a re-join starts a fresh roster (old entry was dropped).
-        assert_eq!(roster_of(&one(ch.handle(&member("#n/x", "carol", "home", "join")))),
-                   Some(vec![("carol", "home")]));
+        assert_eq!(
+            roster_of(&one(ch.handle(&member("#n/x", "carol", "home", "join")))),
+            Some(vec![("carol", "home")])
+        );
     }
 
     fn typing(channel: &str, user: &str, state: &str) -> ClientEvent {
-        ClientEvent::Typing { channel: channel.into(), user: user.into(), state: state.into() }
+        ClientEvent::Typing {
+            channel: channel.into(),
+            user: user.into(),
+            state: state.into(),
+        }
     }
     fn typers_of(d: &ChanDiff) -> Option<Vec<&str>> {
         match d {
@@ -917,11 +1092,20 @@ mod tests {
     #[test]
     fn typing_start_and_stop_maintain_the_set() {
         let mut ch = Channels::default();
-        assert_eq!(typers_of(&one(ch.handle(&typing("#n/c", "alice", "start")))), Some(vec!["alice"]));
-        assert_eq!(typers_of(&one(ch.handle(&typing("#n/c", "bob", "start")))), Some(vec!["alice", "bob"]));
+        assert_eq!(
+            typers_of(&one(ch.handle(&typing("#n/c", "alice", "start")))),
+            Some(vec!["alice"])
+        );
+        assert_eq!(
+            typers_of(&one(ch.handle(&typing("#n/c", "bob", "start")))),
+            Some(vec!["alice", "bob"])
+        );
         // A duplicate start (re-sent) is a no-op; stop removes.
         assert!(ch.handle(&typing("#n/c", "alice", "start")).is_empty());
-        assert_eq!(typers_of(&one(ch.handle(&typing("#n/c", "alice", "stop")))), Some(vec!["bob"]));
+        assert_eq!(
+            typers_of(&one(ch.handle(&typing("#n/c", "alice", "stop")))),
+            Some(vec!["bob"])
+        );
         // Stopping someone absent is a no-op.
         assert!(ch.handle(&typing("#n/c", "alice", "stop")).is_empty());
     }
@@ -940,12 +1124,19 @@ mod tests {
     #[test]
     fn metadata_still_works_alongside_layout() {
         let mut ch = Channels::default();
-        let ChanDiff::ChanState { topic, restricted, view_gated, voice, .. } = ({
+        let ChanDiff::ChanState {
+            topic,
+            restricted,
+            view_gated,
+            voice,
+            ..
+        } = ({
             ch.handle(&chanmeta("#n/c", "topic", "hi"));
             ch.handle(&chanmeta("#n/c", "posting", "restricted"));
             ch.handle(&chanmeta("#n/c", "view-gated", "true"));
             one(ch.handle(&layout("#n/c", None, 0, "voice", "")))
-        }) else {
+        })
+        else {
             panic!("expected a ChanState diff");
         };
         assert_eq!(topic.as_deref(), Some("hi"));
