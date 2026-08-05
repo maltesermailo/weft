@@ -76,6 +76,12 @@ pub fn routes() -> Router<AdminState> {
             "/api/v1/namespaces/:name/federation",
             post(set_ns_federation),
         )
+        .route("/api/v1/plugins", get(list_plugins))
+        .route("/api/v1/plugins/:plugin/:action", post(run_plugin_action))
+        .route(
+            "/api/v1/plugin-views/:view_id",
+            post(step_plugin_view).delete(close_plugin_view),
+        )
         .route("/api/v1/namespaces/:name/bridging", post(set_ns_bridging))
         .route(
             "/api/v1/namespaces/:name/takeover",
@@ -1624,6 +1630,199 @@ fn provider_still_enabled(
         Some(_) => Some("this namespace's provider is still enabled — remove its plugin pin first"),
         None => Some("cannot verify the provider is disabled (panel is running standalone)"),
     }
+}
+
+/// Encode an admin request's plugin params for the wire.
+///
+/// Values are `component-id → value` (§13.4) and untyped beyond that, so this
+/// validates the shape and nothing further. A `BTreeMap` keeps the encoding
+/// deterministic, matching the rest of the codebase.
+fn encode_plugin_params(params: Option<serde_json::Value>) -> Result<Option<String>, &'static str> {
+    let Some(value) = params else {
+        return Ok(None);
+    };
+    let values: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_value(value).map_err(|_| "params must be a JSON object")?;
+
+    weft_proto::plugin_to_b64(&values)
+        .map(Some)
+        .map_err(|_| "params could not be encoded")
+}
+
+/// Decode a plugin's wire answer for the panel.
+///
+/// The answer is a raw WEFT line (`PLUGIN-VIEW`/`PLUGIN-RESULT` with a base64
+/// CBOR payload, or an `ERR`). The panel works in JSON, so — mirroring
+/// [`encode_plugin_params`] on the way in — the wire format stops here:
+/// `{kind: "view"|"result"|"error", view_id?, payload|message}`.
+fn decode_plugin_answer(line: &str) -> serde_json::Value {
+    use weft_proto::Event;
+
+    let Ok(reply) = weft_proto::Reply::parse(line) else {
+        return serde_json::json!({ "kind": "error", "message": "unreadable plugin answer" });
+    };
+
+    // A payload that does not decode is an error, not an empty page — the
+    // operator should see that the plugin misbehaved.
+    let decode = |kind: &str, view_id: String, b64: &str| match weft_proto::plugin_from_b64::<
+        serde_json::Value,
+    >(b64)
+    {
+        Ok(payload) => {
+            serde_json::json!({ "kind": kind, "view_id": view_id, "payload": payload })
+        }
+        Err(_) => serde_json::json!({ "kind": "error", "message": "undecodable plugin payload" }),
+    };
+
+    match reply.event {
+        Event::PluginView { view_id, view } => decode("view", view_id, &view),
+        Event::PluginResult { view_id, result } => decode("result", view_id, &result),
+        Event::Err(e) => serde_json::json!({
+            "kind": "error",
+            "code": e.code.as_str(),
+            "message": e.text,
+        }),
+        _ => serde_json::json!({ "kind": "error", "message": "unexpected plugin answer" }),
+    }
+}
+
+/// `GET /plugins` — the action catalog (plugin-spec §22), so the panel knows
+/// which `admin`-surface pages to offer. Embedded only: a standalone panel has
+/// no live server to ask, and plugins are a live-session concept.
+async fn list_plugins(
+    State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Read) {
+        return r;
+    }
+    let Some(live) = st.live.as_ref() else {
+        return (StatusCode::NOT_IMPLEMENTED, "requires the embedded server").into_response();
+    };
+
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        live.plugin_catalog().await,
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct PluginInvokeBody {
+    /// What the action acts on — a namespace id, a channel, an account.
+    #[serde(default)]
+    ctx_ref: Option<String>,
+    /// The declared inputs' values, as JSON.
+    #[serde(default)]
+    params: Option<serde_json::Value>,
+}
+
+/// `POST /plugins/:plugin/:action` — run a plugin action and return its answer.
+///
+/// Unlike every other surface, the panel cannot be *pushed* a view: it holds no
+/// session. weftd waits for the plugin and hands back `{view_id, payload}`, so
+/// the page can render the result and drive later steps of the same flow.
+///
+/// `Moderate` scope: an admin plugin page is an operator tool, and the actions
+/// behind it (a bridge's ban list) are moderation.
+async fn run_plugin_action(
+    State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path((plugin, action)): Path<(String, String)>,
+    Json(body): Json<PluginInvokeBody>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Some(live) = st.live.as_ref() else {
+        return (StatusCode::NOT_IMPLEMENTED, "requires the embedded server").into_response();
+    };
+    // The panel sends JSON; the wire wants base64 CBOR. Encoding here means the
+    // panel never touches the wire format, and a malformed payload is refused
+    // before it is sent rather than reaching a plugin that cannot read it.
+    let params = match encode_plugin_params(body.params) {
+        Ok(params) => params,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+
+    match live
+        .plugin_invoke(&plugin, &action, body.ctx_ref, params)
+        .await
+    {
+        Some((view_id, answer)) => {
+            let mut decoded = decode_plugin_answer(&answer);
+            // The flow handle. The event names it too, but an error answer
+            // does not — and the page still needs it to close the flow.
+            decoded["view_id"] = serde_json::json!(view_id);
+            Json(decoded).into_response()
+        }
+        // The plugin is gone, or did not answer in time. Say so plainly rather
+        // than leaving the operator with an empty page and no reason.
+        None => (
+            StatusCode::BAD_GATEWAY,
+            "the plugin did not answer (not connected, or timed out)",
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PluginStepBody {
+    /// The clicked control's id; absent for a form submit.
+    #[serde(default)]
+    button: Option<String>,
+    /// The view's input values, as JSON.
+    #[serde(default)]
+    values: Option<serde_json::Value>,
+}
+
+/// `POST /plugin-views/:view_id` — drive the next step of a panel-owned flow.
+async fn step_plugin_view(
+    State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(view_id): Path<String>,
+    Json(body): Json<PluginStepBody>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Some(live) = st.live.as_ref() else {
+        return (StatusCode::NOT_IMPLEMENTED, "requires the embedded server").into_response();
+    };
+    let values = match encode_plugin_params(body.values) {
+        Ok(values) => values,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+
+    match live.plugin_step(&view_id, body.button, values).await {
+        Some(answer) => {
+            let mut decoded = decode_plugin_answer(&answer);
+            decoded["view_id"] = serde_json::json!(view_id);
+            Json(decoded).into_response()
+        }
+        None => (
+            StatusCode::BAD_GATEWAY,
+            "the plugin did not answer (not connected, timed out, or not your view)",
+        )
+            .into_response(),
+    }
+}
+
+/// `DELETE /plugin-views/:view_id` — the panel dismissed a view.
+async fn close_plugin_view(
+    State(st): State<AdminState>,
+    Extension(scopes): Extension<AdminScopes>,
+    Path(view_id): Path<String>,
+) -> Response {
+    if let Some(r) = require(&scopes, AdminScope::Moderate) {
+        return r;
+    }
+    let Some(live) = st.live.as_ref() else {
+        return (StatusCode::NOT_IMPLEMENTED, "requires the embedded server").into_response();
+    };
+
+    live.plugin_close(&view_id).await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(serde::Deserialize)]

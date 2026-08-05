@@ -378,8 +378,28 @@ implements and the daemon is written against.*
       *Fixed here:* `plugin_invoke` passed `params` through **raw** while `SUBMIT`/`ACTION` encoded
       it, so a frontend (which has no CBOR) could never send readable params. Slash was the first
       caller to pass any.
-      **Remaining:** `admin` (needs the `Live` routing seam, since the panel speaks no wire
-      protocol); `Container::Custom` widgets are Track B.
+      **`admin` DONE 2026-08-05 — all seven surfaces wired.** The panel is HTTP request/response and
+      holds no session, so unlike every other surface it cannot be *pushed* a view.
+      `ctx.admin_plugin_invoke` bridges the shapes: park a private channel, send the invoke, await
+      the first line, **10 s timeout** so an HTTP request never hangs on a plugin that went quiet.
+      It returns `(view_id, payload)` so a page can drive later steps of the same flow rather than
+      restarting each request. `Live::plugin_catalog` + `Live::plugin_invoke` are the seam;
+      `GET /api/v1/plugins` (Read) and `POST /api/v1/plugins/:plugin/:action` (Moderate) the routes.
+      A plugin that does not answer is `502` with a reason, and a standalone panel `501` — neither
+      pretends there are no plugins. Params travel as JSON and weftd encodes them, so the panel never
+      touches the wire format either.
+      **Panel UI DONE 2026-08-05.** Flow steps got their own routes —
+      `POST /api/v1/plugin-views/:view_id` `{button?, values?}` (ACTION with a button, SUBMIT
+      without) and `DELETE` (CLOSE, terminal) — backed by `ctx.admin_plugin_step`/`_close`.
+      Panel-owned views are tracked (`admin_views`), so the panel cannot re-park (= hijack) a
+      session-owned flow and a session cannot step a panel's (reply-channel identity). Answers are
+      decoded to JSON at the handler (`decode_plugin_answer`), mirroring `encode_plugin_params`
+      inbound — the vanilla-JS SPA never sees CBOR. The SPA renders a dynamic **Plugins** nav group
+      from the catalog's `surface=admin` actions and draws the §10 component set (minus `custom`
+      widgets; `markdown` is escaped verbatim — no renderer in the panel, untrusted text). A step's
+      terminal result re-runs the action so the page shows post-action state; an *invoke's* terminal
+      result renders as the page (re-running would loop). Leaving a page CLOSEs its flow.
+      *Remaining for the plugin surface overall:* `Container::Custom` widgets (Track B).
 - [~] **8. Capability-profile slice** (S–M) — **server half DONE 2026-08-04.**
       `authority=roles|levels|none` + `settings=<comma-list>` ride `NS-META` both ways: a provider
       declares them on its foreign assertion, they persist on the namespace record (migration 0054,

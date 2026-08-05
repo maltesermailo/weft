@@ -70,6 +70,13 @@ async fn session(app: &axum::Router) -> String {
         .to_string()
 }
 
+/// One routed plugin invocation: `(plugin, action, ctx_ref)`.
+/// plugin, action, ctx_ref, params — params included because the route has to
+/// encode them for the wire, and a mock that drops them cannot catch it.
+type Invoked = (String, String, Option<String>, Option<String>);
+/// view_id, button, values (wire-encoded).
+type Stepped = (String, Option<String>, Option<String>);
+
 /// Records live calls so tests can assert the embedded path fired.
 #[derive(Clone, Default)]
 struct MockLive {
@@ -78,6 +85,25 @@ struct MockLive {
     disconnects: Arc<std::sync::Mutex<Vec<String>>>,
     removed: Arc<std::sync::Mutex<Vec<String>>>,
     bridging: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+    /// Plugin invocations the panel routed: `(plugin, action, ctx_ref)`.
+    invokes: Arc<std::sync::Mutex<Vec<Invoked>>>,
+    /// Flow steps the panel routed: `(view_id, button, values_b64)`.
+    steps: Arc<std::sync::Mutex<Vec<Stepped>>>,
+    /// Views the panel dismissed.
+    closes: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Stands for "the plugin never answered".
+    silent: bool,
+}
+
+/// A genuine wire answer, as weftd's `Live` returns it — the decode path in
+/// the handler is only exercised if the mock speaks the real format.
+fn wire_view(view_id: &str, view: &weft_proto::View) -> String {
+    weft_proto::Reply::new(weft_proto::Event::PluginView {
+        view_id: view_id.to_string(),
+        view: weft_proto::plugin_to_b64(view).unwrap(),
+    })
+    .serialize()
+    .unwrap()
 }
 
 #[async_trait::async_trait]
@@ -87,6 +113,65 @@ impl weft_admin::Live for MockLive {
             .lock()
             .unwrap()
             .push((channel.to_string(), account.to_string()));
+    }
+    async fn plugin_catalog(&self) -> String {
+        r#"{"plugins":[{"plugin_id":"modq","name":"Mod Queue","actions":[]}]}"#.to_string()
+    }
+    async fn plugin_invoke(
+        &self,
+        plugin: &str,
+        action: &str,
+        ctx_ref: Option<String>,
+        params_b64: Option<String>,
+    ) -> Option<(String, String)> {
+        self.invokes.lock().unwrap().push((
+            plugin.to_string(),
+            action.to_string(),
+            ctx_ref,
+            params_b64,
+        ));
+
+        // `None` stands for "the plugin never answered" — the case the route has
+        // to turn into a plain failure rather than a hung request.
+        (!self.silent).then(|| {
+            let view = weft_proto::View {
+                container: weft_proto::Container::Panel,
+                title: Some("Bridged spaces".into()),
+                panel_key: None,
+                submit_label: None,
+                blocks: vec![],
+                widget: None,
+                params: vec![],
+            };
+            ("modq:1".to_string(), wire_view("modq:1", &view))
+        })
+    }
+    async fn plugin_step(
+        &self,
+        view_id: &str,
+        button: Option<String>,
+        values_b64: Option<String>,
+    ) -> Option<String> {
+        self.steps
+            .lock()
+            .unwrap()
+            .push((view_id.to_string(), button, values_b64));
+
+        (!self.silent).then(|| {
+            weft_proto::Reply::new(weft_proto::Event::PluginResult {
+                view_id: view_id.to_string(),
+                result: weft_proto::plugin_to_b64(&weft_proto::ViewResult::Toast {
+                    kind: weft_proto::ToastKind::Ok,
+                    text: "banned".into(),
+                })
+                .unwrap(),
+            })
+            .serialize()
+            .unwrap()
+        })
+    }
+    async fn plugin_close(&self, view_id: &str) {
+        self.closes.lock().unwrap().push(view_id.to_string());
     }
     async fn set_bridging(&self, namespace: &weft_proto::NamespaceId, banned: bool) -> bool {
         self.bridging
@@ -2593,4 +2678,170 @@ async fn banning_a_bridged_space_tells_the_bridge_and_keeps_nothing() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::CONFLICT);
     assert_eq!(live.bridging.lock().unwrap().len(), 2, "unchanged");
+}
+
+#[tokio::test]
+async fn the_admin_panel_runs_plugin_actions_and_waits_for_the_answer() {
+    // plugin-spec §22. Every other surface is push-shaped: a client invokes and
+    // the view arrives later on its session. The panel holds no session, so
+    // weftd waits for the plugin and hands the answer back on the HTTP response.
+    let store = Arc::new(MemoryStore::default());
+    store
+        .register(
+            &"admin".parse().unwrap(),
+            PasswordHash::new(PASSWORD).as_phc(),
+        )
+        .await
+        .unwrap();
+
+    let auth = || {
+        auth::config(
+            b"a-test-session-secret".to_vec(),
+            ["admin".parse().unwrap()],
+        )
+    };
+    let live = MockLive::default();
+    let app = weft_admin::router(
+        AdminState::from_store(Arc::clone(&store), auth(), "test.net".into())
+            .with_live(Arc::new(live.clone())),
+    );
+    let cookie = session(&app).await;
+
+    // The catalog tells the panel which admin pages exist.
+    let res = app
+        .clone()
+        .oneshot(get("/admin/api/v1/plugins", Some(&cookie)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Running one returns the view **and** its view_id, so the page can drive
+    // later steps of the same flow rather than starting over each request.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/plugins/modq/bans",
+            &cookie,
+            r#"{"ctx_ref":"01arz3ndektsv4rrffq69g5fav"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        live.invokes.lock().unwrap().as_slice(),
+        [(
+            "modq".to_string(),
+            "bans".to_string(),
+            Some("01arz3ndektsv4rrffq69g5fav".to_string()),
+            None
+        )]
+    );
+
+    // The answer reaches the panel as JSON — the wire's base64 CBOR stops at
+    // the handler, so the vanilla-JS page never needs a CBOR decoder.
+    let body: serde_json::Value = serde_json::from_str(&body_string(res).await).unwrap();
+    assert_eq!(body["kind"], "view");
+    assert_eq!(body["view_id"], "modq:1");
+    assert_eq!(body["payload"]["title"], "Bridged spaces");
+
+    // A later step (a button click) drives the same flow by its view-id; the
+    // values travel to the plugin in the wire encoding, and the terminal
+    // result comes back decoded.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/plugin-views/modq:1",
+            &cookie,
+            r#"{"button":"ban","values":{"space":"!room:matrix.org"}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&body_string(res).await).unwrap();
+    assert_eq!(body["kind"], "result");
+    assert_eq!(body["payload"]["text"], "banned");
+
+    let (view_id, button, values) = live.steps.lock().unwrap()[0].clone();
+    assert_eq!(
+        (view_id.as_str(), button.as_deref()),
+        ("modq:1", Some("ban"))
+    );
+    let decoded: std::collections::BTreeMap<String, serde_json::Value> =
+        weft_proto::plugin_from_b64(&values.expect("values")).expect("wire CBOR");
+    assert_eq!(decoded["space"], "!room:matrix.org");
+
+    // Dismissing tells the plugin (fire-and-forget, 204).
+    let res = app
+        .clone()
+        .oneshot(
+            Request::delete("/admin/api/v1/plugin-views/modq:1")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(live.closes.lock().unwrap().as_slice(), ["modq:1"]);
+
+    // Params must reach the plugin in the **wire** encoding (base64 CBOR), not
+    // as the JSON the panel posted. A plugin cannot read raw JSON here, and the
+    // failure is silent — it sees an unreadable payload, not an error — so the
+    // round-trip is asserted rather than the call merely being recorded.
+    live.invokes.lock().unwrap().clear();
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/plugins/modq/bans",
+            &cookie,
+            r#"{"params":{"space":"!room:matrix.org","reason":"spam"}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let sent = live.invokes.lock().unwrap()[0].3.clone().expect("params");
+    let decoded: std::collections::BTreeMap<String, serde_json::Value> =
+        weft_proto::plugin_from_b64(&sent).expect("params must decode as wire CBOR");
+    assert_eq!(decoded["space"], "!room:matrix.org");
+    assert_eq!(decoded["reason"], "spam");
+
+    // A payload that is not an object is refused before it is sent.
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/admin/api/v1/plugins/modq/bans",
+            &cookie,
+            r#"{"params":["not","an","object"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // A plugin that never answers is a plain failure, not a hung request: the
+    // operator is told, rather than left with a spinner.
+    let silent = MockLive {
+        silent: true,
+        ..MockLive::default()
+    };
+    let app = weft_admin::router(
+        AdminState::from_store(Arc::clone(&store), auth(), "test.net".into())
+            .with_live(Arc::new(silent)),
+    );
+    let cookie = session(&app).await;
+    let res = app
+        .clone()
+        .oneshot(post_json("/admin/api/v1/plugins/modq/bans", &cookie, "{}"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+
+    // Standalone (no live server) says so rather than pretending there are none.
+    let blind = weft_admin::router(AdminState::from_store(store, auth(), "test.net".into()));
+    let cookie = session(&blind).await;
+    let res = blind
+        .oneshot(get("/admin/api/v1/plugins", Some(&cookie)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED);
 }

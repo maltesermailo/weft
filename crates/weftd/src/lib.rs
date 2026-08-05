@@ -821,6 +821,37 @@ impl weft_admin::Live for LiveRegistry {
         }
     }
 
+    async fn plugin_catalog(&self) -> String {
+        serde_json::to_string(&self.ctx.plugin_catalog()).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    async fn plugin_invoke(
+        &self,
+        plugin: &str,
+        action: &str,
+        ctx_ref: Option<String>,
+        params: Option<String>,
+    ) -> Option<(String, String)> {
+        self.ctx
+            .admin_plugin_invoke(plugin, action, ctx_ref, params)
+            .await
+    }
+
+    async fn plugin_step(
+        &self,
+        view_id: &str,
+        button: Option<String>,
+        values_b64: Option<String>,
+    ) -> Option<String> {
+        self.ctx
+            .admin_plugin_step(view_id, button, values_b64)
+            .await
+    }
+
+    async fn plugin_close(&self, view_id: &str) {
+        self.ctx.admin_plugin_close(view_id);
+    }
+
     async fn set_bridging(&self, namespace: &weft_proto::NamespaceId, banned: bool) -> bool {
         self.ctx.tell_provider_bridging(namespace, banned).await
     }

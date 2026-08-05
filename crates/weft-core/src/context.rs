@@ -38,13 +38,19 @@ pub enum Actor {
     Foreign(String),
     /// A **provider** acting as itself (not on behalf of one of its users): the
     /// governing authority of every namespace it bridges, the way an owner is of
-    /// a native one (framework §7a.3). Carries the scheme its key is pinned for,
-    /// which is what bounds that authority.
+    /// a native one (framework §7a.3).
+    ///
+    /// Carries the **plugin id**, not a scheme: a provider may serve several
+    /// schemes, and one that registered a control link without binding a realm
+    /// serves them all the same. Resolving the id to its registered schemes at
+    /// check time covers both, and avoids needing a placeholder scheme for the
+    /// unbound case — a placeholder is a real parseable value, so it could match
+    /// a namespace whose origin genuinely used that scheme.
     ///
     /// This is the bridge's analogue of [`Actor::Foreign`] — expressing "who is
     /// acting" once, so every actor-aware verb (grants, roles, moderation) works
     /// for a provider without a bypass per verb.
-    Provider(weft_proto::Scheme),
+    Provider(String),
 }
 
 impl Actor {
@@ -63,7 +69,7 @@ impl std::fmt::Display for Actor {
         match self {
             Actor::Local(account) => write!(f, "{account}"),
             Actor::Foreign(user) => write!(f, "{user}"),
-            Actor::Provider(scheme) => write!(f, "{scheme}:provider"),
+            Actor::Provider(plugin) => write!(f, "plugin:{plugin}"),
         }
     }
 }
@@ -203,6 +209,10 @@ pub struct ServerCtx {
     /// Parked client invocations awaiting a plugin's `PLUGIN-VIEW`/`-RESULT`,
     /// keyed by the minted view-id (§11.1) → the requester's writer + request label.
     pending_invoke: std::sync::Mutex<HashMap<String, PendingReply>>,
+    /// Views opened by the **admin panel** (plugin-spec §22) rather than a
+    /// session. A panel step re-parks its view before sending, so this is what
+    /// stops it re-parking (and thereby hijacking) a session-owned flow.
+    admin_views: std::sync::Mutex<std::collections::HashSet<String>>,
     /// §11.3 live panels: `view-id → panel_key` (empty for a modal), noted as a
     /// `PLUGIN-VIEW` passes through. It lives here rather than on a session
     /// because the view is sent on the **plugin's** session and subscribed on the
@@ -448,6 +458,10 @@ pub(crate) struct PendingProvision {
 /// completion (foreign-bridge provisioning §3.3; plugin invocation §11.1).
 type PendingReply = (tokio::sync::mpsc::Sender<String>, Option<String>);
 
+/// How long the admin panel waits for a plugin to answer (plugin-spec §22). An
+/// HTTP request cannot hang on a plugin that never replies.
+const PLUGIN_ADMIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A registered remote plugin (App Service, plugin-spec.md §12.3): the writer
 /// weftd pushes routed invocations to, plus the plugin's declared actions (the
 /// catalog it serves to clients) and display metadata.
@@ -585,6 +599,7 @@ impl ServerCtx {
             remote_plugins: Vec::new(),
             plugin_registry: std::sync::Mutex::new(HashMap::new()),
             pending_invoke: std::sync::Mutex::new(HashMap::new()),
+            admin_views: std::sync::Mutex::new(std::collections::HashSet::new()),
             view_panel_keys: std::sync::Mutex::new(HashMap::new()),
             panel_subs: std::sync::Mutex::new(std::collections::HashSet::new()),
             view_seq: AtomicU64::new(1),
@@ -1595,7 +1610,7 @@ impl ServerCtx {
     }
 
     /// The client-facing action catalog of every registered plugin (§12.5).
-    pub(crate) fn plugin_catalog(&self) -> weft_proto::Catalog {
+    pub fn plugin_catalog(&self) -> weft_proto::Catalog {
         let map = self.plugin_registry.lock().expect("plugin_registry lock");
 
         weft_proto::Catalog {
@@ -1709,6 +1724,148 @@ impl ServerCtx {
         )
     }
 
+    /// The admin panel's plugin surface (plugin-spec §22): run an action and
+    /// **wait** for the answer.
+    ///
+    /// Every other surface is push-shaped — a client invokes, and the view
+    /// arrives later on its session. The panel has no session: it is HTTP
+    /// request/response, store-direct, and speaks no wire protocol. So this
+    /// bridges the two shapes by parking a private channel, sending the invoke,
+    /// and awaiting the first line the plugin sends back.
+    ///
+    /// Bounded by `PLUGIN_ADMIN_TIMEOUT`: an HTTP request must not hang on a
+    /// plugin that never answers, and the operator gets a plain "no answer"
+    /// rather than a spinner that never resolves.
+    ///
+    /// Returns `(view_id, line)` so the caller can drive later steps of the same
+    /// flow; the flow stays parked until [`Self::complete_invoke`] frees it.
+    ///
+    /// `params_b64` must already be the wire encoding (base64 CBOR of the
+    /// declared inputs' values) — this does **not** encode it. The name says so
+    /// because a bare `params: Option<String>` does not, and passing JSON here
+    /// produces a payload the plugin silently cannot read.
+    pub async fn admin_plugin_invoke(
+        &self,
+        plugin: &str,
+        action: &str,
+        ctx_ref: Option<String>,
+        params_b64: Option<String>,
+    ) -> Option<(String, String)> {
+        let out = self.plugin_out_for(plugin, action)?;
+        let view_id = self.mint_view_id(plugin);
+
+        let cmd = weft_proto::Command::PluginInvoke {
+            plugin: plugin.to_string(),
+            action: action.to_string(),
+            ctx_ref,
+            params: params_b64,
+        };
+        let answer = self.admin_send_and_await(&out, &view_id, cmd).await?;
+
+        Some((view_id, answer))
+    }
+
+    /// A later step of a panel-owned flow (plugin-spec §22): a submit
+    /// (`button` = `None`) or a control click. Same bounded wait as
+    /// [`Self::admin_plugin_invoke`].
+    ///
+    /// Refused for a view the panel did not open — a step re-parks the view's
+    /// reply slot, which for a session-owned flow would steal its answer.
+    pub async fn admin_plugin_step(
+        &self,
+        view_id: &str,
+        button: Option<String>,
+        values_b64: Option<String>,
+    ) -> Option<String> {
+        let out = self.admin_view_out(view_id)?;
+
+        let cmd = match button {
+            Some(button) => weft_proto::Command::PluginAction {
+                view_id: view_id.to_string(),
+                button,
+                values: values_b64,
+            },
+            None => weft_proto::Command::PluginSubmit {
+                view_id: view_id.to_string(),
+                values: values_b64,
+            },
+        };
+
+        self.admin_send_and_await(&out, view_id, cmd).await
+    }
+
+    /// The panel dismissed a view. Terminal (§11.2): tell the plugin and free
+    /// the parking — nothing more will arrive for it. No answer is awaited.
+    pub fn admin_plugin_close(&self, view_id: &str) {
+        let Some(out) = self.admin_view_out(view_id) else {
+            return;
+        };
+
+        let cmd = weft_proto::Command::PluginClose {
+            view_id: view_id.to_string(),
+        };
+
+        if let Ok(line) = weft_proto::Request::with_label(cmd, view_id).serialize() {
+            let _ = out.try_send(line);
+        }
+
+        self.complete_invoke(view_id);
+    }
+
+    /// The writer of the plugin behind a **panel-owned** view (view-ids are
+    /// minted `<plugin>:<seq>`, §11.1). `None` if the view is not the panel's
+    /// or the plugin went away.
+    fn admin_view_out(&self, view_id: &str) -> Option<tokio::sync::mpsc::Sender<String>> {
+        if !self
+            .admin_views
+            .lock()
+            .expect("admin_views lock")
+            .contains(view_id)
+        {
+            return None;
+        }
+
+        view_id
+            .split_once(':')
+            .and_then(|(plugin, _)| self.plugin_out(plugin))
+    }
+
+    /// The panel's request/answer core: park the view (marking it panel-owned),
+    /// send one step, and wait — bounded — for the plugin's next direct line.
+    async fn admin_send_and_await(
+        &self,
+        out: &tokio::sync::mpsc::Sender<String>,
+        view_id: &str,
+        cmd: weft_proto::Command,
+    ) -> Option<String> {
+        // Re-parking replaces any earlier (now receiver-less) reply slot from a
+        // previous request on this view, so the answer lands here.
+        let (reply, mut answers) = tokio::sync::mpsc::channel(4);
+        self.park_invoke(view_id.to_string(), reply, None);
+        self.admin_views
+            .lock()
+            .expect("admin_views lock")
+            .insert(view_id.to_string());
+
+        let line = weft_proto::Request::with_label(cmd, view_id)
+            .serialize()
+            .ok()?;
+        if out.try_send(line).is_err() {
+            self.complete_invoke(view_id);
+            return None;
+        }
+
+        match tokio::time::timeout(PLUGIN_ADMIN_TIMEOUT, answers.recv()).await {
+            Ok(Some(answer)) => Some(answer),
+            // No answer, or the plugin dropped: free the parking rather than
+            // leaving it pinned for the life of the server.
+            _ => {
+                self.complete_invoke(view_id);
+                None
+            }
+        }
+    }
+
     /// Park a client invocation awaiting the plugin's response, keyed by view-id.
     pub(crate) fn park_invoke(
         &self,
@@ -1725,6 +1882,10 @@ impl ServerCtx {
     /// Remove + return a parked invocation's requester writer + label by view-id
     /// (a terminal `PLUGIN-RESULT`).
     pub(crate) fn complete_invoke(&self, view_id: &str) -> Option<PendingReply> {
+        self.admin_views
+            .lock()
+            .expect("admin_views lock")
+            .remove(view_id);
         self.panel_subs
             .lock()
             .expect("panel_subs lock")
@@ -1861,17 +2022,24 @@ impl ServerCtx {
         // for, so it holds nothing outside its own realms. Stated once here
         // rather than bypassed per verb, so roles, moderation and grants all
         // follow the same rule.
-        if let Actor::Provider(scheme) = actor {
+        if let Actor::Provider(plugin) = actor {
             let Some(ns_id) = scope_namespace(scope) else {
                 return Ok(false); // network-wide scope is never a provider's
             };
-            return Ok(self
+            let Some(origin) = self
                 .namespaces
                 .namespace_by_id(&ns_id)
                 .await?
                 .and_then(|ns| ns.origin)
                 .and_then(|o| o.parse::<weft_proto::ForeignUri>().ok())
-                .is_some_and(|uri| uri.scheme() == scheme));
+            else {
+                return Ok(false); // a native namespace is never a provider's
+            };
+
+            // Every scheme this provider registered — so a control link that
+            // never bound a realm still governs what it serves, and a provider
+            // serving several is not limited to whichever one it bound last.
+            return Ok(self.provider_schemes(plugin).contains(origin.scheme()));
         }
 
         let Some(key) = self.actor_store_key(actor).await? else {

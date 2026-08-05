@@ -92,18 +92,6 @@ fn provider_event(
     }
 }
 
-/// The scheme a provider session speaks for — the bound realm's, else the one it
-/// registered. An unbound, unregistered session gets a scheme that matches
-/// nothing, so its authority is empty rather than accidental.
-fn realm_scheme(state: &State) -> weft_proto::Scheme {
-    match state {
-        State::PluginService {
-            realm: Some(uri), ..
-        } => uri.scheme().clone(),
-        _ => "none".parse().expect("a valid placeholder scheme"),
-    }
-}
-
 /// The §7a.3 capability profile carried on a namespace assertion — kept together
 /// so it travels as one thing rather than two more positional arguments.
 struct NsProfile {
@@ -206,7 +194,7 @@ impl<S: ControlStream> Session<S> {
                     caps,
                     expiry,
                 } => {
-                    let actor = Actor::Provider(realm_scheme(&self.state));
+                    let actor = Actor::Provider(plugin_id.clone());
                     return self
                         .on_grant(req.label, subject, scope, caps, expiry, actor)
                         .await;
@@ -217,7 +205,7 @@ impl<S: ControlStream> Session<S> {
                     caps,
                     epoch,
                 } => {
-                    let actor = Actor::Provider(realm_scheme(&self.state));
+                    let actor = Actor::Provider(plugin_id.clone());
                     return self
                         .on_revoke(req.label, subject, scope, caps, epoch, actor)
                         .await;
@@ -236,7 +224,7 @@ impl<S: ControlStream> Session<S> {
                     position,
                     name,
                 } => {
-                    let actor = Actor::Provider(realm_scheme(&self.state));
+                    let actor = Actor::Provider(plugin_id.clone());
                     return self
                         .on_role_create(
                             req.label, scope, color, caps, hoist, pingable, position, name, actor,
@@ -254,7 +242,7 @@ impl<S: ControlStream> Session<S> {
                     let Some(name) = self.role_name(&role.to_string()).await else {
                         return self.no_such_target(req.label).await;
                     };
-                    let actor = Actor::Provider(realm_scheme(&self.state));
+                    let actor = Actor::Provider(plugin_id.clone());
 
                     return self
                         .on_role_assign(req.label, scope, account, name, actor)
@@ -268,7 +256,7 @@ impl<S: ControlStream> Session<S> {
                     let Some(name) = self.role_name(&role.to_string()).await else {
                         return self.no_such_target(req.label).await;
                     };
-                    let actor = Actor::Provider(realm_scheme(&self.state));
+                    let actor = Actor::Provider(plugin_id.clone());
 
                     return self
                         .on_role_unassign(req.label, scope, account, name, actor)

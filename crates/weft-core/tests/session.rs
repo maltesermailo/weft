@@ -6143,6 +6143,136 @@ async fn a_multi_step_flow_routes_and_stays_the_callers_own() {
 }
 
 #[tokio::test]
+async fn the_admin_panel_drives_a_flow_but_cannot_touch_a_sessions() {
+    // plugin-spec §22: the panel is HTTP request/response with no session, so
+    // its steps go through `admin_plugin_invoke`/`admin_plugin_step` — parked
+    // by view-id like any flow, awaited inline. Ownership is the invariant
+    // under test: a step re-parks the view's reply slot, so the panel must be
+    // refused a session-owned view (it would steal the session's answer).
+    let key = Keypair::generate();
+    let ctx = ctx_plugin("modq", &key.public());
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    let reg = weft_proto::Registration {
+        api: 1,
+        id: "modq".into(),
+        name: "Mod Queue".into(),
+        icon: None,
+        actions: vec![weft_proto::ActionDecl {
+            id: "bans".into(),
+            label: "Bridged spaces".into(),
+            icon: None,
+            surface: weft_proto::Surface::Admin,
+            context: weft_proto::ContextType::None,
+            description: None,
+            visibility: None,
+            input: vec![],
+        }],
+        hooks: vec![],
+        schemes: vec![],
+    };
+    plugin.send(&format!(
+        "@reg={} PLUGIN-REGISTER",
+        weft_proto::plugin_to_b64(&reg).unwrap()
+    ));
+
+    // Invoke: the panel waits, so the answer must come from a concurrent task.
+    let invoke = tokio::spawn({
+        let ctx = Arc::clone(&ctx);
+        async move { ctx.admin_plugin_invoke("modq", "bans", None, None).await }
+    });
+    let req = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    let view_id = req.label.expect("the view-id rides as the label");
+
+    let view = weft_proto::plugin_to_b64(&weft_proto::View {
+        container: weft_proto::Container::Panel,
+        title: Some("Bridged spaces".into()),
+        panel_key: None,
+        submit_label: None,
+        blocks: vec![],
+        widget: None,
+        params: vec![],
+    })
+    .unwrap();
+    plugin.send(&format!("@view={view} PLUGIN-VIEW {view_id}"));
+
+    let (got_id, answer) = invoke.await.unwrap().expect("the invoke answers");
+    assert_eq!(got_id, view_id);
+    assert!(answer.contains("PLUGIN-VIEW"));
+
+    // A step drives the same flow; the plugin sees a PLUGIN ACTION labeled by
+    // the view-id, and its terminal result resolves the step.
+    let step = tokio::spawn({
+        let ctx = Arc::clone(&ctx);
+        let view_id = view_id.clone();
+        async move {
+            ctx.admin_plugin_step(&view_id, Some("ban".into()), None)
+                .await
+        }
+    });
+    let req = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    assert!(matches!(
+        req.command,
+        weft_proto::Command::PluginAction { .. }
+    ));
+    assert_eq!(req.label.as_deref(), Some(view_id.as_str()));
+
+    let result = weft_proto::plugin_to_b64(&weft_proto::ViewResult::Toast {
+        kind: weft_proto::ToastKind::Ok,
+        text: "banned".into(),
+    })
+    .unwrap();
+    plugin.send(&format!("@result={result} PLUGIN-RESULT {view_id}"));
+    let answer = step.await.unwrap().expect("the step answers");
+    assert!(answer.contains("PLUGIN-RESULT"));
+
+    // The result was terminal — the flow is gone, so a further step is refused
+    // immediately (no send, no timeout) rather than hanging on a dead view.
+    assert!(ctx.admin_plugin_step(&view_id, None, None).await.is_none());
+
+    // Ownership: ada opens her own flow; the panel must not be able to step
+    // (and thereby re-park) it — and ada's flow keeps working afterwards.
+    let mut ada = ready(&ctx, "ada").await;
+    wait_for_action(&mut ada, "modq", "bans").await;
+    ada.send("@label=i1 PLUGIN INVOKE modq bans");
+    let req = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    let ada_view = req.label.expect("ada's view-id");
+    plugin.send(&format!("@view={view} PLUGIN-VIEW {ada_view}"));
+    assert!(matches!(ada.recv().await.event, Event::PluginView { .. }));
+
+    assert!(
+        ctx.admin_plugin_step(&ada_view, None, None).await.is_none(),
+        "the panel must be refused a session-owned view"
+    );
+
+    ada.send(&format!("@label=s1 PLUGIN SUBMIT {ada_view}"));
+    let req = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    assert!(
+        matches!(req.command, weft_proto::Command::PluginSubmit { .. }),
+        "ada's flow is untouched"
+    );
+
+    // Close: a fresh panel flow, dismissed — the plugin is told, and the flow
+    // is freed.
+    let invoke = tokio::spawn({
+        let ctx = Arc::clone(&ctx);
+        async move { ctx.admin_plugin_invoke("modq", "bans", None, None).await }
+    });
+    let req = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    let view_id2 = req.label.expect("the view-id rides as the label");
+    plugin.send(&format!("@view={view} PLUGIN-VIEW {view_id2}"));
+    invoke.await.unwrap().expect("the invoke answers");
+
+    ctx.admin_plugin_close(&view_id2);
+    let req = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
+    assert!(matches!(
+        req.command,
+        weft_proto::Command::PluginClose { .. }
+    ));
+    assert!(ctx.admin_plugin_step(&view_id2, None, None).await.is_none());
+}
+
+#[tokio::test]
 async fn a_live_panel_is_patched_by_key_and_only_while_watched() {
     // §11.3 (slice 9): a panel is persistent and the plugin pushes to it
     // unsolicited. It cannot know each open copy's view-id, so it patches by the
@@ -6320,6 +6450,59 @@ async fn a_flow_cannot_be_driven_by_anyone_but_its_caller() {
 
     ada.send(&format!("@label=s2 PLUGIN SUBMIT {view_id}"));
     ada.expect_err(ErrCode::NoSuchTarget).await;
+}
+
+#[tokio::test]
+async fn a_control_link_provider_governs_what_it_registered() {
+    // A provider's authority is bounded by the schemes it **registered**, not by
+    // whichever realm it happens to have bound. A control link (`REALM REGISTER`,
+    // no `REALM ASSERT`) serves its schemes just the same, so it must be able to
+    // govern its namespaces — and a provider serving several schemes must not be
+    // limited to one of them.
+    let key = Keypair::generate();
+    let (ctx, _store) = ctx_plugin_store(
+        vec![(
+            "multi",
+            key.public(),
+            vec!["instagram".parse().unwrap(), "discord".parse().unwrap()],
+        )],
+        &[],
+    );
+
+    // One session binds a realm and asserts a namespace under it…
+    let ns_id = ulid::Ulid::new().to_string().to_lowercase();
+    let mut binder = plugin_session(&ctx, &key).await;
+    binder.send("REALM ASSERT discord://guild-1");
+    binder.send(&format!(
+        "@title=Guild;id={ns_id} NS-META discord://guild-1/space public"
+    ));
+    assert!(matches!(binder.recv().await.event, Event::NsMeta { .. }));
+
+    // …and a *separate* control link, which never bound any realm, governs it
+    // too. Before the fix this session carried a placeholder scheme and could
+    // do nothing — and worse, a namespace whose origin scheme really was the
+    // placeholder would have been governed by any unbound provider.
+    let mut control = plugin_session(&ctx, &key).await;
+    control.send("REALM REGISTER discord");
+    let mut ada = ready(&ctx, "ada").await;
+    let _ = &mut ada;
+
+    control.send(&format!("@label=g1 GRANT ada ns:{ns_id} mute"));
+    let reply = control.recv().await;
+    assert!(
+        matches!(reply.event, Event::Token { .. }),
+        "a registered scheme is authority enough, got {reply:?}"
+    );
+
+    // Its reach still stops at what it registered: a namespace of some other
+    // scheme is not its to govern.
+    let mut other = plugin_session(&ctx, &key).await;
+    other.send("REALM ASSERT instagram://acme-corp");
+    other.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    assert!(matches!(other.recv().await.event, Event::NsMeta { .. }));
 }
 
 #[tokio::test]

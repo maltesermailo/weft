@@ -234,6 +234,19 @@ td.actions{text-align:right;white-space:nowrap}
 .sub-note{color:var(--flax);font-size:12.5px;margin-bottom:18px;max-width:640px}
 .hint{font-family:var(--mono);font-size:11px;color:var(--flax-dim)}
 .btn-row{display:flex;gap:10px;flex-wrap:wrap}
+
+/* Plugin admin pages (SDUI, plugin-spec §22) */
+.sfield{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+.sfield>span{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--flax-dim)}
+.sfield em{color:var(--madder);font-style:normal;margin-left:2px}
+.scheck{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:13px}
+.scheck input{accent-color:var(--thread)}
+.smd{font-size:13px;color:var(--flax);white-space:pre-wrap;margin-bottom:12px}
+.srow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.simg{max-width:100%;border-radius:6px;border:1px solid var(--line-soft)}
+.snote{border:1px solid #2f4b47;background:#1a2422;color:var(--teal);border-radius:6px;padding:9px 13px;margin-bottom:14px;font-size:13px}
+.snote.warn{color:var(--amber);border-color:#4b3d26;background:#241f16}
+.snote.error{color:var(--madder);border-color:#4b2f2c;background:#241816}
 </style>
 </head>
 <body>
@@ -1292,9 +1305,182 @@ async function doModerate() {
   catch (e) { alert(e.message); }
 }
 
+// Plugin admin pages (plugin-spec §22) ---------------------------------------
+// A plugin's admin action is a page: invoking it returns an SDUI view, buttons
+// and submits drive later steps of the same flow, and a terminal result
+// re-runs the action so the page shows fresh state.
+let PLUGIN_PAGES = [];   // [{plugin, pluginName, action, label}] from the catalog
+let PLUGIN_FLOW = null;  // the open page's flow: {plugin, action, title, pluginName, viewId}
+let PLUGIN_NOTE = null;  // a step result's toast, shown once atop the next render
+
+async function loadPluginPages() {
+  PLUGIN_PAGES = [];
+  try {
+    const cat = await api("/plugins");
+    for (const p of cat.plugins || []) {
+      for (const a of p.actions || []) {
+        if (a.surface === "admin") PLUGIN_PAGES.push({ plugin: p.plugin_id, pluginName: p.name, action: a.id, label: a.label });
+      }
+    }
+  } catch { /* standalone panel or no plugins — the nav group just doesn't appear */ }
+}
+
+/// Abandoning a flow (navigating away, or re-invoking the page) tells the
+/// plugin, so it can drop the view's state instead of holding it forever.
+function dropPluginFlow() {
+  const viewId = PLUGIN_FLOW && PLUGIN_FLOW.viewId;
+  PLUGIN_FLOW = null;
+  if (viewId) api("/plugin-views/" + encodeURIComponent(viewId), { method: "DELETE" }).catch(() => {});
+}
+
+async function pluginPage(plugin, action) {
+  dropPluginFlow();
+  const page = PLUGIN_PAGES.find((p) => p.plugin === plugin && p.action === action);
+  const title = page ? page.label : action;
+  const pluginName = page ? page.pluginName : plugin;
+  const head = hrow(esc(title), esc(pluginName));
+  if (!can("admin.moderate")) { set(head + noPerm("admin.moderate")); return; }
+  refresh = () => pluginPage(plugin, action);
+
+  set(head + `<div class="placeholder">Asking the plugin…</div>`);
+  try {
+    const r = await api(`/plugins/${encodeURIComponent(plugin)}/${encodeURIComponent(action)}`, { method: "POST", body: "{}" });
+    PLUGIN_FLOW = { plugin, action, title, pluginName, viewId: r.view_id };
+    renderPluginAnswer(r, false);
+  } catch (e) { set(head + `<p class="err">${esc(e.message)}</p>`); }
+}
+
+/// One answer — view, result, or error — becomes the page.
+/// `fromStep` decides what a terminal result means: after a step it re-runs the
+/// action to show fresh state; on the initial invoke it IS the page (re-running
+/// an action that always answers with a result would loop forever).
+function renderPluginAnswer(r, fromStep) {
+  const f = PLUGIN_FLOW;
+  if (!f) return;
+  const head = hrow(esc(f.title), esc(f.pluginName));
+  const note = PLUGIN_NOTE ? `<div class="snote ${PLUGIN_NOTE.kind === "ok" ? "" : esc(PLUGIN_NOTE.kind)}">${esc(PLUGIN_NOTE.text)}</div>` : "";
+  PLUGIN_NOTE = null;
+
+  if (r.kind === "view") {
+    f.viewId = r.view_id;
+    const v = r.payload || {};
+    set(head + note + card(esc(v.title || f.title), sduiBlocks(v.blocks) + sduiFooter(v)));
+    return;
+  }
+  if (r.kind === "result") {
+    f.viewId = null; // terminal — the flow is gone server-side
+    const res = r.payload || {};
+    if (res.type === "toast" && res.text) PLUGIN_NOTE = { kind: res.kind || "ok", text: res.text };
+    if (fromStep) { pluginPage(f.plugin, f.action); return; }
+    set(head + note + (PLUGIN_NOTE
+      ? `<div class="snote ${PLUGIN_NOTE.kind === "ok" ? "" : esc(PLUGIN_NOTE.kind)}">${esc(PLUGIN_NOTE.text)}</div>`
+      : `<div class="placeholder">Done.</div>`));
+    PLUGIN_NOTE = null;
+    return;
+  }
+  set(head + `<p class="err">${esc(r.message || "plugin error")}${r.code ? ` <span class="mono">(${esc(r.code)})</span>` : ""}</p>`);
+}
+
+function sduiBlocks(blocks) {
+  return (blocks || []).map(sduiBlock).join("") || `<div class="placeholder">Nothing here yet.</div>`;
+}
+
+/// One SDUI component (plugin-spec §10), mirroring the client renderer. An
+/// unrecognised type renders nothing — a block from a newer server costs that
+/// block, not the page. Inputs carry `data-sid`/`data-stoggle`/`data-smulti`,
+/// which is what `sduiValues` collects on submit.
+function sduiBlock(b) {
+  const req = b.required ? "<em>*</em>" : "";
+  switch (b.type) {
+    case "text":
+      return `<label class="sfield"><span>${esc(b.label)}${req}</span>${b.multiline
+        ? `<textarea data-sid="${esc(b.id)}" rows="4" placeholder="${esc(b.placeholder || "")}"${b.max_len ? ` maxlength="${b.max_len}"` : ""}>${esc(b.default || "")}</textarea>`
+        : `<input type="text" data-sid="${esc(b.id)}" value="${esc(b.default || "")}" placeholder="${esc(b.placeholder || "")}"${b.max_len ? ` maxlength="${b.max_len}"` : ""}${b.pattern ? ` pattern="${esc(b.pattern)}"` : ""} />`}</label>`;
+    case "number":
+      return `<label class="sfield"><span>${esc(b.label)}${req}</span><input type="number" data-sid="${esc(b.id)}" data-snum="1" value="${b.default ?? ""}"${b.min != null ? ` min="${b.min}"` : ""}${b.max != null ? ` max="${b.max}"` : ""}${b.step != null ? ` step="${b.step}"` : ""} /></label>`;
+    case "select":
+      return `<label class="sfield"><span>${esc(b.label)}${req}</span><select data-sid="${esc(b.id)}">${(b.options || [])
+        .map((o) => `<option value="${esc(o.value)}"${o.value === b.default ? " selected" : ""}>${esc(o.label)}</option>`).join("")}</select></label>`;
+    case "multiselect":
+      return `<fieldset class="sfield"><span>${esc(b.label)}</span>${(b.options || [])
+        .map((o) => `<label class="scheck"><input type="checkbox" data-smulti="${esc(b.id)}" value="${esc(o.value)}"${(b.default || []).includes(o.value) ? " checked" : ""} /><span>${esc(o.label)}</span></label>`).join("")}</fieldset>`;
+    case "toggle":
+      return `<label class="scheck"><input type="checkbox" data-stoggle="${esc(b.id)}"${b.default ? " checked" : ""} /><span>${esc(b.label)}</span></label>`;
+    case "date":
+      return `<label class="sfield"><span>${esc(b.label)}${req}</span><input type="date" data-sid="${esc(b.id)}"${b.default ? ` value="${esc(b.default)}"` : ""}${b.min ? ` min="${esc(b.min)}"` : ""}${b.max ? ` max="${esc(b.max)}"` : ""} /></label>`;
+    case "heading":
+      return (b.level ?? 2) <= 2 ? `<h2 style="margin:8px 0 6px">${esc(b.text)}</h2>` : `<h3 style="margin:8px 0 6px">${esc(b.text)}</h3>`;
+    // The panel has no markdown renderer; a plugin's text is untrusted, so it
+    // renders escaped and verbatim rather than half-parsed.
+    case "markdown":
+      return `<div class="smd">${esc(b.text)}</div>`;
+    case "divider":
+      return `<hr style="border:none;border-top:1px solid var(--line-soft);margin:12px 0" />`;
+    case "keyvalue":
+      return `<div class="kv" style="margin-bottom:12px">${(b.rows || []).map((r) => `<div class="k">${esc(r.key)}</div><div class="v">${esc(r.value)}</div>`).join("")}</div>`;
+    case "table":
+      return table((b.columns || []).map(esc), (b.rows || []).map((r) => ({ cells: r.map(esc) })));
+    case "image":
+      return `<img class="simg" src="${esc(b.src)}" alt="${esc(b.alt || "")}"${b.max_height ? ` style="max-height:${Number(b.max_height)}px"` : ""} />`;
+    case "button":
+      return `<div class="srow">${sduiButton(b)}</div>`;
+    case "action-row":
+      return `<div class="srow">${(b.buttons || []).map(sduiButton).join("")}</div>`;
+    case "submit":
+      return `<div class="srow" style="justify-content:flex-end"><button class="btn ${b.style === "danger" ? "danger" : "primary"}" data-action="pluginSubmit">${esc(b.label || "Submit")}</button></div>`;
+    default:
+      return "";
+  }
+}
+
+const sduiButton = (b) =>
+  `<button class="btn small${b.style === "danger" ? " danger" : ""}${b.style === "primary" ? " primary" : ""}" data-action="pluginBtn" data-id="${esc(b.id)}"${b.confirm ? ` data-confirm="${esc(b.confirm)}"` : ""}>${esc(b.label)}</button>`;
+
+/// A page with inputs needs a way to send them. A plugin that drew its own
+/// submit control keeps it; otherwise one is supplied iff there is a form.
+function sduiFooter(v) {
+  const blocks = v.blocks || [];
+  const hasOwn = blocks.some((b) => b.type === "submit");
+  const hasInputs = blocks.some((b) => ["text", "number", "select", "multiselect", "toggle", "date"].includes(b.type));
+  if (hasOwn || !hasInputs) return "";
+  return `<div class="srow" style="justify-content:flex-end;margin-top:6px"><button class="btn primary" data-action="pluginSubmit">${esc(v.submit_label || "Submit")}</button></div>`;
+}
+
+/// The view's form state, read off the DOM at send time — the inputs ARE the
+/// state, so there is nothing to keep in step between renders.
+function sduiValues() {
+  const values = {};
+  for (const el of main().querySelectorAll("[data-sid]")) {
+    values[el.dataset.sid] = el.dataset.snum ? (el.value === "" ? null : Number(el.value)) : el.value;
+  }
+  for (const el of main().querySelectorAll("[data-stoggle]")) values[el.dataset.stoggle] = el.checked;
+  for (const el of main().querySelectorAll("[data-smulti]")) {
+    const arr = (values[el.dataset.smulti] ??= []);
+    if (el.checked) arr.push(el.value);
+  }
+  return values;
+}
+
+let PLUGIN_BUSY = false;
+async function pluginStep(button) {
+  const f = PLUGIN_FLOW;
+  if (!f || !f.viewId || PLUGIN_BUSY) return;
+  PLUGIN_BUSY = true;
+  try {
+    const r = await api("/plugin-views/" + encodeURIComponent(f.viewId), {
+      method: "POST",
+      body: JSON.stringify({ button, values: sduiValues() }),
+    });
+    renderPluginAnswer(r, true);
+  } catch (e) { alert(e.message); }
+  finally { PLUGIN_BUSY = false; }
+}
+
 // One delegated click handler (survives innerHTML swaps). --------------------
 const clicks = {
   report: (el) => openReport(el.dataset.id),
+  pluginBtn: (el) => { if (el.dataset.confirm && !confirm(el.dataset.confirm)) return; pluginStep(el.dataset.id); },
+  pluginSubmit: () => pluginStep(null),
   user: (el) => openUser(el.dataset.id),
   channel: (el) => openChannel(el.dataset.id),
   peer: (el) => openPeer(el.dataset.id),
@@ -1521,7 +1707,17 @@ const NAV = [
   { label: "Observability", items: [["audit", "Audit Log"], ["transport", "QUIC Transport", "WC9"]] },
 ];
 function buildNav() {
-  $("#nav").innerHTML = NAV.map((g) =>
+  // The Plugins group is the catalog's admin-surface actions — it only exists
+  // when a connected plugin declared some, and sits with the other integrations.
+  const groups = [...NAV];
+  if (PLUGIN_PAGES.length) {
+    const at = groups.findIndex((g) => g.label === "Observability");
+    groups.splice(at < 0 ? groups.length : at, 0, {
+      label: "Plugins",
+      items: PLUGIN_PAGES.map((p) => [`plugin:${p.plugin}:${p.action}`, p.label]),
+    });
+  }
+  $("#nav").innerHTML = groups.map((g) =>
     `<div class="nav-group">${g.label ? `<div class="nav-label">${g.label}</div>` : ""}` +
     g.items.map(([view, label, soon]) =>
       `<button class="nav-item ${soon ? "soon" : ""}" data-view="${view}"><span class="tick">─</span>${label}${soon ? `<span class="soon-tag">${soon}</span>` : ""}</button>`).join("") +
@@ -1535,6 +1731,14 @@ let WHO = { account: "", network: "" };
 let IS_OPERATOR = false;
 async function go(name) {
   document.querySelectorAll("#nav [data-view]").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
+
+  if (name.startsWith("plugin:")) {
+    const [, plugin, action] = name.split(":");
+    await pluginPage(plugin, action);
+    return;
+  }
+
+  dropPluginFlow(); // navigating off a plugin page abandons its flow
   try { await screens[name](); } catch (e) { set(`<p class="err">${esc(e.message)}</p>`); }
 }
 
@@ -1564,6 +1768,7 @@ async function start() {
     $("#role").innerHTML = IS_OPERATOR
       ? `<span class="op-role">Operator</span>`
       : SCOPES.map((s) => `<span class="pill gold">${esc(s.replace("admin.", ""))}</span>`).join(" ");
+    await loadPluginPages();
     buildNav();
     showApp(); go("dash");
   } catch { showLogin(); }

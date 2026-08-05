@@ -42,6 +42,41 @@ pub trait Live: Send + Sync {
     /// Returns false if the message or its channel can't be found live.
     async fn delete_message(&self, msgid: &weft_proto::MsgId, by: &weft_proto::Account) -> bool;
 
+    /// plugin-spec §22: the plugin action catalog as JSON, so the panel knows
+    /// which `admin`-surface pages to offer. Empty when nothing is registered.
+    async fn plugin_catalog(&self) -> String;
+
+    /// plugin-spec §22: run a plugin action **and wait** for its answer.
+    ///
+    /// The panel is HTTP request/response and holds no session, so unlike every
+    /// other surface it cannot receive a pushed view — weftd bridges the shapes
+    /// and returns `(view_id, payload)`. `view_id` drives later steps of the same
+    /// flow. `None` when the plugin is gone or does not answer in time: an
+    /// operator gets a plain failure rather than a request that hangs.
+    /// `params_b64` is the wire encoding (base64 CBOR), not JSON — see
+    /// [`encode_plugin_params`], which is the only thing that should produce it.
+    async fn plugin_invoke(
+        &self,
+        plugin: &str,
+        action: &str,
+        ctx_ref: Option<String>,
+        params_b64: Option<String>,
+    ) -> Option<(String, String)>;
+
+    /// A later step of a panel-owned flow: a submit (`button` = `None`) or a
+    /// control click. Same wait-for-the-answer contract as [`Self::plugin_invoke`];
+    /// `None` also covers a view the panel does not own.
+    async fn plugin_step(
+        &self,
+        view_id: &str,
+        button: Option<String>,
+        values_b64: Option<String>,
+    ) -> Option<String>;
+
+    /// The panel dismissed a view — tell the plugin so it can drop the flow.
+    /// Fire-and-forget: there is nothing to wait for.
+    async fn plugin_close(&self, view_id: &str);
+
     /// Framework §7a.0f: tell the provider that governs `namespace` to stop (or
     /// resume) bridging it. **The bridge stores and enforces this** — weftd only
     /// carries the operator's decision across, once. Not a weaker guarantee: the

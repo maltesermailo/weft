@@ -1003,9 +1003,31 @@ the existing embedded-only `Live` port — the same seam already used for kick/e
 weftd session to route on and shows these pages as unavailable, exactly as it already does for other
 live-only actions.
 
-**Status:** the declaration (`Surface::Admin`) and the SDK's `admin_action(...)` exist. The `Live`
-routing method and the panel's renderer land with the SDUI work (slices 7 + 9), which is what makes
-any plugin-supplied page drawable.
+**Flow shape.** Every other surface is push-shaped; the panel is HTTP request/response with no
+session, so each step is a bounded round trip (10 s): weftd parks the view-id, sends the step on the
+plugin's control link, and hands the **first direct answer** back on the HTTP response. Panel-owned
+views are tracked (`admin_views`), so the panel can never step — and thereby re-park — a
+session-owned flow, and vice versa (a session's step is rejected by the reply-channel identity
+check). The panel's HTTP API mirrors the wire verbs, JSON in and out (the base64 CBOR stops at the
+handler, both directions):
+
+| Route | Wire analog |
+|---|---|
+| `GET  /api/v1/plugins` | `PLUGINS` → the catalog; the panel lists `surface=admin` actions as nav pages |
+| `POST /api/v1/plugins/:plugin/:action` `{ctx_ref?, params?}` | `PLUGIN INVOKE` → `{kind: view\|result\|error, view_id, payload}` |
+| `POST /api/v1/plugin-views/:view_id` `{button?, values?}` | `PLUGIN ACTION` (with `button`) / `PLUGIN SUBMIT` (without) |
+| `DELETE /api/v1/plugin-views/:view_id` | `PLUGIN CLOSE` (terminal, fire-and-forget) |
+
+The catalog needs `admin.read`; invoking and stepping need `admin.moderate`. A terminal result after
+a step re-runs the action, so the page always shows post-action state; a result on the *initial*
+invoke is rendered as the page itself (re-running would loop). The panel renders the same §10
+component set as the client, minus `custom` widgets; `markdown` renders as escaped verbatim text —
+the panel ships no markdown renderer, and a plugin's text is untrusted.
+
+**Status:** shipped end-to-end 2026-08-05 — `Surface::Admin` + SDK `admin_action(...)`, the `Live`
+routing (`plugin_catalog`/`plugin_invoke`/`plugin_step`/`plugin_close`), and the panel's SDUI
+renderer with a dynamic **Plugins** nav group. A standalone panel shows the pages as unavailable
+(501), exactly as for other live-only actions.
 
 ## §23 Privileged plugins — signed manifests (owner requirement 2026-08-04, DESIGN OPEN)
 
