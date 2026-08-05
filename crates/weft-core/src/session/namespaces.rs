@@ -135,7 +135,8 @@ impl<S: ControlStream> Session<S> {
             ns,
             &UserRef::new(account.clone(), self.ctx.info.network.clone()),
             MemberAction::Join,
-        );
+        )
+        .await;
 
         // Announce the ns-level membership once (client expands to the derived
         // roster), carrying the distinct-account member count after the join.
@@ -248,7 +249,8 @@ impl<S: ControlStream> Session<S> {
                 ns,
                 &UserRef::new(account.clone(), self.ctx.info.network.clone()),
                 MemberAction::Part,
-            );
+            )
+            .await;
         }
 
         // Drop the membership row + all hide overrides for the namespace.

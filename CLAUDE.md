@@ -20,7 +20,8 @@ crates/weftd           L3  binary: config, acceptor, well-known, telemetry   —
 crates/weft-tui        —   dev tool: terminal test client (ratatui)          — deps: proto, transport (insecure-client feature)
 crates/weft-irc        L3  WEFT-IRC gateway (§17): a ControlStream that translates IRC↔WEFT — deps: proto, core
 crates/weft-plugin     L3  plugin host: PLUGIN verb router, action catalog, SDUI router (no script engine) — deps: proto, core, store [skeleton; M-plug-0]
-crates/weft-appservice —   App-Service SDK: build a `remote` plugin / the Matrix bridge — deps: proto, transport, crypto [skeleton; M-plug-0]
+crates/weft-appservice —   App-Service SDK: build a `remote` plugin / the Matrix bridge — deps: proto, transport, crypto
+crates/weft-matrix     —   the Matrix bridge daemon (adapter #1): appservice to a companion HS + weft-appservice provider session — deps: appservice, proto, crypto. **Own MSRV 1.85** (ruma), excluded from the MSRV CI job like `voice`; extra deps: reqwest (rustls), ruma (types only — matrix-sdk rejected)
 ```
 
 Non-negotiable:

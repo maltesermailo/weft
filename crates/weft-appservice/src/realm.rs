@@ -38,6 +38,16 @@ impl Realm {
         Self { out, network }
     }
 
+    /// A detached realm whose lines land on the returned receiver instead of a
+    /// session — for testing an adapter's logic without a weftd. Every adapter
+    /// needs exactly this seam, so it lives here rather than being faked per
+    /// adapter with a private-constructor workaround.
+    pub fn capture(network: &str) -> (Self, mpsc::Receiver<String>) {
+        let (tx, rx) = mpsc::channel(256);
+
+        (Self::new(tx, network.to_string()), rx)
+    }
+
     /// The WEFT network this session is connected to.
     pub fn network(&self) -> &str {
         &self.network

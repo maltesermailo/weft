@@ -435,13 +435,53 @@ implements and the daemon is written against.*
 
 ## Phase 3 — the bridge itself
 
-- [ ] **10. Matrix daemon MVP** (L, external, on the SDK) — companion HS / AS-API, provisioning
-      (resolve + join + enumerate a space), bidirectional message sync, structure assertion.
-      *(Can start in parallel with #7 once #6 lands.)*
-      **Outbound projection (owner directive 2026-08-04):** the daemon models WEFT namespaces **as
-      Matrix Spaces** on the companion homeserver (`matrix.md` §3–16 — already designed), so Matrix
-      users join the Space/rooms natively and their participation arrives as slice-4c membership +
-      slice-4 ingestion. Pure daemon work: no weftd change beyond 4c/4d.
+- [~] **10. Matrix daemon MVP** — **inbound-consume half DONE 2026-08-05** (owner decisions: crate
+      in-workspace `crates/weft-matrix` with its own `rust-version = 1.85` — excluded from the MSRV
+      CI job like `voice` — using **reqwest + ruma types**; matrix-sdk rejected: client-framework
+      mismatch, e2ee dead weight, MSRV).
+      **Shipped:** `weft-matrix` daemon (lib + bin): `ident` (injective `=xx` MXID escaping,
+      deterministic structure ULIDs from sha256(room_id), msgids timestamped from
+      `origin_server_ts` so replica ordering holds), `hs` (thin CS-API client as appservice:
+      resolve/join/state/send/redact/leave/register with `?user_id=` puppeting), `asapi` (AS
+      transaction endpoint: hs_token auth, txn dedup, block-don't-drop), `store` (atomic JSON state:
+      structure maps, event↔msgid, reactions both directions, puppets, BanList), `bridge` (the
+      single-tasked core: PROVISION → resolve+join+enumerate space children → assert ns
+      (`authority=levels`, roles hidden) + channels (encrypted rooms excluded, invariant 8) +
+      member statements; Matrix→WEFT MSG/EDIT(m.replace)/redaction→DELETE/reaction±; WEFT→Matrix
+      puppet relay with register-on-first-use; §8 member_rooms mapping; §8 return path for local
+      mutations; bans enforced at assert/provision/ingest/relay), `main` (reconnect loop with
+      re-assert + SYNC full-replace resync, `generate-registration`).
+      **Protocol amendments shipped with it (owner-approved):** §5 ingestion sender widened to
+      *any foreign* user (cross-realm rooms; local + peer identities still refused; netblock bites
+      sender's network too) and §8's return path made real (local `@as` accepted for mutation verbs
+      on realm-origin roots only — without it the flip side could never close). SDK grew
+      `Incoming::{Event,Command}` (relayed commands were silently dropped before), `BanList`, and
+      `Realm::capture` (adapter testing seam).
+      **Tests:** 10 unit + 3 mock-HS integration tests (provision/exclude-e2ee, both traffic
+      directions incl. puppet-echo suppression, ban both directions + re-provision refusal);
+      weft-core `a_cross_realm_sender_ingests_but_local_and_peer_users_are_refused` pins the
+      amendments.
+      **Storage pivot (owner directive 2026-08-06):** the JSON state file is gone — the daemon's
+      store is **Postgres** (`matrix_`-prefixed tables; its own database or weftd's — idempotent
+      DDL instead of `sqlx::migrate!`, whose `_sqlx_migrations` table weftd already owns). Shape:
+      write-through cache — memory is the read path (single-tasked, one writer), every mutation
+      goes through a `Store` method that also writes its row; a failed write warns rather than
+      killing the bridge. Contract test `tests/pg.rs`, gated on `WEFT_TEST_DATABASE_URL` (CI runs
+      it; not validated on a live PG locally — Docker was down).
+      **Identity pivot (owner directive 2026-08-06):** puppets are keyed by **account ULID**
+      (`weft_<ulid>`), never by name — names are mutable vanity labels, and a name-keyed puppet is
+      orphaned by a rename. Wire addition: weftd stamps `ulid=` alongside `@as` on every provider-
+      bound relay (membership + mutations); the SDK surfaces it (`Incoming::Command.as_ulid`); the
+      daemon's ULID↔name table (`matrix_users`) is populated at the NS JOIN relay — the only door a
+      local user enters through — and the name-only fan-out events resolve against it.
+      Also: OO pass on the store (structured `Reaction` key fixed a real collision bug — `|` is
+      legal in a Matrix annotation key; `Links` encapsulates the two-map invariant; §8 membership
+      transitions live on `Space` with unit tests), and empty Spaces provision as empty namespaces
+      (join confirms immediately — nothing foreign-side to fail).
+      **Not in the MVP (deliberate):** outbound projection (WEFT ns → new Matrix Spaces, the other
+      half of slice 10), HISTORY backfill (request logged), media, typing, DMs, multi-realm
+      (one realm per daemon for now), moderation/power-levels (slice 11), puppet display-name sync
+      on rename (the identity survives; the pretty name catches up later).
 - [~] **10b. Per-space bridging bans** (owner requirement 2026-08-04) — an admin page where
       **individual foreign spaces** can be banned from bridging, finer-grained than `NETBLOCK` (which
       is name-keyed and takes out a whole realm). Banning `matrix://matrix.org/#abusive-space` must

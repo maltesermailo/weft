@@ -161,9 +161,13 @@ The waiting client is parked on `job`; a provider that dies with jobs outstandin
 
 ## 5. Ingestion — replaying the realm's traffic
 
-Every ingested line carries **`@as=<user@realm>`**: the provider acting *on behalf of* one of its
-users. weftd checks that the sender lives on this session's realm, so a provider can never attribute
-an event to a local account or to another realm's user.
+Every ingested line carries **`@as=<user@domain>`**: the provider acting *on behalf of* a foreign
+user. The sender must be **foreign** — weftd refuses a local account and any known WEFT peer's user,
+whose identities are anchored by our auth and their signing keys respectively. It need *not* live on
+the bound realm itself (amended 2026-08-05): foreign systems are cross-realm — a Matrix room homed
+on matrix.org has members from kde.org — and the trust root is the provider's pinned key + the
+channel's scheme, not the sender's domain. Netblocks bite on **both** ends: the channel's realm and
+the sender's own network, so blocking a homeserver silences its users everywhere.
 
 **The provider mints.** `MSG` and `EDIT` — the two verbs whose stored row is keyed by its own id —
 carry `@msgid=<realm>/<ULID>`; weftd never mints for a foreign origin (invariant 2). `DELETE` and
@@ -209,10 +213,10 @@ Membership is **namespace-level; channels are not joinable.** Having access to a
 access to its channels, so putting a user into the foreign rooms is the adapter's job — weftd never
 enumerates rooms for it.
 
-| Dir | Line                                        | Meaning                                                |
-|-----|---------------------------------------------|--------------------------------------------------------|
-| ←   | `@as=<local-user> NS JOIN <ns-id>`          | A **request**: one of our users asks to join.          |
-| ←   | `@as=<local-user> NS LEAVE <ns-id>`         | A request to leave.                                    |
+| Dir | Line                                          | Meaning                                                |
+|-----|-----------------------------------------------|--------------------------------------------------------|
+| ←   | `@as=<local-user>;ulid=<id> NS JOIN <ns-id>`  | A **request**: one of our users asks to join.          |
+| ←   | `@as=<local-user>;ulid=<id> NS LEAVE <ns-id>` | A request to leave.                                    |
 | →   | `NS-MEMBER <ns-id> <user> join` (or `part`) | A **statement**: the authority saying who is a member. |
 
 The inbound statement is what writes the membership row — for the realm's own users *and for ours*,
@@ -305,17 +309,28 @@ else's origin. weftd asks the provider to do it instead, and the resulting forei
 through ordinary ingestion:
 
 ```
-← @as=<local-user> REACT <realm-msgid> <emoji>
-← @as=<local-user> DELETE <realm-msgid>
-← @as=<local-user> EDIT <realm-msgid> :<body>
-← @as=<local-user> MSG @<user@realm> :<body>        (a DM to one of the realm's users)
+← @as=<local-user>;ulid=<id> REACT <realm-msgid> <emoji>
+← @as=<local-user>;ulid=<id> DELETE <realm-msgid>
+← @as=<local-user>;ulid=<id> EDIT <realm-msgid> :<body>
+← @as=<local-user>;ulid=<id> MSG @<user@realm> :<body>   (a DM to one of the realm's users)
 ```
+
+**`ulid=` names the actor's stable identity** (added 2026-08-06): account names are mutable vanity
+labels, so an adapter MUST key its puppets and per-user state by the ULID, never by the name — a
+name-keyed puppet is orphaned by a rename. The name still rides in `@as` for attribution.
 
 There is no local ack — the ingested event *is* the result. Ordinary authorization runs **before** the
 relay: `EDIT` still requires authorship, `DELETE` authorship or `delete-any`.
 
 So `@as` reads the same in both directions — *on behalf of* — naming a foreign user inbound and a
 local user outbound.
+
+**Closing the loop:** the confirmation comes back as ordinary ingestion (§5) **attributed to the
+local user** — `@as=<local-user> REACT <realm-msgid> <emoji>` — the one shape of local `@as`
+ingestion accepts (amended 2026-08-05). It is bounded to exactly the class weftd relays: the
+mutation verbs, on a root the realm itself minted. Authoring as a local user (`MSG`, or touching a
+local-origin root) remains a refused forgery. Practically: the adapter sees its own puppet's echo,
+maps the puppet back to the local user, and re-ingests under that name.
 
 ### Backfill
 

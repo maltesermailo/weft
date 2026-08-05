@@ -53,8 +53,32 @@ use tokio::sync::mpsc;
 use weft_crypto::Keypair;
 use weft_proto::{Command, Event, Line, Registration, Reply, Request};
 
+mod bans;
 mod realm;
+pub use bans::BanList;
 pub use realm::{ChannelAssertion, NamespaceAssertion, Realm};
+
+/// One line from weftd that is not a routed action invoke.
+///
+/// Two shapes because the wire has two: weftd *tells* the adapter things as
+/// events (mapping acks, `PROVISION`/`BRIDGING` pushes, relayed
+/// `MESSAGE`/`EDITED`/… traffic), and *asks* it things as commands (`@as NS
+/// JOIN`, `@as EDIT`/`DELETE`/`REACT`, `HISTORY`, `GRANT`/`REVOKE` relays).
+/// An adapter that saw only the events could not act on any request — which is
+/// exactly what the first cut of this SDK got wrong.
+#[derive(Debug)]
+pub enum Incoming {
+    Event(Event),
+    Command {
+        /// The `@as` attribution — the local user on whose behalf weftd asks.
+        as_user: Option<String>,
+        /// The actor's **account ULID** (`ulid=` tag) — the stable identity.
+        /// Key puppets and any per-user state by this, never by the account
+        /// name, which is a mutable vanity label.
+        as_ulid: Option<String>,
+        command: Command,
+    },
+}
 
 /// What a handler is given: the invocation's correlation, and the way to answer.
 pub struct Ctx {
@@ -253,7 +277,7 @@ impl AppServiceBuilder {
         // `PROVISION` pushes, `NS JOIN` requests, relayed events, backfill
         // requests. An adapter that ignored these could not bridge anything, so
         // the stream is part of the return rather than an opt-in.
-        let (events_tx, events_rx) = mpsc::channel::<Event>(256);
+        let (events_tx, events_rx) = mpsc::channel::<Incoming>(256);
 
         let session = async move {
             // One task owns the stream: a reader task plus a writer task would
@@ -276,13 +300,22 @@ impl AppServiceBuilder {
                         };
 
                         let Some((action, view_id, params)) = invoke_of(&line) else {
-                            // Not an invoke → weftd talking to us: mapping acks,
-                            // `PROVISION` pushes, `NS JOIN` requests, relayed
-                            // events, backfill requests. Surface it. A full queue
-                            // means the adapter stopped reading — its problem to
-                            // notice, not a reason to stall the session.
+                            // Not an invoke → weftd talking to us. Surface it.
+                            // A full queue means the adapter stopped reading —
+                            // its problem to notice, not a reason to stall the
+                            // session. Events first: some lines parse as both
+                            // (`SYNC END` is also a lenient `Command::Sync`),
+                            // and the event reading is the meaningful one.
                             if let Ok(reply) = Reply::from_line(&line) {
-                                let _ = events_tx.try_send(reply.event);
+                                let _ = events_tx.try_send(Incoming::Event(reply.event));
+                            } else if let Ok(req) = Request::from_line(&line) {
+                                let as_user = line.tags.get("as").cloned();
+                                let as_ulid = line.tags.get("ulid").cloned();
+                                let _ = events_tx.try_send(Incoming::Command {
+                                    as_user,
+                                    as_ulid,
+                                    command: req.command,
+                                });
                             }
                             continue;
                         };
@@ -328,8 +361,9 @@ pub struct Connected {
     pub session: Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>,
     /// Speak as the realm.
     pub realm: Realm,
-    /// Everything weftd says that is not a routed action invoke.
-    pub events: mpsc::Receiver<Event>,
+    /// Everything weftd says that is not a routed action invoke — its
+    /// statements as [`Incoming::Event`], its requests as [`Incoming::Command`].
+    pub events: mpsc::Receiver<Incoming>,
 }
 
 /// `PLUGIN-REGISTER` carries its payload as the `reg=` tag (§3).

@@ -774,7 +774,8 @@ impl<S: ControlStream> Session<S> {
                 // §11.4 the provider minted it, so the provider edits it; the
                 // resulting foreign EDITED comes back through ingestion.
                 let me = UserRef::new(account, self.ctx.info.network.clone());
-                self.relay_provider_mut(&origin, &me, root, "edit", body);
+                self.relay_provider_mut(&origin, &me, root, "edit", body)
+                    .await;
             }
             Some(MessageRoute::ChannelRemote {
                 channel,
@@ -836,7 +837,8 @@ impl<S: ControlStream> Session<S> {
                 // Decision 20-H: a moderator's delete of a bridged message is
                 // performed foreign-side by the adapter's bot (a redaction).
                 let me = UserRef::new(account, self.ctx.info.network.clone());
-                self.relay_provider_mut(&origin, &me, root, "delete", String::new());
+                self.relay_provider_mut(&origin, &me, root, "delete", String::new())
+                    .await;
             }
             Some(MessageRoute::ChannelRemote {
                 channel,
@@ -899,7 +901,7 @@ impl<S: ControlStream> Session<S> {
                 // foreign-side and the resulting REACTION arrives via ingestion.
                 let me = UserRef::new(account, self.ctx.info.network.clone());
                 let op = if add { "react-add" } else { "react-remove" };
-                self.relay_provider_mut(&origin, &me, root, op, emoji);
+                self.relay_provider_mut(&origin, &me, root, op, emoji).await;
             }
             Some(MessageRoute::ChannelRemote {
                 channel,

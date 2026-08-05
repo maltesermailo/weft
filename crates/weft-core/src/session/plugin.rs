@@ -1075,8 +1075,10 @@ impl<S: ControlStream> Session<S> {
     ///
     /// **Authority:** the target channel must be an `origin`-marked replica whose
     /// scheme this provider's key is pinned for — a provider can only speak into
-    /// rooms it owns — and `@as`/`@msgid` must both name that channel's realm, so
-    /// a provider cannot forge a local user or another realm's event.
+    /// rooms it owns. `@msgid` must name that channel's realm; `@as` must be
+    /// **foreign** (any non-local, non-peer network — rooms are cross-realm),
+    /// with one bounded exception for the §8 return path. Both amendments
+    /// 2026-08-05; the gates below carry the details.
     async fn on_provider_ingest(
         &mut self,
         key: &PublicKey,
@@ -1170,30 +1172,65 @@ impl<S: ControlStream> Session<S> {
             return Ok(Flow::Continue);
         };
 
-        // A realm is a network: the sender must live on the one this channel
-        // replicates, so a provider can never attribute an event to a local
-        // account (or to another realm's user).
+        // The sender must be **foreign** — not ours, and not a peer network's
+        // (owner decision 2026-08-05, amending the protocol doc's §5). It need
+        // not live on the bound realm itself: foreign systems are cross-realm —
+        // a Matrix room homed on matrix.org has members from kde.org — and the
+        // trust root here is the provider's pinned key + the channel's scheme,
+        // not the sender's domain. Forgery protection keeps its teeth: a local
+        // account or a real WEFT peer's user still cannot be attributed, since
+        // those identities are anchored by *our* auth and *their* signing keys
+        // respectively, never by a bridge.
         let Ok(realm) = origin.realm().parse::<NetworkName>() else {
             debug!(realm = origin.realm(), "realm is not a usable network name");
             return self.unsupported(None, "realm is not a network name").await;
         };
-        if sender.network != realm {
+        if sender.network == self.ctx.info.network {
+            // The return half of §8's outbound relay: weftd itself asked the
+            // provider to perform this local user's mutation foreign-side
+            // (`relay_provider_mut`), and the provider confirming it IS the
+            // flow completing — without this arm the flip side can never
+            // close, because the puppet's echo always maps back to a local
+            // account. Bounded hard: only the mutation verbs, and only on a
+            // root the realm itself minted — the exact class weftd relays.
+            // Authoring as a local user (`MSG`, or touching a local-origin
+            // root) stays a forgery and is refused.
+            let confirms_relay = match &cmd {
+                Command::Edit { msgid, .. }
+                | Command::Delete { msgid }
+                | Command::React { msgid, .. }
+                | Command::Unreact { msgid, .. } => msgid.origin().as_str() == origin.realm(),
+                _ => false,
+            };
+
+            if !confirms_relay {
+                return self
+                    .unsupported(None, "@as cannot name a local account")
+                    .await;
+            }
+        }
+        if let Ok(Some(_)) = self.ctx.peers.peer(&sender.network).await {
             return self
-                .unsupported(None, "@as is not a user of this realm")
+                .unsupported(None, "@as cannot name a peer network's user")
                 .await;
         }
+
         // Invariant 7 effect 3, name-keyed: a realm blocked mid-session stops
         // being ingested at once, exactly as a blocked peer does — a bridge is
-        // not a way back in for a network an operator has shut out.
-        if self
-            .ctx
-            .netblocks
-            .is_netblocked(&realm)
-            .await
-            .unwrap_or(false)
-        {
-            debug!(%realm, "ingestion from a netblocked realm — dropped");
-            return Ok(Flow::Continue);
+        // not a way back in for a network an operator has shut out. The check
+        // covers both the channel's realm and the sender's own network, so
+        // blocking a homeserver silences its users everywhere.
+        for blocked in [&realm, &sender.network] {
+            if self
+                .ctx
+                .netblocks
+                .is_netblocked(blocked)
+                .await
+                .unwrap_or(false)
+            {
+                debug!(%blocked, "ingestion touching a netblocked network — dropped");
+                return Ok(Flow::Continue);
+            }
         }
 
         // The provider minted these, exactly as a peer network does, so they take
@@ -1572,7 +1609,7 @@ impl<S: ControlStream> Session<S> {
     /// The wire form is the ordinary verb carrying `@as=<the acting local user>` —
     /// the mirror image of ingestion (§3.1), where `@as` names a foreign user
     /// acting on our side. In both directions it reads "on behalf of".
-    pub(super) fn relay_provider_mut(
+    pub(super) async fn relay_provider_mut(
         &self,
         origin: &str,
         user: &UserRef,
@@ -1586,6 +1623,7 @@ impl<S: ControlStream> Session<S> {
         let Some((_, out)) = self.ctx.provider_for_scheme(uri.scheme()) else {
             return; // liveness is gated upstream; a race here just drops it
         };
+        let ulid = self.actor_ulid(user).await;
 
         let cmd = match op {
             "edit" => Command::Edit {
@@ -1606,12 +1644,32 @@ impl<S: ControlStream> Session<S> {
 
         if let Ok(mut line) = Request::new(cmd).to_line() {
             line.tags.insert("as".to_string(), user.to_string());
+            if let Some(ulid) = ulid {
+                line.tags.insert("ulid".to_string(), ulid);
+            }
             if let Ok(serialized) = line.serialize() {
                 if out.try_send(serialized).is_err() {
                     warn!(%user, "provider queue full — mutation relay dropped");
                 }
             }
         }
+    }
+
+    /// The acting **local** user's account ULID, for the `ulid=` tag on
+    /// provider-bound relays (owner directive 2026-08-06): account names are
+    /// mutable vanity labels, so an adapter that keyed puppets by name would
+    /// orphan them on a rename. Foreign actors have no local ULID — `None`.
+    async fn actor_ulid(&self, user: &UserRef) -> Option<String> {
+        if user.network != self.ctx.info.network {
+            return None;
+        }
+
+        self.ctx
+            .accounts
+            .account_ulid(&user.account)
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Whether a channel/namespace `origin` names a replica whose provider is
@@ -1646,7 +1704,7 @@ impl<S: ControlStream> Session<S> {
     /// Membership is namespace-level — channels are not joinable — so this names
     /// only the namespace. Putting the user into the foreign rooms it maps
     /// (including ones created later) is the adapter's job.
-    pub(super) fn relay_ns_membership(
+    pub(super) async fn relay_ns_membership(
         &self,
         origin: Option<&str>,
         namespace: weft_proto::NamespaceId,
@@ -1659,6 +1717,7 @@ impl<S: ControlStream> Session<S> {
         let Some((_, out)) = self.ctx.provider_for_scheme(uri.scheme()) else {
             return; // provider offline; it re-reads membership when it returns
         };
+        let ulid = self.actor_ulid(user).await;
 
         let cmd = match action {
             MemberAction::Join => match namespace.to_string().parse() {
@@ -1670,6 +1729,9 @@ impl<S: ControlStream> Session<S> {
 
         if let Ok(mut line) = Request::new(cmd).to_line() {
             line.tags.insert("as".to_string(), user.to_string());
+            if let Some(ulid) = ulid {
+                line.tags.insert("ulid".to_string(), ulid);
+            }
             if let Ok(serialized) = line.serialize() {
                 if out.try_send(serialized).is_err() {
                     warn!(%user, "provider queue full — membership relay dropped");

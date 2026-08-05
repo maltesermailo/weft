@@ -93,8 +93,10 @@ jobs:
       # the shipped libraries are not. weftd's `voice` feature is excluded from the
       # MSRV contract — it pulls the LiveKit client SDK (libwebrtc, the integral
       # media relay), which needs a newer toolchain + system libs and is exercised
-      # by the `voice` job below and the Docker build, not by MSRV.
-      - run: cargo check --workspace --exclude client --exclude weftd --all-features
+      # by the `voice` job below and the Docker build, not by MSRV. weft-matrix is
+      # excluded the same way: the external daemon rides ruma, which tracks recent
+      # stable (its own rust-version = 1.85); the stable-toolchain test job covers it.
+      - run: cargo check --workspace --exclude client --exclude weftd --exclude weft-matrix --all-features
       - run: cargo check -p weftd --features web-ui
 
   deny:

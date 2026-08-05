@@ -4821,6 +4821,113 @@ fn ctx_plugin_store(
 }
 
 #[tokio::test]
+async fn a_cross_realm_sender_ingests_but_local_and_peer_users_are_refused() {
+    // Owner decision 2026-08-05 (amends the protocol doc's §5): foreign systems
+    // are cross-realm — a Matrix room homed on matrix.org has members from
+    // kde.org — so `@as` must be *foreign*, not necessarily a user of the bound
+    // realm. What must stay impossible is attributing to an identity anchored
+    // elsewhere: a local account (our auth) or a WEFT peer's user (its keys).
+    let key = Keypair::generate();
+    let (ctx, store) = ctx_plugin_store(
+        vec![("mx", key.public(), vec!["matrix".parse().unwrap()])],
+        &[],
+    );
+
+    // peer.example is a real federation peer — its identities are its own.
+    store
+        .upsert_peer(weft_store::PeerRecord {
+            peer: "peer.example".parse().unwrap(),
+            scope: "*".into(),
+            manifest: "m".into(),
+            version: 1,
+            acked_manifest: None,
+            severed: false,
+            created_ms: 0,
+            updated_ms: 0,
+        })
+        .await
+        .unwrap();
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT matrix://matrix.org");
+    plugin.send(&format!(
+        "@title=Space;id={} NS-META matrix://matrix.org/space public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT matrix://matrix.org/space/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+    assert!(matches!(
+        weft_proto::Request::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .command,
+        weft_proto::Command::NsJoin { .. }
+    ));
+
+    // A third-server user posts into the matrix.org-homed room. The msgid is
+    // still minted under the **channel's** realm — the room's home is the
+    // authority for its event ids, whoever the author's homeserver is.
+    let posted = format!("matrix.org/{}", ulid::Ulid::new());
+    plugin.send(&format!(
+        "@as=carol@kde.org;msgid={posted} MSG {channel} :hello from kde"
+    ));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("ada expected the cross-realm MESSAGE");
+    };
+    assert_eq!(m.sender.to_string(), "carol@kde.org");
+    assert_eq!(m.msgid.to_string(), posted);
+
+    // A local account stays unforgeable…
+    plugin.send(&format!(
+        "@as=ada@test.example;msgid=matrix.org/{} MSG {channel} :forged",
+        ulid::Ulid::new()
+    ));
+    plugin.expect_err(ErrCode::Unsupported).await;
+
+    // …and so does a federation peer's user.
+    plugin.send(&format!(
+        "@as=eve@peer.example;msgid=matrix.org/{} MSG {channel} :forged",
+        ulid::Ulid::new()
+    ));
+    plugin.expect_err(ErrCode::Unsupported).await;
+
+    // §8's return path: ada reacts to the realm-minted message; weftd relays
+    // the request to the provider rather than minting anything…
+    let root = m.msgid.clone();
+    ada.send(&format!("@label=r1 REACT {root} wave"));
+    let raw = plugin.recv_raw().await;
+    let relayed = weft_proto::Request::parse(&raw).unwrap();
+    assert!(matches!(relayed.command, weft_proto::Command::React { .. }));
+    assert!(
+        raw.contains("ulid="),
+        "the mutation relay carries @ulid: {raw}"
+    );
+
+    // …the provider performs it foreign-side and **confirms it back through
+    // ingestion, attributed to ada** — the one shape of local `@as` that is
+    // the flow completing rather than a forgery. Without this the flip side
+    // never closes: the puppet's echo always maps back to a local account.
+    plugin.send(&format!("@as=ada@test.example REACT {root} wave"));
+    let Event::Reaction { by, op, .. } = ada.recv().await.event else {
+        panic!("ada expected her own confirmed REACTION");
+    };
+    assert_eq!(op, weft_proto::ReactionOp::Add);
+    assert_eq!(by.to_string(), "ada@test.example");
+}
+
+#[tokio::test]
 async fn provider_ingests_foreign_messages() {
     // Slice 4: the provider replays a foreign room's traffic as ordinary verbs
     // with a `<scheme>://` channel target + `@as=<foreign identity>`; weftd mints
