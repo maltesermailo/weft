@@ -3,6 +3,8 @@
 // indicators, and the inline edit / reaction actions. Shared by `Composer` and
 // `MessageItem`, so the state lives here rather than in either component.
 import type { Msg, MentionOpt } from "$lib/types";
+import { plugins } from "$lib/plugins/plugins.svelte";
+import { slashParams } from "$lib/plugins/sdui";
 import * as media from "$lib/media/media";
 import { view } from "$lib/navigation/view.svelte";
 import { store } from "$lib/store/store.svelte";
@@ -151,6 +153,7 @@ export function removeAttachment(i: number): void {
 }
 
 // ---- send / slash commands ----
+
 function runSlash(input: string): void {
   const [raw, ...rest] = input.slice(1).split(/\s+/);
   const cmd = raw.toLowerCase();
@@ -180,11 +183,44 @@ function runSlash(input: string): void {
     case "topic":
       if (active.startsWith("#")) weft.channelMeta(active, "topic", arg).catch(() => {});
       break;
-    case "help":
-      sys("/join #chan · /part · /create #chan · /delete · /topic <text> · /ban /unban /kick /mute /unmute <user>");
+    case "help": {
+      const builtin =
+        "/join #chan · /part · /create #chan · /delete · /topic <text> · /ban /unban /kick /mute /unmute <user>";
+      // §13.1 plugin commands are listed too — a command you can run but cannot
+      // discover may as well not exist.
+      const fromPlugins = slashActions().map(({ action }) => `/${action.id}`);
+
+      sys(fromPlugins.length ? `${builtin} · ${fromPlugins.join(" · ")}` : builtin);
       break;
-    default:
+    }
+    default: {
+      // §13.1 the `slash` surface: `/<action-id>`. Checked after the built-ins,
+      // so a plugin cannot shadow `/ban` — the command a user expects wins.
+      const match = slashActions().find(({ action }) => action.id === cmd);
+      if (match) {
+        plugins.invoke(match.plugin, match.action.id, ctxRefFor(match.action.context), slashParams(match.action, arg));
+        break;
+      }
+
       sys(`unknown command: /${cmd} (try /help)`);
+    }
+  }
+}
+
+/** Plugin actions declared on the `slash` surface. */
+function slashActions() {
+  return plugins.actionsFor("slash");
+}
+
+/** What a slash-invoked action acts on, by its declared context. */
+function ctxRefFor(context: string): string | undefined {
+  switch (context) {
+    case "channel":
+      return view.active.startsWith("#") ? view.active : undefined;
+    case "namespace":
+      return view.activeServer || undefined;
+    default:
+      return undefined;
   }
 }
 

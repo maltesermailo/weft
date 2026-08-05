@@ -368,8 +368,18 @@ implements and the daemon is written against.*
       `channel-list`, `global` (the Cmd+K palette, with a Commands section). The catalog survived
       contact: every type rendered with **no proto change** needed, which was the point of doing the
       client before the daemon.
-      **Remaining:** `slash` (needs composer integration) and `admin` (needs the `Live` routing seam,
-      since the panel speaks no wire protocol); `Container::Custom` widgets are Track B.
+      **`slash` DONE 2026-08-05** — `/<action-id>` in the composer, checked **after** the built-ins
+      so a plugin cannot shadow `/ban`. Arguments map per §13.4 / decision §20-F: **both**
+      `key:value` (binds by input id) and positional (a bare token fills the next unbound input, by
+      declaration order). Quoted runs are one token, so a free-text input can hold a phrase — without
+      that no positional input could ever contain a space. A `key:value` whose key is not a declared
+      input is treated as text rather than dropped (a URL or a time is likelier than a typo'd field).
+      `/help` lists plugin commands too — one you can run but cannot discover may as well not exist.
+      *Fixed here:* `plugin_invoke` passed `params` through **raw** while `SUBMIT`/`ACTION` encoded
+      it, so a frontend (which has no CBOR) could never send readable params. Slash was the first
+      caller to pass any.
+      **Remaining:** `admin` (needs the `Live` routing seam, since the panel speaks no wire
+      protocol); `Container::Custom` widgets are Track B.
 - [~] **8. Capability-profile slice** (S–M) — **server half DONE 2026-08-04.**
       `authority=roles|levels|none` + `settings=<comma-list>` ride `NS-META` both ways: a provider
       declares them on its foreign assertion, they persist on the namespace record (migration 0054,

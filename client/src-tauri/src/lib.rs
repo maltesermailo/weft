@@ -153,8 +153,14 @@ fn plugin_invoke(
     ctx_ref: Option<String>,
     params: Option<String>,
 ) -> Result<(), String> {
+    // `params` carries the declared inputs' values — the same shape a SUBMIT
+    // sends, so it takes the same JSON→CBOR encoding. Passing it through raw
+    // meant a frontend, which has no CBOR, could never send readable params.
     conn.send(weft::build_plugin_invoke(
-        &plugin, &action, ctx_ref, params,
+        &plugin,
+        &action,
+        ctx_ref,
+        weft::plugin_values(params)?,
     )?)
 }
 

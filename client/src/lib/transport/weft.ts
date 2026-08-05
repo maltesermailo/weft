@@ -516,8 +516,15 @@ export function plugins() {
 
 /** Open a plugin flow. `ctxRef` names what it was invoked on (a msgid, a channel,
  *  a member); the answer arrives as a `plugin-view` or a terminal `plugin-result`. */
-export function pluginInvoke(plugin: string, action: string, ctxRef?: string, params?: string) {
-  return invoke("plugin_invoke", { plugin, action, ctxRef, params });
+export function pluginInvoke(
+  plugin: string,
+  action: string,
+  ctxRef?: string,
+  params?: Record<string, unknown>,
+) {
+  // Plain JSON, like `pluginSubmit` — the CBOR encoding happens in
+  // weft-client-core so nothing here touches the wire format.
+  return invoke("plugin_invoke", { plugin, action, ctxRef, params: params && JSON.stringify(params) });
 }
 
 /** Submit a form step. `values` is plain JSON — the CBOR encoding happens in

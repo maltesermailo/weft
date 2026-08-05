@@ -196,3 +196,50 @@ export function applyPatch(view: View, op: PatchOp): View {
       return view;
   }
 }
+
+/**
+ * Split a slash command's argument text into tokens.
+ *
+ * Quoted runs count as one token, so a free-text input can hold a phrase
+ * (`/ban alice "being rude"`). The spec says a bare *token* fills the next
+ * input; it does not say what a token is, and without quoting no positional
+ * input could ever hold a space.
+ */
+export function tokenizeArgs(arg: string): string[] {
+  return [...arg.matchAll(/"([^"]*)"|(\S+)/g)].map((m) => m[1] ?? m[2]);
+}
+
+/**
+ * Map a slash command's arguments onto a declared action's inputs (§13.4,
+ * decision §20-F): **both** forms are accepted.
+ *
+ * - `key:value` binds by input id, wherever it appears.
+ * - a bare token fills the next input not already bound, by declaration order.
+ *
+ * A `key:value` whose key is not a declared input is treated as a bare token —
+ * it is far likelier to be ordinary text containing a colon (a URL, a time) than
+ * a typo'd field name, and silently dropping it would lose the user's words.
+ */
+export function slashParams(action: ActionDecl, arg: string): Record<string, unknown> {
+  const inputs = (action.input ?? []).map(fieldId).filter((id): id is string => id !== null);
+  const values: Record<string, unknown> = {};
+  const positional: string[] = [];
+
+  for (const token of tokenizeArgs(arg)) {
+    const sep = token.indexOf(":");
+    const key = sep > 0 ? token.slice(0, sep) : "";
+
+    if (key && inputs.includes(key)) values[key] = token.slice(sep + 1);
+    else positional.push(token);
+  }
+
+  for (const id of inputs) {
+    if (id in values) continue;
+
+    const next = positional.shift();
+    if (next === undefined) break;
+    values[id] = next;
+  }
+
+  return values;
+}

@@ -76,8 +76,11 @@ class PluginStore {
     void weft.plugins();
   }
 
-  invoke(plugin: string, action: string, ctxRef?: string) {
-    void weft.pluginInvoke(plugin, action, ctxRef);
+  /** Open a flow. `params` pre-fills the action's declared inputs — a slash
+   *  command's arguments arrive this way (§13.4), so the plugin can act without
+   *  a form step. */
+  invoke(plugin: string, action: string, ctxRef?: string, params?: Record<string, unknown>) {
+    void weft.pluginInvoke(plugin, action, ctxRef, params);
   }
 
   submit(view: OpenView) {
