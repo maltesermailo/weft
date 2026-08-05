@@ -11,6 +11,7 @@ import { store } from "$lib/store/store.svelte";
 import * as weft from "$lib/transport/weft";
 import { toast } from "$lib/notifications/toasts.svelte";
 import { plugins } from "$lib/plugins/plugins.svelte";
+import type { Surface } from "$lib/plugins/sdui";
 import { channelStore, scopesFor } from "$lib/channels/channel.svelte";
 import { isMuted, setNotifLevel, scopeKeyOf } from "$lib/notifications/notif";
 
@@ -75,7 +76,7 @@ export function msgCtx(e: MouseEvent, m: Msg): void {
     if (mod) items.push({ label: "Delete", icon: "delete", danger: true, run: () => doDelete(m) });
     items.push({ label: "Report", run: () => openReport(m) });
   }
-  items.push(...pluginItems("message", m.msgid));
+  items.push(...pluginItems("context-menu", ["message"], m.msgid));
   openCtx(e, items);
 }
 
@@ -86,10 +87,10 @@ export function msgCtx(e: MouseEvent, m: Msg): void {
  * `ctxRef` tells the plugin what it was invoked on — the msgid here — so it can
  * act without a round trip to ask.
  */
-function pluginItems(context: string, ctxRef?: string): CtxItem[] {
+function pluginItems(surface: Surface, contexts: string[], ctxRef?: string): CtxItem[] {
   const matching = plugins
-    .actionsFor("context-menu")
-    .filter(({ action }) => action.context === context);
+    .actionsFor(surface)
+    .filter(({ action }) => contexts.includes(action.context));
   if (matching.length === 0) return [];
 
   return [
@@ -236,5 +237,8 @@ export function listCtx(e: MouseEvent): void {
   openCtx(e, [
     { label: "Create channel", icon: "channel", run: () => openCreateChannel() },
     { label: "Create category", icon: "folder", run: openCreateCategory },
+    // §13.1 the `channel-list` surface: the namespace is what a plugin acts on
+    // from the sidebar background.
+    ...pluginItems("channel-list", ["namespace", "none"], view.activeServer),
   ]);
 }

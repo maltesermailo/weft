@@ -33,6 +33,7 @@
   import ThreadPanel from "$lib/components/chat/ThreadPanel.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import QuickSwitcher from "$lib/components/QuickSwitcher.svelte";
+  import { plugins } from "$lib/plugins/plugins.svelte";
   import CommunityRail from "$lib/components/CommunityRail.svelte";
   import MemberList from "$lib/components/MemberList.svelte";
   import VoiceBar from "$lib/components/VoiceBar.svelte";
@@ -169,6 +170,15 @@
       sigil: c.name.startsWith("@") ? "@" : "#",
       unread: c.unread,
     }))}
+    commands={plugins.actionsFor("global").map(({ plugin, action }) => ({
+      plugin,
+      id: action.id,
+      label: action.label,
+    }))}
+    oncommand={(plugin, action) => {
+      plugins.invoke(plugin, action);
+      switcherOpen = false;
+    }}
     onselect={switchTo}
     onclose={() => (switcherOpen = false)}
   />

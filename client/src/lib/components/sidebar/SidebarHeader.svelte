@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plugins } from "$lib/plugins/plugins.svelte";
   import { store } from "$lib/store/store.svelte";
   import { vm } from "$lib/navigation/viewmodel.svelte";
   import { nsLeave } from "$lib/navigation/navigation";
@@ -7,6 +8,12 @@
   
   import { getApp } from "$lib/ui/context";
   const app = getApp();
+
+  // §13.1 the `server-menu` surface. A namespace-context action makes sense
+  // here; a context-less one is app-wide and belongs on `global` instead.
+  const serverMenuActions = $derived(
+    plugins.actionsFor("server-menu").filter(({ action }) => action.context === "namespace" || action.context === "none"),
+  );
 </script>
 
 <div class="sidebar-header">
@@ -58,6 +65,23 @@
             Create Category
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h7l2 2h9v10a1 1 0 0 1-1 1H3Z" /><path d="M12 13v4M10 15h4" /></svg>
           </button>
+        {/if}
+        <!-- §13.1 plugin-declared server-menu entries, below the built-ins so a
+             plugin adds to the menu rather than displacing what is there. The
+             namespace rides along as `ctxRef` — it is what the action acts on. -->
+        {#if serverMenuActions.length}
+          <div class="sm-sep"></div>
+          {#each serverMenuActions as { plugin, action } (plugin + action.id)}
+            <button
+              class="sm-item"
+              onclick={() => {
+                plugins.invoke(plugin, action.id, app.activeServer);
+                ui.serverMenu = false;
+              }}
+            >
+              {action.label}
+            </button>
+          {/each}
         {/if}
         <div class="sm-sep"></div>
         <button class="sm-item" onclick={() => { navigator.clipboard?.writeText(app.activeServer || store.session.network); ui.serverMenu = false; }}>Copy Server ID</button>

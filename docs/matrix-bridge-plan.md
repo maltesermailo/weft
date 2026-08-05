@@ -363,9 +363,13 @@ implements and the daemon is written against.*
       * **Tauri** — six commands wrapping them.
       * **TS transport** — `plugins`/`pluginInvoke`/`pluginSubmit`/`pluginAction`/`pluginSubscribe`/
         `pluginClose` + the four event variants on `WeftEvent`. `svelte-check`: 0 errors/0 warnings.
-      **Remaining:** the Svelte renderer itself — 13 component types, modal + panel containers, and
-      the launch surfaces (context-menu, slash, global, settings, server-menu, channel-list, admin).
-      That is the part that validates the catalog.
+      **Renderer DONE 2026-08-05** — 13 component types, modal container, and five of the seven
+      launch surfaces: `context-menu` (message), `settings` (Server Settings pages), `server-menu`,
+      `channel-list`, `global` (the Cmd+K palette, with a Commands section). The catalog survived
+      contact: every type rendered with **no proto change** needed, which was the point of doing the
+      client before the daemon.
+      **Remaining:** `slash` (needs composer integration) and `admin` (needs the `Live` routing seam,
+      since the panel speaks no wire protocol); `Container::Custom` widgets are Track B.
 - [~] **8. Capability-profile slice** (S–M) — **server half DONE 2026-08-04.**
       `authority=roles|levels|none` + `settings=<comma-list>` ride `NS-META` both ways: a provider
       declares them on its foreign assertion, they persist on the namespace record (migration 0054,
@@ -394,8 +398,10 @@ implements and the daemon is written against.*
       *Design note:* the key/subscription state lives in `ServerCtx`, not on a session — the view is
       sent on the **plugin's** session and subscribed on the **client's**, so a per-session map is
       silently always empty (which is exactly how the first cut failed).
-      The `settings`/`server-menu`/`channel-list` surfaces already exist in `ActionDecl`; what makes
-      them appear is the client renderer (slice 7's remaining half).
+      **Client DONE 2026-08-05:** `settings` pages render in Server Settings (opening one closes the
+      previous panel, so a plugin is not left pushing into a screen nobody is watching);
+      `server-menu` and `channel-list` entries append below the built-ins rather than displacing
+      them.
 
 ## Phase 3 — the bridge itself
 
