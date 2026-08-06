@@ -152,6 +152,47 @@ impl Hs {
         str_field(&v, "event_id")
     }
 
+    /// Create a room as the bot. `body` is the raw createRoom payload — the
+    /// projection engine owns the shape (space vs room, alias, presets).
+    pub async fn create_room(&self, body: Value) -> anyhow::Result<String> {
+        let v = self
+            .call(
+                reqwest::Method::POST,
+                "/_matrix/client/v3/createRoom",
+                Some(body),
+                None,
+                &[],
+            )
+            .await?;
+
+        str_field(&v, "room_id")
+    }
+
+    /// Set a state event as the bot (`m.space.child`, power levels, …).
+    pub async fn put_state(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+        content: Value,
+    ) -> anyhow::Result<()> {
+        self.call(
+            reqwest::Method::PUT,
+            &format!(
+                "/_matrix/client/v3/rooms/{}/state/{}/{}",
+                enc(room_id),
+                enc(event_type),
+                enc(state_key)
+            ),
+            Some(content),
+            None,
+            &[],
+        )
+        .await?;
+
+        Ok(())
+    }
+
     /// Leave a room, optionally as a puppet.
     pub async fn leave(&self, room_id: &str, as_user: Option<&str>) -> anyhow::Result<()> {
         self.call(

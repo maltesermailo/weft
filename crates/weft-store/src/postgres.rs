@@ -1719,6 +1719,16 @@ impl InviteStore for PgStore {
     }
 }
 
+/// Namespace rows with their projection opt-ins aggregated from the join
+/// table (migration 0055). Callers append `WHERE …` (qualify only `name` —
+/// the joined side has just `b.scheme`) and MUST end with `GROUP BY n.name`:
+/// `name` is the primary key, so every other `n.*` column is functionally
+/// dependent and selectable under the group.
+const NS_SELECT: &str = "SELECT n.*, COALESCE(array_agg(b.scheme ORDER BY b.scheme) \
+     FILTER (WHERE b.scheme IS NOT NULL), '{}') AS bridge_schemes \
+     FROM weft_namespaces n \
+     LEFT JOIN weft_namespace_bridges b ON b.namespace = n.name";
+
 #[async_trait]
 impl NamespaceStore for PgStore {
     async fn create_namespace(&self, record: NamespaceRecord) -> Result<bool, StoreError> {
@@ -1747,11 +1757,30 @@ impl NamespaceStore for PgStore {
         .execute(&self.pool)
         .await
         .map_err(backend_err)?;
-        Ok(result.rows_affected() == 1)
+        let created = result.rows_affected() == 1;
+
+        // Opt-ins ride the join table. In practice a fresh namespace has none
+        // (NS CREATE and replica assertion both start unprojected), but the
+        // record type carries them, so honor what was given.
+        if created && !record.bridges.is_empty() {
+            for scheme in &record.bridges {
+                sqlx::query(
+                    "INSERT INTO weft_namespace_bridges (namespace, scheme) VALUES ($1, $2) \
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(record.name.as_str())
+                .bind(scheme)
+                .execute(&self.pool)
+                .await
+                .map_err(backend_err)?;
+            }
+        }
+
+        Ok(created)
     }
 
     async fn namespace(&self, name: &NamespaceName) -> Result<Option<NamespaceRecord>, StoreError> {
-        let row = sqlx::query("SELECT * FROM weft_namespaces WHERE name = $1")
+        let row = sqlx::query(&format!("{NS_SELECT} WHERE n.name = $1 GROUP BY n.name"))
             .bind(name.as_str())
             .fetch_optional(&self.pool)
             .await
@@ -1801,7 +1830,7 @@ impl NamespaceStore for PgStore {
         &self,
         origin: &str,
     ) -> Result<Option<NamespaceRecord>, StoreError> {
-        let row = sqlx::query("SELECT * FROM weft_namespaces WHERE origin = $1")
+        let row = sqlx::query(&format!("{NS_SELECT} WHERE origin = $1 GROUP BY n.name"))
             .bind(origin)
             .fetch_optional(&self.pool)
             .await
@@ -1810,15 +1839,28 @@ impl NamespaceStore for PgStore {
     }
 
     async fn namespaces_with_origin(&self) -> Result<Vec<NamespaceRecord>, StoreError> {
-        let rows = sqlx::query("SELECT * FROM weft_namespaces WHERE origin IS NOT NULL")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(backend_err)?;
+        let rows = sqlx::query(&format!(
+            "{NS_SELECT} WHERE origin IS NOT NULL GROUP BY n.name"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
+        rows.iter().map(namespace_from_row).collect()
+    }
+
+    async fn namespaces_bridged(&self) -> Result<Vec<NamespaceRecord>, StoreError> {
+        let rows = sqlx::query(&format!(
+            "{NS_SELECT} WHERE EXISTS (SELECT 1 FROM weft_namespace_bridges e \
+             WHERE e.namespace = n.name) GROUP BY n.name"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend_err)?;
         rows.iter().map(namespace_from_row).collect()
     }
 
     async fn namespace_by_id(&self, id: &str) -> Result<Option<NamespaceRecord>, StoreError> {
-        let row = sqlx::query("SELECT * FROM weft_namespaces WHERE id = $1")
+        let row = sqlx::query(&format!("{NS_SELECT} WHERE id = $1 GROUP BY n.name"))
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -1885,14 +1927,11 @@ impl NamespaceStore for PgStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<NamespaceRecord>, StoreError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT * FROM weft_namespaces
-            WHERE visibility = 'public' AND ($1::text IS NULL OR name > $1)
-            ORDER BY name
-            LIMIT $2
-            "#,
-        )
+        let rows = sqlx::query(&format!(
+            "{NS_SELECT} \
+                 WHERE visibility = 'public' AND ($1::text IS NULL OR n.name > $1) \
+                 GROUP BY n.name ORDER BY n.name LIMIT $2"
+        ))
         .bind(after)
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -1906,14 +1945,11 @@ impl NamespaceStore for PgStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<NamespaceRecord>, StoreError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT * FROM weft_namespaces
-            WHERE ($1::text IS NULL OR name > $1)
-            ORDER BY name
-            LIMIT $2
-            "#,
-        )
+        let rows = sqlx::query(&format!(
+            "{NS_SELECT} \
+                 WHERE ($1::text IS NULL OR n.name > $1) \
+                 GROUP BY n.name ORDER BY n.name LIMIT $2"
+        ))
         .bind(after)
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -1986,6 +2022,33 @@ impl NamespaceStore for PgStore {
             .execute(&self.pool)
             .await
             .map_err(backend_err)?;
+        Ok(())
+    }
+
+    async fn set_namespace_bridges(
+        &self,
+        name: &NamespaceName,
+        bridges: &[String],
+    ) -> Result<(), StoreError> {
+        // Full replace, transactionally: the handler passes the whole set, so
+        // delete-and-reinsert mirrors it exactly (and an empty set just clears).
+        let mut tx = self.pool.begin().await.map_err(backend_err)?;
+
+        sqlx::query("DELETE FROM weft_namespace_bridges WHERE namespace = $1")
+            .bind(name.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(backend_err)?;
+        for scheme in bridges {
+            sqlx::query("INSERT INTO weft_namespace_bridges (namespace, scheme) VALUES ($1, $2)")
+                .bind(name.as_str())
+                .bind(scheme)
+                .execute(&mut *tx)
+                .await
+                .map_err(backend_err)?;
+        }
+
+        tx.commit().await.map_err(backend_err)?;
         Ok(())
     }
 
@@ -2106,9 +2169,9 @@ impl NamespaceStore for PgStore {
     }
 
     async fn due_recoveries(&self, now_ms: u64) -> Result<Vec<NamespaceRecord>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT * FROM weft_namespaces WHERE pending_eta_ms IS NOT NULL AND pending_eta_ms <= $1",
-        )
+        let rows = sqlx::query(&format!(
+            "{NS_SELECT} WHERE pending_eta_ms IS NOT NULL AND pending_eta_ms <= $1 GROUP BY n.name"
+        ))
         .bind(now_ms as i64)
         .fetch_all(&self.pool)
         .await
@@ -2142,7 +2205,7 @@ impl NamespaceStore for PgStore {
         &self,
         since_seq: i64,
     ) -> Result<Vec<NamespaceRecord>, StoreError> {
-        let rows = sqlx::query("SELECT * FROM weft_namespaces WHERE seq > $1")
+        let rows = sqlx::query(&format!("{NS_SELECT} WHERE seq > $1 GROUP BY n.name"))
             .bind(since_seq)
             .fetch_all(&self.pool)
             .await
@@ -2209,6 +2272,11 @@ fn namespace_from_row(row: &sqlx::postgres::PgRow) -> Result<NamespaceRecord, St
             .filter(|k| !k.is_empty())
             .map(str::to_string)
             .collect(),
+        // Aggregated from the 0055 join table; a bare-row read (no join) has
+        // no aggregate column and means "not projected".
+        bridges: row
+            .try_get::<Vec<String>, _>("bridge_schemes")
+            .unwrap_or_default(),
         // Pre-0030 rows predate the column; missing means "not frozen".
         frozen: row.try_get("frozen").unwrap_or(false),
         // Pre-0044 rows predate the column; missing means "no welcome channel".

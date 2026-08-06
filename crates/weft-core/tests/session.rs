@@ -7118,6 +7118,206 @@ async fn ns_meta_federation_opt_in_on_any_visibility() {
 }
 
 #[tokio::test]
+async fn a_projected_namespace_bridges_both_directions_and_the_home_mints() {
+    // Outbound projection, the return path (owner decision 2026-08-06): a
+    // native namespace flagged `bridge:matrix` accepts the matrix provider's
+    // foreign traffic — the home mints (no @msgid), the injection's labeled
+    // echo is the ack (§3.5), and local-origin traffic flows out to the
+    // provider like a replica's.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("mx", key.public(), vec!["matrix".parse().unwrap()])],
+        &[],
+    );
+
+    // ada builds a native, public, projected namespace.
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    let channel = ada.channel_by_vanity(&ns_id, "general").await;
+    ada.send(&format!("NS META {ns_id} bridge:matrix :open"));
+    ada.recv().await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+
+    // The provider connects *after* the flag is set (live flag-flip attach is
+    // a reconnect concern — §10's recovery story) and binds its realm. The
+    // bind pushes the projected **structure**: NS-META (with `bridges=`), then
+    // each channel's CHANNEL-LAYOUT + POLICY — the adapter needs the policy to
+    // apply the §3 projection rules.
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT matrix://matrix.org");
+    let pushed_meta = loop {
+        if let Ok(reply) = weft_proto::Reply::parse(&plugin.recv_raw().await) {
+            if let Event::NsMeta { id, bridges, .. } = reply.event {
+                break (id.to_string(), bridges);
+            }
+        }
+    };
+    assert_eq!(pushed_meta.0, ns_id);
+    assert_eq!(pushed_meta.1.len(), 1, "bridges= rides the pushed meta");
+    let layout = loop {
+        if let Ok(reply) = weft_proto::Reply::parse(&plugin.recv_raw().await) {
+            if let Event::ChannelLayout { channel, .. } = reply.event {
+                break channel;
+            }
+        }
+    };
+    assert_eq!(layout, channel);
+    let policy = loop {
+        if let Ok(reply) = weft_proto::Reply::parse(&plugin.recv_raw().await) {
+            if let Event::Policy { policy, .. } = reply.event {
+                break policy;
+            }
+        }
+    };
+    assert_eq!(policy.to_string(), "retained:90d"); // the ns-create default seed
+
+    // §8 in the outbound sense: the provider states a **foreign** member of
+    // the projected namespace (a Matrix user joined the projected room)…
+    plugin.send(&format!("NS-MEMBER {ns_id} carol@kde.org join"));
+    let Event::Member { user, action, .. } = ada.recv().await.event else {
+        panic!("ada expected carol's MEMBER join");
+    };
+    assert_eq!(user.to_string(), "carol@kde.org");
+    assert_eq!(action, MemberAction::Join);
+
+    // …but never a local one: locals join natively, and a provider claiming
+    // otherwise is forging an action weftd itself owns.
+    plugin.send(&format!("NS-MEMBER {ns_id} bob@test.example join"));
+    plugin.expect_err(ErrCode::Unsupported).await;
+
+    // WEFT → provider: a local member's post crosses like a replica's — and
+    // carries her ULID (`ulid=`), the stable identity puppets key on.
+    ada.send(&format!("@label=m1 MSG {channel} :hello matrix"));
+    let (out, raw) = loop {
+        let raw = plugin.recv_raw().await;
+        if let Ok(reply) = weft_proto::Reply::parse(&raw) {
+            if let Event::Message(m) = reply.event {
+                break (m, raw);
+            }
+        }
+    };
+    assert_eq!(out.body, "hello matrix");
+    assert_eq!(out.sender.to_string(), "ada@test.example");
+    assert!(
+        raw.contains("ulid="),
+        "the event copy is ULID-stamped: {raw}"
+    );
+    ada.recv().await; // her own echo-ack
+
+    // Provider → WEFT: a foreign user's post, no @msgid — the home mints…
+    plugin.send(&format!(
+        "@as=carol@kde.org;label=inj1 MSG {channel} :hi from matrix"
+    ));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("ada expected the projected MESSAGE");
+    };
+    assert_eq!(m.body, "hi from matrix");
+    assert_eq!(m.sender.to_string(), "carol@kde.org");
+    assert_eq!(
+        m.msgid.origin().as_str(),
+        "test.example",
+        "the home mints on a projected channel"
+    );
+
+    // …and the provider's own copy carries the injection label — the §3.5
+    // echo-ack, which is how the daemon learns the minted id.
+    let echo = loop {
+        let raw = plugin.recv_raw().await;
+        if raw.contains("MESSAGE") && raw.contains("hi from matrix") {
+            break raw;
+        }
+    };
+    assert!(echo.contains("label=inj1"), "the echo is the ack: {echo}");
+
+    // A carried @msgid is refused outright: foreign-minted ids on a native
+    // channel would break home authority.
+    plugin.send(&format!(
+        "@as=carol@kde.org;msgid=matrix.org/{} MSG {channel} :minted elsewhere",
+        ulid::Ulid::new()
+    ));
+    plugin.expect_err(ErrCode::Unsupported).await;
+
+    // A local account stays a forgery — there is no relay to confirm here.
+    plugin.send(&format!("@as=ada@test.example MSG {channel} :forged"));
+    plugin.expect_err(ErrCode::Unsupported).await;
+
+    // An *unflagged* namespace's channel refuses the whole path.
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send(&format!("@root={} NS CREATE quiet public", root_key_b64()));
+    let Event::NsMeta { id, .. } = bob.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let quiet = bob.channel_by_vanity(&id.to_string(), "general").await;
+    plugin.send(&format!("@as=carol@kde.org MSG {quiet} :not projected"));
+    plugin.expect_err(ErrCode::Unsupported).await;
+
+    // The foreign author reacts to the home-minted message by its real id —
+    // ada sees it, and the provider gets the home-minted copy back too (the
+    // ordinary local-origin forwarding; the daemon's own-echo handling drops it).
+    plugin.send(&format!("@as=carol@kde.org REACT {} wave", m.msgid));
+    let Event::Reaction { by, op, .. } = ada.recv().await.event else {
+        panic!("ada expected the projected REACTION");
+    };
+    assert_eq!(op, weft_proto::ReactionOp::Add);
+    assert_eq!(by.to_string(), "carol@kde.org");
+}
+
+#[tokio::test]
+async fn ns_meta_bridge_flag_requires_public_and_closes_with_visibility() {
+    // Outbound projection (matrix.md §17.1): `NS META <ns> bridge:<scheme>
+    // :open|closed`. The flag is ns-admin consent to mirror a native namespace
+    // into a foreign system — and the return-path authorization anchor — so
+    // it demands `public` and must never outlive that visibility.
+    let ctx = ctx(&[]);
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+
+    ada.send(&format!("NS META {ns_id} bridge:matrix :open"));
+    let Event::NsMeta { bridges, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    assert_eq!(
+        bridges.iter().map(|b| b.to_string()).collect::<Vec<_>>(),
+        ["matrix"],
+        "the projection opt-in rides the meta event"
+    );
+
+    // A second scheme accumulates; closing one leaves the other.
+    ada.send(&format!("NS META {ns_id} bridge:discord :open"));
+    ada.recv().await;
+    ada.send(&format!("NS META {ns_id} bridge:matrix :closed"));
+    let Event::NsMeta { bridges, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    assert_eq!(
+        bridges.iter().map(|b| b.to_string()).collect::<Vec<_>>(),
+        ["discord"]
+    );
+
+    // Leaving `public` closes every projection — the flag would otherwise
+    // leak what the visibility now hides.
+    ada.send(&format!("@label=v1 NS VISIBILITY {ns_id} unlisted"));
+    let Event::NsMeta { bridges, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    assert!(bridges.is_empty(), "projection must not outlive public");
+
+    // …and opening on a non-public namespace is refused outright.
+    ada.send(&format!("@label=b1 NS META {ns_id} bridge:matrix :open"));
+    let reply = ada.expect_err(ErrCode::Forbidden).await;
+    assert_eq!(err_context(&reply).as_deref(), Some("visibility"));
+}
+
+#[tokio::test]
 async fn bridge_request_offers_only_reachable_namespaces() {
     let peer_key = Keypair::generate();
     let ctx = ctx_bridged(&[], &[], "peer.example", &peer_key.public());

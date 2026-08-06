@@ -464,6 +464,14 @@ pub enum Event {
         /// provider-managed namespace, so this makes the *client* match rather
         /// than offering buttons that will be rejected.
         settings_disabled: Vec<String>,
+        /// `bridges=<comma-list of schemes>` — outbound-projection opt-ins
+        /// (matrix.md §17.1): the ns-admin opened this **native** namespace to
+        /// being mirrored into these foreign systems. The flag is also the
+        /// authorization anchor for the return path: only a provider whose
+        /// pinned scheme is listed may attribute foreign users into the
+        /// namespace's channels (and the home mints). Requires `public`;
+        /// cleared when visibility leaves `public`.
+        bridges: Vec<crate::Scheme>,
     },
     /// `MORE <cursor>` — pagination continuation (DISCOVER, §6.2).
     More {
@@ -1403,6 +1411,17 @@ impl Event {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    bridges: line
+                        .tags
+                        .get("bridges")
+                        .map(|s| {
+                            s.split(',')
+                                .filter(|b| !b.is_empty())
+                                .map(str::parse)
+                                .collect::<Result<Vec<_>, _>>()
+                        })
+                        .transpose()?
+                        .unwrap_or_default(),
                 })
             }
             "MORE" => {
@@ -2246,6 +2265,7 @@ impl Event {
                 provider_online,
                 authority,
                 settings_disabled,
+                bridges,
             } => {
                 if let Some(origin) = origin {
                     tags.insert("origin".to_string(), origin.to_string());
@@ -2259,6 +2279,10 @@ impl Event {
                 }
                 if !settings_disabled.is_empty() {
                     tags.insert("settings".to_string(), settings_disabled.join(","));
+                }
+                if !bridges.is_empty() {
+                    let list: Vec<String> = bridges.iter().map(|b| b.to_string()).collect();
+                    tags.insert("bridges".to_string(), list.join(","));
                 }
                 tags.insert("vanity".to_string(), vanity.to_string());
                 for (k, v) in [
@@ -3527,6 +3551,7 @@ mod tests {
                 // §7a.3: …and how the client should render its authority.
                 authority: Some(crate::types::Authority::Levels),
                 settings_disabled: vec!["roles".into(), "ns-edit".into()],
+                bridges: vec!["matrix".parse().unwrap(), "discord".parse().unwrap()],
             },
             "n1",
         ));
@@ -3548,6 +3573,7 @@ mod tests {
             provider_online: None,
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
         }));
         round_trip(&Reply::new(Event::More {
             cursor: "next-page".into(),

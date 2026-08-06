@@ -485,6 +485,10 @@ pub trait NamespaceStore: Send + Sync {
     /// fan-out surface (a handful of rows; providers manage few spaces).
     async fn namespaces_with_origin(&self) -> Result<Vec<NamespaceRecord>, StoreError>;
 
+    /// Every namespace with a projection opt-in (`bridges` non-empty) — the
+    /// provider-forwarder surface for outbound projection (matrix.md §17.1).
+    async fn namespaces_bridged(&self) -> Result<Vec<NamespaceRecord>, StoreError>;
+
     /// Is this vanity name admin-locked (§2.3)? A locked vanity can't be
     /// (re-)registered via NS CREATE without an operator lifting the lock.
     async fn vanity_locked(&self, name: &NamespaceName) -> Result<bool, StoreError>;
@@ -552,6 +556,14 @@ pub trait NamespaceStore: Send + Sync {
         &self,
         name: &NamespaceName,
         open: bool,
+    ) -> Result<(), StoreError>;
+
+    /// Outbound projection (matrix.md §17.1): replace the namespace's set of
+    /// opted-in bridge schemes.
+    async fn set_namespace_bridges(
+        &self,
+        name: &NamespaceName,
+        bridges: &[String],
     ) -> Result<(), StoreError>;
 
     /// §6.2 set (or clear, `None`) the namespace's welcome channel.

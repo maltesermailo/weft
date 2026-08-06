@@ -203,10 +203,45 @@ impl LocalUsers {
     }
 }
 
+/// A WEFT namespace mirrored as a Matrix Space (outbound projection) — the
+/// inverse of [`Space`], which is consumed foreign structure.
+#[derive(Debug, Default, Clone)]
+pub struct Projection {
+    pub space_room: String,
+    /// WEFT channel name → the projected Matrix room.
+    pub rooms: BTreeMap<String, String>,
+    /// §8 in the outbound sense: which projected rooms each **Matrix** user
+    /// has joined — first join ⇒ NS-MEMBER join statement, last leave ⇒ part.
+    pub member_rooms: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Projection {
+    pub fn member_joined(&mut self, user: &str, room_id: &str) -> Option<MemberAction> {
+        let rooms = self.member_rooms.entry(user.to_string()).or_default();
+        let first = rooms.is_empty();
+        rooms.insert(room_id.to_string());
+
+        first.then_some(MemberAction::Join)
+    }
+
+    pub fn member_left(&mut self, user: &str, room_id: &str) -> Option<MemberAction> {
+        let rooms = self.member_rooms.get_mut(user)?;
+        rooms.remove(room_id);
+
+        if rooms.is_empty() {
+            self.member_rooms.remove(user);
+            return Some(MemberAction::Part);
+        }
+        None
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct State {
     /// space URI (`matrix://realm/space`) → the bridged space.
     pub spaces: BTreeMap<String, Space>,
+    /// WEFT ns-id → its outbound projection.
+    pub projections: BTreeMap<String, Projection>,
     /// event_id ↔ msgid, both directions of traffic.
     pub links: Links,
     /// Our users with puppets, keyed by account ULID.
@@ -240,6 +275,25 @@ impl State {
 
     pub fn space_of_ns(&self, ns_id: &str) -> Option<&Space> {
         self.spaces.values().find(|s| s.ns_id == ns_id)
+    }
+
+    /// The projected Matrix room behind a WEFT channel, with its ns-id.
+    pub fn projected_room_of_channel(&self, channel: &str) -> Option<(&str, &str)> {
+        self.projections.iter().find_map(|(ns_id, p)| {
+            p.rooms
+                .get(channel)
+                .map(|room| (ns_id.as_str(), room.as_str()))
+        })
+    }
+
+    /// The WEFT channel behind a projected Matrix room, with its ns-id.
+    pub fn channel_of_projected_room(&self, room_id: &str) -> Option<(&str, &str)> {
+        self.projections.iter().find_map(|(ns_id, p)| {
+            p.rooms
+                .iter()
+                .find(|(_, r)| r.as_str() == room_id)
+                .map(|(chan, _)| (chan.as_str(), ns_id.as_str()))
+        })
     }
 }
 
@@ -397,6 +451,30 @@ impl Store {
                 },
                 row.get("event_id"),
             );
+        }
+
+        for row in sqlx::query("SELECT ns_id, space_room FROM matrix_projections")
+            .fetch_all(pool)
+            .await?
+        {
+            let ns_id: String = row.get("ns_id");
+            state.projections.insert(
+                ns_id,
+                crate::store::Projection {
+                    space_room: row.get("space_room"),
+                    ..Projection::default()
+                },
+            );
+        }
+
+        for row in sqlx::query("SELECT channel, ns_id, room_id FROM matrix_projected_rooms")
+            .fetch_all(pool)
+            .await?
+        {
+            let ns_id: String = row.get("ns_id");
+            if let Some(p) = state.projections.get_mut(&ns_id) {
+                p.rooms.insert(row.get("channel"), row.get("room_id"));
+            }
         }
 
         let banned: Vec<String> = sqlx::query_scalar("SELECT ns_id FROM matrix_bans")
@@ -619,6 +697,55 @@ impl Store {
                 )
                 .bind(space_uri)
                 .bind(member)
+                .bind(room_id)
+                .execute(pool),
+            )
+            .await;
+        }
+    }
+
+    /// Record a projected Space (in memory + its row).
+    pub async fn save_projection(&mut self, ns_id: &str, space_room: &str) {
+        self.state
+            .projections
+            .entry(ns_id.to_string())
+            .or_default()
+            .space_room = space_room.to_string();
+
+        if let Some(pool) = &self.pool {
+            best_effort(
+                "save_projection",
+                sqlx::query(
+                    "INSERT INTO matrix_projections (ns_id, space_room) VALUES ($1, $2) \
+                     ON CONFLICT (ns_id) DO UPDATE SET space_room = $2",
+                )
+                .bind(ns_id)
+                .bind(space_room)
+                .execute(pool),
+            )
+            .await;
+        }
+    }
+
+    /// Record a projected room under an already-projected Space.
+    pub async fn save_projected_room(&mut self, ns_id: &str, channel: &str, room_id: &str) {
+        self.state
+            .projections
+            .entry(ns_id.to_string())
+            .or_default()
+            .rooms
+            .insert(channel.to_string(), room_id.to_string());
+
+        if let Some(pool) = &self.pool {
+            best_effort(
+                "save_projected_room",
+                sqlx::query(
+                    "INSERT INTO matrix_projected_rooms (channel, ns_id, room_id) \
+                     VALUES ($1, $2, $3) \
+                     ON CONFLICT (channel) DO UPDATE SET ns_id = $2, room_id = $3",
+                )
+                .bind(channel)
+                .bind(ns_id)
                 .bind(room_id)
                 .execute(pool),
             )

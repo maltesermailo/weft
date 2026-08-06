@@ -1251,6 +1251,7 @@ where
         .create_namespace(NamespaceRecord {
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
             id: String::new(), // empty ⇒ lazily backfilled by namespace_id
             name: ns.clone(),
             owner: format!("owner-{tag}").parse().unwrap(),
@@ -1274,6 +1275,7 @@ where
         .create_namespace(NamespaceRecord {
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
             id: String::new(), // empty ⇒ lazily backfilled by namespace_id
             name: ns.clone(),
             owner: format!("someone-{tag}").parse().unwrap(),
@@ -1328,6 +1330,7 @@ where
         .create_namespace(NamespaceRecord {
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
             id: String::new(), // empty ⇒ lazily backfilled, like a native ns
             name: foreign.clone(),
             owner: format!("fowner-{tag}").parse().unwrap(),
@@ -1436,6 +1439,38 @@ where
     store.set_namespace_federation(&ns, false).await.unwrap();
     assert!(!store.namespace(&ns).await.unwrap().unwrap().federation);
     store.set_namespace_federation(&ns, true).await.unwrap();
+
+    // Outbound-projection opt-ins (matrix.md §17.1): default empty, replace +
+    // clear persist, and the flagged listing finds exactly the flagged rows.
+    assert!(record.bridges.is_empty());
+    store
+        .set_namespace_bridges(&ns, &["matrix".into(), "discord".into()])
+        .await
+        .unwrap();
+    assert_eq!(
+        store.namespace(&ns).await.unwrap().unwrap().bridges,
+        ["matrix", "discord"]
+    );
+    assert!(store
+        .namespaces_bridged()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.name == ns));
+    store.set_namespace_bridges(&ns, &[]).await.unwrap();
+    assert!(store
+        .namespace(&ns)
+        .await
+        .unwrap()
+        .unwrap()
+        .bridges
+        .is_empty());
+    assert!(!store
+        .namespaces_bridged()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.name == ns));
 
     // §6.2 welcome channel: default None, set + clear persist.
     assert_eq!(record.welcome_channel, None);
@@ -1556,6 +1591,7 @@ where
         .create_namespace(NamespaceRecord {
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
             id: String::new(),
             name: rns.clone(),
             owner: format!("owner-{tag}").parse().unwrap(),

@@ -95,6 +95,36 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
             ),
         )
         .route(
+            "/_matrix/client/v3/createRoom",
+            post(
+                |State(hs): State<MockHs>, axum::Json(body): axum::Json<Value>| async move {
+                    let alias = body["room_alias_name"].as_str().unwrap_or("noalias");
+                    let room_id = format!("!{alias}:test.example");
+                    hs.calls.lock().unwrap().push((
+                        "POST createRoom".to_string(),
+                        String::new(),
+                        body,
+                    ));
+                    axum::Json(json!({ "room_id": room_id }))
+                },
+            ),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/:room/state/:kind/:key",
+            put(
+                |State(hs): State<MockHs>,
+                 Path((room, kind, key)): Path<(String, String, String)>,
+                 axum::Json(body): axum::Json<Value>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("PUT state/{room}/{kind}/{key}"),
+                        String::new(),
+                        body,
+                    ));
+                    axum::Json(json!({ "event_id": "$state" }))
+                },
+            ),
+        )
+        .route(
             "/_matrix/client/v3/register",
             post(
                 |State(hs): State<MockHs>, axum::Json(body): axum::Json<Value>| async move {
@@ -159,6 +189,9 @@ async fn bridge_with(
         domain: "test.example".into(),
         puppet_prefix: "weft_".into(),
         bot_localpart: "weftbot".into(),
+        pending_layouts: Default::default(),
+        pending_injections: Default::default(),
+        injection_seq: 0,
     };
 
     (bridge, lines, calls)
@@ -393,8 +426,10 @@ async fn matrix_traffic_ingests_and_weft_traffic_relays() {
         .parse()
         .unwrap();
     bridge
-        .on_incoming(weft_appservice::Incoming::Event(
-            weft_proto::Event::Message(Box::new(weft_proto::MessageEvent {
+        .on_incoming(weft_appservice::Incoming::Event {
+            label: None,
+            actor_ulid: Some(ADA_ULID.into()),
+            event: weft_proto::Event::Message(Box::new(weft_proto::MessageEvent {
                 target: weft_proto::Target::Channel(channel.parse().unwrap()),
                 sender: "ada@test.example".parse().unwrap(),
                 msgid: msgid.clone(),
@@ -403,7 +438,7 @@ async fn matrix_traffic_ingests_and_weft_traffic_relays() {
                 edited: None,
                 edited_at: None,
             })),
-        ))
+        })
         .await;
 
     let recorded = calls.lock().unwrap().clone();
@@ -455,12 +490,14 @@ async fn a_banned_space_stops_bridging_in_both_directions() {
 
     // The operator bans the space in the admin panel; weftd tells us once.
     bridge
-        .on_incoming(weft_appservice::Incoming::Event(
-            weft_proto::Event::Bridging {
+        .on_incoming(weft_appservice::Incoming::Event {
+            label: None,
+            actor_ulid: None,
+            event: weft_proto::Event::Bridging {
                 namespace: ns_id.parse().unwrap(),
                 state: weft_proto::BridgingState::Banned,
             },
-        ))
+        })
         .await;
 
     // Inbound stops…
@@ -479,8 +516,10 @@ async fn a_banned_space_stops_bridging_in_both_directions() {
     // …outbound stops…
     let sends_before = calls.lock().unwrap().len();
     bridge
-        .on_incoming(weft_appservice::Incoming::Event(
-            weft_proto::Event::Message(Box::new(weft_proto::MessageEvent {
+        .on_incoming(weft_appservice::Incoming::Event {
+            label: None,
+            actor_ulid: Some(ADA_ULID.into()),
+            event: weft_proto::Event::Message(Box::new(weft_proto::MessageEvent {
                 target: weft_proto::Target::Channel(channel.parse().unwrap()),
                 sender: "ada@test.example".parse().unwrap(),
                 msgid: format!("test.example/{}", ulid::Ulid::new())
@@ -492,7 +531,7 @@ async fn a_banned_space_stops_bridging_in_both_directions() {
                 edited: None,
                 edited_at: None,
             })),
-        ))
+        })
         .await;
     assert_eq!(
         calls.lock().unwrap().len(),
@@ -508,4 +547,265 @@ async fn a_banned_space_stops_bridging_in_both_directions() {
         .await
         .unwrap();
     assert!(!ok, "banned space must not re-provision");
+}
+
+/// Shorthand: a weftd event delivery on the provider session.
+async fn deliver(
+    bridge: &mut Bridge,
+    event: weft_proto::Event,
+    label: Option<&str>,
+    ulid: Option<&str>,
+) {
+    bridge
+        .on_incoming(weft_appservice::Incoming::Event {
+            event,
+            label: label.map(String::from),
+            actor_ulid: ulid.map(String::from),
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_projected_namespace_becomes_a_space_and_bridges_both_directions() {
+    // The daemon half of outbound projection: weftd pushes the structure
+    // (NS-META with bridges= + CHANNEL-LAYOUT + POLICY), the daemon mirrors it
+    // as a Space with rooms (§3 rules applied), local traffic goes out via
+    // ULID-keyed puppets, and Matrix traffic comes back through the injection
+    // door — no msgid, labeled echo as the ack.
+    let (mut bridge, mut lines, calls) = bridge_with(BTreeMap::new()).await;
+    let ns_id = ulid::Ulid::new().to_string().to_lowercase();
+    let chan_id = ulid::Ulid::new().to_string().to_lowercase();
+    let channel = format!("#{ns_id}/{chan_id}");
+
+    // Structure push → Space + room. The retained channel must NOT project.
+    deliver(
+        &mut bridge,
+        weft_proto::Event::NsMeta {
+            id: ns_id.parse().unwrap(),
+            vanity: "gaming".parse().unwrap(),
+            visibility: weft_proto::Visibility::Public,
+            owner: Some("ada".into()),
+            title: Some("The Lounge".into()),
+            description: None,
+            icon: None,
+            recovery_set: false,
+            recovery_pending: None,
+            categories: Vec::new(),
+            federation: false,
+            welcome: None,
+            origin: None,
+            provider_online: None,
+            authority: None,
+            settings_disabled: Vec::new(),
+            bridges: vec!["matrix".parse().unwrap()],
+        },
+        None,
+        None,
+    )
+    .await;
+    deliver(
+        &mut bridge,
+        weft_proto::Event::ChannelLayout {
+            channel: channel.parse().unwrap(),
+            category: None,
+            position: 0,
+            kind: weft_proto::ChannelKind::Text,
+            vanity: "general".into(),
+            origin: None,
+        },
+        None,
+        None,
+    )
+    .await;
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Policy {
+            channel: channel.parse().unwrap(),
+            policy: weft_proto::RetentionPolicy::Permanent,
+        },
+        None,
+        None,
+    )
+    .await;
+
+    // A retained channel in the same namespace: absent by rule (§3).
+    let ephemeral = format!("#{ns_id}/{}", ulid::Ulid::new().to_string().to_lowercase());
+    deliver(
+        &mut bridge,
+        weft_proto::Event::ChannelLayout {
+            channel: ephemeral.parse().unwrap(),
+            category: None,
+            position: 1,
+            kind: weft_proto::ChannelKind::Text,
+            vanity: "fleeting".into(),
+            origin: None,
+        },
+        None,
+        None,
+    )
+    .await;
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Policy {
+            channel: ephemeral.parse().unwrap(),
+            policy: "retained:30d".parse().unwrap(),
+        },
+        None,
+        None,
+    )
+    .await;
+
+    {
+        let recorded = calls.lock().unwrap();
+        let creates: Vec<_> = recorded
+            .iter()
+            .filter(|(what, _, _)| what == "POST createRoom")
+            .collect();
+        assert_eq!(
+            creates.len(),
+            2,
+            "Space + one projectable room: {creates:?}"
+        );
+        assert_eq!(creates[0].2["creation_content"]["type"], "m.space");
+        assert_eq!(creates[0].2["room_alias_name"], format!("weft_{ns_id}"));
+        assert_eq!(creates[0].2["name"], "The Lounge");
+        assert_eq!(creates[1].2["name"], "general");
+        assert!(
+            recorded.iter().any(
+                |(what, _, _)| what.starts_with("PUT state/") && what.contains("m.space.child")
+            ),
+            "the room is linked under the Space"
+        );
+    }
+    let room_id = format!("!weft_{chan_id}:test.example");
+    assert_eq!(
+        bridge
+            .store
+            .state
+            .channel_of_projected_room(&room_id)
+            .map(|(c, _)| c.to_string()),
+        Some(channel.clone())
+    );
+
+    // WEFT → Matrix: ada posts; the stamped ULID registers her puppet.
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Message(Box::new(weft_proto::MessageEvent {
+            target: weft_proto::Target::Channel(channel.parse().unwrap()),
+            sender: "ada@test.example".parse().unwrap(),
+            msgid: format!("test.example/{}", ulid::Ulid::new())
+                .to_lowercase()
+                .parse()
+                .unwrap(),
+            body: "hello matrix".into(),
+            meta: weft_proto::MsgMeta::default(),
+            edited: None,
+            edited_at: None,
+        })),
+        None,
+        Some(ADA_ULID),
+    )
+    .await;
+    {
+        let recorded = calls.lock().unwrap();
+        let (_, query, body) = recorded
+            .iter()
+            .find(|(what, _, _)| what == &format!("PUT send/{room_id}/m.room.message"))
+            .expect("projected outbound send");
+        assert!(query.contains(&format!("weft_{ADA_ULID}")), "{query}");
+        assert_eq!(body["body"], "hello matrix");
+    }
+
+    // Matrix → WEFT: carol posts in the projected room — the injection line
+    // carries @as + label and NO msgid (the home mints).
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.message",
+            "room_id": room_id,
+            "event_id": "$carol1",
+            "sender": "@carol:kde.org",
+            "origin_server_ts": 1_722_000_000_000u64,
+            "content": { "msgtype": "m.text", "body": "hi from matrix" },
+        }))
+        .await;
+    let sent = drain(&mut lines);
+    let inject = sent.iter().find(|l| l.contains("MSG")).expect("injection");
+    assert!(inject.contains("as=carol@kde.org"), "{inject}");
+    assert!(inject.contains("label=inj-"), "{inject}");
+    assert!(!inject.contains("msgid="), "the home mints: {inject}");
+    let label = inject
+        .split("label=")
+        .nth(1)
+        .unwrap()
+        .split([';', ' '])
+        .next()
+        .unwrap()
+        .to_string();
+
+    // The labeled echo returns with the minted id → linked, never re-relayed.
+    let minted = format!("test.example/{}", ulid::Ulid::new()).to_lowercase();
+    let sends_before = calls.lock().unwrap().len();
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Message(Box::new(weft_proto::MessageEvent {
+            target: weft_proto::Target::Channel(channel.parse().unwrap()),
+            sender: "carol@kde.org".parse().unwrap(),
+            msgid: minted.parse().unwrap(),
+            body: "hi from matrix".into(),
+            meta: weft_proto::MsgMeta::default(),
+            edited: None,
+            edited_at: None,
+        })),
+        Some(&label),
+        None,
+    )
+    .await;
+    let canonical = minted.parse::<weft_proto::MsgId>().unwrap().to_string();
+    assert_eq!(
+        bridge.store.state.links.msgid_of("$carol1"),
+        Some(canonical.as_str()),
+        "the echo linked the minted id"
+    );
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        sends_before,
+        "an echo is an ack, not relay fodder"
+    );
+
+    // §8 outbound sense: carol's first projected-room join is the namespace
+    // join statement; leaving her last room is the part.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.member",
+            "room_id": room_id,
+            "event_id": "$j1",
+            "sender": "@carol:kde.org",
+            "state_key": "@carol:kde.org",
+            "origin_server_ts": 1_722_000_000_001u64,
+            "content": { "membership": "join" },
+        }))
+        .await;
+    let sent = drain(&mut lines);
+    assert!(
+        sent.iter()
+            .any(|l| l.contains("NS-MEMBER") && l.contains("carol@kde.org join")),
+        "{sent:?}"
+    );
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.member",
+            "room_id": room_id,
+            "event_id": "$l1",
+            "sender": "@carol:kde.org",
+            "state_key": "@carol:kde.org",
+            "origin_server_ts": 1_722_000_000_002u64,
+            "content": { "membership": "leave" },
+        }))
+        .await;
+    let sent = drain(&mut lines);
+    assert!(
+        sent.iter()
+            .any(|l| l.contains("NS-MEMBER") && l.contains("carol@kde.org part")),
+        "{sent:?}"
+    );
 }

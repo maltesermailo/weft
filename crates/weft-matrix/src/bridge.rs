@@ -31,6 +31,21 @@ pub struct Bridge {
     pub domain: String,
     pub puppet_prefix: String,
     pub bot_localpart: String,
+    /// Projected structure buffered between `CHANNEL-LAYOUT` and its `POLICY`
+    /// (the §3 rules need the policy, which travels as a separate event).
+    pub pending_layouts: std::collections::HashMap<String, PendingLayout>,
+    /// Injections awaiting their labeled echo (§3.5): label → the Matrix
+    /// event + room the minted id must link back to.
+    pub pending_injections: std::collections::HashMap<String, (String, String)>,
+    /// Injection labels, minted locally and meaningless beyond correlation.
+    pub injection_seq: u64,
+}
+
+/// A projected channel's layout, waiting for its retention policy.
+pub struct PendingLayout {
+    pub vanity: String,
+    pub kind: weft_proto::ChannelKind,
+    pub position: i64,
 }
 
 impl Bridge {
@@ -63,32 +78,71 @@ impl Bridge {
     // ---- weftd → us -------------------------------------------------------
 
     pub async fn on_incoming(&mut self, inc: Incoming) {
-        match inc {
-            Incoming::Event(Event::Provision { uri, job }) => {
+        let Incoming::Command {
+            as_user,
+            as_ulid,
+            command,
+        } = inc
+        else {
+            let Incoming::Event {
+                event,
+                label,
+                actor_ulid,
+            } = inc
+            else {
+                unreachable!("Incoming has two variants");
+            };
+            self.on_weftd_event(event, label, actor_ulid).await;
+            return;
+        };
+
+        self.on_weftd_request(as_user, as_ulid, command).await;
+    }
+
+    async fn on_weftd_event(
+        &mut self,
+        event: Event,
+        label: Option<String>,
+        actor_ulid: Option<String>,
+    ) {
+        match event {
+            Event::Provision { uri, job } => {
                 let ok = self.provision(&uri.to_string()).await.unwrap_or_else(|e| {
                     warn!(%uri, "provisioning failed: {e:#}");
                     false
                 });
                 let _ = self.realm.provisioned(&job, ok).await;
             }
-            Incoming::Event(bridging @ Event::Bridging { .. }) => {
+            bridging @ Event::Bridging { .. } => {
                 // The row is the enforcement: weftd never re-sends a ban.
                 if let Some((ns, banned)) = self.store.apply_bridging(&bridging).await {
                     info!(ns, banned, "bridging instruction from the operator");
                 }
             }
-            Incoming::Event(Event::Message(m)) => {
-                if let Err(e) = self.relay_message(&m).await {
+            Event::Message(m) => {
+                // A labeled echo of our own projected injection: the home
+                // minted it, the label correlates, the msgid links (§3.5).
+                if let Some(label) = label {
+                    if self.link_injection_echo(&label, &m.msgid.to_string()).await {
+                        return;
+                    }
+                }
+                if let Err(e) = self.relay_message(&m, actor_ulid.as_deref()).await {
                     warn!(msgid = %m.msgid, "relay to Matrix failed: {e:#}");
                 }
             }
-            Incoming::Event(Event::Edited {
+            Event::Edited {
                 user,
                 msgid,
                 edit_of,
                 body,
                 ..
-            }) => {
+            } => {
+                if let Some(label) = label {
+                    if self.link_injection_echo(&label, &msgid.to_string()).await {
+                        return;
+                    }
+                }
                 if let Err(e) = self
                     .relay_edit(
                         &user.to_string(),
@@ -101,19 +155,19 @@ impl Bridge {
                     warn!(%edit_of, "edit relay to Matrix failed: {e:#}");
                 }
             }
-            Incoming::Event(Event::Deleted { msgid, by, .. }) => {
+            Event::Deleted { msgid, by, .. } => {
                 let by = by.map(|u| u.to_string());
                 if let Err(e) = self.relay_delete(by.as_deref(), &msgid.to_string()).await {
                     warn!(%msgid, "delete relay to Matrix failed: {e:#}");
                 }
             }
-            Incoming::Event(Event::Reaction {
+            Event::Reaction {
                 msgid,
                 emoji,
                 op,
                 by,
                 ..
-            }) => {
+            } => {
                 let add = op == weft_proto::ReactionOp::Add;
                 if let Err(e) = self
                     .relay_reaction(&by.to_string(), &msgid.to_string(), &emoji, add)
@@ -122,17 +176,55 @@ impl Bridge {
                     warn!(%msgid, "reaction relay to Matrix failed: {e:#}");
                 }
             }
-            // Structure acks: weftd pinning the ids we minted. Nothing to do.
-            Incoming::Event(Event::NsMeta { .. } | Event::ChannelLayout { .. }) => {}
-            Incoming::Event(other) => debug!(?other, "unhandled weftd event"),
-
-            Incoming::Command {
-                as_user,
-                as_ulid,
-                command,
-            } => {
-                self.on_weftd_request(as_user, as_ulid, command).await;
+            // Outbound projection: weftd describes a projected native
+            // namespace (bridges= set, no origin) — mirror it as a Space.
+            Event::NsMeta {
+                id,
+                vanity,
+                title,
+                bridges,
+                origin: None,
+                ..
+            } if bridges.iter().any(|b| b.as_str() == "matrix") => {
+                if let Err(e) = self
+                    .ensure_projection(&id.to_string(), &vanity.to_string(), title.as_deref())
+                    .await
+                {
+                    warn!(ns = %id, "projecting the Space failed: {e:#}");
+                }
             }
+            Event::ChannelLayout {
+                channel,
+                vanity,
+                kind,
+                position,
+                origin: None,
+                ..
+            } => {
+                // Buffered until its POLICY arrives — the §3 projection rules
+                // need the retention policy, which travels separately.
+                self.pending_layouts.insert(
+                    channel.to_string(),
+                    PendingLayout {
+                        vanity,
+                        kind,
+                        position,
+                    },
+                );
+            }
+            Event::Policy { channel, policy } => {
+                if let Some(layout) = self.pending_layouts.remove(&channel.to_string()) {
+                    if let Err(e) = self
+                        .ensure_projected_room(&channel.to_string(), layout, policy)
+                        .await
+                    {
+                        warn!(%channel, "projecting the room failed: {e:#}");
+                    }
+                }
+            }
+            // Structure acks for replicas we asserted ourselves: nothing to do.
+            Event::NsMeta { .. } | Event::ChannelLayout { .. } => {}
+            other => debug!(?other, "unhandled weftd event"),
         }
     }
 
@@ -413,6 +505,19 @@ impl Bridge {
             return;
         };
 
+        // A projected room takes the injection path — the home mints there,
+        // so it is a different wire shape from replica ingestion.
+        if let Some((channel, ns_id)) = self
+            .store
+            .state
+            .channel_of_projected_room(&room_id)
+            .map(|(c, n)| (c.to_string(), n.to_string()))
+        {
+            self.on_projected_matrix_event(&ev, &room_id, &channel, &ns_id, &weft_sender)
+                .await;
+            return;
+        }
+
         let Some((room, space)) = self.store.state.channel_of_room(&room_id) else {
             return; // an unmapped room (the space room itself, or noise)
         };
@@ -551,6 +656,166 @@ impl Bridge {
         }
     }
 
+    /// A Matrix user's event in a **projected** room: the injection path.
+    /// The home mints, so a post carries no msgid — only a label whose echo
+    /// links the minted id back (§3.5); mutations name home-minted roots.
+    async fn on_projected_matrix_event(
+        &mut self,
+        ev: &Value,
+        room_id: &str,
+        channel: &str,
+        ns_id: &str,
+        weft_sender: &str,
+    ) {
+        if self.store.state.bans.is_banned(ns_id) {
+            return;
+        }
+        let event_id = ev["event_id"].as_str().unwrap_or_default().to_string();
+
+        match ev["type"].as_str().unwrap_or_default() {
+            "m.room.message" => {
+                let content = &ev["content"];
+
+                let relates = &content["m.relates_to"];
+                if relates["rel_type"] == "m.replace" {
+                    let Some(root) = relates["event_id"]
+                        .as_str()
+                        .and_then(|id| self.store.state.links.msgid_of(id))
+                        .map(String::from)
+                    else {
+                        return;
+                    };
+                    let Some(body) = content["m.new_content"]["body"].as_str() else {
+                        return;
+                    };
+                    let Ok(root) = root.parse() else { return };
+
+                    let label = self.mint_injection_label(&event_id, room_id);
+                    if let Err(e) = self
+                        .realm
+                        .inject_edit(weft_sender, &root, body, &label)
+                        .await
+                    {
+                        warn!(event_id, "projected edit injection failed: {e:#}");
+                        self.pending_injections.remove(&label);
+                    }
+                    return;
+                }
+
+                let Some(body) = content["body"].as_str() else {
+                    return;
+                };
+                let label = self.mint_injection_label(&event_id, room_id);
+                if let Err(e) = self
+                    .realm
+                    .inject_message(weft_sender, channel, body, &label)
+                    .await
+                {
+                    warn!(event_id, "projected injection failed: {e:#}");
+                    self.pending_injections.remove(&label);
+                }
+            }
+            // Reactions and redactions carry no minted id anywhere, so the
+            // replica helpers apply verbatim — the roots are home-minted and
+            // resolved through the same links.
+            "m.reaction" => {
+                let relates = &ev["content"]["m.relates_to"];
+                if relates["rel_type"] != "m.annotation" {
+                    return;
+                }
+                let (Some(root), Some(key)) = (
+                    relates["event_id"]
+                        .as_str()
+                        .and_then(|id| self.store.state.links.msgid_of(id))
+                        .map(String::from),
+                    relates["key"].as_str(),
+                ) else {
+                    return;
+                };
+                let Ok(root_id) = root.parse() else { return };
+
+                if let Err(e) = self.realm.react(weft_sender, &root_id, key, true).await {
+                    warn!(event_id, "projected reaction failed: {e:#}");
+                    return;
+                }
+                self.store
+                    .reaction_add(
+                        &event_id,
+                        crate::store::Reaction {
+                            root,
+                            key: key.to_string(),
+                            by: weft_sender.to_string(),
+                        },
+                    )
+                    .await;
+            }
+            "m.room.redaction" => {
+                let Some(redacts) = ev["redacts"]
+                    .as_str()
+                    .or_else(|| ev["content"]["redacts"].as_str())
+                    .map(String::from)
+                else {
+                    return;
+                };
+
+                if let Some(r) = self.store.reaction_take(&redacts).await {
+                    let Ok(root) = r.root.parse() else { return };
+                    if let Err(e) = self.realm.react(&r.by, &root, &r.key, false).await {
+                        warn!(event_id, "projected unreact failed: {e:#}");
+                    }
+                    return;
+                }
+
+                let Some(root) = self.store.state.links.msgid_of(&redacts).map(String::from) else {
+                    return;
+                };
+                let Ok(root) = root.parse() else { return };
+                if let Err(e) = self.realm.delete(weft_sender, &root).await {
+                    warn!(event_id, "projected delete failed: {e:#}");
+                }
+            }
+            "m.room.member" => {
+                let Some(subject) = ev["state_key"].as_str() else {
+                    return;
+                };
+                let Some(subject) = self.foreign_user(subject) else {
+                    return;
+                };
+                let joined = ev["content"]["membership"] == "join";
+
+                let Some(projection) = self.store.state.projections.get_mut(ns_id) else {
+                    return;
+                };
+                let action = if joined {
+                    projection.member_joined(&subject, room_id)
+                } else {
+                    projection.member_left(&subject, room_id)
+                };
+
+                // First projected-room join IS the namespace join (§8, run in
+                // the outbound sense); weftd accepts the statement because the
+                // namespace is flagged for our scheme.
+                if let Some(action) = action {
+                    if let Err(e) = self.realm.member(ns_id, &subject, action).await {
+                        warn!(subject, "projected membership statement failed: {e:#}");
+                    }
+                }
+            }
+            other => debug!(other, "unbridged Matrix event type (projected room)"),
+        }
+    }
+
+    /// A fresh injection label, parked with what its echo must link.
+    fn mint_injection_label(&mut self, event_id: &str, room_id: &str) -> String {
+        self.injection_seq += 1;
+        let label = format!("inj-{}", self.injection_seq);
+
+        self.pending_injections
+            .insert(label.clone(), (event_id.to_string(), room_id.to_string()));
+
+        label
+    }
+
     /// §8 membership mapping: [`Space::member_joined`]/[`Space::member_left`]
     /// decide whether this room op is a namespace transition; only a
     /// transition is stated.
@@ -584,26 +849,49 @@ impl Bridge {
 
     // ---- WEFT → Matrix (relayed local events) -------------------------------
 
-    async fn relay_message(&mut self, m: &weft_proto::MessageEvent) -> anyhow::Result<()> {
+    async fn relay_message(
+        &mut self,
+        m: &weft_proto::MessageEvent,
+        actor_ulid: Option<&str>,
+    ) -> anyhow::Result<()> {
         let weft_proto::Target::Channel(channel) = &m.target else {
             return Ok(()); // DMs are v2
         };
-        let Some((room_id, space)) = self.store.state.room_of_channel(&channel.to_string()) else {
+
+        // A foreign-sender event on our session originated on the Matrix side
+        // (only we can put foreign senders there) — relaying it back would
+        // echo every bridged message into its own room.
+        if m.sender.network.as_str() != self.realm.network() {
             return Ok(());
-        };
-        let (room_id, ns_id) = (room_id.to_string(), space.ns_id.clone());
+        }
+
+        // Consumed replica or outbound projection — one relay, two maps.
+        let channel = channel.to_string();
+        let (room_id, ns_id) =
+            if let Some((room, space)) = self.store.state.room_of_channel(&channel) {
+                (room.to_string(), space.ns_id.clone())
+            } else if let Some((ns, room)) = self.store.state.projected_room_of_channel(&channel) {
+                (room.to_string(), ns.to_string())
+            } else {
+                return Ok(());
+            };
 
         if self.store.state.bans.is_banned(&ns_id) {
             return Ok(());
         }
 
         let account = m.sender.account.to_string();
-        let Some(puppet) = self.puppet_of_account(&account) else {
-            warn!(
-                account,
-                "no puppet — user never reached this bridge via a membership relay"
-            );
-            return Ok(());
+        // The stamped ULID registers the puppet on first sight; the name index
+        // covers events that predate the stamp.
+        let puppet = match actor_ulid {
+            Some(ulid) => self.ensure_puppet(ulid, &account).await?,
+            None => match self.puppet_of_account(&account) {
+                Some(puppet) => puppet,
+                None => {
+                    warn!(account, "no puppet and no ulid= on the event — skipped");
+                    return Ok(());
+                }
+            },
         };
         let event_id = self
             .hs
@@ -900,6 +1188,126 @@ impl Bridge {
 
         let root_id = root.parse()?;
         self.realm.delete(user, &root_id).await
+    }
+
+    // ---- outbound projection (matrix.md §3–§9, the daemon half) ------------
+
+    /// Mirror a projected WEFT namespace as a Matrix Space. Idempotent: an
+    /// existing projection only refreshes the display name (vanity is mutable).
+    /// The alias is ULID-keyed (`#weft_<ns-id>`) for the same reason puppets
+    /// are — renames must not orphan it.
+    async fn ensure_projection(
+        &mut self,
+        ns_id: &str,
+        vanity: &str,
+        title: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let name = title.unwrap_or(vanity);
+
+        if let Some(p) = self.store.state.projections.get(ns_id) {
+            let room = p.space_room.clone();
+            self.hs
+                .put_state(&room, "m.room.name", "", json!({ "name": name }))
+                .await?;
+            return Ok(());
+        }
+
+        let space_room = self
+            .hs
+            .create_room(json!({
+                "creation_content": { "type": "m.space" },
+                "name": name,
+                "room_alias_name": format!("weft_{ns_id}"),
+                "preset": "public_chat",
+                // §9: the bot rules the room; nobody else touches state.
+                "power_level_content_override": { "users_default": 0, "state_default": 100 },
+            }))
+            .await?;
+
+        self.store.save_projection(ns_id, &space_room).await;
+        info!(ns_id, space_room, "projected namespace as a Space");
+        Ok(())
+    }
+
+    /// Mirror one projected channel as a room under its Space — iff the §3
+    /// rules hold: `permanent` retention only, never e2ee, never voice. A
+    /// channel failing them is simply absent, not an error.
+    async fn ensure_projected_room(
+        &mut self,
+        channel: &str,
+        layout: PendingLayout,
+        policy: weft_proto::RetentionPolicy,
+    ) -> anyhow::Result<()> {
+        let Some(ns_id) = channel
+            .strip_prefix('#')
+            .and_then(|c| c.split_once('/'))
+            .map(|(ns, _)| ns.to_string())
+        else {
+            return Ok(()); // top-level channels are not projectable
+        };
+        let Some(projection) = self.store.state.projections.get(&ns_id) else {
+            return Ok(()); // POLICY for a namespace we don't project
+        };
+
+        // §3 projection rules (locked decisions 2 + 7 + voice-out-of-v1).
+        if policy != weft_proto::RetentionPolicy::Permanent
+            || layout.kind == weft_proto::ChannelKind::Voice
+        {
+            debug!(channel, ?policy, "not projectable — absent by rule");
+            return Ok(());
+        }
+
+        if projection.rooms.contains_key(channel) {
+            return Ok(()); // already projected; renames ride m.room.name later
+        }
+        let space_room = projection.space_room.clone();
+
+        let chan_id = channel.rsplit('/').next().unwrap_or_default().to_string();
+        let room_id = self
+            .hs
+            .create_room(json!({
+                "name": layout.vanity,
+                "room_alias_name": format!("weft_{chan_id}"),
+                "preset": "public_chat",
+                "power_level_content_override": { "users_default": 0, "state_default": 100 },
+            }))
+            .await?;
+
+        // Space ↔ room links, ordered by the WEFT position (§6).
+        self.hs
+            .put_state(
+                &space_room,
+                "m.space.child",
+                &room_id,
+                json!({ "via": [self.domain], "order": format!("{:010}", layout.position) }),
+            )
+            .await?;
+        self.hs
+            .put_state(
+                &room_id,
+                "m.space.parent",
+                &space_room,
+                json!({ "via": [self.domain], "canonical": true }),
+            )
+            .await?;
+
+        self.store
+            .save_projected_room(&ns_id, channel, &room_id)
+            .await;
+        info!(channel, room_id, "projected channel as a room");
+        Ok(())
+    }
+
+    /// A labeled event on our session that answers a pending injection: link
+    /// the home-minted id to the Matrix event it came from. Returns whether
+    /// the label was ours — if so the event is the ack, never relay fodder.
+    async fn link_injection_echo(&mut self, label: &str, msgid: &str) -> bool {
+        let Some((event_id, room_id)) = self.pending_injections.remove(label) else {
+            return false;
+        };
+
+        self.store.link(&event_id, msgid, &room_id).await;
+        true
     }
 
     /// The puppet MXID for one of our users, **keyed by account ULID** (owner

@@ -460,6 +460,7 @@ impl<S: ControlStream> Session<S> {
         if !schemes.is_empty() {
             self.push_provider_state(&schemes).await;
             self.sync_provider_forwarders(&schemes).await;
+            self.push_projected_structure(&schemes).await?;
         }
         Ok(Flow::Continue)
     }
@@ -491,7 +492,9 @@ impl<S: ControlStream> Session<S> {
         info!(%plugin_id, %scheme, "provider registered scheme");
         self.push_provider_state(std::slice::from_ref(&scheme))
             .await;
-        self.sync_provider_forwarders(&[scheme]).await;
+        self.sync_provider_forwarders(std::slice::from_ref(&scheme))
+            .await;
+        self.push_projected_structure(&[scheme]).await?;
         Ok(Flow::Continue)
     }
 
@@ -602,6 +605,8 @@ impl<S: ControlStream> Session<S> {
             // which native settings surfaces to hide.
             authority: profile.authority.map(|a| a.to_string()),
             settings_disabled: profile.settings_disabled,
+            // A replica cannot itself be projected (it IS a projection).
+            bridges: Vec::new(),
             name: base.parse().expect("sanitized vanity is a valid name"),
             owner,
             root_key: String::new(), // never transferable/recoverable locally
@@ -896,20 +901,42 @@ impl<S: ControlStream> Session<S> {
             Ok(None) => return Ok(Flow::Continue),
             Err(e) => return self.internal(None, &e).await,
         };
-        let Some(uri) = record
+        match record
             .origin
             .as_deref()
             .and_then(|o| o.parse::<ForeignUri>().ok())
-        else {
-            debug!(%ns, "NS-MEMBER for a native namespace — refused");
-            return self
-                .unsupported(None, "not a provider-managed namespace")
-                .await;
-        };
-        if !self.ctx.scheme_authorized(key, uri.scheme()) {
-            return self
-                .unsupported(None, "provider key not pinned for that scheme")
-                .await;
+        {
+            // A replica: the realm is the membership authority outright (§6).
+            Some(uri) => {
+                if !self.ctx.scheme_authorized(key, uri.scheme()) {
+                    return self
+                        .unsupported(None, "provider key not pinned for that scheme")
+                        .await;
+                }
+            }
+            // Native: only a **projected** namespace accepts statements, and
+            // only for **foreign** members — the §8 mapping of Matrix users
+            // joining the projected rooms. Local users join natively; a
+            // provider stating a local membership here would be forging an
+            // action weftd itself owns.
+            None => {
+                let projected = record.bridges.iter().any(|b| {
+                    b.parse::<Scheme>()
+                        .is_ok_and(|b| self.ctx.scheme_authorized(key, &b))
+                });
+
+                if !projected {
+                    debug!(%ns, "NS-MEMBER for an unprojected native namespace — refused");
+                    return self
+                        .unsupported(None, "not a provider-managed namespace")
+                        .await;
+                }
+                if user.network == self.ctx.info.network {
+                    return self
+                        .unsupported(None, "locals join natively — statement refused")
+                        .await;
+                }
+            }
         }
 
         // Our own users are keyed by their bare account, a foreign member by the
@@ -1156,9 +1183,10 @@ impl<S: ControlStream> Session<S> {
             .as_deref()
             .and_then(|o| o.parse::<ForeignUri>().ok());
         let Some(origin) = origin else {
-            debug!(%channel, "provider ingest into a native channel — refused");
+            // Not a replica: a **native** channel accepts foreign traffic only
+            // through the outbound-projection door (matrix.md §17.1).
             return self
-                .unsupported(None, "not a provider-managed channel")
+                .on_projected_ingest(key, sender, cmd, line, channel, record)
                 .await;
         };
         if !self.ctx.scheme_authorized(key, origin.scheme()) {
@@ -1252,6 +1280,143 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    /// Outbound projection, the return path (owner decision 2026-08-06): a
+    /// foreign user's traffic entering a **native** channel whose namespace
+    /// opted in via `bridge:<scheme>` — the flag is the authorization anchor.
+    ///
+    /// The differences from replica ingestion are the point:
+    /// - **The home mints.** A carried `@msgid` is refused outright — a
+    ///   foreign-minted id on a native channel would break home authority
+    ///   (invariant 2 read in this direction).
+    /// - **No local `@as` at all.** Local users act natively here; there is no
+    ///   relay to confirm, so a local sender is always a forgery.
+    /// - **The ack is the echo** (§3.5): the minted event returns on this same
+    ///   session carrying the injection's label (`on_provider_event`), which is
+    ///   how the adapter learns the minted id.
+    async fn on_projected_ingest(
+        &mut self,
+        key: &PublicKey,
+        sender: UserRef,
+        cmd: Command,
+        line: &Line,
+        channel: ChannelName,
+        _record: weft_store::ChannelRecord,
+    ) -> io::Result<Flow> {
+        // The namespace rides the canonical channel name (`#<ns-id>/<chan-id>`);
+        // a top-level network channel has none and is never projectable.
+        let Some(ns_id) = channel.namespace().map(str::to_string) else {
+            return self
+                .unsupported(None, "not a provider-managed channel")
+                .await;
+        };
+        let ns = match self.ctx.namespaces.namespace_by_id(&ns_id).await {
+            Ok(Some(ns)) => ns,
+            _ => {
+                debug!(%channel, "projected ingest for a channel with no namespace — dropped");
+                return Ok(Flow::Continue);
+            }
+        };
+
+        let projected = ns.bridges.iter().any(|b| {
+            b.parse::<Scheme>()
+                .is_ok_and(|b| self.ctx.scheme_authorized(key, &b))
+        });
+        if !projected {
+            return self
+                .unsupported(None, "not a provider-managed channel")
+                .await;
+        }
+
+        if sender.network == self.ctx.info.network {
+            return self
+                .unsupported(None, "@as cannot name a local account")
+                .await;
+        }
+        if let Ok(Some(_)) = self.ctx.peers.peer(&sender.network).await {
+            return self
+                .unsupported(None, "@as cannot name a peer network's user")
+                .await;
+        }
+        if self
+            .ctx
+            .netblocks
+            .is_netblocked(&sender.network)
+            .await
+            .unwrap_or(false)
+        {
+            debug!(network = %sender.network, "projected ingest from a netblocked network — dropped");
+            return Ok(Flow::Continue);
+        }
+
+        if line.tags.contains_key("msgid") {
+            return self.unsupported(None, "the home mints — drop @msgid").await;
+        }
+
+        let Some(handle) = self.ctx.registry.get(&channel) else {
+            debug!(%channel, "projected ingest for a channel with no live actor — dropped");
+            return Ok(Flow::Continue);
+        };
+
+        match cmd {
+            Command::Msg { body, meta, .. } => {
+                // The echo returns to this session keyed on its bound realm —
+                // the injection's label rides it back as the ack (§3.5).
+                let echo = match (&self.state, line.tags.get("label")) {
+                    (
+                        State::PluginService {
+                            realm: Some(realm), ..
+                        },
+                        Some(label),
+                    ) => realm.realm().parse().ok().map(|net| (label.clone(), net)),
+                    _ => None,
+                };
+
+                handle
+                    .relay_publish(sender, body.unwrap_or_default(), meta, echo)
+                    .await;
+            }
+            Command::Edit { msgid, body } => {
+                // §11.4 authored-by, exactly as the home re-checks a spoke's
+                // relay: EDIT requires the sender to own the target.
+                match self.ctx.events.find_root(msgid.ulid()).await {
+                    Ok(Some(target)) if target.sender == sender => {}
+                    Ok(_) => return Ok(Flow::Continue),
+                    Err(e) => return self.internal(None, &e).await,
+                }
+                handle
+                    .relay_mutate(sender, msgid, "edit".into(), body)
+                    .await;
+            }
+            Command::Delete { msgid } => {
+                match self.ctx.events.find_root(msgid.ulid()).await {
+                    Ok(Some(target)) if target.sender == sender => {}
+                    // Foreign moderator deletes ride slice 11's authority
+                    // mapping; until then a non-author delete drops silently.
+                    Ok(_) => return Ok(Flow::Continue),
+                    Err(e) => return self.internal(None, &e).await,
+                }
+                handle
+                    .relay_mutate(sender, msgid, "delete".into(), String::new())
+                    .await;
+            }
+            Command::React { msgid, emoji } => {
+                handle
+                    .relay_mutate(sender, msgid, "react-add".into(), emoji)
+                    .await;
+            }
+            Command::Unreact { msgid, emoji } => {
+                handle
+                    .relay_mutate(sender, msgid, "react-remove".into(), emoji)
+                    .await;
+            }
+            _ => {
+                debug!("unsupported projected-ingest verb — dropped");
+            }
+        }
+
+        Ok(Flow::Continue)
+    }
+
     /// The channel a stored msgid belongs to — the mutation verbs name their
     /// target by msgid, not channel (slice 4).
     async fn channel_of_msgid(&self, msgid: &MsgId) -> Option<ChannelName> {
@@ -1322,19 +1487,100 @@ impl<S: ControlStream> Session<S> {
     /// is forwarded to the provider to puppet into the foreign system
     /// (framework §3.2). Idempotent; called whenever the provider's scheme set
     /// grows (`PLUGIN-REGISTER` / `REALM REGISTER` / `REALM ASSERT`).
-    pub(super) async fn sync_provider_forwarders(&mut self, schemes: &[Scheme]) {
-        let Ok(namespaces) = self.ctx.namespaces.namespaces_with_origin().await else {
-            return;
-        };
+    /// Outbound projection: describe every projected namespace serving these
+    /// schemes to the provider — `NS-META` (carrying `bridges=`), then each
+    /// channel's `CHANNEL-LAYOUT` + `POLICY`. The same events the provider
+    /// itself speaks inbound for a replica, with the roles swapped: here weftd
+    /// holds the structure and the adapter conforms (it needs the policy to
+    /// apply the projection rules — `permanent`-only, no e2ee, no voice).
+    ///
+    /// Runs at registration/`REALM ASSERT`, like the forwarder sweep — a flag
+    /// flipped mid-session is picked up on reconnect (§10's recovery story).
+    pub(super) async fn push_projected_structure(&mut self, schemes: &[Scheme]) -> io::Result<()> {
+        let namespaces = self
+            .ctx
+            .namespaces
+            .namespaces_bridged()
+            .await
+            .unwrap_or_default();
 
         for record in namespaces {
             let serves = record
+                .bridges
+                .iter()
+                .any(|b| b.parse::<Scheme>().is_ok_and(|b| schemes.contains(&b)));
+            if !serves {
+                continue;
+            }
+
+            self.send_event(None, self.ns_meta_event(&record)).await?;
+
+            let Ok(channels) = self
+                .ctx
+                .channel_store
+                .channels_in_namespace(&record.id)
+                .await
+            else {
+                continue;
+            };
+
+            for (channel, chan) in channels {
+                self.send_event(
+                    None,
+                    Event::ChannelLayout {
+                        channel: channel.clone(),
+                        category: chan.category.clone(),
+                        position: chan.position,
+                        kind: chan.kind,
+                        vanity: chan.vanity.clone(),
+                        origin: None,
+                    },
+                )
+                .await?;
+                self.send_event(
+                    None,
+                    Event::Policy {
+                        channel,
+                        policy: chan.policy,
+                    },
+                )
+                .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(super) async fn sync_provider_forwarders(&mut self, schemes: &[Scheme]) {
+        // Two families feed a provider: the replicas of its own realms, and —
+        // outbound projection (matrix.md §17.1) — native namespaces whose
+        // `bridge:<scheme>` opt-in names one of its schemes.
+        let mut namespaces = self
+            .ctx
+            .namespaces
+            .namespaces_with_origin()
+            .await
+            .unwrap_or_default();
+        namespaces.extend(
+            self.ctx
+                .namespaces
+                .namespaces_bridged()
+                .await
+                .unwrap_or_default(),
+        );
+
+        for record in namespaces {
+            let replica = record
                 .origin
                 .as_deref()
                 .and_then(|o| o.parse::<ForeignUri>().ok())
                 .is_some_and(|uri| schemes.contains(uri.scheme()));
+            let projected = record
+                .bridges
+                .iter()
+                .any(|b| b.parse::<Scheme>().is_ok_and(|b| schemes.contains(&b)));
 
-            if !serves {
+            if !replica && !projected {
                 continue;
             }
 
@@ -1395,12 +1641,72 @@ impl<S: ControlStream> Session<S> {
         };
 
         if forward {
-            if let Ok(line) = Reply::new(event.event).serialize() {
-                self.stream.send_line(&line).await?;
+            // §3.5 on the projection path: an event minted from this session's
+            // own injection carries the injection's label back — the sender's
+            // echo is the ack, and it is how the daemon learns the minted id.
+            // Keyed on the bound realm, exactly like the peer forwarder (§11.14).
+            let label = match (&event.echo, &self.state) {
+                (
+                    Some((l, net)),
+                    State::PluginService {
+                        realm: Some(realm), ..
+                    },
+                ) if net.as_str() == realm.realm() => Some(l.clone()),
+                _ => None,
+            };
+
+            // The acting **local** user's ULID rides as `ulid=` (owner
+            // directive 2026-08-06) — the adapter keys puppets by it, and
+            // names are mutable vanity labels. Cached per session: one store
+            // hit per distinct author, not per message.
+            let actor = match &event.event {
+                Event::Message(m) => Some(&m.sender),
+                Event::Edited { user, .. } => Some(user),
+                Event::Reaction { by, .. } => Some(by),
+                Event::Deleted { by: Some(by), .. } => Some(by),
+                Event::Member { user, .. } => Some(user),
+                _ => None,
+            };
+            let ulid = match actor {
+                Some(user) if user.network == self.ctx.info.network => {
+                    self.cached_account_ulid(&user.account).await
+                }
+                _ => None,
+            };
+
+            if let Ok(mut line) = Reply::new(event.event).to_line() {
+                if let Some(l) = label {
+                    line.tags.insert("label".to_string(), l);
+                }
+                if let Some(ulid) = ulid {
+                    line.tags.insert("ulid".to_string(), ulid);
+                }
+                if let Ok(serialized) = line.serialize() {
+                    self.stream.send_line(&serialized).await?;
+                }
             }
         }
 
         Ok(())
+    }
+
+    /// [`Self::on_provider_event`]'s ULID lookup, memoized for the session —
+    /// authors repeat, and the map only ever holds this provider's audience.
+    async fn cached_account_ulid(&mut self, account: &Account) -> Option<String> {
+        if let Some(hit) = self.provider_ulids.get(account) {
+            return Some(hit.clone());
+        }
+
+        let ulid = self
+            .ctx
+            .accounts
+            .account_ulid(account)
+            .await
+            .ok()
+            .flatten()?;
+        self.provider_ulids.insert(account.clone(), ulid.clone());
+
+        Some(ulid)
     }
 
     /// **Authority, outbound**: a local `GRANT`/`REVOKE` inside a replica
@@ -1838,7 +2144,9 @@ impl<S: ControlStream> Session<S> {
 
         self.push_provider_state(std::slice::from_ref(&scheme))
             .await;
-        self.sync_provider_forwarders(&[scheme]).await;
+        self.sync_provider_forwarders(std::slice::from_ref(&scheme))
+            .await;
+        self.push_projected_structure(&[scheme]).await?;
         Ok(Flow::Continue)
     }
 

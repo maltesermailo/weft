@@ -114,6 +114,9 @@ async fn session(
         domain: cfg.matrix.domain.clone(),
         puppet_prefix: cfg.matrix.puppet_prefix.clone(),
         bot_localpart: cfg.matrix.bot.clone(),
+        pending_layouts: Default::default(),
+        pending_injections: Default::default(),
+        injection_seq: 0,
     };
 
     reassert(&mut bridge).await?;

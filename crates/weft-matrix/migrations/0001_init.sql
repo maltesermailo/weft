@@ -56,6 +56,20 @@ CREATE TABLE IF NOT EXISTS matrix_sent_reactions (
     PRIMARY KEY (root, key, sender)
 );
 
+-- Outbound projection: WEFT namespaces mirrored as Matrix Spaces (the inverse
+-- of matrix_spaces, which is consumed *foreign* structure). Keyed by the WEFT
+-- ids weftd pushed — stable where names are vanity.
+CREATE TABLE IF NOT EXISTS matrix_projections (
+    ns_id      TEXT PRIMARY KEY,
+    space_room TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS matrix_projected_rooms (
+    channel TEXT PRIMARY KEY,
+    ns_id   TEXT NOT NULL,
+    room_id TEXT NOT NULL
+);
+
 -- Per-space bridging bans (bridge-session-protocol §11): weftd tells us once
 -- and keeps no record, so this table IS the enforcement across restarts.
 CREATE TABLE IF NOT EXISTS matrix_bans (

@@ -68,7 +68,17 @@ pub use realm::{ChannelAssertion, NamespaceAssertion, Realm};
 /// exactly what the first cut of this SDK got wrong.
 #[derive(Debug)]
 pub enum Incoming {
-    Event(Event),
+    Event {
+        event: Event,
+        /// The line's `label=` — on the projection path this is the echo-ack
+        /// correlation: an injected line's label returns on the minted event
+        /// (§3.5), which is how an adapter learns the home-minted id.
+        label: Option<String>,
+        /// The acting **local** user's account ULID (`ulid=` tag), when the
+        /// event has one — the stable identity to key puppets by (names are
+        /// mutable vanity labels). Absent on foreign-actor and system events.
+        actor_ulid: Option<String>,
+    },
     Command {
         /// The `@as` attribution — the local user on whose behalf weftd asks.
         as_user: Option<String>,
@@ -307,7 +317,12 @@ impl AppServiceBuilder {
                             // (`SYNC END` is also a lenient `Command::Sync`),
                             // and the event reading is the meaningful one.
                             if let Ok(reply) = Reply::from_line(&line) {
-                                let _ = events_tx.try_send(Incoming::Event(reply.event));
+                                let actor_ulid = line.tags.get("ulid").cloned();
+                                let _ = events_tx.try_send(Incoming::Event {
+                                    event: reply.event,
+                                    label: reply.label,
+                                    actor_ulid,
+                                });
                             } else if let Ok(req) = Request::from_line(&line) {
                                 let as_user = line.tags.get("as").cloned();
                                 let as_ulid = line.tags.get("ulid").cloned();

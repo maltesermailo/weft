@@ -273,6 +273,10 @@ pub struct NamespaceRecord {
     /// namespace is auto-federation-reachable — a `BRIDGE REQUEST` for it is
     /// answered with a signed manifest. Default `false` (closed).
     pub federation: bool,
+    /// Outbound-projection opt-ins (matrix.md §17.1): schemes this native
+    /// namespace is mirrored into. Also the return-path authorization anchor —
+    /// see migration 0055. Empty = not projected.
+    pub bridges: Vec<String>,
     /// WC7 **full freeze**: a namespace-wide posting lock, one rung above the
     /// per-channel freeze. Every channel in the namespace refuses messages from
     /// everyone but the namespace **owner** and network operators — a delegated

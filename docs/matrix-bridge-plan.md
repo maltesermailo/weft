@@ -478,10 +478,38 @@ implements and the daemon is written against.*
       legal in a Matrix annotation key; `Links` encapsulates the two-map invariant; §8 membership
       transitions live on `Space` with unit tests), and empty Spaces provision as empty namespaces
       (join confirms immediately — nothing foreign-side to fail).
-      **Not in the MVP (deliberate):** outbound projection (WEFT ns → new Matrix Spaces, the other
-      half of slice 10), HISTORY backfill (request logged), media, typing, DMs, multi-realm
-      (one realm per daemon for now), moderation/power-levels (slice 11), puppet display-name sync
-      on rename (the identity survives; the pretty name catches up later).
+      **Outbound projection, weftd half DONE 2026-08-06** (owner decision: flag-keyed provider
+      ingest — the plan's old "pure daemon work" note did not survive the framework, since provider
+      ingestion hard-refused native channels). Shipped: **O1** the §17.1 `bridge:<scheme>` opt-in
+      (`NS META <ns> bridge:matrix :open` — ns-admin, requires `public`, `bridges=` on NS-META,
+      migration 0055 + mem/PG contract, cleared when visibility leaves public); **O2** the return
+      path (`on_projected_ingest`): the flag authorizes the scheme's provider to inject foreign
+      users into the namespace's channels — **the home mints** (`@msgid` refused), the injection's
+      labeled echo is the §3.5 ack (`RelayPublish` echo → `on_provider_event`), EDIT/DELETE
+      authorship-checked, local `@as` always refused; provider forwarders now also cover projected
+      namespaces (attach at register/ASSERT — a mid-session flag flip attaches on reconnect).
+      Tests: `ns_meta_bridge_flag_requires_public_and_closes_with_visibility`,
+      `a_projected_namespace_bridges_both_directions_and_the_home_mints`.
+      **O3–O7 daemon half DONE 2026-08-06.** weftd enablers: structure push at register/ASSERT
+      (NS-META + CHANNEL-LAYOUT + POLICY per projected ns — the adapter needs the policy for the §3
+      rules), `ulid=` stamped on relayed event copies with a local actor (session-memoized lookup;
+      SDK `Incoming::Event { event, label, actor_ulid }`), and NS-MEMBER accepted through the flag
+      door for **foreign** members only (§8 run in the outbound sense; locals refused — they join
+      natively). Daemon: `Projection` state + `matrix_projections`/`matrix_projected_rooms` tables,
+      `ensure_projection`/`ensure_projected_room` (Space + rooms, ULID-keyed aliases `#weft_<id>`,
+      §3 rules enforced — a `retained` channel is absent by rule), unified relay routing (consumed
+      replica OR projection; foreign-sender events never relay back — they originated on Matrix),
+      the injection door (`Realm::inject_message`/`inject_edit` — no msgid, labeled echo links the
+      home-minted id via `pending_injections`), and §8 membership statements from projected-room
+      joins. Tests: the weftd conformance-style core test (structure push, ulid stamp, member door
+      both ways) + the daemon mock-HS end-to-end (Space+room creation, §3 exclusion, both traffic
+      directions, echo-ack linking, membership join/part).
+      **Projection polish remaining:** category sub-spaces (locked decision 4 — flat under the top
+      Space for now), live re-assert on rename/layout change (currently reconnect), room directory
+      publishing, roster mode config.
+      **Not in the MVP (deliberate):** HISTORY backfill (request logged), media, typing, DMs,
+      multi-realm (one realm per daemon for now), moderation/power-levels (slice 11), puppet
+      display-name sync on rename (the identity survives; the pretty name catches up later).
 - [~] **10b. Per-space bridging bans** (owner requirement 2026-08-04) — an admin page where
       **individual foreign spaces** can be banned from bridging, finer-grained than `NETBLOCK` (which
       is name-keyed and takes out a whole realm). Banning `matrix://matrix.org/#abusive-space` must

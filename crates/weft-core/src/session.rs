@@ -434,6 +434,10 @@ struct Session<S> {
     /// peer to backfill, so repeated client scrolls over the same window fetch
     /// the peer only once.
     backfilled: std::collections::HashSet<(ChannelName, Option<String>)>,
+
+    /// Provider sessions: account → ULID, memoizing the `ulid=` stamp on
+    /// forwarded event copies (one store hit per distinct author).
+    pub(crate) provider_ulids: std::collections::HashMap<Account, String>,
     /// Framework §7a.0a, provider sessions: the in-flight **full-replace**
     /// statement opened by `SYNC` — the namespaces it covers, and the
     /// `(namespace, member)` pairs named so far. At `SYNC END` every member of
@@ -501,6 +505,7 @@ impl<S: ControlStream> Session<S> {
             fed_out_rx,
             request_accept: false,
             backfilled: std::collections::HashSet::new(),
+            provider_ulids: std::collections::HashMap::new(),
             ns_replace: None,
             backfill_demand_tx,
             backfill_demand_rx,

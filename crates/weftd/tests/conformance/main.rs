@@ -2614,7 +2614,10 @@ async fn appservice_sdk_bridges_a_space_end_to_end() {
     // barrier that says the space exists before anyone tries to join it.
     let acked = loop {
         match events.recv().await.expect("the session should stay up") {
-            weft_appservice::Incoming::Event(Event::NsMeta { id, .. }) => break id.to_string(),
+            weft_appservice::Incoming::Event {
+                event: Event::NsMeta { id, .. },
+                ..
+            } => break id.to_string(),
             _ => continue,
         }
     };

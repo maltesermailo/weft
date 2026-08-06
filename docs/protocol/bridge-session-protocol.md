@@ -205,6 +205,37 @@ like a local one — being foreign confers nothing.
 Stored in the ordinary DM scope keyed by member keys, preserving the realm's msgid. A bridged
 conversation is a first-class DM, not a second table.
 
+### Outbound projection — the return path into a native channel (2026-08-06)
+
+A **native** namespace whose ns-admin opted in — `NS META <ns-id> bridge:<scheme> :open` (requires
+`public`; echoed as `bridges=` on NS-META; every projection closes when visibility leaves `public`)
+— accepts the scheme's provider on three surfaces:
+
+| Dir | Line                                                    | Notes                                                        |
+|-----|---------------------------------------------------------|--------------------------------------------------------------|
+| ←   | `MESSAGE`/`EDITED`/`DELETED`/`REACTION` (local-origin)  | The provider is subscribed to the namespace's channels, exactly like a replica's — mirror them outward. |
+| →   | `@as=<user@domain>;label=<l> MSG #<ns-id>/<chan-id> :…` | **No `@msgid` — the home mints** (a carried id is refused). |
+| ←   | the minted `MESSAGE`, tagged `label=<l>`                | The §3.5 echo **is the ack** — how the adapter learns the minted id. |
+
+Mutations (`EDIT`/`DELETE`/`REACT`/`UNREACT`) name the home-minted root; EDIT/DELETE require
+authorship (a foreign moderator's delete rides the authority mapping, not this path). A local `@as`
+is always refused here — locals act natively, so there is no relay to confirm. The flag is the whole
+authorization anchor: no flag, no injection, and `NO-SUCH-TARGET`-uniform refusals reveal nothing.
+
+At registration/`REALM ASSERT` weftd also **pushes the projected structure** — `NS-META` (with
+`bridges=`), then each channel's `CHANNEL-LAYOUT` + `POLICY` — the same events the provider speaks
+inbound for a replica, roles swapped; the adapter needs the policy to apply the projection rules
+(`permanent`-only, no e2ee, no voice). Membership runs §8 in the outbound sense: the provider states
+**foreign** members of a projected namespace (`NS-MEMBER <ns-id> <user@domain> join|part`) as its
+users join the projected rooms; a *local* member statement is refused — locals join natively.
+
+Every relayed event copy whose actor is local carries `ulid=` (as on the §6/§8 relays): key puppets
+by it, never by the mutable account name.
+
+Note: a provider attaches projected-channel forwarders (and receives the structure push) at
+registration/`REALM ASSERT` time — a flag flipped mid-session is picked up on reconnect (§10's
+recovery story).
+
 ---
 
 ## 6. Membership — the realm is the authority

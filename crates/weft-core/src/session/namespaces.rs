@@ -432,6 +432,13 @@ impl<S: ControlStream> Session<S> {
             provider_online: self.ctx.origin_online(record),
             authority: record.authority.as_deref().and_then(|a| a.parse().ok()),
             settings_disabled: record.settings_disabled.clone(),
+            // Outbound-projection opt-ins (`bridges=` tag) — a stored scheme
+            // that no longer parses (never produced by our writer) is dropped.
+            bridges: record
+                .bridges
+                .iter()
+                .filter_map(|b| b.parse().ok())
+                .collect(),
         }
     }
 
@@ -527,9 +534,11 @@ impl<S: ControlStream> Session<S> {
             name: name.clone(),
             owner: account.clone(),
             root_key,
-            // Native: the default profile (roles authority, nothing disabled).
+            // Native: the default profile (roles authority, nothing disabled),
+            // and no projection opt-ins.
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
             visibility: visibility.to_string(),
             title: None,
             description: None,
@@ -799,15 +808,17 @@ impl<S: ControlStream> Session<S> {
         value: String,
         actor: Actor,
     ) -> io::Result<Flow> {
+        let bridge_scheme = key.strip_prefix("bridge:");
         if !matches!(
             key.as_str(),
             "title" | "description" | "icon" | "categories" | "federation" | "welcome"
-        ) {
+        ) && bridge_scheme.is_none()
+        {
             self.send_err(
                 label,
                 ErrCode::Policy,
                 None,
-                "meta key must be title|description|icon|categories|federation|welcome",
+                "meta key must be title|description|icon|categories|federation|welcome|bridge:<scheme>",
             )
             .await?;
             return Ok(Flow::Continue);
@@ -861,6 +872,49 @@ impl<S: ControlStream> Session<S> {
             self.send_event(label, self.ns_meta_event(&record)).await?;
             return Ok(Flow::Continue);
         }
+        // Outbound projection (matrix.md §17.1): `bridge:<scheme> :open|closed`.
+        // `open` requires `public` — projecting an unlisted/private namespace
+        // into an open foreign federation would leak what visibility hides.
+        // This flag is also the return-path authorization anchor (the scheme's
+        // provider may attribute foreign users into the namespace), so it is
+        // ns-admin consent, never an operator default.
+        if let Some(scheme) = bridge_scheme {
+            let Ok(scheme) = scheme.parse::<weft_proto::Scheme>() else {
+                self.send_err(label, ErrCode::Policy, None, "not a valid bridge scheme")
+                    .await?;
+                return Ok(Flow::Continue);
+            };
+            let open = value == "open";
+
+            if open && record.visibility != "public" {
+                self.send_err(
+                    label,
+                    ErrCode::Forbidden,
+                    Some("visibility"),
+                    "projection requires a public namespace",
+                )
+                .await?;
+                return Ok(Flow::Continue);
+            }
+
+            let mut bridges = record.bridges.clone();
+            bridges.retain(|b| b != scheme.as_str());
+            if open {
+                bridges.push(scheme.to_string());
+            }
+
+            if let Err(e) = self
+                .ctx
+                .namespaces
+                .set_namespace_bridges(&name, &bridges)
+                .await
+            {
+                return self.internal(label, &e).await;
+            }
+            record.bridges = bridges;
+            self.send_event(label, self.ns_meta_event(&record)).await?;
+            return Ok(Flow::Continue);
+        }
         if let Err(e) = self
             .ctx
             .namespaces
@@ -911,6 +965,21 @@ impl<S: ControlStream> Session<S> {
             return self.internal(label, &e).await;
         }
         record.visibility = visibility.to_string();
+
+        // §3 (matrix.md): leaving `public` implies every projection closes —
+        // the flag must never outlive the visibility that justified it.
+        if visibility != Visibility::Public && !record.bridges.is_empty() {
+            if let Err(e) = self
+                .ctx
+                .namespaces
+                .set_namespace_bridges(&record.name, &[])
+                .await
+            {
+                return self.internal(label, &e).await;
+            }
+            record.bridges.clear();
+        }
+
         self.send_event(label, self.ns_meta_event(&record)).await?;
         Ok(Flow::Continue)
     }
@@ -1044,6 +1113,7 @@ impl<S: ControlStream> Session<S> {
             icon: None,
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
             recovery_set: false,
             recovery_pending: None,
             categories: Vec::new(),

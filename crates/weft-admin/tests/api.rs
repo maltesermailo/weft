@@ -1713,6 +1713,7 @@ async fn namespace_detail_and_operator_takeover() {
         .create_namespace(NamespaceRecord {
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
             id: ns_id.to_string(),
             name: ns.clone(),
             owner: "owner".parse().unwrap(),
@@ -1900,6 +1901,7 @@ async fn admin_deletes_a_namespace_and_cascades() {
         .create_namespace(NamespaceRecord {
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
             id: ns_id.to_string(),
             name: ns.clone(),
             owner: "owner".parse().unwrap(),
@@ -1984,6 +1986,7 @@ async fn seize_to_support_transfers_ownership() {
         .create_namespace(NamespaceRecord {
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
             id: "01arz3ndektsv4rrffq69g5fav".to_string(),
             name: ns.clone(),
             owner: "owner".parse().unwrap(),
@@ -2098,6 +2101,7 @@ async fn seize_to_support_is_501_when_unconfigured() {
         .create_namespace(NamespaceRecord {
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
             id: "01arz3ndektsv4rrffq69g5fav".to_string(),
             name: "gaming".parse().unwrap(),
             owner: "owner".parse().unwrap(),
@@ -2152,6 +2156,7 @@ async fn admin_assigns_and_unassigns_a_namespace_role() {
         .create_namespace(NamespaceRecord {
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
             id: ns_id.to_string(),
             name: ns.clone(),
             owner: "owner".parse().unwrap(),
@@ -2506,6 +2511,7 @@ async fn a_replica_is_deletable_only_once_its_provider_is_disabled() {
         .create_namespace(NamespaceRecord {
             authority: None,
             settings_disabled: Vec::new(),
+            bridges: Vec::new(),
             id: ns_id.to_string(),
             name: ns.clone(),
             owner: "foreign".parse().unwrap(),
@@ -2604,6 +2610,7 @@ async fn banning_a_bridged_space_tells_the_bridge_and_keeps_nothing() {
             .create_namespace(NamespaceRecord {
                 authority: None,
                 settings_disabled: Vec::new(),
+                bridges: Vec::new(),
                 id: if name == "club" {
                     ns_id.to_string()
                 } else {

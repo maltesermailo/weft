@@ -203,6 +203,56 @@ impl Realm {
         self.send(line.serialize()?).await
     }
 
+    /// Inject a foreign user's post into a **projected native** channel
+    /// (protocol doc §5's outbound-projection door). The inversion from
+    /// [`Realm::message`] is the point: **no msgid** — the home mints, and the
+    /// minted `MESSAGE` returns on this session tagged with `label`, which is
+    /// the ack (§3.5) and the only way to learn the id. Weftd refuses a
+    /// carried msgid here, so this API cannot offer one.
+    pub async fn inject_message(
+        &self,
+        sender: &str,
+        channel: &str,
+        body: &str,
+        label: &str,
+    ) -> anyhow::Result<()> {
+        let mut line = weft_proto::Request::with_label(
+            weft_proto::Command::Msg {
+                target: Target::Channel(channel.parse()?),
+                body: Some(body.to_string()),
+                meta: weft_proto::MsgMeta::default(),
+            },
+            label,
+        )
+        .to_line()?;
+        line.tags.insert("as".to_string(), sender.to_string());
+
+        self.send(line.serialize()?).await
+    }
+
+    /// Inject a foreign user's edit of a **home-minted** root (projected
+    /// path). As with [`Realm::inject_message`]: no own msgid — the home mints
+    /// the edit row and echoes it back labeled.
+    pub async fn inject_edit(
+        &self,
+        sender: &str,
+        root: &MsgId,
+        body: &str,
+        label: &str,
+    ) -> anyhow::Result<()> {
+        let mut line = weft_proto::Request::with_label(
+            weft_proto::Command::Edit {
+                msgid: root.clone(),
+                body: body.to_string(),
+            },
+            label,
+        )
+        .to_line()?;
+        line.tags.insert("as".to_string(), sender.to_string());
+
+        self.send(line.serialize()?).await
+    }
+
     /// State that a user is (or is no longer) a member of a namespace we govern.
     ///
     /// This is an **authoritative statement**, and it covers the connected

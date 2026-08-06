@@ -1482,6 +1482,16 @@ impl NamespaceStore for MemoryStore {
             .collect())
     }
 
+    async fn namespaces_bridged(&self) -> Result<Vec<NamespaceRecord>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .namespaces
+            .values()
+            .filter(|r| !r.bridges.is_empty())
+            .cloned()
+            .collect())
+    }
+
     async fn vanity_locked(&self, name: &NamespaceName) -> Result<bool, StoreError> {
         let inner = self.inner.lock().expect("store lock");
         Ok(inner.ns_vanity_locked.contains(name))
@@ -1620,6 +1630,19 @@ impl NamespaceStore for MemoryStore {
         let mut inner = self.inner.lock().expect("store lock");
         if let Some(ns) = inner.namespaces.get_mut(name) {
             ns.federation = open;
+        }
+        inner.stamp_namespace(name);
+        Ok(())
+    }
+
+    async fn set_namespace_bridges(
+        &self,
+        name: &NamespaceName,
+        bridges: &[String],
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        if let Some(ns) = inner.namespaces.get_mut(name) {
+            ns.bridges = bridges.to_vec();
         }
         inner.stamp_namespace(name);
         Ok(())
