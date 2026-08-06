@@ -113,6 +113,19 @@ jobs:
         with:
           command: check advisories licenses bans sources
 
+  compose:
+    name: compose config (deploy stack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Validate with every profile enabled, so the optional services are checked
+      # too — a typo in an interpolation, a volume that no `volumes:` entry
+      # declares, or a `depends_on` naming a service that no longer exists fails
+      # here instead of on an operator's server. The runner's `.env` is the one in
+      # the repo, so the required POSTGRES_PASSWORD is present.
+      - run: docker compose --profile caddy --profile matrix --profile setup config -q
+        working-directory: deploy/weftd
+
   fuzz:
     name: fuzz smoke (L0 parsers)
     runs-on: ubuntu-latest

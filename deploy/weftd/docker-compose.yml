@@ -148,9 +148,10 @@ services:
       retries: 60
 
   bridge:
-    # Built locally — unlike weftd, this one is not published to a registry.
-    # The tag is shared with `registration` below so both use the one image.
-    image: weft-matrix:local
+    # Published by .github/workflows/docker.yml, same as weftd — `docker compose
+    # pull bridge`. The build block is the local-build alternative. `registration`
+    # below shares the tag, so there is one image either way.
+    image: ghcr.io/maltesermailo/weft-matrix:latest
     build:
       context: ../..
       dockerfile: deploy/weftd/Dockerfile.matrix
@@ -180,7 +181,7 @@ services:
   # exactly one place instead of two files that drift.
   #   docker compose run --rm registration
   registration:
-    image: weft-matrix:local
+    image: ghcr.io/maltesermailo/weft-matrix:latest
     build:
       context: ../..
       dockerfile: deploy/weftd/Dockerfile.matrix

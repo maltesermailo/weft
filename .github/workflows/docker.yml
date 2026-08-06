@@ -1,9 +1,17 @@
-name: Build and push weftd image
+name: Build and push container images
 
-# Builds the weftd container (embedded web client + voice) and pushes it to the
-# GitHub Container Registry. `voice` is integral to the image: it bundles the
-# webrtc SFU AND the §16 M-lk-3b libwebrtc media relay (cross-network calls /
-# federated voice carry audio without exposing a client's IP to the peer network).
+# Builds the deployment's two images and pushes them to the GitHub Container
+# Registry, so a server never has to compile Rust:
+#
+#   weft-weftd      the server itself, with the embedded web client and voice.
+#                   `voice` is integral to the image: it bundles the webrtc SFU
+#                   AND the §16 M-lk-3b libwebrtc media relay (cross-network
+#                   calls / federated voice carry audio without exposing a
+#                   client's IP to the peer network).
+#   weft-matrix     the Matrix bridge daemon — the `matrix` Compose profile.
+#                   Published for the same reason: it rides ruma, which is a
+#                   long compile to ask of a small VPS.
+#
 # Runs on pushes to the default branch, on version tags (v1.2.3), and manual
 # dispatch.
 on:
@@ -14,10 +22,21 @@ on:
 
 jobs:
   build-and-push:
+    name: ${{ matrix.image }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write # required to push to ghcr.io with the built-in token
+
+    strategy:
+      # Independent images: a broken bridge build must not hide a good weftd one.
+      fail-fast: false
+      matrix:
+        include:
+          - image: weft-weftd
+            dockerfile: deploy/weftd/Dockerfile
+          - image: weft-matrix
+            dockerfile: deploy/weftd/Dockerfile.matrix
 
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +55,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/weft-weftd
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
@@ -46,12 +65,13 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: deploy/weftd/Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Layer cache across runs so the heavy Rust + web + libwebrtc build only
-          # rebuilds what changed.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # rebuilds what changed. Scoped per image — one shared cache key would
+          # have the two builds evicting each other.
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
