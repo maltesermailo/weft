@@ -287,6 +287,8 @@ pub struct State {
     pub reactions: BTreeMap<String, Reaction>,
     /// Last-seen `m.room.power_levels` users map per room — the diff baseline.
     pub room_levels: BTreeMap<String, BTreeMap<String, i64>>,
+    /// Bridged DMs: `(our account, their MXID)` → the Matrix DM room.
+    pub dm_rooms: BTreeMap<(String, String), String>,
     pub sent_reactions: SentReactions,
     pub bans: BanList,
 }
@@ -309,6 +311,14 @@ impl State {
         self.spaces
             .values()
             .find_map(|space| space.rooms.get(room_id).map(|room| (room, space)))
+    }
+
+    /// The DM pair behind a Matrix room, if it is a bridged conversation.
+    pub fn dm_of_room(&self, room_id: &str) -> Option<(&str, &str)> {
+        self.dm_rooms
+            .iter()
+            .find(|(_, room)| room.as_str() == room_id)
+            .map(|((account, mxid), _)| (account.as_str(), mxid.as_str()))
     }
 
     pub fn space_of_ns(&self, ns_id: &str) -> Option<&Space> {
@@ -525,6 +535,15 @@ impl Store {
                 p.categories
                     .insert(row.get("category"), row.get("space_room"));
             }
+        }
+
+        for row in sqlx::query("SELECT account, mxid, room_id FROM matrix_dm_rooms")
+            .fetch_all(pool)
+            .await?
+        {
+            state
+                .dm_rooms
+                .insert((row.get("account"), row.get("mxid")), row.get("room_id"));
         }
 
         for row in sqlx::query("SELECT room_id, mxid, level FROM matrix_room_levels")
@@ -834,6 +853,28 @@ impl Store {
                 )
                 .bind(ns_id)
                 .bind(category)
+                .bind(room)
+                .execute(pool),
+            )
+            .await;
+        }
+    }
+
+    /// Remember a bridged DM's room.
+    pub async fn save_dm_room(&mut self, account: &str, mxid: &str, room: &str) {
+        self.state
+            .dm_rooms
+            .insert((account.to_string(), mxid.to_string()), room.to_string());
+
+        if let Some(pool) = &self.pool {
+            best_effort(
+                "save_dm_room",
+                sqlx::query(
+                    "INSERT INTO matrix_dm_rooms (account, mxid, room_id) VALUES ($1, $2, $3) \
+                     ON CONFLICT (account, mxid) DO UPDATE SET room_id = $3",
+                )
+                .bind(account)
+                .bind(mxid)
                 .bind(room)
                 .execute(pool),
             )

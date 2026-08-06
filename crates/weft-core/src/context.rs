@@ -478,12 +478,16 @@ struct PluginReg {
     /// The provider session's own event queue — so another session can ask it
     /// to attach to a newly created channel (`SessionEvent::Attach`).
     events: Option<tokio::sync::mpsc::Sender<crate::session::SessionEvent>>,
+    /// The provider's bot account, if it asked weftd to provision one.
+    bot: Option<Account>,
 }
 
 /// What a connected provider brings to [`ServerCtx::register_plugin`] — its
 /// writer, its identity, its declared actions, and its session's event queue.
 /// Grouped because they travel as one thing.
 pub(crate) struct ProviderRegistration {
+    /// The provider's own attributable identity, if it asked for one.
+    pub bot: Option<Account>,
     pub out: tokio::sync::mpsc::Sender<String>,
     pub name: String,
     pub icon: Option<String>,
@@ -1450,6 +1454,7 @@ impl ServerCtx {
         mut schemes: Vec<weft_proto::Scheme>,
     ) {
         let ProviderRegistration {
+            bot,
             out,
             name,
             icon,
@@ -1476,6 +1481,7 @@ impl ServerCtx {
                 actions,
                 schemes,
                 events: Some(events),
+                bot,
             },
         );
     }
@@ -1499,12 +1505,21 @@ impl ServerCtx {
             actions: Vec::new(),
             schemes: Vec::new(),
             events: None,
+            bot: None,
         });
         entry.events = Some(events);
 
         if !entry.schemes.contains(&scheme) {
             entry.schemes.push(scheme);
         }
+    }
+
+    /// The bot account a provider registered, if any — the one local identity
+    /// it may attribute lines to (its own).
+    pub fn provider_bot(&self, plugin: &str) -> Option<Account> {
+        let map = self.plugin_registry.lock().expect("plugin_registry lock");
+
+        map.get(plugin).and_then(|r| r.bot.clone())
     }
 
     /// Ask every provider projecting `scheme` to start watching `channel`

@@ -209,6 +209,14 @@ pub trait AccountStore: Send + Sync {
     /// Whether the account is currently suspended (`false` also covers unknown).
     async fn is_suspended(&self, account: &Account) -> Result<bool, StoreError>;
 
+    /// Mark an account as a **bot** (or not): a real account that cannot
+    /// authenticate by password or key, acting instead through the provider
+    /// that registered it. Distinct from `suspended`, which is moderation.
+    async fn set_bot(&self, account: &Account, bot: bool) -> Result<bool, StoreError>;
+
+    /// Is this account a bot? Checked at the single AUTH chokepoint.
+    async fn is_bot(&self, account: &Account) -> Result<bool, StoreError>;
+
     /// Set/clear an account's operator flag (§10.4). An operator holds every
     /// capability at every scope. Idempotent; false iff the account is unknown.
     async fn set_operator(&self, account: &Account, operator: bool) -> Result<bool, StoreError>;

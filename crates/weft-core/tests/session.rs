@@ -16,7 +16,7 @@ use weft_proto::RetentionPolicy;
 use weft_proto::{
     CallState, ChannelName, ErrCode, Event, FriendState, MemberAction, Reply, VoiceAction,
 };
-use weft_store::{ChannelStore, NamespaceStore, NetblockStore, PeerStore};
+use weft_store::{AccountStore, ChannelStore, NamespaceStore, NetblockStore, PeerStore};
 
 struct MockStream {
     from_client: mpsc::UnboundedReceiver<String>,
@@ -4522,6 +4522,7 @@ async fn plugin_register_and_invoke() {
             input: vec![],
         }],
         hooks: vec![],
+        bot: None,
         schemes: vec![],
     };
     plugin.send(&format!(
@@ -4582,6 +4583,7 @@ async fn plugin_scheme_registration_routes_provision() {
         icon: None,
         actions: vec![],
         hooks: vec![],
+        bot: None,
         schemes: vec!["instagram".into()],
     };
     plugin.send(&format!(
@@ -4633,6 +4635,7 @@ async fn plugin_unauthorized_scheme_is_refused() {
         icon: None,
         actions: vec![],
         hooks: vec![],
+        bot: None,
         schemes: vec!["instagram".into()],
     };
     plugin.send(&format!(
@@ -4667,6 +4670,7 @@ async fn foreign_ns_join_succeeds_via_assertion() {
         icon: None,
         actions: vec![],
         hooks: vec![],
+        bot: None,
         schemes: vec!["instagram".into()],
     };
     plugin.send(&format!(
@@ -5195,6 +5199,7 @@ async fn duplicate_scheme_claim_is_refused() {
         icon: None,
         actions: vec![],
         hooks: vec![],
+        bot: None,
         schemes: vec!["instagram".into()],
     };
     let first = plugin_session(&ctx, &key1).await;
@@ -6190,6 +6195,7 @@ async fn a_multi_step_flow_routes_and_stays_the_callers_own() {
             input: vec![],
         }],
         hooks: vec![],
+        bot: None,
         schemes: vec![],
     };
     plugin.send(&format!(
@@ -6276,6 +6282,7 @@ async fn the_admin_panel_drives_a_flow_but_cannot_touch_a_sessions() {
             input: vec![],
         }],
         hooks: vec![],
+        bot: None,
         schemes: vec![],
     };
     plugin.send(&format!(
@@ -6406,6 +6413,7 @@ async fn a_live_panel_is_patched_by_key_and_only_while_watched() {
             input: vec![],
         }],
         hooks: vec![],
+        bot: None,
         schemes: vec![],
     };
     plugin.send(&format!(
@@ -6514,6 +6522,7 @@ async fn a_flow_cannot_be_driven_by_anyone_but_its_caller() {
             input: vec![],
         }],
         hooks: vec![],
+        bot: None,
         schemes: vec![],
     };
     plugin.send(&format!(
@@ -6768,6 +6777,7 @@ async fn provider_offline_gates_virtual_namespace() {
             icon: None,
             actions: vec![],
             hooks: vec![],
+            bot: None,
             schemes: vec!["instagram".into()],
         };
         c.send(&format!(
@@ -6929,6 +6939,7 @@ async fn provider_death_fails_parked_requests_loudly() {
             input: vec![],
         }],
         hooks: vec![],
+        bot: None,
         schemes: vec!["instagram".into()],
     };
     plugin.send(&format!(
@@ -7265,6 +7276,141 @@ async fn a_projected_namespace_bridges_both_directions_and_the_home_mints() {
     };
     assert_eq!(op, weft_proto::ReactionOp::Add);
     assert_eq!(by.to_string(), "carol@kde.org");
+}
+
+#[tokio::test]
+async fn a_provider_bot_is_a_kind_of_account_not_a_suspended_one() {
+    // Owner directive 2026-08-06: bots are native. A provider's bot is a real
+    // account that cannot authenticate — it acts through the provider, and later
+    // through an API token — and it is **not** suspended, so a moderator can
+    // still suspend a misbehaving one and see the difference.
+    let key = Keypair::generate();
+    let (ctx, store) = ctx_plugin_store(
+        vec![("mx", key.public(), vec!["matrix".parse().unwrap()])],
+        &[],
+    );
+
+    let plugin = plugin_session(&ctx, &key).await;
+    let reg = weft_proto::Registration {
+        api: 1,
+        id: "mx".into(),
+        name: "Matrix Bridge".into(),
+        icon: None,
+        actions: vec![],
+        hooks: vec![],
+        bot: Some("matrixbot".into()),
+        schemes: vec!["matrix".parse().unwrap()],
+    };
+    plugin.send(&format!(
+        "@reg={} PLUGIN-REGISTER",
+        weft_proto::plugin_to_b64(&reg).unwrap()
+    ));
+
+    // Give the registration a moment to land, then read the account's state.
+    let bot: weft_proto::Account = "matrixbot".parse().unwrap();
+    let mut provisioned = false;
+    for _ in 0..50 {
+        if store.account_ulid(&bot).await.unwrap().is_some() {
+            provisioned = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(provisioned, "the bot account was provisioned");
+    assert!(store.is_bot(&bot).await.unwrap(), "marked as a bot");
+    assert!(
+        !store.is_suspended(&bot).await.unwrap(),
+        "and NOT suspended — that is a moderation state, not a kind"
+    );
+
+    // It cannot sign in: uniform AUTH-FAILED, indistinguishable from bad
+    // credentials (whether a handle is a bot is not probeable).
+    let mut client = connect(&ctx);
+    client.send("HELLO weft/1");
+    assert!(matches!(client.recv().await.event, Event::Welcome { .. }));
+    client.send("@label=a1 AUTH PASSWORD matrixbot :hunter2");
+    let reply = client.expect_err(ErrCode::AuthFailed).await;
+    assert_eq!(reply.label.as_deref(), Some("a1"));
+
+    // …and the provider may still attribute lines to it (its own identity).
+    assert_eq!(
+        ctx.provider_bot("mx").map(|b| b.to_string()).as_deref(),
+        Some("matrixbot")
+    );
+}
+
+#[tokio::test]
+async fn typing_crosses_a_replica_both_ways() {
+    // §15: typing is bridged when the bridge asks for it. Ephemeral, so it is
+    // announced rather than ingested — and attributed, since the wire's TYPING
+    // names no user (a client's own session identifies them).
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("mx", key.public(), vec!["matrix".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT matrix://matrix.org");
+    plugin.send(&format!(
+        "@title=Space;id={} NS-META matrix://matrix.org/space public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT matrix://matrix.org/space/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+    assert!(matches!(
+        weft_proto::Request::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .command,
+        weft_proto::Command::NsJoin { .. }
+    ));
+
+    // Realm → us: a foreign user is typing. Ada sees it attributed to them.
+    plugin.send(&format!("@as=carol@kde.org TYPING {channel} start"));
+    let Event::Typing { user, state, .. } = ada.recv().await.event else {
+        panic!("ada expected the foreign TYPING");
+    };
+    assert_eq!(user.to_string(), "carol@kde.org");
+    assert_eq!(state, weft_proto::TypingState::Start);
+
+    // A *local* sender would be a forgery, small but still a forgery.
+    plugin.send(&format!("@as=ada@test.example TYPING {channel} start"));
+    plugin.expect_err(ErrCode::Unsupported).await;
+
+    // Us → realm: ada's typing crosses, carrying her identity.
+    ada.send(&format!("JOIN {channel}"));
+    loop {
+        if matches!(ada.recv().await.event, Event::Policy { .. }) {
+            break;
+        }
+    }
+    ada.send(&format!("TYPING {channel} start"));
+    let relayed = loop {
+        let raw = plugin.recv_raw().await;
+        if raw.contains("TYPING") {
+            break raw;
+        }
+    };
+    // TYPING names its user in the event itself (no `@as` — that is a command
+    // tag), and carries her ULID so the adapter can pick the right puppet.
+    assert!(relayed.contains("ada@test.example"), "{relayed}");
+    assert!(
+        relayed.contains("ulid="),
+        "puppets key on the ULID: {relayed}"
+    );
 }
 
 #[tokio::test]

@@ -405,6 +405,11 @@ pub struct Registration {
     pub actions: Vec<ActionDecl>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<HookDecl>,
+    /// The account this service asks weftd to provision and attribute it — the
+    /// bridge's own WEFT identity, for the lines it posts as *itself* rather
+    /// than on a user's behalf. Login-disabled: nobody authenticates as it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot: Option<String>,
     /// Foreign-URI schemes this provider handles (spec §18 capability 6): a
     /// `NS JOIN <scheme>://…` for an unknown space routes a `PROVISION` push
     /// here. Must be authorized by the provider's pinned config entry.
@@ -572,6 +577,9 @@ mod tests {
                 kind: HookKind::Veto,
                 fail: Some(FailPolicy::Open),
             }],
+            // The provider's own attributable identity (weftd provisions it
+            // suspended) — optional, so it round-trips both present and absent.
+            bot: Some("automod".into()),
             schemes: vec!["instagram".into()],
         });
     }

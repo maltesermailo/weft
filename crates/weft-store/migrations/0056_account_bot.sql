@@ -1,0 +1,13 @@
+-- Native bot accounts.
+--
+-- A bot is a *kind* of account, not a punished one. The first cut provisioned
+-- provider bots by setting `suspended`, which reused a moderation state for a
+-- structural fact: the admin panel showed them as suspended, un-suspending one
+-- would silently make it loginable, and a real suspension of a bot was
+-- indistinguishable from its normal state.
+--
+-- A bot cannot authenticate by password or key. It acts through the provider
+-- that registered it (attributed `@as`), and later through an API token — which
+-- is why this is a flag rather than "no credentials": the account is real, its
+-- *authentication paths* are what differ.
+ALTER TABLE weft_accounts ADD COLUMN bot BOOLEAN NOT NULL DEFAULT FALSE;

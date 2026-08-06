@@ -126,6 +126,13 @@ async fn session(
         pending_acts: Default::default(),
         act_seq: 0,
         flows: Default::default(),
+        weft_media: cfg
+            .weft
+            .media_url
+            .as_deref()
+            .map(weft_matrix::media::WeftMedia::new),
+        pending_uploads: Default::default(),
+        upload_seq: 0,
     };
 
     reassert(&mut bridge).await?;

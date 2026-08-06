@@ -696,7 +696,9 @@ function renderUsers(q) {
   if (!list.length) { $("#userList").innerHTML = `<div class="card-b"><div class="placeholder">No accounts match "${esc(q)}".</div></div>`; return; }
   $("#userList").innerHTML = list.map((u) => {
     const initials = esc(u.account.slice(0, 2).toUpperCase());
-    const state = u.suspended ? `<span class="knot severed">suspended</span>` : u.deletion_scheduled ? `<span class="knot severed">pending delete</span>` : u.banned ? `<span class="knot severed">banned</span>` : u.muted ? `<span class="knot frayed">muted</span>` : `<span class="knot woven">active</span>`;
+    // A bot is a *kind* of account, so it leads — otherwise a provider's
+    // identity reads as an ordinary user who happens to be online.
+    const state = u.bot ? `<span class="knot idle">bot</span>` : u.suspended ? `<span class="knot severed">suspended</span>` : u.deletion_scheduled ? `<span class="knot severed">pending delete</span>` : u.banned ? `<span class="knot severed">banned</span>` : u.muted ? `<span class="knot frayed">muted</span>` : `<span class="knot woven">active</span>`;
     const tags = `${u.operator ? pill("operator", "gold") : ""}${(u.caps || []).map((c) => pill(c)).join("")}`;
     return `<div class="result">
       <div class="r-avatar u">${initials}</div>
@@ -760,7 +762,7 @@ async function openUser(name) {
   const email = (u.verifications || []).find((v) => v.kind === "email");
   const flag = (n, on) => `<label class="flag ${on ? "on" : ""}"><span class="box"></span>${n}</label>`;
   // Every flag shows its state (✓/✕), so "not suspended" is visible, not absent.
-  const state = flagChip("operator", u.operator) + flagChip("suspended", u.suspended, "bad") +
+  const state = flagChip("bot", u.bot, "neutral") + flagChip("operator", u.operator) + flagChip("suspended", u.suspended, "bad") +
     flagChip("banned", u.banned, "bad") + flagChip("muted", u.muted, "warn") +
     (u.deletion_scheduled ? pill("pending delete", "bad") : "");
 
@@ -794,6 +796,7 @@ async function openUser(name) {
             <div class="k">Email</div><div class="v">${email ? `<span class="mono">${esc(email.subject)}</span> ${email.verified ? '<span class="ok">verified</span>' : '<span class="warn">unconfirmed</span>'}` : '<span class="dim">none on file</span>'}</div>
             <div class="k">Operator</div><div class="v">${u.operator ? '<span class="ok">yes</span>' : "no"}</div>
             <div class="k">Suspended</div><div class="v">${u.suspended ? '<span class="bad">yes</span>' : "no"}</div>
+            ${u.bot ? '<div class="k">Kind</div><div class="v">bot — acts through its provider, cannot sign in</div>' : ""}
             <div class="k">Channels</div><div class="v mono">${(u.memberships || []).length}</div>
             <div class="k">DM conversations</div><div class="v mono">${dms.length}</div>
             <div class="k">Messages authored</div><div class="v mono">${msgs.length}</div>

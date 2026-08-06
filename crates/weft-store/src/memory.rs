@@ -78,6 +78,9 @@ struct AccountRecord {
     purge_at: Option<u64>,
     /// WC7 moderation: suspended accounts can't authenticate.
     suspended: bool,
+    /// A **bot**: cannot authenticate at all, acts through its provider. A
+    /// *kind* of account, not a moderation state.
+    bot: bool,
     /// §10.4 operator authority (managed via `weftd admin`).
     operator: bool,
 }
@@ -614,6 +617,7 @@ impl AccountStore for MemoryStore {
                 verifications: HashMap::new(),
                 purge_at: None,
                 suspended: false,
+                bot: false,
                 operator: false,
             },
         );
@@ -752,6 +756,27 @@ impl AccountStore for MemoryStore {
             .accounts
             .get(account)
             .is_some_and(|r| r.suspended))
+    }
+
+    async fn set_bot(&self, account: &Account, bot: bool) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().expect("store lock");
+        match inner.accounts.get_mut(account) {
+            Some(record) => {
+                record.bot = bot;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn is_bot(&self, account: &Account) -> Result<bool, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("store lock")
+            .accounts
+            .get(account)
+            .is_some_and(|r| r.bot))
     }
 
     async fn set_operator(&self, account: &Account, operator: bool) -> Result<bool, StoreError> {

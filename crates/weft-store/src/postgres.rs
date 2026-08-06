@@ -901,6 +901,27 @@ impl AccountStore for PgStore {
         )
     }
 
+    async fn set_bot(&self, account: &Account, bot: bool) -> Result<bool, StoreError> {
+        let result = sqlx::query("UPDATE weft_accounts SET bot = $2 WHERE name = $1")
+            .bind(account.as_str())
+            .bind(bot)
+            .execute(&self.pool)
+            .await
+            .map_err(backend_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn is_bot(&self, account: &Account) -> Result<bool, StoreError> {
+        Ok(
+            sqlx::query_scalar::<_, bool>("SELECT bot FROM weft_accounts WHERE name = $1")
+                .bind(account.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend_err)?
+                .unwrap_or(false),
+        )
+    }
+
     async fn set_operator(&self, account: &Account, operator: bool) -> Result<bool, StoreError> {
         let result = sqlx::query("UPDATE weft_accounts SET operator = $2 WHERE name = $1")
             .bind(account.as_str())

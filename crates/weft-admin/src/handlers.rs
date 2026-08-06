@@ -321,6 +321,7 @@ async fn list_accounts(State(st): State<AdminState>) -> Response {
                 .any(|m| m.account == account && matches!(m.kind, ModKind::Ban));
             let deletion_scheduled = st.accounts.deletion_scheduled(&account).await?;
             let suspended = st.accounts.is_suspended(&account).await?;
+            let bot = st.accounts.is_bot(&account).await?;
             out.push(dto::AccountSummary {
                 operator: st.auth.operators.contains(&account),
                 caps: caps_by_ulid.get(&ulid).cloned().unwrap_or_default(),
@@ -328,6 +329,7 @@ async fn list_accounts(State(st): State<AdminState>) -> Response {
                 banned,
                 deletion_scheduled,
                 suspended,
+                bot,
                 account: account.to_string(),
                 ulid,
             });
@@ -418,6 +420,7 @@ async fn account_detail(State(st): State<AdminState>, Path(name): Path<String>) 
                 .await?,
             deletion_scheduled: st.accounts.deletion_scheduled(&account).await?,
             suspended: st.accounts.is_suspended(&account).await?,
+            bot: st.accounts.is_bot(&account).await?,
             devices,
             related,
             account: account.to_string(),

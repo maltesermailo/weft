@@ -524,7 +524,43 @@ implements and the daemon is written against.*
       spelling a caller held — the lowercase wire form from ingestion vs the uppercase canonical
       `MsgId::to_string()` from events — so a WEFT reaction to an *ingested* Matrix message looked up
       the canonical form, missed, and never reached Matrix (now canonicalized inside `Links`).
-      **Not in the MVP (deliberate):** media, typing, DMs,
+      **Media DONE 2026-08-06** (§12), with the two weftd surfaces it needed —
+      owner decision: provider-scoped upload grant **and** fix bot accounts.
+      weftd: `STREAM OFFER` routed on a provider session (authorized by the pinned key, not an
+      `attach` cap — a provider has no account; size/mime still bounded, grant one-shot), and
+      `Registration.bot` finally wired end to end — the SDK collected `.bot()` from day one but the
+      proto had no field, so every request was silently dropped. weftd provisions it as a **native bot account**
+      (owner directive 2026-08-06: the first cut reused `suspended`, which made a bot look like a
+      punished user, made un-suspending it silently grant login, and left no way to actually suspend
+      one — now a `bot` flag, migration 0056, refused at the single AUTH chokepoint with the uniform
+      `AUTH-FAILED`, independent of suspension) and it is the one local account a provider may name
+      in `@as`. The intended second door is an API token; the flag is what makes room for it.
+      Discovery that shrank the work: weftd's `GET /media/<hash>` is **already** unauthenticated by
+      design (media-proxy model — the hash is the capability), so WEFT→Matrix needs no credential
+      and no new bearer type was necessary.
+      daemon: `media.rs` (weftd's HTTP plane + msgtype/mime mapping + magic-number sniffing, since
+      weftd's fetch reports no mime), `Hs::download_mxc`/`upload_media`. Inbound waits for the
+      grant before sending the message — a reference to a blob weftd does not hold yet renders as a
+      broken attachment. Outbound mirrors each blob as its own Matrix event (one attachment per
+      event is all Matrix carries). SDK: `Realm::offer_media`, `message_with_attachments`.
+      **Honest limits:** the outbound mime is sniffed rather than known (weftd's fetch carries none
+      — worth a `Content-Type` on that response later); `MEDIA BLOCK`-after-the-fact does not yet
+      redact the mapped Matrix events or quarantine the mxc (§12's third bullet); inbound size is
+      bounded by weftd's config, not pre-checked against it.
+      **Typing + DMs DONE 2026-08-06.** Typing (§15) crosses both ways: inbound needs `@as`
+      (the wire's `TYPING` names no user — a client's own session identifies them), so a provider's
+      is bounded like every attributed line (replica of its scheme, foreign sender) and **announced**
+      rather than ingested since it is never stored; outbound rides the event's own `user` field plus
+      `ulid=`, and the daemon mirrors it as the puppet's typing EDU with a 20 s TTL so a lost `stop`
+      still clears. DMs: weftd's outbound relay was **already wired** (`relay_foreign_dm` →
+      `provider_for_realm`) — the doc's "not wired" note was stale; the real gap was the daemon,
+      which now opens a Matrix DM room **as the puppet** (`is_direct` + invite, so it belongs to the
+      two of them, not the bot), remembers it (`matrix_dm_rooms`), and routes messages in it to the
+      ordinary DM scope. SDK: `Realm::dm`.
+      **Remaining:** DM *edits/reactions* (the message path is wired both ways; the mutation verbs
+      are not), and read receipts stay unbridged by design (WEFT's `MARK` is private, Matrix
+      receipts are public).
+      **Not in the MVP (deliberate):**
       multi-realm (one realm per daemon for now), moderation/power-levels (slice 11), puppet
       display-name sync on rename (the identity survives; the pretty name catches up later).
 - [~] **10b. Per-space bridging bans** (owner requirement 2026-08-04) — an admin page where

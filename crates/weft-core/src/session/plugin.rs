@@ -175,6 +175,17 @@ impl<S: ControlStream> Session<S> {
         // Bridge-verb family first (they are Commands, not Events).
         if let Ok(req) = Request::from_line(line) {
             match req.command {
+                // §13 media upload grant. A provider has no account, so the
+                // client path (cap check against `attach`) does not apply — its
+                // authority is the pinned key that already lets it speak into
+                // its channels, and a blob is worth less than the messages it
+                // attaches to. Size/mime are still bounded, and the grant is
+                // one-shot.
+                Command::StreamOffer { mode, mime, bytes } => {
+                    return self
+                        .on_provider_stream_offer(req.label, &plugin_id, mode, mime, bytes)
+                        .await;
+                }
                 Command::RealmRegister { scheme } => {
                     return self
                         .on_realm_register(req.label, key, plugin_id, scheme)
@@ -445,9 +456,31 @@ impl<S: ControlStream> Session<S> {
             schemes.push(scheme);
         }
 
+        // The provider's own WEFT identity, at its request. Provisioned
+        // **suspended** — like the §6.7 support account, it exists to be
+        // attributed, never to authenticate — and idempotent across reconnects.
+        let bot = match reg.bot.as_deref().map(str::parse::<Account>) {
+            Some(Ok(bot)) => match self.ctx.accounts.provision_bot(&bot).await {
+                Ok(()) => {
+                    info!(%plugin_id, %bot, "provider bot account provisioned");
+                    Some(bot)
+                }
+                Err(e) => {
+                    warn!(%plugin_id, %bot, "could not provision the bot account: {e}");
+                    None
+                }
+            },
+            Some(Err(_)) => {
+                warn!(%plugin_id, "invalid bot handle in PLUGIN-REGISTER — ignored");
+                None
+            }
+            None => None,
+        };
+
         self.ctx.register_plugin(
             plugin_id.to_string(),
             crate::context::ProviderRegistration {
+                bot,
                 out: self.fed_out_tx.clone(),
                 name: reg.name,
                 icon: reg.icon,
@@ -1094,6 +1127,13 @@ impl<S: ControlStream> Session<S> {
                 reason,
             } => self.on_kick(label, channel, target, reason, actor).await,
 
+            // §15 ephemera: a foreign user is typing in a replica. Never
+            // stored, so it takes the announce seam rather than the ingest
+            // path — and it needs `@as` because the wire's `TYPING` names no
+            // user (a client's own session identifies them).
+            Command::Typing { channel, state } => {
+                self.on_provider_typing(key, sender, channel, state).await
+            }
             // §10 (matrix.md): a foreign moderator's PL change arrives as an
             // attributed GRANT/REVOKE and succeeds **iff WEFT granted that
             // user** `grant:<cap>` — the ordinary handlers with the ordinary
@@ -1250,6 +1290,14 @@ impl<S: ControlStream> Session<S> {
             return self.unsupported(None, "realm is not a network name").await;
         };
         if sender.network == self.ctx.info.network {
+            // A provider's **own bot** is its WEFT identity, provisioned at its
+            // request and login-disabled — attributing a line to it is the
+            // service speaking as itself, not forging a user.
+            let own_bot = self
+                .plugin_id()
+                .and_then(|id| self.ctx.provider_bot(id))
+                .is_some_and(|bot| bot == sender.account);
+
             // The return half of §8's outbound relay: weftd itself asked the
             // provider to perform this local user's mutation foreign-side
             // (`relay_provider_mut`), and the provider confirming it IS the
@@ -1267,7 +1315,7 @@ impl<S: ControlStream> Session<S> {
                 _ => false,
             };
 
-            if !confirms_relay {
+            if !own_bot && !confirms_relay {
                 return self
                     .unsupported(None, "@as cannot name a local account")
                     .await;
@@ -1312,6 +1360,50 @@ impl<S: ControlStream> Session<S> {
         };
 
         handle.ingest(self.id, record, event).await;
+
+        Ok(Flow::Continue)
+    }
+
+    /// §15 a realm's user is typing in one of its replica channels.
+    ///
+    /// Bounded like every other attributed line: the channel must be a replica
+    /// this provider's key is pinned for, and the sender must be foreign — a
+    /// local "is typing" from a bridge would be a small forgery, but a forgery.
+    /// Ephemeral, so it is announced, never ingested.
+    async fn on_provider_typing(
+        &mut self,
+        key: &PublicKey,
+        sender: UserRef,
+        channel: ChannelName,
+        state: weft_proto::TypingState,
+    ) -> io::Result<Flow> {
+        if sender.network == self.ctx.info.network {
+            return self
+                .unsupported(None, "@as cannot name a local account")
+                .await;
+        }
+
+        let origin = match self.ctx.channel_store.channel(&channel).await {
+            Ok(Some(record)) => record.origin,
+            _ => return Ok(Flow::Continue),
+        };
+        let authorized = origin
+            .as_deref()
+            .and_then(|o| o.parse::<ForeignUri>().ok())
+            .is_some_and(|uri| self.ctx.scheme_authorized(key, uri.scheme()));
+        if !authorized {
+            return Ok(Flow::Continue);
+        }
+
+        if let Some(handle) = self.ctx.registry.get(&channel) {
+            handle
+                .announce(Event::Typing {
+                    channel,
+                    user: sender,
+                    state,
+                })
+                .await;
+        }
 
         Ok(Flow::Continue)
     }
@@ -1467,6 +1559,52 @@ impl<S: ControlStream> Session<S> {
         }
 
         Ok(Flow::Continue)
+    }
+
+    /// §13 `STREAM OFFER` from a provider: mint the one-shot upload grant it
+    /// posts the bytes with (`POST /media?t=…`).
+    ///
+    /// Attributed to the provider's **bot** when it has one, so the blob's
+    /// uploader is a real identity; otherwise to the realm's own name, which is
+    /// enough for the grant's bookkeeping (the fetch path is content-addressed
+    /// and does not consult it).
+    async fn on_provider_stream_offer(
+        &mut self,
+        label: Option<String>,
+        plugin_id: &str,
+        mode: weft_proto::StreamMode,
+        mime: String,
+        bytes: u64,
+    ) -> io::Result<Flow> {
+        if mode != weft_proto::StreamMode::Media {
+            return self
+                .unsupported(label, "a provider offers media only")
+                .await;
+        }
+        if bytes == 0 || bytes > crate::MEDIA_MAX_BYTES {
+            self.send_err(label, ErrCode::TooLarge, None, "blob size out of range")
+                .await?;
+            return Ok(Flow::Continue);
+        }
+
+        let uploader = self.ctx.provider_bot(plugin_id).unwrap_or_else(|| {
+            plugin_id
+                .parse()
+                .unwrap_or_else(|_| "bridge".parse().expect("a valid fallback account"))
+        });
+        let token = self.ctx.mint_upload_token(uploader, mime, bytes);
+
+        self.send_event(label, Event::StreamAccept { token })
+            .await?;
+        Ok(Flow::Continue)
+    }
+
+    /// This session's provider id, if it is a provider session.
+    fn plugin_id(&self) -> Option<&str> {
+        match &self.state {
+            State::PluginService { plugin_id, .. } => Some(plugin_id),
+            _ => None,
+        }
     }
 
     /// The channel a stored msgid belongs to — the mutation verbs name their
@@ -1709,7 +1847,11 @@ impl<S: ControlStream> Session<S> {
             // mirrors them into the foreign room), a bridged member's do not —
             // that one is the echo of an ingested JOIN/PART.
             Event::Member { user, .. } => user.network.as_str() == self.ctx.network_name(),
-            // TYPING/POLICY are not relayed outward.
+            // §15 typing is bridged both ways; like MEMBER it has no msgid, so
+            // the same rule applies against the *user* — ours goes out, a
+            // bridged user's does not (that one is the echo of an ingest).
+            Event::Typing { user, .. } => user.network.as_str() == self.ctx.network_name(),
+            // POLICY is not relayed outward.
             _ => false,
         };
 
@@ -1738,6 +1880,9 @@ impl<S: ControlStream> Session<S> {
                 Event::Reaction { by, .. } => Some(by),
                 Event::Deleted { by: Some(by), .. } => Some(by),
                 Event::Member { user, .. } => Some(user),
+                // §15 the daemon needs the ULID to pick the right puppet, and
+                // typing is the one ephemeral event that crosses.
+                Event::Typing { user, .. } => Some(user),
                 _ => None,
             };
             let ulid = match actor {

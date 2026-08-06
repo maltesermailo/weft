@@ -70,6 +70,15 @@ CREATE TABLE IF NOT EXISTS matrix_projected_rooms (
     room_id TEXT NOT NULL
 );
 
+-- Bridged 1:1 conversations: a WEFT DM ↔ a Matrix DM room. Keyed by the pair,
+-- since that is what both sides address it by.
+CREATE TABLE IF NOT EXISTS matrix_dm_rooms (
+    account TEXT NOT NULL,   -- our local account
+    mxid    TEXT NOT NULL,   -- the Matrix user
+    room_id TEXT NOT NULL,
+    PRIMARY KEY (account, mxid)
+);
+
 -- Category sub-spaces of a projected namespace (matrix.md §6, locked decision
 -- 4): a WEFT category becomes a child Space holding its channels' rooms.
 CREATE TABLE IF NOT EXISTS matrix_projected_categories (

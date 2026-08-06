@@ -389,6 +389,26 @@ where
     assert!(!store.is_suspended(&dan).await.unwrap());
     assert!(!store.set_suspended(&cara, true).await.unwrap()); // unknown
 
+    // Bot: a *kind* of account, independent of suspension — a suspended bot and
+    // an ordinary bot must be distinguishable, which is exactly what reusing
+    // `suspended` for provisioning destroyed.
+    assert!(!store.is_bot(&dan).await.unwrap());
+    assert!(store.set_bot(&dan, true).await.unwrap());
+    assert!(store.is_bot(&dan).await.unwrap());
+    assert!(
+        !store.is_suspended(&dan).await.unwrap(),
+        "a bot is not suspended"
+    );
+    assert!(store.set_suspended(&dan, true).await.unwrap());
+    assert!(
+        store.is_bot(&dan).await.unwrap() && store.is_suspended(&dan).await.unwrap(),
+        "and a bot can still be suspended, independently"
+    );
+    assert!(store.set_suspended(&dan, false).await.unwrap());
+    assert!(store.set_bot(&dan, false).await.unwrap());
+    assert!(!store.is_bot(&dan).await.unwrap());
+    assert!(!store.set_bot(&cara, true).await.unwrap()); // unknown
+
     // §10.4 operator flag: toggleable, listable; unknown account → false.
     assert!(!store.is_operator(&dan).await.unwrap());
     assert!(!store.list_operators().await.unwrap().contains(&dan));

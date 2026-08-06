@@ -126,12 +126,14 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
         .route(
             "/_matrix/client/v3/createRoom",
             post(
-                |State(hs): State<MockHs>, axum::Json(body): axum::Json<Value>| async move {
+                |State(hs): State<MockHs>,
+                 axum::extract::RawQuery(q): axum::extract::RawQuery,
+                 axum::Json(body): axum::Json<Value>| async move {
                     let alias = body["room_alias_name"].as_str().unwrap_or("noalias");
                     let room_id = format!("!{alias}:test.example");
                     hs.calls.lock().unwrap().push((
                         "POST createRoom".to_string(),
-                        String::new(),
+                        q.unwrap_or_default(),
                         body,
                     ));
                     axum::Json(json!({ "room_id": room_id }))
@@ -196,6 +198,22 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
             ),
         )
         .route(
+            "/_matrix/client/v3/rooms/:room/typing/:user",
+            put(
+                |State(hs): State<MockHs>,
+                 Path((room, user)): Path<(String, String)>,
+                 axum::extract::RawQuery(q): axum::extract::RawQuery,
+                 axum::Json(body): axum::Json<Value>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("PUT typing/{room}/{user}"),
+                        q.unwrap_or_default(),
+                        body,
+                    ));
+                    axum::Json(json!({}))
+                },
+            ),
+        )
+        .route(
             "/_matrix/client/v3/rooms/:room/kick",
             post(
                 |State(hs): State<MockHs>,
@@ -237,6 +255,65 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
                         body,
                     ));
                     axum::Json(json!({}))
+                },
+            ),
+        )
+        .route(
+            "/_matrix/client/v1/media/download/:server/:id",
+            get(
+                |State(hs): State<MockHs>, Path((server, id)): Path<(String, String)>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("GET media/download/{server}/{id}"),
+                        String::new(),
+                        Value::Null,
+                    ));
+                    // A PNG magic number, so the sniffer has something real.
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "image/png")],
+                        vec![0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+                    )
+                },
+            ),
+        )
+        .route(
+            "/_matrix/media/v3/upload",
+            post(
+                |State(hs): State<MockHs>, _body: axum::body::Bytes| async move {
+                    hs.calls.lock().unwrap().push((
+                        "POST matrix-upload".to_string(),
+                        String::new(),
+                        Value::Null,
+                    ));
+                    axum::Json(json!({ "content_uri": "mxc://test.example/uploaded" }))
+                },
+            ),
+        )
+        // weftd's media plane, stood up on the same mock for the test.
+        .route(
+            "/media",
+            post(
+                |State(hs): State<MockHs>,
+                 axum::extract::RawQuery(q): axum::extract::RawQuery,
+                 _body: axum::body::Bytes| async move {
+                    hs.calls.lock().unwrap().push((
+                        "POST media".to_string(),
+                        q.unwrap_or_default(),
+                        Value::Null,
+                    ));
+                    axum::Json(json!({ "hash": "deadbeef" }))
+                },
+            ),
+        )
+        .route(
+            "/media/:hash",
+            get(
+                |State(hs): State<MockHs>, Path(hash): Path<String>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("GET weft-media/{hash}"),
+                        String::new(),
+                        Value::Null,
+                    ));
+                    vec![0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
                 },
             ),
         )
@@ -311,6 +388,9 @@ async fn bridge_with(
         pending_acts: Default::default(),
         act_seq: 0,
         flows: Default::default(),
+        weft_media: Some(weft_matrix::media::WeftMedia::new(&url)),
+        pending_uploads: Default::default(),
+        upload_seq: 0,
     };
 
     (bridge, lines, calls)
@@ -1939,5 +2019,273 @@ async fn backfill_replays_a_window_as_ordinary_ingestion() {
         drain(&mut lines).len(),
         before,
         "a re-fetched window replays nothing — every event is already linked"
+    );
+}
+
+#[tokio::test]
+async fn media_crosses_both_ways_as_a_copy() {
+    // matrix.md §12: neither side can fetch the other's blobs, so each
+    // direction downloads and re-uploads. Inbound waits for weftd's upload
+    // grant before sending the message — a reference to a blob weftd does not
+    // hold yet renders as a broken attachment.
+    let (mut bridge, mut lines, calls) = bridge_with(kde_space()).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    drain(&mut lines);
+    let channel = bridge
+        .store
+        .state
+        .channel_of_room("!gen:kde.org")
+        .unwrap()
+        .0
+        .channel
+        .clone();
+
+    // Matrix → WEFT: an m.image is downloaded, then offered.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.message",
+            "room_id": "!gen:kde.org",
+            "event_id": "$img1",
+            "sender": "@carol:kde.org",
+            "origin_server_ts": 1_722_000_000_000u64,
+            "content": {
+                "msgtype": "m.image",
+                "body": "cat.png",
+                "url": "mxc://kde.org/blob1",
+                "info": { "mimetype": "image/png" },
+            },
+        }))
+        .await;
+
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(what, _, _)| what.contains("media/download") && what.contains("blob1")),
+        "the blob was downloaded from the homeserver"
+    );
+    let sent = drain(&mut lines);
+    let offer = sent
+        .iter()
+        .find(|l| l.contains("STREAM OFFER"))
+        .expect("an upload grant was requested");
+    assert!(offer.contains("image/png"), "{offer}");
+    assert!(
+        !sent.iter().any(|l| l.contains("MSG")),
+        "the message waits for the blob: {sent:?}"
+    );
+    let label = offer
+        .split("label=")
+        .nth(1)
+        .map(|l| l.split([';', ' ']).next().unwrap().to_string())
+        .expect("the offer is labeled");
+
+    // The grant arrives → the blob is posted and the message references it.
+    deliver(
+        &mut bridge,
+        weft_proto::Event::StreamAccept {
+            token: "grant-1".into(),
+        },
+        Some(&label),
+        None,
+    )
+    .await;
+
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(what, q, _)| what == "POST media" && q.contains("t=grant-1")),
+        "the blob was posted with its grant"
+    );
+    let sent = drain(&mut lines);
+    let msg = sent
+        .iter()
+        .find(|l| l.contains("MSG"))
+        .expect("the message");
+    assert!(msg.contains("attach.1=weft-media://"), "{msg}");
+    assert!(msg.contains("as=carol@kde.org"), "{msg}");
+
+    // WEFT → Matrix: a local message's attachment becomes its own event.
+    join_ada(&mut bridge, &ident::stable_ulid("!space:kde.org")).await;
+    drain(&mut lines);
+    let msgid: weft_proto::MsgId = format!("test.example/{}", ulid::Ulid::new())
+        .to_lowercase()
+        .parse()
+        .unwrap();
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Message(Box::new(weft_proto::MessageEvent {
+            target: weft_proto::Target::Channel(channel.parse().unwrap()),
+            sender: "ada@test.example".parse().unwrap(),
+            msgid,
+            body: "look".into(),
+            meta: weft_proto::MsgMeta {
+                attachments: vec!["weft-media://cafebabe".into()],
+                ..weft_proto::MsgMeta::default()
+            },
+            edited: None,
+            edited_at: None,
+        })),
+        None,
+        Some(ADA_ULID),
+    )
+    .await;
+
+    let recorded = calls.lock().unwrap().clone();
+    assert!(
+        recorded
+            .iter()
+            .any(|(what, _, _)| what == "GET weft-media/cafebabe"),
+        "the blob was fetched from weftd: {recorded:?}"
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|(what, _, _)| what == "POST matrix-upload"),
+        "…uploaded to the homeserver: {recorded:?}"
+    );
+    let (_, _, body) = recorded
+        .iter()
+        .rev()
+        .find(|(what, _, _)| what.contains("m.room.message"))
+        .expect("an attachment event");
+    assert_eq!(body["msgtype"], "m.image", "sniffed from the bytes");
+    assert!(
+        body["url"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("mxc://"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn dms_and_typing_cross_the_bridge() {
+    // Protocol doc §5 + matrix.md §15. A bridged DM is a first-class WEFT DM,
+    // and the Matrix side of it is a real DM room owned by the two people in it
+    // — created as the puppet, not as the bridge bot.
+    let (mut bridge, mut lines, calls) = bridge_with(kde_space()).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    drain(&mut lines);
+    let ns_id = ident::stable_ulid("!space:kde.org");
+    let channel = bridge
+        .store
+        .state
+        .channel_of_room("!gen:kde.org")
+        .unwrap()
+        .0
+        .channel
+        .clone();
+    join_ada(&mut bridge, &ns_id).await;
+    drain(&mut lines);
+
+    // WEFT → Matrix: ada DMs carol. The room is opened on first use.
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            as_user: Some("ada@test.example".into()),
+            as_ulid: Some(ADA_ULID.into()),
+            command: weft_proto::Command::Msg {
+                target: weft_proto::Target::User {
+                    account: "carol".parse().unwrap(),
+                    network: Some("kde.org".parse().unwrap()),
+                },
+                body: Some("hi carol".into()),
+                meta: weft_proto::MsgMeta::default(),
+            },
+        })
+        .await;
+
+    let dm_room = {
+        let recorded = calls.lock().unwrap();
+        let (_, query, body) = recorded
+            .iter()
+            .find(|(what, _, body)| what == "POST createRoom" && body["is_direct"] == true)
+            .expect("a DM room was created");
+        assert!(
+            query.contains(&format!("weft_{ADA_ULID}")),
+            "created as ada's puppet, not the bot: {query}"
+        );
+        assert_eq!(body["invite"][0], "@carol:kde.org");
+        format!("!{}:test.example", "noalias")
+    };
+    let sent_dm = calls.lock().unwrap().iter().any(|(what, q, body)| {
+        what.starts_with("PUT send/")
+            && what.contains("m.room.message")
+            && q.contains(&format!("weft_{ADA_ULID}"))
+            && body["body"] == "hi carol"
+    });
+    assert!(sent_dm, "the DM was sent as her puppet");
+
+    // Matrix → WEFT: carol replies in that room; it ingests as a WEFT DM
+    // addressed to ada, not as a channel message.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.message",
+            "room_id": dm_room,
+            "event_id": "$dm1",
+            "sender": "@carol:kde.org",
+            "origin_server_ts": 1_722_000_000_000u64,
+            "content": { "msgtype": "m.text", "body": "hi ada" },
+        }))
+        .await;
+    let sent = drain(&mut lines);
+    let dm = sent
+        .iter()
+        .find(|l| l.contains("MSG @ada"))
+        .expect("the DM ingested to ada");
+    assert!(dm.contains("as=carol@kde.org"), "{dm}");
+    assert!(
+        dm.contains("msgid=kde.org/"),
+        "the realm mints its own: {dm}"
+    );
+
+    // §15 typing: ada's indicator becomes her puppet's typing EDU.
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Typing {
+            channel: channel.parse().unwrap(),
+            user: "ada@test.example".parse().unwrap(),
+            state: weft_proto::TypingState::Start,
+        },
+        None,
+        Some(ADA_ULID),
+    )
+    .await;
+    assert!(
+        calls.lock().unwrap().iter().any(|(what, q, body)| what
+            .starts_with("PUT typing/!gen:kde.org")
+            && q.contains(&format!("weft_{ADA_ULID}"))
+            && body["typing"] == true),
+        "typing was mirrored as her puppet"
+    );
+
+    // …and `stop` clears it rather than waiting for the TTL.
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Typing {
+            channel: channel.parse().unwrap(),
+            user: "ada@test.example".parse().unwrap(),
+            state: weft_proto::TypingState::Stop,
+        },
+        None,
+        Some(ADA_ULID),
+    )
+    .await;
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(what, _, body)| what.starts_with("PUT typing/") && body["typing"] == false),
+        "stop clears the indicator"
     );
 }

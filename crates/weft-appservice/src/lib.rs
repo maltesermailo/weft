@@ -360,6 +360,10 @@ impl AppServiceBuilder {
             icon: None,
             actions: self.actions.clone(),
             hooks: Vec::new(),
+            // The bot request finally reaches weftd: the builder collected it
+            // from the start, but the registration had no field for it, so
+            // every `.bot(…)` was silently dropped.
+            bot: self.bot.clone(),
             schemes: self.schemes.clone(),
         };
         out_tx.send(register_line(&registration)?).await.ok();

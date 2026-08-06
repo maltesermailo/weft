@@ -19,4 +19,5 @@ pub mod config;
 pub mod hs;
 pub mod ident;
 pub mod levels;
+pub mod media;
 pub mod store;

@@ -155,12 +155,22 @@ impl Hs {
     /// Create a room as the bot. `body` is the raw createRoom payload — the
     /// projection engine owns the shape (space vs room, alias, presets).
     pub async fn create_room(&self, body: Value) -> anyhow::Result<String> {
+        self.create_room_as(body, None).await
+    }
+
+    /// Create a room as a **puppet** — a DM belongs to the two people in it,
+    /// not to the bridge bot.
+    pub async fn create_room_as(
+        &self,
+        body: Value,
+        as_user: Option<&str>,
+    ) -> anyhow::Result<String> {
         let v = self
             .call(
                 reqwest::Method::POST,
                 "/_matrix/client/v3/createRoom",
                 Some(body),
-                None,
+                as_user,
                 &[],
             )
             .await?;
@@ -190,6 +200,31 @@ impl Hs {
             Err(e) if e.to_string().contains(" 404 ") => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Typing notification, as a puppet (§15). `timeout_ms` is how long the
+    /// indicator lives; `0` with `typing: false` clears it.
+    pub async fn typing(
+        &self,
+        room_id: &str,
+        as_user: &str,
+        typing: bool,
+        timeout_ms: u64,
+    ) -> anyhow::Result<()> {
+        self.call(
+            reqwest::Method::PUT,
+            &format!(
+                "/_matrix/client/v3/rooms/{}/typing/{}",
+                enc(room_id),
+                enc(as_user)
+            ),
+            Some(json!({ "typing": typing, "timeout": timeout_ms })),
+            Some(as_user),
+            &[],
+        )
+        .await?;
+
+        Ok(())
     }
 
     /// Set a state event as the bot (`m.space.child`, power levels, …).
@@ -224,6 +259,70 @@ impl Hs {
         .await?;
 
         Ok(())
+    }
+
+    /// Download a blob by its `mxc://server/id`, through the companion
+    /// homeserver's **authenticated** media endpoint. Returns the bytes and
+    /// whatever content type the server reported.
+    pub async fn download_mxc(&self, mxc: &str) -> anyhow::Result<(Vec<u8>, String)> {
+        let rest = mxc
+            .strip_prefix("mxc://")
+            .ok_or_else(|| anyhow!("not an mxc uri: {mxc}"))?;
+        let (server, id) = rest
+            .split_once('/')
+            .ok_or_else(|| anyhow!("malformed mxc uri: {mxc}"))?;
+
+        let res = self
+            .http
+            .get(format!(
+                "{}/_matrix/client/v1/media/download/{}/{}",
+                self.base,
+                enc(server),
+                enc(id)
+            ))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("downloading media")?;
+        let status = res.status();
+        let mime = res
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let bytes = res.bytes().await.context("reading media body")?;
+
+        anyhow::ensure!(status.is_success(), "media download failed: {status}");
+
+        Ok((bytes.to_vec(), mime))
+    }
+
+    /// Upload a blob to the companion homeserver's media repo. Returns its
+    /// `mxc://` — remote homeservers fetch from here, which is what makes a
+    /// projected attachment work over ordinary Matrix media federation (§12).
+    pub async fn upload_media(
+        &self,
+        bytes: Vec<u8>,
+        mime: &str,
+        filename: &str,
+    ) -> anyhow::Result<String> {
+        let res = self
+            .http
+            .post(format!("{}/_matrix/media/v3/upload", self.base))
+            .bearer_auth(&self.token)
+            .header(reqwest::header::CONTENT_TYPE, mime)
+            .query(&[("filename", filename)])
+            .body(bytes)
+            .send()
+            .await
+            .context("uploading media")?;
+        let status = res.status();
+        let v: Value = res.json().await.unwrap_or(Value::Null);
+
+        anyhow::ensure!(status.is_success(), "media upload failed: {status} {v}");
+
+        str_field(&v, "content_uri")
     }
 
     /// A pagination token positioned **at** an event — Matrix's `/messages`

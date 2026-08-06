@@ -205,6 +205,10 @@ like a local one — being foreign confers nothing.
 Stored in the ordinary DM scope keyed by member keys, preserving the realm's msgid. A bridged
 conversation is a first-class DM, not a second table.
 
+The other direction is already wired: a local user's `MSG @<user@realm>` is stored and echoed
+locally **and** relayed to the realm's provider as `@as=<local-user>;ulid=<id> MSG @<user@realm>`
+(§8) — the only route that can reach them.
+
 ### Outbound projection — the return path into a native channel (2026-08-06)
 
 A **native** namespace whose ns-admin opted in — `NS META <ns-id> bridge:<scheme> :open` (requires
@@ -443,10 +447,60 @@ the shared implementation so every adapter behaves the same:
 - Deciding what a power level means in capabilities, and vice versa (§7).
 - When to re-assert, and reconciling foreign state after a gap (§4, §6).
 
+## 11a. Media (§13's data plane)
+
+Blobs do **not** ride the control stream. Two surfaces, and they are
+asymmetric:
+
+| Dir | What | Credential |
+|-----|------|------------|
+| →   | `@label=<l> STREAM OFFER media <mime> <bytes>` | the session itself |
+| ←   | `@label=<l> STREAM ACCEPT <token>` | — |
+| →   | `POST /media?t=<token>` (HTTP), then `attach.N=weft-media://<hash>` on the `MSG` | the one-shot grant |
+| ←   | `GET /media/<hash>` (HTTP) | **none** — content-addressed |
+
+The fetch needs no credential by design (§13's media-proxy model: the 256-bit
+BLAKE3 hash *is* the capability, obtainable only from a message you can already
+see). The upload does, because it consumes storage — and a provider's grant is
+authorized by its pinned key rather than an `attach` capability, since it has no
+account. Size and mime are bounded exactly as for a client.
+
+**Attach after upload, never before.** A `weft-media://` reference to a blob
+weftd does not hold yet renders as a broken attachment, so the message waits for
+the grant.
+
+## 11b. A provider's own identity
+
+`PLUGIN-REGISTER` may carry `bot=<account>`. weftd provisions it as a **bot** —
+a native account kind, `bot` flag, migration 0056 — and it is then the one local
+account this provider may name in `@as` (§5's forgery rule otherwise refuses
+every local sender). That is the service speaking as itself.
+
+A bot is a *kind*, not a punishment: it **cannot authenticate** on a client
+session (uniform `AUTH-FAILED` at the single chokepoint — whether a handle is a
+bot is not probeable), yet it is not suspended, so a misbehaving bot can still be
+suspended and the two states stay distinguishable. It acts through its provider
+today; an API-token path is the intended second door (owner directive
+2026-08-06). The first cut reused `suspended` for this and was wrong: the panel
+showed bots as punished users, un-suspending one would have silently granted it
+login, and a real suspension was invisible.
+
+## 11c. Typing (§15)
+
+| Dir | Line | Notes |
+|-----|------|-------|
+| →   | `@as=<user@realm> TYPING #<ns-id>/<chan-id> start\|stop` | A realm's user. Needs `@as`: the wire's `TYPING` names no user, since a client's own session identifies them. |
+| ←   | `TYPING #<ns-id>/<chan-id> <user@ournet> start\|stop` with `ulid=` | Ours. Attribution rides the **event**, so there is no `@as` here. |
+
+Never stored, so it is announced rather than ingested. Same one-hop rule as
+`MEMBER`, applied to the *user*: ours goes out, a bridged user's does not (that
+one is the echo of an ingest). Read receipts stay unbridged — WEFT's `MARK` is
+private, Matrix receipts are public.
+
 ## 12. Not yet built
 
-- **DM mutations** on a bridged conversation apply locally only; the relay hook exists (`MessageRoute::Dm`
-  carries a `UserRef`) but is not wired.
+- **DM edits/reactions** on a bridged conversation apply locally only; the
+  message path is wired (both directions), the mutation verbs are not.
 - **Per-device attestations** on bridged events — trust is network-level: the provider proved control
   of its key on the session, so `att=` tags are not carried per event.
-- **Typing, presence, media mirroring** across the bridge.
+- **Presence** — never bridged (core lock).

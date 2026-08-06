@@ -153,6 +153,31 @@ impl Realm {
         self.send(line.serialize()?).await
     }
 
+    /// Replay a **DM** from one of the realm's users to one of ours. Stored in
+    /// the ordinary DM scope keyed by member keys — a bridged conversation is a
+    /// first-class DM, not a second table.
+    pub async fn dm(
+        &self,
+        sender: &str,
+        msgid: &str,
+        to_account: &str,
+        body: &str,
+    ) -> anyhow::Result<()> {
+        let mut line = weft_proto::Request::new(weft_proto::Command::Msg {
+            target: Target::User {
+                account: to_account.parse()?,
+                network: None,
+            },
+            body: Some(body.to_string()),
+            meta: weft_proto::MsgMeta::default(),
+        })
+        .to_line()?;
+        line.tags.insert("as".to_string(), sender.to_string());
+        line.tags.insert("msgid".to_string(), msgid.to_string());
+
+        self.send(line.serialize()?).await
+    }
+
     /// Replay an edit. Carries its **own** minted id, since the edit is itself a
     /// stored event; `root` is the message being edited.
     pub async fn edit(
@@ -407,6 +432,49 @@ impl Realm {
             },
         )
         .await
+    }
+
+    /// §13 ask for a media upload grant. weftd answers `STREAM ACCEPT <token>`
+    /// on the session (surfaced as an [`crate::Incoming::Event`]); the bytes
+    /// then ride weftd's HTTP media plane, not this stream.
+    pub async fn offer_media(&self, mime: &str, bytes: u64, label: &str) -> anyhow::Result<()> {
+        self.send(
+            weft_proto::Request::with_label(
+                weft_proto::Command::StreamOffer {
+                    mode: weft_proto::StreamMode::Media,
+                    mime: mime.to_string(),
+                    bytes,
+                },
+                label,
+            )
+            .serialize()?,
+        )
+        .await
+    }
+
+    /// Replay a message from one of the realm's users **with attachments** —
+    /// `weft-media://<hash>` references obtained from an upload.
+    pub async fn message_with_attachments(
+        &self,
+        sender: &str,
+        msgid: &str,
+        channel: &str,
+        body: &str,
+        attachments: Vec<String>,
+    ) -> anyhow::Result<()> {
+        let mut line = weft_proto::Request::new(weft_proto::Command::Msg {
+            target: Target::Channel(channel.parse()?),
+            body: Some(body.to_string()),
+            meta: weft_proto::MsgMeta {
+                attachments,
+                ..weft_proto::MsgMeta::default()
+            },
+        })
+        .to_line()?;
+        line.tags.insert("as".to_string(), sender.to_string());
+        line.tags.insert("msgid".to_string(), msgid.to_string());
+
+        self.send(line.serialize()?).await
     }
 
     /// Create a channel **as** a WEFT user (their `chan-create` capability is

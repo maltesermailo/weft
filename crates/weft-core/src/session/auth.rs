@@ -129,6 +129,13 @@ impl<S: ControlStream> Session<S> {
         {
             return self.auth_failed(label).await;
         }
+        // A **bot** never authenticates on a client session (owner directive
+        // 2026-08-06): it acts through the provider that registered it, and
+        // later through an API token. Same uniform failure — whether a handle
+        // is a bot is not something an unauthenticated caller may probe.
+        if self.ctx.accounts.is_bot(&account).await.unwrap_or(false) {
+            return self.auth_failed(label).await;
+        }
         let welcome = Event::Welcome {
             network: self.ctx.info.network.clone(),
             features: Vec::new(),

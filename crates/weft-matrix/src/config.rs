@@ -19,6 +19,11 @@ pub struct Weft {
     /// PEM/base64 Ed25519 signing key file — the key pinned in weftd's
     /// `[[plugin.remote]]`. Generated on first run if absent.
     pub key_file: PathBuf,
+    /// weftd's HTTP media base, e.g. `https://weft.example` — §13's data plane
+    /// (`POST /media`, `GET /media/<hash>`) is HTTP, not the control stream.
+    /// Absent ⇒ media is not bridged, and the daemon says so once.
+    #[serde(default)]
+    pub media_url: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]

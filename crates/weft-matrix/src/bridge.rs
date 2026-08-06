@@ -46,6 +46,27 @@ pub struct Bridge {
     pub act_seq: u64,
     /// Open management flows by view-id: which action, on what, for whom.
     pub flows: std::collections::HashMap<String, Flow>,
+    /// weftd's HTTP media plane, when configured. `None` ⇒ media is not
+    /// bridged, and the daemon says so once rather than per message.
+    pub weft_media: Option<crate::media::WeftMedia>,
+    /// Blobs downloaded from Matrix and waiting for their upload grant
+    /// (`STREAM ACCEPT`), by the label the offer carried.
+    pub pending_uploads: std::collections::HashMap<String, PendingUpload>,
+    pub upload_seq: u64,
+}
+
+/// A Matrix attachment already in hand, waiting for weftd's upload grant so it
+/// can be posted and attached to the message it belongs to.
+pub struct PendingUpload {
+    pub bytes: Vec<u8>,
+    pub mime: String,
+    /// Everything needed to send the message once the blob has a hash.
+    pub sender: String,
+    pub channel: String,
+    pub body: String,
+    pub msgid: String,
+    pub event_id: String,
+    pub room_id: String,
 }
 
 /// An open management flow (slice 11) — the context its next step acts on.
@@ -84,6 +105,10 @@ pub enum PendingAct {
 /// paginated far below WEFT's `MAX_HISTORY_LIMIT` (500), and backfill is
 /// demand-driven — the client scrolls again for the next window.
 const BACKFILL_PAGE: u32 = 50;
+
+/// How long a mirrored typing indicator lives. Matrix expires it server-side,
+/// so a `stop` that never arrives (a dropped session) still clears.
+const TYPING_TTL_MS: u64 = 20_000;
 
 /// A projected channel's layout, waiting for its retention policy.
 pub struct PendingLayout {
@@ -291,6 +316,24 @@ impl Bridge {
                     }
                 }
             }
+            // §15 one of our members is typing in a bridged channel — mirror it
+            // as their puppet's typing EDU. The event names its own user, so
+            // there is no `@as` here.
+            Event::Typing {
+                channel,
+                user,
+                state,
+            } => {
+                let user = user.to_string();
+                self.relay_typing(&user, actor_ulid.as_deref(), &channel.to_string(), state)
+                    .await;
+            }
+            // §13 the upload grant for a blob we are holding.
+            Event::StreamAccept { token } => {
+                if let Some(label) = label {
+                    self.finish_attachment_upload(&label, &token).await;
+                }
+            }
             // §10: a refusal of one of our attributed acts — undo the
             // foreign-side change and notice the actor.
             Event::Err(err) => {
@@ -408,6 +451,26 @@ impl Bridge {
                     .await
                 {
                     warn!(user, %msgid, "relayed DELETE failed: {e:#}");
+                }
+            }
+            // §5 a local user's DM to one of the realm's users: weftd stored and
+            // echoed it locally, and hands us the copy for the only route that
+            // can reach them.
+            Command::Msg {
+                target:
+                    weft_proto::Target::User {
+                        account: peer,
+                        network: Some(network),
+                    },
+                body,
+                ..
+            } => {
+                let peer = format!("{peer}@{network}");
+                if let Err(e) = self
+                    .relay_dm(&ulid, &account, &peer, body.as_deref().unwrap_or_default())
+                    .await
+                {
+                    warn!(user, peer, "DM relay failed: {e:#}");
                 }
             }
             other => debug!(?other, "unhandled weftd request"),
@@ -619,6 +682,18 @@ impl Bridge {
             return;
         };
 
+        // A bridged DM room is neither a replica nor a projection: it carries
+        // one conversation, stored in the ordinary DM scope.
+        if let Some((account, mxid)) = self
+            .store
+            .state
+            .dm_of_room(&room_id)
+            .map(|(a, m)| (a.to_string(), m.to_string()))
+        {
+            self.on_dm_event(&ev, &account, &mxid).await;
+            return;
+        }
+
         // A projected room takes the injection path — the home mints there,
         // so it is a different wire shape from replica ingestion.
         if let Some((channel, ns_id)) = self
@@ -678,6 +753,27 @@ impl Bridge {
                     return;
                 };
                 let minted = ident::msgid_for(&realm, &event_id, ts);
+
+                // An attachment must exist on our side *before* the message
+                // references it, so the blob round trip comes first and the
+                // MSG is sent when the grant lands (§12).
+                if let Some((mxc, mime, _)) = crate::media::attachment_of(content) {
+                    self.begin_attachment_upload(
+                        &mxc,
+                        &mime,
+                        crate::media::PendingParts {
+                            sender: weft_sender,
+                            channel,
+                            body: body.to_string(),
+                            msgid: minted,
+                            event_id,
+                            room_id,
+                        },
+                    )
+                    .await;
+                    return;
+                }
+
                 if let Err(e) = self
                     .realm
                     .message(&weft_sender, &minted, &channel, body)
@@ -1039,6 +1135,12 @@ impl Bridge {
         self.store
             .link(&event_id, &m.msgid.to_string(), &room_id)
             .await;
+
+        // §12 each blob becomes its own Matrix event — one attachment per event
+        // is all Matrix carries.
+        self.relay_attachments(&room_id, &puppet, &m.msgid.to_string(), &m.meta.attachments)
+            .await;
+
         Ok(())
     }
 
@@ -1320,6 +1422,301 @@ impl Bridge {
 
         let root_id = root.parse()?;
         self.realm.delete(user, &root_id).await
+    }
+
+    // ---- DMs and typing (matrix.md §15, protocol doc §5) -------------------
+
+    /// WEFT → Matrix: carry a local user's DM into a Matrix DM room, opening
+    /// one on first use. Sent as their puppet, so it reads as coming from them.
+    async fn relay_dm(
+        &mut self,
+        ulid: &str,
+        account: &str,
+        peer: &str,
+        body: &str,
+    ) -> anyhow::Result<()> {
+        let Some(mxid) = ident::mxid_of_weft_user(peer) else {
+            anyhow::bail!("{peer} has no Matrix identity");
+        };
+        let puppet = self.ensure_puppet(ulid, account).await?;
+
+        let room = match self
+            .store
+            .state
+            .dm_rooms
+            .get(&(account.to_string(), mxid.clone()))
+        {
+            Some(room) => room.clone(),
+            None => {
+                // `is_direct` + the invite is what makes clients render it as a
+                // DM rather than a tiny room; created **as the puppet**, so the
+                // conversation belongs to the two of them.
+                let room = self
+                    .hs
+                    .create_room_as(
+                        json!({
+                            "is_direct": true,
+                            "preset": "trusted_private_chat",
+                            "invite": [mxid],
+                        }),
+                        Some(&puppet),
+                    )
+                    .await?;
+                self.store.save_dm_room(account, &mxid, &room).await;
+                room
+            }
+        };
+
+        let txn = txn_of(&format!("dm-{account}-{}", self.next_dm_txn()));
+        self.hs
+            .send(
+                &room,
+                "m.room.message",
+                json!({ "msgtype": "m.text", "body": body }),
+                &txn,
+                Some(&puppet),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// A Matrix message in a bridged **DM** room: ingest it as an ordinary WEFT
+    /// DM (`Scope::Dm`), keyed by the realm's msgid like any other ingest.
+    async fn on_dm_event(&mut self, ev: &Value, account: &str, mxid: &str) {
+        if ev["type"] != "m.room.message" {
+            return; // v1 bridges DM text; edits/reactions ride the channel path
+        }
+        let (Some(event_id), Some(body)) = (
+            ev["event_id"].as_str().map(String::from),
+            ev["content"]["body"].as_str(),
+        ) else {
+            return;
+        };
+        if self.store.state.links.msgid_of(&event_id).is_some() {
+            return; // already ingested
+        }
+        let Some(sender) = ev["sender"].as_str().filter(|s| *s == mxid) else {
+            return; // our own puppet's copy, or a third party in a "DM"
+        };
+        let Some(weft_sender) = self.foreign_user(sender) else {
+            return;
+        };
+
+        let realm = weft_sender
+            .split('@')
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
+        let ts = ev["origin_server_ts"].as_u64().unwrap_or_default();
+        let minted = ident::msgid_for(&realm, &event_id, ts);
+
+        if let Err(e) = self.realm.dm(&weft_sender, &minted, account, body).await {
+            warn!(event_id, "DM ingestion failed: {e:#}");
+            return;
+        }
+
+        let room = ev["room_id"].as_str().unwrap_or_default().to_string();
+        self.store.link(&event_id, &minted, &room).await;
+    }
+
+    /// §15 mirror a local member's typing as their puppet's typing EDU.
+    async fn relay_typing(
+        &mut self,
+        user: &str,
+        ulid: Option<&str>,
+        channel: &str,
+        state: weft_proto::TypingState,
+    ) {
+        let Some(room) = self.room_of_channel(channel) else {
+            return;
+        };
+        let account = account_of(user);
+        let puppet = match ulid {
+            Some(ulid) => self.ensure_puppet(ulid, &account).await.ok(),
+            None => self.puppet_of_account(&account),
+        };
+        let Some(puppet) = puppet else {
+            return; // nobody to type as
+        };
+
+        let typing = state == weft_proto::TypingState::Start;
+        if let Err(e) = self
+            .hs
+            .typing(
+                &room,
+                &puppet,
+                typing,
+                if typing { TYPING_TTL_MS } else { 0 },
+            )
+            .await
+        {
+            debug!(channel, "typing relay failed: {e:#}");
+        }
+    }
+
+    /// A monotonic suffix so two DMs in the same second get distinct txn ids
+    /// (a DM carries no msgid we could key on — weftd minted it locally).
+    fn next_dm_txn(&mut self) -> u64 {
+        self.upload_seq += 1;
+        self.upload_seq
+    }
+
+    // ---- media (matrix.md §12) ---------------------------------------------
+
+    /// Matrix → WEFT: download the blob, then ask weftd for an upload grant.
+    /// The message waits — a reference to a blob weftd does not hold yet would
+    /// render as a broken attachment.
+    async fn begin_attachment_upload(
+        &mut self,
+        mxc: &str,
+        mime: &str,
+        parts: crate::media::PendingParts,
+    ) {
+        if self.weft_media.is_none() {
+            warn!("media is not bridged ([weft] media_url unset) — attachment dropped");
+            return;
+        }
+
+        let (bytes, served_mime) = match self.hs.download_mxc(mxc).await {
+            Ok(blob) => blob,
+            Err(e) => {
+                warn!(mxc, "attachment download failed: {e:#}");
+                return;
+            }
+        };
+        // Trust the event's declared mime over the transport's when both exist
+        // — the sender described the file, the server may have guessed.
+        let mime = if mime == "application/octet-stream" {
+            served_mime
+        } else {
+            mime.to_string()
+        };
+
+        self.upload_seq += 1;
+        let label = format!("up-{}", self.upload_seq);
+        let bytes_len = bytes.len() as u64;
+
+        self.pending_uploads.insert(
+            label.clone(),
+            PendingUpload {
+                bytes,
+                mime: mime.clone(),
+                sender: parts.sender,
+                channel: parts.channel,
+                body: parts.body,
+                msgid: parts.msgid,
+                event_id: parts.event_id,
+                room_id: parts.room_id,
+            },
+        );
+
+        if let Err(e) = self.realm.offer_media(&mime, bytes_len, &label).await {
+            warn!("media offer failed: {e:#}");
+            self.pending_uploads.remove(&label);
+        }
+    }
+
+    /// The grant arrived: post the bytes, then send the message that references
+    /// them. A failure at either step drops the whole message rather than
+    /// leaving one that points at nothing.
+    async fn finish_attachment_upload(&mut self, label: &str, token: &str) {
+        let Some(pending) = self.pending_uploads.remove(label) else {
+            return; // not ours (weftd labels its answer with our offer's label)
+        };
+        let Some(media) = self.weft_media.clone() else {
+            return;
+        };
+
+        let reference = match media.upload(token, pending.bytes, &pending.mime).await {
+            Ok(reference) => reference,
+            Err(e) => {
+                warn!(event_id = %pending.event_id, "blob upload failed: {e:#}");
+                return;
+            }
+        };
+
+        if let Err(e) = self
+            .realm
+            .message_with_attachments(
+                &pending.sender,
+                &pending.msgid,
+                &pending.channel,
+                &pending.body,
+                vec![reference],
+            )
+            .await
+        {
+            warn!(event_id = %pending.event_id, "attachment message failed: {e:#}");
+            return;
+        }
+
+        self.store
+            .link(&pending.event_id, &pending.msgid, &pending.room_id)
+            .await;
+    }
+
+    /// WEFT → Matrix: mirror a message's attachments as their own Matrix
+    /// events, one per blob (Matrix carries one attachment per event).
+    ///
+    /// Uploaded to the companion homeserver once and referenced by `mxc://`, so
+    /// remote homeservers fetch it through ordinary Matrix media federation.
+    async fn relay_attachments(
+        &mut self,
+        room_id: &str,
+        puppet: &str,
+        msgid: &str,
+        attachments: &[String],
+    ) {
+        let Some(media) = self.weft_media.clone() else {
+            if !attachments.is_empty() {
+                warn!("media is not bridged ([weft] media_url unset) — attachments dropped");
+            }
+            return;
+        };
+
+        for (index, reference) in attachments.iter().enumerate() {
+            let Some(hash) = crate::media::weft_hash(reference) else {
+                continue; // not a blob reference we understand
+            };
+
+            let bytes = match media.fetch(hash).await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    warn!(hash, "blob fetch failed: {e:#}");
+                    continue;
+                }
+            };
+            // weftd does not report a mime on the fetch, so sniff the two cases
+            // a chat actually cares about and fall back to a download.
+            let mime = sniff_mime(&bytes);
+            let mxc = match self.hs.upload_media(bytes, mime, hash).await {
+                Ok(mxc) => mxc,
+                Err(e) => {
+                    warn!(hash, "media upload to Matrix failed: {e:#}");
+                    continue;
+                }
+            };
+
+            if let Err(e) = self
+                .hs
+                .send(
+                    room_id,
+                    "m.room.message",
+                    json!({
+                        "msgtype": crate::media::msgtype_for(mime),
+                        "body": hash,
+                        "url": mxc,
+                        "info": { "mimetype": mime },
+                    }),
+                    &txn_of(&format!("att-{msgid}-{index}")),
+                    Some(puppet),
+                )
+                .await
+            {
+                warn!(hash, "attachment event failed: {e:#}");
+            }
+        }
     }
 
     // ---- backfill (protocol doc §8) ----------------------------------------
@@ -2602,6 +2999,21 @@ fn vanity_of(name: &str) -> String {
 /// only byte that needs replacing to be path-safe.
 fn txn_of(msgid: &str) -> String {
     msgid.replace('/', "_")
+}
+
+/// The mime of a blob weftd handed us. weftd's fetch reports none, and a chat's
+/// blobs are overwhelmingly images — so sniff the common magic numbers and fall
+/// back to a download rather than mislabelling everything as an image.
+fn sniff_mime(bytes: &[u8]) -> &'static str {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
+        [b'G', b'I', b'F', b'8', ..] => "image/gif",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
+        [0x1A, 0x45, 0xDF, 0xA3, ..] => "video/webm",
+        [b'%', b'P', b'D', b'F', ..] => "application/pdf",
+        _ => "application/octet-stream",
+    }
 }
 
 fn account_of(user: &str) -> String {

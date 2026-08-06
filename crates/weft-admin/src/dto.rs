@@ -51,6 +51,10 @@ pub struct AccountSummary {
     pub deletion_scheduled: Option<u64>,
     /// WC7: the account is suspended (blocked from authenticating).
     pub suspended: bool,
+    /// A **bot**: a provider's own identity. Cannot authenticate at all — a
+    /// *kind* of account, not a moderation state, so the panel must not read it
+    /// as a punishment.
+    pub bot: bool,
 }
 
 /// `DELETE /accounts/:name` response — the account was scheduled for deletion
@@ -95,6 +99,10 @@ pub struct AccountDetail {
     pub deletion_scheduled: Option<u64>,
     /// WC7: the account is suspended (blocked from authenticating).
     pub suspended: bool,
+    /// A **bot**: a provider's own identity. Cannot authenticate at all — a
+    /// *kind* of account, not a moderation state, so the panel must not read it
+    /// as a punishment.
+    pub bot: bool,
     /// WC4: enrolled device fingerprints (truncated hex of the Ed25519 pubkey).
     pub devices: Vec<String>,
     /// WC4 "find related": other accounts sharing this account's email domain

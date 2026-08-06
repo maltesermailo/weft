@@ -52,6 +52,34 @@ impl Accounts {
         })
     }
 
+    /// Provision a **bot** account for a provider (owner directive
+    /// 2026-08-06): a real account whose *authentication paths* differ — no
+    /// password, no key — acting through the provider that registered it, and
+    /// later through an API token.
+    ///
+    /// Marked with the `bot` flag rather than `suspended`. Suspension is a
+    /// moderation state: reusing it made a bot indistinguishable from a punished
+    /// user in the panel, made "un-suspend" silently grant login, and left no
+    /// way to actually suspend a misbehaving bot. Idempotent, and it **clears a
+    /// stale suspension** from the first cut's accounts.
+    pub async fn provision_bot(&self, account: &Account) -> Result<(), StoreError> {
+        if self.store.account_ulid(account).await?.is_none() {
+            // A password is still stored, unguessable and never usable: the
+            // column is NOT NULL, and `is_bot` refuses the login path outright.
+            let password = format!("{}{}", weft_proto::Ulid::new(), weft_proto::Ulid::new());
+            let phc = PasswordHash::new(&password).as_phc().to_owned();
+            self.store.register(account, &phc).await?;
+        }
+
+        self.store.set_bot(account, true).await?;
+        self.store.set_suspended(account, false).await.map(|_| ())
+    }
+
+    /// Is this account a bot? The AUTH chokepoint asks before welcoming.
+    pub async fn is_bot(&self, account: &Account) -> Result<bool, StoreError> {
+        self.store.is_bot(account).await
+    }
+
     /// The account's immutable ULID (§10.4), or `None` if unknown.
     pub async fn account_ulid(&self, account: &Account) -> Result<Option<String>, StoreError> {
         self.store.account_ulid(account).await
