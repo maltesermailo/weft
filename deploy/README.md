@@ -134,21 +134,43 @@ The order below is forced by a circular dependency: the daemon's key must exist
 before weftd can pin it, and weftd must pin it before the daemon may connect.
 So the profile goes on **last**.
 
-### 1. Edit the bridge's config
+### 1. Choose the homeserver's name, and point DNS at it
+
+Matrix federation needs a public name with real TLS, so add a third A record:
+
+```
+matrix.example.com     →  203.0.113.10
+```
+
+That name becomes Synapse's `server_name` — the suffix of every MXID
+(`@weft_<ulid>:matrix.example.com`). It is **permanent**: it is baked into every
+event the server signs, so changing it later invalidates all of them.
+
+You can instead use your **apex** (`server_name: example.com`, prettier MXIDs)
+while the server still runs at `matrix.example.com` — but then federation
+delegation has to be served from the apex, which is weftd's Caddy block, not the
+homeserver's. The `Caddyfile` has the snippet. The subdomain form is simpler and
+is what the shipped files assume.
+
+### 2. Edit the bridge's config
 
 Still in `deploy/weftd`:
 
-- **`weft-matrix.toml`** — `[matrix] domain` (the homeserver's name, e.g.
-  `matrix.example.com`), `as_token` and `hs_token` (**change both** —
-  anyone holding `hs_token` can inject events as any Matrix user), and `admins`
-  (MXIDs allowed to run the `!weft` console) if you want it.
-- **`homeserver.yaml`** — `server_name` = the *same* domain, and the Synapse
-  Postgres password.
+- **`weft-matrix.toml`** — `[matrix] domain` = the name you just chose,
+  `as_token` and `hs_token` (**change both** — anyone holding `hs_token` can
+  inject events as any Matrix user), and `admins` (MXIDs allowed to run the
+  `!weft` console) if you want it.
+- **`homeserver.yaml`** — `server_name` = **exactly** the same string, and the
+  Synapse Postgres password.
 - **`initdb/10-matrix.sql`** — the same Synapse password.
+- **`Caddyfile`** — uncomment the matrix site block and set the same domain. This
+  is what makes federation work: it routes `https://<server_name>/` to Synapse,
+  which lets Synapse's own `/.well-known/matrix/server` tell remote servers to
+  federate over **443**, so port 8448 never has to be opened.
 - **`.env`** — `MATRIX_BIND` / `MATRIX_PORT`, where the homeserver's port is
-  published.
+  published on the host (keep it on loopback; Caddy fronts it).
 
-### 2. Create the two databases
+### 3. Create the two databases
 
 `initdb/` only runs on an *empty* Postgres volume, and yours has data from Part 1,
 so do it by hand — once:
@@ -160,7 +182,7 @@ docker compose exec -T postgres psql -U weft -d postgres < initdb/10-matrix.sql
 (Synapse needs a `C`-collation database, which `POSTGRES_DB` cannot express; that
 is what the script is for. `weftmatrix` is the daemon's own store.)
 
-### 3. Create the adapter key
+### 4. Create the adapter key
 
 ```sh
 docker compose run --rm bridge keygen /etc/weft/weft-matrix.toml
@@ -168,7 +190,7 @@ docker compose run --rm bridge keygen /etc/weft/weft-matrix.toml
 
 Prints the public key. Idempotent — it only creates the file if absent.
 
-### 4. Pin the key in `weft.toml`
+### 5. Pin the key in `weft.toml`
 
 ```toml
 [[plugin.remote]]
@@ -184,7 +206,7 @@ docker compose up -d weftd
 
 Until this matches, the bridge is refused with `AUTH-FAILED` — by design.
 
-### 5. Generate the appservice registration
+### 6. Generate the appservice registration
 
 ```sh
 docker compose run --rm registration     # → /appservices/weft-matrix.yaml
@@ -196,7 +218,7 @@ mounts read-only, so the tokens exist in one file rather than two that drift.
 Re-run it (and restart Synapse) after changing the tokens, the domain or the
 puppet prefix.
 
-### 6. Turn the profile on
+### 7. Turn the profile on
 
 ```sh
 # .env
@@ -208,26 +230,47 @@ docker compose up -d
 docker compose logs -f bridge     # → the adapter pubkey, then "connected to weftd"
 ```
 
-### 7. Federation TLS (only if real Matrix users elsewhere should reach it)
+### 8. Check that federation works
 
-Add to the `Caddyfile`:
+```sh
+docker compose logs synapse | grep -i appservice   # a bad registration is fatal, so
+                                                   # a running Synapse means it loaded
+curl https://matrix.example.com/.well-known/matrix/server
+# → {"m.server":"matrix.example.com:443"}
+```
+
+**That `:443` is what keeps port 8448 shut.** A remote server discovers us in this
+order: `/.well-known/matrix/server` → SRV record → `<server_name>:8448` as a last
+resort. The well-known short-circuits it to 443, which is why nothing here listens
+on 8448. If the curl above comes back **without** a port, remote servers will fall
+back to 8448 and federation breaks — fix it by either publishing 8448 through
+Caddy:
 
 ```caddyfile
-matrix.example.com {
+matrix.example.com:8448 {
 	reverse_proxy synapse:8008
-	handle /.well-known/matrix/* {
-		header Content-Type application/json
-		respond `{"m.server": "matrix.example.com:443"}`
-	}
 }
 ```
 
-Without this the bridge still works for rooms **on the companion server** — enough
-to exercise both traffic directions, media, DMs and typing.
+(then open 8448/TCP in the firewall), or by serving the delegation from Caddy with
+the port spelled out, instead of letting Synapse answer it:
 
-Verification steps (consume a room, project a namespace, the `!weft` console) are
-in [`weftd/MATRIX.md`](weftd/MATRIX.md#verifying-it-works). Note the warning there:
-**the bridge has never been run against a real homeserver.**
+```caddyfile
+handle /.well-known/matrix/server {
+	header Content-Type application/json
+	respond `{"m.server": "matrix.example.com:443"}`
+}
+```
+
+Then run your `server_name` through
+**<https://federationtester.matrix.org>** — it checks DNS, delegation, the
+certificate and the signing key the way a remote homeserver would, and names
+whatever is wrong. It must come back green before a Matrix user on another server
+can join anything here.
+
+The remaining verification (consume a room, project a namespace, the `!weft`
+console) is in [`weftd/MATRIX.md`](weftd/MATRIX.md#verifying-it-works). Note the
+warning there: **the bridge has never been run against a real homeserver.**
 
 ---
 

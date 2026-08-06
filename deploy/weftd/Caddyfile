@@ -19,3 +19,29 @@ weft.example.com {
 livekit.weft.example.com {
 	reverse_proxy livekit:7880
 }
+
+# ── Matrix bridge (COMPOSE_PROFILES=…,matrix) ────────────────────────────────
+# Uncomment and set your domain to make the companion homeserver reachable —
+# federation needs a public name with real TLS, and this is what provides it.
+# It MUST MATCH `server_name` in homeserver.yaml.
+#
+# No /.well-known/matrix/server block is needed here: `serve_server_wellknown:
+# true` has Synapse serve it, which is what tells remote servers to federate over
+# 443 instead of 8448 (so 8448 never has to be opened). That only works because
+# this block routes `https://<server_name>/` to Synapse.
+#
+# If you instead set `server_name` to your APEX domain (prettier MXIDs,
+# `@weft_…:weft.example.com`), the delegation has to be served from the apex —
+# i.e. from the weftd block above, not here:
+#
+#     weft.example.com {
+#         handle /.well-known/matrix/* {
+#             header Content-Type application/json
+#             respond `{"m.server": "matrix.weft.example.com:443"}`
+#         }
+#         reverse_proxy weftd:8081
+#     }
+#
+# matrix.weft.example.com {
+# 	reverse_proxy synapse:8008
+# }

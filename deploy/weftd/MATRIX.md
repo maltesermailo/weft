@@ -46,96 +46,16 @@ The bridge is an appservice to Synapse **and** a provider session to weftd.
 
 ## Setup
 
-Order matters: the adapter key must exist before weftd can pin it, and weftd must
-pin it before the bridge may connect. Steps 1–3 therefore run *before* you add the
-profile.
+**The walkthrough is [`../README.md`](../README.md) → Part 2** — one ordered list,
+kept in one place so it cannot drift from Part 1. In outline: choose the
+`server_name` and add its A record, edit the four files, create the two databases,
+`keygen`, pin the key in `weft.toml`, generate the registration and Synapse's
+signing key, then turn the profile on.
 
-### 1. Edit the config
-
-- **`weft-matrix.toml`** — set `[matrix] domain` (the homeserver's name),
-  `as_token` / `hs_token` (change both; anyone with `hs_token` can inject events as
-  any Matrix user), and `admins` if you want the operator console.
-- **`homeserver.yaml`** — `server_name` = the *same* domain, plus the Synapse
-  Postgres password.
-- **`initdb/10-matrix.sql`** — the same Synapse password (it creates the role).
-  See the note below: this runs **only** on an empty Postgres volume.
-- **`.env`** — `MATRIX_BIND` / `MATRIX_PORT`, how the homeserver's port is
-  published.
-
-### 2. Create the adapter key
-
-```sh
-docker compose run --rm bridge keygen /etc/weft/weft-matrix.toml
-```
-
-Prints the public key. Idempotent — it creates the key file only if absent, so
-running it again just prints the same key.
-
-### 3. Pin it in `weft.toml`
-
-(The annotated block lives in the repo's `weftd.example.toml`.)
-
-```toml
-[[plugin.remote]]
-id      = "matrix"
-key     = "<the key from step 2>"
-bot     = "matrixbot"     # optional: weftd provisions a native bot account
-schemes = ["matrix"]
-```
-
-`docker compose up -d weftd` to apply it. Until this matches, the bridge is
-refused with `AUTH-FAILED` — by design, not a misconfiguration you can work
-around.
-
-### 4. Generate the appservice registration
-
-```sh
-docker compose run --rm registration
-```
-
-Writes `/appservices/weft-matrix.yaml` into a volume Synapse mounts read-only and
-loads via `app_service_config_files`. Generated rather than hand-written so the
-tokens live in exactly one place — `weft-matrix.toml` — instead of being copied
-into two files that can drift.
-
-Re-run it (and restart Synapse) after changing the tokens, the domain or the
-puppet prefix.
-
-### 5. Generate Synapse's signing key
-
-```sh
-docker compose run --rm synapse-keys
-```
-
-`--generate-keys` fills in what is *missing* and leaves `homeserver.yaml` alone,
-which is why that file stays hand-edited.
-
-### 6. Enable the profile
-
-In `.env`:
-
-```sh
-COMPOSE_PROFILES=caddy,matrix
-```
-
-Then:
-
-```sh
-docker compose up -d --build
-docker compose logs -f bridge
-```
-
-A healthy start logs the adapter pubkey, `connected to weftd`, and — on a fresh
-database — nothing about recovery (there is nothing to recover).
-
-### If Postgres already has data
-
-`initdb/` scripts run only when the data directory is empty, so an existing
-deployment needs the two databases created by hand — once:
-
-```sh
-docker compose exec -T postgres psql -U weft -d postgres < initdb/10-matrix.sql
-```
+That order is forced, not stylistic: the adapter key must exist before weftd can
+pin it, and weftd must pin it before the bridge may connect — so
+`COMPOSE_PROFILES=…,matrix` goes on **last**, and everything before it runs via
+`docker compose run --rm`, which enables a profiled service for that one command.
 
 ## Verifying it works
 
@@ -157,26 +77,35 @@ docker compose exec -T postgres psql -U weft -d postgres < initdb/10-matrix.sql
 
 ## Federation and TLS
 
-Matrix federation needs the homeserver on a public name with real TLS, plus
-`/.well-known/matrix/server`. The stack's Caddy fronts it — add to `Caddyfile`:
+Federation is not optional in practice — remote homeservers reaching projected
+Spaces is the point of outbound projection. It needs three things, and the shipped
+files provide all three:
 
-```caddyfile
-matrix.weft.example {
-	# Client + federation API.
-	reverse_proxy synapse:8008
-	# Delegation: tells other servers where to find us.
-	handle /.well-known/matrix/* {
-		header Content-Type application/json
-		respond `{"m.server": "matrix.weft.example:443"}`
-	}
-}
-```
+1. **`server_name` on a public name with real TLS.** Uncomment the matrix site
+   block in `Caddyfile` (`matrix.weft.example { reverse_proxy synapse:8008 }`) and
+   add the A record. `server_name` is the MXID suffix and is permanent.
+2. **Delegation to port 443.** `serve_server_wellknown: true` (already set) has
+   Synapse answer `/.well-known/matrix/server` itself, which works *because* (1)
+   routes `https://<server_name>/` to it. With an **apex** `server_name` it does
+   not — the apex serves weftd — so the delegation moves into Caddy's weftd block;
+   the `Caddyfile` carries that snippet.
+3. **Nothing on 8448.** Remote servers try the well-known first, then SRV, then
+   `<server_name>:8448` as a last resort. Delegation short-circuits that to 443, so
+   8448 stays closed. Verify with
+   `curl https://<server_name>/.well-known/matrix/server` — the answer must carry
+   `:443`. If it doesn't, either publish `matrix.weft.example:8448` through Caddy
+   (and open the port) or serve the delegation from Caddy with the port spelled
+   out. `deploy/README.md` step 8 has both.
 
-Federation is not required to test: with `federation_domain_whitelist: []` in
-`homeserver.yaml`, the bridge still works for rooms **on this server**, and
-projected Spaces are usable by local Matrix clients. That exercises provisioning,
-both traffic directions, media, DMs, typing and the console without any public
-TLS.
+Then run `server_name` through <https://federationtester.matrix.org>, which checks
+DNS, delegation, the certificate and the signing key the way a remote homeserver
+would.
+
+**For a first smoke test without any of this:** add
+`federation_domain_whitelist: []` to `homeserver.yaml`. The bridge still works for
+rooms **on this server**, and projected Spaces are usable by local Matrix clients —
+enough to exercise provisioning, both traffic directions, media, DMs, typing and
+the console. Remove it before you expect anyone else to join.
 
 ## Operating
 

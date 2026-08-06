@@ -8,11 +8,24 @@
 # appservices through its admin room, which is a manual step this deployment
 # deliberately does not have. matrix.md decision 1 lists Synapse as supported.
 #
-# Missing keys (the signing key) are generated in place by the `keys` one-shot in
-# docker-compose.yml — see the README.
+# Missing keys (the signing key) are generated in place by the `synapse-keys`
+# one-shot in docker-compose.yml — see MATRIX.md.
 
-# MUST MATCH [matrix] domain in weft-matrix.toml. It is baked into every MXID and
-# event this server signs; changing it later invalidates all of them.
+# The MXID suffix — `@weft_<ulid>:<server_name>` — NOT the hostname this server
+# runs on. The two are independent, so there are two valid shapes:
+#
+#   1. server_name = the subdomain it actually serves ("matrix.weft.example").
+#      Nothing else to configure. This is the default here.
+#   2. server_name = the apex ("weft.example") while the server runs at
+#      matrix.weft.example. Prettier MXIDs, but it REQUIRES delegation:
+#      `https://weft.example/.well-known/matrix/server` must return
+#      {"m.server": "matrix.weft.example:443"}. That path is on the apex, which
+#      in this stack is weftd's Caddy site block, not the matrix one — see
+#      MATRIX.md's "Federation and TLS".
+#
+# MUST MATCH [matrix] domain in weft-matrix.toml either way, and it is
+# PERMANENT: baked into every MXID and event this server signs, so changing it
+# later invalidates all of them.
 server_name: "matrix.weft.example"
 
 pid_file: /data/homeserver.pid
@@ -55,10 +68,22 @@ app_service_config_files:
 # through its own token, which bypasses this.
 enable_registration: false
 
-# Federation: on = remote homeservers can reach projected Spaces (the point of
-# outbound projection) and we can join remote rooms (the point of consuming
-# them). Set `federation_domain_whitelist: []` to bridge only rooms on this
-# server.
+# ── Federation ─────────────────────────────────────────────────────────────
+# ON, and it has to be: remote homeservers reaching projected Spaces is the point
+# of outbound projection, and joining remote rooms is the point of consuming
+# them. It is NOT restricted here — adding `federation_domain_whitelist: []`
+# would confine the bridge to rooms on this server (useful only for a first
+# smoke test without public TLS).
+#
+# What federation actually needs from the deployment:
+#   1. `server_name` resolvable in public DNS, with real TLS on 443. The stack's
+#      Caddy does that — uncomment its matrix block.
+#   2. Delegation, so remote servers use 443 instead of 8448. `serve_server_
+#      wellknown` below has Synapse answer `/.well-known/matrix/server` itself,
+#      which works as long as `https://<server_name>/` routes here. With an apex
+#      `server_name` it does NOT — the apex serves weftd — so the delegation goes
+#      in Caddy's weftd block instead. See the Caddyfile.
+#   3. Nothing on 8448. That is what (2) buys.
 serve_server_wellknown: true
 
 report_stats: false
