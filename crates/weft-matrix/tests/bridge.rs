@@ -1303,3 +1303,141 @@ async fn a_refused_act_is_reverted_on_the_matrix_side() {
     assert_eq!(calls.lock().unwrap().len(), before, "one revert per act");
     let _ = ns_id;
 }
+
+#[tokio::test]
+async fn create_room_acts_on_whichever_side_owns_the_room() {
+    // Projected namespace: the WEFT channel is the real object, so the flow
+    // issues the **invoker's** CHANNEL CREATE with `permanent` retention (the
+    // only policy that projects, §3) and creates nothing on Matrix — weftd's
+    // structure push brings the room back through the ordinary path.
+    let (mut bridge, mut lines, calls) = bridge_with(BTreeMap::new()).await;
+    let (ns_id, _channel, _room) = projected_fixture(&mut bridge, &mut lines).await;
+
+    bridge
+        .on_invoke("c1", "create-room", Some(&ns_id), Some("ada@test.example"))
+        .await;
+    drain(&mut lines);
+    let creates_before = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(what, _, _)| what == "POST createRoom")
+        .count();
+
+    bridge
+        .on_step(
+            "c1",
+            None,
+            &[("name".to_string(), json!("Announcements!"))]
+                .into_iter()
+                .collect(),
+            false,
+        )
+        .await;
+
+    let sent = drain(&mut lines);
+    let create = sent
+        .iter()
+        .find(|l| l.contains("CHANNEL CREATE"))
+        .expect("the channel create went out");
+    assert!(create.contains("as=ada@test.example"), "{create}");
+    assert!(
+        create.contains("permanent"),
+        "only permanent projects: {create}"
+    );
+    assert!(
+        create.contains("announcements"),
+        "the name is vanity-cased: {create}"
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(what, _, _)| what == "POST createRoom")
+            .count(),
+        creates_before,
+        "the projected path creates no room itself — weftd's push does"
+    );
+
+    // Consumed space: weftd refuses local creates in a replica, so the room is
+    // created on Matrix and asserted back — and filed in the **consumed** map,
+    // because its events are realm-minted.
+    let (mut bridge, mut lines, calls) = bridge_with(kde_space()).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    drain(&mut lines);
+    let ns_id = ident::stable_ulid("!space:kde.org");
+
+    bridge
+        .on_invoke("c2", "create-room", Some(&ns_id), Some("ada@test.example"))
+        .await;
+    drain(&mut lines);
+    bridge
+        .on_step(
+            "c2",
+            None,
+            &[("name".to_string(), json!("Offtopic"))]
+                .into_iter()
+                .collect(),
+            false,
+        )
+        .await;
+
+    {
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded
+                .iter()
+                .any(|(what, _, body)| what == "POST createRoom" && body["name"] == "Offtopic"),
+            "the room was created on Matrix: {recorded:?}"
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|(what, _, _)| what.contains("m.space.child")),
+            "…and linked under the Space"
+        );
+    }
+    let sent = drain(&mut lines);
+    assert!(
+        sent.iter().any(|l| l.contains("CHANNEL-LAYOUT")),
+        "the room is asserted into WEFT: {sent:?}"
+    );
+    assert!(
+        !sent.iter().any(|l| l.contains("CHANNEL CREATE")),
+        "a replica's channels are asserted, never created locally: {sent:?}"
+    );
+
+    // Filed as consumed (realm-minted), not as a projection (home-minted):
+    // the projection map would route its events through the injection door,
+    // where the *home* mints — two ids for every message.
+    let space = bridge
+        .store
+        .state
+        .spaces
+        .get("matrix://kde.org/community")
+        .expect("the space is stored");
+    assert_eq!(
+        space.rooms.len(),
+        2,
+        "the provisioned room plus the new one: {:?}",
+        space.rooms
+    );
+    let new_room = space
+        .rooms
+        .keys()
+        .find(|id| id.as_str() != "!gen:kde.org")
+        .cloned()
+        .expect("the new room is in the consumed map");
+    assert!(
+        bridge
+            .store
+            .state
+            .channel_of_projected_room(&new_room)
+            .is_none(),
+        "…and not in the projection map"
+    );
+}

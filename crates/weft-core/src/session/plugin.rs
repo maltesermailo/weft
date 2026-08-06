@@ -447,10 +447,13 @@ impl<S: ControlStream> Session<S> {
 
         self.ctx.register_plugin(
             plugin_id.to_string(),
-            self.fed_out_tx.clone(),
-            reg.name,
-            reg.icon,
-            reg.actions,
+            crate::context::ProviderRegistration {
+                out: self.fed_out_tx.clone(),
+                name: reg.name,
+                icon: reg.icon,
+                actions: reg.actions,
+                events: self.events_tx.clone(),
+            },
             schemes.clone(),
         );
         info!(%plugin_id, "provider registered");
@@ -487,8 +490,12 @@ impl<S: ControlStream> Session<S> {
                 .map(|_| Flow::Continue);
         }
 
-        self.ctx
-            .add_provider_scheme(&plugin_id, scheme.clone(), self.fed_out_tx.clone());
+        self.ctx.add_provider_scheme(
+            &plugin_id,
+            scheme.clone(),
+            self.fed_out_tx.clone(),
+            self.events_tx.clone(),
+        );
         info!(%plugin_id, %scheme, "provider registered scheme");
         self.push_provider_state(std::slice::from_ref(&scheme))
             .await;
@@ -1664,6 +1671,27 @@ impl<S: ControlStream> Session<S> {
     /// realm), so an event we ingested is never sent back to the provider that
     /// produced it — which would ping-pong into the foreign system.
     pub(super) async fn on_provider_event(&mut self, event: SessionEvent) -> io::Result<()> {
+        // A channel created in a projected namespace after our startup sweep:
+        // start watching it, so its traffic mirrors without a reconnect.
+        if let SessionEvent::Attach { channel, ready } = event {
+            if !self.bridged.contains_key(&channel) {
+                if let Some(handle) = self.ctx.registry.get(&channel) {
+                    if let Some(rx) = handle.subscribe().await {
+                        let forwarder =
+                            spawn_forwarder(channel.clone(), rx, self.events_tx.clone());
+                        self.bridged.insert(channel, forwarder);
+                    }
+                }
+            }
+
+            // Confirm either way — already-attached is just as ready, and the
+            // creator is waiting on this before it acks.
+            if let Some(ready) = ready {
+                let _ = ready.send(());
+            }
+            return Ok(());
+        }
+
         let SessionEvent::Channel { event, .. } = event else {
             return Ok(()); // Lagged: the provider re-syncs via HISTORY
         };
@@ -2204,8 +2232,12 @@ impl<S: ControlStream> Session<S> {
         // joins the provider registry (liveness + PROVISION routing) like a
         // REALM REGISTER would, and its namespaces come online.
         let scheme = realm.scheme().clone();
-        self.ctx
-            .add_provider_scheme(&plugin_id, scheme.clone(), self.fed_out_tx.clone());
+        self.ctx.add_provider_scheme(
+            &plugin_id,
+            scheme.clone(),
+            self.fed_out_tx.clone(),
+            self.events_tx.clone(),
+        );
 
         info!(%realm, %plugin_id, "provider data connection bound to realm");
 

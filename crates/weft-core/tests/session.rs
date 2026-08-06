@@ -7268,6 +7268,92 @@ async fn a_projected_namespace_bridges_both_directions_and_the_home_mints() {
 }
 
 #[tokio::test]
+async fn a_channel_created_in_a_projected_namespace_reaches_the_provider_live() {
+    // The create-room flow's weftd half: a channel created *after* the
+    // provider's startup structure push must reach it immediately — structure
+    // **and** traffic. Without both, a create-room button appears to do
+    // nothing until the bridge reconnects.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("mx", key.public(), vec!["matrix".parse().unwrap()])],
+        &[],
+    );
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("NS META {ns_id} bridge:matrix :open"));
+    ada.recv().await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+
+    // The provider is connected and has already taken its structure push.
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT matrix://matrix.org");
+    let mut seen_policy = false;
+    while !seen_policy {
+        if let Ok(reply) = weft_proto::Reply::parse(&plugin.recv_raw().await) {
+            seen_policy = matches!(reply.event, Event::Policy { .. });
+        }
+    }
+
+    // Now ada creates a channel — with `permanent` retention, exactly as the
+    // create-room flow does, since nothing else projects (matrix.md §3). Its
+    // layout + policy must arrive unprompted.
+    ada.send(&format!(
+        "@label=c1 CHANNEL CREATE #{ns_id}/announcements permanent"
+    ));
+    let channel = loop {
+        match ada.recv().await.event {
+            Event::Policy { channel, .. } => break channel,
+            _ => continue,
+        }
+    };
+    let mut layout = None;
+    let mut policy = None;
+    while layout.is_none() || policy.is_none() {
+        if let Ok(reply) = weft_proto::Reply::parse(&plugin.recv_raw().await) {
+            match reply.event {
+                Event::ChannelLayout {
+                    channel, vanity, ..
+                } => layout = Some((channel, vanity)),
+                Event::Policy { policy: p, .. } => policy = Some(p),
+                _ => {}
+            }
+        }
+    }
+    let (pushed, vanity) = layout.unwrap();
+    assert_eq!(pushed, channel);
+    assert_eq!(vanity, "announcements");
+    assert_eq!(policy.unwrap().to_string(), "permanent");
+
+    // …and its traffic mirrors without a reconnect: the provider was attached
+    // to the new channel, not merely told about it.
+    // Creating a channel does not join it (v0.12 derived membership covers the
+    // roster, not the session's subscription).
+    ada.send(&format!("@label=jn JOIN {channel}"));
+    loop {
+        if ada.recv().await.label.as_deref() == Some("jn") {
+            break;
+        }
+    }
+
+    ada.send(&format!("@label=m1 MSG {channel} :first post"));
+    let mirrored = loop {
+        if let Ok(reply) = weft_proto::Reply::parse(&plugin.recv_raw().await) {
+            if let Event::Message(m) = reply.event {
+                break m;
+            }
+        }
+    };
+    assert_eq!(mirrored.body, "first post");
+    assert_eq!(mirrored.sender.to_string(), "ada@test.example");
+}
+
+#[tokio::test]
 async fn foreign_moderators_wield_exactly_their_granted_authority() {
     // §10 (slice 11): a Matrix moderator's act arrives as an attributed
     // command and succeeds iff WEFT granted *that user* the authority — a

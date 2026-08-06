@@ -232,9 +232,13 @@ users join the projected rooms; a *local* member statement is refused — locals
 Every relayed event copy whose actor is local carries `ulid=` (as on the §6/§8 relays): key puppets
 by it, never by the mutable account name.
 
-Note: a provider attaches projected-channel forwarders (and receives the structure push) at
-registration/`REALM ASSERT` time — a flag flipped mid-session is picked up on reconnect (§10's
-recovery story).
+A channel **created after** that push is handed over immediately — its `CHANNEL-LAYOUT` + `POLICY`
+arrive unprompted, and weftd waits (bounded, 2 s) for the provider to start watching it before the
+creator's ack. That wait is not politeness: a channel actor's broadcast has no replay, so an ack that
+outran the subscription would silently drop the room's first messages.
+
+Note: a **flag** flipped mid-session is still picked up on reconnect — the sweep runs at
+registration/`REALM ASSERT` (§10's recovery story).
 
 ---
 

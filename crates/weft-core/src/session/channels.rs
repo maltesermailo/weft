@@ -144,6 +144,16 @@ impl<S: ControlStream> Session<S> {
                 }
             }
         }
+        // A **projected** namespace's provider must hear about a channel created
+        // after its structure push, or the room it should mirror only appears on
+        // the next reconnect — which, for a create-room flow, reads as the
+        // button doing nothing (matrix.md §3).
+        if let Some(ns) = canonical.namespace() {
+            if let Ok(Some(record)) = self.ctx.namespaces.namespace_by_id(ns).await {
+                self.push_new_channel_to_providers(&record, &canonical, &vanity, policy, kind)
+                    .await;
+            }
+        }
         // Tell the creator the channel's layout (carrying the vanity) so their
         // client shows "chat", not the raw minted ULID — MEMBER/POLICY don't carry
         // the vanity, the creator is skipped in the member push above, and the
@@ -173,6 +183,65 @@ impl<S: ControlStream> Session<S> {
         )
         .await?;
         Ok(Flow::Continue)
+    }
+
+    /// Push a newly created channel's structure to every provider whose scheme
+    /// this namespace opted into projecting, and subscribe them to it.
+    ///
+    /// The structure push at register/`REALM ASSERT` covers what exists then;
+    /// this covers what appears afterwards. Native channels only — a replica's
+    /// channels come *from* its provider, so telling it about one would be
+    /// describing its own room back to it.
+    async fn push_new_channel_to_providers(
+        &mut self,
+        record: &weft_store::NamespaceRecord,
+        channel: &ChannelName,
+        vanity: &str,
+        policy: weft_proto::RetentionPolicy,
+        kind: weft_proto::ChannelKind,
+    ) {
+        if record.origin.is_some() || record.bridges.is_empty() {
+            return;
+        }
+
+        let layout = Event::ChannelLayout {
+            channel: channel.clone(),
+            category: None,
+            position: 0,
+            kind,
+            vanity: vanity.to_string(),
+            origin: None,
+        };
+        let policy_event = Event::Policy {
+            channel: channel.clone(),
+            policy,
+        };
+
+        let schemes: Vec<weft_proto::Scheme> = record
+            .bridges
+            .iter()
+            .filter_map(|b| b.parse().ok())
+            .collect();
+
+        for scheme in &schemes {
+            let Some((_, out)) = self.ctx.provider_for_scheme(scheme) else {
+                continue; // provider offline; it re-reads the tree on reconnect
+            };
+
+            for event in [&layout, &policy_event] {
+                if let Ok(line) = Reply::new(event.clone()).serialize() {
+                    if out.try_send(line).is_err() {
+                        warn!(%channel, "provider queue full — structure push dropped");
+                    }
+                }
+            }
+        }
+
+        // Structure alone would leave the room silent: the forwarder lives on
+        // the provider's own session, so ask it to attach.
+        self.ctx
+            .attach_providers_to_channel(&schemes, channel)
+            .await;
     }
 
     pub(super) async fn on_channel_policy(

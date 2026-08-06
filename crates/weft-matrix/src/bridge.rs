@@ -1549,6 +1549,19 @@ impl Bridge {
 
         let opened = match action {
             "power-levels" => self.open_power_levels(&ctx, ctx_ref).await,
+            "create-room" => {
+                let projected = self.store.state.projections.contains_key(ctx_ref);
+                let consumed = self.store.state.space_of_ns(ctx_ref).is_some();
+                if !projected && !consumed {
+                    let _ = ctx
+                        .toast(ToastKind::Error, "this namespace is not bridged")
+                        .await;
+                    self.flows.remove(view_id);
+                    return;
+                }
+
+                ctx.view(&crate::actions::create_room_view(projected)).await
+            }
             "invite" => {
                 self.open_for_channel(&ctx, ctx_ref, crate::actions::invite_view)
                     .await
@@ -1660,6 +1673,7 @@ impl Bridge {
 
         let outcome = match flow.action.as_str() {
             "power-levels" => self.step_power_levels(&flow, values).await,
+            "create-room" => self.step_create_room(&flow, values).await,
             "invite" => self.step_invite(&flow, values).await,
             "moderate" => self.step_moderate(&flow, button, values).await,
             "room-settings" => self.step_room_settings(&flow, values).await,
@@ -1730,6 +1744,107 @@ impl Bridge {
         }
 
         Ok(format!("{mxid} set to {level}"))
+    }
+
+    /// Create a room, on whichever side owns it.
+    ///
+    /// **Projected namespace:** the WEFT channel is the real object, so this is
+    /// an attributed `CHANNEL CREATE` — the invoker's `chan-create` is what
+    /// weftd checks — with `permanent` retention, since nothing else projects
+    /// (§3). weftd then pushes the new channel's structure to us and we mirror
+    /// it through the ordinary path; no room is created here.
+    ///
+    /// **Consumed space:** weftd refuses local creates in a replica (its
+    /// channels are whatever the realm asserts), so the room is created on
+    /// Matrix and *asserted* back — the same direction as provisioning.
+    async fn step_create_room(
+        &mut self,
+        flow: &Flow,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> anyhow::Result<String> {
+        let name = crate::actions::value(values, "name").trim().to_string();
+        anyhow::ensure!(!name.is_empty(), "name the room");
+        let ns_id = flow.ctx_ref.clone();
+
+        if self.store.state.projections.contains_key(&ns_id) {
+            let vanity = vanity_of(&name);
+            anyhow::ensure!(!vanity.is_empty(), "that name has no usable characters");
+
+            self.realm
+                .create_channel_as(
+                    &flow.invoker,
+                    &ns_id,
+                    &vanity,
+                    weft_proto::RetentionPolicy::Permanent,
+                    None,
+                )
+                .await?;
+
+            return Ok(format!("creating #{vanity} — it will mirror as a room"));
+        }
+
+        // A consumed space: create foreign-side, then assert it.
+        let Some(space) = self.store.state.space_of_ns(&ns_id).cloned() else {
+            anyhow::bail!("this namespace is not bridged");
+        };
+        anyhow::ensure!(
+            !self.store.state.bans.is_banned(&ns_id),
+            "this space is banned from bridging"
+        );
+        let Some(space_ref) = ident::SpaceRef::parse(&space.uri) else {
+            anyhow::bail!("the stored space URI is unusable");
+        };
+
+        let room_id = self
+            .hs
+            .create_room(json!({
+                "name": name,
+                "preset": "public_chat",
+                "power_level_content_override": { "users_default": 0, "state_default": 100 },
+            }))
+            .await?;
+        self.hs
+            .put_state(
+                &space.room_id,
+                "m.space.child",
+                &room_id,
+                json!({ "via": [self.domain], "order": format!("{:010}", space.rooms.len()) }),
+            )
+            .await?;
+
+        // Assert it into WEFT: our ids, weftd pins them (§4).
+        let chan_id = ident::stable_ulid(&room_id);
+        let uri = space_ref.room_uri(&chan_id);
+        let vanity = vanity_of(&name);
+        let channel = self
+            .realm
+            .assert_channel(&weft_appservice::ChannelAssertion {
+                uri: &uri,
+                id: &chan_id,
+                namespace_id: &ns_id,
+                vanity: &vanity,
+                position: space.rooms.len() as i64,
+                kind: weft_proto::ChannelKind::Text,
+                category: None,
+            })
+            .await?;
+
+        // The **consumed** map, not the projection one: this room's events are
+        // realm-minted (ordinary replica ingestion), and filing it under
+        // projections would route them down the injection path instead, where
+        // the home mints — two ids for every message.
+        let mut space = space;
+        space.rooms.insert(
+            room_id,
+            crate::store::Room {
+                chan_id,
+                channel,
+                uri,
+            },
+        );
+        self.store.save_space(space).await;
+
+        Ok(format!("created {name}"))
     }
 
     async fn step_invite(

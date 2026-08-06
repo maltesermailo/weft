@@ -409,6 +409,33 @@ impl Realm {
         .await
     }
 
+    /// Create a channel **as** a WEFT user (their `chan-create` capability is
+    /// what weftd checks). For a *projected* namespace this is how a room is
+    /// made: the channel is the real object, and the projection mirrors it.
+    ///
+    /// `policy` matters more than it looks: only a `permanent` channel projects
+    /// (matrix.md §3, locked decision 2), so a create meant to appear on Matrix
+    /// must say so — the namespace default is `retained:90d`.
+    pub async fn create_channel_as(
+        &self,
+        actor: &str,
+        namespace: &str,
+        vanity: &str,
+        policy: weft_proto::RetentionPolicy,
+        label: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.send_as(
+            actor,
+            label,
+            weft_proto::Command::ChannelCreate {
+                channel: format!("#{namespace}/{vanity}").parse()?,
+                policy: Some(policy),
+                kind: weft_proto::ChannelKind::Text,
+            },
+        )
+        .await
+    }
+
     /// A foreign moderator's mute (or unmute) at a scope.
     pub async fn mute_as(
         &self,

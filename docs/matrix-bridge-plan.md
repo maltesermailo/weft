@@ -575,8 +575,21 @@ implements and the daemon is written against.*
       CBOR-decoded submits/clicks/closes), labeled `*_as` moderation helpers, `mute_as`.
       Client: `channel-settings` pages render in `ChannelSettings.svelte` (same pattern as the
       server-settings surface).
-      **Remaining:** create-room/create-subspace flows (structure creation from the client),
-      and a kick flow needs a channel context (the current one refuses rather than guessing scope).
+      **create-room DONE 2026-08-06**, both sides of the fork it turned out to be: in a
+      **projected** namespace the WEFT channel is the real object, so the flow issues the invoker's
+      attributed `CHANNEL CREATE` with `permanent` retention (nothing else projects, §3) and creates
+      no room itself; in a **consumed** space weftd refuses local creates, so the room is created on
+      Matrix, linked under the Space, and asserted back — filed in the *consumed* map, since its
+      events are realm-minted (the projection map would re-mint every message).
+      weftd half: a channel created after the provider's startup push now reaches it live —
+      `push_new_channel_to_providers` (structure) **plus** `SessionEvent::Attach` with a bounded
+      confirm (`PROVIDER_ATTACH_TIMEOUT`, 2 s) so the create acks only once the provider is
+      watching; a broadcast has no replay, so acking first loses the room's first messages.
+      `PluginReg` carries the provider session's event queue; `register_plugin` takes a grouped
+      `ProviderRegistration`. SDK: `Realm::create_channel_as`.
+      **Remaining:** create-subspace (categories → sub-spaces, locked decision 4 — the projection is
+      still flat, so this waits on sub-space support), and a kick flow needs a channel context (the
+      current one refuses rather than guessing scope).
 - [ ] **12. Track B — widgets + client-Rhai + CSP** (L) — the rich PL-matrix editor as a sandboxed
       widget. **Polish, not gating**: SDUI tables/forms carry the v1 levels view.
 

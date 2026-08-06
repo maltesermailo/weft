@@ -310,13 +310,27 @@ enum JoinResult {
 /// sizes are lopsided but these only transit the bounded session queue
 /// (256 × ~256 B) — boxing would add an allocation per delivered event.
 #[allow(clippy::large_enum_variant)]
-enum SessionEvent {
+pub(crate) enum SessionEvent {
     Channel {
         channel: ChannelName,
         event: ChannelEvent,
     },
     Lagged {
         channel: ChannelName,
+    },
+    /// Attach this session to a channel it does not yet watch. Sent to a
+    /// **provider** session when a channel appears in a namespace it projects
+    /// after its startup sweep — the forwarder can only be spawned by the
+    /// session that owns it, so the creating session asks rather than reaching
+    /// into another session's state.
+    ///
+    /// `ready` fires once the subscription exists. The creating session waits
+    /// on it: a channel actor's broadcast has **no replay**, so a create that
+    /// acked before its provider subscribed would silently lose the first
+    /// messages — including the ones a client sends immediately after.
+    Attach {
+        channel: ChannelName,
+        ready: Option<tokio::sync::oneshot::Sender<()>>,
     },
 }
 
@@ -1867,6 +1881,10 @@ impl<S: ControlStream> Session<S> {
             return self.on_provider_event(event).await;
         }
         match event {
+            // Only a provider session is ever asked to attach (the branch
+            // above takes those); a client watching a channel it did not join
+            // would be a membership bypass.
+            SessionEvent::Attach { .. } => Ok(()),
             SessionEvent::Lagged { channel } => {
                 // §9.2 backpressure: tell the client it lost events. The
                 // forced HISTORY resync completes this once M3 exists.

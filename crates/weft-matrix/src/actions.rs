@@ -47,6 +47,13 @@ pub fn declarations() -> Vec<ActionDecl> {
             Some("Kick or ban this member in the bridged rooms."),
         ),
         decl(
+            "create-room",
+            "New bridged room",
+            Surface::ChannelList,
+            ContextType::Namespace,
+            Some("Create a channel that mirrors as a Matrix room."),
+        ),
+        decl(
             "room-settings",
             "Bridged room",
             Surface::ChannelSettings,
@@ -168,6 +175,43 @@ pub fn power_levels_view(space_room: &str, users: &BTreeMap<String, i64>) -> Vie
         title: Some("Power Levels".into()),
         panel_key: None,
         submit_label: Some("Set level".into()),
+        blocks,
+        widget: None,
+        params: Vec::new(),
+    }
+}
+
+/// The create-room view. Two shapes, because the two namespace kinds are
+/// genuinely different objects: in a **projected** namespace the WEFT channel
+/// is the real thing (and only a `permanent` one mirrors, §3), while in a
+/// **consumed** space the Matrix room is, and WEFT gets a replica of it.
+pub fn create_room_view(projected: bool) -> View {
+    let mut blocks = vec![Component::Text {
+        id: "name".into(),
+        label: "Room name".into(),
+        required: Some(true),
+        default: None,
+        placeholder: Some("announcements".into()),
+        multiline: None,
+        max_len: Some(64),
+        pattern: None,
+    }];
+
+    blocks.push(Component::Markdown {
+        text: if projected {
+            "Creates a WEFT channel with **permanent** retention — the policy              Matrix projection requires — and mirrors it as a room."
+                .into()
+        } else {
+            "Creates the room on Matrix; WEFT receives it as a channel of this              bridged space."
+                .into()
+        },
+    });
+
+    View {
+        container: Container::Modal,
+        title: Some("New bridged room".into()),
+        panel_key: None,
+        submit_label: Some("Create".into()),
         blocks,
         widget: None,
         params: Vec::new(),
@@ -338,6 +382,37 @@ mod tests {
             decls.iter().all(|d| d.description.is_some()),
             "a management action must explain itself"
         );
+    }
+
+    #[test]
+    fn the_create_room_view_states_which_side_owns_the_room() {
+        // The two namespace kinds create genuinely different objects, and the
+        // view says which — a silent difference here would surprise the user
+        // when the retention policy or the source of truth differs.
+        let projected = create_room_view(true);
+        let consumed = create_room_view(false);
+
+        let text = |v: &View| {
+            v.blocks
+                .iter()
+                .filter_map(|b| match b {
+                    Component::Markdown { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<String>()
+        };
+        assert!(text(&projected).contains("permanent"));
+        assert!(text(&consumed).contains("on Matrix"));
+        // Both ask for exactly one thing: the name.
+        for v in [&projected, &consumed] {
+            assert_eq!(
+                v.blocks
+                    .iter()
+                    .filter(|b| matches!(b, Component::Text { .. }))
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

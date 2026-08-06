@@ -460,6 +460,9 @@ type PendingReply = (tokio::sync::mpsc::Sender<String>, Option<String>);
 
 /// How long the admin panel waits for a plugin to answer (plugin-spec §22). An
 /// HTTP request cannot hang on a plugin that never replies.
+/// How long a channel create waits for a projecting provider to subscribe.
+const PROVIDER_ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 const PLUGIN_ADMIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A registered remote plugin (App Service, plugin-spec.md §12.3): the writer
@@ -472,6 +475,20 @@ struct PluginReg {
     actions: Vec<weft_proto::ActionDecl>,
     /// Schemes this provider provisions (`NS JOIN <scheme>://…` routing, §18).
     schemes: Vec<weft_proto::Scheme>,
+    /// The provider session's own event queue — so another session can ask it
+    /// to attach to a newly created channel (`SessionEvent::Attach`).
+    events: Option<tokio::sync::mpsc::Sender<crate::session::SessionEvent>>,
+}
+
+/// What a connected provider brings to [`ServerCtx::register_plugin`] — its
+/// writer, its identity, its declared actions, and its session's event queue.
+/// Grouped because they travel as one thing.
+pub(crate) struct ProviderRegistration {
+    pub out: tokio::sync::mpsc::Sender<String>,
+    pub name: String,
+    pub icon: Option<String>,
+    pub actions: Vec<weft_proto::ActionDecl>,
+    pub events: tokio::sync::mpsc::Sender<crate::session::SessionEvent>,
 }
 
 /// Deliver a control line to a **peer network** (§11.14). Preferred path: the
@@ -1429,12 +1446,17 @@ impl ServerCtx {
     pub(crate) fn register_plugin(
         &self,
         id: String,
-        out: tokio::sync::mpsc::Sender<String>,
-        name: String,
-        icon: Option<String>,
-        actions: Vec<weft_proto::ActionDecl>,
+        registration: ProviderRegistration,
         mut schemes: Vec<weft_proto::Scheme>,
     ) {
+        let ProviderRegistration {
+            out,
+            name,
+            icon,
+            actions,
+            events,
+        } = registration;
+
         let mut map = self.plugin_registry.lock().expect("plugin_registry lock");
 
         if let Some(prior) = map.get(&id) {
@@ -1453,6 +1475,7 @@ impl ServerCtx {
                 icon,
                 actions,
                 schemes,
+                events: Some(events),
             },
         );
     }
@@ -1465,6 +1488,7 @@ impl ServerCtx {
         id: &str,
         scheme: weft_proto::Scheme,
         out: tokio::sync::mpsc::Sender<String>,
+        events: tokio::sync::mpsc::Sender<crate::session::SessionEvent>,
     ) {
         let mut map = self.plugin_registry.lock().expect("plugin_registry lock");
 
@@ -1474,10 +1498,53 @@ impl ServerCtx {
             icon: None,
             actions: Vec::new(),
             schemes: Vec::new(),
+            events: None,
         });
+        entry.events = Some(events);
 
         if !entry.schemes.contains(&scheme) {
             entry.schemes.push(scheme);
+        }
+    }
+
+    /// Ask every provider projecting `scheme` to start watching `channel`
+    /// (`SessionEvent::Attach`) — a forwarder belongs to the session that owns
+    /// it, so a channel created after the provider's startup sweep is handed
+    /// over rather than reached into.
+    /// Waits for each provider to confirm, bounded — a channel actor's
+    /// broadcast has no replay, so returning before the subscription exists
+    /// would drop the channel's first messages.
+    pub(crate) async fn attach_providers_to_channel(
+        &self,
+        schemes: &[weft_proto::Scheme],
+        channel: &ChannelName,
+    ) {
+        let queues: Vec<_> = {
+            let map = self.plugin_registry.lock().expect("plugin_registry lock");
+            map.values()
+                .filter(|r| r.schemes.iter().any(|s| schemes.contains(s)))
+                .filter_map(|r| r.events.clone())
+                .collect()
+        };
+
+        let mut waits = Vec::new();
+        for queue in queues {
+            let (ready, wait) = tokio::sync::oneshot::channel();
+            if queue
+                .try_send(crate::session::SessionEvent::Attach {
+                    channel: channel.clone(),
+                    ready: Some(ready),
+                })
+                .is_ok()
+            {
+                waits.push(wait);
+            }
+        }
+
+        for wait in waits {
+            // A wedged provider must not stall the create: it re-reads the
+            // whole tree on reconnect, so the worst case is a late mirror.
+            let _ = tokio::time::timeout(PROVIDER_ATTACH_TIMEOUT, wait).await;
         }
     }
 
