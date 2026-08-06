@@ -54,6 +54,13 @@ pub fn declarations() -> Vec<ActionDecl> {
             Some("Create a channel that mirrors as a Matrix room."),
         ),
         decl(
+            "create-subspace",
+            "New category",
+            Surface::ChannelList,
+            ContextType::Namespace,
+            Some("Add a category — it mirrors as a Matrix sub-space."),
+        ),
+        decl(
             "room-settings",
             "Bridged room",
             Surface::ChannelSettings,
@@ -210,6 +217,48 @@ pub fn create_room_view(projected: bool) -> View {
     View {
         container: Container::Modal,
         title: Some("New bridged room".into()),
+        panel_key: None,
+        submit_label: Some("Create".into()),
+        blocks,
+        widget: None,
+        params: Vec::new(),
+    }
+}
+
+/// The create-subspace view. A WEFT category is namespace-level and ordered
+/// (`cats=`), so this appends to that list and the sub-space follows; `current`
+/// is shown so the operator sees what is already there.
+pub fn create_subspace_view(current: &[String]) -> View {
+    let mut blocks = Vec::new();
+
+    if !current.is_empty() {
+        blocks.push(Component::Table {
+            columns: vec!["Category".into()],
+            rows: current.iter().map(|c| vec![c.clone()]).collect(),
+            dense: Some(true),
+        });
+    }
+    blocks.extend([
+        Component::Text {
+            id: "name".into(),
+            label: "Category name".into(),
+            required: Some(true),
+            default: None,
+            placeholder: Some("Voice".into()),
+            multiline: None,
+            max_len: Some(48),
+            pattern: None,
+        },
+        Component::Markdown {
+            text: "Channels assigned to it hang under the matching Matrix \
+                   sub-space. Ordering follows the namespace's category list."
+                .into(),
+        },
+    ]);
+
+    View {
+        container: Container::Modal,
+        title: Some("New category".into()),
         panel_key: None,
         submit_label: Some("Create".into()),
         blocks,
@@ -419,6 +468,34 @@ mod tests {
         assert!(
             decls.iter().all(|d| d.description.is_some()),
             "a management action must explain itself"
+        );
+    }
+
+    #[test]
+    fn the_subspace_view_shows_what_exists_and_asks_for_one_name() {
+        let view = create_subspace_view(&["Text".to_string(), "Voice".to_string()]);
+        let Some(Component::Table { rows, .. }) = view
+            .blocks
+            .iter()
+            .find(|b| matches!(b, Component::Table { .. }))
+        else {
+            panic!("the existing categories are shown");
+        };
+        assert_eq!(rows.len(), 2);
+
+        // Nothing yet: no empty table, just the field.
+        let first = create_subspace_view(&[]);
+        assert!(!first
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Component::Table { .. })));
+        assert_eq!(
+            first
+                .blocks
+                .iter()
+                .filter(|b| matches!(b, Component::Text { .. }))
+                .count(),
+            1
         );
     }
 

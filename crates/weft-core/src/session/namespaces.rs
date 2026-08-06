@@ -442,6 +442,36 @@ impl<S: ControlStream> Session<S> {
         }
     }
 
+    /// Ack an `NS-META` change to the actor **and** push it to every provider
+    /// projecting this namespace.
+    ///
+    /// A provider is not an ns member, so it hears nothing from the ordinary
+    /// member fan-out — yet its structure (Space name, category sub-spaces) is
+    /// exactly what this event describes. Without the push, a category added in
+    /// a client would never appear on the foreign side.
+    async fn announce_ns_meta(
+        &mut self,
+        label: Option<String>,
+        record: &weft_store::NamespaceRecord,
+    ) -> io::Result<()> {
+        let event = self.ns_meta_event(record);
+
+        if record.origin.is_none() {
+            for scheme in record.bridges.iter().filter_map(|b| b.parse().ok()) {
+                let Some((_, out)) = self.ctx.provider_for_scheme(&scheme) else {
+                    continue; // offline; it re-reads the tree on reconnect
+                };
+                if let Ok(line) = Reply::new(event.clone()).serialize() {
+                    if out.try_send(line).is_err() {
+                        warn!(ns = %record.id, "provider queue full — NS-META push dropped");
+                    }
+                }
+            }
+        }
+
+        self.send_event(label, event).await
+    }
+
     pub(super) async fn on_ns_create(
         &mut self,
         label: Option<String>,
@@ -607,7 +637,7 @@ impl<S: ControlStream> Session<S> {
                     error!("seed creator ns membership failed: {e}");
                 }
 
-                self.send_event(label, self.ns_meta_event(&record)).await?;
+                self.announce_ns_meta(label, &record).await?;
                 Ok(Flow::Continue)
             }
             Ok(false) => {
@@ -850,7 +880,7 @@ impl<S: ControlStream> Session<S> {
                 return self.internal(label, &e).await;
             }
             record.welcome_channel = channel.map(str::to_string);
-            self.send_event(label, self.ns_meta_event(&record)).await?;
+            self.announce_ns_meta(label, &record).await?;
             return Ok(Flow::Continue);
         }
         // §11.10 auto-federation reachability lives on its own column. It is off
@@ -869,7 +899,7 @@ impl<S: ControlStream> Session<S> {
                 return self.internal(label, &e).await;
             }
             record.federation = open;
-            self.send_event(label, self.ns_meta_event(&record)).await?;
+            self.announce_ns_meta(label, &record).await?;
             return Ok(Flow::Continue);
         }
         // Outbound projection (matrix.md §17.1): `bridge:<scheme> :open|closed`.
@@ -912,7 +942,7 @@ impl<S: ControlStream> Session<S> {
                 return self.internal(label, &e).await;
             }
             record.bridges = bridges;
-            self.send_event(label, self.ns_meta_event(&record)).await?;
+            self.announce_ns_meta(label, &record).await?;
             return Ok(Flow::Continue);
         }
         if let Err(e) = self
@@ -936,7 +966,7 @@ impl<S: ControlStream> Session<S> {
             }
             _ => {}
         }
-        self.send_event(label, self.ns_meta_event(&record)).await?;
+        self.announce_ns_meta(label, &record).await?;
         Ok(Flow::Continue)
     }
 
@@ -980,7 +1010,7 @@ impl<S: ControlStream> Session<S> {
             record.bridges.clear();
         }
 
-        self.send_event(label, self.ns_meta_event(&record)).await?;
+        self.announce_ns_meta(label, &record).await?;
         Ok(Flow::Continue)
     }
 
@@ -1396,7 +1426,7 @@ impl<S: ControlStream> Session<S> {
             info!(%name, rung, new_owner = %signed.record.new_owner, "namespace seized (§2.4 rung 3, immediate)");
             let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
             if let Some(record) = updated {
-                self.send_event(label, self.ns_meta_event(&record)).await?;
+                self.announce_ns_meta(label, &record).await?;
             }
             return Ok(Flow::Continue);
         }
@@ -1421,7 +1451,7 @@ impl<S: ControlStream> Session<S> {
         // ns-member broadcast, a follow-up.)
         let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
         if let Some(record) = updated {
-            self.send_event(label, self.ns_meta_event(&record)).await?;
+            self.announce_ns_meta(label, &record).await?;
         }
         Ok(Flow::Continue)
     }
@@ -1453,7 +1483,7 @@ impl<S: ControlStream> Session<S> {
         debug!(%name, "recovery cancelled by root veto");
         let updated = self.ctx.namespaces.namespace(&name).await.ok().flatten();
         if let Some(record) = updated {
-            self.send_event(label, self.ns_meta_event(&record)).await?;
+            self.announce_ns_meta(label, &record).await?;
         }
         Ok(Flow::Continue)
     }
@@ -1538,8 +1568,7 @@ impl<S: ControlStream> Session<S> {
         }
         // The layout fetch also carries the namespace meta (categories, title,
         // …) so the client renders category groups purely from server state.
-        self.send_event(label.clone(), self.ns_meta_event(&record))
-            .await?;
+        self.announce_ns_meta(label.clone(), &record).await?;
         let channels = match self.ctx.channel_store.channels_in_namespace(&ns_str).await {
             Ok(channels) => channels,
             Err(e) => return self.internal(label, &e).await,

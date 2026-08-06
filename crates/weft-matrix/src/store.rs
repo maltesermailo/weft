@@ -220,6 +220,15 @@ pub struct Projection {
     pub space_room: String,
     /// WEFT channel name → the projected Matrix room.
     pub rooms: BTreeMap<String, String>,
+    /// WEFT category → its sub-space room (matrix.md §6): a category holds its
+    /// channels' rooms, so a channel's parent is its category's sub-space when
+    /// it has one, and the top Space otherwise.
+    pub categories: BTreeMap<String, String>,
+    /// The namespace's category list **as weftd declares it**, in order — the
+    /// authority for any edit, since `NS META categories` is a full replace.
+    /// Refreshed by every `NS-META` push, so it needs no persistence: the push
+    /// precedes any flow on a fresh session.
+    pub declared_categories: Vec<String>,
     /// §8 in the outbound sense: which projected rooms each **Matrix** user
     /// has joined — first join ⇒ NS-MEMBER join statement, last leave ⇒ part.
     pub member_rooms: BTreeMap<String, BTreeSet<String>>,
@@ -486,6 +495,18 @@ impl Store {
             let ns_id: String = row.get("ns_id");
             if let Some(p) = state.projections.get_mut(&ns_id) {
                 p.rooms.insert(row.get("channel"), row.get("room_id"));
+            }
+        }
+
+        for row in
+            sqlx::query("SELECT ns_id, category, space_room FROM matrix_projected_categories")
+                .fetch_all(pool)
+                .await?
+        {
+            let ns_id: String = row.get("ns_id");
+            if let Some(p) = state.projections.get_mut(&ns_id) {
+                p.categories
+                    .insert(row.get("category"), row.get("space_room"));
             }
         }
 
@@ -771,6 +792,32 @@ impl Store {
                 .bind(channel)
                 .bind(ns_id)
                 .bind(room_id)
+                .execute(pool),
+            )
+            .await;
+        }
+    }
+
+    /// Record a category's sub-space.
+    pub async fn save_projected_category(&mut self, ns_id: &str, category: &str, room: &str) {
+        self.state
+            .projections
+            .entry(ns_id.to_string())
+            .or_default()
+            .categories
+            .insert(category.to_string(), room.to_string());
+
+        if let Some(pool) = &self.pool {
+            best_effort(
+                "save_projected_category",
+                sqlx::query(
+                    "INSERT INTO matrix_projected_categories (ns_id, category, space_room) \
+                     VALUES ($1, $2, $3) \
+                     ON CONFLICT (ns_id, category) DO UPDATE SET space_room = $3",
+                )
+                .bind(ns_id)
+                .bind(category)
+                .bind(room)
                 .execute(pool),
             )
             .await;

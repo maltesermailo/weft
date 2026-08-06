@@ -70,6 +70,15 @@ CREATE TABLE IF NOT EXISTS matrix_projected_rooms (
     room_id TEXT NOT NULL
 );
 
+-- Category sub-spaces of a projected namespace (matrix.md §6, locked decision
+-- 4): a WEFT category becomes a child Space holding its channels' rooms.
+CREATE TABLE IF NOT EXISTS matrix_projected_categories (
+    ns_id      TEXT NOT NULL,
+    category   TEXT NOT NULL,
+    space_room TEXT NOT NULL,
+    PRIMARY KEY (ns_id, category)
+);
+
 -- Last-seen m.room.power_levels `users` map per bridged room — the baseline
 -- an incoming PL event diffs against to find who actually changed.
 CREATE TABLE IF NOT EXISTS matrix_room_levels (

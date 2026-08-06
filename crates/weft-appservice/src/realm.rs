@@ -436,6 +436,30 @@ impl Realm {
         .await
     }
 
+    /// Set a namespace's metadata **as** a WEFT user (ns-admin is what weftd
+    /// checks). The categories key is how a projected namespace's sub-spaces
+    /// are created: weftd applies it and pushes the resulting `NS-META` back,
+    /// which is what tells the adapter to build them.
+    pub async fn set_ns_meta_as(
+        &self,
+        actor: &str,
+        namespace: &str,
+        key: &str,
+        value: &str,
+        label: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.send_as(
+            actor,
+            label,
+            weft_proto::Command::NsMeta {
+                ns: namespace.parse()?,
+                key: key.to_string(),
+                value: value.to_string(),
+            },
+        )
+        .await
+    }
+
     /// A foreign moderator's mute (or unmute) at a scope.
     pub async fn mute_as(
         &self,

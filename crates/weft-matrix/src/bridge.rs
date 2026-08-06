@@ -85,6 +85,9 @@ pub struct PendingLayout {
     pub vanity: String,
     pub kind: weft_proto::ChannelKind,
     pub position: i64,
+    /// The channel's category, if any — its room is parented under that
+    /// category's sub-space rather than the top Space (matrix.md §6).
+    pub category: Option<String>,
 }
 
 impl Bridge {
@@ -233,15 +236,23 @@ impl Bridge {
                 id,
                 vanity,
                 title,
+                categories,
                 bridges,
                 origin: None,
                 ..
             } if bridges.iter().any(|b| b.as_str() == "matrix") => {
+                let ns_id = id.to_string();
                 if let Err(e) = self
-                    .ensure_projection(&id.to_string(), &vanity.to_string(), title.as_deref())
+                    .ensure_projection(&ns_id, &vanity.to_string(), title.as_deref())
                     .await
                 {
                     warn!(ns = %id, "projecting the Space failed: {e:#}");
+                    return;
+                }
+                // Categories are ns-level and ordered; each becomes a
+                // sub-space (matrix.md §6, locked decision 4).
+                if let Err(e) = self.ensure_categories(&ns_id, &categories).await {
+                    warn!(ns = %id, "projecting the categories failed: {e:#}");
                 }
             }
             Event::ChannelLayout {
@@ -249,6 +260,7 @@ impl Bridge {
                 vanity,
                 kind,
                 position,
+                category,
                 origin: None,
                 ..
             } => {
@@ -260,6 +272,7 @@ impl Bridge {
                         vanity,
                         kind,
                         position,
+                        category,
                     },
                 );
             }
@@ -1564,6 +1577,32 @@ impl Bridge {
 
                 ctx.view(&crate::actions::create_room_view(projected)).await
             }
+            "create-subspace" => {
+                if !self.store.state.projections.contains_key(ctx_ref) {
+                    // A consumed space's structure is the realm's to describe
+                    // (§4): its categories arrive on the assertions, so there
+                    // is nothing for us to add here.
+                    let _ = ctx
+                        .toast(
+                            ToastKind::Error,
+                            "categories are only ours to add in a projected namespace",
+                        )
+                        .await;
+                    self.flows.remove(view_id);
+                    return;
+                }
+
+                let current = self
+                    .store
+                    .state
+                    .projections
+                    .get(ctx_ref)
+                    .map(|p| p.declared_categories.clone())
+                    .unwrap_or_default();
+
+                ctx.view(&crate::actions::create_subspace_view(&current))
+                    .await
+            }
             "invite" => {
                 self.open_for_channel(&ctx, ctx_ref, crate::actions::invite_view)
                     .await
@@ -1680,6 +1719,7 @@ impl Bridge {
         let outcome = match flow.action.as_str() {
             "power-levels" => self.step_power_levels(&flow, values).await,
             "create-room" => self.step_create_room(&flow, values).await,
+            "create-subspace" => self.step_create_subspace(&flow, values).await,
             "invite" => self.step_invite(&flow, values).await,
             "moderate" => self.step_moderate(&flow, button, values).await,
             "room-settings" => self.step_room_settings(&flow, values).await,
@@ -1851,6 +1891,54 @@ impl Bridge {
         self.store.save_space(space).await;
 
         Ok(format!("created {name}"))
+    }
+
+    /// Add a category to a projected namespace.
+    ///
+    /// The category list is namespace metadata, so this is an attributed
+    /// `NS META … categories` — the invoker's ns-admin is what weftd checks.
+    /// The sub-space is **not** created here: weftd applies the change and
+    /// pushes the resulting `NS-META` back, and that push is what builds it.
+    /// Creating it locally first would leave an orphan sub-space behind
+    /// whenever weftd refused.
+    async fn step_create_subspace(
+        &mut self,
+        flow: &Flow,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> anyhow::Result<String> {
+        let name = crate::actions::value(values, "name").trim().to_string();
+        anyhow::ensure!(!name.is_empty(), "name the category");
+        anyhow::ensure!(
+            !name.contains(','),
+            "a category name cannot contain a comma (the list separator)"
+        );
+
+        let ns_id = flow.ctx_ref.clone();
+        let Some(projection) = self.store.state.projections.get(&ns_id) else {
+            anyhow::bail!("this namespace is not projected");
+        };
+        anyhow::ensure!(
+            !projection.declared_categories.contains(&name),
+            "that category already exists"
+        );
+
+        // Append to **weftd's** list, not to the sub-spaces we happen to have
+        // built: the meta key is a full replace, so appending to a partial view
+        // would delete every category we had not projected yet.
+        let mut categories = projection.declared_categories.clone();
+        categories.push(name.clone());
+
+        self.realm
+            .set_ns_meta_as(
+                &flow.invoker,
+                &ns_id,
+                "categories",
+                &categories.join(","),
+                None,
+            )
+            .await?;
+
+        Ok(format!("creating the {name} category"))
     }
 
     async fn step_invite(
@@ -2181,6 +2269,68 @@ impl Bridge {
         Ok(())
     }
 
+    /// Mirror a projected namespace's categories as **sub-spaces** under its
+    /// top Space (matrix.md §6, locked decision 4), ordered by their position
+    /// in `cats=` — the same order clients render.
+    ///
+    /// Additive: a category dropped from the list keeps its sub-space (with
+    /// whatever rooms are in it) rather than being tombstoned, because a
+    /// tombstone is unrecoverable and a rename arrives as a drop plus an add.
+    async fn ensure_categories(
+        &mut self,
+        ns_id: &str,
+        categories: &[String],
+    ) -> anyhow::Result<()> {
+        let Some(projection) = self.store.state.projections.get_mut(ns_id) else {
+            return Ok(());
+        };
+        // weftd's list is the authority for later edits (the meta key is a full
+        // replace), so record it before acting on it.
+        projection.declared_categories = categories.to_vec();
+        let space_room = projection.space_room.clone();
+        let known = projection.categories.clone();
+
+        for (index, category) in categories.iter().enumerate() {
+            if known.contains_key(category) {
+                continue;
+            }
+
+            let room = self
+                .hs
+                .create_room(json!({
+                    "creation_content": { "type": "m.space" },
+                    "name": category,
+                    "preset": "public_chat",
+                    "power_level_content_override": { "users_default": 0, "state_default": 100 },
+                }))
+                .await?;
+
+            self.hs
+                .put_state(
+                    &space_room,
+                    "m.space.child",
+                    &room,
+                    json!({ "via": [self.domain], "order": format!("{index:010}") }),
+                )
+                .await?;
+            self.hs
+                .put_state(
+                    &room,
+                    "m.space.parent",
+                    &space_room,
+                    json!({ "via": [self.domain], "canonical": true }),
+                )
+                .await?;
+
+            self.store
+                .save_projected_category(ns_id, category, &room)
+                .await;
+            info!(ns_id, category, room, "projected category as a sub-space");
+        }
+
+        Ok(())
+    }
+
     /// Mirror one projected channel as a room under its Space — iff the §3
     /// rules hold: `permanent` retention only, never e2ee, never voice. A
     /// channel failing them is simply absent, not an error.
@@ -2212,7 +2362,14 @@ impl Bridge {
         if projection.rooms.contains_key(channel) {
             return Ok(()); // already projected; renames ride m.room.name later
         }
-        let space_room = projection.space_room.clone();
+        // A categorized channel hangs under its category's sub-space; an
+        // uncategorized one directly under the top Space (§6).
+        let parent = layout
+            .category
+            .as_ref()
+            .and_then(|c| projection.categories.get(c))
+            .cloned()
+            .unwrap_or_else(|| projection.space_room.clone());
 
         let chan_id = channel.rsplit('/').next().unwrap_or_default().to_string();
         let room_id = self
@@ -2228,7 +2385,7 @@ impl Bridge {
         // Space ↔ room links, ordered by the WEFT position (§6).
         self.hs
             .put_state(
-                &space_room,
+                &parent,
                 "m.space.child",
                 &room_id,
                 json!({ "via": [self.domain], "order": format!("{:010}", layout.position) }),
@@ -2238,7 +2395,7 @@ impl Bridge {
             .put_state(
                 &room_id,
                 "m.space.parent",
-                &space_room,
+                &parent,
                 json!({ "via": [self.domain], "canonical": true }),
             )
             .await?;

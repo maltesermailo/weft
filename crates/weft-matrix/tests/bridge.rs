@@ -1611,3 +1611,190 @@ async fn the_kick_flow_picks_its_scope_and_reverts_when_refused() {
     );
     let _ = room_id;
 }
+
+#[tokio::test]
+async fn categories_become_subspaces_and_parent_their_rooms() {
+    // matrix.md §6 / locked decision 4: a WEFT category is a child Space, and a
+    // categorized channel's room hangs under it rather than the top Space.
+    let (mut bridge, mut lines, calls) = bridge_with(BTreeMap::new()).await;
+    let ns_id = ulid::Ulid::new().to_string().to_lowercase();
+    let chan_id = ulid::Ulid::new().to_string().to_lowercase();
+    let channel = format!("#{ns_id}/{chan_id}");
+
+    let meta = |cats: Vec<String>| weft_proto::Event::NsMeta {
+        id: ns_id.parse().unwrap(),
+        vanity: "gaming".parse().unwrap(),
+        visibility: weft_proto::Visibility::Public,
+        owner: Some("ada".into()),
+        title: None,
+        description: None,
+        icon: None,
+        recovery_set: false,
+        recovery_pending: None,
+        categories: cats,
+        federation: false,
+        welcome: None,
+        origin: None,
+        provider_online: None,
+        authority: None,
+        settings_disabled: Vec::new(),
+        bridges: vec!["matrix".parse().unwrap()],
+    };
+
+    deliver(
+        &mut bridge,
+        meta(vec!["Text".into(), "Voice".into()]),
+        None,
+        None,
+    )
+    .await;
+
+    {
+        let recorded = calls.lock().unwrap();
+        let spaces: Vec<_> = recorded
+            .iter()
+            .filter(|(what, _, body)| {
+                what == "POST createRoom" && body["creation_content"]["type"] == "m.space"
+            })
+            .collect();
+        assert_eq!(
+            spaces.len(),
+            3,
+            "the top Space plus two sub-spaces: {spaces:?}"
+        );
+        assert_eq!(spaces[1].2["name"], "Text");
+        assert_eq!(spaces[2].2["name"], "Voice");
+    }
+    let text_space = bridge.store.state.projections[&ns_id].categories["Text"].clone();
+
+    // A categorized channel is parented under its category's sub-space.
+    deliver(
+        &mut bridge,
+        weft_proto::Event::ChannelLayout {
+            channel: channel.parse().unwrap(),
+            category: Some("Text".into()),
+            position: 3,
+            kind: weft_proto::ChannelKind::Text,
+            vanity: "general".into(),
+            origin: None,
+        },
+        None,
+        None,
+    )
+    .await;
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Policy {
+            channel: channel.parse().unwrap(),
+            policy: weft_proto::RetentionPolicy::Permanent,
+        },
+        None,
+        None,
+    )
+    .await;
+
+    {
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded.iter().any(|(what, _, body)| what
+                .starts_with(&format!("PUT state/{text_space}/m.space.child"))
+                && body["order"] == "0000000003"),
+            "the room hangs under the Text sub-space, ordered by position: {recorded:?}"
+        );
+    }
+
+    // Re-delivering the same list is idempotent — no duplicate sub-spaces.
+    let before = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(what, _, _)| what == "POST createRoom")
+        .count();
+    deliver(
+        &mut bridge,
+        meta(vec!["Text".into(), "Voice".into()]),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(what, _, _)| what == "POST createRoom")
+            .count(),
+        before,
+        "an unchanged list creates nothing"
+    );
+
+    // The create-subspace flow appends to **weftd's** declared list, so a
+    // category weftd knows but we never projected cannot be deleted by it.
+    bridge
+        .store
+        .state
+        .projections
+        .get_mut(&ns_id)
+        .unwrap()
+        .declared_categories = vec!["Text".into(), "Voice".into(), "Archive".into()];
+    bridge
+        .on_invoke(
+            "s1",
+            "create-subspace",
+            Some(&ns_id),
+            Some("ada@test.example"),
+        )
+        .await;
+    drain(&mut lines);
+    bridge
+        .on_step(
+            "s1",
+            None,
+            &[("name".to_string(), json!("Announcements"))]
+                .into_iter()
+                .collect(),
+            false,
+        )
+        .await;
+
+    let sent = drain(&mut lines);
+    let meta_set = sent
+        .iter()
+        .find(|l| l.contains("NS META"))
+        .expect("the category list was set");
+    assert!(
+        meta_set.contains("Text,Voice,Archive,Announcements"),
+        "appended to weftd's list, not to our sub-spaces: {meta_set}"
+    );
+    assert!(meta_set.contains("as=ada@test.example"), "{meta_set}");
+
+    // A comma would corrupt the list; a duplicate is refused.
+    for bad in ["Text", "A,B"] {
+        bridge
+            .on_invoke(
+                "s2",
+                "create-subspace",
+                Some(&ns_id),
+                Some("ada@test.example"),
+            )
+            .await;
+        drain(&mut lines);
+        bridge
+            .on_step(
+                "s2",
+                None,
+                &[("name".to_string(), json!(bad))].into_iter().collect(),
+                false,
+            )
+            .await;
+        let sent = drain(&mut lines);
+        assert!(
+            sent.iter().any(|l| l.contains("PLUGIN-RESULT")),
+            "{bad} is refused with an answer: {sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|l| l.contains("NS META")),
+            "{bad} must not reach weftd: {sent:?}"
+        );
+    }
+}

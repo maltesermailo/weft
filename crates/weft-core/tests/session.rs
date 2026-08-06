@@ -7268,6 +7268,73 @@ async fn a_projected_namespace_bridges_both_directions_and_the_home_mints() {
 }
 
 #[tokio::test]
+async fn an_ns_meta_change_reaches_a_projecting_provider() {
+    // A provider is not an ns member, so the ordinary fan-out never reaches it
+    // — yet NS-META is exactly what describes its structure (Space name,
+    // category sub-spaces). Without this push a category added in a client
+    // would never appear on the foreign side.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("mx", key.public(), vec!["matrix".parse().unwrap()])],
+        &[],
+    );
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    ada.send(&format!("NS META {ns_id} bridge:matrix :open"));
+    ada.recv().await;
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT matrix://matrix.org");
+    let mut settled = false;
+    while !settled {
+        if let Ok(reply) = weft_proto::Reply::parse(&plugin.recv_raw().await) {
+            settled = matches!(reply.event, Event::Policy { .. });
+        }
+    }
+
+    // The category list is namespace metadata; the provider must hear it.
+    ada.send(&format!("NS META {ns_id} categories :Text,Voice"));
+    let pushed = loop {
+        if let Ok(reply) = weft_proto::Reply::parse(&plugin.recv_raw().await) {
+            if let Event::NsMeta { categories, .. } = reply.event {
+                break categories;
+            }
+        }
+    };
+    assert_eq!(pushed, ["Text", "Voice"]);
+
+    // An **unprojected** namespace's meta stays local: nothing to describe.
+    ada.send(&format!("NS META {ns_id} bridge:matrix :closed"));
+    ada.recv().await;
+    let mut bob = ready(&ctx, "bob").await;
+    bob.send(&format!("@root={} NS CREATE quiet public", root_key_b64()));
+    let Event::NsMeta { id, .. } = bob.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    bob.send(&format!("NS META {id} categories :Private"));
+    bob.recv().await;
+    // Drain what the flag-close pushed, then assert nothing else arrives.
+    let quiet = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            let raw = plugin.recv_raw().await;
+            if raw.contains("Private") {
+                return raw;
+            }
+        }
+    })
+    .await;
+    assert!(
+        quiet.is_err(),
+        "an unprojected namespace must not be described: {quiet:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_channel_created_in_a_projected_namespace_reaches_the_provider_live() {
     // The create-room flow's weftd half: a channel created *after* the
     // provider's startup structure push must reach it immediately — structure

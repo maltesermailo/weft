@@ -599,8 +599,25 @@ implements and the daemon is written against.*
       **Client gap closed:** `member`/`user` context actions were never offered — `pluginItems` was
       only ever called with `["message"]`, so every member-context plugin action was invisible. Now
       wired into both `userCtx` and the Server-Settings roster (`nsMemberCtx`).
-      **Remaining:** create-subspace (categories → sub-spaces, locked decision 4 — the projection is
-      still flat, so this waits on sub-space support).
+      **create-subspace DONE 2026-08-06**, together with the sub-space projection it was blocked
+      on (locked decision 4): a projected namespace's categories become **child Spaces** —
+      `ensure_categories` creates one per `cats=` entry, ordered by its index, and a categorized
+      channel's room is parented under its category's sub-space instead of the top Space. Additive
+      by design: a category dropped from the list keeps its sub-space, because a tombstone is
+      unrecoverable and a rename arrives as a drop plus an add. Persisted in
+      `matrix_projected_categories`.
+      The flow itself sends an attributed `NS META … categories` (the invoker's ns-admin is what
+      weftd checks) and creates **nothing** locally — weftd applies the change and pushes the
+      resulting `NS-META` back, and that push is what builds the sub-space; creating it first would
+      orphan one whenever weftd refused. It appends to **weftd's declared list**
+      (`Projection.declared_categories`, refreshed by every push), never to the sub-spaces the
+      daemon happens to have built — the meta key is a full replace, so appending to a partial view
+      would delete every category not yet projected. Commas and duplicates are refused before the
+      wire. A *consumed* space refuses the flow outright: its structure is the realm's to describe.
+      weftd half: `announce_ns_meta` pushes every NS-META change to the projecting providers (a
+      provider is not an ns member, so the member fan-out never reached it). SDK:
+      `Realm::set_ns_meta_as`.
+      **Slice 11 is complete.**
 - [ ] **12. Track B — widgets + client-Rhai + CSP** (L) — the rich PL-matrix editor as a sandboxed
       widget. **Polish, not gating**: SDUI tables/forms carry the v1 levels view.
 
