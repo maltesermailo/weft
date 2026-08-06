@@ -11,6 +11,13 @@ use anyhow::Context as _;
 use tracing::{error, info, warn};
 use weft_matrix::{asapi, bridge::Bridge, config::Config, hs::Hs, store::Store};
 
+/// What this invocation is for.
+enum Mode {
+    Run,
+    Keygen,
+    Registration,
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -19,21 +26,42 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let mut args = std::env::args().skip(1);
-    let (registration, config_path) = match (args.next().as_deref(), args.next()) {
-        (Some("generate-registration"), Some(path)) => (true, PathBuf::from(path)),
-        (Some(path), None) => (false, PathBuf::from(path)),
+    let (mode, config_path) = match (args.next().as_deref(), args.next()) {
+        (Some("generate-registration"), Some(path)) => (Mode::Registration, PathBuf::from(path)),
+        (Some("keygen"), Some(path)) => (Mode::Keygen, PathBuf::from(path)),
+        (Some(path), None) => (Mode::Run, PathBuf::from(path)),
         _ => {
-            eprintln!("usage: weft-matrix [generate-registration] <config.toml>");
+            eprintln!(
+                "usage: weft-matrix <config.toml>                      run the bridge\n\
+                 \x20      weft-matrix keygen <config.toml>               create the adapter key, print its pubkey\n\
+                 \x20      weft-matrix generate-registration <config.toml>  print the appservice registration"
+            );
             std::process::exit(2);
         }
     };
 
     let cfg = Config::load(&config_path)?;
 
-    if registration {
-        let url = format!("http://{}", cfg.matrix.listen);
-        print!("{}", weft_matrix::config::registration_yaml(&cfg, &url));
-        return Ok(());
+    match mode {
+        Mode::Registration => {
+            // The URL the *homeserver* dials, not our bind address — those
+            // differ the moment the two run in separate containers.
+            print!(
+                "{}",
+                weft_matrix::config::registration_yaml(&cfg, &cfg.as_url())
+            );
+            return Ok(());
+        }
+        // Setup is circular — weftd must pin our public key before we may
+        // connect, and the key is ours to make. This breaks the circle without
+        // running the bridge: create the key file if absent, print the pubkey
+        // to paste into weftd's `[[plugin.remote]]`.
+        Mode::Keygen => {
+            let keypair = load_or_generate_key(&cfg.weft.key_file)?;
+            println!("{}", keypair.public().to_b64());
+            return Ok(());
+        }
+        Mode::Run => {}
     }
 
     tokio::runtime::Builder::new_multi_thread()

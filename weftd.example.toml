@@ -206,6 +206,25 @@ auto_accept = false
 # (SSRF-guarded; abuse handled reactively via NETBLOCK).
 auto_bridge = "off"
 
+# PROVIDERS / App Services (plugin-spec §3.5, framework §3) — an external
+# process that authenticates with `AUTH ADAPTER`, proving control of the key
+# pinned here. The Matrix bridge (`weft-matrix`, deploy/matrix/) is one.
+#
+# Get `key` from the daemon itself: `weft-matrix keygen <config.toml>` creates
+# the key file if absent and prints its public half. Nothing connects until the
+# key here matches — an unpinned provider is refused with AUTH-FAILED.
+#
+# `schemes` is the authority boundary: this provider may only assert, ingest into
+# and govern namespaces of these foreign-URI schemes. `bot` asks weftd to
+# provision the service's own attributable identity — a native bot account,
+# which cannot authenticate at all (no password, no key) and acts through this
+# provider. Repeat the block per provider.
+# [[plugin.remote]]
+# id      = "matrix"
+# key     = "BASE64_ADAPTER_PUBKEY"   # from `weft-matrix keygen`
+# bot     = "matrixbot"               # optional; provisioned as a bot account
+# schemes = ["matrix"]
+
 # OUTBOUND peers (§11.2) — weftd dials each and maintains the bridge (transmits
 # any operator-proposed manifest, forwards local-origin events, ingests theirs).
 # The key is pinned: the peer proves control of it, and it verifies their

@@ -1,0 +1,74 @@
+# The Matrix bridge daemon. Plain TOML the operator edits — same convention as
+# weft.toml (no templating, no .env indirection for application config).
+#
+# Design: docs/architecture/matrix.md. Wire contract with weftd:
+# docs/protocol/bridge-session-protocol.md.
+
+[weft]
+# weftd's QUIC control plane, reachable on the shared Compose network. The
+# service name comes from the weftd stack (../weftd/docker-compose.yml).
+endpoint = "weftd:4433"
+
+# The adapter's Ed25519 identity. Created by `weft-matrix keygen <this file>`;
+# its PUBLIC half goes in weftd's `[[plugin.remote]] key`. Nothing connects
+# until those match — an unpinned provider gets AUTH-FAILED.
+#
+# On the `matrix_keys` volume so it survives `docker compose down`. Losing it
+# means generating a new one and re-pinning.
+key_file = "/var/lib/weft-matrix/adapter.key"
+
+# weftd's HTTP media plane (§13): `POST /media` to upload, `GET /media/<hash>`
+# to fetch. Blobs do not ride the control stream, so this is a separate address.
+# Omit to run without media — attachments are then dropped, with a warning.
+media_url = "http://weftd:8081"
+
+[matrix]
+# The companion homeserver's client-server API, on the shared network.
+hs_url = "http://synapse:8008"
+
+# The appservice token pair. MUST MATCH the registration you give the
+# homeserver (`weft-matrix generate-registration <this file>`):
+#   as_token — ours to the homeserver
+#   hs_token — the homeserver's to us (we reject pushes without it)
+# Change both. Anyone holding hs_token can inject events as any Matrix user.
+as_token = "change-me-as-token"
+hs_token = "change-me-hs-token"
+
+# Where we bind the appservice API the homeserver pushes transactions to.
+listen = "0.0.0.0:9010"
+
+# Where the HOMESERVER dials us — this is the `url` in the generated
+# registration, and it must be a name Synapse can resolve. Distinct from
+# `listen` on purpose: we bind a wildcard, it needs the service name.
+as_url = "http://bridge:9010"
+
+# The companion homeserver's server_name. MUST MATCH homeserver.yaml's
+# `server_name`, and it is what puppet MXIDs live under
+# (`@weft_<account-ulid>:<domain>`).
+domain = "matrix.weft.example"
+
+# Puppet localpart prefix. The appservice registration claims `@<prefix>*`
+# exclusively, so this is the boundary between our users and real ones.
+#
+# DO NOT CHANGE THIS after users exist: puppets are named `<prefix><ulid>`, and
+# a changed prefix orphans every existing one (state recovery logs a warning
+# naming the mismatch, but cannot repair it).
+puppet_prefix = "weft_"
+
+# The appservice bot — the bridge's own identity, and the operator console.
+bot = "weftbot"
+
+# MXIDs allowed to drive the console (`!weft status|recover|attach-*`). A config
+# allowlist, deliberately NOT Matrix power levels: power in a room says what you
+# may do to that room, not who may re-point this bridge's internal state. Empty
+# disables the console entirely.
+admins = []
+
+[daemon]
+# The daemon's store, on the stack's shared Postgres (created by
+# initdb/10-matrix.sql). Its tables are `matrix_`-prefixed, so weftd's own
+# `weft` database would work too; a separate one is the default so the bridge
+# can be removed without touching weftd's data.
+#
+# MUST MATCH the POSTGRES_* values in docker-compose.yml.
+database_url = "postgres://weft:change-me-postgres-password@postgres/weftmatrix"

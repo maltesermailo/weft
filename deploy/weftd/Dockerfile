@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 #
 # weftd container, built WITH the embedded web client (`--features web-ui`).
-# Build context is the repo root (see docker-compose.yml's `build.context: ..`).
+# Build context is the repo root (see docker-compose.yml's `build.context: ../..`).
 
 # ---- builder: browser client (wasm + SPA) + weftd ----
 FROM rust:1-bookworm AS builder

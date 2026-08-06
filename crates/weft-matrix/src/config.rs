@@ -37,6 +37,13 @@ pub struct Matrix {
     pub hs_token: String,
     /// Where the homeserver reaches our appservice API, bind address.
     pub listen: String,
+    /// The URL the **homeserver** calls us on, as it appears in the appservice
+    /// registration. Distinct from `listen`: we bind `0.0.0.0:9010`, but the
+    /// homeserver has to dial a name it can resolve (`http://bridge:9010` on a
+    /// Compose network). Defaults to `http://<listen>`, which is right only when
+    /// both run in one place.
+    #[serde(default)]
+    pub as_url: Option<String>,
     /// The companion homeserver's server name — puppets live under it.
     pub domain: String,
     /// Puppet localpart prefix (registration namespace `@<prefix>.*`).
@@ -78,6 +85,14 @@ impl Config {
 
     pub fn bot_mxid(&self) -> String {
         format!("@{}:{}", self.matrix.bot, self.matrix.domain)
+    }
+
+    /// The URL to put in the registration — what the homeserver will call.
+    pub fn as_url(&self) -> String {
+        self.matrix
+            .as_url
+            .clone()
+            .unwrap_or_else(|| format!("http://{}", self.matrix.listen))
     }
 }
 
@@ -147,8 +162,13 @@ mod tests {
         assert_eq!(cfg.matrix.puppet_prefix, "weft_");
         assert_eq!(cfg.bot_mxid(), "@weftbot:test.example");
 
-        let reg = registration_yaml(&cfg, "http://127.0.0.1:9010");
+        // Absent `as_url` ⇒ the bind address, which is only right when the
+        // homeserver shares our network namespace.
+        assert_eq!(cfg.as_url(), "http://127.0.0.1:9010");
+
+        let reg = registration_yaml(&cfg, &cfg.as_url());
         assert!(reg.contains("regex: \"@weft_.*:test\\.example\""), "{reg}");
         assert!(reg.contains("sender_localpart: weftbot"), "{reg}");
+        assert!(reg.contains("url: http://127.0.0.1:9010"), "{reg}");
     }
 }

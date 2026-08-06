@@ -1,0 +1,69 @@
+# The companion homeserver: a dedicated Matrix server whose only users are the
+# bridge bot and its puppets (matrix.md §2). That is what lets the appservice
+# claim the whole `@weft_*` namespace, so a puppet is `@weft_<ulid>:<domain>`
+# with no second prefix.
+#
+# **Synapse, not conduwuit** — because appservice registration must be
+# declarative (`app_service_config_files` below). conduwuit registers
+# appservices through its admin room, which is a manual step this deployment
+# deliberately does not have. matrix.md decision 1 lists Synapse as supported.
+#
+# Missing keys (the signing key) are generated in place by the `keys` one-shot in
+# docker-compose.yml — see the README.
+
+# MUST MATCH [matrix] domain in weft-matrix.toml. It is baked into every MXID and
+# event this server signs; changing it later invalidates all of them.
+server_name: "matrix.weft.example"
+
+pid_file: /data/homeserver.pid
+signing_key_path: /data/signing.key
+log_config: /data/log.config
+media_store_path: /data/media_store
+
+listeners:
+  - port: 8008
+    type: http
+    tls: false
+    # `x_forwarded` because a reverse proxy terminates TLS in front (see the
+    # README's Caddyfile snippet).
+    x_forwarded: true
+    bind_addresses: ["0.0.0.0"]
+    resources:
+      - names: [client, federation]
+        compress: false
+
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: change-me-synapse-postgres-password
+    database: synapse
+    # The stack's shared Postgres. Synapse needs a C-collation database;
+    # initdb/10-matrix.sql creates it that way on a fresh volume.
+    host: postgres
+    cp_min: 5
+    cp_max: 10
+
+# ── The appservice registration ────────────────────────────────────────────
+# THIS is the config-based registration. The file is produced by
+# `weft-matrix generate-registration` into a volume both containers share, so
+# the tokens cannot drift from weft-matrix.toml by being copied twice.
+app_service_config_files:
+  - /appservices/weft-matrix.yaml
+
+# Dedicated to the bridge: nobody signs up here. The appservice creates puppets
+# through its own token, which bypasses this.
+enable_registration: false
+
+# Federation: on = remote homeservers can reach projected Spaces (the point of
+# outbound projection) and we can join remote rooms (the point of consuming
+# them). Set `federation_domain_whitelist: []` to bridge only rooms on this
+# server.
+serve_server_wellknown: true
+
+report_stats: false
+
+# A bridge-only server needs no presence or URL previews, and both are cost.
+presence:
+  enabled: false
+url_preview_enabled: false
