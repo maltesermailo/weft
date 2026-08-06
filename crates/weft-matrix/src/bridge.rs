@@ -80,6 +80,11 @@ pub enum PendingAct {
     },
 }
 
+/// How many events one backfill page fetches. Matrix's `/messages` is
+/// paginated far below WEFT's `MAX_HISTORY_LIMIT` (500), and backfill is
+/// demand-driven — the client scrolls again for the next window.
+const BACKFILL_PAGE: u32 = 50;
+
 /// A projected channel's layout, waiting for its retention policy.
 pub struct PendingLayout {
     pub vanity: String,
@@ -335,6 +340,20 @@ impl Bridge {
                     .await;
                 return;
             }
+            // Backfill is a request about a *channel*, not on anyone's behalf
+            // (protocol doc §8), so it carries no `@as` either.
+            Command::History {
+                target: weft_proto::Target::Channel(channel),
+                before,
+                limit,
+                ..
+            } => {
+                let (channel, before, limit) = (channel.to_string(), before.clone(), *limit);
+                if let Err(e) = self.backfill(&channel, before.as_ref(), limit).await {
+                    warn!(channel, "backfill failed: {e:#}");
+                }
+                return;
+            }
             _ => {}
         }
 
@@ -391,9 +410,6 @@ impl Bridge {
                     warn!(user, %msgid, "relayed DELETE failed: {e:#}");
                 }
             }
-            // HISTORY backfill is deferred with the rest of the scrollback
-            // work; saying so beats silently eating the request.
-            Command::History { .. } => debug!("HISTORY backfill not implemented yet (deferred)"),
             other => debug!(?other, "unhandled weftd request"),
         }
     }
@@ -1304,6 +1320,109 @@ impl Bridge {
 
         let root_id = root.parse()?;
         self.realm.delete(user, &root_id).await
+    }
+
+    // ---- backfill (protocol doc §8) ----------------------------------------
+
+    /// Answer weftd's `HISTORY` for a replica channel by **replaying the window
+    /// as ordinary ingestion** — there is no separate backfill ingress.
+    ///
+    /// Two properties make the replay safe to repeat:
+    ///
+    /// - **Deterministic msgids.** `ident::msgid_for` derives the id from the
+    ///   event id and its `origin_server_ts`, so replaying an event yields the
+    ///   id it already has. A window fetched twice cannot fork a message.
+    /// - **Oldest-first.** Matrix pages backwards (newest first); the replica is
+    ///   ordered by ULID time, so the page is reversed before it is sent.
+    ///
+    /// Events already linked are skipped: they are in the store, and re-sending
+    /// them would ask the channel actor to ingest what it has.
+    async fn backfill(
+        &mut self,
+        channel: &str,
+        before: Option<&weft_proto::MsgId>,
+        limit: Option<u32>,
+    ) -> anyhow::Result<()> {
+        // Only a consumed replica has a foreign scrollback to fetch; a
+        // projected channel's history is the home's own (it minted every id),
+        // so weftd never asks — but be explicit rather than rely on that.
+        let Some((room_id, space)) = self.store.state.room_of_channel(channel) else {
+            return Ok(());
+        };
+        let (room_id, ns_id, realm) = (
+            room_id.to_string(),
+            space.ns_id.clone(),
+            realm_of_uri(&space.uri),
+        );
+
+        if self.store.state.bans.is_banned(&ns_id) {
+            return Ok(());
+        }
+
+        // Anchor the page at the oldest message we hold; without one, start at
+        // the live end (a channel we have nothing for yet).
+        let from = match before {
+            Some(msgid) => {
+                let Some(at) = self.store.state.links.event_of(&msgid.to_string()) else {
+                    // We do not know that id — nothing to anchor on, and
+                    // guessing would replay an arbitrary window.
+                    debug!(%msgid, "backfill anchor is unknown — skipped");
+                    return Ok(());
+                };
+                self.hs.token_at_event(&room_id, &at.event.clone()).await?
+            }
+            None => None,
+        };
+
+        // Matrix caps a page far below WEFT's 500; asking for more just wastes
+        // the round trip, and the client scrolls again for the next window.
+        let limit = limit.unwrap_or(BACKFILL_PAGE).min(BACKFILL_PAGE);
+        let mut chunk = self
+            .hs
+            .messages_back(&room_id, from.as_deref(), limit)
+            .await?;
+        chunk.reverse();
+
+        let mut replayed = 0usize;
+        for ev in chunk {
+            let (Some(event_id), Some(sender)) = (
+                ev["event_id"].as_str().map(String::from),
+                ev["sender"].as_str().map(String::from),
+            ) else {
+                continue;
+            };
+            if ev["type"] != "m.room.message" {
+                continue; // v1 replays messages; edits/reactions ride live
+            }
+            if self.store.state.links.msgid_of(&event_id).is_some() {
+                continue; // already ingested
+            }
+            // Our own puppets' events are WEFT-origin already (relayed out);
+            // ingesting them would author our users under the realm.
+            let Some(weft_sender) = self.foreign_user(&sender) else {
+                continue;
+            };
+            let Some(body) = ev["content"]["body"].as_str() else {
+                continue;
+            };
+
+            let ts = ev["origin_server_ts"].as_u64().unwrap_or_default();
+            let minted = ident::msgid_for(&realm, &event_id, ts);
+            if let Err(e) = self
+                .realm
+                .message(&weft_sender, &minted, channel, body)
+                .await
+            {
+                warn!(event_id, "backfill replay failed: {e:#}");
+                break;
+            }
+
+            self.store.link(&event_id, &minted, &room_id).await;
+            replayed += 1;
+        }
+
+        info!(channel, replayed, "backfilled a window");
+        Ok(())
     }
 
     // ---- authority: capabilities here, power levels there (§10) ------------

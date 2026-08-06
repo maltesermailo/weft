@@ -226,6 +226,61 @@ impl Hs {
         Ok(())
     }
 
+    /// A pagination token positioned **at** an event — Matrix's `/messages`
+    /// pages from a token, not an event id, so a backfill anchored on a known
+    /// message has to resolve one first.
+    pub async fn token_at_event(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let v = self
+            .call(
+                reqwest::Method::GET,
+                &format!(
+                    "/_matrix/client/v3/rooms/{}/context/{}",
+                    enc(room_id),
+                    enc(event_id)
+                ),
+                None,
+                None,
+                &[("limit".to_string(), "0".to_string())],
+            )
+            .await?;
+
+        Ok(v["start"].as_str().map(String::from))
+    }
+
+    /// One page of a room's timeline, walking **backwards**. `from` is a token
+    /// ([`Self::token_at_event`]); `None` starts at the live end. Returns the
+    /// events newest-first, as Matrix does.
+    pub async fn messages_back(
+        &self,
+        room_id: &str,
+        from: Option<&str>,
+        limit: u32,
+    ) -> anyhow::Result<Vec<Value>> {
+        let mut query = vec![
+            ("dir".to_string(), "b".to_string()),
+            ("limit".to_string(), limit.to_string()),
+        ];
+        if let Some(from) = from {
+            query.push(("from".to_string(), from.to_string()));
+        }
+
+        let v = self
+            .call(
+                reqwest::Method::GET,
+                &format!("/_matrix/client/v3/rooms/{}/messages", enc(room_id)),
+                None,
+                None,
+                &query,
+            )
+            .await?;
+
+        Ok(v["chunk"].as_array().cloned().unwrap_or_default())
+    }
+
     /// Kick or ban a user from a room, as the bot (§9: bridge-created rooms are
     /// bridge-controlled, and a **foreign** member's membership is the realm's
     /// to state — so removing them happens here, not over the WEFT wire).

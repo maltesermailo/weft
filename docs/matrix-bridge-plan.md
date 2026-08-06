@@ -507,7 +507,24 @@ implements and the daemon is written against.*
       **Projection polish remaining:** category sub-spaces (locked decision 4 — flat under the top
       Space for now), live re-assert on rename/layout change (currently reconnect), room directory
       publishing, roster mode config.
-      **Not in the MVP (deliberate):** HISTORY backfill (request logged), media, typing, DMs,
+      **HISTORY backfill DONE 2026-08-06.** Replica-only by construction (a projected channel's
+      history is the home's own — it minted every id). weftd's `HISTORY #chan before=… limit=…` is
+      answered by **replaying the window as ordinary ingestion** (§8, no separate ingress):
+      `before` → its Matrix event via the links map → `/context` for a pagination token →
+      `/messages?dir=b` → the page **reversed** (Matrix pages newest-first; the replica orders by
+      ULID time). Safe to repeat because `ident::msgid_for` is deterministic and already-linked
+      events are skipped; our own puppets' events are skipped too (they are WEFT-origin). Page size
+      is capped at 50 — Matrix paginates far below WEFT's `MAX_HISTORY_LIMIT`, and backfill is
+      demand-driven. `HISTORY` is handled **before** the `@as` gate: it is a request about a
+      channel, not on anyone's behalf.
+      Two bugs fixed on the way, both pre-existing: (a) `ident::stable_ulid` built a ULID from a raw
+      hash u128, overflowing the 48-bit timestamp field — such a value does **not** survive a parse
+      round trip, so weftd stored a different id than the daemon minted and every map keyed on ours
+      missed (now `from_parts`, with a round-trip test); (b) the links map was keyed on whatever
+      spelling a caller held — the lowercase wire form from ingestion vs the uppercase canonical
+      `MsgId::to_string()` from events — so a WEFT reaction to an *ingested* Matrix message looked up
+      the canonical form, missed, and never reached Matrix (now canonicalized inside `Links`).
+      **Not in the MVP (deliberate):** media, typing, DMs,
       multi-realm (one realm per daemon for now), moderation/power-levels (slice 11), puppet
       display-name sync on rename (the identity survives; the pretty name catches up later).
 - [~] **10b. Per-space bridging bans** (owner requirement 2026-08-04) — an admin page where

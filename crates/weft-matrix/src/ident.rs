@@ -155,11 +155,23 @@ impl SpaceRef {
 
 /// A deterministic ULID for a structure object (space, room, role), derived
 /// from its Matrix id. Same room ⇒ same ULID, across restarts and stores.
+///
+/// Built through `from_parts` rather than from the hash wholesale: a raw u128
+/// overflows the 48-bit timestamp field, and such a value does **not** survive
+/// a parse round trip — weftd would store a different id than the one we minted
+/// and every map keyed on ours would miss. The timestamp bits carry hash
+/// material too (structure ids are not time-ordered), so collisions stay as
+/// unlikely as the 128 bits allow.
 pub fn stable_ulid(matrix_id: &str) -> String {
     let hash = Sha256::digest(matrix_id.as_bytes());
-    let n = u128::from_be_bytes(hash[..16].try_into().expect("16 bytes"));
+    let mut ts = [0u8; 8];
+    ts[2..].copy_from_slice(&hash[..6]); // 48 bits, the field's full width
+    let timestamp = u64::from_be_bytes(ts);
+    let random = u128::from_be_bytes(hash[6..22].try_into().expect("16 bytes"));
 
-    ulid::Ulid::from(n).to_string().to_ascii_lowercase()
+    ulid::Ulid::from_parts(timestamp, random)
+        .to_string()
+        .to_ascii_lowercase()
 }
 
 /// The msgid we mint for a Matrix event: `<realm>/<ulid>`.
@@ -252,6 +264,26 @@ mod tests {
         assert_eq!(SpaceRef::parse("discord://x/y"), None);
         assert_eq!(SpaceRef::parse("matrix://matrix.org"), None);
         assert_eq!(SpaceRef::parse("matrix://m/a/b/c"), None);
+    }
+
+    #[test]
+    fn minted_ids_survive_a_parse_round_trip() {
+        // The ids we mint are pinned by weftd, which parses them — an id that
+        // re-encodes differently would leave every map keyed on ours missing.
+        for id in ["!space:kde.org", "!gen:kde.org", "!zzz:matrix.org", "$ev"] {
+            let minted = stable_ulid(id);
+            let parsed: ulid::Ulid = minted.parse().expect("a canonical ULID");
+            assert_eq!(
+                parsed.to_string().to_ascii_lowercase(),
+                minted,
+                "round trip of {id}"
+            );
+        }
+
+        let msgid = msgid_for("kde.org", "$ev", 1_722_000_000_000);
+        let ulid_part = msgid.split('/').nth(1).unwrap();
+        let parsed: ulid::Ulid = ulid_part.parse().expect("a canonical ULID");
+        assert_eq!(parsed.to_string().to_ascii_lowercase(), ulid_part);
     }
 
     #[test]

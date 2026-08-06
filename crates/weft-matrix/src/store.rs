@@ -95,9 +95,10 @@ pub struct Links {
 
 impl Links {
     pub fn link(&mut self, event_id: &str, msgid: &str, room_id: &str) {
-        self.events.insert(event_id.to_string(), msgid.to_string());
+        let msgid = canonical_msgid(msgid);
+        self.events.insert(event_id.to_string(), msgid.clone());
         self.msgids.insert(
-            msgid.to_string(),
+            msgid,
             EventRef {
                 room: room_id.to_string(),
                 event: event_id.to_string(),
@@ -110,8 +111,24 @@ impl Links {
     }
 
     pub fn event_of(&self, msgid: &str) -> Option<&EventRef> {
-        self.msgids.get(msgid)
+        self.msgids.get(&canonical_msgid(msgid))
     }
+}
+
+/// A msgid in the one form the map is keyed by.
+///
+/// The same id reaches us in two spellings: the **wire** form we mint
+/// (lowercase, `ident::msgid_for`) and the **canonical** form
+/// `MsgId::to_string()` produces (uppercase ULID) when it arrives on an event.
+/// Keying on whatever a caller happened to hold split one message across two
+/// entries — so a WEFT reaction to an ingested Matrix message looked up the
+/// canonical spelling and missed the lowercase one it was stored under, and
+/// never reached Matrix. Normalizing here fixes every call site at once.
+fn canonical_msgid(msgid: &str) -> String {
+    msgid
+        .parse::<weft_proto::MsgId>()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|_| msgid.to_string())
 }
 
 /// One reaction, fully named — `(root, key, by)` as an anonymous tuple let a
@@ -932,6 +949,24 @@ mod tests {
         };
         sent.note(weird.clone(), "$r1".into());
         assert_eq!(sent.take(&weird).as_deref(), Some("$r1"));
+    }
+
+    #[test]
+    fn a_msgid_is_keyed_the_same_however_it_is_spelled() {
+        // The wire form we mint is lowercase; `MsgId::to_string()` is uppercase.
+        // Both must find the one entry, or a reaction to an ingested message
+        // silently never reaches the foreign side.
+        let mut links = Links::default();
+        let lower = "kde.org/01arz3ndektsv4rrffq69g5fav";
+        let upper = "kde.org/01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+        links.link("$ev", lower, "!room:kde.org");
+        assert!(
+            links.event_of(lower).is_some(),
+            "the spelling it was stored as"
+        );
+        assert!(links.event_of(upper).is_some(), "and the canonical one");
+        assert_eq!(links.msgid_of("$ev"), Some(upper), "stored canonically");
     }
 
     #[test]

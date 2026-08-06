@@ -54,6 +54,35 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
             ),
         )
         .route(
+            "/_matrix/client/v3/rooms/:room/context/:event",
+            get(
+                |State(hs): State<MockHs>, Path((room, event)): Path<(String, String)>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("GET context/{room}/{event}"),
+                        String::new(),
+                        Value::Null,
+                    ));
+                    axum::Json(json!({ "start": format!("tok-{event}") }))
+                },
+            ),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/:room/messages",
+            get(
+                |State(hs): State<MockHs>,
+                 Path(room): Path<String>,
+                 axum::extract::RawQuery(q): axum::extract::RawQuery| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("GET messages/{room}"),
+                        q.unwrap_or_default(),
+                        Value::Null,
+                    ));
+                    let chunk = hs.state.get("__messages__").cloned().unwrap_or_default();
+                    axum::Json(json!({ "chunk": chunk }))
+                },
+            ),
+        )
+        .route(
             "/_matrix/client/v3/rooms/:room/state",
             get(
                 |State(hs): State<MockHs>, Path(room): Path<String>| async move {
@@ -1797,4 +1826,118 @@ async fn categories_become_subspaces_and_parent_their_rooms() {
             "{bad} must not reach weftd: {sent:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn backfill_replays_a_window_as_ordinary_ingestion() {
+    // Protocol doc §8: weftd's HISTORY is answered by replaying the window as
+    // ordinary ingestion — no separate ingress. The replay is oldest-first
+    // (the replica orders by ULID time) and idempotent (msgids derive from the
+    // event id + its timestamp).
+    let mut rooms = kde_space();
+    // The room's scrollback, newest-first as Matrix returns it.
+    rooms.insert(
+        "__messages__".to_string(),
+        vec![
+            json!({ "type": "m.room.message", "event_id": "$old3", "sender": "@carol:kde.org",
+                    "origin_server_ts": 3_000u64, "content": { "body": "third" } }),
+            json!({ "type": "m.room.message", "event_id": "$old2", "sender": "@dave:kde.org",
+                    "origin_server_ts": 2_000u64, "content": { "body": "second" } }),
+            // Our own puppet: already WEFT-origin, must not be ingested back.
+            json!({ "type": "m.room.message", "event_id": "$mine", "sender": "@weft_ada:test.example",
+                    "origin_server_ts": 1_500u64, "content": { "body": "ours" } }),
+            json!({ "type": "m.room.message", "event_id": "$old1", "sender": "@carol:kde.org",
+                    "origin_server_ts": 1_000u64, "content": { "body": "first" } }),
+            // Not a message: skipped in v1.
+            json!({ "type": "m.reaction", "event_id": "$r", "sender": "@carol:kde.org",
+                    "origin_server_ts": 900u64, "content": {} }),
+        ],
+    );
+    let (mut bridge, mut lines, calls) = bridge_with(rooms).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    drain(&mut lines);
+    let channel = bridge
+        .store
+        .state
+        .channel_of_room("!gen:kde.org")
+        .unwrap()
+        .0
+        .channel
+        .clone();
+
+    // weftd asks for the window before the oldest message it holds. Anchor it
+    // on a message we already know, so the token can be resolved.
+    let anchor = format!("kde.org/{}", ulid::Ulid::new().to_string().to_lowercase());
+    bridge.store.link("$anchor", &anchor, "!gen:kde.org").await;
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            as_user: None,
+            as_ulid: None,
+            command: weft_proto::Command::History {
+                target: weft_proto::Target::Channel(channel.parse().unwrap()),
+                before: Some(anchor.parse().unwrap()),
+                after: None,
+                limit: Some(50),
+                thread: None,
+            },
+        })
+        .await;
+
+    // The anchor was resolved through /context, then a backwards page fetched.
+    {
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded
+                .iter()
+                .any(|(what, _, _)| what.contains("context/") && what.contains("$anchor")),
+            "the anchor became a pagination token: {recorded:?}"
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|(what, q, _)| what.contains("messages") && q.contains("dir=b")),
+            "…and the page walks backwards: {recorded:?}"
+        );
+    }
+
+    // Replayed oldest-first, ours and non-messages skipped.
+    let sent = drain(&mut lines);
+    let bodies: Vec<&str> = sent
+        .iter()
+        .filter(|l| l.contains("MSG"))
+        .filter_map(|l| l.split(" :").nth(1))
+        .collect();
+    assert_eq!(
+        bodies,
+        ["first", "second", "third"],
+        "oldest first: {sent:?}"
+    );
+    assert!(
+        !sent.iter().any(|l| l.contains("ours")),
+        "our own puppet's message must not be ingested back: {sent:?}"
+    );
+
+    // Deterministic ids: replaying the same window sends nothing new.
+    let before = drain(&mut lines).len();
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            as_user: None,
+            as_ulid: None,
+            command: weft_proto::Command::History {
+                target: weft_proto::Target::Channel(channel.parse().unwrap()),
+                before: Some(anchor.parse().unwrap()),
+                after: None,
+                limit: Some(50),
+                thread: None,
+            },
+        })
+        .await;
+    assert_eq!(
+        drain(&mut lines).len(),
+        before,
+        "a re-fetched window replays nothing — every event is already linked"
+    );
 }
