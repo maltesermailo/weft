@@ -179,6 +179,10 @@ export function userCtx(e: MouseEvent, name: string): void {
       items.push({ label: "Ban", icon: "ban", danger: true, run: () => moderate("ban", name, banScope()) });
     }
   }
+  // §13.2 a member/user action's ctx-ref is the qualified `user@net` — the
+  // plugin resolves any further scope itself (a bridge's kick, for instance,
+  // asks which channel, since the ref carries none).
+  items.push(...pluginItems("context-menu", ["member", "user"], ref));
   openCtx(e, items);
 }
 
@@ -194,6 +198,7 @@ export function groupCtx(e: MouseEvent, id: string): void {
 // Right-click a member row in the Server-Settings directory → namespace-scoped
 // moderation (mute/ban key on `ns:<server>`; kick has no place on a roster).
 export function nsMemberCtx(e: MouseEvent, target: string): void {
+  // (plugin entries are appended at the end, below the built-ins)
   e.preventDefault();
   const scope = banScope();
   const deny = denyList();
@@ -215,6 +220,7 @@ export function nsMemberCtx(e: MouseEvent, target: string): void {
         : { label: "Ban", icon: "ban", danger: true, run: () => moderate("ban", target, scope) },
     );
   }
+  items.push(...pluginItems("context-menu", ["member", "user"], store.social.qualify(target)));
   openCtx(e, items);
 }
 

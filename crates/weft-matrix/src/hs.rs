@@ -226,6 +226,38 @@ impl Hs {
         Ok(())
     }
 
+    /// Kick or ban a user from a room, as the bot (§9: bridge-created rooms are
+    /// bridge-controlled, and a **foreign** member's membership is the realm's
+    /// to state — so removing them happens here, not over the WEFT wire).
+    pub async fn remove_member(
+        &self,
+        room_id: &str,
+        mxid: &str,
+        reason: Option<&str>,
+        ban: bool,
+    ) -> anyhow::Result<()> {
+        let mut body = serde_json::Map::new();
+        body.insert("user_id".into(), json!(mxid));
+        if let Some(reason) = reason {
+            body.insert("reason".into(), json!(reason));
+        }
+
+        self.call(
+            reqwest::Method::POST,
+            &format!(
+                "/_matrix/client/v3/rooms/{}/{}",
+                enc(room_id),
+                if ban { "ban" } else { "kick" }
+            ),
+            Some(Value::Object(body)),
+            None,
+            &[],
+        )
+        .await?;
+
+        Ok(())
+    }
+
     /// Unban a user (the §10 revert of a refused ban).
     pub async fn unban(&self, room_id: &str, mxid: &str) -> anyhow::Result<()> {
         self.call(

@@ -587,9 +587,20 @@ implements and the daemon is written against.*
       watching; a broadcast has no replay, so acking first loses the room's first messages.
       `PluginReg` carries the provider session's event queue; `register_plugin` takes a grouped
       `ProviderRegistration`. SDK: `Realm::create_channel_as`.
+      **kick/ban flow DONE 2026-08-06.** A member action's ctx-ref is `user@net` (§13.2) — no
+      channel — so the moderate view **asks**: a picker over the bridge's channels, kick names the
+      chosen one, ban derives `ns:<id>` from it (never a guessed `*`). Two paths, because the target
+      kinds are different acts: a **local** member takes the attributed `KICK`/`BAN`; a **foreign**
+      member cannot be named by those verbs at all (they take a bare `Account`; `carol@kde.org` is a
+      `user@realm`), and their membership is the realm's to state (§6) — so they are removed
+      *foreign-side* via `Hs::remove_member`, and the realm's `NS-MEMBER part` follows.
+      `PendingAct::Membership.mxid` became optional and every flow-initiated act is now parked: with
+      no puppet there is nothing to revert, but the refusal is still reported (notice-only remedy).
+      **Client gap closed:** `member`/`user` context actions were never offered — `pluginItems` was
+      only ever called with `["message"]`, so every member-context plugin action was invisible. Now
+      wired into both `userCtx` and the Server-Settings roster (`nsMemberCtx`).
       **Remaining:** create-subspace (categories → sub-spaces, locked decision 4 — the projection is
-      still flat, so this waits on sub-space support), and a kick flow needs a channel context (the
-      current one refuses rather than guessing scope).
+      still flat, so this waits on sub-space support).
 - [ ] **12. Track B — widgets + client-Rhai + CSP** (L) — the rich PL-matrix editor as a sandboxed
       widget. **Polish, not gating**: SDUI tables/forms carry the v1 levels view.
 

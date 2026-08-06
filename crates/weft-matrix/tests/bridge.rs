@@ -167,6 +167,36 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
             ),
         )
         .route(
+            "/_matrix/client/v3/rooms/:room/kick",
+            post(
+                |State(hs): State<MockHs>,
+                 Path(room): Path<String>,
+                 axum::Json(body): axum::Json<Value>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("POST kick/{room}"),
+                        String::new(),
+                        body,
+                    ));
+                    axum::Json(json!({}))
+                },
+            ),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/:room/ban",
+            post(
+                |State(hs): State<MockHs>,
+                 Path(room): Path<String>,
+                 axum::Json(body): axum::Json<Value>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("POST ban/{room}"),
+                        String::new(),
+                        body,
+                    ));
+                    axum::Json(json!({}))
+                },
+            ),
+        )
+        .route(
             "/_matrix/client/v3/rooms/:room/unban",
             post(
                 |State(hs): State<MockHs>,
@@ -1440,4 +1470,144 @@ async fn create_room_acts_on_whichever_side_owns_the_room() {
             .is_none(),
         "…and not in the projection map"
     );
+}
+
+#[tokio::test]
+async fn the_kick_flow_picks_its_scope_and_reverts_when_refused() {
+    // §13.2: a member action's ctx-ref is `user@net` — no channel — so the kick
+    // asks which one, and the ban derives its namespace from that answer.
+    let (mut bridge, mut lines, calls) = bridge_with(BTreeMap::new()).await;
+    let (ns_id, channel, room_id) = projected_fixture(&mut bridge, &mut lines).await;
+
+    bridge
+        .on_invoke(
+            "k1",
+            "moderate",
+            Some("carol@kde.org"),
+            Some("ada@test.example"),
+        )
+        .await;
+    let sent = drain(&mut lines);
+    let view = sent
+        .iter()
+        .find(|l| l.contains("PLUGIN-VIEW"))
+        .expect("the moderate view opened");
+    let payload = view
+        .split("view=")
+        .nth(1)
+        .and_then(|v| v.split([';', ' ']).next())
+        .expect("a view payload");
+    let decoded: weft_proto::View = weft_proto::plugin_from_b64(payload).expect("decodes");
+    let Some(weft_proto::Component::Select { options, .. }) = decoded
+        .blocks
+        .iter()
+        .find(|b| matches!(b, weft_proto::Component::Select { .. }))
+    else {
+        panic!("the scope picker lists the bridged channels");
+    };
+    assert!(
+        options.iter().any(|o| o.value == channel),
+        "the projected channel is offered: {options:?}"
+    );
+
+    // A **foreign** member is removed foreign-side: weftd's moderation verbs
+    // take a bare `Account` and cannot name `carol@kde.org` at all, and their
+    // membership is the realm's to state (§6).
+    bridge
+        .on_step(
+            "k1",
+            Some("kick"),
+            &[
+                ("channel".to_string(), json!(channel)),
+                ("reason".to_string(), json!("spam")),
+            ]
+            .into_iter()
+            .collect(),
+            false,
+        )
+        .await;
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(what, _, body)| what == &format!("POST kick/{room_id}")
+                && body["user_id"] == "@carol:kde.org"
+                && body["reason"] == "spam"),
+        "the foreign member was removed on Matrix"
+    );
+    assert!(
+        !drain(&mut lines).iter().any(|l| l.contains("KICK")),
+        "…and no WEFT KICK was attempted with an unnameable account"
+    );
+
+    // A **local** member takes the WEFT path: an attributed BAN whose scope is
+    // derived from the chosen channel — no guessing at `*`.
+    join_ada(&mut bridge, &ns_id).await;
+    drain(&mut lines);
+    bridge
+        .on_invoke("k2", "moderate", Some("bob"), Some("ada@test.example"))
+        .await;
+    drain(&mut lines);
+    bridge
+        .on_step(
+            "k2",
+            Some("ban"),
+            &[("channel".to_string(), json!(channel))]
+                .into_iter()
+                .collect(),
+            false,
+        )
+        .await;
+    let sent = drain(&mut lines);
+    let ban = sent
+        .iter()
+        .find(|l| l.contains("BAN"))
+        .expect("the ban went out");
+    assert!(ban.contains(&format!("BAN ns:{ns_id} bob")), "{ban}");
+    assert!(ban.contains("as=ada@test.example"), "{ban}");
+    let label = ban
+        .split("label=")
+        .nth(1)
+        .map(|l| l.split([';', ' ']).next().unwrap().to_string())
+        .expect("the ban is labeled");
+
+    // Refused → the Matrix-side ban is lifted and the actor is told.
+    let before = calls.lock().unwrap().len();
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Err(weft_proto::ErrEvent {
+            code: weft_proto::ErrCode::CapRequired,
+            context: Some("ban".into()),
+            text: "not a moderator here".into(),
+            retry_after: None,
+            max: None,
+        }),
+        Some(&label),
+        None,
+    )
+    .await;
+    let after: Vec<(String, String, Value)> =
+        calls.lock().unwrap().iter().skip(before).cloned().collect();
+    // bob has no puppet (he never reached this bridge), so there is no
+    // Matrix-side ban to lift — the notice is then the *whole* remedy, and it
+    // still names the reason. A refused act always reports.
+    assert!(
+        !after
+            .iter()
+            .any(|(what, _, _)| what.starts_with("POST unban/")),
+        "nothing to unban: {after:?}"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|(what, _, body)| what.contains("m.room.message")
+                && body["msgtype"] == "m.notice"
+                && body["body"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("not a moderator here")),
+        "…but the refusal was reported: {after:?}"
+    );
+    let _ = room_id;
 }

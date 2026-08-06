@@ -244,45 +244,83 @@ pub fn invite_view(room: &str) -> View {
     }
 }
 
-pub fn moderate_view(member: &str) -> View {
+/// The moderate view. A member invoke carries only `user@net` (§13.2), so the
+/// **scope** is chosen here: a kick names one channel, a ban covers the
+/// namespace that channel belongs to. `channels` is what the bridge mirrors —
+/// `(wire name, label)`.
+pub fn moderate_view(member: &str, channels: &[(String, String)]) -> View {
+    let mut blocks = Vec::new();
+
+    if channels.is_empty() {
+        blocks.push(Component::Markdown {
+            text: "Nothing is bridged yet, so there is nowhere to moderate.".into(),
+        });
+
+        return View {
+            container: Container::Modal,
+            title: Some(format!("Moderate {member}")),
+            panel_key: None,
+            submit_label: None,
+            blocks,
+            widget: None,
+            params: Vec::new(),
+        };
+    }
+
+    blocks.push(Component::Select {
+        id: "channel".into(),
+        label: "Channel".into(),
+        required: Some(true),
+        default: channels.first().map(|(name, _)| name.clone()),
+        options: channels
+            .iter()
+            .map(|(name, label)| SelectOption {
+                value: name.clone(),
+                label: label.clone(),
+            })
+            .collect(),
+    });
+    blocks.extend([
+        Component::Text {
+            id: "reason".into(),
+            label: "Reason".into(),
+            required: None,
+            default: None,
+            placeholder: Some("optional".into()),
+            multiline: None,
+            max_len: Some(200),
+            pattern: None,
+        },
+        Component::Markdown {
+            text: "**Kick** removes them from the chosen channel; **ban** covers its \
+                   whole namespace. Checked against *your* WEFT capabilities — a \
+                   refusal is reverted on the Matrix side."
+                .into(),
+        },
+        Component::ActionRow {
+            buttons: vec![
+                weft_proto::Button {
+                    id: "kick".into(),
+                    label: "Kick from channel".into(),
+                    style: None,
+                    confirm: None,
+                },
+                weft_proto::Button {
+                    id: "ban".into(),
+                    label: "Ban from namespace".into(),
+                    style: Some(weft_proto::ButtonStyle::Danger),
+                    confirm: Some(format!("Ban {member} from the whole namespace?")),
+                },
+            ],
+        },
+    ]);
+
     View {
         container: Container::Modal,
         title: Some(format!("Moderate {member}")),
         panel_key: None,
         submit_label: None,
-        blocks: vec![
-            Component::Text {
-                id: "reason".into(),
-                label: "Reason".into(),
-                required: None,
-                default: None,
-                placeholder: Some("optional".into()),
-                multiline: None,
-                max_len: Some(200),
-                pattern: None,
-            },
-            Component::Markdown {
-                text: "Checked against **your** WEFT capabilities — a refusal is \
-                       reverted on the Matrix side."
-                    .into(),
-            },
-            Component::ActionRow {
-                buttons: vec![
-                    weft_proto::Button {
-                        id: "kick".into(),
-                        label: "Kick".into(),
-                        style: None,
-                        confirm: None,
-                    },
-                    weft_proto::Button {
-                        id: "ban".into(),
-                        label: "Ban".into(),
-                        style: Some(weft_proto::ButtonStyle::Danger),
-                        confirm: Some(format!("Ban {member} from the bridged rooms?")),
-                    },
-                ],
-            },
-        ],
+        blocks,
         widget: None,
         params: Vec::new(),
     }
@@ -382,6 +420,40 @@ mod tests {
             decls.iter().all(|d| d.description.is_some()),
             "a management action must explain itself"
         );
+    }
+
+    #[test]
+    fn moderating_picks_a_scope_because_a_member_invoke_carries_none() {
+        // §13.2: a member action's ctx-ref is `user@net` — no channel. A kick
+        // names one, so the view asks rather than guessing.
+        let channels = vec![
+            ("#ns/one".to_string(), "#general".to_string()),
+            ("#ns/two".to_string(), "#offtopic".to_string()),
+        ];
+        let view = moderate_view("carol@kde.org", &channels);
+
+        let Some(Component::Select {
+            options, default, ..
+        }) = view
+            .blocks
+            .iter()
+            .find(|b| matches!(b, Component::Select { .. }))
+        else {
+            panic!("a channel picker is offered");
+        };
+        assert_eq!(options.len(), 2);
+        assert_eq!(
+            default.as_deref(),
+            Some("#ns/one"),
+            "the first is preselected"
+        );
+
+        // Nothing bridged: say so instead of offering buttons that cannot work.
+        let empty = moderate_view("carol@kde.org", &[]);
+        assert!(!empty
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Component::ActionRow { .. })));
     }
 
     #[test]

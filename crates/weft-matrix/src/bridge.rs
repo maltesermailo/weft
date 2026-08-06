@@ -69,10 +69,12 @@ pub enum PendingAct {
         previous: i64,
         actor: String,
     },
-    /// A member was banned/kicked; put them back.
+    /// A member was banned/kicked. `mxid` is `None` when they have no Matrix
+    /// identity to restore — there is then nothing to undo, but the refusal is
+    /// still worth reporting, so the act is still parked.
     Membership {
         room: String,
-        mxid: String,
+        mxid: Option<String>,
         was_banned: bool,
         actor: String,
     },
@@ -1488,7 +1490,7 @@ impl Bridge {
 
         let label = self.park_act(PendingAct::Membership {
             room: ev["room_id"].as_str().unwrap_or_default().to_string(),
-            mxid: target.to_string(),
+            mxid: Some(target.to_string()),
             was_banned: membership == "ban",
             actor: actor.to_string(),
         });
@@ -1566,7 +1568,11 @@ impl Bridge {
                 self.open_for_channel(&ctx, ctx_ref, crate::actions::invite_view)
                     .await
             }
-            "moderate" => ctx.view(&crate::actions::moderate_view(ctx_ref)).await,
+            "moderate" => {
+                let channels = self.bridged_channels();
+                ctx.view(&crate::actions::moderate_view(ctx_ref, &channels))
+                    .await
+            }
             "room-settings" => self.open_room_settings(&ctx, ctx_ref).await,
             "bans" => {
                 let banned: Vec<String> =
@@ -1868,6 +1874,9 @@ impl Bridge {
         Ok(format!("invited {mxid}"))
     }
 
+    /// Kick or ban, at the scope the view collected: a kick names the chosen
+    /// channel, a ban covers that channel's namespace. Both are attributed and
+    /// labeled — weftd checks the invoker's caps, and a refusal reverts.
     async fn step_moderate(
         &mut self,
         flow: &Flow,
@@ -1876,28 +1885,117 @@ impl Bridge {
     ) -> anyhow::Result<String> {
         let reason = crate::actions::value(values, "reason");
         let reason = (!reason.is_empty()).then_some(reason);
+        // §13.2: the ctx-ref is `user@net`; weftd's moderation verbs name the
+        // bare account (a foreign member keeps their handle).
         let target = flow.ctx_ref.clone();
+        let channel = crate::actions::value(values, "channel").to_string();
+        anyhow::ensure!(!channel.is_empty(), "pick a channel");
 
-        // The target is a WEFT member; the scope is whatever they are being
-        // moderated in — a namespace ban, a channel kick.
+        let Some(room) = self.room_of_channel(&channel) else {
+            anyhow::bail!("that channel is not bridged");
+        };
+        let mxid = self.matrix_id_of(&target);
+
+        // A **foreign** member cannot be named by weftd's moderation verbs at
+        // all — they take a bare `Account`, and a foreign handle is a
+        // `user@realm`. That is not an oversight to route around: a foreign
+        // member's membership is the realm's to state (§6), so removing them
+        // is a foreign-side act, and the realm's `NS-MEMBER part` follows.
+        if target.contains('@') {
+            let Some(mxid) = mxid else {
+                anyhow::bail!("that member has no Matrix identity to remove");
+            };
+            let ban = button == Some("ban");
+            anyhow::ensure!(ban || button == Some("kick"), "pick an action");
+
+            self.hs.remove_member(&room, &mxid, reason, ban).await?;
+
+            return Ok(if ban {
+                format!("banned {target} from the room")
+            } else {
+                format!("kicked {target} from the room")
+            });
+        }
+
         match button {
-            Some("ban") => {
-                self.realm
-                    .ban_as(&flow.invoker, "*", &target, reason, true, None)
-                    .await?;
-                Ok(format!("banned {target}"))
-            }
             Some("kick") => {
-                anyhow::ensure!(
-                    self.store.state.projections.len() + self.store.state.spaces.len() > 0,
-                    "nothing is bridged"
-                );
-                // A kick names one channel; without one in context, the ban
-                // scope is the honest instrument. Say so rather than guess.
-                anyhow::bail!("kick needs a channel context — use it from a channel")
+                // Foreign-side first, so a WEFT refusal has something to
+                // revert; a kick cannot be undone, so the notice is the remedy
+                // (see `revert_act`).
+                let label = self.park_act(PendingAct::Membership {
+                    room: room.clone(),
+                    mxid,
+                    was_banned: false,
+                    actor: flow.invoker.clone(),
+                });
+
+                self.realm
+                    .kick_as(&flow.invoker, &channel, &target, reason, Some(&label))
+                    .await?;
+
+                Ok(format!("kicked {target} from the channel"))
+            }
+            Some("ban") => {
+                let Some(ns_id) = channel
+                    .strip_prefix('#')
+                    .and_then(|c| c.split_once('/'))
+                    .map(|(ns, _)| ns.to_string())
+                else {
+                    anyhow::bail!("that channel has no namespace to ban in");
+                };
+                let label = self.park_act(PendingAct::Membership {
+                    room: room.clone(),
+                    mxid,
+                    was_banned: true,
+                    actor: flow.invoker.clone(),
+                });
+
+                self.realm
+                    .ban_as(
+                        &flow.invoker,
+                        &format!("ns:{ns_id}"),
+                        &target,
+                        reason,
+                        true,
+                        Some(&label),
+                    )
+                    .await?;
+
+                Ok(format!("banned {target} from the namespace"))
             }
             _ => anyhow::bail!("pick an action"),
         }
+    }
+
+    /// Every channel this bridge mirrors, as `(wire name, display label)` —
+    /// what the moderate view's scope picker offers.
+    fn bridged_channels(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+
+        for space in self.store.state.spaces.values() {
+            for room in space.rooms.values() {
+                out.push((room.channel.clone(), room.uri.clone()));
+            }
+        }
+        for projection in self.store.state.projections.values() {
+            for (channel, room) in &projection.rooms {
+                out.push((channel.clone(), room.clone()));
+            }
+        }
+        out.sort();
+
+        out
+    }
+
+    /// The Matrix identity a WEFT member maps to: a foreign handle addresses
+    /// its own MXID, one of ours their puppet. `None` ⇒ nothing to revert
+    /// foreign-side (the WEFT act still stands or falls on its own).
+    fn matrix_id_of(&self, member: &str) -> Option<String> {
+        if member.contains('@') {
+            return ident::mxid_of_weft_user(member);
+        }
+
+        self.puppet_of_account(member)
     }
 
     async fn step_room_settings(
@@ -1997,13 +2095,18 @@ impl Bridge {
                 actor,
             } => {
                 // Unban restores the ability to rejoin; a kick cannot be
-                // undone (only they can rejoin), so the notice is the remedy.
+                // undone (only they can rejoin), so the notice is the remedy —
+                // and it is the *whole* remedy when there was no Matrix-side
+                // change to reverse.
                 if was_banned {
-                    if let Err(e) = self.hs.unban(&room, &mxid).await {
-                        warn!(room, mxid, "revert of the ban failed: {e:#}");
+                    if let Some(mxid) = &mxid {
+                        if let Err(e) = self.hs.unban(&room, mxid).await {
+                            warn!(room, %mxid, "revert of the ban failed: {e:#}");
+                        }
                     }
                 }
-                (room, actor, format!("moderating {mxid} was refused: {why}"))
+                let who = mxid.as_deref().unwrap_or("that member");
+                (room, actor, format!("moderating {who} was refused: {why}"))
             }
         };
 
