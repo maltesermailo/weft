@@ -136,30 +136,109 @@ So the profile goes on **last**.
 
 ### 1. Choose the homeserver's name, and point DNS at it
 
-Matrix federation needs a public name with real TLS, so add a third A record:
+Synapse's `server_name` is the suffix of every MXID (`@weft_<ulid>:<server_name>`)
+and it is **permanent** — baked into every event the server signs, so changing it
+later invalidates all of them. It is *not* the hostname the server runs on: remote
+servers fetch `/.well-known/matrix/server` from `https://<server_name>/` and that
+file tells them where to actually connect. So there are two shapes.
+
+| `server_name`        | MXIDs                        | Well-known served by                     | Federation lands on  |
+| -------------------- | ---------------------------- | ---------------------------------------- | -------------------- |
+| `matrix.example.com` | `@weft_…:matrix.example.com` | Synapse (`serve_server_wellknown: true`) | `matrix.example.com` |
+| `example.com` (apex) | `@weft_…:example.com`        | Caddy, in an apex site block             | `matrix.example.com` |
+
+**Direct (subdomain)** is what the shipped files assume: no apex record, no
+delegation, nothing to configure beyond the site block. One record to add:
 
 ```
 matrix.example.com     →  203.0.113.10
 ```
 
-That name becomes Synapse's `server_name` — the suffix of every MXID
-(`@weft_<ulid>:matrix.example.com`). It is **permanent**: it is baked into every
-event the server signs, so changing it later invalidates all of them.
+**Delegated (apex)** is worth it when you want Matrix identities on your main
+domain — `@weft_…:example.com` rather than `@weft_…:matrix.example.com`. Recipe
+below. Two records to add, the apex among them, because Caddy needs a certificate
+for it:
 
-**Which name — subdomain or apex?** Remote servers fetch
-`/.well-known/matrix/server` from `https://<server_name>/`, whatever that name is;
-there is no apex requirement in Matrix. The choice is only about how MXIDs read
-and therefore who serves the delegation:
+```
+matrix.example.com     →  203.0.113.10
+example.com            →  203.0.113.10
+```
 
-| `server_name`        | MXIDs                        | Delegation served by                      |
-| -------------------- | ---------------------------- | ----------------------------------------- |
-| `matrix.example.com` | `@weft_…:matrix.example.com` | Synapse itself (`serve_server_wellknown`) |
-| `example.com` (apex) | `@weft_…:example.com`        | Caddy, in **weftd's** site block          |
+#### Delegated (apex) — the full recipe
 
-The subdomain form is what the shipped files assume and needs no extra config. The
-apex form is worth it if you want Matrix identities to match your WEFT network
-name — `/.well-known/weft` and `/.well-known/matrix/server` are different paths, so
-they coexist on one host fine. The `Caddyfile` carries the apex snippet.
+Note that the apex block does **not** have to be weftd's. weftd can live on its own
+subdomain: `/.well-known/weft` is fetched at `https://<network>/`, so weftd's host
+and its `network` are the same string, and that is independent of Matrix's
+`server_name`. The apex then serves exactly one file.
+
+**`Caddyfile`** — add an apex block, and keep the `matrix.…` one:
+
+```caddyfile
+example.com {
+	handle /.well-known/matrix/* {
+		header Content-Type application/json
+		respond `{"m.server": "matrix.example.com:443"}`
+	}
+
+	# Everything else on the apex. Drop this block if the apex already serves a
+	# site from elsewhere — but then THAT server has to answer the well-known
+	# above, because the apex is the Matrix authority either way.
+	handle {
+		redir https://weft.example.com{uri}
+	}
+}
+
+matrix.example.com {
+	reverse_proxy synapse:8008
+}
+```
+
+Both apex routes are `handle` blocks deliberately: those are mutually exclusive and
+first-match, so the well-known cannot be swallowed by the catch-all. A bare
+directive next to a `handle` leaves that to Caddy's internal directive ordering,
+which is not something to bet federation on.
+
+**`homeserver.yaml`**
+
+```yaml
+server_name: "example.com"                        # the apex — the MXID suffix
+public_baseurl: "https://matrix.example.com/"     # where it actually answers
+serve_server_wellknown: false                     # Caddy owns that file now
+```
+
+`serve_server_wellknown: false` is hygiene rather than necessity. Synapse can only
+ever name *itself* — the endpoint returns `{"m.server": "<server_name>:443"}` —
+so with an apex `server_name` its copy would say `example.com:443`, published on
+`matrix.example.com`, pointing back at a host that serves only the JSON. Nothing
+queries it (discovery fetches the well-known for `server_name` only, then resolves
+the returned host by port/SRV/A — it does not recurse), but it is a confidently
+wrong answer to find while troubleshooting, and it becomes actively wrong the day
+the apex is re-pointed.
+
+**`weft-matrix.toml`** — `[matrix] domain = "example.com"`, the apex, matching
+`server_name` exactly. Not weftd's network name; the two identity spaces are
+separate and only this one appears in MXIDs.
+
+<details>
+<summary>Variant: let the apex front the federation API instead</summary>
+
+If you would rather proxy the well-known than hard-code it — the common nginx
+pattern — the apex must also front `/_matrix/*`, because the file Synapse returns
+names the apex and remote servers will then send federation traffic there:
+
+```caddyfile
+example.com {
+	handle /.well-known/matrix/* { reverse_proxy synapse:8008 }
+	handle /_matrix/* { reverse_proxy synapse:8008 }
+	handle { redir https://weft.example.com{uri} }
+}
+```
+
+with `serve_server_wellknown: true` and `public_baseurl: "https://example.com/"`.
+Equally correct; it just puts the whole federation surface on the apex instead of
+one static file, and the certificate remote servers validate becomes the apex's.
+
+</details>
 
 ### 2. Edit the bridge's config
 
@@ -172,10 +251,9 @@ Still in `deploy/weftd`:
 - **`homeserver.yaml`** — `server_name` = **exactly** the same string, and the
   Synapse Postgres password.
 - **`initdb/10-matrix.sql`** — the same Synapse password.
-- **`Caddyfile`** — uncomment the matrix site block and set the same domain. This
-  is what makes federation work: it routes `https://<server_name>/` to Synapse,
-  which lets Synapse's own `/.well-known/matrix/server` tell remote servers to
-  federate over **443**, so port 8448 never has to be opened.
+- **`Caddyfile`** — uncomment the `matrix.…` site block and set your domain (plus
+  the apex block, on the delegated shape). This is what makes federation work over
+  **443**, so port 8448 never has to be opened.
 - **`.env`** — `MATRIX_BIND` / `MATRIX_PORT`, where the homeserver's port is
   published on the host (keep it on loopback; Caddy fronts it).
 

@@ -81,23 +81,34 @@ Federation is not optional in practice — remote homeservers reaching projected
 Spaces is the point of outbound projection. It needs three things, and the shipped
 files provide all three:
 
-1. **`server_name` on a public name with real TLS.** Uncomment the matrix site
+1. **A public name with real TLS in front of Synapse.** Uncomment the matrix site
    block in `Caddyfile` (`matrix.weft.example { reverse_proxy synapse:8008 }`) and
-   add the A record. `server_name` is the MXID suffix and is permanent.
-2. **Delegation to port 443**, served from `https://<server_name>/` — that host,
-   not the apex, unless the apex *is* the `server_name`. With the subdomain form
-   `serve_server_wellknown: true` (already set) has Synapse answer it, which works
-   *because* (1) routes `https://<server_name>/` to Synapse. With an apex
-   `server_name` it does not — the apex serves weftd — so the delegation moves
-   into Caddy's weftd block, in a `handle` block so the proxy cannot swallow it.
-   The `Caddyfile` carries that snippet.
+   add the A record.
+2. **`/.well-known/matrix/server`, served from `https://<server_name>/`** — that
+   host and no other, because `server_name` is the authority in every MXID. Which
+   host that is, is your choice, and it is the whole difference between the two
+   supported shapes:
+   - **Direct**: `server_name` = `matrix.weft.example`, the host Synapse already
+     answers on. `serve_server_wellknown: true` (the shipped default) has Synapse
+     serve the file itself. Nothing else to do.
+   - **Delegated**: `server_name` = your apex, Synapse still running on the
+     subdomain, so an apex Caddy block answers the file with the subdomain as its
+     target. MXIDs read `@weft_…:weft.example` instead of
+     `@weft_…:matrix.weft.example`. **Step-by-step recipe:
+     [`../README.md`](../README.md) → Part 2, step 1.**
+
+   The constraint that decides the details: Synapse's endpoint can only ever name
+   *itself* — it returns `{"m.server": "<server_name>:443"}`. So on the delegated
+   shape Caddy has to author that file (`respond` with the subdomain), and Synapse's
+   own copy is turned off. Proxying the path to Synapse instead is possible, but
+   then the apex must front `/_matrix/*` too, since the answer will name the apex.
 3. **Nothing on 8448.** Remote servers try the well-known first, then SRV, then
    `<server_name>:8448` as a last resort. Delegation short-circuits that to 443, so
    8448 stays closed. Verify with
    `curl https://<server_name>/.well-known/matrix/server` — the answer must carry
    `:443`. If it doesn't, either publish `matrix.weft.example:8448` through Caddy
-   (and open the port) or serve the delegation from Caddy with the port spelled
-   out. `deploy/README.md` step 8 has both.
+   (and open the port) or author the file in Caddy with the port spelled out.
+   `deploy/README.md` step 8 has both.
 
 Then run `server_name` through <https://federationtester.matrix.org>, which checks
 DNS, delegation, the certificate and the signing key the way a remote homeserver
