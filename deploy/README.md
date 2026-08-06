@@ -272,10 +272,14 @@ is what the script is for. `weftmatrix` is the daemon's own store.)
 ### 4. Create the adapter key
 
 ```sh
-docker compose run --rm bridge keygen /etc/weft/weft-matrix.toml
+docker compose run --rm --build adapter-key
 ```
 
-Prints the public key. Idempotent — it only creates the file if absent.
+Prints the public key. Idempotent — it only creates the file if absent. `--build`
+compiles the bridge image locally; drop it once you are pulling a published one.
+
+(Not `run bridge keygen …`: `run` starts the target's dependencies, and the bridge
+depends on Synapse, which cannot start until step 6.)
 
 ### 5. Pin the key in `weft.toml`
 
@@ -293,23 +297,7 @@ docker compose up -d weftd
 
 Until this matches, the bridge is refused with `AUTH-FAILED` — by design.
 
-### 6. Generate the appservice registration
-
-```sh
-docker compose run --rm registration     # → /appservices/weft-matrix.yaml
-```
-
-The registration is *generated* from `weft-matrix.toml` into a volume Synapse
-mounts read-only, so the tokens exist in one file rather than two that drift.
-Re-run it (and restart Synapse) after changing the tokens, the domain or the
-puppet prefix.
-
-Synapse's signing key and log config need no step of their own: it writes both
-itself on first boot, into the `synapse_data` volume. **Back the signing key up** —
-it is the identity remote homeservers pin, and losing it means every server that
-has federated with you rejects your events.
-
-### 7. Turn the profile on
+### 6. Turn the profile on
 
 ```sh
 # .env
@@ -317,11 +305,21 @@ COMPOSE_PROFILES=caddy,matrix
 ```
 
 ```sh
-docker compose up -d
+docker compose up -d --build
 docker compose logs -f bridge     # → the adapter pubkey, then "connected to weftd"
 ```
 
-### 8. Check that federation works
+Two things happen on their own here, so there is no step for either:
+
+- **The appservice registration** is derived from `weft-matrix.toml` into the volume
+  Synapse mounts, by a one-shot Synapse waits for. Every `up` re-derives it, so a
+  changed token cannot leave a stale registration behind, and a missing one cannot
+  leave Synapse crash-looping on `FileNotFoundError`.
+- **Synapse's signing key** is written on first boot into `synapse_data`.
+  **Back that volume up** — the key is the identity remote homeservers pin, and
+  losing it means every server you have federated with rejects your events.
+
+### 7. Check that federation works
 
 ```sh
 docker compose logs synapse | grep -i appservice   # a bad registration is fatal, so

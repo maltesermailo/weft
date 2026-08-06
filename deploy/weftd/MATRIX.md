@@ -49,8 +49,9 @@ The bridge is an appservice to Synapse **and** a provider session to weftd.
 **The walkthrough is [`../README.md`](../README.md) → Part 2** — one ordered list,
 kept in one place so it cannot drift from Part 1. In outline: choose the
 `server_name` and add its A record, edit the four files, create the two databases,
-`keygen`, pin the key in `weft.toml`, generate the registration and Synapse's
-signing key, then turn the profile on.
+`keygen`, pin the key in `weft.toml`, then turn the profile on. The appservice
+registration and Synapse's signing key need no steps — `up` derives the first and
+Synapse writes the second.
 
 That order is forced, not stylistic: the adapter key must exist before weftd can
 pin it, and weftd must pin it before the bridge may connect — so
@@ -108,7 +109,7 @@ files provide all three:
    `curl https://<server_name>/.well-known/matrix/server` — the answer must carry
    `:443`. If it doesn't, either publish `matrix.weft.example:8448` through Caddy
    (and open the port) or author the file in Caddy with the port spelled out.
-   `deploy/README.md` step 8 has both.
+   `deploy/README.md` step 7 has both.
 
 Then run `server_name` through <https://federationtester.matrix.org>, which checks
 DNS, delegation, the certificate and the signing key the way a remote homeserver

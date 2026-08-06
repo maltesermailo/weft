@@ -123,6 +123,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # A missing registration is fatal at startup (`FileNotFoundError:
+      # /appservices/weft-matrix.yaml`), so generating it is a dependency, not a
+      # step someone can run in the wrong order — or forget after changing a token.
+      registration:
+        condition: service_completed_successfully
     environment:
       # NOT under /data: that is the state volume, and this file is a read-only
       # bind mount. Nesting them means the chown below cannot touch it (`chown:
@@ -195,18 +200,39 @@ services:
     expose:
       - "9010"
 
-  # ── setup one-shots (profile: setup — never started by `up`) ─────────────
-
-  # Generate the appservice registration from weft-matrix.toml into the volume
-  # Synapse reads. Generated rather than hand-written so the tokens live in
-  # exactly one place instead of two files that drift.
-  #   docker compose run --rm registration
-  registration:
+  # ── setup one-shot (profile: setup — never started by `up`) ───────────────
+  # Creates the adapter's Ed25519 key if absent and prints its public half — the
+  # value to pin in weft.toml's `[[plugin.remote]]`. Idempotent.
+  #   docker compose run --rm adapter-key
+  #
+  # A service of its own, NOT `docker compose run bridge keygen`, because `run`
+  # starts the target's dependencies: going through `bridge` would drag Synapse and
+  # weftd up just to write a key file — and at this point in setup Synapse cannot
+  # start yet (its registration doesn't exist), so it crash-loops. This has no
+  # depends_on, needs no network, and touches nothing but the key volume.
+  adapter-key:
     image: ghcr.io/maltesermailo/weft-matrix:latest
     build:
       context: ../..
       dockerfile: deploy/weftd/Dockerfile.matrix
     profiles: ["setup"]
+    command: ["keygen", "/etc/weft/weft-matrix.toml"]
+    volumes:
+      - ./weft-matrix.toml:/etc/weft/weft-matrix.toml:ro
+      - matrix_keys:/var/lib/weft-matrix
+
+  # Generates the appservice registration from weft-matrix.toml into the volume
+  # Synapse reads, then exits — Synapse waits for it (see its depends_on). Derived
+  # rather than hand-written so the tokens live in exactly one place instead of two
+  # files that drift, and re-derived on every `up` so a changed token can never
+  # leave a stale registration behind. Idempotent.
+  registration:
+    image: ghcr.io/maltesermailo/weft-matrix:latest
+    build:
+      context: ../..
+      dockerfile: deploy/weftd/Dockerfile.matrix
+    profiles: ["matrix"]
+    restart: "no"
     entrypoint: ["/bin/sh", "-c"]
     command:
       - "weft-matrix generate-registration /etc/weft/weft-matrix.toml > /appservices/weft-matrix.yaml && echo wrote /appservices/weft-matrix.yaml"

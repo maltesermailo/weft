@@ -8,8 +8,8 @@
 # appservices through its admin room, which is a manual step this deployment
 # deliberately does not have. matrix.md decision 1 lists Synapse as supported.
 #
-# Missing keys (the signing key) are generated in place by the `synapse-keys`
-# one-shot in docker-compose.yml — see MATRIX.md.
+# The signing key and any other missing file are written on first boot, into the
+# `synapse_data` volume — nothing to run by hand. See MATRIX.md.
 
 # The MXID suffix — `@weft_<ulid>:<server_name>` — NOT the hostname this server
 # runs on. The two are independent, so there are two valid shapes:
