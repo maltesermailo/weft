@@ -141,6 +141,9 @@ services:
     entrypoint: ["/bin/sh", "-c", "chown -R 991:991 /data && exec /start.py"]
     volumes:
       - ./homeserver.yaml:/etc/synapse/homeserver.yaml:ro
+      # Ours, not Synapse-generated: the generated one logs to a file at the
+      # process CWD (`/`), which the 991 user cannot write. See the file.
+      - ./synapse-log.config:/etc/synapse/log.config:ro
       - synapse_data:/data
       # Read-only: the registration is generated (see the `registration`
       # one-shot), never edited here.

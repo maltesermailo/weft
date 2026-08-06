@@ -133,6 +133,9 @@ the console. Remove it before you expect anyone else to join.
   ready to re-pin.
 - **Nor is Synapse's signing key.** It is written into `synapse_data` on first boot
   and is the identity remote homeservers pin; back that volume up too.
+- **Synapse logs to stdout** (`docker compose logs synapse`), per
+  `synapse-log.config`. Set `root.level: DEBUG` there and recreate the container to
+  debug a federation or appservice problem — it is very verbose.
 - **Bans** are set from weftd's admin panel (a namespace's bridging toggle), not
   here; the bridge stores and enforces them.
 - **Removing the bridge:** drop `matrix` from `COMPOSE_PROFILES`,

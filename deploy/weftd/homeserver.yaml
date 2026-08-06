@@ -29,9 +29,18 @@
 server_name: "matrix.weft.example"
 
 pid_file: /data/homeserver.pid
-signing_key_path: /data/signing.key
-log_config: /data/log.config
 media_store_path: /data/media_store
+
+# Generated on first boot if absent. BACK IT UP: this is the identity remote
+# homeservers pin, and it is also what `macaroon_secret_key` is derived from when
+# unset — which is why `Config is missing macaroon_secret_key` in the log is a
+# benign warning, not something to fix.
+signing_key_path: /data/signing.key
+
+# Ours (mounted read-only), NOT Synapse-generated: the generated config logs to a
+# file at the process working directory, which is `/` in this image and not
+# writable by the user Synapse drops to. It logs to stdout instead.
+log_config: /etc/synapse/log.config
 
 listeners:
   - port: 8008
@@ -87,6 +96,14 @@ enable_registration: false
 serve_server_wellknown: true
 
 report_stats: false
+
+# Federation needs somewhere to fetch other servers' signing keys. matrix.org is
+# the historical default, but the default is going away — the startup warning says
+# so — and an unset value is one more thing to discover later. Stated explicitly,
+# warning suppressed.
+trusted_key_servers:
+  - server_name: "matrix.org"
+suppress_key_server_warning: true
 
 # A bridge-only server needs no presence or URL previews, and both are cost.
 presence:
