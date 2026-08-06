@@ -130,20 +130,24 @@ services:
       # reason. Every path *inside* homeserver.yaml is absolute, so Synapse does
       # not care where the config itself lives.
       SYNAPSE_CONFIG_PATH: /etc/synapse/homeserver.yaml
-    # The image's start.py drops privileges to 991:991 via gosu, but with
-    # SYNAPSE_CONFIG_PATH set ("run" mode) it does NOT chown the data directory —
-    # it only does that in its `generate`/`migrate_config` modes. A named volume
-    # starts out root-owned, so Synapse would fail on its first write:
-    # `PermissionError: '/data/log.config'`. Chown before handing over, then exec
-    # the normal entrypoint so the gosu drop still happens (Synapse never runs as
-    # root). Recursive so it also repairs anything an earlier root-run left
-    # behind; after first boot everything is 991 and the walk costs nothing.
+    # Why this wrapper exists, given the image needs no help normally: the image
+    # establishes /data's ownership in its `generate` mode (`chown ownership
+    # data_dir` in start.py) — the documented first step, which also WRITES
+    # homeserver.yaml into the volume. We don't use it: our config is a file in
+    # git, mounted read-only, because declarative appservice registration is the
+    # reason we run Synapse at all. In plain "run" mode start.py drops privileges
+    # to 991:991 via gosu but chowns nothing, and Docker creates a named volume
+    # root-owned — so Synapse's first write fails with
+    # `PermissionError: '/data/…'`. Four words of chown, then exec the real
+    # entrypoint so the gosu drop still happens and Synapse never runs as root.
+    # Recursive to repair volumes an earlier root-run wrote into; after first boot
+    # everything is already 991 and the walk costs nothing.
+    #
+    # The alternative is a `generate` one-shot, which would duplicate server_name
+    # into an env var and produce a homeserver.yaml we ignore. This is smaller.
     entrypoint: ["/bin/sh", "-c", "chown -R 991:991 /data && exec /start.py"]
     volumes:
       - ./homeserver.yaml:/etc/synapse/homeserver.yaml:ro
-      # Ours, not Synapse-generated: the generated one logs to a file at the
-      # process CWD (`/`), which the 991 user cannot write. See the file.
-      - ./synapse-log.config:/etc/synapse/log.config:ro
       - synapse_data:/data
       # Read-only: the registration is generated (see the `registration`
       # one-shot), never edited here.

@@ -37,10 +37,13 @@ media_store_path: /data/media_store
 # benign warning, not something to fix.
 signing_key_path: /data/signing.key
 
-# Ours (mounted read-only), NOT Synapse-generated: the generated config logs to a
-# file at the process working directory, which is `/` in this image and not
-# writable by the user Synapse drops to. It logs to stdout instead.
-log_config: /etc/synapse/log.config
+# `log_config` is deliberately ABSENT. Set it, and Synapse generates a config that
+# logs to a rotating file at `abspath("homeserver.log")` — the process working
+# directory, which is `/` in this image and unwritable by the 991 user it drops to
+# (a hard startup failure). Unset, it installs a plain StreamHandler: logs go to
+# stderr, `docker compose logs synapse` shows them, nothing accumulates in the
+# volume. That is what a container wants. Level is INFO; to get DEBUG you have to
+# mount a real log config and point `log_config` at it.
 
 listeners:
   - port: 8008
