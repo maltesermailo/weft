@@ -297,13 +297,17 @@ Until this matches, the bridge is refused with `AUTH-FAILED` — by design.
 
 ```sh
 docker compose run --rm registration     # → /appservices/weft-matrix.yaml
-docker compose run --rm synapse-keys     # → Synapse's signing key
 ```
 
 The registration is *generated* from `weft-matrix.toml` into a volume Synapse
 mounts read-only, so the tokens exist in one file rather than two that drift.
 Re-run it (and restart Synapse) after changing the tokens, the domain or the
 puppet prefix.
+
+Synapse's signing key and log config need no step of their own: it writes both
+itself on first boot, into the `synapse_data` volume. **Back the signing key up** —
+it is the identity remote homeservers pin, and losing it means every server that
+has federated with you rejects your events.
 
 ### 7. Turn the profile on
 
