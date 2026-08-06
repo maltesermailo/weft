@@ -133,7 +133,20 @@ async fn session(
             .map(weft_matrix::media::WeftMedia::new),
         pending_uploads: Default::default(),
         upload_seq: 0,
+        admins: cfg.matrix.admins.clone(),
     };
+
+    // An empty store on a homeserver we are already joined to means the
+    // database was lost (or this is a fresh deploy — the pass is a no-op then).
+    // Recovering *before* re-asserting matters: the bans come back first, so a
+    // banned space is not re-bridged on the way in.
+    if bridge.store.state.spaces.is_empty() && bridge.store.state.projections.is_empty() {
+        match bridge.recover().await {
+            Ok(found) if found == Default::default() => {}
+            Ok(found) => info!("recovered state from Matrix: {found}"),
+            Err(e) => warn!("state recovery failed: {e:#}"),
+        }
+    }
 
     reassert(&mut bridge).await?;
 

@@ -671,6 +671,19 @@ implements and the daemon is written against.*
       provider is not an ns member, so the member fan-out never reached it). SDK:
       `Realm::set_ns_meta_as`.
       **Slice 11 is complete.**
+- [x] **11c. State recovery + bot console** (owner requirement 2026-08-06) — **DONE.** The daemon's
+      database is a cache: `recover()` (`weft-matrix/src/recover.rs`) rebuilds spaces, rooms,
+      projections, category sub-spaces, DMs, puppets and the power-level baseline by walking the
+      bot's joined rooms, using the deterministic ids + `dev.weft.space`/`dev.weft.dm` markers
+      stamped at creation. Runs at boot when the store is empty, idempotent, and reports the rooms it
+      could **not** classify rather than hiding them. Outbound messages now carry `dev.weft.msgid`,
+      so the link map is rebuildable on demand (an ingested msgid was already deterministic).
+      The one non-derivable fact — the **bridging ban list** (weftd sends it once and keeps nothing,
+      §11) — lives in the bot's Matrix account data (`dev.weft.bans`), outside our database so it
+      survives losing it. The appservice bot doubles as a console (`!weft status|recover|
+      attach-puppet|attach-dm|help`), authorized by a **config allowlist** (`[matrix] admins`) rather
+      than Matrix power levels, because room power says nothing about who may re-point this bridge's
+      state. Design written up in `matrix.md` §20a.
 - [ ] **12. Track B — widgets + client-Rhai + CSP** (L) — the rich PL-matrix editor as a sandboxed
       widget. **Polish, not gating**: SDUI tables/forms carry the v1 levels view.
 

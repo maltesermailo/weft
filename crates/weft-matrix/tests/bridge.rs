@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, State};
+use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use serde_json::{json, Value};
 use weft_appservice::Realm;
@@ -79,6 +80,36 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
                     ));
                     let chunk = hs.state.get("__messages__").cloned().unwrap_or_default();
                     axum::Json(json!({ "chunk": chunk }))
+                },
+            ),
+        )
+        .route(
+            "/_matrix/client/v3/joined_rooms",
+            get(|State(hs): State<MockHs>| async move {
+                let joined = hs.state.get("__joined__").cloned().unwrap_or_default();
+                axum::Json(json!({ "joined_rooms": joined }))
+            }),
+        )
+        .route(
+            "/_matrix/client/v3/user/:user/account_data/:kind",
+            get(|State(hs): State<MockHs>| async move {
+                match hs.state.get("__account_data__").and_then(|d| d.first()) {
+                    Some(data) => axum::Json(data.clone()).into_response(),
+                    None => (
+                        axum::http::StatusCode::NOT_FOUND,
+                        axum::Json(json!({ "errcode": "M_NOT_FOUND" })),
+                    )
+                        .into_response(),
+                }
+            })
+            .put(
+                |State(hs): State<MockHs>, axum::Json(body): axum::Json<Value>| async move {
+                    hs.calls.lock().unwrap().push((
+                        "PUT account_data".to_string(),
+                        String::new(),
+                        body,
+                    ));
+                    axum::Json(json!({}))
                 },
             ),
         )
@@ -318,6 +349,21 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
             ),
         )
         .route(
+            "/_matrix/client/v3/profile/:user/displayname",
+            put(
+                |State(hs): State<MockHs>,
+                 Path(user): Path<String>,
+                 axum::Json(body): axum::Json<Value>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("PUT displayname/{user}"),
+                        String::new(),
+                        body,
+                    ));
+                    axum::Json(json!({}))
+                },
+            ),
+        )
+        .route(
             "/_matrix/client/v3/register",
             post(
                 |State(hs): State<MockHs>, axum::Json(body): axum::Json<Value>| async move {
@@ -391,6 +437,7 @@ async fn bridge_with(
         weft_media: Some(weft_matrix::media::WeftMedia::new(&url)),
         pending_uploads: Default::default(),
         upload_seq: 0,
+        admins: vec!["@boss:test.example".into()],
     };
 
     (bridge, lines, calls)
@@ -647,6 +694,14 @@ async fn matrix_traffic_ingests_and_weft_traffic_relays() {
             .iter()
             .any(|(what, _, body)| what == "POST register" && body["username"] == *puppet),
         "puppet registered by ULID: {recorded:?}"
+    );
+    // The display name is where the account *label* lives Matrix-side: without
+    // it users see the raw ULID, and recovery has no name to read back.
+    assert!(
+        recorded.iter().any(|(what, _, body)| what
+            == &format!("PUT displayname/@{puppet}:test.example")
+            && body["displayname"] == "ada"),
+        "the puppet was named: {recorded:?}"
     );
     let (_, query, body) = recorded
         .iter()
@@ -2287,5 +2342,189 @@ async fn dms_and_typing_cross_the_bridge() {
             .iter()
             .any(|(what, _, body)| what.starts_with("PUT typing/") && body["typing"] == false),
         "stop clears the indicator"
+    );
+}
+
+#[tokio::test]
+async fn state_is_rebuilt_from_matrix_after_a_database_loss() {
+    // The recovery story (owner requirement 2026-08-06): the daemon's database
+    // is a cache. Structure ids are deterministic and Matrix holds the markers,
+    // so a wiped store rebuilds itself — and the one thing Matrix does not know
+    // (the bridging bans) lives in the bot's account data, outside our database
+    // precisely so it survives losing it.
+    let ns_id = ident::stable_ulid("!space:kde.org");
+    let chan_id = ident::stable_ulid("!gen:kde.org");
+    let banned_ns = "01bx5zzkbkactav9wevgemmvrz";
+
+    // A homeserver that already carries a bridged world: a marked consumed
+    // Space, a channel room under it, a marked DM, and a puppet.
+    let mut rooms = BTreeMap::new();
+    rooms.insert(
+        "!space:kde.org".to_string(),
+        vec![
+            json!({ "type": "dev.weft.space", "state_key": "",
+                    "content": { "kind": "consumed", "ns": ns_id,
+                                 "uri": "matrix://kde.org/community" } }),
+            json!({ "type": "m.space.child", "state_key": "!gen:kde.org",
+                    "content": { "via": ["kde.org"] } }),
+        ],
+    );
+    rooms.insert(
+        "!gen:kde.org".to_string(),
+        vec![
+            json!({ "type": "m.space.parent", "state_key": "!space:kde.org",
+                    "content": { "via": ["kde.org"], "canonical": true } }),
+            json!({ "type": "m.room.member", "state_key": format!("@weft_{ADA_ULID}:test.example"),
+                    "content": { "membership": "join", "displayname": "ada" } }),
+            json!({ "type": "m.room.power_levels", "state_key": "",
+                    "content": { "users": { "@mod:kde.org": 50 } } }),
+        ],
+    );
+    rooms.insert(
+        "!dm:test.example".to_string(),
+        vec![json!({ "type": "dev.weft.dm", "state_key": "",
+                     "content": { "account": "ada", "mxid": "@carol:kde.org" } })],
+    );
+    rooms.insert(
+        "__joined__".to_string(),
+        vec![
+            json!("!space:kde.org"),
+            json!("!gen:kde.org"),
+            json!("!dm:test.example"),
+        ],
+    );
+    rooms.insert(
+        "__account_data__".to_string(),
+        vec![json!({ "banned": [banned_ns] })],
+    );
+
+    let (mut bridge, _lines, _calls) = bridge_with(rooms).await;
+    assert!(
+        bridge.store.state.spaces.is_empty(),
+        "starting from nothing"
+    );
+
+    let found = bridge.recover().await.expect("recovery ran");
+
+    // The consumed Space and its room, with the ids re-derived — not guessed.
+    assert_eq!((found.spaces, found.rooms), (1, 1), "{found}");
+    let (room, space) = bridge
+        .store
+        .state
+        .channel_of_room("!gen:kde.org")
+        .expect("the room was re-attached");
+    assert_eq!(space.ns_id, ns_id);
+    assert_eq!(
+        room.channel,
+        format!("#{ns_id}/{chan_id}"),
+        "the same channel name as before the loss — deterministic ids are the point"
+    );
+
+    // The DM, the puppet (ULID from its localpart, name from its display name),
+    // and the power-level baseline.
+    assert_eq!(found.dms, 1, "{found}");
+    assert_eq!(
+        bridge.store.state.dm_of_room("!dm:test.example"),
+        Some(("ada", "@carol:kde.org"))
+    );
+    let (ulid, user) = bridge
+        .store
+        .state
+        .users
+        .by_account("ada")
+        .expect("the puppet was recovered");
+    assert_eq!(ulid, ADA_ULID);
+    assert_eq!(user.localpart, format!("weft_{ADA_ULID}"));
+    assert_eq!(
+        bridge.store.state.room_levels["!gen:kde.org"]["@mod:kde.org"], 50,
+        "the live map IS the baseline — without it every level re-translates"
+    );
+
+    // The ban survived our database because it never lived there.
+    assert_eq!(found.bans, 1, "{found}");
+    assert!(bridge.store.state.bans.is_banned(banned_ns));
+
+    // Idempotent: recovery on a healthy daemon changes nothing.
+    let again = bridge.recover().await.expect("recovery repeats");
+    assert_eq!(again.spaces, 1);
+    assert_eq!(bridge.store.state.spaces.len(), 1, "no duplicate space");
+    assert_eq!(
+        bridge.store.state.spaces["matrix://kde.org/community"]
+            .rooms
+            .len(),
+        1,
+        "no duplicate room"
+    );
+}
+
+#[tokio::test]
+async fn the_console_answers_only_configured_admins() {
+    let (mut bridge, _lines, calls) = bridge_with(BTreeMap::new()).await;
+
+    let say = |sender: &str, body: &str| {
+        json!({
+            "type": "m.room.message",
+            "room_id": "!ops:test.example",
+            "event_id": format!("$c{}", ulid::Ulid::new()),
+            "sender": sender,
+            "origin_server_ts": 1_722_000_000_000u64,
+            "content": { "msgtype": "m.text", "body": body },
+        })
+    };
+
+    // A stranger's command is not a command — no reply, no action.
+    bridge
+        .on_matrix_event(say("@nobody:kde.org", "!weft status"))
+        .await;
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(what, _, _)| what.contains("m.room.message")),
+        "an unauthorized console line is ignored entirely"
+    );
+
+    // The configured admin gets an answer.
+    bridge
+        .on_matrix_event(say("@boss:test.example", "!weft status"))
+        .await;
+    let replied = calls.lock().unwrap().iter().any(|(what, _, body)| {
+        what.contains("m.room.message")
+            && body["msgtype"] == "m.notice"
+            && body["body"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("consumed:")
+    });
+    assert!(replied, "the admin's status query was answered");
+
+    // A malformed command explains itself rather than failing silently.
+    bridge
+        .on_matrix_event(say("@boss:test.example", "!weft attach-dm ada"))
+        .await;
+    let usage = calls.lock().unwrap().iter().any(|(_, _, body)| {
+        body["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("usage: !weft attach-dm")
+    });
+    assert!(usage, "the usage line came back");
+
+    // And an attach re-points state by hand, for what recovery cannot infer.
+    bridge
+        .on_matrix_event(say(
+            "@boss:test.example",
+            &format!("!weft attach-puppet @weft_{ADA_ULID}:test.example {ADA_ULID} ada"),
+        ))
+        .await;
+    assert_eq!(
+        bridge
+            .store
+            .state
+            .users
+            .by_account("ada")
+            .map(|(ulid, _)| ulid.to_string()),
+        Some(ADA_ULID.to_string())
     );
 }

@@ -110,6 +110,15 @@ impl Links {
         self.events.get(event_id).map(String::as_str)
     }
 
+    /// How many links are held — the console's "how much do I remember".
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
     pub fn event_of(&self, msgid: &str) -> Option<&EventRef> {
         self.msgids.get(&canonical_msgid(msgid))
     }

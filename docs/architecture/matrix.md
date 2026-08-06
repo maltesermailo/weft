@@ -241,6 +241,54 @@ The Matrix binding of the [Foreign-Realm Bridging Framework](foreign-bridge-fram
 - **Retention/visibility:** bounded replica `retained:<config>`, never `permanent`/`e2ee`; listed in `DISCOVER` (subject to the Space's own visibility) and client-badged "Matrix · matrix.org" (framework §6).
 - **Authority (honest limit):** matrix.org is the social home of a *consumed* Space — WEFT caps govern only our replica + our users' relay; `NETBLOCK REALM matrix://matrix.org` is the escape hatch (framework §7). (For *projected* WEFT namespaces, §10 still applies — WEFT is authoritative.)
 
+## 20a. State recovery — the database is a cache (owner requirement 2026-08-06)
+
+**What happens if the daemon's database is deleted?** Almost nothing is lost,
+because three properties were designed in rather than bolted on:
+
+1. **Structure ids are deterministic** (`ident::stable_ulid` from the Matrix room
+   id) and weftd *pins* what the adapter mints — re-asserting a room reproduces
+   the same namespace and channels instead of orphaning them.
+2. **Matrix is a database we already have.** Which rooms we bridge, who is in
+   them, the power levels, whose DM a room is — all readable room state, marked
+   with `dev.weft.space` / `dev.weft.dm` at creation.
+3. **Msgids are recoverable.** An ingested one is deterministic from
+   `(realm, event_id, origin_server_ts)`; one we minted is stamped onto the
+   Matrix event as `dev.weft.msgid`. So the link map rebuilds *on demand* — a
+   mutation naming an unknown event resolves by reading that one event — rather
+   than needing an eager replay of every room.
+
+Exactly one thing cannot be derived: the **bridging ban list**. weftd sends each
+ban once and deliberately keeps no record (§11), and Matrix has no opinion about
+it — so it lives in the bot's Matrix **account data** (`dev.weft.bans`), the
+adapter's own durable notebook, which survives our database precisely because it
+is not in it.
+
+`recover()` runs automatically at boot when the store is empty (a no-op on a
+fresh deploy) and is idempotent, so it is safe to repeat. It reports what it
+found *and what it could not classify* — an unclaimed room is the operator's cue.
+
+### The bot console
+
+The appservice bot doubles as an operator console for the residue a machine
+cannot infer (a puppet or DM room created by an older build, before the markers
+existed). Authorization is a **config allowlist** (`[matrix] admins`), not a
+Matrix power level: power in a room says what you may do to that room, not who
+may re-point this bridge's internal state, and a room admin on a *consumed*
+space is a stranger to us. An empty allowlist disables the console.
+
+```
+!weft status                                  what this bridge believes it bridges
+!weft recover                                 rebuild state from Matrix (safe to repeat)
+!weft attach-puppet <mxid> <ulid> [name]      re-point a puppet whose marker is missing
+!weft attach-dm <weft-account> <mxid>         re-point *this* room as a DM
+!weft help
+```
+
+`attach-dm` acts on the room it was typed in rather than taking a room id: an
+operator can see which room they are in, and a mistyped id would silently hijack
+another conversation.
+
 ## 21. Deferred (v2+)
 
 Double-puppeting (link accounts on both sides); DMs (Matrix DM ↔ two-member WEFT group); voice (MatrixRTC ↔ LiveKit); `REPORT-FORWARD` into virtual networks; image custom-emoji packs; direct S2S federation in weftd (retiring the companion HS).

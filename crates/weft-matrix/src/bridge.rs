@@ -53,6 +53,8 @@ pub struct Bridge {
     /// (`STREAM ACCEPT`), by the label the offer carried.
     pub pending_uploads: std::collections::HashMap<String, PendingUpload>,
     pub upload_seq: u64,
+    /// MXIDs allowed to drive the `!weft` console. Empty ⇒ disabled.
+    pub admins: Vec<String>,
 }
 
 /// A Matrix attachment already in hand, waiting for weftd's upload grant so it
@@ -201,6 +203,9 @@ impl Bridge {
                 // The row is the enforcement: weftd never re-sends a ban.
                 if let Some((ns, banned)) = self.store.apply_bridging(&bridging).await {
                     info!(ns, banned, "bridging instruction from the operator");
+                    // weftd sends each ban exactly once and keeps no record, so
+                    // ours must outlive our own database (§11).
+                    self.persist_bans().await;
                 }
             }
             Event::Message(m) => {
@@ -581,6 +586,24 @@ impl Bridge {
             let _ = self.realm.member(&ns_id, user, MemberAction::Join).await;
         }
 
+        // Mark the consumed Space too, so recovery can tell it from a
+        // projected one — the two are restored differently (its channels come
+        // from the realm's assertions, ours from weftd's structure).
+        if let Err(e) = self
+            .hs
+            .put_state(
+                &space_room,
+                crate::recover::SPACE_MARKER,
+                "",
+                json!({ "kind": "consumed", "ns": ns_id, "uri": space_uri }),
+            )
+            .await
+        {
+            // Best-effort: a space we cannot mark still bridges, it just needs
+            // re-provisioning rather than recovery if the database is lost.
+            warn!(space_room, "could not mark the consumed Space: {e:#}");
+        }
+
         self.store.save_space(space).await;
         Ok(true)
     }
@@ -681,6 +704,18 @@ impl Bridge {
         let Some(weft_sender) = self.foreign_user(&sender) else {
             return;
         };
+
+        // An operator's console line is a command wherever it is typed — and it
+        // is checked before any room mapping, so `recover` works precisely when
+        // the mappings are gone.
+        if self.admins.iter().any(|a| a == &sender) {
+            if let Some(body) = ev["content"]["body"].as_str() {
+                if let Some(command) = crate::admin::parse(body) {
+                    self.run_console(&room_id, command).await;
+                    return;
+                }
+            }
+        }
 
         // A bridged DM room is neither a replica nor a projection: it carries
         // one conversation, stored in the ordinary DM scope.
@@ -1126,7 +1161,15 @@ impl Bridge {
             .send(
                 &room_id,
                 "m.room.message",
-                json!({ "msgtype": "m.text", "body": m.body }),
+                json!({
+                    "msgtype": "m.text",
+                    "body": m.body,
+                    // The id we minted, carried on the event itself: this is
+                    // what makes the link map rebuildable after a database
+                    // loss (see `recover`) — an ingested message's id is
+                    // already derivable, ours would not be.
+                    crate::recover::MSGID_FIELD: m.msgid.to_string(),
+                }),
                 &txn_of(&m.msgid.to_string()),
                 Some(&puppet),
             )
@@ -1424,6 +1467,116 @@ impl Bridge {
         self.realm.delete(user, &root_id).await
     }
 
+    // ---- the operator console (owner requirement 2026-08-06) ---------------
+
+    /// Run one `!weft` command and answer in the room it was typed in.
+    ///
+    /// Every answer goes back as an `m.notice` — an operator who asks a question
+    /// gets a reply even when the command failed, because a console that
+    /// sometimes says nothing is worse than no console.
+    async fn run_console(&mut self, room_id: &str, command: Result<crate::admin::Command, String>) {
+        use crate::admin::Command;
+
+        let reply = match command {
+            Err(usage) => usage,
+            Ok(Command::Help) => crate::admin::HELP.to_string(),
+            Ok(Command::Status) => self.console_status(),
+            Ok(Command::Recover) => match self.recover().await {
+                Ok(found) => format!("recovered {found}"),
+                Err(e) => format!("recovery failed: {e:#}"),
+            },
+            Ok(Command::AttachPuppet {
+                mxid,
+                ulid,
+                account,
+            }) => {
+                self.console_attach_puppet(&mxid, &ulid, account.as_deref())
+                    .await
+            }
+            Ok(Command::AttachDm { account, mxid }) => {
+                self.console_attach_dm(room_id, &account, &mxid).await
+            }
+        };
+
+        let txn = txn_of(&format!("console-{}", self.next_dm_txn()));
+        if let Err(e) = self
+            .hs
+            .send(
+                room_id,
+                "m.room.message",
+                json!({ "msgtype": "m.notice", "body": reply }),
+                &txn,
+                None,
+            )
+            .await
+        {
+            warn!(room_id, "console reply failed: {e:#}");
+        }
+    }
+
+    fn console_status(&self) -> String {
+        let state = &self.store.state;
+        let rooms: usize = state.spaces.values().map(|s| s.rooms.len()).sum();
+        let projected: usize = state.projections.values().map(|p| p.rooms.len()).sum();
+
+        format!(
+            "consumed: {} space(s), {rooms} room(s)\n             projected: {} namespace(s), {projected} room(s)\n             DMs: {}   puppets: {}   links: {}\n             banned from bridging: {}",
+            state.spaces.len(),
+            state.projections.len(),
+            state.dm_rooms.len(),
+            state.users.iter().count(),
+            state.links.len(),
+            state.bans.iter().count(),
+        )
+    }
+
+    /// Re-point a puppet by hand. The ULID is the identity, so that is what is
+    /// recorded; the name is a label the next relay would fix anyway.
+    async fn console_attach_puppet(
+        &mut self,
+        mxid: &str,
+        ulid: &str,
+        account: Option<&str>,
+    ) -> String {
+        let Some(localpart) = mxid
+            .strip_prefix('@')
+            .and_then(|m| m.split_once(':'))
+            .filter(|(_, server)| *server == self.domain)
+            .map(|(local, _)| local.to_string())
+        else {
+            return format!(
+                "{mxid} is not a puppet on {} — nothing to attach",
+                self.domain
+            );
+        };
+
+        let account = account.unwrap_or(ulid);
+        self.store.note_user(ulid, account, &localpart).await;
+
+        format!("attached {mxid} to {account} ({ulid})")
+    }
+
+    /// Re-point the room the command was typed in as a DM. Deliberately uses
+    /// *this* room rather than taking a room id: an operator can see which room
+    /// they are in, and a mistyped id would silently hijack another conversation.
+    async fn console_attach_dm(&mut self, room_id: &str, account: &str, mxid: &str) -> String {
+        if let Err(e) = self
+            .hs
+            .put_state(
+                room_id,
+                crate::recover::DM_MARKER,
+                "",
+                json!({ "account": account, "mxid": mxid }),
+            )
+            .await
+        {
+            return format!("could not mark the room: {e:#}");
+        }
+        self.store.save_dm_room(account, mxid, room_id).await;
+
+        format!("attached this room as the DM between {account} and {mxid}")
+    }
+
     // ---- DMs and typing (matrix.md §15, protocol doc §5) -------------------
 
     /// WEFT → Matrix: carry a local user's DM into a Matrix DM room, opening
@@ -1462,6 +1615,21 @@ impl Bridge {
                         Some(&puppet),
                     )
                     .await?;
+                // Same idea as the Space marker: a DM room says whose it is,
+                // so it can be re-attached without a database.
+                if let Err(e) = self
+                    .hs
+                    .put_state(
+                        &room,
+                        crate::recover::DM_MARKER,
+                        "",
+                        json!({ "account": account, "mxid": mxid }),
+                    )
+                    .await
+                {
+                    warn!(room, "could not mark the DM room: {e:#}");
+                }
+
                 self.store.save_dm_room(account, &mxid, &room).await;
                 room
             }
@@ -2780,6 +2948,17 @@ impl Bridge {
             }))
             .await?;
 
+        // The marker is what recovery reads back: which WEFT namespace this
+        // Space is, and which side owns it.
+        self.hs
+            .put_state(
+                &space_room,
+                crate::recover::SPACE_MARKER,
+                "",
+                json!({ "kind": "projected", "ns": ns_id }),
+            )
+            .await?;
+
         self.store.save_projection(ns_id, &space_room).await;
         info!(ns_id, space_room, "projected namespace as a Space");
         Ok(())
@@ -2942,20 +3121,32 @@ impl Bridge {
     async fn ensure_puppet(&mut self, ulid: &str, account: &str) -> anyhow::Result<String> {
         if let Some(user) = self.store.state.users.by_ulid(ulid) {
             let localpart = user.localpart.clone();
+            let mxid = format!("@{localpart}:{}", self.domain);
 
-            // A rename: same identity, re-point the name index.
+            // A rename: same identity, re-point the name index — and carry the
+            // new label to Matrix, which is where recovery reads names back
+            // from (and what Matrix users actually see).
             if user.account != account {
                 self.store.note_user(ulid, account, &localpart).await;
+                if let Err(e) = self.hs.set_display_name(&mxid, account).await {
+                    warn!(account, "could not update the puppet's display name: {e:#}");
+                }
             }
 
-            return Ok(format!("@{localpart}:{}", self.domain));
+            return Ok(mxid);
         }
 
         let localpart = ident::puppet_localpart(&self.puppet_prefix, ulid);
+        let mxid = format!("@{localpart}:{}", self.domain);
         self.hs.ensure_registered(&localpart).await?;
+        // Best-effort: a nameless puppet still bridges, it just renders as its
+        // ULID and recovers without its label.
+        if let Err(e) = self.hs.set_display_name(&mxid, account).await {
+            warn!(account, "could not set the puppet's display name: {e:#}");
+        }
         self.store.note_user(ulid, account, &localpart).await;
 
-        Ok(format!("@{localpart}:{}", self.domain))
+        Ok(mxid)
     }
 
     /// Resolve a puppet by wire **name** — for the fan-out events, which carry

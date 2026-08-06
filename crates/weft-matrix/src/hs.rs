@@ -325,6 +325,98 @@ impl Hs {
         str_field(&v, "content_uri")
     }
 
+    /// Every room the bot has joined — the entry point for recovery: the
+    /// homeserver knows what we bridge even when our own store does not.
+    pub async fn joined_rooms(&self) -> anyhow::Result<Vec<String>> {
+        let v = self
+            .call(
+                reqwest::Method::GET,
+                "/_matrix/client/v3/joined_rooms",
+                None,
+                None,
+                &[],
+            )
+            .await?;
+
+        Ok(v["joined_rooms"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|r| r.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Read the bot's account data — where the adapter keeps the decisions it
+    /// cannot rebuild from anywhere else.
+    pub async fn account_data(&self, user: &str, kind: &str) -> anyhow::Result<Option<Value>> {
+        match self
+            .call(
+                reqwest::Method::GET,
+                &format!(
+                    "/_matrix/client/v3/user/{}/account_data/{}",
+                    enc(user),
+                    enc(kind)
+                ),
+                None,
+                None,
+                &[],
+            )
+            .await
+        {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if e.to_string().contains(" 404 ") => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn set_account_data(
+        &self,
+        user: &str,
+        kind: &str,
+        content: Value,
+    ) -> anyhow::Result<()> {
+        self.call(
+            reqwest::Method::PUT,
+            &format!(
+                "/_matrix/client/v3/user/{}/account_data/{}",
+                enc(user),
+                enc(kind)
+            ),
+            Some(content),
+            None,
+            &[],
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// One event by id — the on-demand half of link recovery: a mutation that
+    /// names an event we have no row for is resolved by reading that event,
+    /// which carries the WEFT msgid we stamped on it.
+    pub async fn event(&self, room_id: &str, event_id: &str) -> anyhow::Result<Option<Value>> {
+        match self
+            .call(
+                reqwest::Method::GET,
+                &format!(
+                    "/_matrix/client/v3/rooms/{}/event/{}",
+                    enc(room_id),
+                    enc(event_id)
+                ),
+                None,
+                None,
+                &[],
+            )
+            .await
+        {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if e.to_string().contains(" 404 ") => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// A pagination token positioned **at** an event — Matrix's `/messages`
     /// pages from a token, not an event id, so a backfill anchored on a known
     /// message has to resolve one first.
@@ -438,6 +530,25 @@ impl Hs {
             &format!("/_matrix/client/v3/rooms/{}/invite", enc(room_id)),
             Some(json!({ "user_id": mxid })),
             as_user,
+            &[],
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Set a puppet's display name.
+    ///
+    /// Two reasons this is not cosmetic: Matrix users would otherwise see the
+    /// raw `@weft_<ulid>` as the sender, and it is where the account label
+    /// lives on the Matrix side — the ULID in the localpart is the identity, the
+    /// display name is what recovery reads the *name* back from.
+    pub async fn set_display_name(&self, mxid: &str, name: &str) -> anyhow::Result<()> {
+        self.call(
+            reqwest::Method::PUT,
+            &format!("/_matrix/client/v3/profile/{}/displayname", enc(mxid)),
+            Some(json!({ "displayname": name })),
+            Some(mxid),
             &[],
         )
         .await?;

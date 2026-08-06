@@ -45,6 +45,12 @@ pub struct Matrix {
     /// The appservice bot's localpart.
     #[serde(default = "default_bot")]
     pub bot: String,
+    /// MXIDs allowed to drive the bot console (`!weft …`). A **config
+    /// allowlist**, not a Matrix power level: power in a room says what you may
+    /// do to that room, not who may re-point this bridge's state. Empty (the
+    /// default) disables the console.
+    #[serde(default)]
+    pub admins: Vec<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
