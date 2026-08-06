@@ -97,12 +97,18 @@ async fn session(
     // rebuilds it from the seed.
     let keypair = weft_crypto::Keypair::from_seed_b64(&keypair.seed_b64())
         .expect("a round-tripped seed is valid");
-    let connected =
+    let builder =
         weft_appservice::AppService::builder(cfg.weft.endpoint.clone(), keypair, "matrix")
             .name("Matrix Bridge")
             .scheme("matrix")
-            .connect()
-            .await?;
+            .bot(&cfg.matrix.bot);
+    // The management flows (slice 11) are declared without closure handlers:
+    // they run inline in the bridge task, where the structure maps live.
+    let mut builder = builder;
+    for decl in weft_matrix::actions::declarations() {
+        builder = builder.declare(decl);
+    }
+    let connected = builder.connect().await?;
     let realm = connected.realm.clone();
     let session = tokio::spawn(connected.session);
     info!(network = realm.network(), "connected to weftd");
@@ -117,6 +123,9 @@ async fn session(
         pending_layouts: Default::default(),
         pending_injections: Default::default(),
         injection_seq: 0,
+        pending_acts: Default::default(),
+        act_seq: 0,
+        flows: Default::default(),
     };
 
     reassert(&mut bridge).await?;

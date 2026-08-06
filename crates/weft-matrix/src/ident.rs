@@ -37,6 +37,38 @@ pub fn escape_localpart(localpart: &str) -> String {
     out
 }
 
+/// The inverse of [`escape_localpart`]: `=xx` → the byte. Anything malformed
+/// (`=` without two hex digits) is a mapping we never produced — `None`.
+pub fn unescape_localpart(escaped: &str) -> Option<String> {
+    let bytes = escaped.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'=' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            let hex = std::str::from_utf8(hex).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+
+    String::from_utf8(out).ok()
+}
+
+/// A **foreign** WEFT handle (`carol=40x@kde.org`) back to its MXID — the
+/// inverse of [`weft_user`], for addressing them on the Matrix side (power
+/// levels, bans). `None` for a handle we could not have produced.
+pub fn mxid_of_weft_user(user: &str) -> Option<String> {
+    let (account, network) = user.split_once('@')?;
+    let localpart = unescape_localpart(account)?;
+
+    Some(format!("@{localpart}:{network}"))
+}
+
 /// `@carol:kde.org` → `carol@kde.org` (WEFT `user@network` form).
 ///
 /// `None` when the identity cannot be represented injectively: a server name
@@ -166,6 +198,25 @@ mod tests {
                 "outside the account charset: {c}"
             );
         }
+    }
+
+    #[test]
+    fn escaping_round_trips_through_unescape() {
+        for lp in ["alice", "Alice", "weird/{user}!", "=41", "a=b", "über"] {
+            assert_eq!(
+                unescape_localpart(&escape_localpart(lp)).as_deref(),
+                Some(lp),
+                "round trip of {lp:?}"
+            );
+        }
+
+        let mxid: &ruma::UserId = "@Weird User:kde.org".try_into().unwrap();
+        let handle = weft_user(mxid).unwrap();
+        assert_eq!(
+            mxid_of_weft_user(&handle).as_deref(),
+            Some("@Weird User:kde.org"),
+            "the WEFT handle addresses the original MXID"
+        );
     }
 
     #[test]

@@ -1044,6 +1044,11 @@ impl<S: ControlStream> Session<S> {
         line: &Line,
     ) -> io::Result<Flow> {
         let actor = Actor::Foreign(sender.to_string());
+        // §3.5: an attributed act may carry a label, and weftd echoes it on the
+        // direct response — including `ERR`. That is what makes §10's *revert*
+        // possible: a refused act is correlated back to the foreign-side state
+        // change the adapter must undo. Absent ⇒ fire-and-forget, as before.
+        let label = line.tags.get("label").cloned();
 
         match cmd {
             Command::Mute {
@@ -1051,14 +1056,14 @@ impl<S: ControlStream> Session<S> {
                 account: target,
                 reason,
             } => {
-                self.on_moderate(None, scope, target, ModKind::Mute, true, reason, actor)
+                self.on_moderate(label, scope, target, ModKind::Mute, true, reason, actor)
                     .await
             }
             Command::Unmute {
                 scope,
                 account: target,
             } => {
-                self.on_moderate(None, scope, target, ModKind::Mute, false, None, actor)
+                self.on_moderate(label, scope, target, ModKind::Mute, false, None, actor)
                     .await
             }
             Command::Ban {
@@ -1066,21 +1071,45 @@ impl<S: ControlStream> Session<S> {
                 account: target,
                 reason,
             } => {
-                self.on_moderate(None, scope, target, ModKind::Ban, true, reason, actor)
+                self.on_moderate(label, scope, target, ModKind::Ban, true, reason, actor)
                     .await
             }
             Command::Unban {
                 scope,
                 account: target,
             } => {
-                self.on_moderate(None, scope, target, ModKind::Ban, false, None, actor)
+                self.on_moderate(label, scope, target, ModKind::Ban, false, None, actor)
                     .await
             }
             Command::Kick {
                 channel,
                 account: target,
                 reason,
-            } => self.on_kick(None, channel, target, reason, actor).await,
+            } => self.on_kick(label, channel, target, reason, actor).await,
+
+            // §10 (matrix.md): a foreign moderator's PL change arrives as an
+            // attributed GRANT/REVOKE and succeeds **iff WEFT granted that
+            // user** `grant:<cap>` — the ordinary handlers with the ordinary
+            // authority check. No side-channel authority: being a Matrix admin
+            // confers exactly what some WEFT grant gave their account.
+            Command::Grant {
+                subject,
+                scope,
+                caps,
+                expiry,
+            } => {
+                self.on_grant(label, subject, scope, caps, expiry, actor)
+                    .await
+            }
+            Command::Revoke {
+                subject,
+                scope,
+                caps,
+                epoch,
+            } => {
+                self.on_revoke(label, subject, scope, caps, epoch, actor)
+                    .await
+            }
 
             cmd => self.on_provider_ingest(key, sender, cmd, line).await,
         }
@@ -1390,9 +1419,25 @@ impl<S: ControlStream> Session<S> {
             Command::Delete { msgid } => {
                 match self.ctx.events.find_root(msgid.ulid()).await {
                     Ok(Some(target)) if target.sender == sender => {}
-                    // Foreign moderator deletes ride slice 11's authority
-                    // mapping; until then a non-author delete drops silently.
-                    Ok(_) => return Ok(Flow::Continue),
+                    // Not the author: a foreign **moderator** may still delete
+                    // iff WEFT granted them `delete-any` (§10 — a Matrix mod's
+                    // redaction has exactly the power some grant gave them).
+                    Ok(Some(_)) => {
+                        let allowed = self
+                            .ctx
+                            .actor_has_cap(
+                                &Actor::Foreign(sender.to_string()),
+                                &weft_crypto::Capability::DeleteAny,
+                                &TokenScope::Channel(channel.to_string()),
+                                unix_now(),
+                            )
+                            .await
+                            .unwrap_or(false);
+                        if !allowed {
+                            return Ok(Flow::Continue);
+                        }
+                    }
+                    Ok(None) => return Ok(Flow::Continue),
                     Err(e) => return self.internal(None, &e).await,
                 }
                 handle
@@ -1732,15 +1777,21 @@ impl<S: ControlStream> Session<S> {
         let Ok(Some(record)) = self.ctx.namespaces.namespace_by_id(&ns).await else {
             return;
         };
-        let Some(uri) = record
+        // A replica's realm scheme, or a projected namespace's flagged scheme
+        // — either way the grant maps onto a foreign power level (§10).
+        let scheme = match record
             .origin
             .as_deref()
             .and_then(|o| o.parse::<ForeignUri>().ok())
-        else {
-            return; // a native namespace has no provider to tell
+        {
+            Some(uri) => Some(uri.scheme().clone()),
+            None => record.bridges.iter().find_map(|b| b.parse::<Scheme>().ok()),
         };
-        let Some((_, out)) = self.ctx.provider_for_scheme(uri.scheme()) else {
-            return;
+        let Some((_, out)) = scheme
+            .as_ref()
+            .and_then(|s| self.ctx.provider_for_scheme(s))
+        else {
+            return; // native + unprojected, or the provider is offline
         };
 
         let cmd = if grant {
@@ -1759,7 +1810,28 @@ impl<S: ControlStream> Session<S> {
             }
         };
 
-        if let Ok(line) = Request::new(cmd).serialize() {
+        // A **local** subject rides with `ulid=` like every other local-actor
+        // relay: the adapter addresses them by their ULID-keyed puppet, and
+        // without the id a grant for a user it has not seen post yet could
+        // never be applied at all.
+        let subject_ulid = match subject.parse::<Account>() {
+            Ok(account) => self
+                .ctx
+                .accounts
+                .account_ulid(&account)
+                .await
+                .ok()
+                .flatten(),
+            Err(_) => None, // a foreign handle addresses its own MXID
+        };
+
+        if let Ok(mut line) = Request::new(cmd).to_line() {
+            if let Some(ulid) = subject_ulid {
+                line.tags.insert("ulid".to_string(), ulid);
+            }
+            let Ok(line) = line.serialize() else {
+                return;
+            };
             if out.try_send(line).is_err() {
                 warn!(%subject, "provider queue full — authority relay dropped");
             }
@@ -2293,6 +2365,7 @@ impl<S: ControlStream> Session<S> {
     pub(super) async fn on_plugin_invoke(
         &mut self,
         label: Option<String>,
+        account: Account,
         plugin: String,
         action: String,
         ctx_ref: Option<String>,
@@ -2311,7 +2384,20 @@ impl<S: ControlStream> Session<S> {
             ctx_ref,
             params,
         };
-        let Ok(line) = Request::with_label(cmd, view_id.clone()).serialize() else {
+        // The invoker rides as `as=`/`ulid=` (slice 11): a management action's
+        // handler must know **who** is asking to attribute the resulting wire
+        // commands — anonymous invokes would force every provider to invent a
+        // side-channel identity, or worse, act as itself.
+        let invoker = UserRef::new(account.clone(), self.ctx.info.network.clone());
+        let ulid = self.cached_account_ulid(&account).await;
+        let Ok(mut line) = Request::with_label(cmd, view_id.clone()).to_line() else {
+            return self.no_such_target(label).await;
+        };
+        line.tags.insert("as".to_string(), invoker.to_string());
+        if let Some(ulid) = ulid {
+            line.tags.insert("ulid".to_string(), ulid);
+        }
+        let Ok(line) = line.serialize() else {
             return self.no_such_target(label).await;
         };
 

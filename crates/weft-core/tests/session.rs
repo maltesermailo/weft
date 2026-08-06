@@ -7268,6 +7268,99 @@ async fn a_projected_namespace_bridges_both_directions_and_the_home_mints() {
 }
 
 #[tokio::test]
+async fn foreign_moderators_wield_exactly_their_granted_authority() {
+    // §10 (slice 11): a Matrix moderator's act arrives as an attributed
+    // command and succeeds iff WEFT granted *that user* the authority — a
+    // foreign admin has exactly the power some grant gave their handle,
+    // nothing structural.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("mx", key.public(), vec!["matrix".parse().unwrap()])],
+        &[],
+    );
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    let channel = ada.channel_by_vanity(&ns_id, "general").await;
+    ada.send(&format!("NS META {ns_id} bridge:matrix :open"));
+    ada.recv().await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT matrix://matrix.org");
+
+    // ada posts; carol (a foreign non-moderator) tries to delete it.
+    ada.send(&format!("@label=m1 MSG {channel} :try to remove this"));
+    let posted = loop {
+        if let Ok(reply) = weft_proto::Reply::parse(&plugin.recv_raw().await) {
+            if let Event::Message(m) = reply.event {
+                break m.msgid;
+            }
+        }
+    };
+    ada.recv().await; // her echo-ack
+
+    // No grant → the non-author delete drops silently (nothing reaches ada).
+    plugin.send(&format!("@as=carol@kde.org DELETE {posted}"));
+
+    // …and an ungranted GRANT attempt is refused with the ordinary error.
+    plugin.send(&format!(
+        "@as=carol@kde.org GRANT bob@kde.org ns:{ns_id} mute"
+    ));
+    plugin.expect_err(ErrCode::CapRequired).await;
+
+    // ada (the owner) makes carol a moderator: delete-any + grant:mute.
+    ada.send(&format!(
+        "@label=g1 GRANT carol@kde.org ns:{ns_id} delete-any,grant:mute"
+    ));
+    loop {
+        let reply = ada.recv().await;
+        if reply.label.as_deref() == Some("g1") {
+            break;
+        }
+    }
+    // The grant relays outward so the provider can raise carol's level (§10).
+    loop {
+        let raw = plugin.recv_raw().await;
+        if let Ok(req) = weft_proto::Request::parse(&raw) {
+            if matches!(req.command, weft_proto::Command::Grant { .. }) {
+                break;
+            }
+        }
+    }
+
+    // Now the same two acts succeed: the moderator delete lands as a
+    // tombstone ada sees…
+    plugin.send(&format!("@as=carol@kde.org DELETE {posted}"));
+    let deleted = loop {
+        match ada.recv().await.event {
+            Event::Deleted { msgid, by, .. } => break (msgid, by),
+            _ => continue,
+        }
+    };
+    assert_eq!(deleted.0, posted);
+    assert_eq!(
+        deleted.1.map(|u| u.to_string()).as_deref(),
+        Some("carol@kde.org")
+    );
+
+    // …and the granted `grant:mute` lets carol promote bob to muter.
+    plugin.send(&format!(
+        "@as=carol@kde.org GRANT bob@kde.org ns:{ns_id} mute"
+    ));
+    let raw = plugin.recv_raw().await;
+    assert!(
+        raw.contains("TOKEN") || !raw.contains("ERR"),
+        "the granted authority must be honored: {raw}"
+    );
+}
+
+#[tokio::test]
 async fn ns_meta_bridge_flag_requires_public_and_closes_with_visibility() {
     // Outbound projection (matrix.md §17.1): `NS META <ns> bridge:<scheme>
     // :open|closed`. The flag is ns-admin consent to mirror a native namespace

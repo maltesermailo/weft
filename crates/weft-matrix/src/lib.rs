@@ -12,9 +12,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod actions;
 pub mod asapi;
 pub mod bridge;
 pub mod config;
 pub mod hs;
 pub mod ident;
+pub mod levels;
 pub mod store;

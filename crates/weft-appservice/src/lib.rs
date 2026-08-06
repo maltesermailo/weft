@@ -79,6 +79,31 @@ pub enum Incoming {
         /// mutable vanity labels). Absent on foreign-actor and system events.
         actor_ulid: Option<String>,
     },
+    /// An invoke of an action declared with [`AppServiceBuilder::declare`] —
+    /// no closure handler, so the adapter handles it inline. Answer on
+    /// `Realm::ctx_for(&view_id)`.
+    Invoke {
+        view_id: String,
+        action: String,
+        /// What the action was invoked on (a namespace, channel, member id).
+        ctx_ref: Option<String>,
+        /// The declared inputs' values, decoded from the wire's CBOR.
+        params: std::collections::BTreeMap<String, serde_json::Value>,
+        /// The invoking WEFT user, and their stable id.
+        invoker: Option<String>,
+        invoker_ulid: Option<String>,
+    },
+    /// A later step of a flow we opened: the user submitted a view or clicked
+    /// one of its controls (spec §12.1). `values` are the form's inputs,
+    /// already decoded from the wire's CBOR.
+    Step {
+        view_id: String,
+        /// The clicked control's id; `None` for a plain submit.
+        button: Option<String>,
+        values: std::collections::BTreeMap<String, serde_json::Value>,
+        /// True when the user dismissed the view — terminal, nothing to answer.
+        closed: bool,
+    },
     Command {
         /// The `@as` attribution — the local user on whose behalf weftd asks.
         as_user: Option<String>,
@@ -90,13 +115,60 @@ pub enum Incoming {
     },
 }
 
-/// What a handler is given: the invocation's correlation, and the way to answer.
+/// What a handler is given: the invocation's correlation, who is asking, and
+/// the way to answer.
 pub struct Ctx {
     view_id: String,
+    /// The invoking WEFT user (`as=` on the routed invoke) — attribute any
+    /// resulting wire commands to them, never to the service itself.
+    pub invoker: Option<String>,
+    /// The invoker's account ULID (`ulid=`) — the stable identity.
+    pub invoker_ulid: Option<String>,
     out: mpsc::Sender<String>,
 }
 
 impl Ctx {
+    /// A bare context for a known view-id — [`Realm::ctx_for`]'s backing.
+    /// Invoker fields are empty: a step is answered on the flow the adapter
+    /// already parked, which is where it remembers who is acting.
+    pub(crate) fn new(view_id: String, out: mpsc::Sender<String>) -> Self {
+        Self {
+            view_id,
+            invoker: None,
+            invoker_ulid: None,
+            out,
+        }
+    }
+
+    /// The flow's correlation id — park per-view state under it, and it is
+    /// what a later [`Incoming::Step`] names.
+    pub fn view_id(&self) -> &str {
+        &self.view_id
+    }
+
+    /// Show an SDUI view (spec §11.2). Non-terminal: the flow stays open, and
+    /// the user's submit/click arrives as an [`Incoming::Step`].
+    pub async fn view(&self, view: &weft_proto::View) -> anyhow::Result<()> {
+        let mut line = Reply::new(Event::PluginView {
+            view_id: self.view_id.clone(),
+            view: String::new(),
+        })
+        .to_line()?;
+        line.tags
+            .insert("view".to_string(), weft_proto::plugin_to_b64(view)?);
+
+        self.send_line(line.serialize()?).await
+    }
+
+    /// Finish the flow with a toast — the ordinary "done" answer.
+    pub async fn toast(&self, kind: weft_proto::ToastKind, text: &str) -> anyhow::Result<()> {
+        self.result(weft_proto::plugin_to_b64(&weft_proto::ViewResult::Toast {
+            kind,
+            text: text.to_string(),
+        })?)
+        .await
+    }
+
     /// Answer the invocation. Terminal — the client's parked request completes.
     pub async fn result(&self, result: impl Into<String>) -> anyhow::Result<()> {
         let line = Reply::new(Event::PluginResult {
@@ -189,6 +261,18 @@ impl AppServiceBuilder {
             decl.id.clone(),
             Arc::new(move |ctx, params| Box::pin(handler(ctx, params))),
         );
+        self.actions.push(decl);
+        self
+    }
+
+    /// Declare an action **without** a closure handler: its invokes arrive on
+    /// the [`Incoming`] stream as [`Incoming::Invoke`].
+    ///
+    /// This is the shape a bridge wants. Closure handlers are spawned detached
+    /// (a slow one must not stall the session), so they cannot touch the
+    /// adapter's own state; a single-tasked adapter handles invokes inline
+    /// instead, next to the maps the flow needs.
+    pub fn declare(mut self, decl: weft_proto::ActionDecl) -> Self {
         self.actions.push(decl);
         self
     }
@@ -309,7 +393,9 @@ impl AppServiceBuilder {
                             continue; // tolerate noise (§4, lenient-in)
                         };
 
-                        let Some((action, view_id, params)) = invoke_of(&line) else {
+                        let Some((action, view_id, params, invoker, invoker_ulid)) =
+                            invoke_of(&line)
+                        else {
                             // Not an invoke → weftd talking to us. Surface it.
                             // A full queue means the adapter stopped reading —
                             // its problem to notice, not a reason to stall the
@@ -324,6 +410,13 @@ impl AppServiceBuilder {
                                     actor_ulid,
                                 });
                             } else if let Ok(req) = Request::from_line(&line) {
+                                // Flow steps are commands too, but an adapter
+                                // wants them typed and decoded, not raw.
+                                if let Some(step) = step_of(&req.command) {
+                                    let _ = events_tx.try_send(step);
+                                    continue;
+                                }
+
                                 let as_user = line.tags.get("as").cloned();
                                 let as_ulid = line.tags.get("ulid").cloned();
                                 let _ = events_tx.try_send(Incoming::Command {
@@ -335,10 +428,31 @@ impl AppServiceBuilder {
                             continue;
                         };
                         let Some(handler) = handlers.get(&action) else {
-                            continue; // weftd only routes actions we declared
+                            // Declared without a closure (`declare`): the
+                            // adapter owns it. Dropping it here is what the
+                            // first cut did, and a flow that never opens looks
+                            // to the user like a dead button.
+                            let ctx_ref = ctx_ref_of(&line);
+                            let _ = events_tx.try_send(Incoming::Invoke {
+                                view_id,
+                                action,
+                                ctx_ref,
+                                params: params
+                                    .as_deref()
+                                    .and_then(|p| weft_proto::plugin_from_b64(p).ok())
+                                    .unwrap_or_default(),
+                                invoker,
+                                invoker_ulid,
+                            });
+                            continue;
                         };
 
-                        let ctx = Ctx { view_id, out: out_tx.clone() };
+                        let ctx = Ctx {
+                            view_id,
+                            invoker,
+                            invoker_ulid,
+                            out: out_tx.clone(),
+                        };
                         let handler = Arc::clone(handler);
                         // Detached: a slow handler must not stall the session,
                         // and weftd correlates the answer by view-id whenever it
@@ -448,12 +562,73 @@ async fn next_event(stream: &mut weft_transport::QuicControlStream) -> anyhow::R
     }
 }
 
-/// `(action, view-id, params)` if this line is a routed `PLUGIN INVOKE`. weftd
-/// carries the correlation as the request's label and expects it echoed back.
-fn invoke_of(line: &Line) -> Option<(String, String, Option<String>)> {
+/// The invoke's `ctx_ref` — what the action was invoked on.
+fn ctx_ref_of(line: &Line) -> Option<String> {
+    match Request::from_line(line).ok()?.command {
+        Command::PluginInvoke { ctx_ref, .. } => ctx_ref,
+        _ => None,
+    }
+}
+
+/// A flow step as an [`Incoming::Step`], if that is what this command is.
+fn step_of(cmd: &Command) -> Option<Incoming> {
+    let decode = |values: &Option<String>| {
+        values
+            .as_deref()
+            .and_then(|v| weft_proto::plugin_from_b64(v).ok())
+            .unwrap_or_default()
+    };
+
+    match cmd {
+        Command::PluginSubmit { view_id, values } => Some(Incoming::Step {
+            view_id: view_id.clone(),
+            button: None,
+            values: decode(values),
+            closed: false,
+        }),
+        Command::PluginAction {
+            view_id,
+            button,
+            values,
+        } => Some(Incoming::Step {
+            view_id: view_id.clone(),
+            button: Some(button.clone()),
+            values: decode(values),
+            closed: false,
+        }),
+        Command::PluginClose { view_id } => Some(Incoming::Step {
+            view_id: view_id.clone(),
+            button: None,
+            values: Default::default(),
+            closed: true,
+        }),
+        _ => None,
+    }
+}
+
+/// `(action, view-id, params, invoker, invoker-ulid)` if this line is a routed
+/// `PLUGIN INVOKE`. weftd carries the correlation as the request's label and
+/// the invoking user as `as=`/`ulid=` (slice 11 — management actions must know
+/// who is asking).
+#[allow(clippy::type_complexity)]
+fn invoke_of(
+    line: &Line,
+) -> Option<(
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+)> {
     let req = Request::from_line(line).ok()?;
     match req.command {
-        Command::PluginInvoke { action, params, .. } => Some((action, req.label?, params)),
+        Command::PluginInvoke { action, params, .. } => Some((
+            action,
+            req.label?,
+            params,
+            line.tags.get("as").cloned(),
+            line.tags.get("ulid").cloned(),
+        )),
         _ => None,
     }
 }
@@ -500,11 +675,17 @@ mod tests {
     fn a_routed_invoke_is_recognized_by_its_label() {
         // weftd correlates the whole flow by a minted view-id carried as the
         // invoke's label; anything without one is not an invocation.
-        let line =
-            Line::parse("@label=v1 PLUGIN INVOKE matrix power-levels").expect("a valid line");
-        let (action, view_id, _) = invoke_of(&line).expect("an invoke");
+        let line = Line::parse(
+            "@label=v1;as=ada@test.example;ulid=01abc PLUGIN INVOKE matrix power-levels",
+        )
+        .expect("a valid line");
+        let (action, view_id, _, invoker, ulid) = invoke_of(&line).expect("an invoke");
         assert_eq!(action, "power-levels");
         assert_eq!(view_id, "v1");
+        // Slice 11: a management action must know who is asking, so it can
+        // attribute the wire commands it issues to them.
+        assert_eq!(invoker.as_deref(), Some("ada@test.example"));
+        assert_eq!(ulid.as_deref(), Some("01abc"));
 
         let other = Line::parse("PING probe").expect("a valid line");
         assert!(invoke_of(&other).is_none());

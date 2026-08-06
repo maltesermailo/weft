@@ -11,10 +11,36 @@
   import { CHAN_CAPS, CAP_META, EVERYONE_ROLE, RETENTION_OPTIONS } from "$lib/constants";
   import Avatar from "$lib/components/Avatar.svelte";
   import SaveBar from "$lib/components/SaveBar.svelte";
+  import PluginBlock from "$lib/components/plugins/PluginBlock.svelte";
+  import { plugins } from "$lib/plugins/plugins.svelte";
   const app = getApp();
   let { channel, onclose }: { channel: string; onclose: () => void } = $props();
 
-  let tab = $state<"overview" | "permissions" | "danger">("overview");
+  /// A plugin page is `plugin:<id>:<action>`, namespaced so it can never
+  /// shadow a native tab.
+  type Tab = "overview" | "permissions" | "danger" | `plugin:${string}:${string}`;
+  let tab = $state<Tab>("overview");
+
+  // §13.1 the `channel-settings` surface: per-channel configuration a plugin
+  // supplies (the bridged Matrix room's name/topic, say) — a page here rather
+  // than a button in the channel list.
+  const pluginPages = $derived(
+    plugins.actionsFor("channel-settings").filter(({ action }) => action.context === "channel" || action.context === "none"),
+  );
+  /// The panel backing the open plugin page, once its flow has answered. A
+  /// plugin that answers with a modal instead is drawn by `AppModals`.
+  const pluginView = $derived(tab.startsWith("plugin:") ? [...plugins.views.values()].find((v) => v.isPanel) : undefined);
+
+  /// Open a plugin page: close whatever panel was showing (so its plugin stops
+  /// pushing into a screen nobody is watching), then invoke with this channel.
+  function openPluginPage(plugin: string, action: string) {
+    for (const v of plugins.views.values()) {
+      if (v.isPanel) plugins.close(v.id);
+    }
+
+    tab = `plugin:${plugin}:${action}`;
+    plugins.invoke(plugin, action, channel);
+  }
 
   // ---- §6.5 permission editor (per-target: @everyone / role / member) ----
   type Target =
@@ -171,6 +197,16 @@
       <div class="so-heading">#{app.chanShort(channel)}</div>
       <button class="so-navitem" class:active={tab === "overview"} onclick={() => (tab = "overview")}>Overview</button>
       <button class="so-navitem" class:active={tab === "permissions"} onclick={() => (tab = "permissions")}>Permissions</button>
+      {#each pluginPages as { plugin, action } (plugin + action.id)}
+        <button
+          class="so-navitem"
+          class:active={tab === `plugin:${plugin}:${action.id}`}
+          title={action.description ?? ""}
+          onclick={() => openPluginPage(plugin, action.id)}
+        >
+          {action.label}
+        </button>
+      {/each}
       <div class="so-heading">Danger</div>
       <button class="so-navitem danger" class:active={tab === "danger"} onclick={() => (tab = "danger")}>Delete channel</button>
     </div>
@@ -345,6 +381,20 @@
             </div>
           </section>
         </div>
+      {:else if tab.startsWith("plugin:")}
+        {#if pluginView}
+          {#each pluginView.view.blocks ?? [] as block, i (i)}
+            <PluginBlock
+              {block}
+              bind:values={pluginView.values}
+              disabled={pluginView.busy}
+              onpress={(b) => plugins.press(pluginView, b.id)}
+              onsubmit={() => plugins.submit(pluginView)}
+            />
+          {/each}
+        {:else}
+          <p class="so-empty">Loading…</p>
+        {/if}
       {:else if tab === "danger"}
         <h1>Delete channel</h1>
         <p class="so-sub">Removes the channel and its history. This cannot be undone.</p>

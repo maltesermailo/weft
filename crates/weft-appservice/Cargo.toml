@@ -21,7 +21,8 @@ anyhow = { workspace = true }
 # `BanList` is serializable because the adapter MUST persist it (weftd never
 # re-sends a ban) — the SDK ships the type, the adapter picks the storage.
 serde = { workspace = true }
+# Flow-step values are decoded from the wire's CBOR into JSON for the adapter.
+serde_json = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-serde_json = "1"

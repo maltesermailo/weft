@@ -535,8 +535,48 @@ implements and the daemon is written against.*
       ingest for a banned space) belong in `weft-appservice`, not in each adapter — this is exactly
       the "utilities to ensure smooth operation like a federation" the SDK is for, so every adapter
       gets one consistent implementation.
-- [ ] **11. Management actions in the daemon** — invite/kick/ban/create-room/create-subspace/
-      room-settings/power-level actions as SDUI flows; profile supplied via `NS-META`.
+- [~] **11. Moderation + power levels DONE 2026-08-06** (the authority half; SDUI management flows
+      remain). §10 implemented as *attributed* authority, both directions:
+      **weftd:** `@as` `GRANT`/`REVOKE` route to the ordinary handlers as `Actor::Foreign` (a
+      foreign moderator wields exactly the caps WEFT granted **them**, incl. `grant:<cap>`);
+      `@as DELETE` of another author now checks `delete-any` (the slice-10 TODO closed); grant
+      relays cover projected namespaces too and carry `ulid=` for local **subjects**; `PLUGIN
+      INVOKE` carries the invoker (`as=`/`ulid=`) so a management action knows who is asking
+      (SDK `Ctx::invoker`/`invoker_ulid`).
+      **daemon:** `levels.rs` owns the mapping — three tiers (admin 90 = `ns-admin`, mod 50 =
+      `mute,ban,kick,delete-any`, member 0; bot 100 above all, §9) + a `diff_users` on the PL
+      users map so only real changes translate. Outbound: a grant/revoke becomes a read-modify-write
+      of `m.room.power_levels` in every room of the space (subject = real MXID for a foreign handle,
+      ULID-keyed puppet for a local account, registered on the spot from the relay's `ulid=`).
+      Inbound: a PL event diffs against the persisted baseline (`matrix_room_levels`) and emits the
+      acting moderator's attributed revoke-then-grant; a Matrix ban/kick **of a puppet** becomes the
+      attributed `BAN`/`KICK` (foreign targets stay Matrix-internal — roster flow handles them).
+      `ident::unescape_localpart`/`mxid_of_weft_user` close the identity round trip.
+      Tests: `foreign_moderators_wield_exactly_their_granted_authority` (weftd: ungranted delete
+      dropped + ungranted GRANT `CAP-REQUIRED`, then both succeed after the grant, and the grant
+      relays outward), `authority_translates_both_directions` (daemon: grant→PL for foreign and
+      local subjects, PL→attributed grants, unchanged map = no work, puppet ban→attributed BAN),
+      `levels.rs` unit tests.
+      **SDUI flows + §10 revert DONE 2026-08-06.** Flows live in `weft-matrix/src/actions.rs`
+      (declarations + views) with handlers in `bridge.rs`: **Power Levels** (`settings`/namespace —
+      the surface `authority=levels` promises: the live map as a table + a three-tier picker, since
+      the capability mapping has three tiers and a free number would imply precision it lacks),
+      **Invite** (`channel-list`), **Moderate** (`context-menu`/member), **Bridged room**
+      (`channel-settings` — new surface, owner directive: `channel-list` is for custom buttons,
+      configuration belongs in the settings pane), **Bans** (`admin`). Every flow's wire commands
+      are **attributed to the invoker**, never the service — that is what `Ctx::invoker` was for.
+      **§10 revert:** attributed acts now carry a `label`, weftd echoes it on the direct response
+      **including `ERR`** (`on_provider_acting` passes the request label through), and the daemon
+      parks an undo per act (`PendingAct::Level`/`Membership`) — a refusal restores the previous
+      power level or unbans, then posts an `m.notice` naming the reason. One revert per act (the
+      label is spent). SDK additions: `Ctx::view`/`toast`/`view_id`, `Realm::ctx_for`,
+      `AppServiceBuilder::declare` (declared-without-closure actions arrive as `Incoming::Invoke` —
+      the old loop **dropped** them, which read as a dead button), `Incoming::Step` (typed +
+      CBOR-decoded submits/clicks/closes), labeled `*_as` moderation helpers, `mute_as`.
+      Client: `channel-settings` pages render in `ChannelSettings.svelte` (same pattern as the
+      server-settings surface).
+      **Remaining:** create-room/create-subspace flows (structure creation from the client),
+      and a kick flow needs a channel context (the current one refuses rather than guessing scope).
 - [ ] **12. Track B — widgets + client-Rhai + CSP** (L) — the rich PL-matrix editor as a sandboxed
       widget. **Polish, not gating**: SDUI tables/forms carry the v1 levels view.
 

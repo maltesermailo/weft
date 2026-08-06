@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use weft_appservice::{ChannelAssertion, Incoming, NamespaceAssertion, Realm};
-use weft_proto::{Command, Event, MemberAction};
+use weft_proto::{Command, Event, MemberAction, ToastKind};
 
 use crate::asapi::Txn;
 use crate::hs::Hs;
@@ -39,6 +39,43 @@ pub struct Bridge {
     pub pending_injections: std::collections::HashMap<String, (String, String)>,
     /// Injection labels, minted locally and meaningless beyond correlation.
     pub injection_seq: u64,
+    /// §10 revert: attributed acts awaiting weftd's verdict, by label. An
+    /// `ERR` echoing the label means WEFT refused — undo the foreign-side
+    /// change and notice the actor.
+    pub pending_acts: std::collections::HashMap<String, PendingAct>,
+    pub act_seq: u64,
+    /// Open management flows by view-id: which action, on what, for whom.
+    pub flows: std::collections::HashMap<String, Flow>,
+}
+
+/// An open management flow (slice 11) — the context its next step acts on.
+#[derive(Debug, Clone)]
+pub struct Flow {
+    pub action: String,
+    /// The invoking WEFT user; every wire command the flow issues is theirs.
+    pub invoker: String,
+    /// What the action was invoked on (`ctx_ref`): a namespace, channel or member.
+    pub ctx_ref: String,
+}
+
+/// A foreign-side change we already made, and how to undo it if WEFT refuses
+/// the corresponding WEFT-side act (§10: "revert + notice").
+#[derive(Debug, Clone)]
+pub enum PendingAct {
+    /// A power level was set; restore the previous one (0 = remove).
+    Level {
+        room: String,
+        mxid: String,
+        previous: i64,
+        actor: String,
+    },
+    /// A member was banned/kicked; put them back.
+    Membership {
+        room: String,
+        mxid: String,
+        was_banned: bool,
+        actor: String,
+    },
 }
 
 /// A projected channel's layout, waiting for its retention policy.
@@ -78,25 +115,37 @@ impl Bridge {
     // ---- weftd → us -------------------------------------------------------
 
     pub async fn on_incoming(&mut self, inc: Incoming) {
-        let Incoming::Command {
-            as_user,
-            as_ulid,
-            command,
-        } = inc
-        else {
-            let Incoming::Event {
+        match inc {
+            Incoming::Event {
                 event,
                 label,
                 actor_ulid,
-            } = inc
-            else {
-                unreachable!("Incoming has two variants");
-            };
-            self.on_weftd_event(event, label, actor_ulid).await;
-            return;
-        };
-
-        self.on_weftd_request(as_user, as_ulid, command).await;
+            } => self.on_weftd_event(event, label, actor_ulid).await,
+            Incoming::Invoke {
+                view_id,
+                action,
+                ctx_ref,
+                invoker,
+                ..
+            } => {
+                self.on_invoke(&view_id, &action, ctx_ref.as_deref(), invoker.as_deref())
+                    .await
+            }
+            Incoming::Step {
+                view_id,
+                button,
+                values,
+                closed,
+            } => {
+                self.on_step(&view_id, button.as_deref(), &values, closed)
+                    .await
+            }
+            Incoming::Command {
+                as_user,
+                as_ulid,
+                command,
+            } => self.on_weftd_request(as_user, as_ulid, command).await,
+        }
     }
 
     async fn on_weftd_event(
@@ -222,6 +271,15 @@ impl Bridge {
                     }
                 }
             }
+            // §10: a refusal of one of our attributed acts — undo the
+            // foreign-side change and notice the actor.
+            Event::Err(err) => {
+                if let Some(label) = label {
+                    self.revert_act(&label, &err.text).await;
+                } else {
+                    debug!(code = %err.code, text = %err.text, "unlabeled ERR from weftd");
+                }
+            }
             // Structure acks for replicas we asserted ourselves: nothing to do.
             Event::NsMeta { .. } | Event::ChannelLayout { .. } => {}
             other => debug!(?other, "unhandled weftd event"),
@@ -240,6 +298,31 @@ impl Bridge {
         as_ulid: Option<String>,
         command: Command,
     ) {
+        // Authority relays (a WEFT-side GRANT/REVOKE inside a bridged
+        // namespace) arrive bare — weftd tells us the fact; the level is ours
+        // to compute (§7: the adapter owns the mapping).
+        match &command {
+            Command::Grant {
+                subject,
+                scope,
+                caps,
+                ..
+            } => {
+                let (subject, scope, caps) = (subject.clone(), scope.clone(), caps.clone());
+                let level = crate::levels::level_for_grant(&caps);
+                self.apply_level_outbound(&scope, &subject, as_ulid.as_deref(), level)
+                    .await;
+                return;
+            }
+            Command::Revoke { subject, scope, .. } => {
+                let (subject, scope) = (subject.clone(), scope.clone());
+                self.apply_level_outbound(&scope, &subject, as_ulid.as_deref(), 0)
+                    .await;
+                return;
+            }
+            _ => {}
+        }
+
         let Some(user) = as_user else {
             debug!(?command, "request without @as — ignored");
             return;
@@ -634,7 +717,16 @@ impl Bridge {
                     warn!(event_id, "delete ingestion failed: {e:#}");
                 }
             }
+            "m.room.power_levels" => {
+                let (room_id, ns_id, sender) =
+                    (room_id.clone(), ns_id.clone(), weft_sender.clone());
+                self.on_power_levels_event(&ev, &room_id, &ns_id, &sender)
+                    .await;
+            }
             "m.room.member" => {
+                let (chan, ns, sender) = (channel.clone(), ns_id.clone(), weft_sender.clone());
+                self.on_member_moderation(&ev, &chan, &ns, &sender).await;
+
                 let Some(subject) = ev["state_key"].as_str() else {
                     return;
                 };
@@ -774,7 +866,16 @@ impl Bridge {
                     warn!(event_id, "projected delete failed: {e:#}");
                 }
             }
+            "m.room.power_levels" => {
+                self.on_power_levels_event(ev, room_id, ns_id, weft_sender)
+                    .await;
+            }
             "m.room.member" => {
+                // Moderation of a puppet translates (§10); everything else is
+                // roster flow.
+                self.on_member_moderation(ev, channel, ns_id, weft_sender)
+                    .await;
+
                 let Some(subject) = ev["state_key"].as_str() else {
                     return;
                 };
@@ -1188,6 +1289,639 @@ impl Bridge {
 
         let root_id = root.parse()?;
         self.realm.delete(user, &root_id).await
+    }
+
+    // ---- authority: capabilities here, power levels there (§10) ------------
+
+    /// A WEFT grant/revoke in a bridged namespace → the mapped Matrix level,
+    /// written into every room of that namespace's space (replica or
+    /// projection alike).
+    async fn apply_level_outbound(
+        &mut self,
+        scope: &str,
+        subject: &str,
+        subject_ulid: Option<&str>,
+        level: i64,
+    ) {
+        let Some(ns_id) = scope.strip_prefix("ns:") else {
+            return; // only namespace authority maps onto a space (§10)
+        };
+
+        // Consumed space or outbound projection — collect its rooms.
+        let mut rooms: Vec<String> = Vec::new();
+        if let Some(space) = self.store.state.space_of_ns(ns_id) {
+            rooms.extend(space.rooms.keys().cloned());
+            rooms.push(space.room_id.clone());
+        } else if let Some(p) = self.store.state.projections.get(ns_id) {
+            rooms.extend(p.rooms.values().cloned());
+            rooms.push(p.space_room.clone());
+        } else {
+            return;
+        }
+
+        // The subject on the Matrix side: a foreign handle addresses its real
+        // MXID; a local account addresses their puppet — registered here if
+        // this is the first we hear of them (the relay carries their ULID
+        // precisely so a grant need not wait for their first message).
+        let mxid = if subject.contains('@') {
+            ident::mxid_of_weft_user(subject)
+        } else {
+            match subject_ulid {
+                Some(ulid) => self.ensure_puppet(ulid, subject).await.ok(),
+                None => self.puppet_of_account(subject),
+            }
+        };
+        let Some(mxid) = mxid else {
+            warn!(
+                subject,
+                "no Matrix identity for the grant subject — skipped"
+            );
+            return;
+        };
+
+        for room in rooms {
+            if let Err(e) = self.set_room_level(&room, &mxid, level).await {
+                warn!(room, mxid, level, "power-level write failed: {e:#}");
+            }
+        }
+    }
+
+    /// Read-modify-write one room's `m.room.power_levels` users map, and move
+    /// our own diff baseline with it (so the echo of our write is a no-op).
+    async fn set_room_level(&mut self, room: &str, mxid: &str, level: i64) -> anyhow::Result<()> {
+        let mut content = self
+            .hs
+            .get_state(room, "m.room.power_levels", "")
+            .await?
+            .unwrap_or_else(|| json!({}));
+
+        let users = content["users"].as_object().cloned().unwrap_or_default();
+        let mut users = users;
+        if level == 0 {
+            users.remove(mxid);
+        } else {
+            users.insert(mxid.to_string(), json!(level));
+        }
+        content["users"] = Value::Object(users.clone());
+
+        self.hs
+            .put_state(room, "m.room.power_levels", "", content)
+            .await?;
+
+        let baseline: std::collections::BTreeMap<String, i64> = users
+            .iter()
+            .filter_map(|(u, l)| l.as_i64().map(|l| (u.clone(), l)))
+            .collect();
+        self.store.set_room_levels(room, baseline).await;
+        Ok(())
+    }
+
+    /// An inbound `m.room.power_levels` event: diff against the baseline and
+    /// translate each change into the acting moderator's attributed
+    /// GRANT/REVOKE — weftd honors them iff WEFT granted *them* the authority
+    /// (§10: no side-channel authority).
+    async fn on_power_levels_event(&mut self, ev: &Value, room_id: &str, ns_id: &str, actor: &str) {
+        let new: std::collections::BTreeMap<String, i64> = ev["content"]["users"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(u, l)| l.as_i64().map(|l| (u.clone(), l)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let old = self
+            .store
+            .state
+            .room_levels
+            .get(room_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let scope = format!("ns:{ns_id}");
+        for (mxid, level) in crate::levels::diff_users(&old, &new) {
+            let Some(subject) = self.weft_subject_of_mxid(&mxid) else {
+                continue; // the bot, or an unmappable identity
+            };
+
+            // §10: label the act so a refusal comes back correlated, and park
+            // the undo — the Matrix state changed *before* WEFT agreed.
+            let label = self.park_act(PendingAct::Level {
+                room: room_id.to_string(),
+                mxid: mxid.clone(),
+                previous: old.get(&mxid).copied().unwrap_or(0),
+                actor: actor.to_string(),
+            });
+
+            // Revoke-then-grant makes the translation deterministic: the new
+            // tier's caps replace whatever the old tier held. Only the act that
+            // can be *refused* carries the label — a revoke of nothing cannot.
+            let caps = crate::levels::caps_for_level(level);
+            if let Err(e) = self
+                .realm
+                .revoke_as(
+                    actor,
+                    &subject,
+                    &scope,
+                    None,
+                    caps.is_none().then_some(&*label),
+                )
+                .await
+            {
+                warn!(subject, "revoke_as failed: {e:#}");
+                continue;
+            }
+            if let Some(caps) = caps {
+                if let Err(e) = self
+                    .realm
+                    .grant_as(actor, &subject, &scope, caps, Some(&label))
+                    .await
+                {
+                    warn!(subject, "grant_as failed: {e:#}");
+                }
+            }
+        }
+
+        self.store.set_room_levels(room_id, new).await;
+    }
+
+    /// The WEFT subject a Matrix id maps to: a puppet → its bare local
+    /// account, a foreign MXID → the escaped handle, the bot → nothing.
+    fn weft_subject_of_mxid(&self, mxid: &str) -> Option<String> {
+        let parsed: &ruma::UserId = mxid.try_into().ok()?;
+
+        if parsed.server_name().host() == self.domain && parsed.localpart() == self.bot_localpart {
+            return None;
+        }
+        if parsed.server_name().host() == self.domain {
+            if let Some(localpart) = parsed.localpart().strip_prefix(&self.puppet_prefix) {
+                // Puppets are ULID-keyed; the subject is the bare account.
+                return self
+                    .store
+                    .state
+                    .users
+                    .by_ulid(localpart)
+                    .map(|u| u.account.clone());
+            }
+        }
+
+        ident::weft_user(parsed)
+    }
+
+    /// An inbound moderation act on one of **our** users' puppets: a Matrix
+    /// ban/kick of a foreign user stays Matrix-internal (their membership
+    /// event updates the roster), but against a puppet it is the §10
+    /// translation — the attributed BAN/KICK, checked against the actor's
+    /// WEFT grants.
+    async fn on_member_moderation(&mut self, ev: &Value, channel: &str, ns_id: &str, actor: &str) {
+        let Some(target) = ev["state_key"].as_str() else {
+            return;
+        };
+        let sender = ev["sender"].as_str().unwrap_or_default();
+        if sender == target {
+            return; // an ordinary self leave/join, not moderation
+        }
+        let Some(account) = self.puppet_account_of(target) else {
+            return; // not a puppet — roster flows handle it
+        };
+        let membership = ev["content"]["membership"].as_str().unwrap_or_default();
+        let reason = ev["content"]["reason"].as_str();
+
+        let label = self.park_act(PendingAct::Membership {
+            room: ev["room_id"].as_str().unwrap_or_default().to_string(),
+            mxid: target.to_string(),
+            was_banned: membership == "ban",
+            actor: actor.to_string(),
+        });
+
+        let result = match membership {
+            "ban" => {
+                self.realm
+                    .ban_as(
+                        actor,
+                        &format!("ns:{ns_id}"),
+                        &account,
+                        reason,
+                        true,
+                        Some(&label),
+                    )
+                    .await
+            }
+            "leave" => {
+                self.realm
+                    .kick_as(actor, channel, &account, reason, Some(&label))
+                    .await
+            }
+            _ => return,
+        };
+        if let Err(e) = result {
+            warn!(account, membership, "moderation relay failed: {e:#}");
+        }
+    }
+
+    // ---- management flows (slice 11) ---------------------------------------
+
+    /// A routed `PLUGIN INVOKE`: open the flow's first view. The invoker is
+    /// remembered because every command the flow later issues is **theirs**
+    /// (`@as`), never the service's.
+    pub async fn on_invoke(
+        &mut self,
+        view_id: &str,
+        action: &str,
+        ctx_ref: Option<&str>,
+        invoker: Option<&str>,
+    ) {
+        let ctx = self.realm.ctx_for(view_id);
+        let Some(invoker) = invoker else {
+            let _ = ctx
+                .toast(ToastKind::Error, "weftd did not name the invoker")
+                .await;
+            return;
+        };
+        let ctx_ref = ctx_ref.unwrap_or_default();
+        self.flows.insert(
+            view_id.to_string(),
+            Flow {
+                action: action.to_string(),
+                invoker: invoker.to_string(),
+                ctx_ref: ctx_ref.to_string(),
+            },
+        );
+
+        let opened = match action {
+            "power-levels" => self.open_power_levels(&ctx, ctx_ref).await,
+            "invite" => {
+                self.open_for_channel(&ctx, ctx_ref, crate::actions::invite_view)
+                    .await
+            }
+            "moderate" => ctx.view(&crate::actions::moderate_view(ctx_ref)).await,
+            "room-settings" => self.open_room_settings(&ctx, ctx_ref).await,
+            "bans" => {
+                let banned: Vec<String> =
+                    self.store.state.bans.iter().map(str::to_string).collect();
+                ctx.view(&crate::actions::bans_view(&banned)).await
+            }
+            _ => {
+                let _ = ctx.toast(ToastKind::Error, "unknown action").await;
+                self.flows.remove(view_id);
+                return;
+            }
+        };
+
+        if let Err(e) = opened {
+            warn!(action, "opening the flow failed: {e:#}");
+            let _ = ctx.toast(ToastKind::Error, &format!("{e}")).await;
+            self.flows.remove(view_id);
+        }
+    }
+
+    /// The Power Levels surface — the stand-in `authority=levels` promises.
+    async fn open_power_levels(
+        &mut self,
+        ctx: &weft_appservice::Ctx,
+        ns_id: &str,
+    ) -> anyhow::Result<()> {
+        let Some(space_room) = self.space_room_of_ns(ns_id) else {
+            anyhow::bail!("this namespace is not bridged");
+        };
+        // Read the live map rather than our diff baseline: the view is for a
+        // human, so it should show what Matrix actually says.
+        let users = self
+            .hs
+            .get_state(&space_room, "m.room.power_levels", "")
+            .await?
+            .and_then(|c| c["users"].as_object().cloned())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(u, l)| l.as_i64().map(|l| (u.clone(), l)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        ctx.view(&crate::actions::power_levels_view(&space_room, &users))
+            .await
+    }
+
+    async fn open_for_channel(
+        &mut self,
+        ctx: &weft_appservice::Ctx,
+        channel: &str,
+        view: fn(&str) -> weft_proto::View,
+    ) -> anyhow::Result<()> {
+        let Some(room) = self.room_of_channel(channel) else {
+            anyhow::bail!("this channel is not bridged");
+        };
+
+        ctx.view(&view(&room)).await
+    }
+
+    async fn open_room_settings(
+        &mut self,
+        ctx: &weft_appservice::Ctx,
+        channel: &str,
+    ) -> anyhow::Result<()> {
+        let Some(room) = self.room_of_channel(channel) else {
+            anyhow::bail!("this channel is not bridged");
+        };
+
+        let name = self
+            .hs
+            .get_state(&room, "m.room.name", "")
+            .await?
+            .and_then(|c| c["name"].as_str().map(String::from))
+            .unwrap_or_default();
+        let topic = self
+            .hs
+            .get_state(&room, "m.room.topic", "")
+            .await?
+            .and_then(|c| c["topic"].as_str().map(String::from))
+            .unwrap_or_default();
+
+        ctx.view(&crate::actions::room_settings_view(&room, &name, &topic))
+            .await
+    }
+
+    /// A submit or control click on an open flow.
+    pub async fn on_step(
+        &mut self,
+        view_id: &str,
+        button: Option<&str>,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+        closed: bool,
+    ) {
+        // Dismissed: terminal, nothing to answer.
+        if closed {
+            self.flows.remove(view_id);
+            return;
+        }
+        let Some(flow) = self.flows.get(view_id).cloned() else {
+            return; // not ours (or already finished)
+        };
+        let ctx = self.step_ctx(view_id);
+
+        let outcome = match flow.action.as_str() {
+            "power-levels" => self.step_power_levels(&flow, values).await,
+            "invite" => self.step_invite(&flow, values).await,
+            "moderate" => self.step_moderate(&flow, button, values).await,
+            "room-settings" => self.step_room_settings(&flow, values).await,
+            _ => Err(anyhow::anyhow!("this flow has no steps")),
+        };
+
+        self.flows.remove(view_id);
+        let answer = match outcome {
+            Ok(text) => ctx.toast(ToastKind::Ok, &text).await,
+            Err(e) => {
+                warn!(action = %flow.action, "flow step failed: {e:#}");
+                ctx.toast(ToastKind::Error, &format!("{e}")).await
+            }
+        };
+        if let Err(e) = answer {
+            warn!("answering the flow failed: {e:#}");
+        }
+    }
+
+    /// Set one user's level: write it on Matrix, then mirror the mapped
+    /// capabilities as the **invoker's** attributed GRANT — so weftd checks
+    /// their authority, and refuses (with a revert) if they lack it.
+    async fn step_power_levels(
+        &mut self,
+        flow: &Flow,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> anyhow::Result<String> {
+        let mxid = crate::actions::value(values, "mxid").to_string();
+        let level: i64 = crate::actions::value(values, "level").parse().unwrap_or(0);
+        if mxid.is_empty() {
+            anyhow::bail!("name a Matrix user");
+        }
+        let ns_id = flow.ctx_ref.clone();
+        let Some(space_room) = self.space_room_of_ns(&ns_id) else {
+            anyhow::bail!("this namespace is not bridged");
+        };
+
+        // The Matrix write goes first and is the thing a refusal reverts —
+        // `on_power_levels_event` will not double-apply it, since our own
+        // write moves the baseline with it.
+        self.set_room_level(&space_room, &mxid, level).await?;
+
+        let Some(subject) = self.weft_subject_of_mxid(&mxid) else {
+            anyhow::bail!("that Matrix user maps to no WEFT identity");
+        };
+        let scope = format!("ns:{ns_id}");
+        let label = self.park_act(PendingAct::Level {
+            room: space_room,
+            mxid: mxid.clone(),
+            previous: 0,
+            actor: flow.invoker.clone(),
+        });
+
+        let caps = crate::levels::caps_for_level(level);
+        self.realm
+            .revoke_as(
+                &flow.invoker,
+                &subject,
+                &scope,
+                None,
+                caps.is_none().then_some(&*label),
+            )
+            .await?;
+        if let Some(caps) = caps {
+            self.realm
+                .grant_as(&flow.invoker, &subject, &scope, caps, Some(&label))
+                .await?;
+        }
+
+        Ok(format!("{mxid} set to {level}"))
+    }
+
+    async fn step_invite(
+        &mut self,
+        flow: &Flow,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> anyhow::Result<String> {
+        let mxid = crate::actions::value(values, "mxid");
+        if mxid.is_empty() {
+            anyhow::bail!("name a Matrix user");
+        }
+        let Some(room) = self.room_of_channel(&flow.ctx_ref) else {
+            anyhow::bail!("this channel is not bridged");
+        };
+
+        // As the invoker's puppet when we have one: an invite is a social act,
+        // and it should read as coming from the person who made it.
+        let puppet = self.puppet_of_account(&account_of(&flow.invoker));
+        self.hs.invite(&room, mxid, puppet.as_deref()).await?;
+
+        Ok(format!("invited {mxid}"))
+    }
+
+    async fn step_moderate(
+        &mut self,
+        flow: &Flow,
+        button: Option<&str>,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> anyhow::Result<String> {
+        let reason = crate::actions::value(values, "reason");
+        let reason = (!reason.is_empty()).then_some(reason);
+        let target = flow.ctx_ref.clone();
+
+        // The target is a WEFT member; the scope is whatever they are being
+        // moderated in — a namespace ban, a channel kick.
+        match button {
+            Some("ban") => {
+                self.realm
+                    .ban_as(&flow.invoker, "*", &target, reason, true, None)
+                    .await?;
+                Ok(format!("banned {target}"))
+            }
+            Some("kick") => {
+                anyhow::ensure!(
+                    self.store.state.projections.len() + self.store.state.spaces.len() > 0,
+                    "nothing is bridged"
+                );
+                // A kick names one channel; without one in context, the ban
+                // scope is the honest instrument. Say so rather than guess.
+                anyhow::bail!("kick needs a channel context — use it from a channel")
+            }
+            _ => anyhow::bail!("pick an action"),
+        }
+    }
+
+    async fn step_room_settings(
+        &mut self,
+        flow: &Flow,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> anyhow::Result<String> {
+        let Some(room) = self.room_of_channel(&flow.ctx_ref) else {
+            anyhow::bail!("this channel is not bridged");
+        };
+        let name = crate::actions::value(values, "name");
+        let topic = crate::actions::value(values, "topic");
+
+        // Room state is the **bot's** to write (§9: bridge-created rooms are
+        // bridge-controlled), so this is not an attributed act — the gate is
+        // the client's own: the action is only offered where it is allowed.
+        if !name.is_empty() {
+            self.hs
+                .put_state(&room, "m.room.name", "", json!({ "name": name }))
+                .await?;
+        }
+        self.hs
+            .put_state(&room, "m.room.topic", "", json!({ "topic": topic }))
+            .await?;
+
+        Ok("room settings saved".into())
+    }
+
+    /// A `Ctx` for answering a step of an already-open flow.
+    fn step_ctx(&self, view_id: &str) -> weft_appservice::Ctx {
+        self.realm.ctx_for(view_id)
+    }
+
+    /// The Space room of a bridged namespace (consumed or projected).
+    fn space_room_of_ns(&self, ns_id: &str) -> Option<String> {
+        if let Some(space) = self.store.state.space_of_ns(ns_id) {
+            return Some(space.room_id.clone());
+        }
+
+        self.store
+            .state
+            .projections
+            .get(ns_id)
+            .map(|p| p.space_room.clone())
+    }
+
+    /// The Matrix room of a bridged channel (consumed or projected).
+    fn room_of_channel(&self, channel: &str) -> Option<String> {
+        if let Some((room, _)) = self.store.state.room_of_channel(channel) {
+            return Some(room.to_string());
+        }
+
+        self.store
+            .state
+            .projected_room_of_channel(channel)
+            .map(|(_, room)| room.to_string())
+    }
+
+    /// Park an undo and return its correlation label.
+    fn park_act(&mut self, act: PendingAct) -> String {
+        self.act_seq += 1;
+        let label = format!("act-{}", self.act_seq);
+        self.pending_acts.insert(label.clone(), act);
+
+        label
+    }
+
+    /// §10's *revert + notice*: WEFT refused an attributed act, so undo the
+    /// foreign-side change that got ahead of it and tell the actor why.
+    /// Without this, the two sides disagree permanently — Matrix would show a
+    /// moderator power that WEFT never granted.
+    async fn revert_act(&mut self, label: &str, why: &str) {
+        let Some(act) = self.pending_acts.remove(label) else {
+            return; // not ours, or already resolved
+        };
+
+        let (room, actor, note) = match act {
+            PendingAct::Level {
+                room,
+                mxid,
+                previous,
+                actor,
+            } => {
+                if let Err(e) = self.set_room_level(&room, &mxid, previous).await {
+                    warn!(room, mxid, "revert of the power level failed: {e:#}");
+                }
+                (
+                    room,
+                    actor,
+                    format!("{mxid}'s power level was reverted: {why}"),
+                )
+            }
+            PendingAct::Membership {
+                room,
+                mxid,
+                was_banned,
+                actor,
+            } => {
+                // Unban restores the ability to rejoin; a kick cannot be
+                // undone (only they can rejoin), so the notice is the remedy.
+                if was_banned {
+                    if let Err(e) = self.hs.unban(&room, &mxid).await {
+                        warn!(room, mxid, "revert of the ban failed: {e:#}");
+                    }
+                }
+                (room, actor, format!("moderating {mxid} was refused: {why}"))
+            }
+        };
+
+        // The notice goes to the room as the bot — the actor is a Matrix user
+        // with no WEFT session to answer on.
+        if let Err(e) = self
+            .hs
+            .send(
+                &room,
+                "m.room.message",
+                json!({ "msgtype": "m.notice", "body": format!("{actor}: {note}") }),
+                &format!("revert-{label}"),
+                None,
+            )
+            .await
+        {
+            warn!(room, "revert notice failed: {e:#}");
+        }
+    }
+
+    /// A puppet MXID → the bare local account it stands for.
+    fn puppet_account_of(&self, mxid: &str) -> Option<String> {
+        let parsed: &ruma::UserId = mxid.try_into().ok()?;
+        if parsed.server_name().host() != self.domain {
+            return None;
+        }
+        let ulid = parsed.localpart().strip_prefix(&self.puppet_prefix)?;
+
+        self.store
+            .state
+            .users
+            .by_ulid(ulid)
+            .map(|u| u.account.clone())
     }
 
     // ---- outbound projection (matrix.md §3–§9, the daemon half) ------------

@@ -122,6 +122,63 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
                     ));
                     axum::Json(json!({ "event_id": "$state" }))
                 },
+            )
+            .get(|| async {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    axum::Json(json!({ "errcode": "M_NOT_FOUND", "error": "no state" })),
+                )
+            }),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/:room/state/:kind",
+            put(
+                |State(hs): State<MockHs>,
+                 Path((room, kind)): Path<(String, String)>,
+                 axum::Json(body): axum::Json<Value>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("PUT state/{room}/{kind}/"),
+                        String::new(),
+                        body,
+                    ));
+                    axum::Json(json!({ "event_id": "$state" }))
+                },
+            )
+            .get(|| async {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    axum::Json(json!({ "errcode": "M_NOT_FOUND", "error": "no state" })),
+                )
+            }),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/:room/invite",
+            post(
+                |State(hs): State<MockHs>,
+                 Path(room): Path<String>,
+                 axum::Json(body): axum::Json<Value>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("POST invite/{room}"),
+                        String::new(),
+                        body,
+                    ));
+                    axum::Json(json!({}))
+                },
+            ),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/:room/unban",
+            post(
+                |State(hs): State<MockHs>,
+                 Path(room): Path<String>,
+                 axum::Json(body): axum::Json<Value>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("POST unban/{room}"),
+                        String::new(),
+                        body,
+                    ));
+                    axum::Json(json!({}))
+                },
             ),
         )
         .route(
@@ -192,6 +249,9 @@ async fn bridge_with(
         pending_layouts: Default::default(),
         pending_injections: Default::default(),
         injection_seq: 0,
+        pending_acts: Default::default(),
+        act_seq: 0,
+        flows: Default::default(),
     };
 
     (bridge, lines, calls)
@@ -808,4 +868,438 @@ async fn a_projected_namespace_becomes_a_space_and_bridges_both_directions() {
             .any(|l| l.contains("NS-MEMBER") && l.contains("carol@kde.org part")),
         "{sent:?}"
     );
+}
+
+#[tokio::test]
+async fn authority_translates_both_directions() {
+    // §10: capabilities here, power levels there — a WEFT grant becomes a
+    // level write; a Matrix PL change becomes the acting moderator's
+    // attributed GRANT/REVOKE, which weftd checks against *their* grants.
+    let (mut bridge, mut lines, calls) = bridge_with(BTreeMap::new()).await;
+    let ns_id = ulid::Ulid::new().to_string().to_lowercase();
+    let chan_id = ulid::Ulid::new().to_string().to_lowercase();
+    let channel = format!("#{ns_id}/{chan_id}");
+
+    // A projected namespace with one room, and ada known to the bridge.
+    deliver(
+        &mut bridge,
+        weft_proto::Event::NsMeta {
+            id: ns_id.parse().unwrap(),
+            vanity: "gaming".parse().unwrap(),
+            visibility: weft_proto::Visibility::Public,
+            owner: Some("ada".into()),
+            title: None,
+            description: None,
+            icon: None,
+            recovery_set: false,
+            recovery_pending: None,
+            categories: Vec::new(),
+            federation: false,
+            welcome: None,
+            origin: None,
+            provider_online: None,
+            authority: None,
+            settings_disabled: Vec::new(),
+            bridges: vec!["matrix".parse().unwrap()],
+        },
+        None,
+        None,
+    )
+    .await;
+    deliver(
+        &mut bridge,
+        weft_proto::Event::ChannelLayout {
+            channel: channel.parse().unwrap(),
+            category: None,
+            position: 0,
+            kind: weft_proto::ChannelKind::Text,
+            vanity: "general".into(),
+            origin: None,
+        },
+        None,
+        None,
+    )
+    .await;
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Policy {
+            channel: channel.parse().unwrap(),
+            policy: weft_proto::RetentionPolicy::Permanent,
+        },
+        None,
+        None,
+    )
+    .await;
+    join_ada(&mut bridge, &ns_id).await;
+    drain(&mut lines);
+    let room_id = format!("!weft_{chan_id}:test.example");
+
+    // WEFT → Matrix: a bare grant relay (weftd tells the fact, the level is
+    // ours): carol becomes a moderator → 50 in every room of the space.
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            as_user: None,
+            as_ulid: None,
+            command: weft_proto::Command::Grant {
+                subject: "carol@kde.org".into(),
+                scope: format!("ns:{ns_id}"),
+                caps: "delete-any".into(),
+                expiry: None,
+            },
+        })
+        .await;
+    {
+        let recorded = calls.lock().unwrap();
+        let pl_writes: Vec<_> = recorded
+            .iter()
+            .filter(|(what, _, _)| what.contains("m.room.power_levels"))
+            .collect();
+        assert_eq!(pl_writes.len(), 2, "the room and the space: {pl_writes:?}");
+        assert_eq!(pl_writes[0].2["users"]["@carol:kde.org"], 50);
+    }
+
+    // …and a local subject addresses their ULID-keyed puppet.
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            as_user: None,
+            as_ulid: Some(ADA_ULID.into()),
+            command: weft_proto::Command::Grant {
+                subject: "ada".into(),
+                scope: format!("ns:{ns_id}"),
+                caps: "ns-admin".into(),
+                expiry: None,
+            },
+        })
+        .await;
+    // (the relay carries the subject's ULID, so a grant for a local user the
+    // bridge has not seen post yet still addresses the right puppet)
+    {
+        let recorded = calls.lock().unwrap();
+        let last = recorded
+            .iter()
+            .rev()
+            .find(|(what, _, _)| what.contains("m.room.power_levels"))
+            .unwrap();
+        assert_eq!(
+            last.2["users"][format!("@weft_{ADA_ULID}:test.example")],
+            90
+        );
+    }
+
+    // Matrix → WEFT: a kde.org moderator raises carol — the diff becomes an
+    // attributed revoke-then-grant of the mapped tier.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.power_levels",
+            "room_id": room_id,
+            "event_id": "$pl1",
+            "sender": "@mod:kde.org",
+            "origin_server_ts": 1_722_000_000_000u64,
+            "content": { "users": { "@carol:kde.org": 50 } },
+        }))
+        .await;
+    let sent = drain(&mut lines);
+    assert!(
+        sent.iter()
+            .any(|l| l.contains("REVOKE carol@kde.org") && l.contains("as=mod@kde.org")),
+        "{sent:?}"
+    );
+    assert!(
+        sent.iter().any(|l| l.contains("GRANT carol@kde.org")
+            && l.contains("mute,ban,kick,delete-any")
+            && l.contains("as=mod@kde.org")),
+        "{sent:?}"
+    );
+
+    // The same map again: the baseline moved, so nothing changes — no lines.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.power_levels",
+            "room_id": room_id,
+            "event_id": "$pl2",
+            "sender": "@mod:kde.org",
+            "origin_server_ts": 1_722_000_000_001u64,
+            "content": { "users": { "@carol:kde.org": 50 } },
+        }))
+        .await;
+    assert!(
+        drain(&mut lines).is_empty(),
+        "an unchanged map must not re-grant"
+    );
+
+    // A Matrix mod bans ada's puppet: the attributed BAN, target = the bare
+    // local account — weftd checks the actor's grants, not us.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.member",
+            "room_id": room_id,
+            "event_id": "$ban1",
+            "sender": "@mod:kde.org",
+            "state_key": format!("@weft_{ADA_ULID}:test.example"),
+            "origin_server_ts": 1_722_000_000_002u64,
+            "content": { "membership": "ban", "reason": "spam" },
+        }))
+        .await;
+    let sent = drain(&mut lines);
+    assert!(
+        sent.iter().any(|l| l.contains("BAN")
+            && l.contains(&format!("ns:{ns_id} ada"))
+            && l.contains("as=mod@kde.org")),
+        "{sent:?}"
+    );
+}
+
+/// A projected namespace with one room, ada known — the substrate the
+/// management flows act on.
+async fn projected_fixture(
+    bridge: &mut Bridge,
+    lines: &mut tokio::sync::mpsc::Receiver<String>,
+) -> (String, String, String) {
+    let ns_id = ulid::Ulid::new().to_string().to_lowercase();
+    let chan_id = ulid::Ulid::new().to_string().to_lowercase();
+    let channel = format!("#{ns_id}/{chan_id}");
+
+    deliver(
+        bridge,
+        weft_proto::Event::NsMeta {
+            id: ns_id.parse().unwrap(),
+            vanity: "gaming".parse().unwrap(),
+            visibility: weft_proto::Visibility::Public,
+            owner: Some("ada".into()),
+            title: None,
+            description: None,
+            icon: None,
+            recovery_set: false,
+            recovery_pending: None,
+            categories: Vec::new(),
+            federation: false,
+            welcome: None,
+            origin: None,
+            provider_online: None,
+            authority: None,
+            settings_disabled: Vec::new(),
+            bridges: vec!["matrix".parse().unwrap()],
+        },
+        None,
+        None,
+    )
+    .await;
+    deliver(
+        bridge,
+        weft_proto::Event::ChannelLayout {
+            channel: channel.parse().unwrap(),
+            category: None,
+            position: 0,
+            kind: weft_proto::ChannelKind::Text,
+            vanity: "general".into(),
+            origin: None,
+        },
+        None,
+        None,
+    )
+    .await;
+    deliver(
+        bridge,
+        weft_proto::Event::Policy {
+            channel: channel.parse().unwrap(),
+            policy: weft_proto::RetentionPolicy::Permanent,
+        },
+        None,
+        None,
+    )
+    .await;
+    join_ada(bridge, &ns_id).await;
+    drain(lines);
+
+    (ns_id, channel, format!("!weft_{chan_id}:test.example"))
+}
+
+#[tokio::test]
+async fn management_flows_open_views_and_act_as_the_invoker() {
+    // Slice 11's SDUI half: a management action opens a view, and its submit
+    // issues **attributed** commands — the invoker's authority, not ours.
+    let (mut bridge, mut lines, calls) = bridge_with(BTreeMap::new()).await;
+    let (ns_id, channel, room_id) = projected_fixture(&mut bridge, &mut lines).await;
+
+    // Power Levels: the view lists the live map and offers the mapped tiers.
+    bridge
+        .on_invoke("v1", "power-levels", Some(&ns_id), Some("ada@test.example"))
+        .await;
+    let sent = drain(&mut lines);
+    let view = sent
+        .iter()
+        .find(|l| l.contains("PLUGIN-VIEW"))
+        .expect("a view opened");
+    assert!(view.contains("v1"), "{view}");
+
+    // Its submit writes the level on Matrix **and** mirrors the mapped caps as
+    // ada's own GRANT — labeled, so a refusal can be reverted (§10).
+    bridge
+        .on_step(
+            "v1",
+            None,
+            &[
+                ("mxid".to_string(), json!("@carol:kde.org")),
+                ("level".to_string(), json!("50")),
+            ]
+            .into_iter()
+            .collect(),
+            false,
+        )
+        .await;
+
+    {
+        let recorded = calls.lock().unwrap();
+        let pl = recorded
+            .iter()
+            .rev()
+            .find(|(what, _, _)| what.contains("m.room.power_levels"))
+            .expect("the Matrix write happened");
+        assert_eq!(pl.2["users"]["@carol:kde.org"], 50);
+    }
+    let sent = drain(&mut lines);
+    assert!(
+        sent.iter().any(|l| l.contains("GRANT carol@kde.org")
+            && l.contains("as=ada@test.example")
+            && l.contains("label=act-")),
+        "the grant is the invoker's, and labeled: {sent:?}"
+    );
+    // Terminal: the flow answered and closed.
+    assert!(sent.iter().any(|l| l.contains("PLUGIN-RESULT")), "{sent:?}");
+
+    // Invite: opens on a channel, and invites through the HS.
+    bridge
+        .on_invoke("v2", "invite", Some(&channel), Some("ada@test.example"))
+        .await;
+    drain(&mut lines);
+    bridge
+        .on_step(
+            "v2",
+            None,
+            &[("mxid".to_string(), json!("@dave:kde.org"))]
+                .into_iter()
+                .collect(),
+            false,
+        )
+        .await;
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(what, _, body)| what.starts_with("POST invite")
+                && body["user_id"] == "@dave:kde.org"),
+        "the invite reached the homeserver"
+    );
+
+    // An action on something unbridged refuses rather than half-acting.
+    bridge
+        .on_invoke(
+            "v3",
+            "power-levels",
+            Some("01hxnope"),
+            Some("ada@test.example"),
+        )
+        .await;
+    let sent = drain(&mut lines);
+    assert!(
+        sent.iter().any(|l| l.contains("PLUGIN-RESULT")),
+        "an unbridged target answers, never hangs: {sent:?}"
+    );
+
+    // Dismissing a flow is terminal and leaks nothing.
+    bridge
+        .on_invoke("v4", "moderate", Some("bob"), Some("ada@test.example"))
+        .await;
+    drain(&mut lines);
+    bridge.on_step("v4", None, &Default::default(), true).await;
+    assert!(bridge.flows.is_empty(), "a closed flow is forgotten");
+
+    let _ = room_id;
+}
+
+#[tokio::test]
+async fn a_refused_act_is_reverted_on_the_matrix_side() {
+    // §10's other half: the Matrix state changed before WEFT agreed, so a
+    // refusal must undo it — otherwise Matrix shows authority WEFT denied.
+    let (mut bridge, mut lines, calls) = bridge_with(BTreeMap::new()).await;
+    let (ns_id, _channel, room_id) = projected_fixture(&mut bridge, &mut lines).await;
+
+    // A kde.org moderator promotes carol; we translate (and park the undo).
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.power_levels",
+            "room_id": room_id,
+            "event_id": "$pl1",
+            "sender": "@mod:kde.org",
+            "origin_server_ts": 1_722_000_000_000u64,
+            "content": { "users": { "@carol:kde.org": 50 } },
+        }))
+        .await;
+    let sent = drain(&mut lines);
+    let label = sent
+        .iter()
+        .find_map(|l| l.split("label=").nth(1))
+        .map(|l| l.split([';', ' ']).next().unwrap().to_string())
+        .expect("the act was labeled");
+    let before = calls.lock().unwrap().len();
+
+    // weftd refuses: the moderator holds no `grant:mute` here.
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Err(weft_proto::ErrEvent {
+            code: weft_proto::ErrCode::CapRequired,
+            context: Some("grant:mute".into()),
+            text: "not permitted".into(),
+            retry_after: None,
+            max: None,
+        }),
+        Some(&label),
+        None,
+    )
+    .await;
+
+    // Snapshot rather than hold the guard: the assertions below straddle an
+    // await, and a std MutexGuard must not.
+    let after: Vec<(String, String, Value)> =
+        calls.lock().unwrap().iter().skip(before).cloned().collect();
+    // The level went back to its previous value (absent = removed)…
+    let reverted = after
+        .iter()
+        .find(|(what, _, _)| what.contains("m.room.power_levels"))
+        .expect("the level was reverted");
+    assert!(
+        reverted.2["users"].get("@carol:kde.org").is_none(),
+        "carol's level is gone again: {:?}",
+        reverted.2
+    );
+    // …and the actor was told why (§10: revert **and** notice).
+    let notice = after
+        .iter()
+        .find(|(what, _, _)| what.contains("m.room.message"))
+        .expect("a notice was posted");
+    assert_eq!(notice.2["msgtype"], "m.notice");
+    assert!(
+        notice.2["body"].as_str().unwrap().contains("not permitted"),
+        "{:?}",
+        notice.2
+    );
+
+    // The label is spent: a second ERR cannot re-revert.
+    let before = calls.lock().unwrap().len();
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Err(weft_proto::ErrEvent {
+            code: weft_proto::ErrCode::CapRequired,
+            context: None,
+            text: "again".into(),
+            retry_after: None,
+            max: None,
+        }),
+        Some(&label),
+        None,
+    )
+    .await;
+    assert_eq!(calls.lock().unwrap().len(), before, "one revert per act");
+    let _ = ns_id;
 }

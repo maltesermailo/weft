@@ -50,7 +50,13 @@ pub enum Surface {
     Settings,
     Global,
     ServerMenu,
+    /// A custom button in the **channel list** (next to the channels), for an
+    /// action that belongs to the list itself.
     ChannelList,
+    /// A page inside a **channel's settings** — where per-channel configuration
+    /// belongs, rather than as a button in the list (owner directive
+    /// 2026-08-06).
+    ChannelSettings,
     /// A page in the **operator admin panel** rather than the client — where a
     /// provider puts what only an operator should see or do (a bridge's own
     /// per-space ban list, a connection health page).

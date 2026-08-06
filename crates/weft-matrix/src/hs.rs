@@ -168,6 +168,30 @@ impl Hs {
         str_field(&v, "room_id")
     }
 
+    /// One state event's content, or `None` if absent (M_NOT_FOUND).
+    pub async fn get_state(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+    ) -> anyhow::Result<Option<Value>> {
+        match self
+            .call(
+                reqwest::Method::GET,
+                &state_path(room_id, event_type, state_key),
+                None,
+                None,
+                &[],
+            )
+            .await
+        {
+            Ok(v) => Ok(Some(v)),
+            // Absent state is a 404 (M_NOT_FOUND) — an answer, not a failure.
+            Err(e) if e.to_string().contains(" 404 ") => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Set a state event as the bot (`m.space.child`, power levels, …).
     pub async fn put_state(
         &self,
@@ -178,12 +202,7 @@ impl Hs {
     ) -> anyhow::Result<()> {
         self.call(
             reqwest::Method::PUT,
-            &format!(
-                "/_matrix/client/v3/rooms/{}/state/{}/{}",
-                enc(room_id),
-                enc(event_type),
-                enc(state_key)
-            ),
+            &state_path(room_id, event_type, state_key),
             Some(content),
             None,
             &[],
@@ -199,6 +218,39 @@ impl Hs {
             reqwest::Method::POST,
             &format!("/_matrix/client/v3/rooms/{}/leave", enc(room_id)),
             Some(json!({})),
+            as_user,
+            &[],
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Unban a user (the §10 revert of a refused ban).
+    pub async fn unban(&self, room_id: &str, mxid: &str) -> anyhow::Result<()> {
+        self.call(
+            reqwest::Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/unban", enc(room_id)),
+            Some(json!({ "user_id": mxid })),
+            None,
+            &[],
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Invite a user to a room, optionally as a puppet.
+    pub async fn invite(
+        &self,
+        room_id: &str,
+        mxid: &str,
+        as_user: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.call(
+            reqwest::Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/invite", enc(room_id)),
+            Some(json!({ "user_id": mxid })),
             as_user,
             &[],
         )
@@ -270,6 +322,22 @@ impl Hs {
         }
 
         Ok(v)
+    }
+}
+
+/// A state event's path. An empty state key omits its segment — a trailing
+/// slash is legal on real homeservers but trips strict routers.
+fn state_path(room_id: &str, event_type: &str, state_key: &str) -> String {
+    let base = format!(
+        "/_matrix/client/v3/rooms/{}/state/{}",
+        enc(room_id),
+        enc(event_type)
+    );
+
+    if state_key.is_empty() {
+        base
+    } else {
+        format!("{base}/{}", enc(state_key))
     }
 }
 

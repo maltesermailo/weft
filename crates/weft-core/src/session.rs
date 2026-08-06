@@ -1459,7 +1459,7 @@ impl<S: ControlStream> Session<S> {
                 ctx_ref,
                 params,
             } => {
-                self.on_plugin_invoke(label, plugin, action, ctx_ref, params)
+                self.on_plugin_invoke(label, account, plugin, action, ctx_ref, params)
                     .await
             }
             // M-plug-3 multi-step flows. `CLOSE` is terminal — the view is gone;

@@ -292,6 +292,21 @@ Inbound authority is the ingestion rule: the scope must name a namespace whose s
 pinned for. No capability chain is consulted — for a provider-managed namespace the **provider is
 the governing authority**, as an owner is for a native one.
 
+**Attributed authority (§10, 2026-08-06).** A `GRANT`/`REVOKE` carrying `@as=<user@domain>` is a
+*foreign moderator's* act, not the provider's: it runs the ordinary handler as `Actor::Foreign` and
+succeeds **iff WEFT granted that user** `grant:<cap>`. Same for `@as` `BAN`/`UNBAN`/`KICK`, and for
+`@as DELETE` of another author's message (needs `delete-any`). So a foreign admin holds exactly what
+some WEFT grant gave their handle — the bridge translates power, it does not confer it. The two
+inbound forms differ deliberately:
+
+| Form | Authority | Use |
+|---|---|---|
+| bare `GRANT` (no `@as`) | the provider as governing authority of **its own replicas** | mirroring the realm's own role/level state |
+| `@as=<user@domain> GRANT` | that user's WEFT grants (`Actor::Foreign`) | a foreign moderator's PL change, in a replica **or** a projected namespace |
+
+Outbound relays carry `ulid=` when the **subject** is one of our accounts, so an adapter can address
+their ULID-keyed puppet without waiting for them to post first.
+
 **Role assignment relays too.** A WEFT role is a labelled bundle that *materializes into grants*
 (`ROLE ASSIGN` records the membership, then grants the role's caps at that scope), so promoting
 someone to a role in a replica namespace emits the outbound `GRANT` above and raises their foreign

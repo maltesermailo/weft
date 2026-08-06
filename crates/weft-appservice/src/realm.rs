@@ -53,6 +53,12 @@ impl Realm {
         &self.network
     }
 
+    /// A [`crate::Ctx`] for answering a later step of an already-open flow —
+    /// the first step arrives with one, the rest are correlated by view-id.
+    pub fn ctx_for(&self, view_id: &str) -> crate::Ctx {
+        crate::Ctx::new(view_id.to_string(), self.out.clone())
+    }
+
     /// Is this user one of the connected network's, rather than one of ours?
     /// Membership statements cover both, so the distinction matters when
     /// deciding whether to mirror somebody into the foreign system.
@@ -301,6 +307,134 @@ impl Realm {
         self.send(line.serialize()?).await
     }
 
+    /// A **foreign moderator's** grant (§10, slice 11): `actor` — a user of a
+    /// foreign system whose power-level change this translates — wields the
+    /// authority, and weftd honors it iff WEFT granted *them* `grant:<cap>`.
+    /// Contrast [`Realm::grant`], which is the provider acting as the
+    /// governing authority of its own replicas.
+    pub async fn grant_as(
+        &self,
+        actor: &str,
+        subject: &str,
+        scope: &str,
+        caps: &str,
+        label: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.send_as(
+            actor,
+            label,
+            weft_proto::Command::Grant {
+                subject: subject.to_string(),
+                scope: scope.to_string(),
+                caps: caps.to_string(),
+                expiry: None,
+            },
+        )
+        .await
+    }
+
+    /// A foreign moderator's revoke — the demotion half of [`Realm::grant_as`].
+    pub async fn revoke_as(
+        &self,
+        actor: &str,
+        subject: &str,
+        scope: &str,
+        caps: Option<&str>,
+        label: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.send_as(
+            actor,
+            label,
+            weft_proto::Command::Revoke {
+                subject: subject.to_string(),
+                scope: scope.to_string(),
+                caps: caps.map(str::to_string),
+                epoch: None,
+            },
+        )
+        .await
+    }
+
+    /// A foreign moderator's ban (or unban) at a scope — checked against the
+    /// grants weftd holds for *them* (`Actor::Foreign`), like every attributed
+    /// moderation act.
+    ///
+    /// `label` opts into §3.5 correlation: weftd echoes it on the direct
+    /// response, **including `ERR`**, which is what lets an adapter revert the
+    /// foreign-side change when the act is refused (§10). Pass `None` for
+    /// fire-and-forget.
+    pub async fn ban_as(
+        &self,
+        actor: &str,
+        scope: &str,
+        account: &str,
+        reason: Option<&str>,
+        ban: bool,
+        label: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let cmd = if ban {
+            weft_proto::Command::Ban {
+                scope: scope.to_string(),
+                account: account.parse()?,
+                reason: reason.map(str::to_string),
+            }
+        } else {
+            weft_proto::Command::Unban {
+                scope: scope.to_string(),
+                account: account.parse()?,
+            }
+        };
+
+        self.send_as(actor, label, cmd).await
+    }
+
+    /// A foreign moderator's kick from one channel.
+    pub async fn kick_as(
+        &self,
+        actor: &str,
+        channel: &str,
+        account: &str,
+        reason: Option<&str>,
+        label: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.send_as(
+            actor,
+            label,
+            weft_proto::Command::Kick {
+                channel: channel.parse()?,
+                account: account.parse()?,
+                reason: reason.map(str::to_string),
+            },
+        )
+        .await
+    }
+
+    /// A foreign moderator's mute (or unmute) at a scope.
+    pub async fn mute_as(
+        &self,
+        actor: &str,
+        scope: &str,
+        account: &str,
+        reason: Option<&str>,
+        mute: bool,
+        label: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let cmd = if mute {
+            weft_proto::Command::Mute {
+                scope: scope.to_string(),
+                account: account.parse()?,
+                reason: reason.map(str::to_string),
+            }
+        } else {
+            weft_proto::Command::Unmute {
+                scope: scope.to_string(),
+                account: account.parse()?,
+            }
+        };
+
+        self.send_as(actor, label, cmd).await
+    }
+
     /// Grant capabilities in a namespace we govern — how a foreign moderator
     /// becomes one here. Translate the foreign model (a Matrix power level, a
     /// Discord role) into capabilities yourself: weftd has no notion of a level.
@@ -350,6 +484,22 @@ impl Realm {
         };
 
         self.send(weft_proto::Request::new(cmd).serialize()?).await
+    }
+
+    /// One attributed act, optionally labeled for §10 revert correlation.
+    async fn send_as(
+        &self,
+        actor: &str,
+        label: Option<&str>,
+        cmd: weft_proto::Command,
+    ) -> anyhow::Result<()> {
+        let mut line = match label {
+            Some(label) => weft_proto::Request::with_label(cmd, label).to_line()?,
+            None => weft_proto::Request::new(cmd).to_line()?,
+        };
+        line.tags.insert("as".to_string(), actor.to_string());
+
+        self.send(line.serialize()?).await
     }
 
     async fn send(&self, line: String) -> anyhow::Result<()> {

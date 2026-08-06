@@ -104,6 +104,7 @@ export type Surface =
   | "global"
   | "server-menu"
   | "channel-list"
+  | "channel-settings"
   | "admin";
 
 export type ActionDecl = {

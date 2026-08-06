@@ -70,6 +70,15 @@ CREATE TABLE IF NOT EXISTS matrix_projected_rooms (
     room_id TEXT NOT NULL
 );
 
+-- Last-seen m.room.power_levels `users` map per bridged room — the baseline
+-- an incoming PL event diffs against to find who actually changed.
+CREATE TABLE IF NOT EXISTS matrix_room_levels (
+    room_id TEXT NOT NULL,
+    mxid    TEXT NOT NULL,
+    level   BIGINT NOT NULL,
+    PRIMARY KEY (room_id, mxid)
+);
+
 -- Per-space bridging bans (bridge-session-protocol §11): weftd tells us once
 -- and keeps no record, so this table IS the enforcement across restarts.
 CREATE TABLE IF NOT EXISTS matrix_bans (

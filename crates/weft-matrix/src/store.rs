@@ -198,6 +198,16 @@ impl LocalUsers {
         self.by_ulid.get(ulid).map(|user| (ulid.as_str(), user))
     }
 
+    /// Resolve a puppet localpart back to its user — for Matrix events whose
+    /// *target* is one of our puppets (a mod banning a WEFT user). Linear:
+    /// the map holds this bridge's own audience, never the world.
+    pub fn by_localpart(&self, localpart: &str) -> Option<(&str, &LocalUser)> {
+        self.by_ulid
+            .iter()
+            .find(|(_, u)| u.localpart == localpart)
+            .map(|(ulid, u)| (ulid.as_str(), u))
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&String, &LocalUser)> {
         self.by_ulid.iter()
     }
@@ -249,6 +259,8 @@ pub struct State {
     /// A remote `m.reaction`'s event id → the reaction it made, so its
     /// redaction can become the matching `UNREACT`.
     pub reactions: BTreeMap<String, Reaction>,
+    /// Last-seen `m.room.power_levels` users map per room — the diff baseline.
+    pub room_levels: BTreeMap<String, BTreeMap<String, i64>>,
     pub sent_reactions: SentReactions,
     pub bans: BanList,
 }
@@ -475,6 +487,18 @@ impl Store {
             if let Some(p) = state.projections.get_mut(&ns_id) {
                 p.rooms.insert(row.get("channel"), row.get("room_id"));
             }
+        }
+
+        for row in sqlx::query("SELECT room_id, mxid, level FROM matrix_room_levels")
+            .fetch_all(pool)
+            .await?
+        {
+            let room: String = row.get("room_id");
+            state
+                .room_levels
+                .entry(room)
+                .or_default()
+                .insert(row.get("mxid"), row.get("level"));
         }
 
         let banned: Vec<String> = sqlx::query_scalar("SELECT ns_id FROM matrix_bans")
@@ -751,6 +775,35 @@ impl Store {
             )
             .await;
         }
+    }
+
+    /// Replace a room's power-level baseline (after translating a PL event).
+    pub async fn set_room_levels(&mut self, room_id: &str, users: BTreeMap<String, i64>) {
+        if let Some(pool) = self.pool.clone() {
+            let users = users.clone();
+            let room = room_id.to_string();
+            best_effort("set_room_levels", async move {
+                let mut tx = pool.begin().await?;
+                sqlx::query("DELETE FROM matrix_room_levels WHERE room_id = $1")
+                    .bind(&room)
+                    .execute(&mut *tx)
+                    .await?;
+                for (mxid, level) in &users {
+                    sqlx::query(
+                        "INSERT INTO matrix_room_levels (room_id, mxid, level) VALUES ($1, $2, $3)",
+                    )
+                    .bind(&room)
+                    .bind(mxid)
+                    .bind(level)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await.map_err(anyhow::Error::from)
+            })
+            .await;
+        }
+
+        self.state.room_levels.insert(room_id.to_string(), users);
     }
 
     /// Apply a `BRIDGING` instruction: the ban list update plus its row —

@@ -366,7 +366,7 @@ ctx.plugin_id   : string
 ctx.network     : string           # this server's network name
 ctx.actor_user  : string | null    # the invoking user (invoke/submit/action only; null in hook/timer)
 ctx.actor_roles : [string]         # advisory role/cap hints for the invoking user (for provider re-checks)
-ctx.surface     : string | null    # context-menu | slash | settings | global | server-menu | channel-list
+ctx.surface     : string | null    # context-menu | slash | settings | global | server-menu | channel-list | channel-settings | admin
 ctx.context_ref : ContextRef | null# the target the action was invoked on (§13.2)
 ctx.session     : string           # opaque session id (per-session panel/widget routing)
 ctx.view_id     : string | null    # present in on_submit/on_action
@@ -652,6 +652,7 @@ stays server-side.
 - `global` — command-palette entry and/or a side-panel launcher.
 - `server-menu` — an item in the **namespace/server header dropdown**. Always-visible; context = namespace.
 - `channel-list` — a button in the **channel-list sidebar**. Always-visible; context = namespace.
+- **`channel-settings`** — a page inside a *channel's* settings, for per-channel configuration (owner directive 2026-08-06: `channel-list` is for custom buttons next to the channels; configuration belongs in the settings pane).
 
 ### 13.2 Context types & `ctx-ref`
 | context | offered on | wire `ctx-ref` |
@@ -662,7 +663,8 @@ stays server-side.
 | `namespace` | a namespace | `ns:<id>` |
 | `none` | global/slash/settings, no target | *(omitted)* |
 
-`server-menu` / `channel-list` always invoke with `context = namespace` + a `ns:<id>` ctx-ref.
+`server-menu` / `channel-list` always invoke with `context = namespace` + a `ns:<id>` ctx-ref;
+`channel-settings` invokes with `context = channel` + the channel's canonical name.
 
 ### 13.3 Visibility predicate
 Optional client-side show/hide over an advisory context (`actor.is_admin`, `actor.roles`, `context.*`) — a
