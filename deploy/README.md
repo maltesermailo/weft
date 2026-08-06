@@ -146,11 +146,20 @@ That name becomes Synapse's `server_name` — the suffix of every MXID
 (`@weft_<ulid>:matrix.example.com`). It is **permanent**: it is baked into every
 event the server signs, so changing it later invalidates all of them.
 
-You can instead use your **apex** (`server_name: example.com`, prettier MXIDs)
-while the server still runs at `matrix.example.com` — but then federation
-delegation has to be served from the apex, which is weftd's Caddy block, not the
-homeserver's. The `Caddyfile` has the snippet. The subdomain form is simpler and
-is what the shipped files assume.
+**Which name — subdomain or apex?** Remote servers fetch
+`/.well-known/matrix/server` from `https://<server_name>/`, whatever that name is;
+there is no apex requirement in Matrix. The choice is only about how MXIDs read
+and therefore who serves the delegation:
+
+| `server_name`        | MXIDs                        | Delegation served by                      |
+| -------------------- | ---------------------------- | ----------------------------------------- |
+| `matrix.example.com` | `@weft_…:matrix.example.com` | Synapse itself (`serve_server_wellknown`) |
+| `example.com` (apex) | `@weft_…:example.com`        | Caddy, in **weftd's** site block          |
+
+The subdomain form is what the shipped files assume and needs no extra config. The
+apex form is worth it if you want Matrix identities to match your WEFT network
+name — `/.well-known/weft` and `/.well-known/matrix/server` are different paths, so
+they coexist on one host fine. The `Caddyfile` carries the apex snippet.
 
 ### 2. Edit the bridge's config
 

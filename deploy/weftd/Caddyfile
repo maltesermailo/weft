@@ -30,17 +30,31 @@ livekit.weft.example.com {
 # 443 instead of 8448 (so 8448 never has to be opened). That only works because
 # this block routes `https://<server_name>/` to Synapse.
 #
-# If you instead set `server_name` to your APEX domain (prettier MXIDs,
-# `@weft_…:weft.example.com`), the delegation has to be served from the apex —
-# i.e. from the weftd block above, not here:
+# ── If `server_name` is your APEX domain instead ──
+# `server_name: weft.example.com` gives MXIDs that match the WEFT network name
+# (`@weft_…:weft.example.com`) — but then the APEX is the authority remote servers
+# ask, and the apex serves weftd, not Synapse. So the delegation moves into the
+# weftd block above, and Synapse's own `serve_server_wellknown` becomes dead
+# weight (nothing queries it there).
+#
+# Both routes go in `handle` blocks: those are mutually exclusive and first-match,
+# so the well-known cannot be swallowed by the proxy. A bare `reverse_proxy`
+# alongside a `handle` would leave that to Caddy's directive ordering, which is
+# not something to bet federation on.
 #
 #     weft.example.com {
 #         handle /.well-known/matrix/* {
 #             header Content-Type application/json
 #             respond `{"m.server": "matrix.weft.example.com:443"}`
 #         }
-#         reverse_proxy weftd:8081
+#         handle {
+#             reverse_proxy weftd:8081
+#         }
 #     }
+#
+# The delegated target still needs this site block below (that is where remote
+# servers actually connect, and whose certificate they validate) — it just no
+# longer needs to serve the well-known.
 #
 # matrix.weft.example.com {
 # 	reverse_proxy synapse:8008

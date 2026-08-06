@@ -84,11 +84,13 @@ files provide all three:
 1. **`server_name` on a public name with real TLS.** Uncomment the matrix site
    block in `Caddyfile` (`matrix.weft.example { reverse_proxy synapse:8008 }`) and
    add the A record. `server_name` is the MXID suffix and is permanent.
-2. **Delegation to port 443.** `serve_server_wellknown: true` (already set) has
-   Synapse answer `/.well-known/matrix/server` itself, which works *because* (1)
-   routes `https://<server_name>/` to it. With an **apex** `server_name` it does
-   not — the apex serves weftd — so the delegation moves into Caddy's weftd block;
-   the `Caddyfile` carries that snippet.
+2. **Delegation to port 443**, served from `https://<server_name>/` — that host,
+   not the apex, unless the apex *is* the `server_name`. With the subdomain form
+   `serve_server_wellknown: true` (already set) has Synapse answer it, which works
+   *because* (1) routes `https://<server_name>/` to Synapse. With an apex
+   `server_name` it does not — the apex serves weftd — so the delegation moves
+   into Caddy's weftd block, in a `handle` block so the proxy cannot swallow it.
+   The `Caddyfile` carries that snippet.
 3. **Nothing on 8448.** Remote servers try the well-known first, then SRV, then
    `<server_name>:8448` as a last resort. Delegation short-circuits that to 443, so
    8448 stays closed. Verify with
