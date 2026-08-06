@@ -124,18 +124,23 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+      # NOT under /data: that is the state volume, and this file is a read-only
+      # bind mount. Nesting them means the chown below cannot touch it (`chown:
+      # Read-only file system`) and every path is one mount inside another for no
+      # reason. Every path *inside* homeserver.yaml is absolute, so Synapse does
+      # not care where the config itself lives.
+      SYNAPSE_CONFIG_PATH: /etc/synapse/homeserver.yaml
     # The image's start.py drops privileges to 991:991 via gosu, but with
     # SYNAPSE_CONFIG_PATH set ("run" mode) it does NOT chown the data directory —
     # it only does that in its `generate`/`migrate_config` modes. A named volume
     # starts out root-owned, so Synapse would fail on its first write:
     # `PermissionError: '/data/log.config'`. Chown before handing over, then exec
     # the normal entrypoint so the gosu drop still happens (Synapse never runs as
-    # root). Recursive so it also repairs anything a root-run left behind; after
-    # the first boot every file is already 991 and the walk is a no-op.
+    # root). Recursive so it also repairs anything an earlier root-run left
+    # behind; after first boot everything is 991 and the walk costs nothing.
     entrypoint: ["/bin/sh", "-c", "chown -R 991:991 /data && exec /start.py"]
     volumes:
-      - ./homeserver.yaml:/data/homeserver.yaml:ro
+      - ./homeserver.yaml:/etc/synapse/homeserver.yaml:ro
       - synapse_data:/data
       # Read-only: the registration is generated (see the `registration`
       # one-shot), never edited here.
