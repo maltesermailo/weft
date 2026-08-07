@@ -37,6 +37,15 @@ use crate::store::{Projection, Room, Space};
 pub const SPACE_MARKER: &str = "dev.weft.space";
 pub const DM_MARKER: &str = "dev.weft.dm";
 pub const BANS_KEY: &str = "dev.weft.bans";
+/// Account data listing the Spaces we *consume*, keyed by room id.
+///
+/// The marker for a consumed Space cannot live in the room's state: a state event
+/// needs power level 50 and the bot joins someone else's Space at 0, so the write is
+/// refused every time (`M_FORBIDDEN … user_level (0) < send_level (50)`). Account
+/// data is the bot's own and always writable, which is why the ban list lives there
+/// too. A *projected* Space is different — we created it and we are its admin — so
+/// that marker stays in room state, where it is visible and portable.
+pub const CONSUMED_KEY: &str = "dev.weft.consumed";
 /// The field carrying a WEFT msgid on an event we sent.
 pub const MSGID_FIELD: &str = "dev.weft.msgid";
 
@@ -88,6 +97,12 @@ impl Bridge {
             found.bans = bans;
         }
 
+        // The consumed-Space records first: they come from the bot's account data,
+        // not from room state, because a Space we merely joined will not let us write
+        // state into it. Without this pass every consumed Space classifies as an
+        // unclaimed child room, and its channels never find their namespace.
+        let consumed = self.consumed_spaces().await.unwrap_or_default();
+
         let rooms = self.hs.joined_rooms().await?;
         // Two passes: Spaces define the containers, so they must exist before a
         // child room can be filed under one.
@@ -102,6 +117,25 @@ impl Bridge {
                     continue;
                 }
             };
+
+            // A room named in the account-data record IS a consumed Space, whatever
+            // its state says.
+            if let Some(record) = consumed.get(&room_id) {
+                let (Some(ns_id), Some(uri)) = (record["ns"].as_str(), record["uri"].as_str())
+                else {
+                    continue;
+                };
+                self.store
+                    .save_space(Space {
+                        ns_id: ns_id.to_string(),
+                        room_id: room_id.clone(),
+                        uri: uri.to_string(),
+                        ..Space::default()
+                    })
+                    .await;
+                found.spaces += 1;
+                continue;
+            }
 
             match self.classify(&room_id, &state).await {
                 Some(Classified::Space) => found.spaces += 1,
@@ -126,6 +160,24 @@ impl Bridge {
         }
 
         Ok(found)
+    }
+
+    /// The Spaces we consume, from the bot's account data: `room_id → {ns, uri}`.
+    ///
+    /// The authoritative record for a consumed Space. Room state cannot hold it —
+    /// see [`CONSUMED_KEY`].
+    async fn consumed_spaces(
+        &self,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, serde_json::Value>> {
+        let bot = format!("@{}:{}", self.bot_localpart, self.domain);
+        let Some(data) = self.hs.account_data(&bot, CONSUMED_KEY).await? else {
+            return Ok(Default::default());
+        };
+
+        Ok(data["spaces"]
+            .as_object()
+            .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default())
     }
 
     /// The ban list from the bot's account data — the one thing Matrix does not

@@ -348,7 +348,7 @@ export type WeftEvent =
     }
   | { kind: "voice-desc"; channel: string; sdp: string }
   | { kind: "voice-cand"; channel: string; candidate: string }
-  | { kind: "error"; code: string; text: string }
+  | { kind: "error"; code: string; text: string; label: string | null }
   | { kind: "closed"; reason: string }
   | { kind: "raw"; line: string };
 
@@ -550,9 +550,14 @@ export function pluginClose(viewId: string) {
   return invoke("plugin_close", { viewId });
 }
 
-/// Auto-join every visible channel in a namespace (§6.2 NS JOIN).
-export function nsJoin(name: string) {
-  return invoke("ns_join", { name });
+/// Join a namespace: a local id/vanity (§6.2 NS JOIN), or a
+/// `<scheme>://<realm>/<space>` URI to consume a foreign one through a registered
+/// provider. weft-client-core routes on the target's shape.
+///
+/// `label` correlates a failure back to this attempt (§3.5) — pass one when you
+/// intend to explain what went wrong, since §8 codes alone can't (invariant 1).
+export function nsJoin(name: string, label?: string) {
+  return invoke("ns_join", { name, label: label ?? null });
 }
 
 /// Create a namespace — the root keypair is generated + stored on-device;

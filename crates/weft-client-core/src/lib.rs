@@ -558,6 +558,12 @@ pub enum ClientEvent {
     Error {
         code: String,
         text: String,
+        /// §3.5: the label of the request this answers, echoed on every direct
+        /// response *including* `ERR`. Carrying it is what lets the UI say what
+        /// failed — §8 codes are deliberately uninformative on their own
+        /// (invariant 1: one code for absent / private / gated), so context has to
+        /// come from the request the client itself sent.
+        label: Option<String>,
     },
     Closed {
         reason: String,
@@ -1213,6 +1219,7 @@ pub fn on_line<E: EventSink>(
         Event::Err(e) => sink.emit(ClientEvent::Error {
             code: e.code.to_string(),
             text: e.text,
+            label,
         }),
         // Federation (§11): bridge manifests + netblock notifications.
         Event::Manifest {
@@ -2326,7 +2333,12 @@ pub fn build_ns_recovery_cancel(ns: &str, signature: &str) -> Result<String, Str
 /// the same verb — so one function can't drift from the wire, and a caller doesn't
 /// have to know which kind of thing it holds. `matrix://teamnight.org/myspace` and
 /// `gaming` both belong here.
-pub fn build_ns_join(target: &str) -> Result<String, String> {
+///
+/// `label` correlates the failure back to this attempt (§3.5). Worth passing for a
+/// foreign join especially: it can fail for reasons the server will not distinguish,
+/// and the label is what lets the UI explain the possibilities instead of printing
+/// `NO-SUCH-TARGET`.
+pub fn build_ns_join_labeled(target: &str, label: Option<&str>) -> Result<String, String> {
     let command = if target.contains("://") {
         weft_proto::Command::NsJoinForeign {
             uri: target.parse().map_err(|_| {
@@ -2341,9 +2353,17 @@ pub fn build_ns_join(target: &str) -> Result<String, String> {
         }
     };
 
-    weft_proto::Request::new(command)
-        .serialize()
-        .map_err(|e| e.to_string())
+    let request = match label {
+        Some(label) => weft_proto::Request::with_label(command, label),
+        None => weft_proto::Request::new(command),
+    };
+
+    request.serialize().map_err(|e| e.to_string())
+}
+
+/// `NS JOIN` without correlation — for callers with nothing to say about a failure.
+pub fn build_ns_join(target: &str) -> Result<String, String> {
+    build_ns_join_labeled(target, None)
 }
 
 /// Decode a wire `b64(CBOR)` plugin payload into JSON for the frontend.

@@ -11,6 +11,7 @@
   import { fade } from "svelte/transition";
   import { getApp } from "$lib/ui/context";
   import * as weft from "$lib/transport/weft";
+  import { trackRealmJoin } from "$lib/sync/joinErrors";
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 
@@ -88,7 +89,11 @@
   // has resolved and asserted the space.
   function joinRealmSpace() {
     if (!realmUri) return;
-    weft.nsJoin(realmUri.uri).catch((e) => app.toast(String(e), "error"));
+    // Label it (§3.5) so a failure can be explained in terms of what was asked
+    // for: the server answers `NO-SUCH-TARGET` for every cause it refuses to
+    // distinguish, which is unreadable on its own.
+    const label = trackRealmJoin(realmUri);
+    weft.nsJoin(realmUri.uri, label).catch((e) => app.toast(String(e), "error"));
     onclose();
   }
   function connectForeign() {

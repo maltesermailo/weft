@@ -2528,3 +2528,84 @@ async fn the_console_answers_only_configured_admins() {
         Some(ADA_ULID.to_string())
     );
 }
+
+/// A Space that was EMPTY when it was consumed must still grow channels when rooms
+/// are added to it later. The regression this pins: `m.space.child` arrives in the
+/// *space* room, which is never a mapped channel, so the ingest path dropped it as
+/// noise — and the provisioning comment claiming "rooms added later arrive by
+/// re-assertion" described an intention nobody had implemented. An empty Space
+/// therefore stayed empty forever.
+#[tokio::test]
+async fn a_room_added_to_a_consumed_space_later_becomes_a_channel() {
+    // The space has no children at provision time.
+    let mut state = BTreeMap::new();
+    state.insert(
+        "!space:kde.org".to_string(),
+        vec![json!({ "type": "m.room.name", "state_key": "",
+                     "content": { "name": "Community" } })],
+    );
+    // The room exists on the homeserver, it just isn't in the space yet.
+    state.insert(
+        "!later:kde.org".to_string(),
+        vec![json!({ "type": "m.room.name", "state_key": "",
+                     "content": { "name": "Added Later" } })],
+    );
+
+    let (mut bridge, mut lines, _calls) = bridge_with(state).await;
+    assert!(bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap());
+
+    let after_provision = drain(&mut lines);
+    assert!(
+        !after_provision.iter().any(|l| l.contains("CHANNEL-LAYOUT")),
+        "an empty space asserts no channels: {after_provision:?}"
+    );
+
+    // Someone adds a room to the space.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.space.child",
+            "room_id": "!space:kde.org",
+            "state_key": "!later:kde.org",
+            "sender": "@admin:kde.org",
+            "content": { "via": ["kde.org"], "order": "a" },
+        }))
+        .await;
+
+    let sent = drain(&mut lines);
+    let chan_id = ident::stable_ulid("!later:kde.org");
+    let channel = sent
+        .iter()
+        .find(|l| l.contains("CHANNEL-LAYOUT"))
+        .unwrap_or_else(|| panic!("the added room becomes a channel: {sent:?}"));
+    assert!(channel.contains(&chan_id), "{channel}");
+
+    // And removing it again stops tracking it, so a re-add provisions cleanly
+    // rather than being mistaken for an already-bridged room.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.space.child",
+            "room_id": "!space:kde.org",
+            "state_key": "!later:kde.org",
+            "sender": "@admin:kde.org",
+            "content": {},
+        }))
+        .await;
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.space.child",
+            "room_id": "!space:kde.org",
+            "state_key": "!later:kde.org",
+            "sender": "@admin:kde.org",
+            "content": { "via": ["kde.org"], "order": "a" },
+        }))
+        .await;
+
+    let readded = drain(&mut lines);
+    assert!(
+        readded.iter().any(|l| l.contains("CHANNEL-LAYOUT")),
+        "a re-added room is provisioned again: {readded:?}"
+    );
+}

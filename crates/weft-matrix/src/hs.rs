@@ -603,18 +603,24 @@ impl Hs {
             req = req.json(&body);
         }
 
+        // Name the host we called, not just the path. Without it a failure reads as
+        // if the bridge had dialled whatever appears in the path — a remote server
+        // named inside an alias, say — when in fact every request here goes to our
+        // own companion homeserver, and it is the homeserver's federation that
+        // failed on our behalf.
         let res = req
             .send()
             .await
-            .with_context(|| format!("{method} {path}"))?;
+            .with_context(|| format!("{method} {}{path}", self.base))?;
         let status = res.status();
         let v: Value = res.json().await.unwrap_or(Value::Null);
 
         if !status.is_success() {
             bail!(
-                "{method} {path}: {status} {} {}",
+                "{method} {base}{path}: {status} {} {}",
                 v["errcode"].as_str().unwrap_or(""),
-                v["error"].as_str().unwrap_or("")
+                v["error"].as_str().unwrap_or(""),
+                base = self.base,
             );
         }
 

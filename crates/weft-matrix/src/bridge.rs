@@ -527,18 +527,28 @@ impl Bridge {
             .await?;
 
         // The space's children, in order-key order (design doc §6).
-        let mut children: Vec<(String, String)> = state
+        //
+        // `via` is carried through, not just filtered on: joining a room by ID is
+        // only possible with server hints (`?server_name=`), because an ID says
+        // nothing about who has the room. Dropping them worked for local rooms —
+        // our own homeserver already knows those — and failed every child of a
+        // *remote* space, which is the interesting case.
+        let mut children: Vec<(String, String, Vec<String>)> = state
             .iter()
             .filter(|ev| ev["type"] == "m.space.child")
-            .filter(|ev| {
-                ev["content"]["via"]
-                    .as_array()
-                    .is_some_and(|via| !via.is_empty())
-            })
             .filter_map(|ev| {
+                let via: Vec<String> = ev["content"]["via"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect();
+                if via.is_empty() {
+                    return None; // §space spec: a child without `via` is not joinable
+                }
+
                 let room = ev["state_key"].as_str()?.to_string();
                 let order = ev["content"]["order"].as_str().unwrap_or("").to_string();
-                Some((order, room))
+                Some((order, room, via))
             })
             .collect();
         children.sort();
@@ -550,9 +560,9 @@ impl Bridge {
             ..Space::default()
         };
 
-        for (position, (_, child)) in children.iter().enumerate() {
+        for (position, (_, child, via)) in children.iter().enumerate() {
             match self
-                .provision_room(&space_ref, &ns_id, child, position as i64)
+                .provision_room(&space_ref, &ns_id, child, via, position as i64)
                 .await
             {
                 Ok(Some((room, members))) => {
@@ -586,9 +596,24 @@ impl Bridge {
             let _ = self.realm.member(&ns_id, user, MemberAction::Join).await;
         }
 
-        // Mark the consumed Space too, so recovery can tell it from a
-        // projected one — the two are restored differently (its channels come
-        // from the realm's assertions, ours from weftd's structure).
+        // Record the consumed Space so recovery can tell it from a projected one —
+        // the two are restored differently (its channels come from the realm's
+        // assertions, ours from weftd's structure).
+        //
+        // In the bot's ACCOUNT DATA, not the room's state: a state event needs power
+        // level 50 and we join someone else's Space at 0, so the state write is
+        // refused every single time. Account data is ours and always writable, which
+        // is why the ban list lives there as well.
+        if let Err(e) = self
+            .record_consumed_space(&space_room, &ns_id, &space_uri)
+            .await
+        {
+            warn!(space_room, "could not record the consumed Space: {e:#}");
+        }
+
+        // Best effort on top: where we *do* have the power (a Space whose admin
+        // promoted the bot), the marker in room state is visible and portable. A
+        // refusal here is the normal case and says nothing, so it is not a warning.
         if let Err(e) = self
             .hs
             .put_state(
@@ -600,12 +625,138 @@ impl Bridge {
             .await
         {
             // Best-effort: a space we cannot mark still bridges, it just needs
-            // re-provisioning rather than recovery if the database is lost.
-            warn!(space_room, "could not mark the consumed Space: {e:#}");
+            // Expected without power level 50 — the account-data record above is
+            // what recovery actually reads.
+            debug!(
+                space_room,
+                "no room-state marker on the consumed Space: {e:#}"
+            );
         }
 
         self.store.save_space(space).await;
         Ok(true)
+    }
+
+    /// Add this Space to the bot's account-data list of consumed Spaces.
+    ///
+    /// Read-modify-write: account data is one document per key, so appending means
+    /// merging with what is there. Keyed by room id, which is what recovery walks.
+    async fn record_consumed_space(
+        &self,
+        space_room: &str,
+        ns_id: &str,
+        space_uri: &str,
+    ) -> anyhow::Result<()> {
+        let bot = format!("@{}:{}", self.bot_localpart, self.domain);
+        let mut spaces = self
+            .hs
+            .account_data(&bot, crate::recover::CONSUMED_KEY)
+            .await?
+            .and_then(|d| d.get("spaces").cloned())
+            .and_then(|s| s.as_object().cloned())
+            .unwrap_or_default();
+
+        spaces.insert(
+            space_room.to_string(),
+            json!({ "ns": ns_id, "uri": space_uri }),
+        );
+
+        self.hs
+            .set_account_data(
+                &bot,
+                crate::recover::CONSUMED_KEY,
+                json!({ "spaces": spaces }),
+            )
+            .await
+    }
+
+    /// A child added to (or removed from) a consumed Space, live.
+    ///
+    /// `m.space.child` with a non-empty `via` adds; empty content removes (the
+    /// Matrix spec's tombstone for a child). The added room is provisioned exactly
+    /// as it would have been during `provision`, so a Space that was empty when it
+    /// was consumed still grows channels.
+    async fn on_space_child(&mut self, space_room: &str, ev: &Value) {
+        let Some(space) = self
+            .store
+            .state
+            .spaces
+            .values()
+            .find(|s| s.room_id == space_room)
+            .cloned()
+        else {
+            return; // not a space we consume
+        };
+
+        // Same gate the rest of the ingest path applies.
+        if self.store.state.bans.is_banned(&space.ns_id) {
+            return;
+        }
+
+        let Some(child) = ev["state_key"].as_str() else {
+            return;
+        };
+        let via: Vec<String> = ev["content"]["via"]
+            .as_array()
+            .map(|via| {
+                via.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut space = space;
+
+        if via.is_empty() {
+            // Removed from the space. Stop tracking it; the channel itself is
+            // weftd's to retire, and a re-add re-provisions cleanly.
+            if space.rooms.remove(child).is_some() {
+                info!(child, ns = %space.ns_id, "child removed from consumed Space");
+                self.store.save_space(space).await;
+            }
+            return;
+        }
+
+        if space.rooms.contains_key(child) {
+            return; // already bridged — an order change, or a repeated statement
+        }
+
+        let Some(space_ref) = ident::SpaceRef::parse(&space.uri) else {
+            return;
+        };
+        // Appended: the child's `order` orders it among siblings, but a channel's
+        // position only has to be stable and distinct, and re-asserting every
+        // sibling to make room would be a lot of churn for a cosmetic ordering.
+        let position = space.rooms.len() as i64;
+
+        match self
+            .provision_room(&space_ref, &space.ns_id.clone(), child, &via, position)
+            .await
+        {
+            Ok(Some((room, members))) => {
+                for member in members {
+                    space
+                        .member_rooms
+                        .entry(member)
+                        .or_default()
+                        .insert(child.to_string());
+                }
+                space.rooms.insert(child.to_string(), room);
+
+                let ns_id = space.ns_id.clone();
+                let users: Vec<String> = space.member_rooms.keys().cloned().collect();
+                self.store.save_space(space).await;
+
+                for user in users {
+                    let _ = self.realm.member(&ns_id, &user, MemberAction::Join).await;
+                }
+
+                info!(child, ns = %ns_id, "child added to consumed Space — bridged");
+            }
+            // Encrypted or unjoinable: absent, not fatal (locked decision 7).
+            Ok(None) => {}
+            Err(e) => warn!(child, "provisioning an added child failed: {e:#}"),
+        }
     }
 
     /// Join + assert one child room. `None` = deliberately not bridgeable.
@@ -614,9 +765,12 @@ impl Bridge {
         space_ref: &ident::SpaceRef,
         ns_id: &str,
         room_id: &str,
+        // The `via` servers from the space's `m.space.child` event. Required to join
+        // by room ID at all when the room is not on our own homeserver.
+        via: &[String],
         position: i64,
     ) -> anyhow::Result<Option<(Room, BTreeSet<String>)>> {
-        self.hs.join(room_id, &[], None).await?;
+        self.hs.join(room_id, via, None).await?;
         let state = self.hs.state(room_id).await?;
 
         // Locked decision 7: an encrypted room gets no channel, ever.
@@ -739,6 +893,16 @@ impl Bridge {
         {
             self.on_projected_matrix_event(&ev, &room_id, &channel, &ns_id, &weft_sender)
                 .await;
+            return;
+        }
+
+        // A `m.space.child` arrives in the SPACE room, which is never a mapped
+        // channel — so it has to be handled before the lookup below drops it as
+        // noise. This is how a room added to a consumed Space after provisioning
+        // becomes a channel; without it the Space stays as it was at provision time,
+        // which for an empty Space means forever.
+        if ev["type"] == "m.space.child" {
+            self.on_space_child(&room_id, &ev).await;
             return;
         }
 

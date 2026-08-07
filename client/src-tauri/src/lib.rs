@@ -211,8 +211,8 @@ fn plugin_close(conn: State<'_, Conn>, view_id: String) -> Result<(), String> {
 
 /// Join every visible channel in a namespace (§6.2 `NS JOIN`).
 #[tauri::command]
-fn ns_join(conn: State<'_, Conn>, name: String) -> Result<(), String> {
-    conn.send(weft::build_ns_join(&name)?)
+fn ns_join(conn: State<'_, Conn>, name: String, label: Option<String>) -> Result<(), String> {
+    conn.send(weft::build_ns_join_labeled(&name, label.as_deref())?)
 }
 
 /// Create a namespace (§6.2). Generates the root keypair locally (secret stays
