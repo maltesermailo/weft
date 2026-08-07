@@ -38,10 +38,34 @@ stream, and §4 lines ride inside it exactly as they do on QUIC stream 0.
   changes; the grammar, verbs, events, labels and error registry are untouched. One
   quinn endpoint can advertise both `h3` and `weft/1` and branch on the negotiated
   ALPN after the handshake, so it needs no second port.
-- **Gain:** browsers get QUIC without WebSocket's TCP head-of-line blocking, and —
-  see "stated precisely" below — it is the *only* thing that would let an ordinary
-  HTTP/3 proxy front the control plane, which is the one real operational complaint
-  against the current design.
+- **Gain, browsers:** QUIC without WebSocket's TCP head-of-line blocking, and — see
+  "stated precisely" below — it is the *only* thing that would let an ordinary HTTP/3
+  proxy front the control plane, which is the one real operational complaint against
+  the current design.
+- **Gain, everything that dials in** (App Services, bridges, federation peers, the
+  TUI), which is easy to overlook because there is no browser involved:
+  - *Egress traversal.* Today a provider dials `<host>:4433/udp` with ALPN
+    `weft/1` — a non-standard UDP port carrying an unrecognised ALPN, which is
+    exactly what a PaaS, a corporate network, or UDP-filtering egress drops. The
+    same session over WebTransport is `443/h3`, indistinguishable from web traffic.
+    For an ecosystem where you do not control where a provider runs, that is the
+    difference between connecting and not.
+  - *Port collapse.* Control plane, media plane, `/.well-known/weft` and the web
+    client on one port, one certificate, one firewall rule — and a provider's
+    `endpoint` and `media_url` become the same host with no odd port. Available
+    today for a standalone weftd (`[listen] https` + `[acme]`, which it already
+    supports); behind Caddy it waits on the passthrough PR, since Caddy owns 443.
+
+  Both are properties of the **transport**, so they arrive for anything that adopts
+  the new `ControlStream` — no protocol or spec change. Worth stating explicitly
+  because it is tempting to conclude the opposite: that appservices should become
+  HTTP *request/response*. That is a different proposal and a bad one — it inverts
+  the connection direction, so every provider then needs to be reachable, with a
+  URL, a certificate, an inbound port and a second token. The Matrix side of
+  `weft-matrix` is the worked example: `as_url`, the published port, the Caddy
+  block, and five values hand-copied into `appservices/weft-matrix.yaml` all exist
+  because Synapse pushes to a listening appservice. WebTransport gives the
+  standards-compatible plumbing while keeping the outbound dial.
 - **Browser support is no longer the catch.** WebTransport reached **Baseline in
   March 2026** when Safari 26.4 shipped: Chrome 97+, Edge 98+, Firefox 114+, Safari
   26.4+ on macOS and iOS. So it is not condemned to be a permanent third option —
