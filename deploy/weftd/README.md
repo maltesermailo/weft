@@ -103,9 +103,11 @@ docker compose pull weftd && docker compose up -d
 - **Caddy** terminates public TLS (443) and reverse-proxies `weft.example.com` →
   `weftd:8081` (the SPA, same-origin `/ws`, `/.well-known/weft`, `/media`, all plain
   HTTP behind Caddy) and `livekit.example.com` → `livekit:7880`, by service name on
-  this project's network. It auto-obtains and renews the certificates. Its optional
-  `matrix.…` block is the exception: that upstream is in another project, so it goes
-  through the host (`host.docker.internal:8008`).
+  this project's network. It auto-obtains and renews the certificates. A site block
+  for the Matrix bridge's homeserver is the exception — that upstream is in another
+  project, reached through the host (`localhost:8008` from the host,
+  `host.docker.internal:8008` from inside the container). See
+  [`../weft-matrix/README.md`](../weft-matrix/README.md).
 - **QUIC** (weftd `4433/udp`, for desktop/native clients) can't be proxied — a
   reverse proxy can't terminate it. weftd reads Caddy's certificate from the shared
   `caddy_data` volume, mounted read-only at `/data`, via the `[tls]` block. That

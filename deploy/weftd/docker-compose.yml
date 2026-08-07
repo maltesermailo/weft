@@ -101,9 +101,10 @@ services:
       # HTTP/3.
       - "443:443/udp"
     extra_hosts:
-      # Only for the optional `matrix.…` site block: the Matrix bridge is a separate
-      # Compose project, so Caddy reaches its published port through the host.
-      # weftd and livekit are in here and resolve by service name.
+      # So a hand-added site block can reach a service in ANOTHER Compose project
+      # through the host — the Matrix bridge's homeserver being the case that comes
+      # up (../weft-matrix/README.md). weftd and livekit are in here and resolve by
+      # service name, needing none of this.
       - "host.docker.internal:host-gateway"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro

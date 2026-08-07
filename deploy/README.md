@@ -212,9 +212,13 @@ example.com {
 }
 
 matrix.example.com {
-	reverse_proxy synapse:8008
+	reverse_proxy localhost:8008        # containerised: host.docker.internal:8008
 }
 ```
+
+(`localhost:8008` is the port the bridge stack publishes on the host — the two
+stacks share no network. The bundled Caddy is containerised, so there the host is
+`host.docker.internal`, which its `extra_hosts` already maps.)
 
 Both apex routes are `handle` blocks deliberately: those are mutually exclusive and
 first-match, so the well-known cannot be swallowed by the catch-all. A bare
@@ -251,8 +255,8 @@ names the apex and remote servers will then send federation traffic there:
 
 ```caddyfile
 example.com {
-	handle /.well-known/matrix/* { reverse_proxy synapse:8008 }
-	handle /_matrix/* { reverse_proxy synapse:8008 }
+	handle /.well-known/matrix/* { reverse_proxy localhost:8008 }
+	handle /_matrix/* { reverse_proxy localhost:8008 }
 	handle { redir https://weft.example.com{uri} }
 }
 ```
@@ -286,10 +290,17 @@ Everything below is in `deploy/weft-matrix/`, except the last item.
   same reason).
 - **`initdb/10-matrix.sql`** — the same password once more; it creates Synapse's
   role.
-- **`../weftd/Caddyfile`** — uncomment the `matrix.…` block (and the apex one, on
-  the delegated shape). It points at `host.docker.internal:8008`, because Caddy lives
-  in the weftd stack and reaches this one through the host. This is what makes
-  federation work over **443**, so port 8448 never has to be opened.
+- **`../weftd/Caddyfile`** — add a site block for the homeserver. This stack
+  publishes it on the host, so the upstream is **`localhost:8008`**; the bundled Caddy
+  is containerised, where the host is `host.docker.internal:8008` (`extra_hosts`
+  already maps it). This is what makes federation work over **443**, so port 8448
+  never has to be opened.
+
+  ```caddyfile
+  matrix.example.com {
+  	reverse_proxy localhost:8008        # containerised: host.docker.internal:8008
+  }
+  ```
 
 ### 3. Create the adapter key
 
@@ -354,7 +365,7 @@ Caddy:
 
 ```caddyfile
 matrix.example.com:8448 {
-	reverse_proxy host.docker.internal:8008
+	reverse_proxy localhost:8008        # containerised: host.docker.internal:8008
 }
 ```
 

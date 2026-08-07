@@ -102,9 +102,20 @@ Federation is not optional in practice — remote homeservers reaching projected
 Spaces is the point of outbound projection. It needs three things, and the shipped
 files provide all three:
 
-1. **A public name with real TLS in front of Synapse.** Uncomment the matrix site
-   block in `Caddyfile` (`matrix.weft.example { reverse_proxy synapse:8008 }`) and
-   add the A record.
+1. **A public name with real TLS in front of Synapse.** This stack publishes the
+   homeserver on the host (`MATRIX_PORT`, default 8008), so any reverse proxy points
+   at **`localhost:8008`** — add the A record and a site block. With the bundled
+   Caddy in `../weftd/`, which is containerised, the host is
+   `host.docker.internal:8008` and `extra_hosts` already maps the name:
+
+   ```caddyfile
+   matrix.weft.example {
+   	reverse_proxy localhost:8008        # containerised: host.docker.internal:8008
+   }
+   ```
+
+   Deliberately not shipped commented-out in that Caddyfile: the upstream lives in
+   *this* stack, so the block belongs in the documentation for it.
 2. **`/.well-known/matrix/server`, served from `https://<server_name>/`** — that
    host and no other, because `server_name` is the authority in every MXID. Which
    host that is, is your choice, and it is the whole difference between the two
@@ -127,9 +138,9 @@ files provide all three:
    `<server_name>:8448` as a last resort. Delegation short-circuits that to 443, so
    8448 stays closed. Verify with
    `curl https://<server_name>/.well-known/matrix/server` — the answer must carry
-   `:443`. If it doesn't, either publish `matrix.weft.example:8448` through Caddy
-   (and open the port) or author the file in Caddy with the port spelled out.
-   `deploy/README.md` step 7 has both.
+   `:443`. If it doesn't, either publish `matrix.weft.example:8448` through the proxy
+   (and open the port) or author the file in the proxy with the port spelled out.
+   `../README.md` step 6 has both.
 
 Then run `server_name` through <https://federationtester.matrix.org>, which checks
 DNS, delegation, the certificate and the signing key the way a remote homeserver
