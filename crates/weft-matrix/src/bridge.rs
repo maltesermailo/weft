@@ -21,6 +21,7 @@ use weft_proto::{Command, Event, MemberAction, ToastKind};
 use crate::asapi::Txn;
 use crate::hs::Hs;
 use crate::ident;
+use crate::pending::PendingByLabel;
 use crate::store::{EventRef, Room, Space, Store};
 
 pub struct Bridge {
@@ -34,25 +35,27 @@ pub struct Bridge {
     /// Projected structure buffered between `CHANNEL-LAYOUT` and its `POLICY`
     /// (the §3 rules need the policy, which travels as a separate event).
     pub pending_layouts: std::collections::HashMap<String, PendingLayout>,
-    /// Injections awaiting their labeled echo (§3.5): label → the Matrix
-    /// event + room the minted id must link back to.
-    pub pending_injections: std::collections::HashMap<String, EventRef>,
-    /// Injection labels, minted locally and meaningless beyond correlation.
-    pub injection_seq: u64,
-    /// §10 revert: attributed acts awaiting weftd's verdict, by label. An
-    /// `ERR` echoing the label means WEFT refused — undo the foreign-side
-    /// change and notice the actor.
-    pub pending_acts: std::collections::HashMap<String, PendingAct>,
-    pub act_seq: u64,
+    /// Injections awaiting their labeled echo (§3.5): the Matrix event + room
+    /// the minted id must link back to.
+    pub pending_injections: PendingByLabel<EventRef>,
+    /// §10 revert: attributed acts awaiting weftd's verdict. An `ERR` echoing
+    /// the label means WEFT refused — undo the foreign-side change and notice
+    /// the actor.
+    pub pending_acts: PendingByLabel<PendingAct>,
     /// Open management flows by view-id: which action, on what, for whom.
     pub flows: std::collections::HashMap<String, Flow>,
     /// weftd's HTTP media plane, when configured. `None` ⇒ media is not
     /// bridged, and the daemon says so once rather than per message.
     pub weft_media: Option<crate::media::WeftMedia>,
     /// Blobs downloaded from Matrix and waiting for their upload grant
-    /// (`STREAM ACCEPT`), by the label the offer carried.
-    pub pending_uploads: std::collections::HashMap<String, PendingUpload>,
-    pub upload_seq: u64,
+    /// (`STREAM ACCEPT`).
+    pub pending_uploads: PendingByLabel<PendingUpload>,
+    /// A monotonic suffix for DM transaction ids. Deliberately *not* one of the
+    /// registries above: it parks nothing and resolves nothing, it only has to
+    /// keep two DMs in the same second distinct (a DM carries no msgid to key
+    /// on). It used to share the upload counter, which coupled two unrelated
+    /// sequences for no reason.
+    pub dm_txn: u64,
     /// MXIDs allowed to drive the `!weft` console. Empty ⇒ disabled.
     pub admins: Vec<String>,
     /// weftd's local-membership statement, accumulating between its `BATCH
@@ -1212,7 +1215,7 @@ impl Bridge {
                         .await
                     {
                         warn!(event_id, "projected edit injection failed: {e:#}");
-                        self.pending_injections.remove(&label);
+                        self.pending_injections.forget(&label);
                     }
                     return;
                 }
@@ -1227,7 +1230,7 @@ impl Bridge {
                     .await
                 {
                     warn!(event_id, "projected injection failed: {e:#}");
-                    self.pending_injections.remove(&label);
+                    self.pending_injections.forget(&label);
                 }
             }
             // Reactions and redactions carry no minted id anywhere, so the
@@ -1331,18 +1334,10 @@ impl Bridge {
 
     /// A fresh injection label, parked with what its echo must link.
     fn mint_injection_label(&mut self, event_id: &str, room_id: &str) -> String {
-        self.injection_seq += 1;
-        let label = format!("inj-{}", self.injection_seq);
-
-        self.pending_injections.insert(
-            label.clone(),
-            EventRef {
-                room: room_id.to_string(),
-                event: event_id.to_string(),
-            },
-        );
-
-        label
+        self.pending_injections.park(EventRef {
+            room: room_id.to_string(),
+            event: event_id.to_string(),
+        })
     }
 
     /// §8 membership mapping: [`Space::member_joined`]/[`Space::member_left`]
@@ -2095,8 +2090,8 @@ impl Bridge {
     /// A monotonic suffix so two DMs in the same second get distinct txn ids
     /// (a DM carries no msgid we could key on — weftd minted it locally).
     fn next_dm_txn(&mut self) -> u64 {
-        self.upload_seq += 1;
-        self.upload_seq
+        self.dm_txn += 1;
+        self.dm_txn
     }
 
     // ---- media (matrix.md §12) ---------------------------------------------
@@ -2130,27 +2125,21 @@ impl Bridge {
             mime.to_string()
         };
 
-        self.upload_seq += 1;
-        let label = format!("up-{}", self.upload_seq);
         let bytes_len = bytes.len() as u64;
-
-        self.pending_uploads.insert(
-            label.clone(),
-            PendingUpload {
-                bytes,
-                mime: mime.clone(),
-                sender: parts.sender,
-                channel: parts.channel,
-                body: parts.body,
-                msgid: parts.msgid,
-                event_id: parts.event_id,
-                room_id: parts.room_id,
-            },
-        );
+        let label = self.pending_uploads.park(PendingUpload {
+            bytes,
+            mime: mime.clone(),
+            sender: parts.sender,
+            channel: parts.channel,
+            body: parts.body,
+            msgid: parts.msgid,
+            event_id: parts.event_id,
+            room_id: parts.room_id,
+        });
 
         if let Err(e) = self.realm.offer_media(&mime, bytes_len, &label).await {
             warn!("media offer failed: {e:#}");
-            self.pending_uploads.remove(&label);
+            self.pending_uploads.forget(&label);
         }
     }
 
@@ -2158,7 +2147,7 @@ impl Bridge {
     /// them. A failure at either step drops the whole message rather than
     /// leaving one that points at nothing.
     async fn finish_attachment_upload(&mut self, label: &str, token: &str) {
-        let Some(pending) = self.pending_uploads.remove(label) else {
+        let Some(pending) = self.pending_uploads.take(label) else {
             return; // not ours (weftd labels its answer with our offer's label)
         };
         let Some(media) = self.weft_media.clone() else {
@@ -3197,11 +3186,7 @@ impl Bridge {
 
     /// Park an undo and return its correlation label.
     fn park_act(&mut self, act: PendingAct) -> String {
-        self.act_seq += 1;
-        let label = format!("act-{}", self.act_seq);
-        self.pending_acts.insert(label.clone(), act);
-
-        label
+        self.pending_acts.park(act)
     }
 
     /// §10's *revert + notice*: WEFT refused an attributed act, so undo the
@@ -3209,7 +3194,7 @@ impl Bridge {
     /// Without this, the two sides disagree permanently — Matrix would show a
     /// moderator power that WEFT never granted.
     async fn revert_act(&mut self, label: &str, why: &str) {
-        let Some(act) = self.pending_acts.remove(label) else {
+        let Some(act) = self.pending_acts.take(label) else {
             return; // not ours, or already resolved
         };
 
@@ -3475,7 +3460,7 @@ impl Bridge {
     /// the home-minted id to the Matrix event it came from. Returns whether
     /// the label was ours — if so the event is the ack, never relay fodder.
     async fn link_injection_echo(&mut self, label: &str, msgid: &str) -> bool {
-        let Some(at) = self.pending_injections.remove(label) else {
+        let Some(at) = self.pending_injections.take(label) else {
             return false;
         };
 

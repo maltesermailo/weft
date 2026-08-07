@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use tracing::{error, info, warn};
-use weft_matrix::{asapi, bridge::Bridge, config::Config, hs::Hs, store::Store};
+use weft_matrix::{
+    asapi, bridge::Bridge, config::Config, hs::Hs, pending::PendingByLabel, store::Store,
+};
 
 /// What this invocation is for.
 enum Mode {
@@ -149,18 +151,16 @@ async fn session(
         puppet_prefix: cfg.matrix.puppet_prefix.clone(),
         bot_localpart: cfg.matrix.bot.clone(),
         pending_layouts: Default::default(),
-        pending_injections: Default::default(),
-        injection_seq: 0,
-        pending_acts: Default::default(),
-        act_seq: 0,
+        pending_injections: PendingByLabel::new("inj"),
+        pending_acts: PendingByLabel::new("act"),
         flows: Default::default(),
         weft_media: cfg
             .weft
             .media_url
             .as_deref()
             .map(weft_matrix::media::WeftMedia::new),
-        pending_uploads: Default::default(),
-        upload_seq: 0,
+        pending_uploads: PendingByLabel::new("up"),
+        dm_txn: 0,
         admins: cfg.matrix.admins.clone(),
         local_roster: Default::default(),
     };

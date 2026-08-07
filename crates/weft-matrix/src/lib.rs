@@ -21,5 +21,6 @@ pub mod hs;
 pub mod ident;
 pub mod levels;
 pub mod media;
+pub mod pending;
 pub mod recover;
 pub mod store;

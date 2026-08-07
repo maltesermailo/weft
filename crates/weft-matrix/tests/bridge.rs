@@ -13,6 +13,7 @@ use weft_appservice::Realm;
 use weft_matrix::bridge::Bridge;
 use weft_matrix::hs::Hs;
 use weft_matrix::ident;
+use weft_matrix::pending::PendingByLabel;
 use weft_matrix::store::Store;
 
 /// Every write the daemon made to the "homeserver": (method+path, query, body).
@@ -442,14 +443,12 @@ async fn bridge_with(
         puppet_prefix: "weft_".into(),
         bot_localpart: "weftbot".into(),
         pending_layouts: Default::default(),
-        pending_injections: Default::default(),
-        injection_seq: 0,
-        pending_acts: Default::default(),
-        act_seq: 0,
+        pending_injections: PendingByLabel::new("inj"),
+        pending_acts: PendingByLabel::new("act"),
         flows: Default::default(),
         weft_media: Some(weft_matrix::media::WeftMedia::new(&url)),
-        pending_uploads: Default::default(),
-        upload_seq: 0,
+        pending_uploads: PendingByLabel::new("up"),
+        dm_txn: 0,
         admins: vec!["@boss:test.example".into()],
         local_roster: Default::default(),
     };
