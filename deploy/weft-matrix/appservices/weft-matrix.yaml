@@ -20,6 +20,9 @@
 # `weft-matrix generate-registration /etc/weft/weft-matrix.toml` prints this file
 # from the TOML, if you would rather derive it after a change than hand-edit it.
 #
+# This whole directory is mounted read-only at /appservices, so a second
+# registration only needs listing in homeserver.yaml's `app_service_config_files`.
+#
 # Re-run `docker compose up -d --force-recreate synapse` after editing: Synapse
 # reads appservice registrations at startup only.
 

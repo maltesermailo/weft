@@ -213,7 +213,8 @@ admins    = ["@you:matrix.example.com"]   # optional: the `!weft` console
 Anyone holding `hs_token` can inject events as any Matrix user, so change both.
 Leave `[daemon] database_url` alone — it already reads `${POSTGRES_PASSWORD}`.
 
-**`weft-matrix.yaml`** — the appservice registration Synapse loads:
+**`appservices/weft-matrix.yaml`** — the registration Synapse loads. Everything in
+that directory is mounted read-only into the homeserver:
 
 ```yaml
 id: weft-matrix

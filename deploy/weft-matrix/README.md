@@ -12,7 +12,7 @@ weftd needs its certificate for QUIC). It reaches weftd over weftd's **public na
 appservice would — no shared Docker network, no ordering between the two `up`s, and
 tearing this down cannot touch weftd's data. The bridge and Synapse *do* share this
 project's network, because Synapse has to call the bridge back (`url:` in
-`weft-matrix.yaml`).
+`appservices/weft-matrix.yaml`).
 
 **Synapse rather than conduwuit**, for one reason: appservice registration has to be
 *declarative*. Synapse reads it from `app_service_config_files`; conduwuit registers

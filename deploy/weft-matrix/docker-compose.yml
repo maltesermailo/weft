@@ -7,7 +7,7 @@ name: weft-matrix
 # NAME — `[weft] endpoint` in weft-matrix.toml — the same way any third-party
 # appservice would, so there is no shared network and no ordering between the two
 # `up`s. The bridge and Synapse do share this project's network, because Synapse
-# has to call the bridge back (`url:` in weft-matrix.yaml).
+# has to call the bridge back (`url:` in appservices/weft-matrix.yaml).
 #
 # Setup is NOT just `up`: an adapter key has to exist and be pinned in weftd's
 # weft.toml before the bridge may connect. Follow README.md.
@@ -67,10 +67,12 @@ services:
     entrypoint: ["/bin/sh", "-c", "chown -R 991:991 /data && exec /start.py"]
     volumes:
       - ./homeserver.yaml:/etc/synapse/homeserver.yaml:ro
-      # The appservice registration, hand-written and read-only — same treatment as
-      # homeserver.yaml, and for the same reason: config you can read and diff.
-      # `app_service_config_files` points at this path.
-      - ./weft-matrix.yaml:/appservices/weft-matrix.yaml:ro
+      # Appservice registrations, hand-written and read-only — same treatment as
+      # homeserver.yaml, and for the same reason: config you can read and diff. The
+      # whole directory is mounted rather than the one file, so dropping another
+      # registration in needs no compose edit (list it in
+      # `app_service_config_files` in homeserver.yaml, which is what Synapse reads).
+      - ./appservices:/appservices:ro
       - synapse_data:/data
     ports:
       # Client + federation API. Published so a reverse proxy in another project
@@ -109,7 +111,7 @@ services:
       # The adapter's Ed25519 key — the identity weftd pins. NOT recoverable from
       # anywhere else; losing it means generating a new one and re-pinning.
       - keys:/var/lib/weft-matrix
-    # Not published: only Synapse calls it, at the `url:` in weft-matrix.yaml
+    # Not published: only Synapse calls it, at the `url:` in appservices/weft-matrix.yaml
     # (`http://bridge:9010` on this project's network).
     expose:
       - "9010"

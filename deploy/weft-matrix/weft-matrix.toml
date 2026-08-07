@@ -31,7 +31,7 @@ media_url = "https://weft.example.com"
 # Synapse IS in this project.
 hs_url = "http://synapse:8008"
 
-# The appservice token pair. MUST MATCH weft-matrix.yaml, the registration Synapse
+# The appservice token pair. MUST MATCH appservices/weft-matrix.yaml, the one Synapse
 # loads — that file lists every value the two share and what a mismatch does.
 # (`weft-matrix generate-registration <this file>` prints a matching one.)
 #   as_token — ours to the homeserver
