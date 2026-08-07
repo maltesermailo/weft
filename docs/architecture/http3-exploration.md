@@ -3,9 +3,15 @@
 Exploration, not a plan. Written 2026-08-07, prompted by the operational friction of
 deploying a custom-ALPN QUIC service behind a reverse proxy.
 
-**Conclusion up front: no — but adopt a WebTransport transport additively if browser
-QUIC becomes worth having.** The reasoning matters more than the verdict, because
-the three things people mean by "use HTTP/3" have completely different answers.
+**Conclusion up front: don't move the semantics onto HTTP — but do add a WebTransport
+transport, and plan on it becoming the default.** The reasoning matters more than the
+verdict, because the three things people mean by "use HTTP/3" have completely
+different answers, and only one of them is a good idea.
+
+*Updated 2026-08-07:* WebTransport reached Baseline in March 2026, which removes the
+browser-support objection to (a) entirely and makes it a candidate to eventually
+retire the WebSocket fallback. Two things still argue against making it the *only*
+transport today — see (a).
 
 ## What we have
 
@@ -29,18 +35,37 @@ Concretely: WebTransport (or RFC 9220 extended `CONNECT`) opens a bidirectional
 stream, and §4 lines ride inside it exactly as they do on QUIC stream 0.
 
 - **Cost:** one more `ControlStream` impl. Days, not months. Nothing in the spec
-  changes; the grammar, verbs, events, labels and error registry are untouched.
-- **Gain:** browsers get QUIC without WebSocket's TCP head-of-line blocking. Some
-  middleboxes that pass HTTP/3 but drop unknown ALPN start working.
-- **Catch:** WebTransport's browser support is narrower than WebSocket's, so it
-  can't *replace* the WS fallback — it's a third option, which means three
-  transports to test rather than two.
+  changes; the grammar, verbs, events, labels and error registry are untouched. One
+  quinn endpoint can advertise both `h3` and `weft/1` and branch on the negotiated
+  ALPN after the handshake, so it needs no second port.
+- **Gain:** browsers get QUIC without WebSocket's TCP head-of-line blocking, and —
+  see "stated precisely" below — it is the *only* thing that would let an ordinary
+  HTTP/3 proxy front the control plane, which is the one real operational complaint
+  against the current design.
+- **Browser support is no longer the catch.** WebTransport reached **Baseline in
+  March 2026** when Safari 26.4 shipped: Chrome 97+, Edge 98+, Firefox 114+, Safari
+  26.4+ on macOS and iOS. So it is not condemned to be a permanent third option —
+  it could eventually retire the WebSocket fallback rather than sit beside it.
+- **The catches that remain**, as of 2026-08:
+  - *Proxy passthrough is not shipped.* Caddy's WebTransport reverse-proxy support
+    is an experimental, unmerged PR (#7669, active through May 2026). Until it
+    lands, WebTransport buys browsers QUIC and buys operators nothing — the
+    certificate stays on weftd either way.
+  - *The libraries are pre-1.0 and the protocol is still an IETF draft.*
+    `wtransport` states it is not production-ready; `web-transport-quinn` is
+    narrower and does the minimum for one session owning the whole connection,
+    which happens to be exactly our shape. Both are quinn-based, so our QUIC and
+    rustls stack is unaffected — but check that neither pulls a second rustls
+    crypto provider (`cargo tree -i aws-lc-rs`); the workspace pins ring, and
+    `cargo deny` bans a second.
 
-Verdict: **legitimate and additive.** More valuable than it first looks — see
-"stated precisely" below: this is also the only thing that would let an ordinary
-HTTP/3 proxy front the control plane, which is the one real operational complaint
-against the current design. Not urgent, though: the WS fallback already delivers
-browser reach.
+Verdict: **build it, additively, now; make it the default later.** Adding a
+transport costs one file. *Replacing* raw QUIC with it would break
+`weft-appservice`, `weft-tui`, the federation dialer and `run_bridge_client`
+simultaneously, for no operational gain until the proxy story is real — and it would
+stake our only transport on a pre-1.0 implementation of a draft. Revisit the default
+when Caddy's passthrough merges; that is the event that turns this from a client
+nicety into the answer to the certificate coupling.
 
 ### (b) Replace the verb/event model with HTTP semantics
 
