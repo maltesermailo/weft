@@ -52,6 +52,21 @@ Toolchain: MSRV 1.75, no nightly. Deps so far (workspace-pinned): thiserror, uli
 
 ## Conventions
 
+### Code conventions (required)
+
+Make implicit structure explicit **as you write**, not only when refactoring. The comments and
+call sites usually already know the design; these rules say put it in the type system.
+
+- **Entity IDs and labels are newtypes**; tuple values in maps are a review flag. `HashMap<String, (String, String)>` needs a named value type — and check whether one already exists before minting a new one.
+- **Invariant-coupled collections get a wrapper owning all mutation.** Sibling collections mutated from multiple sites are a review flag: if two collections must agree, make the struct that holds both the only thing that can write them (`Links` in `weft-matrix/src/store.rs` is the house example — private fields, one `link()` write path, "the two directions cannot drift apart").
+- **A repeated state pattern (same invariant + lifecycle, ≥2 instances) gets one shared abstraction.** Hand-rolling a third instance is a review flag.
+- **Fields needing paragraph comments to locate their subsystem are a review flag** — group by subsystem into named types and move each doc comment (with its spec § cross-references) onto the type.
+- **Unify by invariant, never by shape**, and abstractions must pay rent: fewer call-site lines, an invariant with a single choke point, or an isolated unit test. Two `BTreeMap`s are not a pattern; two map+counter pairs with the same mint/resolve/timeout lifecycle are. When a candidate *almost* fits an abstraction, that is evidence it does not belong in it — give it its own type rather than parameterizing the abstraction to accommodate it. Independent handles stay flat; no wrapper for fields that merely coexist.
+- **No** generic `EntityStore` over "all our collections", no `dyn` trait hierarchies, no `Rc<RefCell>` object graphs. Data + functions + storage traits is the house style.
+- **Ratchet:** new code complies; old code converts when touched.
+
+### General
+
 - Errors: `thiserror` in libs, `anyhow` only in `weftd`. Every parse error typed and tested.
 - Parsers are **lenient-in, strict-out** (spec §4): tolerate noisy-but-safe input; `serialize()` MUST refuse to emit anything our own parser rejects. Round-trip tests mandatory for every wire type.
 - Unknown verbs → `Command::Unknown`, never an error; unknown events ignored client-side. There is deliberately no `UNKNOWN-COMMAND` error (spec §8).

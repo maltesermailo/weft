@@ -162,6 +162,7 @@ async fn session(
         pending_uploads: Default::default(),
         upload_seq: 0,
         admins: cfg.matrix.admins.clone(),
+        local_roster: Default::default(),
     };
 
     // An empty store on a homeserver we are already joined to means the

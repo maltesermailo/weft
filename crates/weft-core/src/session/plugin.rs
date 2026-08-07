@@ -534,7 +534,9 @@ impl<S: ControlStream> Session<S> {
             .await;
         self.sync_provider_forwarders(std::slice::from_ref(&scheme))
             .await;
-        self.push_projected_structure(&[scheme]).await?;
+        self.push_projected_structure(std::slice::from_ref(&scheme))
+            .await?;
+        self.push_consumed_membership(&[scheme]).await?;
         Ok(Flow::Continue)
     }
 
@@ -1762,6 +1764,96 @@ impl<S: ControlStream> Session<S> {
         Ok(())
     }
 
+    /// The mirror of the realm's full-replace window, in the direction where
+    /// **weftd** holds the state: our local membership of every namespace this
+    /// provider's realms govern, stated on registration.
+    ///
+    /// A provider's pushes are live-only, so an `NS LEAVE` applied while the
+    /// adapter was down never reaches it and the foreign side keeps a member we
+    /// no longer have. The adapter cannot ask — it holds a key, not an account,
+    /// so the cap-gated `NS INFO MEMBERS` is closed to it — and it cannot infer a
+    /// *departure* from anything pushed incrementally, since an absent name and
+    /// an unchanged one look identical. Only a complete set lets it reconcile by
+    /// difference, which is why this is framed as the same `ni…` roster BATCH the
+    /// verb produces: `BATCH END` is the signal that the set is whole and whoever
+    /// is missing may be dropped foreign-side.
+    ///
+    /// Local members only — the realm is authoritative for its own users and
+    /// already knows them (they are what it re-states back to us).
+    ///
+    /// **One** batch covers every governed namespace, and the rows name their own
+    /// namespace, because the interesting case is a namespace with *no* local
+    /// members left: per-namespace batches would frame that as a batch containing
+    /// nothing that says which namespace it was about, so the one namespace that
+    /// most needs reconciling is the one the adapter could not identify. Spanning
+    /// them makes `BATCH END` mean "this is the whole of what I hold for your
+    /// schemes", and an absent namespace is then honestly empty.
+    pub(super) async fn push_consumed_membership(&mut self, schemes: &[Scheme]) -> io::Result<()> {
+        let namespaces = self
+            .ctx
+            .namespaces
+            .namespaces_with_origin()
+            .await
+            .unwrap_or_default();
+
+        let governed: Vec<_> = namespaces
+            .into_iter()
+            .filter(|record| {
+                record
+                    .origin
+                    .as_deref()
+                    .and_then(|o| o.parse::<ForeignUri>().ok())
+                    .is_some_and(|uri| schemes.contains(uri.scheme()))
+            })
+            .collect();
+
+        if governed.is_empty() {
+            return Ok(());
+        }
+
+        self.batches += 1;
+        let id = format!("ni{}", self.batches);
+        self.send_event(None, Event::BatchStart { id: id.clone() })
+            .await?;
+
+        for record in governed {
+            let Ok(namespace) = record.id.parse::<weft_proto::NamespaceId>() else {
+                continue;
+            };
+            let Ok(members) = self.ctx.memberships.ns_members_joined(&record.id).await else {
+                continue;
+            };
+
+            for (member, joined_ms) in members {
+                let Some(account) = weft_store::local_member(&member) else {
+                    continue;
+                };
+
+                self.send_event(
+                    None,
+                    Event::NsMemberInfo {
+                        namespace,
+                        user: UserRef::new(account, self.ctx.info.network.clone()),
+                        joined_ms: joined_ms.max(0) as u64,
+                        roles: Vec::new(),
+                    },
+                )
+                .await?;
+            }
+        }
+
+        self.send_event(
+            None,
+            Event::BatchEnd {
+                id,
+                truncated: false,
+            },
+        )
+        .await?;
+
+        Ok(())
+    }
+
     pub(super) async fn sync_provider_forwarders(&mut self, schemes: &[Scheme]) {
         // Two families feed a provider: the replicas of its own realms, and —
         // outbound projection (matrix.md §17.1) — native namespaces whose
@@ -2416,7 +2508,9 @@ impl<S: ControlStream> Session<S> {
             .await;
         self.sync_provider_forwarders(std::slice::from_ref(&scheme))
             .await;
-        self.push_projected_structure(&[scheme]).await?;
+        self.push_projected_structure(std::slice::from_ref(&scheme))
+            .await?;
+        self.push_consumed_membership(&[scheme]).await?;
         Ok(Flow::Continue)
     }
 

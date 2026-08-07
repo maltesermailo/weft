@@ -55,6 +55,10 @@ pub struct Bridge {
     pub upload_seq: u64,
     /// MXIDs allowed to drive the `!weft` console. Empty ⇒ disabled.
     pub admins: Vec<String>,
+    /// weftd's local-membership statement, accumulating between its `BATCH
+    /// START` and `BATCH END` (ns id → the local accounts it still holds).
+    /// Consumed by the reconcile on `BATCH END`; see [`Bridge::reconcile_local_membership`].
+    pub local_roster: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 /// A Matrix attachment already in hand, waiting for weftd's upload grant so it
@@ -347,6 +351,20 @@ impl Bridge {
                 } else {
                     debug!(code = %err.code, text = %err.text, "unlabeled ERR from weftd");
                 }
+            }
+            // weftd stating its own local membership of the spaces we consume —
+            // the half of the reconcile only it can know (§7a). Rows accumulate;
+            // the `ni…` BATCH END is what says the statement is complete.
+            Event::NsMemberInfo {
+                namespace, user, ..
+            } => {
+                self.local_roster
+                    .entry(namespace.to_string())
+                    .or_default()
+                    .insert(user.account.to_string());
+            }
+            Event::BatchEnd { id, .. } if id.starts_with("ni") => {
+                self.reconcile_local_membership().await;
             }
             // Structure acks for replicas we asserted ourselves: nothing to do.
             Event::NsMeta { .. } | Event::ChannelLayout { .. } => {}
@@ -666,6 +684,21 @@ impl Bridge {
             Ok(event_id) => Ok(event_id),
             Err(e) if format!("{e:#}").contains("not in room") => {
                 info!(room_id, puppet, "puppet was not in the room — joining");
+                // The Space first: a restricted room admits Space members, so
+                // joining the child directly is refused with "you do not belong
+                // to any of the required rooms/spaces" — a *different* 403 than
+                // the one we are recovering from, and the reason this recovery
+                // used to fail on exactly the rooms it was written for.
+                if let Some((_, space)) = self.store.state.channel_of_room(room_id) {
+                    let (space_room, space_uri) = (space.room_id.clone(), space.uri.clone());
+                    if let Err(e) = self
+                        .puppet_join_space(&space_room, &space_uri, puppet)
+                        .await
+                    {
+                        debug!(space_room, puppet, "puppet space join failed: {e:#}");
+                    }
+                }
+
                 let via = self.room_via(room_id).await;
                 self.hs.join(room_id, &via, Some(puppet)).await?;
 
@@ -1550,6 +1583,7 @@ impl Bridge {
             return Ok(());
         };
         let rooms: Vec<String> = space.rooms.keys().cloned().collect();
+        let (space_room, space_uri) = (space.room_id.clone(), space.uri.clone());
         let user = format!("{account}@{}", self.realm.network());
 
         if self.store.state.bans.is_banned(ns_id) {
@@ -1557,27 +1591,126 @@ impl Bridge {
         }
 
         let puppet = self.ensure_puppet(ulid, account).await?;
-        let rooms_total = rooms.len();
-        let mut any = false;
+
+        // Joining the namespace here **is** joining the Space there. Not
+        // decoration: a restricted child room (`join_rule: restricted`)
+        // authorizes by Space membership, so a puppet outside the Space is
+        // refused every single child with `M_FORBIDDEN … do not belong to any of
+        // the required rooms/spaces`. The Space join is the authorization, and
+        // it has to succeed before the children are even attemptable.
+        self.puppet_join_space(&space_room, &space_uri, &puppet)
+            .await?;
 
         for room in rooms {
             // With `via`: a room on another server cannot be joined by ID alone.
             let via = self.room_via(&room).await;
-            match self.hs.join(&room, &via, Some(&puppet)).await {
-                Ok(_) => any = true,
-                Err(e) => warn!(room, account, "puppet join failed: {e:#}"),
+            if let Err(e) = self.hs.join(&room, &via, Some(&puppet)).await {
+                // A single unjoinable channel is not a failed namespace join —
+                // it may be invite-only, or restricted to a different Space.
+                warn!(room, account, "puppet join failed: {e:#}");
             }
         }
 
-        // The statement is what makes the membership true weftd-side — sent
-        // only once the foreign side actually has them (§6). An **empty**
-        // space is the degenerate case: there is nothing to join foreign-side
-        // (Matrix space-join is cosmetic, §8), so the membership is true the
-        // moment we say so — without this, an empty namespace could never be
-        // joined at all.
-        if any || rooms_total == 0 {
-            self.realm.member(ns_id, &user, MemberAction::Join).await?;
+        // The statement is what makes the membership true weftd-side (§6), and
+        // the Space join above is what makes it true foreign-side — so it is
+        // sent on the Space, not on the children. Gating it on a child join
+        // instead was why an empty namespace, and every namespace whose children
+        // were restricted, could not be joined at all.
+        self.realm.member(ns_id, &user, MemberAction::Join).await?;
+
+        Ok(())
+    }
+
+    /// Retire the puppets of users who are no longer members weftd-side.
+    ///
+    /// weftd applies an `NS LEAVE` whether or not we are connected, and its pushes
+    /// are live-only, so one that happened while this daemon was down never
+    /// reached us: the puppet stays in the Space and its rooms, and Matrix users
+    /// keep seeing a member who left. The statement weftd sends on registration is
+    /// the whole of what it holds, so anyone joined foreign-side and *absent* from
+    /// it has left — including the case where a namespace's local roster is now
+    /// empty, which is why an unmentioned namespace reconciles against an empty
+    /// set rather than being skipped.
+    ///
+    /// Only our own puppets are touched. A foreign member of the space is not ours
+    /// to remove, and the bot has to stay to keep reading the Space.
+    async fn reconcile_local_membership(&mut self) {
+        let statement = std::mem::take(&mut self.local_roster);
+        let spaces: Vec<(String, String, Vec<String>)> = self
+            .store
+            .state
+            .spaces
+            .values()
+            .map(|space| {
+                (
+                    space.ns_id.clone(),
+                    space.room_id.clone(),
+                    space.rooms.keys().cloned().collect(),
+                )
+            })
+            .collect();
+
+        for (ns_id, space_room, rooms) in spaces {
+            let members = statement.get(&ns_id);
+            let Ok(state) = self.hs.state(&space_room).await else {
+                continue; // a Space we cannot read is one we cannot reconcile
+            };
+
+            let departed: Vec<(String, String)> = state
+                .iter()
+                .filter(|ev| ev["type"] == "m.room.member")
+                .filter(|ev| ev["content"]["membership"] == "join")
+                .filter_map(|ev| ev["state_key"].as_str())
+                .filter_map(|mxid| {
+                    let account = self.puppet_account_of(mxid)?;
+                    let still_a_member = members.is_some_and(|m| m.contains(&account));
+
+                    (!still_a_member).then(|| (mxid.to_string(), account))
+                })
+                .collect();
+
+            for (puppet, account) in departed {
+                info!(
+                    account,
+                    ns = %ns_id,
+                    "local member left while we were away — retiring their puppet"
+                );
+
+                for room in &rooms {
+                    if let Err(e) = self.hs.leave(room, Some(&puppet)).await {
+                        debug!(room, account, "reconcile room leave failed: {e:#}");
+                    }
+                }
+                if let Err(e) = self.hs.leave(&space_room, Some(&puppet)).await {
+                    debug!(space_room, account, "reconcile space leave failed: {e:#}");
+                }
+            }
         }
+    }
+
+    /// Join a puppet to a Space, resolving the servers to join through.
+    ///
+    /// A Space is joined by ID like any room, so it needs `via` servers when it
+    /// lives on another homeserver — and a v12+ room ID carries no server part to
+    /// fall back on. The alias is the one handle that resolves to both.
+    async fn puppet_join_space(
+        &self,
+        space_room: &str,
+        space_uri: &str,
+        puppet: &str,
+    ) -> anyhow::Result<()> {
+        let via = match ident::SpaceRef::parse(space_uri) {
+            Some(space_ref) => self
+                .hs
+                .resolve_alias(&space_ref.alias())
+                .await
+                .map(|(_, servers)| servers)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+
+        self.hs.join(space_room, &via, Some(puppet)).await?;
+
         Ok(())
     }
 
@@ -1591,6 +1724,7 @@ impl Bridge {
             return Ok(());
         };
         let rooms: Vec<String> = space.rooms.keys().cloned().collect();
+        let space_room = space.room_id.clone();
         let user = format!("{account}@{}", self.realm.network());
 
         let puppet = self.ensure_puppet(ulid, account).await?;
@@ -1598,6 +1732,13 @@ impl Bridge {
             if let Err(e) = self.hs.leave(&room, Some(&puppet)).await {
                 debug!(room, account, "puppet leave failed: {e:#}");
             }
+        }
+
+        // Symmetric with the join: the Space membership *is* the namespace
+        // membership foreign-side, so leaving it behind would leave the user
+        // still in the Space — and still able to re-enter its restricted rooms.
+        if let Err(e) = self.hs.leave(&space_room, Some(&puppet)).await {
+            debug!(space_room, account, "puppet space leave failed: {e:#}");
         }
 
         self.realm.member(ns_id, &user, MemberAction::Part).await?;

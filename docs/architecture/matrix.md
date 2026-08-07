@@ -146,7 +146,8 @@ Matrix membership is per-room; WEFT membership is per-namespace + hide overrides
 - Each **additional room join** → `@as JOIN <#chan>` (clear that hide).
 - **Room leave** → `@as PART <#chan>` (set the hide).
 - Leaving the **last** joined room → `@as NS LEAVE <ns>`.
-- Joining the **Space itself** is cosmetic on Matrix and maps to nothing (Matrix space-join doesn't auto-join rooms; we mirror that).
+- A remote user joining the **Space itself** maps to nothing *inbound* — it grants them no WEFT visibility, since Matrix space-join carries no room membership.
+  **The outbound direction is not symmetric** (owner directive 2026-08-07): a local user joining a consumed namespace joins the Space *and* every mapped room as their puppet. Matrix does not cascade a space join to its children, so the adapter does it explicitly — and the Space join is load-bearing, not decoration: a **restricted** child room (`join_rule: restricted`, `allow` naming the Space) authorizes by Space membership, so a puppet outside the Space is refused every child with `M_FORBIDDEN … do not belong to any of the required rooms/spaces`. Leaving is symmetric, or the user stays in the Space and keeps access to its restricted rooms.
 - Non-projected channels (retained/e2ee/voice) are hidden from the virtual account by a standing hide — a Matrix user's WEFT presence never exceeds what Matrix can see.
 - WEFT-side bans/kicks of a virtual account project back as Matrix kick/ban of the real user (§10).
 

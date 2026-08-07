@@ -423,6 +423,37 @@ legal-removal path and must work with the bridge down.
 | Realm netblocked mid-session                 | Ingestion stops at once; a fresh `REALM ASSERT` is refused              | Stop; the block is deliberate                                        |
 | Provider queue full                          | The line is dropped with a warning                                      | Keep the session drained; weftd does not block on you                |
 | Membership statement lost (provider offline) | Nothing is queued                                                       | Re-state on reconnect — that is what the full-replace window is for  |
+| Local `NS LEAVE` while the provider is down  | Applied anyway; stated back on your next registration (see below)       | Reconcile: whoever is joined foreign-side and absent has left        |
+
+### 10.1 The membership statement weftd sends *you*
+
+The full-replace window is one direction. It cannot carry the other, because weftd applies an
+`NS LEAVE` whether or not you are connected, and its pushes are live-only — so a leave during your
+downtime never reaches you, and the foreign side keeps a member we no longer have. You cannot ask
+either: you hold a **key, not an account**, so the cap-gated `NS INFO MEMBERS` is closed to you.
+
+So on `REALM REGISTER` / `REALM ASSERT`, weftd states its **local** membership of every namespace your
+schemes govern, framed as the same `ni…` roster BATCH the verb produces:
+
+```
+← BATCH START ni7
+← NS-MEMBER-INFO <ns-id> <user@network> …      (one per local member, any governed namespace)
+← BATCH END ni7
+```
+
+Three properties the framing exists for:
+
+- **One batch spans every governed namespace**, and each row names its own namespace. Per-namespace
+  batches cannot express "this namespace has no local members left" — that batch would contain
+  nothing that says which namespace it was about, so the one namespace most needing reconciliation
+  is the one you could not identify.
+- **`BATCH END` means the statement is whole.** An absent namespace is honestly empty, not unknown.
+- **Local members only.** You are authoritative for your own realm's users and already know them —
+  they are what you re-state back to us.
+
+Reconcile by difference: anyone joined foreign-side whose account is absent has left. Touch only your
+own puppets — a foreign member of the space is not yours to remove, and your bot must stay to keep
+reading it.
 
 ---
 

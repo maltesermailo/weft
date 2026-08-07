@@ -55,6 +55,19 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
             ),
         )
         .route(
+            "/_matrix/client/v3/rooms/:room/leave",
+            post(
+                |State(hs): State<MockHs>, Path(room): Path<String>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("POST leave/{room}"),
+                        String::new(),
+                        Value::Null,
+                    ));
+                    axum::Json(json!({}))
+                },
+            ),
+        )
+        .route(
             "/_matrix/client/v3/rooms/:room/context/:event",
             get(
                 |State(hs): State<MockHs>, Path((room, event)): Path<(String, String)>| async move {
@@ -438,6 +451,7 @@ async fn bridge_with(
         pending_uploads: Default::default(),
         upload_seq: 0,
         admins: vec!["@boss:test.example".into()],
+        local_roster: Default::default(),
     };
 
     (bridge, lines, calls)
@@ -524,6 +538,182 @@ async fn provisioning_asserts_the_space_and_excludes_encrypted_rooms() {
         .channel_of_room("!gen:kde.org")
         .expect("mapped");
     assert_eq!(room.channel, format!("#{ns_id}/{chan_id}"));
+}
+
+#[tokio::test]
+async fn joining_the_namespace_joins_the_space_itself() {
+    // Joining a namespace here IS joining the Space there (owner directive
+    // 2026-08-07) — and it is load-bearing, not decoration: a restricted child
+    // room admits Space members, so a puppet outside the Space is refused every
+    // child with "you do not belong to any of the required rooms/spaces".
+    let (mut bridge, mut lines, calls) = bridge_with(kde_space()).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    drain(&mut lines);
+    let ns_id = bridge
+        .store
+        .state
+        .spaces
+        .get("matrix://kde.org/community")
+        .expect("stored")
+        .ns_id
+        .clone();
+
+    calls.lock().unwrap().clear();
+    join_ada(&mut bridge, &ns_id).await;
+
+    let joins: Vec<String> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, _, _)| path.starts_with("POST join/"))
+        .map(|(path, query, _)| format!("{path}?{query}"))
+        .collect();
+    assert!(
+        joins.iter().any(|j| j.contains("!space:kde.org")),
+        "the puppet must join the Space: {joins:?}"
+    );
+    assert!(
+        joins.iter().any(|j| j.contains("!gen:kde.org")),
+        "…and its rooms: {joins:?}"
+    );
+    // The Space is joined by ID, so it needs `via` servers like any other room —
+    // a v12+ room ID carries no server part to fall back on.
+    assert!(
+        joins
+            .iter()
+            .any(|j| j.contains("!space:kde.org") && j.contains("server_name=kde.org")),
+        "the Space join needs via servers: {joins:?}"
+    );
+
+    // Leaving is symmetric — otherwise the user stays in the Space and keeps
+    // access to its restricted rooms.
+    calls.lock().unwrap().clear();
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            as_user: Some("ada@test.example".into()),
+            as_ulid: Some(ADA_ULID.into()),
+            command: weft_proto::Command::NsLeave {
+                ns: ns_id.parse().unwrap(),
+            },
+        })
+        .await;
+
+    let leaves: Vec<String> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(path, _, _)| path.clone())
+        .filter(|path| path.contains("leave"))
+        .collect();
+    assert!(
+        leaves.iter().any(|l| l.contains("!space:kde.org")),
+        "the puppet must leave the Space too: {leaves:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_leave_during_downtime_reconciles_on_reconnect() {
+    // weftd applies `NS LEAVE` whether or not we are connected and its pushes are
+    // live-only, so one that happened while the daemon was down never reached us.
+    // The statement it sends on registration is the whole of what it holds, so a
+    // puppet joined foreign-side and absent from it has left.
+    let mut rooms = kde_space();
+    // ada's puppet is in the Space and in !gen, as a real join would have left it.
+    let puppet = format!("@weft_{ADA_ULID}:test.example");
+    for room in ["!space:kde.org", "!gen:kde.org"] {
+        rooms.get_mut(room).unwrap().push(json!({
+            "type": "m.room.member", "state_key": puppet,
+            "content": { "membership": "join" } }));
+    }
+    let (mut bridge, mut lines, calls) = bridge_with(rooms).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    let ns_id = bridge
+        .store
+        .state
+        .spaces
+        .get("matrix://kde.org/community")
+        .expect("stored")
+        .ns_id
+        .clone();
+
+    // Introduce ada so her ULID→name mapping exists, which is what identifies the
+    // puppet as ours during the reconcile.
+    join_ada(&mut bridge, &ns_id).await;
+    drain(&mut lines);
+    calls.lock().unwrap().clear();
+
+    // weftd now states its local membership — and ada is not in it, because she
+    // left while we were away. An empty roster is the whole point: the namespace
+    // is never mentioned, so it must reconcile against an empty set.
+    bridge
+        .on_incoming(weft_appservice::Incoming::Event {
+            event: weft_proto::Event::BatchEnd {
+                id: "ni1".into(),
+                truncated: false,
+            },
+            label: None,
+            actor_ulid: None,
+        })
+        .await;
+
+    let leaves: Vec<String> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(path, _, _)| path.clone())
+        .filter(|path| path.starts_with("POST leave/"))
+        .collect();
+    assert!(
+        leaves.iter().any(|l| l.contains("!space:kde.org")),
+        "the departed member's puppet must leave the Space: {leaves:?}"
+    );
+    assert!(
+        leaves.iter().any(|l| l.contains("!gen:kde.org")),
+        "…and its rooms: {leaves:?}"
+    );
+
+    // And a member weftd *does* still hold is left alone.
+    calls.lock().unwrap().clear();
+    bridge
+        .on_incoming(weft_appservice::Incoming::Event {
+            event: weft_proto::Event::NsMemberInfo {
+                namespace: ns_id.parse().unwrap(),
+                user: "ada@test.example".parse().unwrap(),
+                joined_ms: 0,
+                roles: Vec::new(),
+            },
+            label: None,
+            actor_ulid: None,
+        })
+        .await;
+    bridge
+        .on_incoming(weft_appservice::Incoming::Event {
+            event: weft_proto::Event::BatchEnd {
+                id: "ni2".into(),
+                truncated: false,
+            },
+            label: None,
+            actor_ulid: None,
+        })
+        .await;
+
+    let leaves: Vec<String> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(path, _, _)| path.clone())
+        .filter(|path| path.starts_with("POST leave/"))
+        .collect();
+    assert!(
+        leaves.is_empty(),
+        "a member weftd still holds must be left in place: {leaves:?}"
+    );
 }
 
 #[tokio::test]

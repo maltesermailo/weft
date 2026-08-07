@@ -327,6 +327,25 @@ fn err_context(reply: &Reply) -> Option<String> {
 
 /// Send-and-collect a `MEMBERS` roster: skip anything before the batch, then
 /// gather the member account names until `BATCH END`.
+/// The next event, past the local-membership statement a provider is sent when it
+/// registers or asserts a realm (the `ni…` BATCH — see `push_consumed_membership`).
+/// A test asserting on the answer to its *own* command shouldn't have to know that
+/// weftd also states the world on connect.
+async fn recv_past_membership_statement(client: &mut Client) -> Reply {
+    loop {
+        let reply = client.recv().await;
+        let skip = match &reply.event {
+            Event::BatchStart { id } | Event::BatchEnd { id, .. } => id.starts_with("ni"),
+            Event::NsMemberInfo { .. } => true,
+            _ => false,
+        };
+
+        if !skip {
+            return reply;
+        }
+    }
+}
+
 async fn roster_names(client: &mut Client) -> std::collections::HashSet<String> {
     loop {
         if matches!(client.recv().await.event, Event::BatchStart { .. }) {
@@ -5442,6 +5461,72 @@ async fn local_mutations_of_a_bridged_message_relay_to_the_provider() {
 }
 
 #[tokio::test]
+async fn weftd_states_its_local_membership_when_a_realm_connects() {
+    // The other half of the reconcile: weftd applies `NS LEAVE` whether or not the
+    // adapter is connected, and its pushes are live-only, so a leave during
+    // downtime never reaches the realm and the foreign side keeps a member we no
+    // longer have. The adapter cannot ask (it holds a key, not an account, so the
+    // cap-gated NS INFO MEMBERS is closed to it), so weftd states the set on
+    // connect — one batch spanning every governed namespace, rows naming their own
+    // namespace, so an emptied roster is still identifiable.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+    assert!(matches!(
+        weft_proto::Request::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .command,
+        weft_proto::Command::NsJoin { .. }
+    ));
+
+    // A fresh session for the same realm — the reconnect. Its REALM ASSERT must be
+    // answered with the local membership we hold.
+    let mut reconnected = plugin_session(&ctx, &key).await;
+    reconnected.send("REALM ASSERT instagram://acme-corp");
+
+    let mut stated = std::collections::HashSet::new();
+    let mut batched = false;
+    for _ in 0..40 {
+        match reconnected.recv().await.event {
+            Event::BatchStart { id } if id.starts_with("ni") => batched = true,
+            Event::NsMemberInfo {
+                namespace, user, ..
+            } => {
+                stated.insert((namespace.to_string(), user.account.as_str().to_string()));
+            }
+            Event::BatchEnd { id, .. } if id.starts_with("ni") => break,
+            _ => {}
+        }
+    }
+
+    assert!(
+        batched,
+        "the statement must be framed as an `ni…` roster batch"
+    );
+    assert!(
+        stated.contains(&(ns_id.clone(), "ada".to_string())),
+        "weftd must state the local members it holds: {stated:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_realm_resyncs_membership_by_restating_it() {
     // Framework §7a.0a: a realm corrects drift by re-stating its whole
     // membership inside the ordinary SYNC snapshot framing (§6.9) — the same one
@@ -5834,7 +5919,10 @@ async fn the_domain_owner_decides_whether_a_realm_may_be_claimed() {
         "@title=Guild;id={} NS-META instagram://123456789/general public",
         ulid::Ulid::new().to_string().to_lowercase()
     ));
-    assert!(matches!(plugin.recv().await.event, Event::NsMeta { .. }));
+    assert!(matches!(
+        recv_past_membership_statement(&mut plugin).await.event,
+        Event::NsMeta { .. }
+    ));
 }
 
 #[tokio::test]
@@ -6623,7 +6711,7 @@ async fn a_control_link_provider_governs_what_it_registered() {
     let _ = &mut ada;
 
     control.send(&format!("@label=g1 GRANT ada ns:{ns_id} mute"));
-    let reply = control.recv().await;
+    let reply = recv_past_membership_statement(&mut control).await;
     assert!(
         matches!(reply.event, Event::Token { .. }),
         "a registered scheme is authority enough, got {reply:?}"
