@@ -3,9 +3,10 @@ name: weft
 # weftd + PostgreSQL + LiveKit (voice) + Caddy (TLS + reverse proxy).
 #
 # Caddy is in HERE rather than beside it because weftd needs the certificate, not
-# just the proxy: QUIC cannot be reverse-proxied — it is UDP + TLS 1.3 end to end —
-# so weftd terminates it itself and reads the cert out of Caddy's `caddy_data`
-# volume. A shared named volume needs one project.
+# just the proxy. weftd's QUIC is not HTTP/3 (ALPN `weft/1`, raw §4 lines on stream
+# 0), so an HTTP proxy has nothing to route inside it however well it speaks h3 — TLS
+# terminates at weftd, which reads the cert out of Caddy's `caddy_data` volume. A
+# shared named volume needs one project.
 #
 # The Matrix bridge IS a separate stack (`../weft-matrix/`): it needs nothing from
 # in here, and reaches weftd over its public name like any third-party appservice.
@@ -67,15 +68,16 @@ services:
       # §13 uploaded media blobs — persists across restarts (matches weft.toml's
       # [media] dir). Without this, uploads vanish on restart.
       - weftd_media:/var/lib/weft/media
-      # QUIC cannot be reverse-proxied, so weftd holds its own certificate: Caddy's
+      # weftd terminates its own TLS (its QUIC is not HTTP, so no proxy can), which
+      # means it needs the certificate: Caddy's
       # data volume, read-only, is where it finds the one Caddy obtained (see [tls]
       # in weft.toml). Hot-reloaded on renewal, no restart. This shared volume is
       # the reason Caddy lives in this project. Harmless with Caddy disabled —
       # weftd falls back to a self-signed placeholder; README.md → Standalone TLS.
       - caddy_data:/data:ro
     ports:
-      # QUIC, for desktop/native clients. Cannot be proxied — it is UDP + TLS 1.3
-      # end to end, so it is published directly whatever else is in front.
+      # QUIC, for desktop/native clients. Published directly whatever else is in
+      # front: it is not HTTP/3, so no HTTP proxy can terminate or route it.
       - "4433:4433/udp"
       # The HTTP surface: the web client, same-origin /ws, /.well-known/weft, /media.
       # Plain HTTP, and Caddy reaches it from inside this project — so the default

@@ -4,9 +4,10 @@
 and **Caddy** (automatic HTTPS + reverse proxy).
 
 Caddy is in here rather than beside it because weftd needs the *certificate*, not
-just the proxy: QUIC cannot be reverse-proxied — UDP + TLS 1.3 end to end — so weftd
-terminates it itself and reads the certificate out of Caddy's `caddy_data` volume. A
-shared named volume needs one project. It is still optional; see [Running without
+just the proxy. weftd's QUIC is not HTTP/3 (ALPN `weft/1`, a raw byte stream), so an
+HTTP proxy has nothing to route inside it — TLS terminates at weftd, which therefore
+needs the certificate and reads it out of Caddy's `caddy_data` volume. A shared named
+volume needs one project. It is still optional; see [Running without
 Caddy](#running-without-caddy-http-on-the-host).
 
 The Matrix bridge is a **separate** stack, [`../weft-matrix/`](../weft-matrix/README.md):
@@ -108,8 +109,12 @@ docker compose pull weftd && docker compose up -d
   project, reached through the host (`localhost:8008` from the host,
   `host.docker.internal:8008` from inside the container). See
   [`../weft-matrix/README.md`](../weft-matrix/README.md).
-- **QUIC** (weftd `4433/udp`, for desktop/native clients) can't be proxied — a
-  reverse proxy can't terminate it. weftd reads Caddy's certificate from the shared
+- **QUIC** (weftd `4433/udp`, for desktop/native clients) is published directly.
+  Caddy speaks HTTP/3, but this connection isn't HTTP/3 — ALPN `weft/1`, and stream 0
+  is raw §4 lines — so there is no request for `reverse_proxy` to forward, and the
+  ALPN wouldn't even negotiate. (An L4 UDP forwarder *can* relay it; TLS still
+  terminates at weftd, so it changes nothing here.) weftd reads Caddy's certificate
+  from the shared
   `caddy_data` volume, mounted read-only at `/data`, via the `[tls]` block. That
   sharing is the whole reason Caddy is in this project.
 - **LiveKit** signaling rides Caddy (wss); its **media** is UDP `50000-50020`

@@ -2,7 +2,9 @@
 # Encrypt (needs public DNS for these names + ports 80/443 reachable). Edit the
 # two site addresses below to your domains — they MUST MATCH deploy/weft.toml.
 #
-# QUIC is NOT proxied (a reverse proxy can't terminate weftd's UDP+TLS QUIC).
+# weftd's QUIC (4433/udp) is NOT fronted here. Caddy speaks HTTP/3 fine — but that
+# connection is not HTTP/3: ALPN is `weft/1` and stream 0 carries raw §4 lines, so
+# the ALPN wouldn't negotiate and `reverse_proxy` would have no request to forward.
 # weftd holds the QUIC cert itself — it reads Caddy's cert from the shared
 # `caddy_data` volume (see the [tls] block in weft.toml). LiveKit's RTC *media*
 # (UDP 50000-50020) is also direct, not proxied — only its signaling is here.

@@ -8,9 +8,11 @@ Two independent Compose stacks.
 | [`weft-matrix/`](weft-matrix/README.md) | the Matrix bridge + companion Synapse + Postgres | only to bridge to Matrix |
 
 Caddy is inside the weftd stack rather than beside it because weftd needs the
-*certificate*, not just the proxy. QUIC can't be reverse-proxied, so weftd
-terminates it itself and reads the certificate out of Caddy's volume — and a shared
-named volume means a shared project. It's still optional if you already run a proxy.
+*certificate*, not just the proxy. weftd's QUIC is **not HTTP/3** — ALPN `weft/1`,
+a raw byte stream, no requests inside — so an HTTP proxy has nothing to terminate or
+route, however well it speaks h3. TLS therefore terminates at weftd, which needs the
+certificate, and it reads it out of Caddy's volume — and a shared named volume means
+a shared project. It's still optional if you already run a proxy.
 
 The bridge is separate because it needs nothing from in there. It dials weftd's
 public name like any third-party appservice, so there's no shared network, no
@@ -45,7 +47,7 @@ livekit.example.com    →  203.0.113.10
 | ----------- | ----- | -------------------------------------------------------------- |
 | 80, 443     | TCP   | Caddy (HTTP + HTTPS)                                           |
 | 443         | UDP   | HTTP/3 (optional)                                              |
-| 4433        | UDP   | weftd QUIC, for desktop/native clients. **Cannot be proxied.** |
+| 4433        | UDP   | weftd QUIC, for desktop/native clients. **Not HTTP — no proxy.** |
 | 50000-50020 | UDP   | LiveKit voice media                                            |
 
 ### 3. Get the code and generate two secrets

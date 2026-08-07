@@ -36,8 +36,11 @@ stream, and §4 lines ride inside it exactly as they do on QUIC stream 0.
   can't *replace* the WS fallback — it's a third option, which means three
   transports to test rather than two.
 
-Verdict: **legitimate, additive, not urgent.** The WS fallback already delivers
-browser reach; this is a performance improvement for a subset of clients.
+Verdict: **legitimate and additive.** More valuable than it first looks — see
+"stated precisely" below: this is also the only thing that would let an ordinary
+HTTP/3 proxy front the control plane, which is the one real operational complaint
+against the current design. Not urgent, though: the WS fallback already delivers
+browser reach.
 
 ### (b) Replace the verb/event model with HTTP semantics
 
@@ -89,31 +92,55 @@ it means two transports for one relationship and a second authentication path.
 Verdict: **not worth the split.** Revisit if third parties start implementing
 federation and the custom dialer proves to be the barrier.
 
-## The strongest argument for switching, stated fairly
+## The strongest argument for switching, stated precisely
 
-QUIC cannot be reverse-proxied. That single fact caused most of the friction in
-`deploy/`: weftd has to hold its own certificate, which means reading Caddy's
-`caddy_data` volume, which is why Caddy can't be a separate Compose project, which
-is why `[tls]` paths embed the domain and why pointing them at the wrong subdomain
-silently leaves QUIC on a self-signed placeholder. Proxy-terminable HTTP/3 deletes
-that entire class of problem.
+It is tempting to write "QUIC cannot be reverse-proxied". That is wrong, and being
+wrong about it hides what the actual constraint is. Caddy, nginx and Cloudflare all
+speak HTTP/3 perfectly well. Three distinct facts:
 
-Two answers to it, neither requiring a protocol change:
+1. **ALPN.** Caddy's HTTPS server advertises `h3`, `h2`, `http/1.1`. weftd's client
+   offers only `weft/1` (`weft-transport/src/quic.rs`: `alpn_protocols =
+   vec![b"weft/1"]`). No overlap, so the TLS handshake fails before any byte flows —
+   a proxy cannot opt into an ALPN it has no handler for.
+2. **Nothing to route.** Granted the connection, `reverse_proxy` operates on HTTP
+   requests: method, path, headers. Stream 0 carries §4 lines. There is no request.
+3. **L4 forwarding works and is a different thing.** Plain UDP port-forwarding,
+   `caddy-l4`, nginx `stream {}` with `udp` — these relay datagrams blindly, and
+   QUIC's connection IDs make that viable for a single backend. But TLS still
+   terminates at **weftd**, so weftd still holds the certificate. It changes nothing
+   about the coupling, and buys nothing when weftd is already reachable on 4433/udp.
 
-- **weftd already has built-in ACME** (`[acme]`), which obtains and renews its own
+So the precise statement is: **weftd's QUIC isn't HTTP, so no HTTP proxy can
+terminate it — and L7 termination is what would move the certificate.** That is what
+caused the friction in `deploy/`: weftd holds its own certificate, so it reads
+Caddy's `caddy_data` volume, so Caddy cannot be a separate Compose project, so
+`[tls]` paths embed the domain and pointing them at the wrong subdomain silently
+leaves QUIC on a self-signed placeholder while HTTPS looks healthy.
+
+This raises the value of **(a)** above what that section credits. Expressing the
+control plane as HTTP/3 — WebTransport, or extended `CONNECT` — is exactly the
+condition under which Caddy's h3 support starts applying to us. It would not merely
+be a browser performance nicety; it would let a standard proxy terminate the control
+plane and delete the certificate-sharing coupling entirely. Still additive, still no
+spec change: the §4 grammar rides inside the stream either way.
+
+Two answers that need no protocol change at all:
+
+- **weftd already has built-in ACME** (`[acme]`): it obtains and renews its own
   certificate with no proxy and no shared volume. The deployment doesn't use it
-  because Caddy is there anyway; that's a deployment default, not a protocol limit.
-- If a proxy terminated HTTP/3 and spoke HTTP/1.1 to weftd behind it — which is
-  what most deployments would do — we'd be paying HTTP's costs to get TCP's
-  performance. The QUIC properties we want survive only end to end.
+  because Caddy is there anyway — a default, not a protocol limit.
+- If a proxy terminated HTTP/3 and spoke HTTP/1.1 to weftd behind it, which is what
+  most deployments do, we would be paying HTTP's costs to get TCP's performance. The
+  QUIC properties we want survive only end to end.
 
 ## Recommendation
 
 1. **Keep the line grammar and the verb/event model.** They fit the traffic, and
    §4's text form is a real asset for debugging and for the IRC gateway's existence.
-2. **Treat transports as the pluggable thing they already are.** If browser QUIC
-   becomes worth having, add WebTransport as a third `ControlStream` — additive, no
-   spec change, ~a week.
+2. **Treat transports as the pluggable thing they already are.** WebTransport as a
+   third `ControlStream` is additive, needs no spec change, and is worth more than it
+   first looks: it is what makes the control plane frontable by an ordinary HTTP/3
+   proxy, which is the one real operational complaint against the current design.
 3. **Fix the deployment friction at the deployment layer.** Document `[acme]` as
    the no-proxy path more prominently; it is the actual answer to "QUIC can't be
    proxied", and it exists.
@@ -122,6 +149,8 @@ Two answers to it, neither requiring a protocol change:
 
 ## What would change this
 
+- Operators wanting the control plane behind their existing proxy, with one
+  certificate and no shared volume → (a) is the answer, and the only one.
 - A browser-only future where WebSocket is deprecated or throttled → (a) becomes
   necessary rather than nice.
 - A third-party implementer reporting that the custom ALPN, not the semantics, is
