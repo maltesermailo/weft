@@ -135,10 +135,19 @@ export const channelMirrorHandlers: HandlerMap = {
     // local/federated origin here (needs the session's home network). Update only
     // an existing instance: a self-part deletes the instance first, so this then
     // no-ops instead of resurrecting a ghost.
+    //
+    // `name` is the canonical handle — bare for one of ours, `user@network` for
+    // anyone else — the same rule `Server.applyMembers` uses. It must carry the
+    // network: the account alone is not an identity, and a bridged realm can hold
+    // the same name as a local account. Dropping it made your Matrix self collide
+    // with your local one, and since the member list is a *keyed* `{#each}`, the
+    // duplicate key took the whole list down rather than just mis-rendering one
+    // row. It also aimed profile lookups and moderation at the local account of
+    // the same name, which is why a Matrix member could not be opened.
     const ch = channelStore.channels[e.channel];
     if (!ch) return;
     ch.members = e.members.map((m) => ({
-      name: m.account,
+      name: m.network === store.session.network ? m.account : `${m.account}@${m.network}`,
       origin: m.network === store.session.network ? "local" : "federated",
     }));
   },

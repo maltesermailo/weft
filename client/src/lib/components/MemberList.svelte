@@ -77,6 +77,12 @@ import { roleStore } from "$lib/roles/roles.svelte";
     </button>
     {#if m.name !== store.session.account}
       <div class="member-actions">
+        <!-- Local members only, for both actions below. The wire cannot express
+             either one for a federated/bridged member yet: `MUTE`/`BAN` take a
+             bare `Account` (no `@`), so a `user@network` handle does not parse,
+             and a 1:1 DM target has no network slot. Offering buttons that are
+             guaranteed to be refused is worse than not showing them. -->
+        {#if m.origin === "local"}
         <button class="mod-btn" title="Message {m.name}" aria-label="Message {m.name}" onclick={() => openDm(m.name)}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
         </button>
@@ -87,6 +93,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
           <button class="mod-btn danger" title="Ban {m.name}" aria-label="Ban {m.name}" onclick={() => moderate("ban", m.name)}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10" /><line x1="4.9" y1="4.9" x2="19.1" y2="19.1" /></svg>
           </button>
+        {/if}
         {/if}
       </div>
     {/if}

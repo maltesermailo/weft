@@ -3070,7 +3070,7 @@ mod tests {
     use super::*;
     use crate::line::MAX_LABEL_BYTES;
 
-    const MSGID: &str = "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const MSGID: &str = "weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
     /// Serialize → parse must reproduce the request exactly.
     fn round_trip(request: &Request) {
@@ -3281,20 +3281,20 @@ mod tests {
         }));
         round_trip(&Request::new(Command::ThreadName {
             channel: "#general".parse().unwrap(),
-            root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            root: "weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
             name: Some("Release planning".to_string()),
         }));
         // Omitted trailing = clear the name; must round-trip as None.
         round_trip(&Request::new(Command::ThreadName {
             channel: "#general".parse().unwrap(),
-            root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            root: "weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
             name: None,
         }));
         assert_eq!(
-            Request::parse("THREAD NAME #general hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            Request::parse("THREAD NAME #general weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
             Request::new(Command::ThreadName {
                 channel: "#general".parse().unwrap(),
-                root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+                root: "weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
                 name: None,
             })
         );
@@ -3448,7 +3448,7 @@ mod tests {
             target: "#general".parse().unwrap(),
             body: Some(String::new()),
             meta: MsgMeta {
-                attachments: vec!["weft-media://hda.example/b3hash".into()],
+                attachments: vec!["weft-media://weft.example/b3hash".into()],
                 ..MsgMeta::default()
             },
         });
@@ -3718,13 +3718,13 @@ mod tests {
             Command::EmojiAdd {
                 namespace: ns.parse().unwrap(),
                 name: "partyblob".into(),
-                media: "weft-media://hda.example/abc123".into(),
+                media: "weft-media://weft.example/abc123".into(),
             },
             "e1",
         );
         assert_eq!(
             add.serialize().unwrap(),
-            format!("@label=e1 EMOJI ADD {ns} partyblob weft-media://hda.example/abc123")
+            format!("@label=e1 EMOJI ADD {ns} partyblob weft-media://weft.example/abc123")
         );
         round_trip(&add);
         round_trip(&Request::new(Command::EmojiRemove {
@@ -4037,17 +4037,17 @@ mod tests {
     #[test]
     fn auth_bridge_round_trips() {
         round_trip(&Request::new(Command::AuthBridge {
-            network: "hda.example".parse().unwrap(),
+            network: "weft.example".parse().unwrap(),
             token: "B64BRIDGETOKEN==".into(),
         }));
         assert_eq!(
             Request::new(Command::AuthBridge {
-                network: "hda.example".parse().unwrap(),
+                network: "weft.example".parse().unwrap(),
                 token: "T==".into(),
             })
             .serialize()
             .unwrap(),
-            "AUTH BRIDGE hda.example T=="
+            "AUTH BRIDGE weft.example T=="
         );
     }
 
@@ -4056,7 +4056,7 @@ mod tests {
         let propose = Request::with_label(
             Command::BridgePropose {
                 scope: "#general".into(),
-                peer: "hda.example".parse().unwrap(),
+                peer: "weft.example".parse().unwrap(),
                 history: HistoryMode::Full,
                 media: MediaMode::MirrorMax(1_048_576),
                 typing: true,
@@ -4068,7 +4068,7 @@ mod tests {
         let wire = propose.serialize().unwrap();
         assert!(wire.contains("manifest=B64MANIFEST=="), "{wire}");
         assert!(
-            wire.contains("BRIDGE PROPOSE #general hda.example history=full media=mirror-max:1048576 typing=yes voice=yes"),
+            wire.contains("BRIDGE PROPOSE #general weft.example history=full media=mirror-max:1048576 typing=yes voice=yes"),
             "{wire}"
         );
         round_trip(&propose);
@@ -4089,19 +4089,19 @@ mod tests {
         );
 
         round_trip(&Request::new(Command::BridgeAccept {
-            peer: "hda.example".parse().unwrap(),
+            peer: "weft.example".parse().unwrap(),
             version: 3,
         }));
         round_trip(&Request::new(Command::BridgeAdd {
-            peer: "hda.example".parse().unwrap(),
+            peer: "weft.example".parse().unwrap(),
             channel: "#gaming/lobby".parse().unwrap(),
         }));
         round_trip(&Request::new(Command::BridgeRemove {
-            peer: "hda.example".parse().unwrap(),
+            peer: "weft.example".parse().unwrap(),
             channel: "#general".parse().unwrap(),
         }));
         round_trip(&Request::new(Command::BridgeSever {
-            peer: "hda.example".parse().unwrap(),
+            peer: "weft.example".parse().unwrap(),
         }));
         round_trip(&Request::new(Command::BridgeRequest {
             ns: "gaming".parse().unwrap(),
@@ -4115,12 +4115,12 @@ mod tests {
         assert!(br.serialize().unwrap().contains("invite=inv_abc123"));
         round_trip(&br);
         round_trip(&Request::new(Command::Federate {
-            network: "hda.example".parse().unwrap(),
+            network: "weft.example".parse().unwrap(),
             namespace: "gaming".parse().unwrap(),
             invite: None,
         }));
         let fed = Request::new(Command::Federate {
-            network: "hda.example".parse().unwrap(),
+            network: "weft.example".parse().unwrap(),
             namespace: "gaming".parse().unwrap(),
             invite: Some("inv_abc123".into()),
         });
@@ -4270,7 +4270,7 @@ mod tests {
                 report_id: "rep-42".into(),
                 msgid: MSGID.parse().unwrap(),
                 category: "harassment".into(),
-                note: Some("forwarded from hda.example".into()),
+                note: Some("forwarded from weft.example".into()),
             },
             "f1",
         ));

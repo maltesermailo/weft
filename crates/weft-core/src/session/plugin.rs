@@ -2552,8 +2552,8 @@ impl<S: ControlStream> Session<S> {
     ///
     /// **A realm is a network** (§7a.0), which is what makes replicas behave like
     /// federation — but it also means a realm name lands in the *same identity
-    /// space* as real WEFT networks. A realm called `hda.example` mints
-    /// `alice@hda.example`, which is the very `UserRef` that network's own user
+    /// space* as real WEFT networks. A realm called `weft.example` mints
+    /// `alice@weft.example`, which is the very `UserRef` that network's own user
     /// has: same grant subject, same member key, same DM scope — and since DM
     /// routing prefers a provider over a peer, the realm would quietly receive
     /// mail addressed to them. Worse for **our own** name: `member_key` collapses
@@ -2561,7 +2561,7 @@ impl<S: ControlStream> Session<S> {
     /// would let a provider act as the local account `ada`.
     ///
     /// **The arbiter is the domain owner**, not our peer table: whoever controls
-    /// `hda.example` chooses whether it runs a WEFT server or something a bridge
+    /// `weft.example` chooses whether it runs a WEFT server or something a bridge
     /// reaches, and a domain publishing `/.well-known/weft` has chosen WEFT. Only
     /// a *positive* answer refuses — an unreachable domain, or a realm that is no
     /// domain at all (a Discord guild id), still binds (see [`crate::NetworkProbe`]).

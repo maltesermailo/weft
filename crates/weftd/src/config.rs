@@ -410,7 +410,7 @@ pub enum AutoBridge {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Peer {
-    /// Peer network name (DNS), e.g. `hda.example`.
+    /// Peer network name (DNS), e.g. `weft.example`.
     pub network: String,
     /// `host:port` to dial over QUIC (UDP).
     pub endpoint: String,

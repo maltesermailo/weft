@@ -939,6 +939,7 @@ mod tests {
             federation: false,
             origin: None,
             provider_online: None,
+            bridges: Vec::new(),
         }
     }
     fn cat_list(d: &ChanDiff) -> Option<(&str, Vec<&str>)> {

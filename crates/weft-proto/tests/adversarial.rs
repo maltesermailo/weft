@@ -187,8 +187,8 @@ fn oversize_lines_are_rejected_not_truncated() {
 /// partial read off the wire actually takes.
 #[test]
 fn every_prefix_of_a_valid_line_is_safe() {
-    let full = "@label=m1;fmt=md;msgid=hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV \
-                MESSAGE #ns/general ada@hda.example :hello \\r\\n world";
+    let full = "@label=m1;fmt=md;msgid=weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV \
+                MESSAGE #ns/general ada@weft.example :hello \\r\\n world";
     for i in 0..full.len() {
         let prefix = &full[..i];
         if !prefix.is_char_boundary(i) {

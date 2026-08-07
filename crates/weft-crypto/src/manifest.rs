@@ -166,7 +166,7 @@ mod tests {
 
     fn manifest() -> Manifest {
         Manifest {
-            peer: "hda.example".to_string(),
+            peer: "weft.example".to_string(),
             version: 1,
             channels: vec!["#general".to_string(), "#gaming/lobby".to_string()],
             history: "from-epoch".to_string(),

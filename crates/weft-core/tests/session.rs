@@ -5828,7 +5828,7 @@ async fn a_realm_may_not_shadow_a_network_we_already_know() {
     // A peer network we federate with, and a network an operator has blocked.
     store
         .upsert_peer(weft_store::PeerRecord {
-            peer: "hda.example".parse().unwrap(),
+            peer: "weft.example".parse().unwrap(),
             scope: "*".into(),
             manifest: String::new(),
             version: 1,
@@ -5851,7 +5851,7 @@ async fn a_realm_may_not_shadow_a_network_we_already_know() {
 
     for (realm, why) in [
         ("test.example", "our own network"),
-        ("hda.example", "a peer we federate with"),
+        ("weft.example", "a peer we federate with"),
         ("evil.example", "a netblocked network"),
     ] {
         let mut plugin = plugin_session(&ctx, &key).await;
@@ -7908,17 +7908,17 @@ async fn federate_hands_request_to_the_dialer() {
 
     // A valid foreign target is handed to the dialer (async — no client ack);
     // an `@invite=` is threaded through verbatim for the non-public path.
-    ada.send("@invite=inv_xyz FEDERATE hda.example/gaming");
+    ada.send("@invite=inv_xyz FEDERATE weft.example/gaming");
     let req = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
         .expect("timed out waiting for the dialer request")
         .expect("sink closed");
-    assert_eq!(req.network.as_str(), "hda.example");
+    assert_eq!(req.network.as_str(), "weft.example");
     assert_eq!(req.namespace.to_string(), "gaming");
     assert_eq!(req.invite.as_deref(), Some("inv_xyz"));
 
     // A second request immediately after is throttled (per-account cooldown).
-    ada.send("FEDERATE hda.example/other");
+    ada.send("FEDERATE weft.example/other");
     ada.expect_err(ErrCode::Throttled).await;
 
     // Federating your own network is a no-op (self-check precedes the cooldown).
@@ -7930,7 +7930,7 @@ async fn federate_hands_request_to_the_dialer() {
 async fn federate_unsupported_when_auto_bridge_off() {
     let ctx = ctx(&[]); // no sink installed → auto-federation is off
     let mut ada = ready(&ctx, "ada").await;
-    ada.send("FEDERATE hda.example/gaming");
+    ada.send("FEDERATE weft.example/gaming");
     ada.expect_err(ErrCode::Unsupported).await;
 }
 

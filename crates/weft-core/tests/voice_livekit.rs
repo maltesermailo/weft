@@ -39,7 +39,7 @@ async fn livekit_backend_routes_moderation_to_the_room_api() {
     let backend = LiveKitBackend::new(
         admin.clone(),
         "wss://lk.example".to_string(),
-        "hda.example".parse().unwrap(),
+        "weft.example".parse().unwrap(),
         600,
     );
 
@@ -56,7 +56,7 @@ async fn livekit_backend_routes_moderation_to_the_room_api() {
 
     // The offer points at LiveKit with the room id + server URL.
     assert_eq!(grant.mode, VoiceTransport::Livekit);
-    assert_eq!(grant.room.as_deref(), Some("wv:hda.example:#lounge"));
+    assert_eq!(grant.room.as_deref(), Some("wv:weft.example:#lounge"));
     assert_eq!(grant.endpoint.as_deref(), Some("wss://lk.example"));
 
     // A moderator MUTE / UNMUTE → mute_published_track on this participant's
@@ -67,13 +67,13 @@ async fn livekit_backend_routes_moderation_to_the_room_api() {
         *admin.muted.lock().unwrap(),
         vec![
             (
-                "wv:hda.example:#lounge".into(),
-                "ada@hda.example".into(),
+                "wv:weft.example:#lounge".into(),
+                "ada@weft.example".into(),
                 true
             ),
             (
-                "wv:hda.example:#lounge".into(),
-                "ada@hda.example".into(),
+                "wv:weft.example:#lounge".into(),
+                "ada@weft.example".into(),
                 false
             ),
         ]
@@ -87,7 +87,7 @@ async fn livekit_backend_routes_moderation_to_the_room_api() {
     backend.leave(7, &chan).await;
     assert_eq!(
         *admin.removed.lock().unwrap(),
-        vec![("wv:hda.example:#lounge".into(), "ada@hda.example".into())]
+        vec![("wv:weft.example:#lounge".into(), "ada@weft.example".into())]
     );
 
     // After leaving, a second leave and a stray mute are both no-ops (the
@@ -104,7 +104,7 @@ async fn room_grant_mints_a_credential_for_an_ad_hoc_call_room() {
     let backend = LiveKitBackend::new(
         admin.clone(),
         "wss://lk.example".to_string(),
-        "hda.example".parse().unwrap(),
+        "weft.example".parse().unwrap(),
         600,
     );
 
@@ -119,14 +119,14 @@ async fn room_grant_mints_a_credential_for_an_ad_hoc_call_room() {
     assert_eq!(grant.room.as_deref(), Some("call:01ARZ"));
     assert_eq!(grant.endpoint.as_deref(), Some("wss://lk.example"));
     // Identity is the canonical user@network; publish follows can_speak.
-    assert_eq!(grant.token, "tok:call:01ARZ:ada@hda.example:true");
+    assert_eq!(grant.token, "tok:call:01ARZ:ada@weft.example:true");
 
     // A listen-only grant maps to canPublish=false.
     let muted = backend
         .room_grant("call:01ARZ", &"bob".parse().unwrap(), false)
         .await
         .unwrap();
-    assert_eq!(muted.token, "tok:call:01ARZ:bob@hda.example:false");
+    assert_eq!(muted.token, "tok:call:01ARZ:bob@weft.example:false");
 
     // room_grant never touches the per-session peer map (no moderation calls).
     assert!(admin.muted.lock().unwrap().is_empty());

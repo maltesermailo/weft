@@ -2817,7 +2817,7 @@ impl Event {
 mod tests {
     use super::*;
 
-    const MSGID: &str = "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const MSGID: &str = "weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
     fn round_trip(reply: &Reply) {
         let wire = reply.serialize().unwrap();
@@ -2866,11 +2866,11 @@ mod tests {
 
         let stored = Reply::new(Event::StreamStored {
             token: "tok-01H".into(),
-            media: "weft-media://hda.example/b3-abc123".into(),
+            media: "weft-media://weft.example/b3-abc123".into(),
         });
         assert_eq!(
             stored.serialize().unwrap(),
-            "STREAM STORED tok-01H :weft-media://hda.example/b3-abc123"
+            "STREAM STORED tok-01H :weft-media://weft.example/b3-abc123"
         );
         round_trip(&stored);
 
@@ -2892,7 +2892,7 @@ mod tests {
     fn welcome_matches_spec_example() {
         // §3.6 example line.
         let reply =
-            Reply::parse("@features=media,backfill,voice,irc-gw WELCOME hda.example :Willkommen")
+            Reply::parse("@features=media,backfill,voice,irc-gw WELCOME weft.example :Willkommen")
                 .unwrap();
         let Event::Welcome {
             network,
@@ -2903,7 +2903,7 @@ mod tests {
         else {
             panic!("not WELCOME: {reply:?}");
         };
-        assert_eq!(network.as_str(), "hda.example");
+        assert_eq!(network.as_str(), "weft.example");
         assert_eq!(features, &["media", "backfill", "voice", "irc-gw"]);
         assert_eq!(attestation, &None);
         assert_eq!(motd.as_deref(), Some("Willkommen"));
@@ -2913,7 +2913,7 @@ mod tests {
     #[test]
     fn welcome_with_attestation_round_trips() {
         round_trip(&Reply::new(Event::Welcome {
-            network: "hda.example".parse().unwrap(),
+            network: "weft.example".parse().unwrap(),
             features: vec![],
             attestation: Some("B64ATT==".into()),
             motd: None,
@@ -2932,7 +2932,7 @@ mod tests {
         round_trip(&Reply::with_label(
             Event::Message(Box::new(MessageEvent {
                 target: "#general".parse().unwrap(),
-                sender: "ada@hda.example".parse().unwrap(),
+                sender: "ada@weft.example".parse().unwrap(),
                 msgid: MSGID.parse().unwrap(),
                 body: "hello there".into(),
                 meta: MsgMeta {
@@ -2947,7 +2947,7 @@ mod tests {
         // DM copy.
         round_trip(&Reply::new(Event::Message(Box::new(MessageEvent {
             target: "@ada".parse().unwrap(),
-            sender: "bob@hda.example".parse().unwrap(),
+            sender: "bob@weft.example".parse().unwrap(),
             msgid: MSGID.parse().unwrap(),
             body: String::new(),
             meta: MsgMeta {
@@ -2958,7 +2958,7 @@ mod tests {
             edited_at: None,
         }))));
         assert_eq!(
-            Reply::parse("MESSAGE #general ada@hda.example :hi"),
+            Reply::parse("MESSAGE #general ada@weft.example :hi"),
             Err(ParseError::MissingParam {
                 verb: "MESSAGE",
                 what: "msgid tag"
@@ -2972,7 +2972,7 @@ mod tests {
         let join_echo = Reply::with_label(
             Event::Member {
                 channel: "#general".parse().unwrap(),
-                user: "ada@hda.example".parse().unwrap(),
+                user: "ada@weft.example".parse().unwrap(),
                 action: MemberAction::Join,
                 display: Some("Ada L.".into()),
                 count: Some(3),
@@ -2981,20 +2981,20 @@ mod tests {
         );
         assert_eq!(
             join_echo.serialize().unwrap(),
-            "@count=3;display=Ada\\sL.;label=j1 MEMBER #general ada@hda.example join"
+            "@count=3;display=Ada\\sL.;label=j1 MEMBER #general ada@weft.example join"
         );
         round_trip(&join_echo);
         // Broadcast form: no label, tags optional.
         round_trip(&Reply::new(Event::Member {
             channel: "#general".parse().unwrap(),
-            user: "ada@hda.example".parse().unwrap(),
+            user: "ada@weft.example".parse().unwrap(),
             action: MemberAction::Part,
             display: None,
             count: None,
         }));
         round_trip(&Reply::new(Event::Typing {
             channel: "#general".parse().unwrap(),
-            user: "ada@hda.example".parse().unwrap(),
+            user: "ada@weft.example".parse().unwrap(),
             state: TypingState::Start,
         }));
         round_trip(&Reply::new(Event::Marked {
@@ -3005,7 +3005,7 @@ mod tests {
             Event::Emoji {
                 namespace: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
                 name: "partyblob".into(),
-                media: "weft-media://hda.example/abc".into(),
+                media: "weft-media://weft.example/abc".into(),
             },
             "e1",
         ));
@@ -3015,27 +3015,27 @@ mod tests {
         }));
         round_trip(&Reply::new(Event::Thread {
             channel: "#general".parse().unwrap(),
-            root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            root: "weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
             replies: 7,
-            last: Some("hda.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap()),
+            last: Some("weft.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap()),
             name: Some("Release planning".to_string()),
         }));
         // An unnamed active thread: zero-name, no last-activity tag.
         round_trip(&Reply::new(Event::Thread {
             channel: "#general".parse().unwrap(),
-            root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            root: "weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
             replies: 0,
             last: None,
             name: None,
         }));
         round_trip(&Reply::new(Event::ThreadNamed {
             channel: "#general".parse().unwrap(),
-            root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            root: "weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
             name: Some("Release planning".to_string()),
         }));
         round_trip(&Reply::new(Event::ThreadNamed {
             channel: "#general".parse().unwrap(),
-            root: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            root: "weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
             name: None,
         }));
         // Zero and non-zero counts both round-trip (numeric middle params).
@@ -3102,7 +3102,7 @@ mod tests {
             roles: "01ARZ3NDEKTSV4RRFFQ69G5FAV,01BX5ZZKBKACTAV9WEVGEMMVRZ".to_string(),
         }));
         round_trip(&Reply::new(Event::Presence {
-            user: "ada@hda.example".parse().unwrap(),
+            user: "ada@weft.example".parse().unwrap(),
             status: PresenceStatus::Away,
         }));
         round_trip(&Reply::new(Event::Policy {
@@ -3161,7 +3161,7 @@ mod tests {
         // §12.1 wire form: final body + edited count/timestamp, no EDITED chain.
         let reply = Reply::new(Event::Message(Box::new(MessageEvent {
             target: "#general".parse().unwrap(),
-            sender: "ada@hda.example".parse().unwrap(),
+            sender: "ada@weft.example".parse().unwrap(),
             msgid: MSGID.parse().unwrap(),
             body: "final text".into(),
             meta: MsgMeta::default(),
@@ -3178,14 +3178,14 @@ mod tests {
     fn edited_event_round_trips_live_form() {
         round_trip(&Reply::new(Event::Edited {
             target: "#general".parse().unwrap(),
-            user: "ada@hda.example".parse().unwrap(),
-            msgid: "hda.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap(),
+            user: "ada@weft.example".parse().unwrap(),
+            msgid: "weft.example/01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap(),
             edit_of: MSGID.parse().unwrap(),
             body: "corrected".into(),
         }));
         // Both msgid= and edit-of= are required.
         assert!(Reply::parse(
-            "@msgid=hda.example/01ARZ3NDEKTSV4RRFFQ69G5FB0 EDITED #a ada@hda.example :x"
+            "@msgid=weft.example/01ARZ3NDEKTSV4RRFFQ69G5FB0 EDITED #a ada@weft.example :x"
         )
         .is_err());
     }
@@ -3195,7 +3195,7 @@ mod tests {
         round_trip(&Reply::new(Event::Deleted {
             target: "#general".parse().unwrap(),
             msgid: MSGID.parse().unwrap(),
-            by: Some("mod@hda.example".parse().unwrap()),
+            by: Some("mod@weft.example".parse().unwrap()),
         }));
         round_trip(&Reply::new(Event::Deleted {
             target: "@ada".parse().unwrap(),
@@ -3211,7 +3211,7 @@ mod tests {
             msgid: MSGID.parse().unwrap(),
             emoji: "🦀".into(),
             op: ReactionOp::Add,
-            by: "ada@hda.example".parse().unwrap(),
+            by: "ada@weft.example".parse().unwrap(),
         }));
         // Batch summary (§12.1): count authoritative, actors capped upstream.
         // Shortcodes travel bare — `:ferris:` would collide with the §4
@@ -3222,13 +3222,13 @@ mod tests {
             emoji: "ferris".into(),
             count: 41,
             by: vec![
-                "ada@hda.example".parse().unwrap(),
-                "bob@hda.example".parse().unwrap(),
+                "ada@weft.example".parse().unwrap(),
+                "bob@weft.example".parse().unwrap(),
             ],
         });
         let wire = reply.serialize().unwrap();
         assert!(
-            wire.contains("by=ada@hda.example,bob@hda.example"),
+            wire.contains("by=ada@weft.example,bob@weft.example"),
             "{wire}"
         );
         round_trip(&reply);
@@ -3312,13 +3312,13 @@ mod tests {
         // Watermark carried as a tag.
         let with_wm = Reply::new(Event::ChanSync {
             channel: "#gaming/general".parse().unwrap(),
-            expired_before: Some("hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap()),
+            expired_before: Some("weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap()),
             reset: false,
         });
         assert!(with_wm
             .serialize()
             .unwrap()
-            .contains("expired-before=hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+            .contains("expired-before=weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV"));
         round_trip(&with_wm);
 
         // `reset` is a valueless flag.
@@ -3430,7 +3430,7 @@ mod tests {
                 scope: "ns:gaming".into(),
                 invite_id: "inv-1".into(),
                 token: "B64UNBOUND==".into(),
-                link: Some("weft://hda.example/i/B64UNBOUND==".into()),
+                link: Some("weft://weft.example/i/B64UNBOUND==".into()),
                 max_uses: Some(5),
                 expiry: None,
             },
@@ -3453,7 +3453,7 @@ mod tests {
             Event::InviteInfo {
                 scope: "ns:gaming".into(),
                 invite_id: "i01ARZ".into(),
-                creator: "ada@hda.example".parse().unwrap(),
+                creator: "ada@weft.example".parse().unwrap(),
                 uses_left: Some(5),
                 used: 3,
                 expiry: Some(1_700_000_000),
@@ -3461,7 +3461,7 @@ mod tests {
             "il1",
         );
         let wire = info.serialize().unwrap();
-        assert!(wire.contains("INVITE-INFO ns:gaming i01ARZ ada@hda.example"));
+        assert!(wire.contains("INVITE-INFO ns:gaming i01ARZ ada@weft.example"));
         assert!(wire.contains("used=3"));
         round_trip(&info);
         // Unlimited uses, no expiry, never redeemed.
@@ -3597,7 +3597,7 @@ mod tests {
             category: "harassment".into(),
             state: crate::types::ContentState::Verified,
             scope: crate::types::ReportScope::Ns,
-            reporter: Some("ada@hda.example".into()),
+            reporter: Some("ada@weft.example".into()),
         });
         let wire = filed.serialize().unwrap();
         assert!(wire.contains("state=verified"), "{wire}");
@@ -3618,7 +3618,7 @@ mod tests {
         round_trip(&Reply::new(Event::ReportResolved {
             report_id: "rep-42".into(),
             action: crate::types::ResolveAction::UserActioned,
-            by: Some("mod@hda.example".into()),
+            by: Some("mod@weft.example".into()),
             note: Some("banned 7d".into()),
         }));
         round_trip(&Reply::with_label(
@@ -3636,7 +3636,7 @@ mod tests {
     fn manifest_event_round_trips() {
         let live = Reply::with_label(
             Event::Manifest {
-                peer: "hda.example".parse().unwrap(),
+                peer: "weft.example".parse().unwrap(),
                 version: 2,
                 state: BridgeState::Live,
                 channels: vec![
@@ -3656,7 +3656,7 @@ mod tests {
         assert!(wire.contains("media=mirror-max:1000000"), "{wire}");
         assert!(wire.contains("typing=yes"), "{wire}");
         assert!(wire.contains("voice=yes"), "{wire}");
-        assert!(wire.contains("MANIFEST hda.example 2 live"), "{wire}");
+        assert!(wire.contains("MANIFEST weft.example 2 live"), "{wire}");
         round_trip(&live);
 
         // Severed form: no channels, strictest defaults.
@@ -3670,7 +3670,7 @@ mod tests {
             typing: false,
             voice: false,
         }));
-        assert!(Reply::parse("MANIFEST hda.example notanumber live").is_err());
+        assert!(Reply::parse("MANIFEST weft.example notanumber live").is_err());
     }
 
     #[test]
@@ -3869,7 +3869,7 @@ mod tests {
     fn profile_event_round_trips() {
         let full = Reply::with_label(
             Event::Profile {
-                user: "ada@hda.example".parse().unwrap(),
+                user: "ada@weft.example".parse().unwrap(),
                 display: Some("Ada L.".into()),
                 avatar: Some("b3-abc".into()),
                 about: Some("Cryptographer & poet.".into()),
@@ -3892,13 +3892,13 @@ mod tests {
         }));
         // Bare (all unset) — a cleared profile.
         let bare = Reply::new(Event::Profile {
-            user: "eve@hda.example".parse().unwrap(),
+            user: "eve@weft.example".parse().unwrap(),
             display: None,
             avatar: None,
             about: None,
             status: None,
         });
-        assert_eq!(bare.serialize().unwrap(), "PROFILE eve@hda.example");
+        assert_eq!(bare.serialize().unwrap(), "PROFILE eve@weft.example");
         round_trip(&bare);
     }
 
@@ -3907,7 +3907,7 @@ mod tests {
         let set = Reply::with_label(
             Event::Nick {
                 scope: "ns:gaming".into(),
-                user: "bob@hda.example".parse().unwrap(),
+                user: "bob@weft.example".parse().unwrap(),
                 nick: "Cool Bob".into(),
             },
             "n1",
@@ -3915,12 +3915,12 @@ mod tests {
         assert!(set
             .serialize()
             .unwrap()
-            .contains("NICK ns:gaming bob@hda.example :Cool Bob"));
+            .contains("NICK ns:gaming bob@weft.example :Cool Bob"));
         round_trip(&set);
         // Cleared nickname — empty trailing.
         round_trip(&Reply::new(Event::Nick {
             scope: "ns:gaming".into(),
-            user: "ada@hda.example".parse().unwrap(),
+            user: "ada@weft.example".parse().unwrap(),
             nick: String::new(),
         }));
     }
@@ -4100,13 +4100,13 @@ mod tests {
                 mode: VoiceTransport::Webrtc,
                 token: "vtok-01H".into(),
                 room: None,
-                endpoint: Some("stun:sfu.hda.example:3478".into()),
+                endpoint: Some("stun:sfu.weft.example:3478".into()),
             },
             "v1",
         );
         assert_eq!(
             offer.serialize().unwrap(),
-            "@label=v1 VOICE OFFER #gaming/lounge vtok-01H :stun:sfu.hda.example:3478"
+            "@label=v1 VOICE OFFER #gaming/lounge vtok-01H :stun:sfu.weft.example:3478"
         );
         round_trip(&offer);
 
@@ -4126,22 +4126,22 @@ mod tests {
                 channel: "#gaming/lounge".parse().unwrap(),
                 mode: VoiceTransport::Livekit,
                 token: "eyJhbGciOi.JWT.sig".into(),
-                room: Some("wv:hda.example:01H".into()),
-                endpoint: Some("wss://livekit.hda.example".into()),
+                room: Some("wv:weft.example:01H".into()),
+                endpoint: Some("wss://livekit.weft.example".into()),
             },
             "v2",
         );
         assert_eq!(
             lk.serialize().unwrap(),
-            "@label=v2;mode=livekit;room=wv:hda.example:01H \
-             VOICE OFFER #gaming/lounge eyJhbGciOi.JWT.sig :wss://livekit.hda.example"
+            "@label=v2;mode=livekit;room=wv:weft.example:01H \
+             VOICE OFFER #gaming/lounge eyJhbGciOi.JWT.sig :wss://livekit.weft.example"
         );
         round_trip(&lk);
 
         // VOICE STATE flags emit only when set; a speaking participant.
         let speaking = Reply::new(Event::VoiceState {
             channel: "#general".parse().unwrap(),
-            user: "alice@hda.example".parse().unwrap(),
+            user: "alice@weft.example".parse().unwrap(),
             action: VoiceAction::Update,
             muted: false,
             deaf: false,
@@ -4212,7 +4212,7 @@ mod tests {
         round_trip(&grant);
 
         assert!(Reply::parse("VOICE OFFER #general").is_err()); // token required
-        assert!(Reply::parse("VOICE STATE #general alice@hda.example frob").is_err());
+        assert!(Reply::parse("VOICE STATE #general alice@weft.example frob").is_err());
         assert!(Reply::parse("VOICE DESC #general").is_err()); // sdp required
         assert!(Reply::parse("VOICE FROB #general").is_err());
     }

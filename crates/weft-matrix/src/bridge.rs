@@ -3304,9 +3304,15 @@ impl Bridge {
     // ---- outbound projection (matrix.md §3–§9, the daemon half) ------------
 
     /// Mirror a projected WEFT namespace as a Matrix Space. Idempotent: an
-    /// existing projection only refreshes the display name (vanity is mutable).
-    /// The alias is ULID-keyed (`#weft_<ns-id>`) for the same reason puppets
-    /// are — renames must not orphan it.
+    /// existing projection refreshes the display name and the vanity alias
+    /// (both are mutable).
+    ///
+    /// Two aliases, deliberately. The **canonical** one is ULID-keyed
+    /// (`#weft_<ns-id>`) for the same reason puppets are: a rename must not orphan
+    /// it, and everything stored points at it. But a 26-character ULID is not
+    /// something a Matrix user can find or type, so the vanity is published
+    /// *alongside* it as an alt alias (`#<vanity>`) and re-pointed when the vanity
+    /// changes. Findable by name, stable by id — neither property sacrificed.
     async fn ensure_projection(
         &mut self,
         ns_id: &str,
@@ -3320,6 +3326,8 @@ impl Bridge {
             self.hs
                 .put_state(&room, "m.room.name", "", json!({ "name": name }))
                 .await?;
+            self.ensure_vanity_alias(&room, ns_id, vanity).await;
+
             return Ok(());
         }
 
@@ -3330,6 +3338,17 @@ impl Bridge {
                 "name": name,
                 "room_alias_name": format!("weft_{ns_id}"),
                 "preset": "public_chat",
+                // Publish it in the room directory, so a Matrix user can *find*
+                // the namespace instead of needing its alias told to them.
+                // `preset` and `visibility` are different things in Matrix: the
+                // preset sets join rules and history visibility, the directory
+                // listing is this. Without it the Space existed and was joinable
+                // by alias but appeared nowhere when browsing the server.
+                //
+                // Safe by construction: `NS META … bridge:<scheme> :open` already
+                // refuses to project anything that is not a `public` namespace, so
+                // this cannot list what visibility was hiding.
+                "visibility": "public",
                 // §9: the bot rules the room; nobody else touches state.
                 "power_level_content_override": { "users_default": 0, "state_default": 100 },
             }))
@@ -3346,9 +3365,72 @@ impl Bridge {
             )
             .await?;
 
+        self.ensure_vanity_alias(&space_room, ns_id, vanity).await;
+
         self.store.save_projection(ns_id, &space_room).await;
         info!(ns_id, space_room, "projected namespace as a Space");
         Ok(())
+    }
+
+    /// Publish `#<vanity>` for a projected Space, and retire the previous one.
+    ///
+    /// Best-effort throughout: the canonical ULID alias is what the bridge relies
+    /// on, so a vanity that cannot be claimed (already taken on this homeserver by
+    /// something we do not own) costs discoverability, never correctness. It is
+    /// logged rather than failing the projection.
+    async fn ensure_vanity_alias(&self, room: &str, ns_id: &str, vanity: &str) {
+        let canonical = format!("#weft_{ns_id}:{}", self.identity.domain());
+        let wanted = format!("#{vanity}:{}", self.identity.domain());
+
+        // What the room currently advertises, so a rename can drop the stale name
+        // instead of leaving two aliases claiming the same namespace.
+        let current = self
+            .hs
+            .get_state(room, "m.room.canonical_alias", "")
+            .await
+            .ok()
+            .flatten();
+        let previous: Vec<String> = current
+            .as_ref()
+            .and_then(|c| c["alt_aliases"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|a| a.as_str().map(str::to_string))
+            .collect();
+
+        if previous.iter().any(|a| a == &wanted) {
+            return; // already published under this vanity
+        }
+
+        for stale in previous.iter().filter(|a| *a != &canonical) {
+            if let Err(e) = self.hs.delete_alias(stale).await {
+                debug!(stale, "could not retire the previous vanity alias: {e:#}");
+            }
+        }
+
+        if let Err(e) = self.hs.set_alias(&wanted, room).await {
+            warn!(
+                wanted,
+                "could not publish the vanity alias — the Space is still reachable at \
+                 its canonical alias: {e:#}"
+            );
+            return;
+        }
+
+        // Canonical stays the ULID; the vanity rides as an alternative, which is
+        // what makes it resolvable *and* survivable across a rename.
+        if let Err(e) = self
+            .hs
+            .put_state(
+                room,
+                "m.room.canonical_alias",
+                "",
+                json!({ "alias": canonical, "alt_aliases": [wanted] }),
+            )
+            .await
+        {
+            debug!("could not record the canonical alias set: {e:#}");
+        }
     }
 
     /// Mirror a projected namespace's categories as **sub-spaces** under its

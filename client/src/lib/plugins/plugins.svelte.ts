@@ -46,13 +46,18 @@ class PluginStore {
   /** Open views by `view_id`. */
   views = new SvelteMap<string, OpenView>();
 
+  /** The schemes a plugin serves, or `[]` if it governs no realm. */
+  schemesOf(pluginId: string): string[] {
+    return this.catalog.get(pluginId)?.schemes ?? [];
+  }
+
   /** Every declared action on a surface, flattened with its plugin id. */
   actionsFor(surface: Surface): { plugin: string; action: ActionDecl }[] {
     const out: { plugin: string; action: ActionDecl }[] = [];
 
     for (const entry of this.catalog.values()) {
       for (const action of entry.actions) {
-        if (action.surface === surface) out.push({ plugin: entry.id, action });
+        if (action.surface === surface) out.push({ plugin: entry.plugin_id, action });
       }
     }
 
@@ -110,7 +115,7 @@ class PluginStore {
     if (!catalog) return;
 
     this.catalog.clear();
-    for (const entry of catalog.plugins ?? []) this.catalog.set(entry.id, entry);
+    for (const entry of catalog.plugins ?? []) this.catalog.set(entry.plugin_id, entry);
   }
 
   onView(viewId: string, json: string) {

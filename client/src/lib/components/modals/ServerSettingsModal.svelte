@@ -37,10 +37,30 @@ import { roleStore } from "$lib/roles/roles.svelte";
   // that can be *stricter* than the server, never looser.
   // §13.1 actions a plugin declared for the settings surface, scoped to what
   // makes sense here: a namespace-context action, or one with no context.
+  // The scheme of the active namespace's origin (`matrix://…` → `matrix`), or
+  // null when it is native.
+  const nsScheme = $derived(
+    store.servers.get(app.activeServer)?.origin?.match(/^([a-z][a-z0-9+.-]*):\/\//)?.[1] ?? null,
+  );
+  // Schemes some *connected* provider serves — the realms this namespace could be
+  // projected into. Empty when no adapter is up, which is why the section hides.
+  const realmSchemes = $derived([
+    ...new Set([...plugins.catalog.values()].flatMap((p) => p.schemes ?? [])),
+  ].sort());
+  const projectedInto = (scheme: string) =>
+    (store.servers.get(app.activeServer)?.bridges ?? []).includes(scheme);
+
   const pluginPages = $derived(
-    plugins
-      .actionsFor("settings")
-      .filter(({ action }) => action.context === "namespace" || action.context === "none"),
+    plugins.actionsFor("settings").filter(({ plugin, action }) => {
+      if (action.context !== "namespace" && action.context !== "none") return false;
+      // A realm adapter's settings page belongs on *its* realm's replicas only.
+      // Filtering by surface + context alone put Matrix's Power Levels page on
+      // every namespace, native ones included — the catalog said "a plugin offers
+      // a namespace page" and nothing said which namespaces it speaks for.
+      const schemes = plugins.schemesOf(plugin);
+      if (schemes.length === 0) return true; // governs no realm ⇒ generic
+      return nsScheme !== null && schemes.includes(nsScheme);
+    }),
   );
   /// Tab key for a plugin page. Namespaced so it can never collide with a native
   /// tab name — a plugin should not be able to shadow "roles" by picking that id.
@@ -541,6 +561,36 @@ import { roleStore } from "$lib/roles/roles.svelte";
         {/if}
         <div class="section-sep"></div>
 
+        <!-- matrix.md §17.1 outbound projection. One switch per *connected* realm
+             provider, read from the plugin catalog's `schemes` rather than
+             hardcoding "matrix": a future adapter shows up here with no client
+             change, and a realm nobody is bridging is not offered at all. -->
+        {#if realmSchemes.length}
+          <div class="field-label">Projection</div>
+          <p class="so-sub">
+            Mirror <b>{serverVanity}</b> into a foreign realm, so its users can find and join it there.
+            This is also what authorizes that realm to attribute its users into this namespace, so it is
+            your consent as owner.
+          </p>
+          {#each realmSchemes as scheme (scheme)}
+            <label class="fed-check" style="margin-bottom:6px">
+              <input
+                type="checkbox"
+                checked={(vm.activeNsMeta?.visibility ?? "") === "public" && projectedInto(scheme)}
+                disabled={(vm.activeNsMeta?.visibility ?? "") !== "public"}
+                onchange={(e) => nsAdmin.nsSetProjection(scheme, e.currentTarget.checked)}
+              />
+              Project into <b>{scheme}</b>
+            </label>
+          {/each}
+          {#if (vm.activeNsMeta?.visibility ?? "") !== "public"}
+            <p class="so-sub">Projection needs a <b>public</b> namespace — an unlisted or private one would be
+              exposed by the foreign realm's own directory, leaking exactly what its visibility hides. Change
+              visibility in Overview first.</p>
+          {/if}
+          <div class="section-sep"></div>
+        {/if}
+
         <div class="field-label">Active bridges</div>
         <div class="modal-list">
           {#each Object.values(store.federation.manifests) as m (m.peer)}
@@ -561,7 +611,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
         <div class="section-sep"></div>
         <div class="field-label">Propose a bridge</div>
         <p class="so-sub">Snapshot this namespace's channels to <code>&lt;peer&gt;</code> and offer a bridge. Live on mutual accept.</p>
-        <input class="text-input" bind:value={brPeer} placeholder="peer network (e.g. hda.example)" onkeydown={(e) => e.key === "Enter" && proposeBridge()} />
+        <input class="text-input" bind:value={brPeer} placeholder="peer network (e.g. weft.example)" onkeydown={(e) => e.key === "Enter" && proposeBridge()} />
         <div class="fed-propose">
           <div class="fed-field">
             <div class="field-label">History</div>

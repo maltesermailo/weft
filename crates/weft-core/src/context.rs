@@ -1741,6 +1741,7 @@ impl ServerCtx {
                     name: r.name.clone(),
                     icon: r.icon.clone(),
                     actions: r.actions.clone(),
+                    schemes: r.schemes.iter().map(|s| s.to_string()).collect(),
                 })
                 .collect(),
         }

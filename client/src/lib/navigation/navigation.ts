@@ -65,17 +65,29 @@ export function openServerMenu(ns: string): void {
 
 /// §6.2 leave a namespace: drop membership, navigate home, and forget its
 /// channels locally so the rail updates without a reload.
-export function nsLeave(): void {
+///
+/// Order matters. `goto` is async, so dropping the channel records *first* leaves
+/// a tick in which the URL still names a channel whose record is gone — and the
+/// view effects fire one last `HISTORY`/roster fetch for it. weftd has already
+/// unsubscribed us by then, so it answers `CAP-REQUIRED`, and `catchUpChannel`
+/// would re-create the very record we just deleted. So: flip membership (the rail
+/// reads that, and updates immediately), leave the view, and only then tear down.
+export async function nsLeave(): Promise<void> {
   const ns = view.activeServer;
   if (!ns) return;
 
   ui.serverMenu = false;
   weft.nsLeave(ns).catch((e) => toast(String(e), "error"));
+
+  const server = store.servers.get(ns);
+  if (server) server.joined = false;
+
+  await goHome();
+
   for (const name of Object.keys(channelStore.channels)) {
     if (name.startsWith("#") && nsOf(name) === ns) delete channelStore.channels[name];
   }
-  store.servers.delete(ns); // drop the tile now; the NS-MEMBER part echo confirms
-  goHome();
+  store.servers.delete(ns);
 }
 
 /// Open a voice channel's stage (switch the main view) and join the call if we're
@@ -107,12 +119,14 @@ export function selectServer(ns: string): void {
 }
 
 /// The DM/home tile: land on the most recently active conversation, else Friends.
-export function goHome(): void {
+///
+/// Returns the navigation promise so a caller that must not race the view — see
+/// `nsLeave` — can wait for the URL to actually change.
+export function goHome(): Promise<void> {
   const convos = Object.values(channelStore.channels).filter((c) => c.name.startsWith("@") || c.name.startsWith("&"));
   if (!convos.length) {
-    goto("/");
-    return;
+    return goto("/");
   }
   const recent = convos.reduce((a, b) => ((b.messages.at(-1)?.ts ?? 0) >= (a.messages.at(-1)?.ts ?? 0) ? b : a));
-  goto(nav.pathFor(recent.name));
+  return goto(nav.pathFor(recent.name));
 }

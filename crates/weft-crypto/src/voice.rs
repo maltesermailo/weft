@@ -145,7 +145,7 @@ mod tests {
     fn grant() -> VoiceRelayGrant {
         VoiceRelayGrant {
             issuer: "fda.example".to_string(),
-            grantee: "hda.example".to_string(),
+            grantee: "weft.example".to_string(),
             channel: "#lounge".to_string(),
             room: "wv:fda.example:#lounge".to_string(),
             expiry: 1_700_000_600_000,

@@ -38,11 +38,11 @@ mod tests {
     fn proof_round_trips() {
         let device = Keypair::generate();
         let nonce = [7u8; CHALLENGE_NONCE_LEN];
-        let sig = sign_challenge(&device, &nonce, "hda.example");
+        let sig = sign_challenge(&device, &nonce, "weft.example");
         assert!(verify_challenge(
             &device.public(),
             &nonce,
-            "hda.example",
+            "weft.example",
             &sig
         ));
     }
@@ -56,7 +56,7 @@ mod tests {
         assert!(!verify_challenge(
             &device.public(),
             &nonce,
-            "hda.example",
+            "weft.example",
             &sig
         ));
     }
@@ -64,11 +64,11 @@ mod tests {
     #[test]
     fn stale_nonce_is_rejected() {
         let device = Keypair::generate();
-        let sig = sign_challenge(&device, &[1u8; 32], "hda.example");
+        let sig = sign_challenge(&device, &[1u8; 32], "weft.example");
         assert!(!verify_challenge(
             &device.public(),
             &[2u8; 32],
-            "hda.example",
+            "weft.example",
             &sig
         ));
     }

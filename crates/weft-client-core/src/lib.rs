@@ -313,6 +313,11 @@ pub enum ClientEvent {
         /// Provider liveness for a replica (`None` = native): the client shows a
         /// "bridge offline" indicator when `Some(false)`.
         provider_online: Option<bool>,
+        /// matrix.md §17.1 outbound projection opt-ins: the foreign schemes this
+        /// **native** namespace is projected into (`["matrix"]`). Empty = not
+        /// projected. The owner toggles it per scheme in Server Settings, so the
+        /// client needs the current state to render the switch.
+        bridges: Vec<String>,
         /// §7a.3 the capability profile: how the client should render this
         /// namespace's authority (`roles` | `levels` | `none`), and which native
         /// settings surfaces to hide. Absent authority = the native default.
@@ -1004,6 +1009,7 @@ pub fn on_line<E: EventSink>(
             provider_online,
             authority,
             settings_disabled,
+            bridges,
             ..
         } => sink.emit(ClientEvent::NsMeta {
             id: id.to_string(),
@@ -1021,6 +1027,7 @@ pub fn on_line<E: EventSink>(
             authority: authority.map(|a| a.to_string()),
             settings_disabled,
             provider_online,
+            bridges: bridges.iter().map(|b| b.to_string()).collect(),
         }),
         Event::ChannelLayout {
             channel,

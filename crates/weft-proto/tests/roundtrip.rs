@@ -13,12 +13,12 @@ fn assert_canonical(input: &str) {
 fn spec_example_lines_are_canonical() {
     // §3.6
     assert_canonical("HELLO weft/1");
-    assert_canonical("@features=media,backfill,voice,irc-gw WELCOME hda.example :Willkommen");
+    assert_canonical("@features=media,backfill,voice,irc-gw WELCOME weft.example :Willkommen");
     // §6.1 AUTH KEY exchange
     assert_canonical("AUTH KEY ada B64KEY==");
     assert_canonical("CHALLENGE B64NONCE==");
     assert_canonical("AUTH PROOF B64SIG==");
-    assert_canonical("@attestation=B64ATT== WELCOME hda.example");
+    assert_canonical("@attestation=B64ATT== WELCOME weft.example");
 }
 
 #[test]
@@ -34,8 +34,8 @@ fn full_send_ack_exchange() {
 
     // Server echo carries the label plus the actor-assigned msgid.
     let echo = Reply::parse(
-        "@label=m1;fmt=md;msgid=hda.example/01ARZ3NDEKTSV4RRFFQ69G5FAV \
-         MESSAGE #general ada@hda.example :*hi*",
+        "@label=m1;fmt=md;msgid=weft.example/01ARZ3NDEKTSV4RRFFQ69G5FAV \
+         MESSAGE #general ada@weft.example :*hi*",
     )
     .unwrap();
     assert_eq!(echo.label, request.label);
@@ -43,7 +43,7 @@ fn full_send_ack_exchange() {
         panic!()
     };
     assert_eq!(message.body, "*hi*");
-    assert_eq!(message.msgid.origin().as_str(), "hda.example");
+    assert_eq!(message.msgid.origin().as_str(), "weft.example");
 
     // Both directions re-serialize to the same canonical bytes.
     assert_eq!(

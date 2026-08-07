@@ -80,6 +80,15 @@ app_service_config_files:
 # through its own token, which bypasses this.
 enable_registration: false
 
+# Serve the public room directory to OTHER homeservers. Synapse defaults this to
+# false, which makes a projected namespace undiscoverable from anywhere else: a
+# user on another server who adds this one under Element's "add a new server"
+# gets an empty list, even though the Space is published locally. Outbound
+# projection exists to be found, so it is on here. Only rooms explicitly
+# published to the directory are exposed — which is the projected Spaces, and
+# nothing the bridge merely consumes.
+allow_public_rooms_over_federation: true
+
 # ── Federation ─────────────────────────────────────────────────────────────
 # ON, and it has to be: remote homeservers reaching projected Spaces is the point
 # of outbound projection, and joining remote rooms is the point of consuming

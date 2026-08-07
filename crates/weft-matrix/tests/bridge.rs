@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use serde_json::{json, Value};
 use weft_appservice::Realm;
 use weft_matrix::bridge::Bridge;
@@ -38,7 +38,24 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
             "/_matrix/client/v3/directory/room/:alias",
             get(|| async {
                 axum::Json(json!({ "room_id": "!space:kde.org", "servers": ["kde.org"] }))
-            }),
+            })
+            // Publishing/retiring the human-typeable vanity alias.
+            .put(
+                |State(hs): State<MockHs>,
+                 Path(alias): Path<String>,
+                 axum::Json(body): axum::Json<Value>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("PUT alias/{alias}"),
+                        String::new(),
+                        body,
+                    ));
+                    axum::Json(json!({}))
+                },
+            ),
+        )
+        .route(
+            "/_matrix/client/v3/directory/room/:alias/",
+            delete(|| async { axum::Json(json!({})) }),
         )
         .route(
             "/_matrix/client/v3/join/:room",
@@ -1143,6 +1160,17 @@ async fn a_projected_namespace_becomes_a_space_and_bridges_both_directions() {
         assert_eq!(creates[0].2["creation_content"]["type"], "m.space");
         assert_eq!(creates[0].2["room_alias_name"], format!("weft_{ns_id}"));
         assert_eq!(creates[0].2["name"], "The Lounge");
+        // Published in the room directory, or a Matrix user browsing this server
+        // never sees the namespace (`preset` governs join rules, not listing).
+        assert_eq!(creates[0].2["visibility"], "public");
+        // …and findable by its **vanity**: the canonical alias is the 26-char
+        // ULID, which nobody can type, so the vanity rides alongside it.
+        assert!(
+            recorded
+                .iter()
+                .any(|(what, _, _)| what == "PUT alias/#gaming:test.example"),
+            "the vanity alias must be published: {recorded:?}"
+        );
         assert_eq!(creates[1].2["name"], "general");
         assert!(
             recorded.iter().any(

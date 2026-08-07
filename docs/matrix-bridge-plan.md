@@ -127,7 +127,7 @@ slices land.
       Scoping this turned up a **sharper issue than the one the slice named**:
       * **Identity-space collision (the real find — not namespaces, which are ULID-identified and
         network-pinned).** "A realm is a network" puts realm names in the same **`user@network`**
-        space. A realm `hda.example` mints `alice@hda.example` — the same grant subject, member key
+        space. A realm `weft.example` mints `alice@weft.example` — the same grant subject, member key
         and DM scope as that network's own user — and since 4d's DM routing checks
         `provider_for_realm` **before** the peer bridge, it would receive their mail. Our own name is
         worse: `member_key` collapses a local user to their bare account, so a realm `test.example`

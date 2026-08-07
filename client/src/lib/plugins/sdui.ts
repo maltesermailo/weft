@@ -118,7 +118,19 @@ export type ActionDecl = {
   input?: Component[];
 };
 
-export type CatalogEntry = { id: string; name: string; icon?: string; actions: ActionDecl[] };
+/// One plugin's catalog entry (§12.5). Field names are the wire's: the payload is
+/// weftd's `CatalogEntry` serialized as-is, so this is `plugin_id`, not `id` —
+/// reading `entry.id` yielded `undefined`, which keyed every plugin in the store
+/// under the same missing key and handed `undefined` to `PLUGIN INVOKE`.
+export type CatalogEntry = {
+  plugin_id: string;
+  name: string;
+  icon?: string;
+  actions: ActionDecl[];
+  /// Foreign-URI schemes this provider serves. Empty ⇒ it governs no realm, so
+  /// its surfaces are generic rather than tied to one realm's namespaces.
+  schemes?: string[];
+};
 export type Catalog = { plugins: CatalogEntry[] };
 
 /** A component's form id, or `null` for the display-only ones. */

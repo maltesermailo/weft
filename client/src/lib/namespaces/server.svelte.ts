@@ -36,6 +36,16 @@ export class NsAdmin {
     weft.nsVisibility(ns, this.vis).catch(() => {});
   }
 
+  // matrix.md §17.1 project this namespace into a foreign realm (or stop). The
+  // server refuses `open` unless the namespace is public, and this is the same
+  // flag that authorizes the realm's return path — so it is owner consent, never
+  // an operator default.
+  nsSetProjection(scheme: string, open: boolean): void {
+    weft
+      .nsMeta(view.activeServer, `bridge:${scheme}`, open ? "open" : "closed")
+      .catch((e) => toast(String(e), "error"));
+  }
+
   // §11.10 open/close this namespace to on-demand federation (needs public).
   nsSetFederation(open: boolean): void {
     weft.nsMeta(view.activeServer, "federation", open ? "open" : "closed").catch((e) => toast(String(e), "error"));
@@ -136,6 +146,8 @@ export interface NsMetaFields {
   /// §9 liveness: is the provider governing this replica connected? Absent/null
   /// for a native namespace — nothing governs it, so it is never offline.
   provider_online?: boolean | null;
+  /// §17.1 outbound-projection opt-ins (`["matrix"]`); empty = projected nowhere.
+  bridges?: string[];
 }
 
 /**
@@ -166,6 +178,11 @@ export class Server {
   /// namespace, `false` while its bridge is down. weftd refuses joins and writes
   /// into an offline replica, so the UI should not offer to open one.
   providerOnline = $state<boolean | null>(null);
+  /// matrix.md §17.1 the foreign schemes this **native** namespace is projected
+  /// into. Owner-controlled per scheme (`NS META … bridge:<scheme> :open|closed`),
+  /// and `open` requires `public` — projecting an unlisted namespace into an open
+  /// foreign federation would leak what visibility hides.
+  bridges = $state<string[]>([]);
   /// §7a.3 capability profile. `authority` is `roles` (default) | `levels` |
   /// `none`; `settingsDisabled` lists native settings surfaces to hide.
   /// **Display gating only** — the server decides what is actually permitted, so
@@ -280,6 +297,7 @@ export class Server {
     this.welcome = e.welcome ?? null;
     this.origin = e.origin ?? null;
     this.providerOnline = e.provider_online ?? null;
+    this.bridges = e.bridges ?? [];
     this.authority = e.authority ?? null;
     this.settingsDisabled = e.settings_disabled ?? [];
     this.recoveryEta = e.recovery_eta ?? null;

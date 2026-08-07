@@ -25,6 +25,38 @@ impl Hs {
         }
     }
 
+    /// Point a room alias at `room_id` in this server's directory.
+    ///
+    /// Separate from the alias `create_room` mints: that one is the room's stable
+    /// identity, this publishes an *additional*, human-typeable name for it.
+    pub async fn set_alias(&self, alias: &str, room_id: &str) -> anyhow::Result<()> {
+        self.call(
+            reqwest::Method::PUT,
+            &format!("/_matrix/client/v3/directory/room/{}", enc(alias)),
+            Some(json!({ "room_id": room_id })),
+            None,
+            &[],
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Remove an alias mapping. Used when a vanity changes: the old name must stop
+    /// resolving, or two aliases claim to be the same namespace.
+    pub async fn delete_alias(&self, alias: &str) -> anyhow::Result<()> {
+        self.call(
+            reqwest::Method::DELETE,
+            &format!("/_matrix/client/v3/directory/room/{}", enc(alias)),
+            None,
+            None,
+            &[],
+        )
+        .await?;
+
+        Ok(())
+    }
+
     /// Resolve a room alias: `(room_id, servers to join via)`.
     pub async fn resolve_alias(&self, alias: &str) -> anyhow::Result<(String, Vec<String>)> {
         let v = self

@@ -274,13 +274,13 @@ peer-federation machinery applies unchanged.
 ### 7a.0aa Who may claim a realm — the domain owner decides
 
 `§7a.0` puts realm names in the **same identity space as WEFT networks**: a realm called
-`hda.example` mints `alice@hda.example`, which is the very `UserRef` that network's own user has —
+`weft.example` mints `alice@weft.example`, which is the very `UserRef` that network's own user has —
 same grant subject, same member key, same DM scope. And since DM routing prefers a provider over a
 peer, such a realm would quietly receive mail addressed to them. Claiming **our own** name is worse
 still: `member_key` collapses a user on our network to their bare account, so a realm `test.example`
 would let a provider act as the local account `ada`.
 
-**The arbiter is the domain owner, not our peer table.** Whoever controls `hda.example` chooses
+**The arbiter is the domain owner, not our peer table.** Whoever controls `weft.example` chooses
 whether it runs a WEFT server or something a bridge reaches — you cannot have both — and a domain
 publishing `/.well-known/weft` has chosen WEFT. `REALM ASSERT` therefore consults the domain
 (`NetworkProbe`, implemented in weftd on the same TLS-verified, SSRF-guarded fetch auto-federation
@@ -482,7 +482,7 @@ multi-origin, so a local `alice` must not pass as `alice@matrix.org`.
 
 A `foreign=<native-account>` tag on `MESSAGE`/`MEMBER`/`REACTION`/`EDITED` used to carry the exact
 native handle for display beside a locally-minted event. It is **gone**. Under §7a.0 the sender
-`user@realm` *is* the identity — the same way `ada@hda.example` is on a peer network — so the tag
+`user@realm` *is* the identity — the same way `ada@weft.example` is on a peer network — so the tag
 duplicated it. Worse, it concealed a defect: because it made the WEFT handle merely cosmetic, that
 handle was derived lossily, and two distinct foreign users could collide onto one account. Making the
 identity authoritative forces the mapping to be injective. Clients badge a bridged user from the

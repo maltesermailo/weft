@@ -123,7 +123,8 @@ mod tests {
     fn issue(expires_at: u64) -> (Keypair, Attestation) {
         let network_key = Keypair::generate();
         let device = Keypair::generate().public();
-        let attestation = Attestation::sign(&network_key, device, "ada", "hda.example", expires_at);
+        let attestation =
+            Attestation::sign(&network_key, device, "ada", "weft.example", expires_at);
         (network_key, attestation)
     }
 

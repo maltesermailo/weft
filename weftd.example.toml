@@ -247,6 +247,6 @@ auto_bridge = "off"
 # The key is pinned: the peer proves control of it, and it verifies their
 # manifests. Repeat the block per peer.
 # [[peers]]
-# network  = "hda.example"
-# endpoint = "hda.example:443"        # host:port to dial over QUIC (UDP)
+# network  = "weft.example"
+# endpoint = "weft.example:443"        # host:port to dial over QUIC (UDP)
 # key      = "BASE64_NETWORK_PUBKEY"  # from the peer's /.well-known/weft

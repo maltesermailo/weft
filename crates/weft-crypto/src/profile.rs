@@ -138,7 +138,7 @@ mod tests {
 
     fn profile() -> Profile {
         Profile {
-            account: "ada@hda.example".to_string(),
+            account: "ada@weft.example".to_string(),
             display: Some("Ada L.".to_string()),
             avatar: Some("b3-abc123".to_string()),
             updated: 1_700_000_000_000,
@@ -172,7 +172,7 @@ mod tests {
     fn empty_fields_round_trip_as_none() {
         let network = Keypair::generate();
         let bare = Profile {
-            account: "bob@hda.example".to_string(),
+            account: "bob@weft.example".to_string(),
             display: None,
             avatar: None,
             updated: 42,
@@ -201,7 +201,7 @@ mod tests {
         let network = Keypair::generate();
         let signed = profile().sign(&network);
         let mut other = profile();
-        other.account = "eve@hda.example".to_string();
+        other.account = "eve@weft.example".to_string();
         assert!(network
             .public()
             .verify(

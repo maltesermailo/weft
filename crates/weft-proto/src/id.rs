@@ -69,15 +69,15 @@ mod tests {
 
     #[test]
     fn msgid_round_trips() {
-        let id: MsgId = format!("hda.example/{ULID}").parse().unwrap();
-        assert_eq!(id.origin().as_str(), "hda.example");
-        assert_eq!(id.to_string(), format!("hda.example/{ULID}"));
+        let id: MsgId = format!("weft.example/{ULID}").parse().unwrap();
+        assert_eq!(id.origin().as_str(), "weft.example");
+        assert_eq!(id.to_string(), format!("weft.example/{ULID}"));
     }
 
     #[test]
     fn msgid_rejects_malformed() {
         assert!("no-slash".parse::<MsgId>().is_err());
-        assert!("hda.example/NOT-A-ULID".parse::<MsgId>().is_err());
+        assert!("weft.example/NOT-A-ULID".parse::<MsgId>().is_err());
         assert!(format!("bad host!/{ULID}").parse::<MsgId>().is_err());
     }
 

@@ -41,6 +41,9 @@ pub enum NsDiff {
         /// weftd refuses joins and writes into it, so the client badges it and
         /// declines to open it rather than showing a dead room.
         provider_online: Option<bool>,
+        /// §17.1 outbound-projection opt-ins (`["matrix"]`), for the per-scheme
+        /// switch in Server Settings. Empty = projected nowhere.
+        bridges: Vec<String>,
     },
 }
 
@@ -62,6 +65,7 @@ impl Namespaces {
             federation,
             origin,
             provider_online,
+            bridges,
             ..
         } = event
         else {
@@ -86,6 +90,7 @@ impl Namespaces {
             recovery_rung: *recovery_rung,
             origin: origin.clone(),
             provider_online: *provider_online,
+            bridges: bridges.clone(),
         }]
     }
 }
@@ -121,6 +126,7 @@ mod tests {
             federation: true,
             origin: None,
             provider_online: None,
+            bridges: Vec::new(),
         }
     }
 

@@ -377,6 +377,15 @@ pub struct CatalogEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     pub actions: Vec<ActionDecl>,
+    /// Foreign-URI schemes this provider serves, mirrored from its
+    /// [`Registration::schemes`]. Empty for a plugin that governs no realm.
+    ///
+    /// The client needs it to tell *which* namespaces a provider speaks for. A
+    /// settings page a realm adapter declares belongs on that realm's replicas
+    /// only — without this the catalog said "some plugin offers a namespace page"
+    /// and the page appeared on every namespace, including native ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schemes: Vec<String>,
 }
 
 /// The whole `PLUGIN-MANIFEST` payload: the declared actions of every plugin.
@@ -565,6 +574,20 @@ mod tests {
                         }],
                     }],
                 }],
+                schemes: vec![],
+            }],
+        });
+
+        // §12.5 a realm adapter's entry carries its schemes, which is how a client
+        // tells whose namespaces a declared surface belongs to. Absent ⇒ empty, so
+        // an older provider's entry still decodes.
+        round_trip(&Catalog {
+            plugins: vec![CatalogEntry {
+                plugin_id: "matrix".into(),
+                name: "Matrix Bridge".into(),
+                icon: None,
+                actions: vec![],
+                schemes: vec!["matrix".into()],
             }],
         });
     }

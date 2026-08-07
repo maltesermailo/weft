@@ -3,11 +3,11 @@
 //! A **realm is a network** (foreign-bridge framework §7a.0), which is what lets
 //! a bridged space behave like federation — but it also means a realm name lands
 //! in the same identity space as real WEFT networks: a realm called
-//! `hda.example` mints `alice@hda.example`, indistinguishable from that
+//! `weft.example` mints `alice@weft.example`, indistinguishable from that
 //! network's own user.
 //!
 //! The arbiter is the domain owner, not our local bookkeeping: whoever controls
-//! `hda.example` chooses whether it runs a WEFT server or something a bridge
+//! `weft.example` chooses whether it runs a WEFT server or something a bridge
 //! reaches. A domain that publishes `/.well-known/weft` has chosen WEFT, so no
 //! bridge may claim it as a realm.
 //!

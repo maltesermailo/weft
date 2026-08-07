@@ -57,7 +57,7 @@ impl fmt::Display for Account {
     }
 }
 
-/// Sovereign network DNS name, e.g. `hda.example` (§2.1).
+/// Sovereign network DNS name, e.g. `weft.example` (§2.1).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NetworkName(String);
 
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn network_name_validation() {
-        assert!("hda.example".parse::<NetworkName>().is_ok());
+        assert!("weft.example".parse::<NetworkName>().is_ok());
         assert!("localhost".parse::<NetworkName>().is_ok());
         assert!("".parse::<NetworkName>().is_err());
         assert!("-bad.example".parse::<NetworkName>().is_err());
@@ -516,8 +516,8 @@ mod tests {
 
     #[test]
     fn user_ref_round_trips() {
-        let user: UserRef = "jannik@hda.example".parse().unwrap();
-        assert_eq!(user.to_string(), "jannik@hda.example");
+        let user: UserRef = "jannik@weft.example".parse().unwrap();
+        assert_eq!(user.to_string(), "jannik@weft.example");
         assert!("no-at-sign".parse::<UserRef>().is_err());
     }
 

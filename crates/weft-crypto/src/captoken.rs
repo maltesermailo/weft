@@ -692,7 +692,7 @@ mod tests {
         // account@network. Both round-trip through the wire and verify as leaves.
         for subject in [
             Subject::Account(Ulid::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()),
-            Subject::Foreign("alice@hda.example".into()),
+            Subject::Foreign("alice@weft.example".into()),
         ] {
             let token = root(&net, subject.clone(), "ns:gaming", &["mute", "send"], 0);
             let restored = Token::from_b64(&token.to_b64()).unwrap();
