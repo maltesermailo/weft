@@ -110,6 +110,86 @@ pub fn is_our_mxid(mxid: &ruma::UserId, prefix: &str, domain: &str, bot_localpar
         && (mxid.localpart() == bot_localpart || mxid.localpart().starts_with(prefix))
 }
 
+/// This bridge's MXID namespace on the companion homeserver.
+///
+/// The three fields are not independent settings that happen to sit together:
+/// they define one namespace, and every id in it is derived from all three —
+/// puppets are `@<prefix><ulid>:<domain>`, the bot is `@<bot>:<domain>`, and
+/// "is this ours?" is the same question read backwards. Holding them apart meant
+/// each caller re-derived the answer, and the bot MXID in particular was
+/// hand-formatted in four places.
+///
+/// The free functions above stay: this binds them, it does not replace them.
+#[derive(Debug, Clone)]
+pub struct MatrixIdentity {
+    domain: String,
+    puppet_prefix: String,
+    bot_localpart: String,
+}
+
+impl MatrixIdentity {
+    pub fn new(
+        domain: impl Into<String>,
+        puppet_prefix: impl Into<String>,
+        bot_localpart: impl Into<String>,
+    ) -> Self {
+        Self {
+            domain: domain.into(),
+            puppet_prefix: puppet_prefix.into(),
+            bot_localpart: bot_localpart.into(),
+        }
+    }
+
+    /// The companion homeserver's server name — also what we advertise as a
+    /// `via` server for rooms we create.
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    pub fn puppet_prefix(&self) -> &str {
+        &self.puppet_prefix
+    }
+
+    pub fn bot_localpart(&self) -> &str {
+        &self.bot_localpart
+    }
+
+    /// The appservice bot's MXID.
+    pub fn bot_mxid(&self) -> String {
+        self.mxid(&self.bot_localpart)
+    }
+
+    /// A localpart on our homeserver as a full MXID.
+    pub fn mxid(&self, localpart: &str) -> String {
+        format!("@{localpart}:{}", self.domain)
+    }
+
+    /// The puppet localpart / MXID for one of our accounts, keyed by ULID.
+    pub fn puppet_localpart(&self, ulid: &str) -> String {
+        puppet_localpart(&self.puppet_prefix, ulid)
+    }
+
+    pub fn puppet_mxid(&self, ulid: &str) -> String {
+        puppet_mxid(&self.puppet_prefix, ulid, &self.domain)
+    }
+
+    /// Is this Matrix user one of ours (bot or puppet)? Their events are the
+    /// relay of a WEFT event and must never be re-ingested.
+    pub fn is_ours(&self, mxid: &ruma::UserId) -> bool {
+        is_our_mxid(mxid, &self.puppet_prefix, &self.domain, &self.bot_localpart)
+    }
+
+    /// The account ULID this MXID is the puppet of, or `None` if it is not one of
+    /// our puppets (a foreign user, or our own bot).
+    pub fn puppet_ulid<'a>(&self, mxid: &'a ruma::UserId) -> Option<&'a str> {
+        if mxid.server_name().host() != self.domain {
+            return None;
+        }
+
+        mxid.localpart().strip_prefix(self.puppet_prefix.as_str())
+    }
+}
+
 /// A parsed `matrix://<realm>/<space>[/<room>]` foreign URI.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpaceRef {
@@ -187,6 +267,66 @@ pub fn msgid_for(realm: &str, event_id: &str, origin_server_ts_ms: u64) -> Strin
     let ulid = ulid::Ulid::from_parts(origin_server_ts_ms, rand);
 
     format!("{realm}/{}", ulid.to_string().to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    fn identity() -> MatrixIdentity {
+        MatrixIdentity::new("weft.example", "weft_", "weftbot")
+    }
+
+    fn mxid(raw: &str) -> &ruma::UserId {
+        raw.try_into().expect("a valid MXID")
+    }
+
+    #[test]
+    fn the_bot_and_puppets_share_one_namespace() {
+        let id = identity();
+
+        assert_eq!(id.bot_mxid(), "@weftbot:weft.example");
+        assert_eq!(id.puppet_localpart("01abc"), "weft_01abc");
+        assert_eq!(id.puppet_mxid("01abc"), "@weft_01abc:weft.example");
+        // Every id is derived from all three fields, so the round trip holds.
+        assert_eq!(
+            id.puppet_ulid(mxid(&id.puppet_mxid("01abc"))),
+            Some("01abc")
+        );
+    }
+
+    #[test]
+    fn our_own_ids_are_recognised_as_ours() {
+        // This is what keeps a relay from being re-ingested: our bot's and
+        // puppets' events *are* WEFT events already.
+        let id = identity();
+
+        assert!(id.is_ours(mxid("@weftbot:weft.example")));
+        assert!(id.is_ours(mxid("@weft_01abc:weft.example")));
+    }
+
+    #[test]
+    fn a_foreign_user_is_never_ours_even_with_our_localpart_shape() {
+        let id = identity();
+
+        assert!(!id.is_ours(mxid("@carol:kde.org")));
+        // The prefix alone must not be enough — on someone else's homeserver it
+        // is just a name, and treating it as ours would drop a real user's
+        // traffic as if it were our own echo.
+        assert!(!id.is_ours(mxid("@weft_01abc:kde.org")));
+        assert_eq!(id.puppet_ulid(mxid("@weft_01abc:kde.org")), None);
+    }
+
+    #[test]
+    fn the_bot_is_ours_but_is_not_a_puppet() {
+        // `puppet_ulid` answers "which account is this the puppet of", and the
+        // bot is the puppet of nobody — a caller that conflated the two would
+        // attribute bridge traffic to an account.
+        let id = identity();
+
+        assert!(id.is_ours(mxid("@weftbot:weft.example")));
+        assert_eq!(id.puppet_ulid(mxid("@weftbot:weft.example")), None);
+    }
 }
 
 #[cfg(test)]

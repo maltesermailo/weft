@@ -84,8 +84,18 @@ impl Config {
         toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
     }
 
+    /// This deployment's MXID namespace — the one place the bot/puppet id shapes
+    /// are derived, shared with the running bridge.
+    pub fn identity(&self) -> crate::ident::MatrixIdentity {
+        crate::ident::MatrixIdentity::new(
+            &self.matrix.domain,
+            &self.matrix.puppet_prefix,
+            &self.matrix.bot,
+        )
+    }
+
     pub fn bot_mxid(&self) -> String {
-        format!("@{}:{}", self.matrix.bot, self.matrix.domain)
+        self.identity().bot_mxid()
     }
 
     /// The URL to put in the registration — what the homeserver will call.

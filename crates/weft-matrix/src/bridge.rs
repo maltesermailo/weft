@@ -21,6 +21,7 @@ use weft_proto::{Command, Event, MemberAction, ToastKind};
 use crate::asapi::Txn;
 use crate::hs::Hs;
 use crate::ident;
+use crate::ident::MatrixIdentity;
 use crate::pending::PendingByLabel;
 use crate::store::{EventRef, Room, Space, Store};
 
@@ -28,10 +29,9 @@ pub struct Bridge {
     pub realm: Realm,
     pub hs: Hs,
     pub store: Store,
-    /// The companion homeserver's server name — puppets live under it.
-    pub domain: String,
-    pub puppet_prefix: String,
-    pub bot_localpart: String,
+    /// Our MXID namespace on the companion homeserver: the bot, the puppets, and
+    /// the "is this ours?" test that keeps a relay from being re-ingested.
+    pub identity: MatrixIdentity,
     /// Projected structure buffered between `CHANNEL-LAYOUT` and its `POLICY`
     /// (the §3 rules need the policy, which travels as a separate event).
     pub pending_layouts: std::collections::HashMap<String, PendingLayout>,
@@ -747,7 +747,7 @@ impl Bridge {
         ns_id: &str,
         space_uri: &str,
     ) -> anyhow::Result<()> {
-        let bot = format!("@{}:{}", self.bot_localpart, self.domain);
+        let bot = self.identity.bot_mxid();
         let mut spaces = self
             .hs
             .account_data(&bot, crate::recover::CONSUMED_KEY)
@@ -924,12 +924,7 @@ impl Bridge {
     fn foreign_user(&self, mxid: &str) -> Option<String> {
         let parsed: &ruma::UserId = mxid.try_into().ok()?;
 
-        if ident::is_our_mxid(
-            parsed,
-            &self.puppet_prefix,
-            &self.domain,
-            &self.bot_localpart,
-        ) {
+        if self.identity.is_ours(parsed) {
             return None;
         }
 
@@ -1905,12 +1900,12 @@ impl Bridge {
         let Some(localpart) = mxid
             .strip_prefix('@')
             .and_then(|m| m.split_once(':'))
-            .filter(|(_, server)| *server == self.domain)
+            .filter(|(_, server)| *server == self.identity.domain())
             .map(|(local, _)| local.to_string())
         else {
             return format!(
                 "{mxid} is not a puppet on {} — nothing to attach",
-                self.domain
+                self.identity.domain()
             );
         };
 
@@ -2506,19 +2501,19 @@ impl Bridge {
     fn weft_subject_of_mxid(&self, mxid: &str) -> Option<String> {
         let parsed: &ruma::UserId = mxid.try_into().ok()?;
 
-        if parsed.server_name().host() == self.domain && parsed.localpart() == self.bot_localpart {
+        if parsed.server_name().host() == self.identity.domain()
+            && parsed.localpart() == self.identity.bot_localpart()
+        {
             return None;
         }
-        if parsed.server_name().host() == self.domain {
-            if let Some(localpart) = parsed.localpart().strip_prefix(&self.puppet_prefix) {
-                // Puppets are ULID-keyed; the subject is the bare account.
-                return self
-                    .store
-                    .state
-                    .users
-                    .by_ulid(localpart)
-                    .map(|u| u.account.clone());
-            }
+        if let Some(ulid) = self.identity.puppet_ulid(parsed) {
+            // Puppets are ULID-keyed; the subject is the bare account.
+            return self
+                .store
+                .state
+                .users
+                .by_ulid(ulid)
+                .map(|u| u.account.clone());
         }
 
         ident::weft_user(parsed)
@@ -2896,7 +2891,7 @@ impl Bridge {
                 &space.room_id,
                 "m.space.child",
                 &room_id,
-                json!({ "via": [self.domain], "order": format!("{:010}", space.rooms.len()) }),
+                json!({ "via": [self.identity.domain()], "order": format!("{:010}", space.rooms.len()) }),
             )
             .await?;
 
@@ -3256,10 +3251,7 @@ impl Bridge {
     /// A puppet MXID → the bare local account it stands for.
     fn puppet_account_of(&self, mxid: &str) -> Option<String> {
         let parsed: &ruma::UserId = mxid.try_into().ok()?;
-        if parsed.server_name().host() != self.domain {
-            return None;
-        }
-        let ulid = parsed.localpart().strip_prefix(&self.puppet_prefix)?;
+        let ulid = self.identity.puppet_ulid(parsed)?;
 
         self.store
             .state
@@ -3359,7 +3351,7 @@ impl Bridge {
                     &space_room,
                     "m.space.child",
                     &room,
-                    json!({ "via": [self.domain], "order": format!("{index:010}") }),
+                    json!({ "via": [self.identity.domain()], "order": format!("{index:010}") }),
                 )
                 .await?;
             self.hs
@@ -3367,7 +3359,7 @@ impl Bridge {
                     &room,
                     "m.space.parent",
                     &space_room,
-                    json!({ "via": [self.domain], "canonical": true }),
+                    json!({ "via": [self.identity.domain()], "canonical": true }),
                 )
                 .await?;
 
@@ -3437,7 +3429,7 @@ impl Bridge {
                 &parent,
                 "m.space.child",
                 &room_id,
-                json!({ "via": [self.domain], "order": format!("{:010}", layout.position) }),
+                json!({ "via": [self.identity.domain()], "order": format!("{:010}", layout.position) }),
             )
             .await?;
         self.hs
@@ -3445,7 +3437,7 @@ impl Bridge {
                 &room_id,
                 "m.space.parent",
                 &parent,
-                json!({ "via": [self.domain], "canonical": true }),
+                json!({ "via": [self.identity.domain()], "canonical": true }),
             )
             .await?;
 
@@ -3475,7 +3467,7 @@ impl Bridge {
     async fn ensure_puppet(&mut self, ulid: &str, account: &str) -> anyhow::Result<String> {
         if let Some(user) = self.store.state.users.by_ulid(ulid) {
             let localpart = user.localpart.clone();
-            let mxid = format!("@{localpart}:{}", self.domain);
+            let mxid = self.identity.mxid(&localpart);
 
             // A rename: same identity, re-point the name index — and carry the
             // new label to Matrix, which is where recovery reads names back
@@ -3490,8 +3482,8 @@ impl Bridge {
             return Ok(mxid);
         }
 
-        let localpart = ident::puppet_localpart(&self.puppet_prefix, ulid);
-        let mxid = format!("@{localpart}:{}", self.domain);
+        let localpart = self.identity.puppet_localpart(ulid);
+        let mxid = self.identity.mxid(&localpart);
         self.hs.ensure_registered(&localpart).await?;
         // Best-effort: a nameless puppet still bridges, it just renders as its
         // ULID and recovers without its label.
@@ -3511,7 +3503,7 @@ impl Bridge {
             .state
             .users
             .by_account(account)
-            .map(|(_, user)| format!("@{}:{}", user.localpart, self.domain))
+            .map(|(_, user)| self.identity.mxid(&user.localpart))
     }
 }
 

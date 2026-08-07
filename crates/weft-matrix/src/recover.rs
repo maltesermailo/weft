@@ -169,7 +169,7 @@ impl Bridge {
     async fn consumed_spaces(
         &self,
     ) -> anyhow::Result<std::collections::BTreeMap<String, serde_json::Value>> {
-        let bot = format!("@{}:{}", self.bot_localpart, self.domain);
+        let bot = self.identity.bot_mxid();
         let Some(data) = self.hs.account_data(&bot, CONSUMED_KEY).await? else {
             return Ok(Default::default());
         };
@@ -183,7 +183,7 @@ impl Bridge {
     /// The ban list from the bot's account data — the one thing Matrix does not
     /// otherwise know and weftd will never repeat.
     async fn recover_bans(&mut self) -> anyhow::Result<Option<usize>> {
-        let bot = format!("@{}:{}", self.bot_localpart, self.domain);
+        let bot = self.identity.bot_mxid();
         let Some(data) = self.hs.account_data(&bot, BANS_KEY).await? else {
             return Ok(None);
         };
@@ -215,7 +215,7 @@ impl Bridge {
     /// Persist the ban list where it survives our database. Called on every
     /// `BRIDGING` instruction, since weftd sends each exactly once.
     pub async fn persist_bans(&self) {
-        let bot = format!("@{}:{}", self.bot_localpart, self.domain);
+        let bot = self.identity.bot_mxid();
         let banned: Vec<&str> = self.store.state.bans.iter().collect();
 
         if let Err(e) = self
@@ -337,15 +337,15 @@ impl Bridge {
             else {
                 continue;
             };
-            if server != self.domain {
+            if server != self.identity.domain() {
                 continue; // a real Matrix user, not one of ours
             }
             // The remainder after the prefix **is** the account ULID: that is
             // how the localpart was built (`ident::puppet_localpart`), so this
             // is a spelling change, not a lookup — there is nothing here that
             // could have been lost with the database.
-            let Some(ulid) = localpart.strip_prefix(&self.puppet_prefix) else {
-                if localpart != self.bot_localpart {
+            let Some(ulid) = localpart.strip_prefix(self.identity.puppet_prefix()) else {
+                if localpart != self.identity.bot_localpart() {
                     // On our domain (so ours, by the appservice namespace) yet
                     // not named like a puppet: almost certainly a
                     // `puppet_prefix` changed under an existing deployment,
@@ -353,7 +353,7 @@ impl Bridge {
                     // skipping quietly would look like a clean recovery.
                     tracing::warn!(
                         mxid,
-                        prefix = %self.puppet_prefix,
+                        prefix = %self.identity.puppet_prefix(),
                         "a user on our domain does not match the puppet prefix — \
                          orphaned by a prefix change?"
                     );
@@ -369,7 +369,7 @@ impl Bridge {
             // only the name-index lookup, which the next relay refills.
             let account = ev["content"]["displayname"].as_str().unwrap_or(ulid);
             self.store
-                .note_user(ulid, account, &format!("{}{ulid}", self.puppet_prefix))
+                .note_user(ulid, account, &self.identity.puppet_localpart(ulid))
                 .await;
             found += 1;
         }
