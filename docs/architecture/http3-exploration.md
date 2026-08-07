@@ -50,11 +50,21 @@ stream, and §4 lines ride inside it exactly as they do on QUIC stream 0.
     same session over WebTransport is `443/h3`, indistinguishable from web traffic.
     For an ecosystem where you do not control where a provider runs, that is the
     difference between connecting and not.
-  - *Port collapse.* Control plane, media plane, `/.well-known/weft` and the web
-    client on one port, one certificate, one firewall rule — and a provider's
-    `endpoint` and `media_url` become the same host with no odd port. Available
-    today for a standalone weftd (`[listen] https` + `[acme]`, which it already
-    supports); behind Caddy it waits on the passthrough PR, since Caddy owns 443.
+  - *Port collapse, or not needing it.* The obvious version — everything on 443 —
+    is available only when nothing else owns 443, i.e. a standalone weftd
+    (`[listen] https` + `[acme]`, which it already supports); behind Caddy it would
+    wait on the passthrough PR.
+
+    But collapsing onto 443 is not actually required, and the better design does
+    not try to. Serve h3 + WebTransport on **its own UDP port** (8443, say),
+    leave Caddy on 443, and **advertise the endpoint in `/.well-known/weft`** so no
+    client needs to know the port. No contention, no dependency on anyone else's
+    PR, and browsers connect to a non-443 WebTransport URL happily (subject only to
+    the usual blocked-port list). What this does *not* change is the certificate:
+    whoever terminates TLS holds it, so weftd still needs one — via `caddy_data` or
+    `[acme]`. Port problem and certificate problem are separate, and only the
+    passthrough moves the second one. It then becomes an optimisation rather than a
+    blocker.
 
   Both are properties of the **transport**, so they arrive for anything that adopts
   the new `ControlStream` — no protocol or spec change. Worth stating explicitly
@@ -182,18 +192,54 @@ Two answers that need no protocol change at all:
   most deployments do, we would be paying HTTP's costs to get TCP's performance. The
   QUIC properties we want survive only end to end.
 
+## Transport discovery in `/.well-known/weft` (worth doing regardless)
+
+§10.2's document carries `protocol`, `network` and `signing-key` — nothing about how
+to *reach* the server. A client is told the QUIC port by hand or assumes 4433, which
+is why the port question above looks harder than it is. Advertising transports fixes
+it for all of them at once:
+
+```json
+{
+  "protocol": "weft/1",
+  "network": "weft.example.com",
+  "signing-key": "…",
+  "transports": {
+    "webtransport": "https://weft.example.com:8443/weft",
+    "quic": "weft.example.com:4433",
+    "ws": "wss://weft.example.com/ws"
+  }
+}
+```
+
+One fetch, every way in, and a deployment can move ports without reconfiguring a
+single client. Same role Matrix's `/.well-known/matrix/server` plays for delegation;
+we already have both the file (`weftd::wellknown`) and an SSRF-guarded fetcher
+(`weftd::dialer::fetch_signing_key`).
+
+Normative caveat for the spec text: the document is authoritative for its network and
+may legitimately name any host, so a client **must** still check that the `network`
+in `WELCOME` matches the name it asked for. Without that, a tampered well-known is a
+silent redirect.
+
+This is independent of WebTransport and useful on its own — it is what makes adding
+*any* transport a deployment decision instead of a client-configuration change.
+
 ## Recommendation
 
 1. **Keep the line grammar and the verb/event model.** They fit the traffic, and
    §4's text form is a real asset for debugging and for the IRC gateway's existence.
 2. **Treat transports as the pluggable thing they already are.** WebTransport as a
-   third `ControlStream` is additive, needs no spec change, and is worth more than it
-   first looks: it is what makes the control plane frontable by an ordinary HTTP/3
-   proxy, which is the one real operational complaint against the current design.
-3. **Fix the deployment friction at the deployment layer.** Document `[acme]` as
-   the no-proxy path more prominently; it is the actual answer to "QUIC can't be
-   proxied", and it exists.
-4. **Don't split federation.** Watch for third-party implementers; if the custom
+   third `ControlStream` is additive and worth more than it first looks: standards-
+   shaped `443/h3`-style reachability for everything that dials in, without giving up
+   the outbound dial.
+3. **Advertise transports in `/.well-known/weft`** (above). Do this first: it is what
+   lets a new transport live on its own port without every client learning about it,
+   and it removes the dependency on Caddy's passthrough for the port question.
+4. **Fix the remaining deployment friction at the deployment layer.** Document
+   `[acme]` as the no-proxy path more prominently; it is the actual answer to the
+   certificate coupling, and it exists.
+5. **Don't split federation.** Watch for third-party implementers; if the custom
    dialer is what stops them, that's the signal to revisit (c).
 
 ## What would change this
