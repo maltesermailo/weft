@@ -101,8 +101,20 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Layer cache across runs so the heavy Rust + web + libwebrtc build only
-          # rebuilds what changed. Scoped per image — one shared cache key would
-          # have the two builds evicting each other.
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          # Layer cache in the **registry**, not `type=gha`.
+          #
+          # The Actions cache is capped at 10 GB for the whole repo, and this build
+          # has two big consumers: `mode=max` layers (every builder-stage layer,
+          # including the source + node_modules + SPA bundle, which churn on every
+          # commit) and the cache mounts above (a release `target/` with libwebrtc
+          # in it). Together they exceed the quota, and the cache API answers
+          # `failed to reserve cache` — the export fails and takes the build with
+          # it. Moving layers to ghcr.io removes the larger consumer from that
+          # budget entirely: the registry has no comparable cap, dedupes by digest,
+          # and we are already authenticated to push there.
+          #
+          # `mode=max` matters here because everything worth reusing (apt, the Node
+          # tarball, wasm-pack, clang) lives in the *builder* stage, which `min`
+          # would not export at all.
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache,mode=max
