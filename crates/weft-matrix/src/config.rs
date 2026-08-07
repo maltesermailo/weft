@@ -282,6 +282,30 @@ mod tests {
         assert!(!reg.contains('"'), "{reg}");
     }
 
+    /// The SHIPPED deploy config must load with nothing but the environment Compose
+    /// provides. This is the end-to-end version of the test below: a comment in that
+    /// file mentions `${VAR}`, the value line references `${POSTGRES_PASSWORD}`, and
+    /// both have to come out right — otherwise the bridge crash-loops on
+    /// `password authentication failed`, naming nothing that points at the cause.
+    #[test]
+    fn the_shipped_deploy_config_expands_and_parses() {
+        std::env::set_var("POSTGRES_PASSWORD", "s3cret");
+
+        let raw = include_str!("../../../deploy/weft-matrix/weft-matrix.toml");
+        let expanded = expand_env(raw, std::path::Path::new("weft-matrix.toml"))
+            .expect("the shipped config must load");
+        let cfg: Config = toml::from_str(&expanded).expect("and parse");
+
+        assert_eq!(
+            cfg.daemon.database_url,
+            "postgres://weft:s3cret@postgres/weftmatrix"
+        );
+        assert!(
+            !expanded.contains("${POSTGRES_PASSWORD}"),
+            "an unexpanded reference would be sent to Postgres verbatim"
+        );
+    }
+
     /// The Docker deployment keeps the Postgres password in Compose's `.env` and
     /// references it here, so a missing variable must fail loudly rather than
     /// yield an empty password.
