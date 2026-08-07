@@ -6,6 +6,12 @@
 #
 # Every field below has a default; delete anything you don't need to change.
 # `deny_unknown_fields` is on, so a typo'd key is a hard error (a feature).
+#
+# `${VAR}` in a value is substituted from the environment when this file loads, so a
+# secret can live outside it — `url = "postgres://weft:${POSTGRES_PASSWORD}@…"` is
+# how the Docker deployment keeps the password in Compose's `.env` alone. An unset or
+# empty variable refuses the boot rather than becoming an empty string. Whole-line
+# comments are exempt, so prose may mention the syntax freely.
 
 # ── identity ────────────────────────────────────────────────────────────────
 # The network's DNS name. EVERYTHING is scoped to this: user IDs are

@@ -41,8 +41,11 @@ key  = "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/weft.exa
 
 [storage]
 backend = "postgres"
-# MUST MATCH the POSTGRES_* values in docker-compose.yml.
-url = "postgres://weft:change-me-postgres-password@postgres:5432/weft"
+# `${VAR}` is expanded from the environment when this file loads, and
+# docker-compose.yml passes POSTGRES_PASSWORD through from `.env` — so the password
+# is written in exactly one place. An unset variable refuses the boot; it never
+# becomes an empty password.
+url = "postgres://weft:${POSTGRES_PASSWORD}@postgres:5432/weft"
 
 # §13 media blobs. Persist uploaded images/files to disk — WITHOUT this, weftd
 # uses an in-memory blob store and every upload is lost on restart. The path is

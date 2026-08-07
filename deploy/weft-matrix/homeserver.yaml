@@ -9,7 +9,7 @@
 # deliberately does not have. matrix.md decision 1 lists Synapse as supported.
 #
 # The signing key and any other missing file are written on first boot, into the
-# `synapse_data` volume — nothing to run by hand. See MATRIX.md.
+# `synapse_data` volume — nothing to run by hand. See README.md.
 
 # The MXID suffix — `@weft_<ulid>:<server_name>` — NOT the hostname this server
 # runs on. The two are independent, so there are two valid shapes:
@@ -21,7 +21,7 @@
 #      `https://weft.example/.well-known/matrix/server` must return
 #      {"m.server": "matrix.weft.example:443"}. That path is on the apex, which
 #      in this stack is weftd's Caddy site block, not the matrix one — see
-#      MATRIX.md's "Federation and TLS".
+#      README.md's "Federation and TLS".
 #
 # MUST MATCH [matrix] domain in weft-matrix.toml either way, and it is
 # PERMANENT: baked into every MXID and event this server signs, so changing it
@@ -88,8 +88,8 @@ enable_registration: false
 # smoke test without public TLS).
 #
 # What federation actually needs from the deployment:
-#   1. `server_name` resolvable in public DNS, with real TLS on 443. The stack's
-#      Caddy does that — uncomment its matrix block.
+#   1. `server_name` resolvable in public DNS, with real TLS on 443. The Caddy
+#      stack does that (../caddy) — uncomment its matrix block.
 #   2. Delegation, so remote servers use 443 instead of 8448. `serve_server_
 #      wellknown` below has Synapse answer `/.well-known/matrix/server` itself,
 #      which works as long as `https://<server_name>/` routes here. With an apex

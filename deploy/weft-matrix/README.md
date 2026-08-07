@@ -1,70 +1,90 @@
-# The Matrix bridge, in Docker
+# The Matrix bridge stack
 
-The bridge is an **optional part of this stack**, not a separate one: the `matrix`
-Compose profile adds a **companion homeserver** (Synapse) and the **bridge daemon**
-(`weft-matrix`) to the services in `docker-compose.yml`. It shares the stack's
-Postgres, network and Caddy.
+The **`weft-matrix` daemon**, the **companion homeserver** (Synapse) it is an
+appservice to, and a **Postgres** for the two of them.
 
-One profile rather than a second project because the daemon has to reach weftd
-(`weftd:4433` for QUIC, `weftd:8081` for media). Same project ⇒ those names just
-resolve; no external-network wiring, no ordering between two `up`s. Leave `matrix`
-out of `COMPOSE_PROFILES` and none of it is built or run.
+> **Setup walkthrough: [`../README.md`](../README.md) → Part 2** — one ordered list
+> across all three stacks, so it cannot drift. This file is the reference behind it:
+> what the pieces are, how to verify, how to operate and remove it.
 
-**Synapse rather than conduwuit**, for one reason: appservice registration has to
-be *declarative*. Synapse reads it from `app_service_config_files`; conduwuit
-registers appservices through its admin room, which would make setup a manual step
-performed by hand in a chat window. `matrix.md` decision 1 lists Synapse as
-supported, so this is within the design, not a departure from it.
+Its own Compose project, independent of `../weftd`. It reaches weftd over weftd's
+**public name** (`[weft] endpoint` in `weft-matrix.toml`) exactly as a third-party
+appservice would — no shared Docker network, no ordering between the two `up`s, and
+tearing this down cannot touch weftd's data. The bridge and Synapse *do* share this
+project's network, because Synapse has to call the bridge back (`url:` in
+`weft-matrix.yaml`).
 
-Design: [`docs/architecture/matrix.md`](../../docs/architecture/matrix.md). The
-wire contract with weftd:
+**Synapse rather than conduwuit**, for one reason: appservice registration has to be
+*declarative*. Synapse reads it from `app_service_config_files`; conduwuit registers
+appservices through its admin room, which would make setup a manual step performed
+by hand in a chat window. `matrix.md` decision 1 lists Synapse as supported, so this
+is within the design, not a departure from it.
+
+Design: [`docs/architecture/matrix.md`](../../docs/architecture/matrix.md). The wire
+contract with weftd:
 [`docs/protocol/bridge-session-protocol.md`](../../docs/protocol/bridge-session-protocol.md).
 
-> **This has never run against a real homeserver.** Every test to date drives a
-> mock that speaks spec-shaped JSON. Expect at least one mismatch — media-endpoint
-> auth, `/context` token semantics, `is_direct` handling. Where that happens the
-> daemon logs the failing request with its status, which is the fastest path to
-> the answer.
+> **This has never run against a real homeserver.** Every test to date drives a mock
+> that speaks spec-shaped JSON. Expect at least one mismatch — media-endpoint auth,
+> `/context` token semantics, `is_direct` handling. Where that happens the daemon
+> logs the failing request with its status, which is the fastest path to the answer.
 
 ## What talks to what
 
 ```
-   Matrix federation                     WEFT clients
-          │                                    │
-          ▼                                    ▼
-    ┌──────────┐   appservice API    ┌──────┐ QUIC ┌───────┐
-    │ Synapse  │◄───────────────────►│bridge│─────►│ weftd │
-    └──────────┘   (txn push /       └──────┘      └───────┘
-     puppets +      intents)           │  HTTP media (§13)     ▲
-     the bot                           └───────────────────────┘
-                          ┌──────────┐
-                  all of  │ postgres │  weft · synapse · weftmatrix
-                          └──────────┘
+                  this stack                    ../weftd
+   ┌──────────────────────────────────────┐
+   │  ┌──────────┐  appservice  ┌──────┐  │   QUIC 4433   ┌───────┐
+   │  │ Synapse  │◄────────────►│bridge│──┼──────────────►│ weftd │
+   │  └──────────┘  (txn push / └──────┘  │   HTTP media  └───────┘
+   │   puppets +     intents)      │      │  (§13, 8081)      ▲
+   │   the bot                     │      └───────────────────┘
+   │        └──────┬───────────────┘      │
+   │          ┌──────────┐                │
+   │          │ postgres │ synapse ·      │
+   │          └──────────┘ weftmatrix     │
+   └──────────────────────────────────────┘
+        ▲                                      the two arrows leaving this box
+        │ federation (443, via ../caddy)        go to weftd's PUBLIC name
+   remote homeservers
 ```
 
 The bridge is an appservice to Synapse **and** a provider session to weftd.
 
 ## Setup
 
-**The walkthrough is [`../README.md`](../README.md) → Part 2** — one ordered list,
-kept in one place so it cannot drift from Part 1. In outline: choose the
-`server_name` and add its A record, edit the four files, create the two databases,
-`keygen`, pin the key in `weft.toml`, then turn the profile on. The appservice
-registration and Synapse's signing key need no steps — `up` derives the first and
-Synapse writes the second.
+**[`../README.md`](../README.md) → Part 2.** In outline: choose the `server_name`
+and add its A record, edit the five files here (plus `../caddy/Caddyfile` and
+weftd's `weft.toml`), `keygen`, pin the key in weftd, then start this stack.
 
-That order is forced, not stylistic: the adapter key must exist before weftd can
-pin it, and weftd must pin it before the bridge may connect — so
-`COMPOSE_PROFILES=…,matrix` goes on **last**, and everything before it runs via
-`docker compose run --rm`, which enables a profiled service for that one command.
+That order is forced, not stylistic: the adapter key must exist before weftd can pin
+it, and weftd must pin it before the bridge may connect — so the bridge starts
+**last**, and the steps before it run via `docker compose run --rm`.
+
+### If Postgres already has data
+
+`initdb/` runs only on an empty volume, so an existing deployment needs Synapse's
+database created by hand — once (the daemon's own database comes from
+`POSTGRES_DB`, so it already exists):
+
+```sh
+docker compose exec -T postgres psql -U weft -d postgres < initdb/10-matrix.sql
+```
+
+Synapse needs a `C`-collation database, which `POSTGRES_DB` cannot express; that is
+what the script is for.
 
 ## Verifying it works
 
 0. **Synapse loaded the registration.** `docker compose logs synapse | grep -i
    appservice` — a rejected registration is fatal at startup, so a running Synapse
    means the file parsed and the namespace was claimed.
-1. **The provider is up.** `docker compose logs weftd | grep provider` shows
-   `provider registered scheme`.
+1. **The provider is up.** `docker compose logs -f bridge` shows `connected to
+   weftd`, and over in `../weftd`, `docker compose logs weftd | grep provider` shows
+   `provider registered scheme`. A loop of `AUTH-FAILED` means the pinned key does
+   not match; a loop of `password authentication failed` means this stack's own
+   `POSTGRES_PASSWORD` is wrong — the daemon opens its store before it connects to
+   anything.
 2. **Consume a room.** In a WEFT client, join `matrix://<hs>/<space>` — for a room
    on the companion server, `matrix://matrix.weft.example/<alias>`. The bridge
    resolves, joins, enumerates and asserts it; the namespace appears in `DISCOVER`.
@@ -130,8 +150,8 @@ the console. Remove it before you expect anyone else to join.
   (matrix.md §20a).
 - **`puppet_prefix` is permanent.** Changing it orphans every existing puppet.
   Recovery warns when it sees the mismatch but cannot repair it.
-- **The adapter key is not recoverable.** Back up the `matrix_keys` volume, or be
-  ready to re-pin.
+- **The adapter key is not recoverable.** Back up the `keys` volume, or be ready to
+  re-pin.
 - **Nor is Synapse's signing key.** It is written into `synapse_data` on first boot
   and is the identity remote homeservers pin; back that volume up too.
 - **Synapse logs to stderr** at INFO (`docker compose logs synapse`), because
@@ -140,10 +160,9 @@ the console. Remove it before you expect anyone else to join.
   `log_config` at it.
 - **Bans** are set from weftd's admin panel (a namespace's bridging toggle), not
   here; the bridge stores and enforces them.
-- **Removing the bridge:** drop `matrix` from `COMPOSE_PROFILES`,
-  `docker compose up -d --remove-orphans`, then `DROP DATABASE weftmatrix;` and
-  `DROP DATABASE synapse;`. weftd's own data is untouched — that is why the bridge
-  gets its own databases rather than sharing `weft`.
+- **Removing the bridge:** `docker compose down -v` here, and delete the
+  `[[plugin.remote]]` block from `../weftd/weft.toml`. Nothing of weftd's is touched
+  — that is the point of the separation.
 
 ## Known gaps
 

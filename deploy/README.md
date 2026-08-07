@@ -1,16 +1,27 @@
 # Deployments
 
-One Compose stack, in [`weftd/`](weftd/README.md): weftd (with the embedded web client),
-PostgreSQL, LiveKit (voice) and Caddy (automatic HTTPS). The optional **Matrix
-bridge** is a *profile* of that same stack, not a stack of its own.
+**Three independent Compose stacks.** Each is its own project, brought up
+separately, and they reach each other over **published host ports** — no shared
+Docker network, no ordering between `up`s, and none of them can be broken by
+another failing to start.
 
-Follow the walkthrough below start to finish. It is the whole happy path; the two
-reference docs go deeper where you need it:
+| Directory                               | What it runs                          | Needed?                  |
+| --------------------------------------- | ------------------------------------- | ------------------------ |
+| [`weftd/`](weftd/README.md)             | weftd + PostgreSQL + LiveKit (voice)  | yes — this is the server |
+| [`caddy/`](caddy/README.md)             | TLS + reverse proxy (Let's Encrypt)   | unless you run your own  |
+| [`weft-matrix/`](weft-matrix/README.md) | the Matrix bridge + companion Synapse | only to bridge to Matrix |
 
-- [`weftd/README.md`](weftd/README.md) — running without Caddy, standalone TLS,
-  shipping a prebuilt image, local dev with no domain, day-2 operations.
-- [`weftd/MATRIX.md`](weftd/MATRIX.md) — what the bridge is, how to verify it, how
-  to operate and remove it.
+Because they talk through the host, the ports weftd and Synapse publish have to be
+bound where the other containers can reach them — `0.0.0.0` by default, so
+**firewall them**; each stack's `.env` explains the alternatives. Caddy reaches
+them at `host.docker.internal`.
+
+One coupling is not a port: QUIC cannot be reverse-proxied, so weftd needs the
+certificate itself and bind-mounts `caddy/data` read-only. Drop that mount if you
+terminate TLS another way — weftd has built-in ACME, see
+[`weftd/README.md`](weftd/README.md).
+
+Follow the walkthrough below start to finish; the per-stack READMEs go deeper.
 
 ---
 
@@ -44,18 +55,26 @@ livekit.example.com    →  203.0.113.10
 
 ```sh
 git clone <your-weft-repo> weft
-cd weft/deploy/weftd
+cd weft/deploy
 
 openssl rand -hex 32   # → the Postgres password
 openssl rand -hex 32   # → the LiveKit secret
 ```
 
-Keep both strings to hand. Each goes in **two** files — they are not sourced from
-`.env`, so the pair has to match.
+The Postgres password goes in **one** place, `weftd/.env` — weftd expands
+`${POSTGRES_PASSWORD}` from the environment when it reads `weft.toml`. The LiveKit
+secret still goes in two (`weft.toml` and `livekit.yaml`); LiveKit's config has no
+such expansion.
 
-### 4. Edit four files
+### 4. Edit the config
 
-**`weft.toml`**
+**`weftd/.env`**
+
+```dotenv
+POSTGRES_PASSWORD=<the-postgres-password>
+```
+
+**`weftd/weft.toml`**
 
 ```toml
 network   = "weft.example.com"        # your domain
@@ -65,7 +84,7 @@ cert = "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/weft.exa
 key  = "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/weft.example.com/weft.example.com.key"
 
 [storage]
-url = "postgres://weft:POSTGRES-PASSWORD@postgres:5432/weft"
+url = "postgres://weft:${POSTGRES_PASSWORD}@postgres:5432/weft"   # leave as-is
 
 [voice.livekit]
 url        = "wss://livekit.example.com"
@@ -73,32 +92,39 @@ api_key    = "devkey"                 # fine as-is
 api_secret = "LIVEKIT-SECRET"
 ```
 
-**`livekit.yaml`** — `keys: { devkey: LIVEKIT-SECRET }` (the key *name* is
+**`weftd/livekit.yaml`** — `keys: { devkey: LIVEKIT-SECRET }` (the key *name* is
 `api_key` above, its value is `api_secret`).
 
-**`Caddyfile`** — the two site addresses:
+**`caddy/Caddyfile`** — the two site addresses. `weft.example.com` MUST MATCH
+`network` above: §10.2's well-known is fetched at
+`https://<network>/.well-known/weft`, so the network name and the host serving it
+are one and the same.
 
 ```caddyfile
-weft.example.com    { reverse_proxy weftd:8081 }
-livekit.example.com { reverse_proxy livekit:7880 }
+weft.example.com    { reverse_proxy host.docker.internal:8081 }
+livekit.example.com { reverse_proxy host.docker.internal:7880 }
 ```
 
-**`docker-compose.yml`** — `POSTGRES_PASSWORD:` on the `postgres` service.
+`host.docker.internal` because Caddy is a separate project reaching this stack
+through the host. Its two commented-out Matrix blocks stay commented unless you do
+Part 3.
 
-Before moving on, check each value appears in both of its places:
+Still duplicated, so check before moving on:
 
-| Value             | Both of                                                                  |
-| ----------------- | ------------------------------------------------------------------------ |
-| Postgres password | `weft.toml` `[storage] url` · `docker-compose.yml` `POSTGRES_PASSWORD`   |
-| LiveKit secret    | `weft.toml` `api_secret` · `livekit.yaml` `keys:`                        |
-| Your domain       | `weft.toml` (`network`, both `[tls]` paths, LiveKit `url`) · `Caddyfile` |
+| Value          | Both of                                                                              |
+| -------------- | ------------------------------------------------------------------------------------ |
+| LiveKit secret | `weftd/weft.toml` `api_secret` · `weftd/livekit.yaml` `keys:`                        |
+| Your domain    | `weftd/weft.toml` (`network`, both `[tls]` paths, LiveKit `url`) · `caddy/Caddyfile` |
 
-### 5. Start it
+### 5. Start both stacks
 
 ```sh
-docker compose up -d          # add --build to compile locally instead of pulling
-docker compose logs -f caddy  # → certificates obtained, for both names
-docker compose logs -f weftd  # → "same-origin /ws mounted", then "weftd listening"
+(cd weftd && docker compose up -d)    # add --build to compile locally
+(cd caddy && docker compose up -d)
+
+(cd caddy && docker compose logs -f)  # → certificates obtained, for both names
+(cd weftd && docker compose logs -f weftd)
+#                    → "same-origin /ws mounted", then "weftd listening"
 ```
 
 weftd boots on a self-signed placeholder for QUIC and **hot-swaps** Caddy's real
@@ -107,6 +133,7 @@ certificate in once Caddy has it (within a minute) — no restart.
 ### 6. Create the first operator
 
 ```sh
+cd weftd
 docker compose exec weftd weftd admin create admin --password '<a-strong-password>'
 ```
 
@@ -126,13 +153,14 @@ from two browsers to check LiveKit.
 
 ## Part 2 — the Matrix bridge (optional)
 
-Adds a **companion homeserver** (Synapse — dedicated to the bridge, nobody signs
-up on it) and the **bridge daemon**. Same Compose project, because the daemon has
-to reach `weftd:4433` and `weftd:8081`.
+A third stack, `weft-matrix/`: a **companion homeserver** (Synapse — dedicated to
+the bridge, nobody signs up on it), the **bridge daemon**, and their own Postgres.
+It reaches weftd over weftd's public name, the same way any third-party appservice
+would, so it shares nothing with Part 1 but the network cable.
 
 The order below is forced by a circular dependency: the daemon's key must exist
-before weftd can pin it, and weftd must pin it before the daemon may connect.
-So the profile goes on **last**.
+before weftd can pin it, and weftd must pin it before the daemon may connect. So
+the bridge starts **last**.
 
 ### 1. Choose the homeserver's name, and point DNS at it
 
@@ -242,50 +270,47 @@ one static file, and the certificate remote servers validate becomes the apex's.
 
 ### 2. Edit the bridge's config
 
-Still in `deploy/weftd`:
+Everything below is in `deploy/weft-matrix/`, except the last item.
 
-- **`weft-matrix.toml`** — `[matrix] domain` = the name you just chose,
-  `as_token` and `hs_token` (**change both** — anyone holding `hs_token` can
-  inject events as any Matrix user), `[daemon] database_url` with the **same
-  Postgres password as `weft.toml`** (the bridge opens its own store before it
-  connects to anything, so a stale placeholder here shows up as
-  `password authentication failed for user "weft"` in a reconnect loop and
-  nothing else), and `admins` (MXIDs allowed to run the `!weft` console) if you
-  want it.
-- **`homeserver.yaml`** — `server_name` = **exactly** the same string, and the
-  Synapse Postgres password.
-- **`initdb/10-matrix.sql`** — the same Synapse password.
-- **`Caddyfile`** — uncomment the `matrix.…` site block and set your domain (plus
-  the apex block, on the delegated shape). This is what makes federation work over
-  **443**, so port 8448 never has to be opened.
-- **`.env`** — `MATRIX_BIND` / `MATRIX_PORT`, where the homeserver's port is
-  published on the host (keep it on loopback; Caddy fronts it).
+- **`.env`** — this stack's own `POSTGRES_PASSWORD` (unrelated to weftd's), and
+  `MATRIX_BIND`/`MATRIX_PORT` for the homeserver's published port.
+- **`weft-matrix.toml`** — `[matrix] domain` = the name you chose in step 1;
+  `as_token` and `hs_token` (**change both** — anyone holding `hs_token` can inject
+  events as any Matrix user); `[weft] endpoint` and `media_url` = **weftd's public
+  name** (`weft.example.com:4433` and `https://weft.example.com`), since this stack
+  reaches it through the internet, not a shared network; and `admins` (MXIDs allowed
+  to run the `!weft` console) if you want it. `[daemon] database_url` already reads
+  `${POSTGRES_PASSWORD}` from `.env` — leave it.
+- **`weft-matrix.yaml`** — the appservice registration Synapse loads. It repeats
+  five values from `weft-matrix.toml` (`url`, both tokens, the bot localpart, the
+  puppet regex) because Synapse has no environment expansion; the file lists each
+  one and what a mismatch does. Substitute your `server_name` into the regex,
+  **escaping every dot**.
+- **`homeserver.yaml`** — `server_name` = **exactly** the same string as
+  `[matrix] domain`, plus this stack's Postgres password (again literal, for the
+  same reason).
+- **`initdb/10-matrix.sql`** — the same password once more; it creates Synapse's
+  role.
+- **`../caddy/Caddyfile`** — uncomment the `matrix.…` block (and the apex one, on
+  the delegated shape) and point it at `host.docker.internal:8008`. This is what
+  makes federation work over **443**, so port 8448 never has to be opened.
 
-### 3. Create the two databases
-
-`initdb/` only runs on an *empty* Postgres volume, and yours has data from Part 1,
-so do it by hand — once:
-
-```sh
-docker compose exec -T postgres psql -U weft -d postgres < initdb/10-matrix.sql
-```
-
-(Synapse needs a `C`-collation database, which `POSTGRES_DB` cannot express; that
-is what the script is for. `weftmatrix` is the daemon's own store.)
-
-### 4. Create the adapter key
+### 3. Create the adapter key
 
 ```sh
+cd weft-matrix
 docker compose run --rm --build adapter-key
 ```
 
 Prints the public key. Idempotent — it only creates the file if absent. `--build`
-compiles the bridge image locally; drop it once you are pulling a published one.
+compiles the image locally; drop it once you are pulling a published one.
 
 (Not `run bridge keygen …`: `run` starts the target's dependencies, and the bridge
-depends on Synapse, which cannot start until step 6.)
+depends on Synapse, which cannot start until its config is complete.)
 
-### 5. Pin the key in `weft.toml`
+### 4. Pin the key in weftd
+
+In `weftd/weft.toml`:
 
 ```toml
 [[plugin.remote]]
@@ -296,34 +321,26 @@ schemes = ["matrix"]
 ```
 
 ```sh
-docker compose up -d weftd
+(cd weftd && docker compose up -d weftd)
 ```
 
 Until this matches, the bridge is refused with `AUTH-FAILED` — by design.
 
-### 6. Turn the profile on
+### 5. Start the bridge
 
 ```sh
-# .env
-COMPOSE_PROFILES=caddy,matrix
-```
-
-```sh
+cd weft-matrix
 docker compose up -d --build
 docker compose logs -f bridge     # → the adapter pubkey, then "connected to weftd"
+(cd ../caddy && docker compose restart)   # picks up the matrix site block
 ```
 
-Two things happen on their own here, so there is no step for either:
+Synapse's **signing key** is written on first boot into the `synapse_data` volume —
+no step of its own. **Back that volume up**: the key is the identity remote
+homeservers pin, and losing it means every server you have federated with rejects
+your events.
 
-- **The appservice registration** is derived from `weft-matrix.toml` into the volume
-  Synapse mounts, by a one-shot Synapse waits for. Every `up` re-derives it, so a
-  changed token cannot leave a stale registration behind, and a missing one cannot
-  leave Synapse crash-looping on `FileNotFoundError`.
-- **Synapse's signing key** is written on first boot into `synapse_data`.
-  **Back that volume up** — the key is the identity remote homeservers pin, and
-  losing it means every server you have federated with rejects your events.
-
-### 7. Check that federation works
+### 6. Check that federation works
 
 ```sh
 docker compose logs synapse | grep -i appservice   # a bad registration is fatal, so
@@ -341,7 +358,7 @@ Caddy:
 
 ```caddyfile
 matrix.example.com:8448 {
-	reverse_proxy synapse:8008
+	reverse_proxy host.docker.internal:8008
 }
 ```
 
@@ -362,20 +379,33 @@ whatever is wrong. It must come back green before a Matrix user on another serve
 can join anything here.
 
 The remaining verification (consume a room, project a namespace, the `!weft`
-console) is in [`weftd/MATRIX.md`](weftd/MATRIX.md#verifying-it-works). Note the
+console) is in [`weft-matrix/README.md`](weft-matrix/README.md#verifying-it-works). Note the
 warning there: **the bridge has never been run against a real homeserver.**
 
 ---
 
 ## Day 2
 
+Each stack is operated on its own, from its own directory:
+
 ```sh
-docker compose logs -f weftd      # tail
-docker compose up -d weftd        # apply a weft.toml edit
-docker compose pull && docker compose up -d   # update to the latest images
-docker compose down               # stop; data stays in the named volumes
+docker compose logs -f              # tail
+docker compose up -d <service>      # apply a config edit
+docker compose pull && docker compose up -d    # update images
+docker compose down                 # stop; data stays in the named volumes
 ```
 
-**Back up** the `pgdata` volume (the database), `weftd_media` (uploaded files),
-weftd's signing key from `[identity] key_file`, and — with the bridge — the
-`matrix_keys` volume, which holds the one thing the daemon cannot rebuild.
+**Back up**, per stack:
+
+| Stack         | What                  | Why                                          |
+| ------------- | --------------------- | -------------------------------------------- |
+| `weftd`       | `pgdata` volume       | the database                                 |
+| `weftd`       | `weftd_media` volume  | uploaded files (content-addressed blobs)     |
+| `weftd`       | `[identity] key_file` | your network's signing key                   |
+| `caddy`       | `data/` directory     | certificates + the ACME account key          |
+| `weft-matrix` | `keys` volume         | the adapter key weftd pins — not recoverable |
+| `weft-matrix` | `synapse_data` volume | Synapse's signing key — likewise             |
+
+Removing the bridge is `docker compose down -v` in `weft-matrix/` and deleting the
+`[[plugin.remote]]` block from `weftd/weft.toml`. Nothing of weftd's is touched —
+that is the point of the separation.

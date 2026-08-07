@@ -1,33 +1,39 @@
 # The Matrix bridge daemon. Plain TOML the operator edits — same convention as
-# weft.toml (no templating, no .env indirection for application config).
+# weft.toml. `${VAR}` is expanded from the environment at load, which is how the
+# Postgres password stays in `.env` alone; nothing else is templated.
 #
 # Design: docs/architecture/matrix.md. Wire contract with weftd:
 # docs/protocol/bridge-session-protocol.md.
 
 [weft]
-# weftd's QUIC control plane, reachable on the shared Compose network. The
-# service name comes from the weftd stack (../weftd/docker-compose.yml).
-endpoint = "weftd:4433"
+# weftd's QUIC control plane. This is weftd's PUBLIC name, not a Compose service
+# name: this stack is a separate project with no shared network, so it reaches weftd
+# the way any third-party appservice would. The name must be the one weftd's
+# certificate covers, or the TLS handshake fails.
+endpoint = "weft.example.com:4433"
 
 # The adapter's Ed25519 identity. Created by `weft-matrix keygen <this file>`;
 # its PUBLIC half goes in weftd's `[[plugin.remote]] key`. Nothing connects
 # until those match — an unpinned provider gets AUTH-FAILED.
 #
-# On the `matrix_keys` volume so it survives `docker compose down`. Losing it
-# means generating a new one and re-pinning.
+# On the `keys` volume so it survives `docker compose down`. Losing it means
+# generating a new one and re-pinning.
 key_file = "/var/lib/weft-matrix/adapter.key"
 
-# weftd's HTTP media plane (§13): `POST /media` to upload, `GET /media/<hash>`
-# to fetch. Blobs do not ride the control stream, so this is a separate address.
+# weftd's HTTP media plane (§13): `POST /media` to upload, `GET /media/<hash>` to
+# fetch. Blobs do not ride the control stream, so this is a separate address —
+# again weftd's public name, fronted by TLS.
 # Omit to run without media — attachments are then dropped, with a warning.
-media_url = "http://weftd:8081"
+media_url = "https://weft.example.com"
 
 [matrix]
-# The companion homeserver's client-server API, on the shared network.
+# The companion homeserver's client-server API. A Compose service name, because
+# Synapse IS in this project.
 hs_url = "http://synapse:8008"
 
-# The appservice token pair. MUST MATCH the registration you give the
-# homeserver (`weft-matrix generate-registration <this file>`):
+# The appservice token pair. MUST MATCH weft-matrix.yaml, the registration Synapse
+# loads — that file lists every value the two share and what a mismatch does.
+# (`weft-matrix generate-registration <this file>` prints a matching one.)
 #   as_token — ours to the homeserver
 #   hs_token — the homeserver's to us (we reject pushes without it)
 # Change both. Anyone holding hs_token can inject events as any Matrix user.
@@ -70,8 +76,10 @@ admins = []
 # `weft` database would work too; a separate one is the default so the bridge
 # can be removed without touching weftd's data.
 #
-# MUST MATCH the POSTGRES_* values in docker-compose.yml — the same password
-# weft.toml's [storage] url uses. The daemon opens this store before it connects
-# to weftd or the homeserver, so a wrong password here looks like a bridge that
-# never starts: `password authentication failed for user "weft"`, on a loop.
-database_url = "postgres://weft:change-me-postgres-password@postgres/weftmatrix"
+# `${VAR}` is expanded from the environment when this file loads, and
+# docker-compose.yml passes POSTGRES_PASSWORD through from `.env` — the same single
+# source weft.toml uses, so there is no pair to keep in sync. An unset variable
+# refuses to start (which beats the alternative: the daemon opens this store before
+# it connects to anything, so a wrong password shows up only as
+# `password authentication failed for user "weft"` every five seconds).
+database_url = "postgres://weft:${POSTGRES_PASSWORD}@postgres/weftmatrix"

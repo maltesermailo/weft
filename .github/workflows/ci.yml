@@ -114,17 +114,20 @@ jobs:
           command: check advisories licenses bans sources
 
   compose:
-    name: compose config (deploy stack)
+    name: compose config (deploy stacks)
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        stack: [weftd, caddy, weft-matrix]
     steps:
       - uses: actions/checkout@v4
-      # Validate with every profile enabled, so the optional services are checked
-      # too — a typo in an interpolation, a volume that no `volumes:` entry
-      # declares, or a `depends_on` naming a service that no longer exists fails
-      # here instead of on an operator's server. The runner's `.env` is the one in
-      # the repo, so the required POSTGRES_PASSWORD is present.
-      - run: docker compose --profile caddy --profile matrix --profile setup config -q
-        working-directory: deploy/weftd
+      # Validate with every profile enabled, so the setup one-shots are checked too
+      # — a typo in an interpolation, a volume that no `volumes:` entry declares, or
+      # a `depends_on` naming a service that no longer exists fails here instead of
+      # on an operator's server. The `.env` in the repo supplies the required
+      # POSTGRES_PASSWORD.
+      - run: docker compose --profile setup config -q
+        working-directory: deploy/${{ matrix.stack }}
 
   fuzz:
     name: fuzz smoke (L0 parsers)

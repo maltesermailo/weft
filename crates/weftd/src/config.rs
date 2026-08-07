@@ -587,10 +587,92 @@ impl Default for Identity {
     }
 }
 
+/// Substitute every `${VAR}` in the config text from the environment.
+///
+/// So a secret can live in one place instead of being hand-copied into every
+/// file that needs it: the Docker deployment keeps the Postgres password in
+/// Compose's `.env` and writes `${POSTGRES_PASSWORD}` here. An unset or empty
+/// variable is a hard error, never an empty string — booting with a silently
+/// passwordless connection string is worse than not booting.
+fn expand_env(raw: &str, origin: &Path) -> anyhow::Result<String> {
+    let mut out = String::with_capacity(raw.len());
+
+    for (index, line) in raw.split_inclusive('\n').enumerate() {
+        // A whole-line comment is prose, not configuration. Expanding it would let
+        // a sentence that merely *mentions* `${SOMETHING}` — like the ones
+        // documenting this feature — refuse the boot.
+        if line.trim_start().starts_with('#') {
+            out.push_str(line);
+            continue;
+        }
+
+        expand_line(line, origin, index + 1, &mut out)?;
+    }
+
+    Ok(out)
+}
+
+/// One line's worth of substitution, appended to `out`.
+fn expand_line(
+    line: &str,
+    origin: &Path,
+    line_number: usize,
+    out: &mut String,
+) -> anyhow::Result<()> {
+    let mut rest = line;
+
+    while let Some(open) = rest.find("${") {
+        out.push_str(&rest[..open]);
+        rest = &rest[open..];
+
+        // Only a well-formed `${IDENTIFIER}` is a reference; a `${` with no closing
+        // brace, or a name no environment variable could have, is literal text.
+        let name = rest
+            .strip_prefix("${")
+            .and_then(|r| r.split_once('}'))
+            .map(|(name, _)| name)
+            .filter(|name| is_env_name(name));
+
+        let Some(name) = name else {
+            out.push_str("${");
+            rest = &rest[2..];
+            continue;
+        };
+
+        let value = std::env::var(name)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .with_context(|| {
+                format!(
+                    "{}:{line_number} references `${{{name}}}`, which is unset or empty \
+                     in the environment",
+                    origin.display()
+                )
+            })?;
+        // Substituted text is never re-scanned: a password that happens to contain
+        // `${` is data, not another reference.
+        out.push_str(&value);
+
+        rest = &rest[name.len() + 3..];
+    }
+
+    out.push_str(rest);
+
+    Ok(())
+}
+
+/// A POSIX-shaped environment-variable name.
+fn is_env_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Config> {
     let path = path.as_ref();
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
+    let raw = expand_env(&raw, path)?;
+
     toml::from_str(&raw).with_context(|| format!("parsing config {}", path.display()))
 }
 
@@ -602,6 +684,46 @@ mod tests {
     fn example_config_parses() {
         let raw = include_str!("../../../weftd.example.toml");
         toml::from_str::<super::Config>(raw).expect("weftd.example.toml must parse");
+    }
+
+    /// `${VAR}` expansion is what lets the Docker deployment keep the Postgres
+    /// password in `.env` alone instead of hand-copied into every file wanting it.
+    #[test]
+    fn env_references_expand_and_missing_ones_are_refused() {
+        let path = std::path::Path::new("test.toml");
+
+        std::env::set_var("WEFT_TEST_PG_PASSWORD", "s3cr${et}");
+        let expanded = super::expand_env(
+            r#"url = "postgres://weft:${WEFT_TEST_PG_PASSWORD}@postgres/weft""#,
+            path,
+        )
+        .expect("a set variable expands");
+        // The substituted value is not re-scanned: the `${et}` inside it is data.
+        assert_eq!(
+            expanded,
+            r#"url = "postgres://weft:s3cr${et}@postgres/weft""#
+        );
+
+        // An unset — or empty — variable must never become an empty password.
+        std::env::set_var("WEFT_TEST_PG_BLANK", "");
+        for raw in ["${WEFT_TEST_PG_ABSENT}", "${WEFT_TEST_PG_BLANK}"] {
+            let err = super::expand_env(raw, path).expect_err("must refuse");
+            assert!(format!("{err:#}").contains("unset or empty"), "{err:#}");
+        }
+
+        // A whole-line comment is exempt entirely. Not hypothetical: the comment
+        // documenting this feature in deploy/weftd/weft-matrix.toml said `${VAR}`,
+        // a perfectly good variable name, and weftd refused to start because of a
+        // sentence. `${PATH}` is the sharp case — it is always set, so without the
+        // exemption a comment would be silently rewritten rather than error.
+        for comment in ["# use ${SECRET} here", "  # see ${VAR} above", "# ${PATH}"] {
+            assert_eq!(super::expand_env(comment, path).unwrap(), comment);
+        }
+
+        // Outside a comment, a malformed reference is still literal text.
+        for literal in ["a = \"${...}\"", "a = \"bare ${ is fine\"", "${no-dash}"] {
+            assert_eq!(super::expand_env(literal, path).unwrap(), literal);
+        }
     }
 
     /// M-plug-0: the `[[plugin.remote]]` schema slot parses (an operator can

@@ -1,188 +1,13 @@
-# Deploying weft
+# The weftd stack
 
-> **Layout:** this directory is the whole deployment. The optional **Matrix
-> bridge** is a profile of this same stack (`COMPOSE_PROFILES=caddy,matrix`), not a
-> separate one — set it up afterwards, following [`MATRIX.md`](MATRIX.md).
+**weftd** (built with the embedded web client), **PostgreSQL** and **LiveKit**
+(voice). Two optional stacks sit beside it and reach it over published host ports:
+[`../caddy/`](../caddy/README.md) for TLS, and
+[`../weft-matrix/`](../weft-matrix/README.md) for the Matrix bridge.
 
-A **Docker Compose stack** that brings up the whole system — **weftd** (built with
-the embedded web client), **PostgreSQL**, **LiveKit** (voice), and **Caddy**
-(automatic HTTPS + reverse proxy) — plus a **standalone-TLS reference** at the
-bottom for running weftd without Caddy.
-
-The tutorial below is the happy path. It assumes a **Linux server with a public IP
-and a domain you control** (needed for automatic Let's Encrypt certificates). For
-laptop-only hacking with no domain, see [Just trying it locally?](#just-trying-it-locally-no-domain).
-
----
-
-## Tutorial: full deployment
-
-### 0. Prerequisites
-
-- A server (VPS) with Docker + Docker Compose installed, and some RAM to spare —
-  the first build compiles weftd **and** the browser client.
-- A domain you control. This guide uses `example.com`; swap in yours.
-
-### 1. Point DNS at the server
-
-Create two **A records** (AAAA too if you have IPv6) → your server's public IP:
-
-```
-weft.example.com       →  203.0.113.10
-livekit.example.com    →  203.0.113.10
-```
-
-Both must resolve publicly — Let's Encrypt validates them over ports 80/443. Any
-names work (e.g. `chat.mydomain.com` + `livekit.mydomain.com`).
-
-### 2. Open the firewall
-
-Allow these on the host / cloud security group:
-
-| Port | Proto | For |
-|---|---|---|
-| 80, 443 | TCP | Caddy (HTTP + HTTPS) |
-| 443 | UDP | HTTP/3 (optional) |
-| 4433 | UDP | weftd QUIC (desktop/native clients) |
-| 50000–50020 | UDP | LiveKit voice media |
-
-### 3. Get the code and generate secrets
-
-```bash
-git clone <your-weft-repo> weft
-cd weft/deploy/weftd
-
-openssl rand -hex 32   # → Postgres password
-openssl rand -hex 32   # → LiveKit secret
-```
-
-Keep those two strings handy — each goes in **two** places (secrets aren't
-sourced from `.env`, so matching values are duplicated; keep them in sync). The
-`.env` file exists, but only for Compose wiring — the reverse-proxy toggle and
-which host ports are published (see [Running without Caddy](#running-without-caddy-http-on-the-host)).
-
-### 4. Edit the four config files
-
-**`weft.toml`**
-
-```toml
-network   = "weft.example.com"        # ← your domain
-operators = []                        # ← operators live in Postgres now; use the CLI
-
-[tls]                                 # ← replace weft.example.com in BOTH paths
-cert = "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/weft.example.com/weft.example.com.crt"
-key  = "/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/weft.example.com/weft.example.com.key"
-
-[storage]
-url = "postgres://weft:PASTE-POSTGRES-PASSWORD@postgres:5432/weft"
-
-[voice.livekit]
-url        = "wss://livekit.example.com"   # ← your LiveKit subdomain
-api_key    = "devkey"                       # fine as-is
-api_secret = "PASTE-LIVEKIT-SECRET"
-```
-
-Leave `[listen] web = true` — it serves the web client and its same-origin `/ws`.
-
-**`livekit.yaml`**
-
-```yaml
-keys:
-  devkey: PASTE-LIVEKIT-SECRET          # ← same secret as weft.toml api_secret
-```
-
-(LiveKit's format is `<key-name>: <secret>`, so `devkey` here = `api_key` in
-weft.toml, and its value = `api_secret`.)
-
-**`Caddyfile`**
-
-```
-weft.example.com    { reverse_proxy weftd:8081 }
-livekit.example.com { reverse_proxy livekit:7880 }
-```
-
-**`docker-compose.yml`** (the `postgres` service)
-
-```yaml
-POSTGRES_PASSWORD: PASTE-POSTGRES-PASSWORD   # ← same as weft.toml storage.url
-```
-
-**Match check** — the same value must appear in each pair:
-
-| Value | Places |
-|---|---|
-| Postgres password | `weft.toml` `storage.url` · `docker-compose.yml` `POSTGRES_PASSWORD` |
-| LiveKit secret | `weft.toml` `api_secret` · `livekit.yaml` `keys:` |
-| Your domain | `weft.toml` (`network`, `[tls]` paths, LiveKit `url`) · `Caddyfile` |
-
-### 5. Build and start
-
-```bash
-docker compose up -d --build
-```
-
-The **first build is slow** — it compiles weftd (release) and the SvelteKit +
-wasm client. Later starts are instant.
-
-### 6. Watch it come up
-
-```bash
-docker compose logs -f caddy    # → certificates obtained for both domains
-docker compose logs -f weftd    # → "same-origin /ws mounted", then "weftd listening"
-```
-
-weftd boots immediately on a self-signed placeholder for QUIC and **hot-swaps** in
-Caddy's real certificate once Caddy finishes (within a minute) — no restart
-needed.
-
-### 7. Log in
-
-Open **`https://weft.example.com`**. The web client loads (served by weftd) and
-connects over `wss://weft.example.com/ws`.
-
-**Create your first operator** (§11.3 — holds every capability at `*`, and
-unlocks `/admin`). Operator status lives in Postgres now, so use the CLI:
-
-```bash
-docker compose exec weftd weftd admin create admin --password '<a-strong-password>'
-# later: grant <account> / revoke <account> / list
-```
-
-This registers the `admin` account **and** flags it operator; log in with it in
-the web client (or at `/admin` with `[admin] enabled = true`). To promote an
-account someone already registered, use `weftd admin grant <account>` instead.
-
-### 8. Try voice
-
-Create a voice channel and join from two browsers → LiveKit carries the audio (via
-`wss://livekit.example.com`); server-side mute/kick works through weftd.
-
-**Cross-network calls and federated voice** are IP-protected by the libwebrtc
-**media relay** (§16 M-lk-3b) — it bridges the two networks' LiveKit rooms
-server-side so a client never connects to the peer network's LiveKit. The relay
-is an **integral part of `voice`**: the published image is built with `voice`, so
-it ships and uses the relay by default — nothing to opt into. (`voice` pulls
-libwebrtc, so the image carries its libc++/OpenSSL runtime libs; a headless build
-without `voice` skips all of it.) The media plane is verified end-to-end against a
-live LiveKit at deploy time.
-
-### 9. (Optional) email verification
-
-To actually mail verification codes (§10.5), set in `weft.toml`:
-
-```toml
-[smtp]
-enabled  = true
-host     = "smtp.your-provider.com"
-port     = 587
-username = "…"
-password = "…"
-from     = "noreply@example.com"
-```
-
-Left disabled, weftd records claims and logs the code instead of sending it.
-
----
+> **Setup walkthrough: [`../README.md`](../README.md)** — one ordered list across
+> all three stacks, so it cannot drift. This file is the reference behind it:
+> running without Caddy, standalone TLS, prebuilt images, local dev, day-2.
 
 ## Day-2 operations
 
@@ -196,6 +21,7 @@ docker compose down               # stop (data persists in named volumes)
 **Back up** the `pgdata` volume (your database) and the `weftd_media` volume
 (uploaded images/files — content-addressed blobs). If you set `[identity]
 key_file` in `weft.toml`, back that up too — it's your network's signing key.
+Caddy's certificates live in `../caddy/data`, which is that stack's business.
 
 ---
 
@@ -265,13 +91,15 @@ docker compose pull weftd && docker compose up -d
 
 ## How the pieces connect
 
-- **Caddy** terminates public TLS (443) and reverse-proxies `weft.example.com` →
-  `weftd:8081` (the SPA, same-origin `/ws`, `/.well-known/weft`, `/media`, all
-  plain HTTP behind Caddy) and `livekit.example.com` → `livekit:7880`. It
-  auto-obtains + renews the certs.
+- **Caddy** (its own stack, `../caddy/`) terminates public TLS (443) and
+  reverse-proxies `weft.example.com` → this stack's published `8081` (the SPA,
+  same-origin `/ws`, `/.well-known/weft`, `/media`, all plain HTTP behind Caddy) and
+  `livekit.example.com` → the published `7880`. It reaches both through the host at
+  `host.docker.internal`, not a shared Docker network.
 - **QUIC** (weftd `4433/udp`, for desktop/native clients) can't be proxied — a
-  reverse proxy can't terminate it. weftd reads Caddy's cert from the shared
-  `caddy_data` volume (mounted read-only at `/data`) via the `[tls]` block.
+  reverse proxy can't terminate it. weftd reads Caddy's certificate from
+  `../caddy/data`, bind-mounted read-only at `/data`, via the `[tls]` block. This is
+  the only thing the two stacks share that isn't a port.
 - **LiveKit** signaling rides Caddy (wss); its **media** is UDP `50000-50020`
   direct to the host. weftd's own Room-API calls (mute/kick) go internal to
   `http://livekit:7880` (`[voice.livekit] api_url`).
@@ -303,14 +131,16 @@ stack but drop the bundled proxy and publish weftd's HTTP port straight on the
 host. It's driven by `.env`, no compose-file edits:
 
 ```dotenv
-# deploy/.env
-COMPOSE_PROFILES=          # empty → do NOT start Caddy
+# deploy/weftd/.env
 WEFT_HTTP_BIND=0.0.0.0     # advertise weftd's HTTP port on every host interface
 WEFT_HTTP_PORT=8081        # host port (change if 8081 is taken)
 ```
 
+Then simply don't bring up `../caddy`, and remove the `../caddy/data:/data:ro`
+mount from `docker-compose.yml` (nothing will write it).
+
 ```bash
-docker compose up -d       # postgres + livekit + weftd, no caddy
+docker compose up -d       # postgres + livekit + weftd
 curl http://<host>:8081/.well-known/weft
 ```
 
@@ -319,15 +149,16 @@ weftd now serves the web client, same-origin `/ws`, `/.well-known/weft`, and
 as-is on a trusted network. Notes:
 
 - **QUIC (4433/udp) still needs its own cert** — a proxy can't terminate it. Without
-  Caddy writing into the shared volume, weftd boots on a self-signed placeholder
+  Caddy writing certificates for it to read, weftd boots on a self-signed placeholder
   (native clients must opt into insecure mode, or give it a real cert — see
   [Standalone TLS](#standalone-tls-running-weftd-without-caddy) for the `[acme]` /
   `[tls]` options).
 - **LiveKit voice signaling** was fronted by Caddy too; front it yourself (or set
   `[voice] enabled = false` in `weft.toml`) if you need voice in this mode.
 
-The default `.env` (`COMPOSE_PROFILES=caddy`, `WEFT_HTTP_BIND=127.0.0.1`) keeps the
-full proxied stack — weftd's HTTP stays loopback-only and Caddy fronts it on 443.
+Note the default `WEFT_HTTP_BIND=0.0.0.0`: it has to be reachable from Caddy's
+container, which comes through the host. Firewall it, or bind the Docker bridge
+address — `.env` covers both.
 
 ---
 

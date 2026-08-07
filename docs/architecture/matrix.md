@@ -195,7 +195,7 @@ Typing: bridged both ways when the (bridge-internal) manifest says `typing=yes` 
 ## 16. Deployment & config
 
 - Reference `docker-compose` (**shipped**: `deploy/weftd/`, bridge behind the
-  `matrix` profile — see `deploy/weftd/MATRIX.md`).
+  its own stack next to weftd's — see `deploy/weft-matrix/README.md`).
   The reference stack runs **Synapse**, not conduwuit, for one reason: appservice
   registration must be declarative (`app_service_config_files`, generated from
   `weft-matrix.toml` into a shared volume so the tokens exist in one place).

@@ -1,0 +1,142 @@
+name: weft-matrix
+
+# The Matrix bridge: the `weft-matrix` daemon plus the companion homeserver
+# (Synapse) it is an appservice to, and a Postgres for the two of them.
+#
+# Its own project, independent of ../weftd. It reaches weftd over weftd's PUBLIC
+# NAME — `[weft] endpoint` in weft-matrix.toml — the same way any third-party
+# appservice would, so there is no shared network and no ordering between the two
+# `up`s. The bridge and Synapse do share this project's network, because Synapse
+# has to call the bridge back (`url:` in weft-matrix.yaml).
+#
+# Setup is NOT just `up`: an adapter key has to exist and be pinned in weftd's
+# weft.toml before the bridge may connect. Follow README.md.
+#
+#   Synapse rather than conduwuit for one reason: appservice registration has to be
+#   declarative. Synapse reads it from `app_service_config_files`; conduwuit
+#   registers appservices through its admin room.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: weft
+      # From `.env` — weft-matrix.toml references it as `${POSTGRES_PASSWORD}` and
+      # the daemon expands `${VAR}` from the environment when it loads the file.
+      # Synapse cannot do that, so homeserver.yaml repeats it literally; keep the
+      # two in step. `:?` makes an unset value a startup error, not an empty
+      # password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: weftmatrix
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates Synapse's database with the `C` collation it requires — POSTGRES_DB
+      # cannot express that, and Synapse refuses to start without it. Runs ONLY on a
+      # fresh data volume; README.md has the equivalent psql for an existing one.
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U weft -d weftmatrix"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Dedicated to the bridge: registration disabled, its only users the bridge bot
+  # and its puppets — which is what lets the appservice claim the whole `@weft_*`
+  # namespace (matrix.md §2).
+  synapse:
+    image: ghcr.io/element-hq/synapse:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # NOT under /data: that is the state volume, and this is a read-only bind
+      # mount. Nesting them means the chown below cannot touch it. Every path
+      # *inside* homeserver.yaml is absolute, so Synapse does not care where the
+      # config itself lives.
+      SYNAPSE_CONFIG_PATH: /etc/synapse/homeserver.yaml
+    # The image establishes /data's ownership only in its `generate` mode, which
+    # also wants to WRITE homeserver.yaml — we don't use it, because our config is a
+    # file in git. In plain "run" mode start.py drops privileges to 991:991 via gosu
+    # and chowns nothing, while Docker creates named volumes root-owned, so
+    # Synapse's first write fails with `PermissionError: '/data/…'`. Chown, then exec
+    # the real entrypoint so the gosu drop still happens and Synapse never runs as
+    # root. Recursive to repair volumes an earlier root-run wrote into; afterwards
+    # everything is already 991 and the walk costs nothing.
+    entrypoint: ["/bin/sh", "-c", "chown -R 991:991 /data && exec /start.py"]
+    volumes:
+      - ./homeserver.yaml:/etc/synapse/homeserver.yaml:ro
+      # The appservice registration, hand-written and read-only — same treatment as
+      # homeserver.yaml, and for the same reason: config you can read and diff.
+      # `app_service_config_files` points at this path.
+      - ./weft-matrix.yaml:/appservices/weft-matrix.yaml:ro
+      - synapse_data:/data
+    ports:
+      # Client + federation API. Published so a reverse proxy in another project
+      # (../caddy) can front it — federation needs real TLS on a public name.
+      - "${MATRIX_BIND:-0.0.0.0}:${MATRIX_PORT:-8008}:8008"
+    healthcheck:
+      # Python rather than curl: the image is guaranteed to have the former.
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8008/_matrix/client/versions')\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      # Generous: a first start runs the database migrations.
+      retries: 60
+
+  bridge:
+    # Published by .github/workflows/docker.yml — `docker compose pull bridge`. The
+    # build block is the local-build alternative.
+    image: ghcr.io/maltesermailo/weft-matrix:latest
+    build:
+      context: ../..
+      dockerfile: deploy/weft-matrix/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      synapse:
+        condition: service_healthy
+    environment:
+      # weft-matrix.toml's [daemon] database_url references this.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ./weft-matrix.toml:/etc/weft/weft-matrix.toml:ro
+      # The adapter's Ed25519 key — the identity weftd pins. NOT recoverable from
+      # anywhere else; losing it means generating a new one and re-pinning.
+      - keys:/var/lib/weft-matrix
+    # Not published: only Synapse calls it, at the `url:` in weft-matrix.yaml
+    # (`http://bridge:9010` on this project's network).
+    expose:
+      - "9010"
+
+  # ── setup one-shot (profile: setup — never started by `up`) ─────────────────
+  # Creates the adapter's Ed25519 key if absent and prints its public half, the
+  # value to pin in weftd's `[[plugin.remote]]`. Idempotent.
+  #   docker compose run --rm adapter-key
+  #
+  # A service of its own, NOT `docker compose run bridge keygen`, because `run`
+  # starts the target's dependencies: going through `bridge` would drag Synapse up
+  # just to write a key file. This has no depends_on and touches nothing but the key
+  # volume. POSTGRES_PASSWORD only because loading the config expands it.
+  adapter-key:
+    image: ghcr.io/maltesermailo/weft-matrix:latest
+    build:
+      context: ../..
+      dockerfile: deploy/weft-matrix/Dockerfile
+    profiles: ["setup"]
+    command: ["keygen", "/etc/weft/weft-matrix.toml"]
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ./weft-matrix.toml:/etc/weft/weft-matrix.toml:ro
+      - keys:/var/lib/weft-matrix
+
+volumes:
+  pgdata:
+  synapse_data:
+  keys:

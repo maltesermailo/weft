@@ -1,0 +1,41 @@
+name: weft-caddy
+
+# TLS + reverse proxy for the weft stacks: automatic Let's Encrypt on 80/443 in
+# front of weftd's HTTP surface, LiveKit's signalling, and — if you run it — the
+# Matrix bridge's homeserver.
+#
+# Its own project, so it can be replaced wholesale by whatever you already run
+# (nginx, Traefik, a cloud load balancer) without touching the server stacks. It
+# reaches them over PUBLISHED PORTS on the host, not a shared Docker network:
+# `host.docker.internal` below resolves to the host via `extra_hosts`.
+#
+# Setup: edit Caddyfile (your domains + which upstreams you actually run), point
+# DNS at this host, open 80/443, then `docker compose up -d`.
+#
+# ── The one coupling that is not a port ──
+# `./data` is Caddy's storage, and it holds the certificates. weftd bind-mounts
+# this same directory read-only, because QUIC cannot be reverse-proxied and weftd
+# therefore needs the certificate itself. Keep the two paths consistent if you move
+# either stack. Back this directory up — it also holds the ACME account key.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      # HTTP/3.
+      - "443:443/udp"
+    extra_hosts:
+      # How this container reaches services published on the host by the other
+      # stacks. Requires those ports to be published on an address the container
+      # can see — 0.0.0.0, not 127.0.0.1. See ../weftd/.env.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # A bind mount rather than a named volume: weftd (a different Compose
+      # project) reads the certificates out of it, which a project-scoped volume
+      # would not allow.
+      - ./data:/data
+      - ./config:/config

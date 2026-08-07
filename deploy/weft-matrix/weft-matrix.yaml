@@ -1,0 +1,65 @@
+# The appservice registration: how the homeserver knows the bridge exists, which
+# users it may act as, and the two tokens they authenticate with. Synapse loads it
+# via `app_service_config_files` in homeserver.yaml, mounted read-only.
+#
+# ── This file duplicates five values from weft-matrix.toml ──
+# Synapse has no environment-variable expansion, so these cannot be sourced from
+# `.env` the way the Postgres password is. They MUST match, and nothing checks:
+#
+#   here                weft-matrix.toml     consequence of a mismatch
+#   ────────────────────────────────────────────────────────────────────────────
+#   url                 [matrix] as_url      Synapse pushes into the void; the
+#                                            bridge sees no traffic at all
+#   as_token            [matrix] as_token    the bridge's own calls are refused
+#                                            (M_UNKNOWN_TOKEN on every request)
+#   hs_token            [matrix] hs_token    the bridge rejects Synapse's pushes
+#   sender_localpart    [matrix] bot         a second, empty bot identity appears
+#   regex prefix        [matrix] puppet_prefix  puppet registration is refused —
+#                                            the MXIDs fall outside the namespace
+#
+# `weft-matrix generate-registration /etc/weft/weft-matrix.toml` prints this file
+# from the TOML, if you would rather derive it after a change than hand-edit it.
+#
+# Re-run `docker compose up -d --force-recreate synapse` after editing: Synapse
+# reads appservice registrations at startup only.
+
+# Stable identifier for this appservice. Changing it makes Synapse treat the
+# bridge as a different service and re-send its whole transaction backlog.
+id: weft-matrix
+
+# Where the HOMESERVER calls the bridge — a name it can resolve, not the bridge's
+# bind address. `bridge` is the Compose service name.
+url: 'http://bridge:9010'
+
+# The bridge's token TO the homeserver. Anyone holding it can act as any user in
+# the namespace below. `openssl rand -hex 32`.
+as_token: 'change-me-as-token'
+
+# The homeserver's token TO the bridge, checked on every pushed transaction.
+# Anyone holding it can inject events as any Matrix user. `openssl rand -hex 32`.
+hs_token: 'change-me-hs-token'
+
+# The bot's localpart — the bridge's own identity, and the `!weft` operator
+# console. Becomes `@weftbot:<server_name>`.
+sender_localpart: 'weftbot'
+
+# The bridge is not a user: rate-limiting it would throttle every bridged message
+# from every user at once.
+rate_limited: false
+
+namespaces:
+  users:
+    # Every puppet, claimed exclusively — that is what lets a puppet be
+    # `@weft_<account-ulid>:<domain>` with no second prefix, and stops anyone
+    # registering a lookalike. The value is a REGEX: the `\.` escapes the dot so
+    # `@weft_x:teamnightXorg` cannot match, and the quoting must stay SINGLE —
+    # inside double quotes YAML rejects `\.` as an unknown escape and Synapse
+    # refuses to load the whole file.
+    #
+    # Substitute your `server_name`, escaping every dot.
+    - exclusive: true
+      regex: '@weft_.*:matrix\.weft\.example'
+  # The bridge creates rooms and aliases through its own token rather than
+  # claiming namespaces up front, so nothing to declare.
+  aliases: []
+  rooms: []
