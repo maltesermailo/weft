@@ -16,15 +16,6 @@ use crate::types::{
     ReportScope, ResolveAction, TypingState, VerifyState, Visibility, VoiceAction, VoiceTransport,
 };
 
-/// A required, non-empty tag value (for the plugin b64-CBOR payloads, §12.2).
-fn req_tag(line: &Line, verb: &'static str, key: &'static str) -> Result<String, ParseError> {
-    line.tags
-        .get(key)
-        .filter(|v| !v.is_empty())
-        .cloned()
-        .ok_or(ParseError::MissingParam { verb, what: key })
-}
-
 /// A required, non-empty trailing — for a b64-CBOR payload too large for a tag
 /// (§4 caps tag values at 1024 bytes; a line may be 32 KiB).
 fn req_trailing(line: &Line, verb: &'static str, what: &'static str) -> Result<String, ParseError> {

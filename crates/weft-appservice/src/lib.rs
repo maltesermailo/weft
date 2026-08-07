@@ -53,6 +53,11 @@ use tokio::sync::mpsc;
 use weft_crypto::Keypair;
 use weft_proto::{Command, Event, Line, Registration, Reply, Request};
 
+/// §3.4 keepalive interval. weftd reaps an idle session at its own ceiling, and a
+/// bridge is quiet whenever its realm is — so the PING is what distinguishes
+/// "nothing is happening" from "this peer is gone".
+const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(10);
+
 mod bans;
 mod realm;
 pub use bans::BanList;
@@ -385,6 +390,14 @@ impl AppServiceBuilder {
             // over it loses nothing.
             let mut stream = stream;
 
+            // §3.4: an authenticated peer PINGs every ~10 s, and answering is
+            // mandatory. Without this the session is silent whenever the realm is
+            // quiet, and weftd reaps it at its idle ceiling — a bridge that works
+            // perfectly looks like one that keeps dropping. weftd answers PONG,
+            // which arrives as an ordinary event and needs no handling.
+            let mut keepalive = tokio::time::interval(KEEPALIVE);
+            keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
             loop {
                 tokio::select! {
                     incoming = stream.recv_line() => {
@@ -466,6 +479,16 @@ impl AppServiceBuilder {
                                 tracing::warn!("action handler failed: {e}");
                             }
                         });
+                    }
+                    _ = keepalive.tick() => {
+                        // Best effort: a failed write means the session is going
+                        // anyway, and the next branch will see it.
+                        let ping = Request::new(Command::Ping { token: None })
+                            .serialize()
+                            .expect("PING serializes");
+                        if let Err(e) = stream.send_line(&ping).await {
+                            break Err(e.into());
+                        }
                     }
                     outgoing = out_rx.recv() => {
                         let Some(line) = outgoing else {

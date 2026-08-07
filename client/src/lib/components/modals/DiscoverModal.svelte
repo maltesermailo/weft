@@ -55,10 +55,23 @@
     const m = t.match(/^([^/\s]+)\/([^/\s]+)$/);
     return m && m[1] !== store.session.network ? t : null;
   });
+  // `<scheme>://<realm>/<space>` means a space in a FOREIGN REALM — a Matrix Space,
+  // say — reached through whichever provider registered that scheme (framework
+  // §3.3). Distinct from `foreign` above, which is another WEFT network: that one
+  // bridges via federation, this one is provisioned by an adapter.
+  //
+  // `weft://` is excluded on purpose — it is the `network/namespace` form handled
+  // above, and routing it here would send it down the provider path instead.
+  const realmUri = $derived.by(() => {
+    const m = query.trim().match(/^([a-z][a-z0-9+.-]*):\/\/([^\s/]+)\/([^\s/]+)$/i);
+    if (!m || m[1].toLowerCase() === "weft") return null;
+    return { uri: m[0], scheme: m[1].toLowerCase(), realm: m[2], space: m[3] };
+  });
+
   // A namespace can be unlisted but still joinable by exact name (§2.2).
   const directName = $derived.by(() => {
     const n = query.trim().replace(/^@/, "");
-    if (!n || foreign || n.includes("/") || matches.some((ns) => ns.name === n)) return null;
+    if (!n || foreign || realmUri || n.includes("/") || matches.some((ns) => ns.name === n)) return null;
     return n;
   });
 
@@ -67,6 +80,15 @@
   function joinNamespace(id: string) {
     weft.nsJoin(id).catch(() => {});
     weft.channels(id).catch(() => {}); // fetch its category layout
+    onclose();
+  }
+  // The same `NS JOIN` the local path uses — weft-client-core routes on the
+  // target's shape, so a URI reaches the provider. No `channels()` follow-up: the
+  // namespace id doesn't exist yet, and the server pushes NS-META once the adapter
+  // has resolved and asserted the space.
+  function joinRealmSpace() {
+    if (!realmUri) return;
+    weft.nsJoin(realmUri.uri).catch((e) => app.toast(String(e), "error"));
     onclose();
   }
   function connectForeign() {
@@ -223,6 +245,7 @@
           onkeydown={(e) => {
             if (e.key !== "Enter") return;
             if (foreign) connectForeign();
+            else if (realmUri) joinRealmSpace();
             else if (directName) joinNamespace(directName);
           }}
         />
@@ -243,6 +266,19 @@
               />
             </div>
             <button class="go-btn" onclick={connectForeign}>Connect</button>
+          </div>
+        {/if}
+
+        {#if realmUri}
+          <div class="ns-item foreign">
+            <div class="ns-badge">{realmUri.scheme.slice(0, 2)}</div>
+            <div class="ns-info">
+              <div class="ns-name mono">{realmUri.space}</div>
+              <div class="ns-sub">
+                On {realmUri.realm} via {realmUri.scheme} — the bridge will join and mirror it.
+              </div>
+            </div>
+            <button class="go-btn" onclick={joinRealmSpace}>Join</button>
           </div>
         {/if}
 
@@ -269,9 +305,14 @@
             <button class="go-btn" onclick={() => joinNamespace(ns.id)}>Join</button>
           </div>
         {:else}
-          {#if !foreign && !directName}
+          {#if !foreign && !realmUri && !directName}
             <div class="ns-empty">
               {query.trim() ? "No namespaces found." : "No public namespaces yet."}
+              <div class="ns-empty-hint">
+                You can also paste <span class="mono">network/namespace</span> to reach
+                another WEFT network, or <span class="mono">matrix://realm/space</span>
+                for a bridged Matrix Space.
+              </div>
             </div>
           {/if}
         {/each}
@@ -714,6 +755,13 @@
   .ns-item:hover {
     border-color: color-mix(in srgb, var(--join) 40%, transparent);
   }
+  .ns-empty-hint {
+    margin-top: 0.5rem;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    opacity: 0.75;
+  }
+
   .ns-item.foreign {
     border-color: color-mix(in srgb, var(--invite) 35%, transparent);
   }

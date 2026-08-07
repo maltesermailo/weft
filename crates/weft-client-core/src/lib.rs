@@ -2318,11 +2318,30 @@ pub fn build_ns_recovery_cancel(ns: &str, signature: &str) -> Result<String, Str
     .map_err(|e| e.to_string())
 }
 
-/// `NS JOIN <ns-id|vanity>` — auto-join every visible channel in the namespace
-/// (§6.2). Accepts the id or the vanity name (§2.2 unlisted-by-name).
-pub fn build_ns_join(ns: &str) -> Result<String, String> {
-    let ns: weft_proto::NamespaceRef = ns.parse().map_err(|_| "bad namespace".to_string())?;
-    weft_proto::Request::new(weft_proto::Command::NsJoin { ns })
+/// `NS JOIN <target>` — the id or vanity name of a local namespace (§6.2, §2.2
+/// unlisted-by-name), **or** a `<scheme>://<realm>/<space>` URI to consume a
+/// foreign one through a registered provider (framework §3.3).
+///
+/// Routes on the target's *shape*, which is what the server's own parser does with
+/// the same verb — so one function can't drift from the wire, and a caller doesn't
+/// have to know which kind of thing it holds. `matrix://teamnight.org/myspace` and
+/// `gaming` both belong here.
+pub fn build_ns_join(target: &str) -> Result<String, String> {
+    let command = if target.contains("://") {
+        weft_proto::Command::NsJoinForeign {
+            uri: target.parse().map_err(|_| {
+                format!(
+                    "not a foreign namespace URI: {target} (expected <scheme>://<realm>/<space>)"
+                )
+            })?,
+        }
+    } else {
+        weft_proto::Command::NsJoin {
+            ns: target.parse().map_err(|_| "bad namespace".to_string())?,
+        }
+    };
+
+    weft_proto::Request::new(command)
         .serialize()
         .map_err(|e| e.to_string())
 }
@@ -2672,6 +2691,31 @@ mod tests {
         assert!(build_plugin_subscribe("modq:1", false)
             .unwrap()
             .contains("UNSUBSCRIBE"));
+    }
+
+    /// `NS JOIN` takes both kinds of target, and the client decides which by shape
+    /// — the same way the server's parser does. Without this the client could only
+    /// ever emit the local form, so a bridged Matrix space was unreachable from the
+    /// UI however well the bridge worked.
+    #[test]
+    fn ns_join_routes_on_the_targets_shape() {
+        // Local: id or vanity.
+        assert_eq!(build_ns_join("gaming").unwrap(), "NS JOIN gaming");
+
+        // Foreign: a `<scheme>://<realm>/<space>` URI reaches the provider path.
+        // The server parses this line back to `Command::NsJoinForeign`.
+        assert_eq!(
+            build_ns_join("matrix://teamnight.org/myspace").unwrap(),
+            "NS JOIN matrix://teamnight.org/myspace"
+        );
+
+        // A malformed URI is refused here, with the expected form in the message,
+        // rather than travelling as a nonsense namespace name.
+        let err = build_ns_join("matrix://").expect_err("no realm");
+        assert!(err.contains("<scheme>://<realm>/<space>"), "{err}");
+
+        // A bare name that isn't a legal namespace ref is still refused.
+        assert!(build_ns_join("Not A Namespace").is_err());
     }
 
     #[test]

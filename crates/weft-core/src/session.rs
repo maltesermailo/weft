@@ -289,6 +289,28 @@ enum State {
     },
 }
 
+/// How long this session may stay silent before it is reaped.
+///
+/// A free function so it can be tested: the cost of getting it wrong is invisible
+/// in normal use and looks like a flaky peer. Which is what happened — an
+/// authenticated provider sat on the pre-auth budget and reconnected every 30 s.
+fn idle_limit(state: &State, in_voice: bool) -> Duration {
+    match state {
+        // §16 a session holding a voice room is reaped far sooner: a crashed client
+        // leaves no ghost in the roster for two minutes.
+        State::Ready { .. } if in_voice => VOICE_IDLE,
+        State::Ready { .. } => READY_IDLE,
+        // An authenticated peer that dialed IN — a federation bridge (§11.2) or a
+        // provider / App Service (plugin-spec §18) — gets the same ceiling as a
+        // client. It is legitimately quiet: it speaks when something happens on the
+        // other side, which may be never. PREAUTH_IDLE is the budget for an
+        // unauthenticated stranger (§3.3); applying it to a proven peer turns a
+        // healthy idle bridge into a 30-second reconnect loop.
+        State::Bridge { .. } | State::PluginService { .. } => READY_IDLE,
+        State::Negotiating | State::Unauthed { .. } => PREAUTH_IDLE,
+    }
+}
+
 enum Flow {
     Continue,
     Close,
@@ -534,13 +556,7 @@ impl<S: ControlStream> Session<S> {
 
     async fn run(&mut self) -> io::Result<()> {
         loop {
-            let limit = match self.state {
-                // §16 a session holding a voice room is reaped far sooner: a
-                // crashed client leaves no ghost in the roster for two minutes.
-                State::Ready { .. } if !self.voice.is_empty() => VOICE_IDLE,
-                State::Ready { .. } => READY_IDLE,
-                _ => PREAUTH_IDLE,
-            };
+            let limit = idle_limit(&self.state, !self.voice.is_empty());
             let action = tokio::select! {
                 line = self.stream.recv_line() => Action::Line(line?),
                 event = self.events_rx.recv() =>
@@ -2202,4 +2218,49 @@ fn spawn_forwarder(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A session that has *proved who it is* must not be reaped on the budget for
+    /// strangers. This is the regression: the bridge authenticated, registered, then
+    /// dropped every 30 s because `State::PluginService` fell through to
+    /// `PREAUTH_IDLE` — a healthy bridge indistinguishable from a broken one.
+    #[test]
+    fn authenticated_dial_in_peers_are_not_on_the_preauth_budget() {
+        let key = weft_crypto::Keypair::generate().public();
+
+        let provider = State::PluginService {
+            key,
+            plugin_id: "matrix".into(),
+            realm: None,
+        };
+        let bridge = State::Bridge {
+            peer: "peer.example".parse().expect("a network name"),
+            key,
+        };
+
+        for state in [&provider, &bridge] {
+            let limit = idle_limit(state, false);
+            assert_eq!(limit, READY_IDLE, "an authed peer gets the client ceiling");
+            assert!(limit > PREAUTH_IDLE, "and never the stranger's budget");
+        }
+
+        // Unproven sessions keep the short budget (§3.3), which is the whole point
+        // of having one.
+        assert_eq!(idle_limit(&State::Negotiating, false), PREAUTH_IDLE);
+        assert_eq!(
+            idle_limit(&State::Unauthed { challenge: None }, false),
+            PREAUTH_IDLE
+        );
+
+        // §16 unchanged: a client in a call is reaped sooner, not later.
+        let ready = State::Ready {
+            account: "ada".parse().expect("an account"),
+        };
+        assert_eq!(idle_limit(&ready, true), VOICE_IDLE);
+        assert_eq!(idle_limit(&ready, false), READY_IDLE);
+    }
 }
