@@ -302,11 +302,10 @@ pub struct ServerCtx {
     /// network's room for the call + the local accounts currently in it. Members
     /// join/leave; the entry is dropped when the last local participant leaves.
     group_calls: std::sync::Mutex<HashMap<GroupId, GroupCallInfo>>,
-    /// Cross-network group posts awaiting their home-minted echo: correlation
-    /// token → (the spoke poster's session, when it was registered). Swept on
-    /// insert so a token whose echo never comes back (the home was unreachable)
-    /// can't leak.
-    group_echoes: std::sync::Mutex<HashMap<String, (u64, u64)>>,
+    /// Cross-network group posts awaiting their home-minted echo, by correlation
+    /// token. Swept on insert so a token whose echo never comes back (the home
+    /// was unreachable) can't leak.
+    group_echoes: std::sync::Mutex<HashMap<String, GroupEcho>>,
     /// §16 M-lk-3b federated voice: the media-relay driver weftd installs (a
     /// libwebrtc `livekit`-SDK relay, or the no-op default). `None` = no relaying.
     voice_relay: std::sync::OnceLock<Arc<dyn crate::voice::VoiceRelay>>,
@@ -332,6 +331,17 @@ pub struct MirrorRequest {
     pub peer: NetworkName,
     /// The BLAKE3 content hash to fetch + verify.
     pub hash: String,
+}
+
+/// A cross-network group post waiting for its home-minted echo, so the echoed
+/// copy can be delivered as the original poster's own labelled message.
+#[derive(Debug, Clone, Copy)]
+struct GroupEcho {
+    /// The spoke poster's session, which the echo is delivered to.
+    session: u64,
+    /// When the token was registered — the input to the [`GROUP_ECHO_TTL_MS`]
+    /// sweep, so an echo that never comes back cannot leak the entry.
+    created_ms: u64,
 }
 
 /// §11.7 a federated backfill to pull, handed core→weftd: the peer offered a
@@ -1192,8 +1202,14 @@ impl ServerCtx {
     /// back within [`GROUP_ECHO_TTL_MS`]) are swept here.
     pub(crate) fn register_group_echo(&self, token: String, session: u64, now_ms: u64) {
         let mut echoes = self.group_echoes.lock().expect("group echoes lock");
-        echoes.retain(|_, (_, created)| now_ms.saturating_sub(*created) < GROUP_ECHO_TTL_MS);
-        echoes.insert(token, (session, now_ms));
+        echoes.retain(|_, echo| now_ms.saturating_sub(echo.created_ms) < GROUP_ECHO_TTL_MS);
+        echoes.insert(
+            token,
+            GroupEcho {
+                session,
+                created_ms: now_ms,
+            },
+        );
     }
 
     /// Consume a group-echo correlation token → the awaiting poster's session.
@@ -1202,7 +1218,7 @@ impl ServerCtx {
             .lock()
             .expect("group echoes lock")
             .remove(token)
-            .map(|(session, _)| session)
+            .map(|echo| echo.session)
     }
 
     /// The local accounts currently in `group`'s call (for the roster snapshot).

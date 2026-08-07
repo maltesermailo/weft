@@ -21,7 +21,7 @@ use weft_proto::{Command, Event, MemberAction, ToastKind};
 use crate::asapi::Txn;
 use crate::hs::Hs;
 use crate::ident;
-use crate::store::{Room, Space, Store};
+use crate::store::{EventRef, Room, Space, Store};
 
 pub struct Bridge {
     pub realm: Realm,
@@ -36,7 +36,7 @@ pub struct Bridge {
     pub pending_layouts: std::collections::HashMap<String, PendingLayout>,
     /// Injections awaiting their labeled echo (§3.5): label → the Matrix
     /// event + room the minted id must link back to.
-    pub pending_injections: std::collections::HashMap<String, (String, String)>,
+    pub pending_injections: std::collections::HashMap<String, EventRef>,
     /// Injection labels, minted locally and meaningless beyond correlation.
     pub injection_seq: u64,
     /// §10 revert: attributed acts awaiting weftd's verdict, by label. An
@@ -1334,8 +1334,13 @@ impl Bridge {
         self.injection_seq += 1;
         let label = format!("inj-{}", self.injection_seq);
 
-        self.pending_injections
-            .insert(label.clone(), (event_id.to_string(), room_id.to_string()));
+        self.pending_injections.insert(
+            label.clone(),
+            EventRef {
+                room: room_id.to_string(),
+                event: event_id.to_string(),
+            },
+        );
 
         label
     }
@@ -3470,11 +3475,11 @@ impl Bridge {
     /// the home-minted id to the Matrix event it came from. Returns whether
     /// the label was ours — if so the event is the ack, never relay fodder.
     async fn link_injection_echo(&mut self, label: &str, msgid: &str) -> bool {
-        let Some((event_id, room_id)) = self.pending_injections.remove(label) else {
+        let Some(at) = self.pending_injections.remove(label) else {
             return false;
         };
 
-        self.store.link(&event_id, msgid, &room_id).await;
+        self.store.link(&at.event, msgid, &at.room).await;
         true
     }
 

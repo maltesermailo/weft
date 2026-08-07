@@ -252,6 +252,62 @@ pub async fn dial_bridge(
     }
 }
 
+/// A `[[peers]]` pin: where to reach a peer network, and the key we require it to
+/// prove. Both travel together everywhere — a pinned endpoint without its key
+/// would be an unauthenticated dial.
+struct PinnedPeer {
+    endpoint: String,
+    key: PublicKey,
+}
+
+/// The `[[peers]]` pin table, and the one way a peer is turned into something
+/// dialable.
+///
+/// Resolution has two arms — a pin, else the §10.2 well-known key fetch for
+/// arbitrary public domains — and getting that order wrong changes who we trust,
+/// so it lives here once rather than at each consumer.
+struct PinnedPeers(std::collections::HashMap<NetworkName, PinnedPeer>);
+
+impl PinnedPeers {
+    fn from_config(peers: &[crate::config::Peer]) -> Self {
+        Self(
+            peers
+                .iter()
+                .filter_map(|p| {
+                    Some((
+                        p.network.parse().ok()?,
+                        PinnedPeer {
+                            endpoint: p.endpoint.clone(),
+                            key: PublicKey::from_b64(&p.key).ok()?,
+                        },
+                    ))
+                })
+                .collect(),
+        )
+    }
+
+    /// The key to require and the address to dial: a pin if we hold one, else the
+    /// well-known fetch. Note the caller still SSRF-guards the address
+    /// (invariant 13) — resolving is not permission to connect.
+    async fn resolve(&self, network: &NetworkName) -> anyhow::Result<(PublicKey, SocketAddr)> {
+        let Some(pin) = self.0.get(network) else {
+            return fetch_signing_key(network.as_str()).await;
+        };
+
+        tokio::net::lookup_host(&pin.endpoint)
+            .await
+            .ok()
+            .and_then(|mut a| a.next())
+            .map(|addr| (pin.key, addr))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot resolve pinned endpoint {endpoint}",
+                    endpoint = pin.endpoint
+                )
+            })
+    }
+}
+
 /// §11.10 Drain the auto-federation port: for each `FEDERATE` request (handed up
 /// from weft-core), resolve the peer, SSRF-guard, dial, and request its
 /// namespace. Peer keys + endpoints come from `[[peers]]` pins for now
@@ -264,15 +320,7 @@ pub fn spawn_auto_bridge_consumer(
     ctx: Arc<ServerCtx>,
     links: PeerLinks,
 ) -> tokio::task::JoinHandle<()> {
-    let pinned: std::collections::HashMap<NetworkName, (String, PublicKey)> = peers
-        .iter()
-        .filter_map(|p| {
-            Some((
-                p.network.parse().ok()?,
-                (p.endpoint.clone(), PublicKey::from_b64(&p.key).ok()?),
-            ))
-        })
-        .collect();
+    let pinned = PinnedPeers::from_config(peers);
     tokio::spawn(async move {
         let Ok(identity) = Keypair::from_seed_b64(&identity_seed) else {
             return;
@@ -296,15 +344,7 @@ pub fn spawn_auto_bridge_consumer(
             } = req;
             // Resolve the peer's key + dial address: a `[[peers]]` pin, else the
             // §10.2 well-known key fetch (arbitrary public domains).
-            let resolved = match pinned.get(&network) {
-                Some((endpoint, key)) => tokio::net::lookup_host(endpoint)
-                    .await
-                    .ok()
-                    .and_then(|mut a| a.next())
-                    .map(|addr| (*key, addr))
-                    .ok_or_else(|| anyhow::anyhow!("cannot resolve pinned endpoint {endpoint}")),
-                None => fetch_signing_key(network.as_str()).await,
-            };
+            let resolved = pinned.resolve(&network).await;
             let (key, addr) = match resolved {
                 Ok(v) => v,
                 Err(e) => {
@@ -346,15 +386,7 @@ pub fn spawn_friend_deliver_consumer(
     our_network: NetworkName,
     ctx: Arc<ServerCtx>,
 ) -> tokio::task::JoinHandle<()> {
-    let pinned: std::collections::HashMap<NetworkName, (String, PublicKey)> = peers
-        .iter()
-        .filter_map(|p| {
-            Some((
-                p.network.parse().ok()?,
-                (p.endpoint.clone(), PublicKey::from_b64(&p.key).ok()?),
-            ))
-        })
-        .collect();
+    let pinned = PinnedPeers::from_config(peers);
     tokio::spawn(async move {
         let Ok(identity) = Keypair::from_seed_b64(&identity_seed) else {
             return;
@@ -372,15 +404,7 @@ pub fn spawn_friend_deliver_consumer(
                 _ = ctx.shutdown.cancelled() => break,
             };
             let weft_core::FriendDeliver { peer, from, line } = req;
-            let resolved = match pinned.get(&peer) {
-                Some((endpoint, key)) => tokio::net::lookup_host(endpoint)
-                    .await
-                    .ok()
-                    .and_then(|mut a| a.next())
-                    .map(|addr| (*key, addr))
-                    .ok_or_else(|| anyhow::anyhow!("cannot resolve pinned endpoint {endpoint}")),
-                None => fetch_signing_key(peer.as_str()).await,
-            };
+            let resolved = pinned.resolve(&peer).await;
             let (_key, addr) = match resolved {
                 Ok(v) => v,
                 Err(e) => {
