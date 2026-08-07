@@ -49,6 +49,24 @@ export function trackBackground(): string {
   return label;
 }
 
+/// Client-side **developer mode**: `localStorage['weft:developer'] = '1'`.
+///
+/// Deliberately separate from weftd's `developer` flag, because they do different
+/// halves of one job: the server decides whether the ERR *text* names the code
+/// path, this decides whether the client *shows* it. Without this half the two
+/// work against each other — a background fetch's refusal is swallowed below,
+/// and that is precisely the error the server just annotated for you.
+///
+/// Read per call rather than cached so toggling it in the console takes effect
+/// without a reload.
+function devMode(): boolean {
+  try {
+    return localStorage.getItem("weft:developer") === "1";
+  } catch {
+    return false; // SSR / privacy mode — no toggle, no dev mode
+  }
+}
+
 /// The toast for an §8 error, or `null` when it should be swallowed.
 ///
 /// One entry point so "is this the user's business at all?" is answered in a
@@ -61,10 +79,16 @@ export function toastFor(code: string, text: string, label: string | null): stri
     // whoever is debugging why a roster is empty.
     console.debug(`background request ${label} failed: ${code} ${text}`);
 
-    return null;
+    // In developer mode these stop being background noise and become the thing
+    // you are looking for.
+    return devMode() ? `${label}: ${code} ${text}` : null;
   }
 
-  return explainJoinError(code, label) ?? friendlyError(code, text);
+  const message = explainJoinError(code, label) ?? friendlyError(code, text);
+
+  // Canned wording replaces the server's text, which in developer mode is where
+  // the annotation lives — so keep the raw line alongside it.
+  return devMode() && !message.includes(text) ? `${message} — ${code} ${text}` : message;
 }
 
 /// The message to show for an error, or `null` to fall back to the generic path.

@@ -155,6 +155,7 @@ impl<S: ControlStream> Session<S> {
                 account.clone(),
                 self.id,
                 self.direct_tx.clone(),
+                self.events_tx.clone(),
                 self.close.clone(),
             )
             .await;

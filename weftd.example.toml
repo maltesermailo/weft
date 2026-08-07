@@ -33,6 +33,17 @@ log = "info"
 # `closed` — REGISTER is refused; provision accounts out of band.
 registration = "open"
 
+# ── developer mode ───────────────────────────────────────────────────────────
+# Annotate every refusal with the verb and the helper that produced it, so a
+# client toast reads `join the channel first [Members → not_member_cap]` instead
+# of a bare §8 code you have to guess at.
+#
+# NEVER on a production network. The §8 codes are uniform precisely so a caller
+# cannot tell "absent" from "hidden" from "not a member" (invariant 1) — naming
+# the branch tells them, which is the whole point of the mode and the reason it
+# defaults off.
+developer = false
+
 # §6.1 require a contact email at REGISTER (verify-later, §10.5): the account
 # works immediately, and `VERIFY EMAIL` confirms the address whenever the user
 # gets to it. Providing an email also enables **password reset** (a typed code

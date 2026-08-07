@@ -15,7 +15,17 @@ COPY . .
 
 # No system deps beyond the base image: reqwest uses rustls (no OpenSSL), and the
 # daemon links nothing native.
-RUN cargo build --release -p weft-matrix
+#
+# Cache mounts, for the reason spelled out in ../weftd/Dockerfile: `COPY . .` is
+# in this layer's cache key, so the layer cache can never spare this build — only
+# a warm registry + `target/` can, and ruma is a long compile to redo per commit.
+# The binary is copied out of the mount because a mount is not in the image.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    cargo build --release -p weft-matrix \
+ && mkdir -p /out \
+ && cp /src/target/release/weft-matrix /out/weft-matrix
 
 FROM debian:bookworm-slim
 # ca-certificates: outbound TLS to the homeserver and to weftd's media plane
@@ -24,7 +34,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /src/target/release/weft-matrix /usr/local/bin/weft-matrix
+COPY --from=builder /out/weft-matrix /usr/local/bin/weft-matrix
 
 # The appservice API the homeserver pushes transactions to.
 EXPOSE 9010

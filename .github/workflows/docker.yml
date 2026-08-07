@@ -61,6 +61,37 @@ jobs:
             type=ref,event=tag
             type=sha,prefix=sha-
 
+      # The Dockerfiles compile behind BuildKit cache mounts (a warm cargo
+      # registry + `target/`), which is the only thing that can help: `COPY . .`
+      # sits in the build layer's cache key, so every commit invalidates it and
+      # the layer cache below can never spare the compile.
+      #
+      # But `type=gha` exports **layers**, not cache mounts — on a fresh runner
+      # the mounts start empty unless something restores them. That is what these
+      # two steps do: `actions/cache` holds the mount contents, and the dance
+      # injects them into the builder before the build and extracts them after.
+      - name: Restore the build caches
+        id: mount-cache
+        uses: actions/cache@v4
+        with:
+          path: cache-mounts
+          # Keyed on the lockfiles, so a dependency change starts from the
+          # nearest previous cache rather than from nothing.
+          key: buildkit-${{ matrix.image }}-${{ hashFiles('Cargo.lock', 'client/pnpm-lock.yaml') }}
+          restore-keys: |
+            buildkit-${{ matrix.image }}-
+
+      - uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          cache-map: |
+            {
+              "cache-mounts/cargo-registry": "/usr/local/cargo/registry",
+              "cache-mounts/cargo-git": "/usr/local/cargo/git",
+              "cache-mounts/target": "/src/target",
+              "cache-mounts/pnpm-store": "/pnpm-store"
+            }
+          skip-extraction: ${{ steps.mount-cache.outputs.cache-hit }}
+
       - name: Build and push (linux/amd64)
         uses: docker/build-push-action@v6
         with:

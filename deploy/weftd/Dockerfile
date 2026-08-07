@@ -58,8 +58,36 @@ RUN apt-get update \
 
 # 1) Build the browser client → client/build (wasm-pack + vite). 2) Build weftd
 # embedding it, with the selected features.
-RUN cd client && pnpm install --frozen-lockfile && pnpm run build:web
-RUN cargo build --release -p weftd --features "${WEFTD_FEATURES}"
+#
+# Both steps run behind BuildKit **cache mounts**, which is what makes a CI build
+# incremental rather than from-scratch. The layer cache alone cannot help here:
+# `COPY . .` above is part of these layers' cache key, so every commit
+# invalidates them and they re-run regardless. What actually costs the 10+
+# minutes is redoing the work — the pnpm fetch, the libwebrtc download, and a
+# full cargo build — and a cache mount is the only thing that survives a
+# changed layer. It is the same warm `target/` that makes the build ~3 min
+# locally.
+#
+# The mounts are NOT part of the image, so the binary has to be copied out of
+# `target/` inside the same RUN; a later `COPY --from` could not see it.
+# The cargo mounts are here too, not just below: `build:web` runs wasm-pack, which
+# compiles `weft-client-wasm` into the same `target/`. Without them that compile
+# would be redone every build — and the next RUN masks `target/` with the mount
+# anyway, so its artifacts would be thrown away regardless.
+RUN --mount=type=cache,target=/pnpm-store,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    cd client \
+ && pnpm install --frozen-lockfile --store-dir /pnpm-store \
+ && pnpm run build:web
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    cargo build --release -p weftd --features "${WEFTD_FEATURES}" \
+ && mkdir -p /out \
+ && cp /src/target/release/weftd /out/weftd
 
 # ---- runtime ----
 FROM debian:bookworm-slim
@@ -70,7 +98,9 @@ RUN apt-get update \
       ca-certificates libc++1 libc++abi1 libssl3 \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /src/target/release/weftd /usr/local/bin/weftd
+# From `/out`, not `target/`: the build's target dir is a cache mount and so
+# is not present in the builder image.
+COPY --from=builder /out/weftd /usr/local/bin/weftd
 
 # QUIC control plane (UDP) + HTTP (SPA, /ws, /.well-known, /media).
 EXPOSE 4433/udp 8081

@@ -11762,3 +11762,58 @@ async fn developer_mode_names_the_branch_that_refused() {
     };
     assert_eq!(err.text, "join the channel first", "no annotation when off");
 }
+
+#[tokio::test]
+async fn a_realm_confirmed_rejoin_subscribes_the_live_session() {
+    // Rejoining a bridged namespace without reconnecting: the realm's
+    // `NS-MEMBER … join` arrives on the *provider's* session, but subscriptions
+    // live on the user's. Without a nudge the membership row exists while nothing
+    // is joined, so HISTORY/MEMBERS answer CAP-REQUIRED until the next login —
+    // the namespace opens and its history never loads.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    // Ada is connected *before* she is a member — the rejoin case, where no
+    // fresh AUTH re-derives her channel set.
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=h0 HISTORY {channel}"));
+    let Event::Err(err) = ada.recv().await.event else {
+        panic!("a non-member's HISTORY is refused");
+    };
+    assert_eq!(err.code, ErrCode::CapRequired);
+
+    // The realm now confirms her membership on its own session.
+    plugin.send(&format!("NS-MEMBER {ns_id} ada@test.example join"));
+
+    // …and her live session must have been subscribed, so HISTORY is served.
+    for _ in 0..40 {
+        ada.send(&format!("@label=h1 HISTORY {channel}"));
+        match ada.recv().await.event {
+            Event::BatchStart { .. } => return, // served — the nudge worked
+            Event::Err(_) => tokio::task::yield_now().await,
+            _ => {}
+        }
+    }
+    panic!("HISTORY still refused: the realm-confirmed join never subscribed the session");
+}

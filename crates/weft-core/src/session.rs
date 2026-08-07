@@ -1915,10 +1915,28 @@ impl<S: ControlStream> Session<S> {
             return self.on_provider_event(event).await;
         }
         match event {
-            // Only a provider session is ever asked to attach (the branch
-            // above takes those); a client watching a channel it did not join
-            // would be a membership bypass.
-            SessionEvent::Attach { .. } => Ok(()),
+            // A client is asked to attach when its membership became true while
+            // it was already connected — a realm confirming a `NS JOIN` lands on
+            // the *provider's* session, and only this session can spawn its own
+            // forwarders. It is **not** a grant: `join_one` re-checks membership
+            // and view-gating exactly as it does for a client-sent JOIN, so a
+            // stale or wrong nudge attaches nothing. Without it the membership
+            // row exists while nothing is subscribed, and HISTORY/MEMBERS answer
+            // CAP-REQUIRED until the next login re-derives the set.
+            SessionEvent::Attach { channel, ready } => {
+                let State::Ready { account } = self.state.clone() else {
+                    return Ok(());
+                };
+
+                if !self.joined.contains_key(&channel) {
+                    self.join_one(&channel, &account, None).await?;
+                }
+                if let Some(ready) = ready {
+                    let _ = ready.send(());
+                }
+
+                Ok(())
+            }
             SessionEvent::Lagged { channel } => {
                 // §9.2 backpressure: tell the client it lost events. The
                 // forced HISTORY resync completes this once M3 exists.

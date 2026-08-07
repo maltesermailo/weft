@@ -93,8 +93,15 @@ enum Cmd {
         account: Account,
         session: SessionId,
         queue: mpsc::Sender<DirectEvent>,
+        events: mpsc::Sender<crate::session::SessionEvent>,
         /// Cancelled to force this session's loop to exit (WC7 forced logout).
         close: CancellationToken,
+    },
+    /// Ask every live session of `account` to re-evaluate its subscription to
+    /// `channels` — see [`Directory::attach`].
+    Attach {
+        account: Account,
+        channels: Vec<weft_proto::ChannelName>,
     },
     /// WC7: cut every live session of `account` — the operator-side counterpart
     /// to suspend, which only blocks *new* logins. Replies with how many were
@@ -233,11 +240,30 @@ enum Cmd {
 }
 
 impl Directory {
+    /// Ask every live session of `account` to (re-)subscribe to `channels`.
+    ///
+    /// Membership can become true while the account is already connected — a
+    /// realm confirming a `NS JOIN` arrives on the *provider's* session, not the
+    /// user's — and the user's session is what holds the subscriptions. Without
+    /// this nudge the row exists but nothing is joined, so HISTORY and MEMBERS
+    /// answer `CAP-REQUIRED` until the next login re-derives the set.
+    ///
+    /// This grants nothing: the receiving session re-runs its ordinary join,
+    /// which re-checks membership and view-gating. It only says "look again".
+    pub(crate) async fn attach(&self, account: Account, channels: Vec<weft_proto::ChannelName>) {
+        if channels.is_empty() {
+            return;
+        }
+
+        let _ = self.inbox.send(Cmd::Attach { account, channels }).await;
+    }
+
     pub(crate) async fn register(
         &self,
         account: Account,
         session: SessionId,
         queue: mpsc::Sender<DirectEvent>,
+        events: mpsc::Sender<crate::session::SessionEvent>,
         close: CancellationToken,
     ) {
         let _ = self
@@ -246,6 +272,7 @@ impl Directory {
                 account,
                 session,
                 queue,
+                events,
                 close,
             })
             .await;
@@ -584,6 +611,9 @@ pub(crate) fn spawn(
 struct SessionEntry {
     id: SessionId,
     queue: mpsc::Sender<DirectEvent>,
+    /// The session's own inbox, for control signals it must act on itself —
+    /// a forwarder can only be spawned by the session that owns it.
+    events: mpsc::Sender<crate::session::SessionEvent>,
     close: CancellationToken,
 }
 
@@ -605,10 +635,24 @@ impl Actor {
 
     async fn handle(&mut self, cmd: Cmd) {
         match cmd {
+            Cmd::Attach { account, channels } => {
+                for entry in self.sessions.get(&account).into_iter().flatten() {
+                    for channel in &channels {
+                        // `try_send`: a session whose inbox is full is already
+                        // behind and will re-derive on its next login; blocking
+                        // the directory actor on it would stall every account.
+                        let _ = entry.events.try_send(crate::session::SessionEvent::Attach {
+                            channel: channel.clone(),
+                            ready: None,
+                        });
+                    }
+                }
+            }
             Cmd::Register {
                 account,
                 session,
                 queue,
+                events,
                 close,
             } => {
                 self.sessions
@@ -616,6 +660,7 @@ impl Actor {
                     .or_default()
                     .push(SessionEntry {
                         id: session,
+                        events,
                         queue,
                         close,
                     });

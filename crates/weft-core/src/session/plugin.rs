@@ -1033,6 +1033,29 @@ impl<S: ControlStream> Session<S> {
 
         self.announce_ns_member(&ns, user, action).await;
 
+        // A local account whose membership just became true may be connected
+        // *right now* — this statement arrived on our session, not theirs, and
+        // subscriptions live on theirs. Nudge it to re-derive, or the row exists
+        // while nothing is joined and its next HISTORY answers CAP-REQUIRED.
+        if joining {
+            if let Some(account) = weft_store::local_member(&member) {
+                let channels = self
+                    .ctx
+                    .channel_store
+                    .channels_in_namespace(&ns)
+                    .await
+                    .unwrap_or_default();
+
+                self.ctx
+                    .directory
+                    .attach(
+                        account,
+                        channels.into_iter().map(|(name, _)| name).collect(),
+                    )
+                    .await;
+            }
+        }
+
         Ok(Flow::Continue)
     }
 
