@@ -755,7 +755,11 @@ pub fn on_line<E: EventSink>(
             sender: m.sender.account.to_string(),
             network: m.sender.network.to_string(),
             msgid: m.msgid.to_string(),
-            own: m.sender.account.as_str() == account,
+            // Identity is `account@network`, never the account alone: a bridged
+            // realm can carry the *same* handle on a different network (your
+            // Matrix `ada@teamnight.app` beside your local `ada`), and comparing
+            // bare names badged that stranger's messages as your own.
+            own: m.sender.account.as_str() == account && m.sender.network.as_str() == net_name,
             history: *in_batch,
             edited: m.edited.is_some(),
             reply_to: m.meta.reply_to.as_ref().map(|r| r.to_string()),
@@ -2668,6 +2672,35 @@ mod tests {
             line,
         );
         sink.0.into_inner()
+    }
+
+    #[test]
+    fn own_messages_are_identified_by_account_and_network() {
+        /// Was the one emitted message flagged as mine?
+        fn own_of(line: &str) -> bool {
+            match feed(line).into_iter().next() {
+                Some(ClientEvent::Message { own, .. }) => own,
+                _ => panic!("expected exactly one MESSAGE event"),
+            }
+        }
+
+        // The harness is `ada` on `test.example`.
+        assert!(own_of(
+            "@msgid=test.example/01arz3ndektsv4rrffq69g5fav MESSAGE #general ada@test.example :hi"
+        ));
+
+        // A bridged realm can carry the SAME handle on another network — your
+        // Matrix self beside your local self. Comparing bare account names
+        // badged that stranger's messages as yours ("you" in the client).
+        assert!(
+            !own_of("@msgid=test.example/01arz3ndektsv4rrffq69g5fbv MESSAGE #general ada@teamnight.app :hi"),
+            "same name, different network, is not me"
+        );
+
+        // And a plain stranger stays a stranger.
+        assert!(!own_of(
+            "@msgid=test.example/01arz3ndektsv4rrffq69g5fcv MESSAGE #general bob@test.example :hi"
+        ));
     }
 
     #[test]

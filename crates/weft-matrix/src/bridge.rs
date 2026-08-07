@@ -529,7 +529,21 @@ impl Bridge {
         self.hs.join(&space_room, &servers, None).await?;
         let state = self.hs.state(&space_room).await?;
 
-        let title = state_str(&state, "m.room.name", "name");
+        // A title is never optional. An assertion is the **whole truth** about
+        // the namespace weftd-side (§7a.0e), so a field we omit is a field weftd
+        // clears — and a re-assert happens on every reconnect. Sending `None`
+        // because the Space has no `m.room.name` therefore does not mean "leave
+        // the name alone", it means "erase it", which is how a namespace that
+        // looked right at login renamed itself to a placeholder later on.
+        //
+        // The alias localpart is the fallback: always present (we resolved the
+        // Space through it), stable across restarts, and it is what a user typed
+        // to reach the space in the first place.
+        let title = state_str(&state, "m.room.name", "name")
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| space_ref.space.clone());
+        // The topic is genuinely optional — absent means there is none, and
+        // clearing it is the honest outcome.
         let description = state_str(&state, "m.room.topic", "topic");
 
         self.realm
@@ -537,7 +551,7 @@ impl Bridge {
                 uri: &space_uri,
                 id: &ns_id,
                 visibility: weft_proto::Visibility::Public,
-                title: title.as_deref(),
+                title: Some(&title),
                 description: description.as_deref(),
                 icon: None,
                 // Matrix is a levels realm: the native roles editor is hidden;

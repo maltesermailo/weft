@@ -538,6 +538,39 @@ async fn provisioning_asserts_the_space_and_excludes_encrypted_rooms() {
 }
 
 #[tokio::test]
+async fn a_nameless_space_is_still_asserted_with_a_title() {
+    // An assertion is the whole truth about the namespace (§7a.0e): a field we
+    // omit is a field weftd *clears*, and we re-assert on every reconnect. So
+    // sending no title because the Space has no `m.room.name` does not mean
+    // "leave the name alone", it means "erase it" — which is how a namespace that
+    // looked right at login renamed itself to a placeholder later on.
+    let mut rooms = BTreeMap::new();
+    rooms.insert(
+        "!space:kde.org".to_string(),
+        // No `m.room.name` at all, and a blank one would be no better.
+        vec![json!({ "type": "m.room.topic", "state_key": "", "content": { "topic": "hi" } })],
+    );
+    let (mut bridge, mut lines, _calls) = bridge_with(rooms).await;
+
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+
+    let sent = drain(&mut lines);
+    let meta = sent
+        .iter()
+        .find(|l| l.contains("NS-META"))
+        .expect("the space is asserted");
+    // The alias localpart: always present, stable across restarts, and what a
+    // user typed to reach the space.
+    assert!(
+        meta.contains("title=community"),
+        "a nameless space must still carry a title: {meta}"
+    );
+}
+
+#[tokio::test]
 async fn joining_the_namespace_joins_the_space_itself() {
     // Joining a namespace here IS joining the Space there (owner directive
     // 2026-08-07) — and it is load-bearing, not decoration: a restricted child

@@ -227,7 +227,7 @@ export type WeftEvent =
   /// §2/§6.2 the namespace descriptor (client-core model, from NS-META minus the
   /// tombstone); the mirror absorbs it via `Server.applyMeta`. Categories ride
   /// `cat-list`; the deletion drop + `joined` + auto-join stay on the raw event.
-  | { kind: "ns-descriptor"; id: string; name: string; title: string | null; description: string | null; owner: string | null; visibility: string; federation: boolean; recovery_eta: number | null; recovery_rung: number | null; origin: string | null }
+  | { kind: "ns-descriptor"; id: string; name: string; title: string | null; description: string | null; owner: string | null; visibility: string; federation: boolean; recovery_eta: number | null; recovery_rung: number | null; origin: string | null; provider_online: boolean | null }
   | {
       kind: "ns-meta";
       /// Immutable namespace ULID id (v0.13) — the key the client addresses by.

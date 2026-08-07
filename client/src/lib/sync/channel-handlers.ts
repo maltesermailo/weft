@@ -18,6 +18,16 @@ import { confirmSuccess } from "$lib/notifications/toasts.svelte";
 
 const me = (): string => store.session.account;
 
+/// Is this roster event about **me**?
+///
+/// Identity is `account@network`, never the account alone. These events carry the
+/// bare account with the network beside it, so comparing `e.user` to my handle
+/// made a bridged realm's same-named user *me*: your Matrix `ada@teamnight.app`
+/// joining or parting was applied as your local `ada` doing it — flipping your
+/// namespace membership and dropping channels out from under you.
+const isMe = (e: { user: string; network?: string }): boolean =>
+  e.user === me() && (e.network ?? store.session.network) === store.session.network;
+
 export const channelHandlers: HandlerMap = {
   member: (e) => {
     // The member LIST is model-owned (applied by the `roster` mirror handler);
@@ -27,7 +37,7 @@ export const channelHandlers: HandlerMap = {
       channelStore.ensure(e.channel); // ensure the instance the roster diff populates
       store.session.ensureCaps(e.user, e.channel); // roster badge
       profileStore.queryProfile(e.user); // §10.3 display name + avatar
-      if (e.user === me()) {
+      if (isMe(e)) {
         // Jump to a just-joined channel only when browsing a server (not the
         // Friends/DMs home) — keeps startup auto-rejoins from yanking the view.
         if (!view.active && !view.homeView) goto(nav.pathFor(e.channel));
@@ -35,7 +45,7 @@ export const channelHandlers: HandlerMap = {
       } else {
         store.accountOf(e.user).presence ??= "online"; // best-effort online mark
       }
-    } else if (e.user === me()) {
+    } else if (isMe(e)) {
       // Self-part = leave: drop the channel locally + navigate away. The roster
       // diff that also arrives no-ops (the instance is gone before it lands).
       delete channelStore.channels[e.channel];
@@ -45,7 +55,7 @@ export const channelHandlers: HandlerMap = {
   "ns-member": (e) => {
     // §7.4 namespace-level join/part — tracks *my own* membership so a
     // channel-less server still shows on the rail (+ auto-selects on live join).
-    if (e.user !== me()) return;
+    if (!isMe(e)) return;
     if (e.action === "join") {
       store.server(e.namespace).joined = true;
       if (!syncState.syncing && view.activeServer !== e.namespace) selectServer(e.namespace);

@@ -12,18 +12,20 @@ import { peerOf, profileStore } from "$lib/profile/profile.svelte";
 
 const _activeChannel = $derived(view.active ? channelStore.channels[view.active] : undefined);
 
-// The rail = every namespace I belong to: one I hold a channel in, or one I'm a
-// recorded member of (`Server.joined`) — so a channel-less server still shows.
+// The rail = every namespace I'm a **member** of. Membership is namespace-level,
+// so `Server.joined` is the whole answer, and weftd states it outright: SYNC
+// replays an `NS-MEMBER … join` per membership (precisely so a channel-less server
+// shows), and live join/part keep it current.
+//
+// It used to also derive a tile from any `#<ns>/…` channel it happened to hold.
+// That inverted the unit of membership — a channel implied a namespace — so
+// leaving could not stick: `CHANNELS` answers a non-member for a public
+// namespace, so one re-fetch re-created a channel and the tile came back.
 const _serverNamespaces = $derived(
-  [
-    ...new Set([
-      ...Object.values(channelStore.channels)
-        .filter((c) => c.name.startsWith("#"))
-        .map((c) => nsOf(c.name))
-        .filter(Boolean),
-      ...[...store.servers.values()].filter((s) => s.joined).map((s) => s.id),
-    ]),
-  ].sort(),
+  [...store.servers.values()]
+    .filter((s) => s.joined)
+    .map((s) => s.id)
+    .sort(),
 );
 
 const _dmList = $derived(Object.values(channelStore.channels).filter((c) => c.name.startsWith("@") || c.name.startsWith("&")));

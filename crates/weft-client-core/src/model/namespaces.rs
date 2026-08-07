@@ -35,6 +35,12 @@ pub enum NsDiff {
         /// collision-suffixed placeholder (`test-fp1n`) that names nothing a
         /// person recognises — the origin is the only handle that does.
         origin: Option<String>,
+        /// §9 liveness: is the provider governing this replica connected?
+        /// `None` for a native namespace — nothing governs it, so it is never
+        /// offline. `Some(false)` means the namespace exists but cannot serve:
+        /// weftd refuses joins and writes into it, so the client badges it and
+        /// declines to open it rather than showing a dead room.
+        provider_online: Option<bool>,
     },
 }
 
@@ -55,6 +61,7 @@ impl Namespaces {
             recovery_rung,
             federation,
             origin,
+            provider_online,
             ..
         } = event
         else {
@@ -78,6 +85,7 @@ impl Namespaces {
             recovery_eta: *recovery_eta,
             recovery_rung: *recovery_rung,
             origin: origin.clone(),
+            provider_online: *provider_online,
         }]
     }
 }

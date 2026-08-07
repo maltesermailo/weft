@@ -133,6 +133,9 @@ export interface NsMetaFields {
   /// §7a.2 the origin URI of a provider-managed replica, e.g.
   /// `matrix://teamnight.app/test`. Absent for a native namespace.
   origin?: string | null;
+  /// §9 liveness: is the provider governing this replica connected? Absent/null
+  /// for a native namespace — nothing governs it, so it is never offline.
+  provider_online?: boolean | null;
 }
 
 /**
@@ -159,6 +162,10 @@ export class Server {
   /// §7a.2 origin URI when this namespace is a provider-managed replica of a
   /// foreign space (`matrix://teamnight.app/test`); null when it's native.
   origin = $state<string | null>(null);
+  /// §9 liveness of the provider governing this replica: `null` for a native
+  /// namespace, `false` while its bridge is down. weftd refuses joins and writes
+  /// into an offline replica, so the UI should not offer to open one.
+  providerOnline = $state<boolean | null>(null);
   /// §7a.3 capability profile. `authority` is `roles` (default) | `levels` |
   /// `none`; `settingsDisabled` lists native settings surfaces to hide.
   /// **Display gating only** — the server decides what is actually permitted, so
@@ -272,6 +279,7 @@ export class Server {
     this.federation = e.federation ?? false;
     this.welcome = e.welcome ?? null;
     this.origin = e.origin ?? null;
+    this.providerOnline = e.provider_online ?? null;
     this.authority = e.authority ?? null;
     this.settingsDisabled = e.settings_disabled ?? [];
     this.recoveryEta = e.recovery_eta ?? null;
