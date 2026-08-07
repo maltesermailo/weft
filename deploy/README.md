@@ -176,27 +176,85 @@ instead, then come back here.
 
 ### 2. Edit the config
 
-In `deploy/weft-matrix/`:
+Five files here, one next door. Generate the two appservice tokens first — they
+appear in two of them:
 
-- **`.env`** — this stack's own `POSTGRES_PASSWORD` (unrelated to weftd's), and
-  `MATRIX_BIND`/`MATRIX_PORT` for the homeserver's published port.
-- **`weft-matrix.toml`** — `[matrix] domain` = the name from step 1. `as_token` and
-  `hs_token`: **change both**, since anyone holding `hs_token` can inject events as
-  any Matrix user. `[weft] endpoint` and `media_url` = weftd's public name
-  (`weft.example.com:4433`, `https://weft.example.com`) — this stack reaches weftd
-  over the internet, not a shared network. `admins` if you want the `!weft` console.
-  Leave `[daemon] database_url`; it already reads `${POSTGRES_PASSWORD}`.
-- **`weft-matrix.yaml`** — the appservice registration Synapse loads. Substitute
-  your `server_name` into the puppet regex, **escaping every dot**. It repeats five
-  values from `weft-matrix.toml` because Synapse has no environment expansion; the
-  file tabulates each one and what a mismatch does.
-- **`homeserver.yaml`** — `server_name` = exactly the same string as
-  `[matrix] domain`, plus this stack's Postgres password (literal, same reason).
-- **`initdb/10-matrix.sql`** — that password once more; it creates Synapse's role.
+```sh
+cd ../weft-matrix
+openssl rand -hex 32   # → as_token
+openssl rand -hex 32   # → hs_token
+openssl rand -hex 32   # → this stack's Postgres password
+```
 
-And one file in the other stack, **`../weftd/Caddyfile`** — a site block for the
-homeserver. This is what makes federation work over 443, so 8448 never has to be
-opened.
+**`.env`** — this stack's own Postgres password, unrelated to weftd's.
+
+```dotenv
+POSTGRES_PASSWORD=<the-matrix-postgres-password>
+
+MATRIX_BIND=0.0.0.0     # so the proxy can reach it through the host
+MATRIX_PORT=8008
+```
+
+**`weft-matrix.toml`** — the daemon. Only these lines change:
+
+```toml
+[weft]
+# weftd's PUBLIC name, not a service name: separate stacks, no shared network.
+endpoint  = "weft.example.com:4433"
+media_url = "https://weft.example.com"
+
+[matrix]
+domain    = "matrix.example.com"      # = server_name, from step 1
+as_token  = "<as_token>"
+hs_token  = "<hs_token>"
+admins    = ["@you:matrix.example.com"]   # optional: the `!weft` console
+```
+
+Anyone holding `hs_token` can inject events as any Matrix user, so change both.
+Leave `[daemon] database_url` alone — it already reads `${POSTGRES_PASSWORD}`.
+
+**`weft-matrix.yaml`** — the appservice registration Synapse loads:
+
+```yaml
+id: weft-matrix
+url: 'http://bridge:9010'
+as_token: '<as_token>'
+hs_token: '<hs_token>'
+sender_localpart: 'weftbot'
+rate_limited: false
+namespaces:
+  users:
+    - exclusive: true
+      regex: '@weft_.*:matrix\.example\.com'    # escape EVERY dot
+  aliases: []
+  rooms: []
+```
+
+Five of these values repeat `weft-matrix.toml` (`url`, both tokens, the bot
+localpart, the puppet prefix), because Synapse has no environment expansion. The file itself tabulates each one and what a mismatch does. Keep the
+regex **single-quoted**: in double quotes YAML rejects `\.` as an unknown escape and
+Synapse refuses to load the file.
+
+**`homeserver.yaml`** — the homeserver. Three lines:
+
+```yaml
+server_name: "matrix.example.com"     # EXACTLY the same string as [matrix] domain
+
+database:
+  args:
+    password: change-me-synapse-postgres-password    # literal; Synapse has no
+                                                     # ${VAR} expansion
+```
+
+**`initdb/10-matrix.sql`** — that same Synapse password once more; the line creates
+its role:
+
+```sql
+CREATE ROLE synapse WITH LOGIN PASSWORD 'change-me-synapse-postgres-password';
+```
+
+**`../weftd/Caddyfile`** — the one file in the other stack. A site block for the
+homeserver is what makes federation work over 443, so 8448 never has to be opened:
 
 ```caddyfile
 matrix.example.com {
@@ -204,9 +262,9 @@ matrix.example.com {
 }
 ```
 
-The upstream is a **host port**, not a service name: the two stacks share no
+The upstream is a **host port**, not a service name — the two stacks share no
 network. The bundled Caddy runs in a container, where the host is
-`host.docker.internal` — its `extra_hosts` already maps that name.
+`host.docker.internal`; its `extra_hosts` already maps that name.
 
 ### 3. Create the adapter key
 
