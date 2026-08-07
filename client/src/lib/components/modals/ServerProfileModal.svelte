@@ -9,7 +9,9 @@
   let { onclose }: { onclose: () => void } = $props();
 
   const scope = `ns:${app.activeServer}`;
-  const serverName = $derived(vm.activeNsMeta?.title || vm.activeNsMeta?.name || app.activeServer);
+  // `serverName` = the model's `displayName` (title → origin → vanity → id), so a
+  // bridged namespace shows where it came from rather than a local placeholder.
+  const serverName = $derived(vm.serverName(app.activeServer));
   const current = $derived(profileStore.nickOf(store.session.account));
   let draft = $state(untrack(() => profileStore.nickOf(store.session.account)));
   const dirty = $derived(draft.trim() !== current);

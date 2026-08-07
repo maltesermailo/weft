@@ -1591,26 +1591,53 @@ impl Bridge {
         // decoration: a restricted child room (`join_rule: restricted`)
         // authorizes by Space membership, so a puppet outside the Space is
         // refused every single child with `M_FORBIDDEN … do not belong to any of
-        // the required rooms/spaces`. The Space join is the authorization, and
-        // it has to succeed before the children are even attemptable.
-        self.puppet_join_space(&space_room, &space_uri, &puppet)
-            .await?;
+        // the required rooms/spaces`. So the Space comes first — but its failure
+        // must not *abort* the join, or one unjoinable Space costs the user the
+        // whole namespace, including rooms they could still have entered.
+        let space_joined = match self
+            .puppet_join_space(&space_room, &space_uri, &puppet)
+            .await
+        {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(
+                    space_room,
+                    account,
+                    "puppet could not join the Space — restricted children will refuse it: {e:#}"
+                );
+
+                false
+            }
+        };
+
+        let rooms_total = rooms.len();
+        let mut rooms_joined = false;
 
         for room in rooms {
             // With `via`: a room on another server cannot be joined by ID alone.
             let via = self.room_via(&room).await;
-            if let Err(e) = self.hs.join(&room, &via, Some(&puppet)).await {
+            match self.hs.join(&room, &via, Some(&puppet)).await {
+                Ok(_) => rooms_joined = true,
                 // A single unjoinable channel is not a failed namespace join —
                 // it may be invite-only, or restricted to a different Space.
-                warn!(room, account, "puppet join failed: {e:#}");
+                Err(e) => warn!(room, account, "puppet join failed: {e:#}"),
             }
         }
 
-        // The statement is what makes the membership true weftd-side (§6), and
-        // the Space join above is what makes it true foreign-side — so it is
-        // sent on the Space, not on the children. Gating it on a child join
-        // instead was why an empty namespace, and every namespace whose children
-        // were restricted, could not be joined at all.
+        // The statement is what makes the membership true weftd-side (§6), and it
+        // is only honest once the user is *somewhere* foreign-side: in the Space,
+        // or in one of its rooms, or there is nothing to be in (an empty space —
+        // without which an empty namespace could never be joined at all).
+        if !space_joined && !rooms_joined && rooms_total > 0 {
+            warn!(
+                account,
+                ns = %ns_id,
+                "namespace join asserts nothing — the foreign side refused the Space and every room"
+            );
+
+            return Ok(());
+        }
+
         self.realm.member(ns_id, &user, MemberAction::Join).await?;
 
         Ok(())

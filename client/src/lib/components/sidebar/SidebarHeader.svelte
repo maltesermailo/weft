@@ -22,7 +22,11 @@
   {:else}
     <button class="comm-name-btn" class:open={ui.serverMenu} onclick={() => (ui.serverMenu = !ui.serverMenu)}>
       <span class="comm-head">
-        <span class="comm-name">{vm.activeNsMeta?.title || vm.activeNsMeta?.name || store.session.network}</span>
+        <!-- `displayName` (title → origin → vanity → id), not a local re-derivation:
+             re-deriving it here skipped the §7a.2 origin fallback, so a bridged
+             namespace whose title hadn't loaded fell through to the *network* name
+             and the header claimed to be the whole server. -->
+        <span class="comm-name">{app.activeServer ? vm.serverName(app.activeServer) : store.session.network}</span>
         <span class="comm-origin">
           <span class="origin-dot"></span>
           <span>{app.activeServer ? `namespace · ${store.session.network}` : `${store.session.network} · connected`}</span>
