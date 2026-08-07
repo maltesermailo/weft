@@ -841,9 +841,12 @@ impl<S: ControlStream> Session<S> {
     /// A realm resyncs by re-stating, using the **same snapshot framing a client
     /// gets on login** (§6.9): `SYNC START` opens the statement, the assertions
     /// and `NS-MEMBER` events in between *are* the state, `SYNC END` closes it —
-    /// at which point every member of the provider's namespaces it did not name
-    /// is dropped. Only the roles are swapped: here the realm is the one holding
-    /// the state and weftd is the one conforming.
+    /// at which point every **foreign** member of the provider's namespaces it
+    /// did not name is dropped. Only the roles are swapped: here the realm is
+    /// the one holding the state and weftd is the one conforming.
+    ///
+    /// The window is scoped to foreign members because that is what a realm can
+    /// enumerate — see the prune below.
     ///
     /// Stating the whole set beats diffing against what we believe: the adapter
     /// already has it (a Matrix adapter reads room state), there is no
@@ -880,6 +883,24 @@ impl<S: ControlStream> Session<S> {
 
             for member in current {
                 if statement.named.contains(&(ns.clone(), member.clone())) {
+                    continue;
+                }
+                // A full-replace may only prune inside the set its author can
+                // enumerate, and a realm can enumerate its **own** users — it
+                // reads foreign room state. Our local accounts are not in that
+                // state: they are represented foreign-side by puppets, which an
+                // adapter filters out of the roster precisely because their
+                // traffic is a relay of ours. So an adapter re-stating a space
+                // names the foreign members and *cannot* name the local ones,
+                // and pruning what it never had a way to mention turned every
+                // reconnect into a silent mass-part of every local member of
+                // every bridged namespace.
+                //
+                // Local membership stays governed: it only becomes true on the
+                // realm's `NS-MEMBER … join` in the first place, and the realm
+                // can still revoke it by naming the part explicitly. What it
+                // can no longer do is revoke it by omission.
+                if weft_store::local_member(&member).is_some() {
                     continue;
                 }
                 if let Err(e) = self.ctx.memberships.clear_ns_membership(&member, &ns).await {

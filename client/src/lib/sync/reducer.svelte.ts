@@ -9,7 +9,7 @@ import type { Msg } from "$lib/types";
 import { store } from "$lib/store/store.svelte";
 import { channelStore, Channel, nsOf } from "$lib/channels/channel.svelte";
 import { mkMsg, applyReaction, pinsHandlers, messageMirrorHandlers } from "$lib/messages/messages.svelte";
-import { explainJoinError, friendlyError } from "$lib/sync/joinErrors";
+import { toastFor } from "$lib/sync/joinErrors";
 import { pluginHandlers, plugins } from "$lib/plugins/plugins.svelte";
 import { rosterFetchTarget } from "$lib/namespaces/server.svelte";
 import { federationHandlers } from "$lib/federation/federation.svelte";
@@ -585,8 +585,9 @@ export function handle(e: weft.WeftEvent) {
       // A failure we can attribute to a specific request the user made says more
       // than the §8 code can: those are deliberately identical across causes
       // (invariant 1), so the context has to come from our side.
-      const explained = explainJoinError(e.code, e.label);
-      toast(explained ?? friendlyError(e.code, e.text), "error");
+      // ...and a failure the user never asked for is not theirs to read at all.
+      const message = toastFor(e.code, e.text, e.label);
+      if (message) toast(message, "error");
       break;
     }
   }

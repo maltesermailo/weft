@@ -46,7 +46,13 @@
     query.trim()
       ? listed.filter((ns) => {
           const q = query.trim().toLowerCase();
-          return ns.name.toLowerCase().includes(q) || (ns.title ?? "").toLowerCase().includes(q);
+          // Origin included so a bridged namespace is findable by where it came
+          // from — that's what the user knows it as, not its local vanity.
+          return (
+            ns.name.toLowerCase().includes(q) ||
+            (ns.title ?? "").toLowerCase().includes(q) ||
+            (ns.originLabel ?? "").toLowerCase().includes(q)
+          );
         })
       : listed,
   );
@@ -300,11 +306,13 @@
 
         {#each matches as ns (ns.id)}
           <div class="ns-item">
-            <div class="ns-badge">{initials(ns.title || ns.name)}</div>
+            <div class="ns-badge">{initials(ns.displayName)}</div>
             <div class="ns-info">
-              <div class="ns-name">{ns.title || ns.name}</div>
+              <div class="ns-name">{ns.displayName}</div>
               <div class="ns-sub">
-                {ns.description || `@${ns.name}`} · {ns.visibility}{ns.owner ? ` · ${ns.owner}` : ""}
+                <!-- A bridged namespace names its origin instead of a local `@vanity`
+                     that means nothing to the person reading it (§7a.2). -->
+                {ns.description || (ns.originLabel ? ns.originLabel : `@${ns.name}`)} · {ns.visibility}{ns.owner ? ` · ${ns.owner}` : ""}
               </div>
             </div>
             <button class="go-btn" onclick={() => joinNamespace(ns.id)}>Join</button>

@@ -9,6 +9,7 @@
   import { conn, attemptReconnect, HOMESERVER_KEY, SAVED_KEY, nsMetaFetched, logout, doConnect, keyLogin, chooseServer, changeServer, probeServer } from "$lib/connection/connection.svelte";
   import { selectServer, goHome } from "$lib/navigation/navigation";
   import { handle, loadHistory, hist } from "$lib/sync/reducer.svelte";
+  import { trackBackground } from "$lib/sync/joinErrors";
   import { msgEpoch } from "$lib/rendering/time";
   import { scopeKeyOf, notifLevel, isMuted, setNotifLevel } from "$lib/notifications/notif";
   import { peerOf, initials, dotClass, avatarUrl, bioOf, statusOf, profileStore } from "$lib/profile/profile.svelte";
@@ -409,9 +410,14 @@ import { mkMsg, catchUpChannel } from "$lib/messages/messages.svelte";
       // Voice channels aren't in the server's runtime `joined` set, so a MEMBERS
       // fetch answers CAP-REQUIRED ("join the channel first"); their roster comes
       // from voice-state instead. Skip them.
+      //
+      // Labelled as background: a text channel can answer CAP-REQUIRED too, when
+      // our belief that we're joined is stale (a bridged namespace whose provider
+      // never asserted our membership). That's ours to swallow — the user only
+      // opened a channel.
       if (ch && !ch.voice && !ch.rosterLoaded) {
         ch.rosterLoaded = true;
-        weft.members(a).catch(() => {});
+        weft.members(a, trackBackground()).catch(() => {});
       }
     });
   });

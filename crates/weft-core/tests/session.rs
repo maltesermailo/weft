@@ -5524,6 +5524,25 @@ async fn a_realm_resyncs_membership_by_restating_it() {
         "unopened SYNC END wiped it: {roster:?}"
     );
     assert!(roster.contains("ada"), "{roster:?}");
+
+    // And the case a real adapter actually produces: it re-states the space from
+    // foreign room state, which lists the *foreign* members only — our local
+    // accounts appear there as puppets, which an adapter filters out because
+    // their traffic is a relay of ours. So ada is not named at all, and must
+    // still survive: a full-replace prunes only what its author could enumerate.
+    // Pruning by omission here parted every local member of every bridged
+    // namespace on every bridge reconnect.
+    plugin.send("SYNC START");
+    plugin.send(&format!("NS-MEMBER {ns_id} carol@acme-corp join"));
+    plugin.send("@cursor=c3 SYNC END");
+
+    ada.send(&format!("@label=mem4 MEMBERS {channel}"));
+    let roster = roster_names(&mut ada).await;
+    assert!(
+        roster.contains("ada"),
+        "an unnamed local member must survive a realm resync: {roster:?}"
+    );
+    assert!(roster.contains("carol"), "{roster:?}");
 }
 
 #[tokio::test]

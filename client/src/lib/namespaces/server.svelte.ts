@@ -130,6 +130,9 @@ export interface NsMetaFields {
   recovery_eta?: number | null;
   recovery_rung?: number | null;
   categories?: string[];
+  /// §7a.2 the origin URI of a provider-managed replica, e.g.
+  /// `matrix://teamnight.app/test`. Absent for a native namespace.
+  origin?: string | null;
 }
 
 /**
@@ -153,6 +156,9 @@ export class Server {
   visibility = $state("public");
   federation = $state(false);
   welcome = $state<string | null>(null);
+  /// §7a.2 origin URI when this namespace is a provider-managed replica of a
+  /// foreign space (`matrix://teamnight.app/test`); null when it's native.
+  origin = $state<string | null>(null);
   /// §7a.3 capability profile. `authority` is `roles` (default) | `levels` |
   /// `none`; `settingsDisabled` lists native settings surfaces to hide.
   /// **Display gating only** — the server decides what is actually permitted, so
@@ -185,9 +191,22 @@ export class Server {
     this.id = id;
   }
 
-  /// v0.13 rail-tile / header display: vanity title, else name, else the id.
+  /// v0.13 rail-tile / header display: the provider's title, else — for a
+  /// bridged namespace — where it came from, else the local vanity name, else
+  /// the id.
+  ///
+  /// The origin outranks `name` for a replica only. There the vanity is a
+  /// placeholder weftd derived (and collision-suffixed) from a foreign space
+  /// that may have had no name at all, so `test-fp1n` identifies nothing —
+  /// while `teamnight.app/test` is what the user typed to get here.
   get displayName(): string {
-    return this.title || this.name || this.id;
+    return this.title || this.originLabel || this.name || this.id;
+  }
+
+  /// The origin as a person reads it: the scheme dropped, because the
+  /// realm/space pair is the identifying part (`matrix://a/b` → `a/b`).
+  get originLabel(): string | null {
+    return this.origin?.replace(/^[a-z][a-z0-9+.-]*:\/\//, "") || null;
   }
   /// The capability scope string for this namespace.
   get scope(): string {
@@ -252,6 +271,7 @@ export class Server {
     this.visibility = e.visibility ?? "public";
     this.federation = e.federation ?? false;
     this.welcome = e.welcome ?? null;
+    this.origin = e.origin ?? null;
     this.authority = e.authority ?? null;
     this.settingsDisabled = e.settings_disabled ?? [];
     this.recoveryEta = e.recovery_eta ?? null;

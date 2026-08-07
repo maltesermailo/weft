@@ -637,6 +637,70 @@ impl Bridge {
         Ok(true)
     }
 
+    /// Send as a puppet, joining the room first if the puppet isn't in it yet.
+    ///
+    /// A puppet joins a namespace's rooms when its user joins the namespace — but the
+    /// set of rooms changes afterwards. A room added to a Space later, a namespace
+    /// joined while the Space was still empty, a puppet minted after the fact: each
+    /// leaves a puppet outside a room it now needs to speak in, and Matrix answers
+    /// `M_FORBIDDEN … not in room`. Rather than enumerate the orderings, recover from
+    /// the one condition they all produce.
+    async fn send_as_puppet(
+        &mut self,
+        room_id: &str,
+        puppet: &str,
+        content: Value,
+        txn: &str,
+    ) -> anyhow::Result<String> {
+        match self
+            .hs
+            .send(
+                room_id,
+                "m.room.message",
+                content.clone(),
+                txn,
+                Some(puppet),
+            )
+            .await
+        {
+            Ok(event_id) => Ok(event_id),
+            Err(e) if format!("{e:#}").contains("not in room") => {
+                info!(room_id, puppet, "puppet was not in the room — joining");
+                let via = self.room_via(room_id).await;
+                self.hs.join(room_id, &via, Some(puppet)).await?;
+
+                self.hs
+                    .send(room_id, "m.room.message", content, txn, Some(puppet))
+                    .await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Servers to join `room` through, from its `m.space.child` event in the Space.
+    ///
+    /// A room ID cannot be joined without them once the room is on another server —
+    /// and a v12+ room ID carries no server part at all, so there is nothing to fall
+    /// back on. The bot is in the Space, so reading the child event is always allowed.
+    async fn room_via(&self, room: &str) -> Vec<String> {
+        let Some((_, space)) = self.store.state.channel_of_room(room) else {
+            return Vec::new();
+        };
+
+        self.hs
+            .get_state(&space.room_id, "m.space.child", room)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|c| c["via"].as_array().cloned())
+            .map(|via| {
+                via.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Add this Space to the bot's account-data list of consumed Spaces.
     ///
     /// Read-modify-write: account data is one document per key, so appending means
@@ -1320,23 +1384,16 @@ impl Bridge {
                 }
             },
         };
+        let content = json!({
+            "msgtype": "m.text",
+            "body": m.body,
+            // The id we minted, carried on the event itself: this is what makes the
+            // link map rebuildable after a database loss (see `recover`) — an
+            // ingested message's id is already derivable, ours would not be.
+            crate::recover::MSGID_FIELD: m.msgid.to_string(),
+        });
         let event_id = self
-            .hs
-            .send(
-                &room_id,
-                "m.room.message",
-                json!({
-                    "msgtype": "m.text",
-                    "body": m.body,
-                    // The id we minted, carried on the event itself: this is
-                    // what makes the link map rebuildable after a database
-                    // loss (see `recover`) — an ingested message's id is
-                    // already derivable, ours would not be.
-                    crate::recover::MSGID_FIELD: m.msgid.to_string(),
-                }),
-                &txn_of(&m.msgid.to_string()),
-                Some(&puppet),
-            )
+            .send_as_puppet(&room_id, &puppet, content, &txn_of(&m.msgid.to_string()))
             .await?;
 
         self.store
@@ -1504,7 +1561,9 @@ impl Bridge {
         let mut any = false;
 
         for room in rooms {
-            match self.hs.join(&room, &[], Some(&puppet)).await {
+            // With `via`: a room on another server cannot be joined by ID alone.
+            let via = self.room_via(&room).await;
+            match self.hs.join(&room, &via, Some(&puppet)).await {
                 Ok(_) => any = true,
                 Err(e) => warn!(room, account, "puppet join failed: {e:#}"),
             }

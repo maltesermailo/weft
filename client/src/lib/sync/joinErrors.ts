@@ -15,7 +15,10 @@ type PendingRealmJoin = { uri: string; scheme: string; realm: string; space: str
 
 const pending = new Map<string, PendingRealmJoin>();
 
-/// Labels are only ever matched against our own map, so a counter is enough — no
+/// Labels sent on requests the *client* made on its own initiative.
+const background = new Set<string>();
+
+/// Labels are only ever matched against our own maps, so a counter is enough — no
 /// need for randomness, and a readable label helps when reading the raw wire.
 let seq = 0;
 
@@ -31,6 +34,39 @@ export function trackRealmJoin(join: PendingRealmJoin): string {
   return label;
 }
 
+/// Label a request the user did not ask for, so its failure doesn't become a
+/// toast in their face.
+///
+/// Speculative fetches (a roster on opening a channel, a layout on seeing a
+/// namespace) fail for reasons that are ours to handle, not theirs to read: a
+/// stale belief that we're joined answers `CAP-REQUIRED`, and a channel that
+/// went away answers `NO-SUCH-TARGET`. Neither is a thing the user did.
+export function trackBackground(): string {
+  const label = `bg${++seq}`;
+  background.add(label);
+  setTimeout(() => background.delete(label), 60_000);
+
+  return label;
+}
+
+/// The toast for an §8 error, or `null` when it should be swallowed.
+///
+/// One entry point so "is this the user's business at all?" is answered in a
+/// single place: a background fetch's failure is logged and dropped, a tracked
+/// request gets the context only we have, everything else gets friendly text.
+export function toastFor(code: string, text: string, label: string | null): string | null {
+  if (label && background.has(label)) {
+    background.delete(label);
+    // Kept in the console: silent to the user is not the same as invisible to
+    // whoever is debugging why a roster is empty.
+    console.debug(`background request ${label} failed: ${code} ${text}`);
+
+    return null;
+  }
+
+  return explainJoinError(code, label) ?? friendlyError(code, text);
+}
+
 /// The message to show for an error, or `null` to fall back to the generic path.
 ///
 /// TODO once `CatalogEntry.schemes` exists — it currently carries only
@@ -38,7 +74,7 @@ export function trackRealmJoin(join: PendingRealmJoin): string {
 /// outright. "No matrix bridge is connected" is the commonest real cause while one is
 /// being set up, and it is something the client can *assert* rather than offer as one
 /// possibility among several.
-export function explainJoinError(code: string, label: string | null): string | null {
+function explainJoinError(code: string, label: string | null): string | null {
   const join = label ? pending.get(label) : undefined;
   if (!join || !label) return null;
 
@@ -69,7 +105,7 @@ const FRIENDLY: Record<string, string> = {
   POLICY: "The server's policy doesn't allow that.",
 };
 
-export function friendlyError(code: string, text: string): string {
+function friendlyError(code: string, text: string): string {
   const friendly = FRIENDLY[code];
   if (!friendly) return text ? `${code}: ${text}` : code;
 

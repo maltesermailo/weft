@@ -1971,15 +1971,31 @@ pub fn build_call_end(user: &str) -> Result<String, String> {
 }
 
 /// `MEMBERS <#chan>` — request the roster snapshot (§6.3).
-pub fn build_members(channel: &str) -> Result<String, String> {
+///
+/// The label matters here because the client fetches a roster *speculatively*,
+/// on opening a channel, and the answer can be a §8 error the user never asked
+/// for — `CAP-REQUIRED` when our belief that we're joined is stale. Labelling
+/// the request is what lets the frontend recognise its own background fetch
+/// (§3.5) instead of toasting a bare wire code.
+pub fn build_members_labeled(channel: &str, label: Option<&str>) -> Result<String, String> {
     let channel: weft_proto::ChannelName =
         channel.parse().map_err(|_| "bad channel".to_string())?;
-    Request::new(Command::Members {
+    let command = Command::Members {
         channel,
         cursor: None,
-    })
-    .serialize()
-    .map_err(|e| e.to_string())
+    };
+
+    let request = match label {
+        Some(label) => Request::with_label(command, label),
+        None => Request::new(command),
+    };
+
+    request.serialize().map_err(|e| e.to_string())
+}
+
+/// `MEMBERS <#chan>` with no label — a roster the user explicitly asked for.
+pub fn build_members(channel: &str) -> Result<String, String> {
+    build_members_labeled(channel, None)
 }
 
 /// `MODLIST <scope>` — list the moderation deny-list (mutes + bans, §6.7).

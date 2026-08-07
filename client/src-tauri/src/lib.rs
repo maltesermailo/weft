@@ -913,8 +913,8 @@ fn roles_of(conn: State<'_, Conn>, scope: String, account: String) -> Result<(),
 }
 
 #[tauri::command]
-fn members(conn: State<'_, Conn>, channel: String) -> Result<(), String> {
-    conn.send(weft::build_members(&channel)?)
+fn members(conn: State<'_, Conn>, channel: String, label: Option<String>) -> Result<(), String> {
+    conn.send(weft::build_members_labeled(&channel, label.as_deref())?)
 }
 
 #[tauri::command]

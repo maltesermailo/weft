@@ -29,6 +29,12 @@ pub enum NsDiff {
         federation: bool,
         recovery_eta: Option<u64>,
         recovery_rung: Option<u8>,
+        /// Foreign-bridge §7a.2: the provider-managed replica's origin URI
+        /// (`matrix://teamnight.app/test`), or `None` for a native namespace.
+        /// The UI needs it because a foreign namespace's local vanity name is a
+        /// collision-suffixed placeholder (`test-fp1n`) that names nothing a
+        /// person recognises — the origin is the only handle that does.
+        origin: Option<String>,
     },
 }
 
@@ -48,6 +54,7 @@ impl Namespaces {
             recovery_eta,
             recovery_rung,
             federation,
+            origin,
             ..
         } = event
         else {
@@ -70,6 +77,7 @@ impl Namespaces {
             federation: *federation,
             recovery_eta: *recovery_eta,
             recovery_rung: *recovery_rung,
+            origin: origin.clone(),
         }]
     }
 }
@@ -77,6 +85,16 @@ impl Namespaces {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same event, marked as a provider-managed replica (§7a.2).
+    fn foreign_ns_meta(id: &str, origin: &str) -> ClientEvent {
+        let mut event = ns_meta(id, Some("alice"), None);
+        if let ClientEvent::NsMeta { origin: o, .. } = &mut event {
+            *o = Some(origin.into());
+        }
+
+        event
+    }
 
     fn ns_meta(id: &str, owner: Option<&str>, description: Option<&str>) -> ClientEvent {
         ClientEvent::NsMeta {
@@ -106,6 +124,22 @@ mod tests {
             NsDiff::NsDescriptor { id, name, owner, visibility, federation, .. }
             if id == "01ns" && name == "cool-server" && owner.as_deref() == Some("alice")
                 && visibility == "public" && *federation));
+    }
+
+    #[test]
+    fn a_foreign_namespaces_origin_reaches_the_descriptor() {
+        // The origin is what the UI can actually show for a bridged namespace:
+        // its local vanity is a collision-suffixed placeholder. Dropping it here
+        // is why one displayed as `test-fp1n` instead of `teamnight.app/test`.
+        let mut ns = Namespaces;
+        let d = ns.handle(&foreign_ns_meta("01ns", "matrix://teamnight.app/test"));
+        assert!(matches!(&d[0],
+            NsDiff::NsDescriptor { origin, .. }
+            if origin.as_deref() == Some("matrix://teamnight.app/test")));
+
+        // A native namespace has none — the UI falls back to title/name.
+        let d = ns.handle(&ns_meta("01ns", Some("alice"), None));
+        assert!(matches!(&d[0], NsDiff::NsDescriptor { origin, .. } if origin.is_none()));
     }
 
     #[test]
