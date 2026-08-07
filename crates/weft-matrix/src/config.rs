@@ -99,6 +99,12 @@ impl Config {
 /// The appservice registration the operator installs on the companion
 /// homeserver (`weft-matrix generate-registration`).
 pub fn registration_yaml(cfg: &Config, url: &str) -> String {
+    let regex = format!(
+        "@{}.*:{}",
+        cfg.matrix.puppet_prefix,
+        regex_escape(&cfg.matrix.domain)
+    );
+
     format!(
         r#"id: weft-matrix
 url: {url}
@@ -109,16 +115,29 @@ rate_limited: false
 namespaces:
   users:
     - exclusive: true
-      regex: "@{prefix}.*:{domain}"
+      regex: {regex}
   aliases: []
   rooms: []
 "#,
-        as_token = cfg.matrix.as_token,
-        hs_token = cfg.matrix.hs_token,
-        bot = cfg.matrix.bot,
-        prefix = cfg.matrix.puppet_prefix,
-        domain = regex_escape(&cfg.matrix.domain),
+        url = yaml_quoted(url),
+        as_token = yaml_quoted(&cfg.matrix.as_token),
+        hs_token = yaml_quoted(&cfg.matrix.hs_token),
+        bot = yaml_quoted(&cfg.matrix.bot),
+        regex = yaml_quoted(&regex),
     )
+}
+
+/// Wrap a value as a YAML **single-quoted** scalar.
+///
+/// Single, not double, because of the regex: a domain escaped for the regex
+/// engine contains `\.`, which is an *invalid escape* inside a YAML double-quoted
+/// scalar — Synapse then refuses to load the registration with
+/// `found unknown escape character '.'`. Single quotes disable escape processing
+/// entirely; only a literal `'` needs doubling. The other fields are quoted the
+/// same way because they are operator-supplied: a token beginning with `*`, `&`
+/// or `!` would otherwise be a YAML indicator rather than a string.
+fn yaml_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// Escape a literal domain for the registration's regex field.
@@ -167,8 +186,15 @@ mod tests {
         assert_eq!(cfg.as_url(), "http://127.0.0.1:9010");
 
         let reg = registration_yaml(&cfg, &cfg.as_url());
-        assert!(reg.contains("regex: \"@weft_.*:test\\.example\""), "{reg}");
-        assert!(reg.contains("sender_localpart: weftbot"), "{reg}");
-        assert!(reg.contains("url: http://127.0.0.1:9010"), "{reg}");
+        assert!(reg.contains("sender_localpart: 'weftbot'"), "{reg}");
+        assert!(reg.contains("url: 'http://127.0.0.1:9010'"), "{reg}");
+
+        // Single-quoted, NOT double: the regex carries `\.` from escaping the
+        // domain, and `\.` inside a YAML double-quoted scalar is an invalid escape
+        // — Synapse rejects the whole registration with "found unknown escape
+        // character '.'". Guard the class of bug too: we emit no double quotes at
+        // all, so no interpolated value can land somewhere escapes are processed.
+        assert!(reg.contains(r"regex: '@weft_.*:test\.example'"), "{reg}");
+        assert!(!reg.contains('"'), "{reg}");
     }
 }
