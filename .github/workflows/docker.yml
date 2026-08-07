@@ -61,37 +61,6 @@ jobs:
             type=ref,event=tag
             type=sha,prefix=sha-
 
-      # The Dockerfiles compile behind BuildKit cache mounts (a warm cargo
-      # registry + `target/`), which is the only thing that can help: `COPY . .`
-      # sits in the build layer's cache key, so every commit invalidates it and
-      # the layer cache below can never spare the compile.
-      #
-      # But `type=gha` exports **layers**, not cache mounts — on a fresh runner
-      # the mounts start empty unless something restores them. That is what these
-      # two steps do: `actions/cache` holds the mount contents, and the dance
-      # injects them into the builder before the build and extracts them after.
-      - name: Restore the build caches
-        id: mount-cache
-        uses: actions/cache@v4
-        with:
-          path: cache-mounts
-          # Keyed on the lockfiles, so a dependency change starts from the
-          # nearest previous cache rather than from nothing.
-          key: buildkit-${{ matrix.image }}-${{ hashFiles('Cargo.lock', 'client/pnpm-lock.yaml') }}
-          restore-keys: |
-            buildkit-${{ matrix.image }}-
-
-      - uses: reproducible-containers/buildkit-cache-dance@v3
-        with:
-          cache-map: |
-            {
-              "cache-mounts/cargo-registry": "/usr/local/cargo/registry",
-              "cache-mounts/cargo-git": "/usr/local/cargo/git",
-              "cache-mounts/target": "/src/target",
-              "cache-mounts/pnpm-store": "/pnpm-store"
-            }
-          skip-extraction: ${{ steps.mount-cache.outputs.cache-hit }}
-
       - name: Build and push (linux/amd64)
         uses: docker/build-push-action@v6
         with:
@@ -101,20 +70,3 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Layer cache in the **registry**, not `type=gha`.
-          #
-          # The Actions cache is capped at 10 GB for the whole repo, and this build
-          # has two big consumers: `mode=max` layers (every builder-stage layer,
-          # including the source + node_modules + SPA bundle, which churn on every
-          # commit) and the cache mounts above (a release `target/` with libwebrtc
-          # in it). Together they exceed the quota, and the cache API answers
-          # `failed to reserve cache` — the export fails and takes the build with
-          # it. Moving layers to ghcr.io removes the larger consumer from that
-          # budget entirely: the registry has no comparable cap, dedupes by digest,
-          # and we are already authenticated to push there.
-          #
-          # `mode=max` matters here because everything worth reusing (apt, the Node
-          # tarball, wasm-pack, clang) lives in the *builder* stage, which `min`
-          # would not export at all.
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache,mode=max

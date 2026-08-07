@@ -363,6 +363,34 @@ To remove the bridge: `docker compose down -v` in `weft-matrix/`, and delete the
 `[[plugin.remote]]` block from `weftd/weft.toml`. Nothing of weftd's is touched —
 that's the point of the separation.
 
+### Building the images yourself
+
+CI publishes both images to ghcr.io on every push to the default branch, so a
+server normally just `docker compose pull`s. To build them by hand — iterating on
+an image, or unblocking a deploy when CI is down — `deploy/build-images.sh` does
+both at once:
+
+```sh
+./deploy/build-images.sh                 # both, for THIS machine's arch, kept local
+./deploy/build-images.sh --push          # both, linux/amd64, pushed to ghcr.io
+./deploy/build-images.sh --only weftd    # just one
+./deploy/build-images.sh --tag v0.2.0    # a tag other than :latest
+```
+
+It reads the registry owner from your git remote (override with `OWNER=`) and
+creates the buildx container builder that cross-platform builds and pushes
+require. Repeat local builds are as fast as your Docker layer cache makes them —
+there is no shared cache to pull, so the first build of a fresh clone is a full
+one.
+
+**Watch the architecture.** A push has to match the *server's*, and a mismatch
+only shows up at `docker run` as `exec format error`. The default build targets
+your own machine, which is right for testing and wrong for deploying from an
+Apple Silicon laptop; `--push` therefore defaults to `linux/amd64` and warns when
+that means emulation. Cross-building this image under QEMU — clang plus a prebuilt
+libwebrtc — takes tens of minutes, so it is a fallback, not a faster CI. Check the
+server with `uname -m` (`x86_64` ⇒ amd64) before spending the time.
+
 ---
 
 ## Appendix A — MXIDs on your main domain

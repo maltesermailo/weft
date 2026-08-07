@@ -2171,7 +2171,20 @@ impl<S: ControlStream> Session<S> {
         cap: &'static str,
     ) -> io::Result<Flow> {
         if self.ctx.registry.exists(channel) {
-            let text = self.dev_text("join the channel first", "not_member_cap");
+            // Developer mode names the channel too: this refusal means "the
+            // session holds no subscription for *this* name", and the useful
+            // question is always which name — a client asking about a channel it
+            // cached under an id the server never joined it to looks identical to
+            // a join that failed.
+            // Only in developer mode: the uniform text stays uniform otherwise.
+            let text = if self.ctx.developer() {
+                self.dev_text(
+                    &format!("join the channel first ({channel})"),
+                    "not_member_cap",
+                )
+            } else {
+                "join the channel first".to_string()
+            };
             self.send_err(label, ErrCode::CapRequired, Some(cap), &text)
                 .await?;
             Ok(Flow::Continue)
