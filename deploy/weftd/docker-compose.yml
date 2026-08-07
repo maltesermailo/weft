@@ -1,17 +1,18 @@
 name: weft
 
-# weftd + PostgreSQL + LiveKit (voice). That is the whole server; two optional
-# stacks sit next to it and reach it over PUBLISHED PORTS, not a shared network:
+# weftd + PostgreSQL + LiveKit (voice) + Caddy (TLS + reverse proxy).
 #
-#   ../caddy/        TLS + reverse proxy in front of this stack
-#   ../weft-matrix/  the Matrix bridge and its companion homeserver
+# Caddy is in HERE rather than beside it because weftd needs the certificate, not
+# just the proxy: QUIC cannot be reverse-proxied — it is UDP + TLS 1.3 end to end —
+# so weftd terminates it itself and reads the cert out of Caddy's `caddy_data`
+# volume. A shared named volume needs one project.
 #
-# Separate projects on purpose: each is independently deployable, and neither can
-# break this one by failing to start. The price is that ports have to be published
-# where the other stacks can reach them — see WEFT_HTTP_BIND in `.env`.
+# The Matrix bridge IS a separate stack (`../weft-matrix/`): it needs nothing from
+# in here, and reaches weftd over its public name like any third-party appservice.
 #
-# Edit weft.toml (weftd), livekit.yaml (LiveKit keys) and `.env` (the Postgres
-# password + which ports are published), then `docker compose up -d`.
+# Edit weft.toml (weftd), livekit.yaml (LiveKit keys), Caddyfile (your domains) and
+# `.env`, then `docker compose up -d`. Set `COMPOSE_PROFILES=` in `.env` to run
+# without Caddy — see README.md.
 
 services:
   postgres:
@@ -40,11 +41,9 @@ services:
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml:ro
     ports:
-      # RTC media — direct to the host, never proxied.
+      # RTC media — direct to the host, never proxied. Signalling is NOT published:
+      # Caddy fronts it from inside this project, on `livekit:7880`.
       - "50000-50020:50000-50020/udp"
-      # Signalling. Published because Caddy fronts it from another project; weftd
-      # itself reaches it internally on `livekit:7880`.
-      - "${LIVEKIT_BIND:-0.0.0.0}:${LIVEKIT_PORT:-7880}:7880"
 
   weftd:
     # The published image (built + pushed by .github/workflows/docker.yml). Pull it
@@ -68,20 +67,53 @@ services:
       # §13 uploaded media blobs — persists across restarts (matches weft.toml's
       # [media] dir). Without this, uploads vanish on restart.
       - weftd_media:/var/lib/weft/media
-      # QUIC cannot be reverse-proxied, so weftd holds its own certificate. This is
-      # Caddy's data directory from ../caddy, bind-mounted read-only: weftd reads
-      # the cert Caddy obtained (see [tls] in weft.toml) and hot-reloads it on
-      # renewal. Delete this line if you terminate TLS some other way — see
-      # README.md → Standalone TLS.
-      - ../caddy/data:/data:ro
+      # QUIC cannot be reverse-proxied, so weftd holds its own certificate: Caddy's
+      # data volume, read-only, is where it finds the one Caddy obtained (see [tls]
+      # in weft.toml). Hot-reloaded on renewal, no restart. This shared volume is
+      # the reason Caddy lives in this project. Harmless with Caddy disabled —
+      # weftd falls back to a self-signed placeholder; README.md → Standalone TLS.
+      - caddy_data:/data:ro
     ports:
       # QUIC, for desktop/native clients. Cannot be proxied — it is UDP + TLS 1.3
       # end to end, so it is published directly whatever else is in front.
       - "4433:4433/udp"
-      # The HTTP surface: the web client, same-origin /ws, /.well-known/weft,
-      # /media. Plain HTTP — see `.env` for who should be able to reach it.
-      - "${WEFT_HTTP_BIND:-0.0.0.0}:${WEFT_HTTP_PORT:-8081}:8081"
+      # The HTTP surface: the web client, same-origin /ws, /.well-known/weft, /media.
+      # Plain HTTP, and Caddy reaches it from inside this project — so the default
+      # binds LOOPBACK and nothing on the network can touch it. `.env` covers running
+      # without Caddy, where this is what you publish instead.
+      - "${WEFT_HTTP_BIND:-127.0.0.1}:${WEFT_HTTP_PORT:-8081}:8081"
+
+  caddy:
+    image: caddy:2-alpine
+    # Optional: `COMPOSE_PROFILES=` in `.env` runs the stack without it, for when
+    # something else already terminates TLS. weftd then needs its own certificate —
+    # README.md → Standalone TLS.
+    profiles: ["caddy"]
+    restart: unless-stopped
+    depends_on:
+      weftd:
+        condition: service_started
+      livekit:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+      # HTTP/3.
+      - "443:443/udp"
+    extra_hosts:
+      # Only for the optional `matrix.…` site block: the Matrix bridge is a separate
+      # Compose project, so Caddy reaches its published port through the host.
+      # weftd and livekit are in here and resolve by service name.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates + the ACME account key. BACK THIS UP — and note weftd mounts it
+      # read-only above, which is why the two share a project.
+      - caddy_data:/data
+      - caddy_config:/config
 
 volumes:
   pgdata:
   weftd_media:
+  caddy_data:
+  caddy_config:

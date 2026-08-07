@@ -7,8 +7,8 @@ appservice to, and a **Postgres** for the two of them.
 > across all three stacks, so it cannot drift. This file is the reference behind it:
 > what the pieces are, how to verify, how to operate and remove it.
 
-Its own Compose project, independent of `../weftd`. It reaches weftd over weftd's
-**public name** (`[weft] endpoint` in `weft-matrix.toml`) exactly as a third-party
+Its own Compose project, independent of `../weftd` (which is where Caddy lives too —
+weftd needs its certificate for QUIC). It reaches weftd over weftd's **public name** (`[weft] endpoint` in `weft-matrix.toml`) exactly as a third-party
 appservice would — no shared Docker network, no ordering between the two `up`s, and
 tearing this down cannot touch weftd's data. The bridge and Synapse *do* share this
 project's network, because Synapse has to call the bridge back (`url:` in
@@ -45,7 +45,7 @@ contract with weftd:
    │          └──────────┘ weftmatrix     │
    └──────────────────────────────────────┘
         ▲                                      the two arrows leaving this box
-        │ federation (443, via ../caddy)        go to weftd's PUBLIC name
+        │ federation (443, via ../weftd's Caddy)  go to weftd's PUBLIC name
    remote homeservers
 ```
 
@@ -54,7 +54,7 @@ The bridge is an appservice to Synapse **and** a provider session to weftd.
 ## Setup
 
 **[`../README.md`](../README.md) → Part 2.** In outline: choose the `server_name`
-and add its A record, edit the five files here (plus `../caddy/Caddyfile` and
+and add its A record, edit the five files here (plus `../weftd/Caddyfile` and
 weftd's `weft.toml`), `keygen`, pin the key in weftd, then start this stack.
 
 That order is forced, not stylistic: the adapter key must exist before weftd can pin

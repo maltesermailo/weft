@@ -74,7 +74,7 @@ services:
       - synapse_data:/data
     ports:
       # Client + federation API. Published so a reverse proxy in another project
-      # (../caddy) can front it — federation needs real TLS on a public name.
+      # (Caddy, in ../weftd) can front it — federation needs real TLS on a public name.
       - "${MATRIX_BIND:-0.0.0.0}:${MATRIX_PORT:-8008}:8008"
     healthcheck:
       # Python rather than curl: the image is guaranteed to have the former.

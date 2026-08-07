@@ -1,25 +1,24 @@
 # Deployments
 
-**Three independent Compose stacks.** Each is its own project, brought up
-separately, and they reach each other over **published host ports** — no shared
-Docker network, no ordering between `up`s, and none of them can be broken by
-another failing to start.
+**Two independent Compose stacks.**
 
-| Directory                               | What it runs                          | Needed?                  |
-| --------------------------------------- | ------------------------------------- | ------------------------ |
-| [`weftd/`](weftd/README.md)             | weftd + PostgreSQL + LiveKit (voice)  | yes — this is the server |
-| [`caddy/`](caddy/README.md)             | TLS + reverse proxy (Let's Encrypt)   | unless you run your own  |
-| [`weft-matrix/`](weft-matrix/README.md) | the Matrix bridge + companion Synapse | only to bridge to Matrix |
+| Directory                               | What it runs                                     | Needed?                  |
+| --------------------------------------- | ------------------------------------------------ | ------------------------ |
+| [`weftd/`](weftd/README.md)             | weftd + PostgreSQL + LiveKit + Caddy (TLS)       | yes — this is the server |
+| [`weft-matrix/`](weft-matrix/README.md) | the Matrix bridge + companion Synapse + Postgres | only to bridge to Matrix |
 
-Because they talk through the host, the ports weftd and Synapse publish have to be
-bound where the other containers can reach them — `0.0.0.0` by default, so
-**firewall them**; each stack's `.env` explains the alternatives. Caddy reaches
-them at `host.docker.internal`.
+**Caddy is part of the weftd stack**, not a third one, because weftd needs the
+*certificate* and not merely the proxy: QUIC cannot be reverse-proxied — it is UDP +
+TLS 1.3 end to end — so weftd terminates it itself and reads the certificate out of
+Caddy's volume. Sharing a named volume means sharing a project. It stays optional
+(`COMPOSE_PROFILES=`, then give weftd its own certificate) if you already run a
+proxy.
 
-One coupling is not a port: QUIC cannot be reverse-proxied, so weftd needs the
-certificate itself and bind-mounts `caddy/data` read-only. Drop that mount if you
-terminate TLS another way — weftd has built-in ACME, see
-[`weftd/README.md`](weftd/README.md).
+**The bridge is separate** because it needs nothing from inside that stack: it
+reaches weftd over weftd's public name, exactly as any third-party appservice would.
+No shared network, no ordering between the two `up`s, and tearing the bridge down
+cannot touch weftd's data. The one thing it needs from the weftd side is a
+`Caddyfile` site block, since federation needs public TLS.
 
 Follow the walkthrough below start to finish; the per-stack READMEs go deeper.
 
@@ -66,15 +65,17 @@ The Postgres password goes in **one** place, `weftd/.env` — weftd expands
 secret still goes in two (`weft.toml` and `livekit.yaml`); LiveKit's config has no
 such expansion.
 
+Everything in Part 1 is in `deploy/weftd/`.
+
 ### 4. Edit the config
 
-**`weftd/.env`**
+**`.env`**
 
 ```dotenv
 POSTGRES_PASSWORD=<the-postgres-password>
 ```
 
-**`weftd/weft.toml`**
+**`weft.toml`**
 
 ```toml
 network   = "weft.example.com"        # your domain
@@ -92,39 +93,34 @@ api_key    = "devkey"                 # fine as-is
 api_secret = "LIVEKIT-SECRET"
 ```
 
-**`weftd/livekit.yaml`** — `keys: { devkey: LIVEKIT-SECRET }` (the key *name* is
+**`livekit.yaml`** — `keys: { devkey: LIVEKIT-SECRET }` (the key *name* is
 `api_key` above, its value is `api_secret`).
 
-**`caddy/Caddyfile`** — the two site addresses. `weft.example.com` MUST MATCH
+**`Caddyfile`** — the two site addresses. `weft.example.com` MUST MATCH
 `network` above: §10.2's well-known is fetched at
 `https://<network>/.well-known/weft`, so the network name and the host serving it
 are one and the same.
 
 ```caddyfile
-weft.example.com    { reverse_proxy host.docker.internal:8081 }
-livekit.example.com { reverse_proxy host.docker.internal:7880 }
+weft.example.com    { reverse_proxy weftd:8081 }
+livekit.example.com { reverse_proxy livekit:7880 }
 ```
 
-`host.docker.internal` because Caddy is a separate project reaching this stack
-through the host. Its two commented-out Matrix blocks stay commented unless you do
-Part 3.
+Its two commented-out Matrix blocks stay commented unless you do Part 2.
 
 Still duplicated, so check before moving on:
 
-| Value          | Both of                                                                              |
-| -------------- | ------------------------------------------------------------------------------------ |
-| LiveKit secret | `weftd/weft.toml` `api_secret` · `weftd/livekit.yaml` `keys:`                        |
-| Your domain    | `weftd/weft.toml` (`network`, both `[tls]` paths, LiveKit `url`) · `caddy/Caddyfile` |
+| Value          | Both of                                                                  |
+| -------------- | ------------------------------------------------------------------------ |
+| LiveKit secret | `weft.toml` `api_secret` · `livekit.yaml` `keys:`                        |
+| Your domain    | `weft.toml` (`network`, both `[tls]` paths, LiveKit `url`) · `Caddyfile` |
 
-### 5. Start both stacks
+### 5. Start it
 
 ```sh
-(cd weftd && docker compose up -d)    # add --build to compile locally
-(cd caddy && docker compose up -d)
-
-(cd caddy && docker compose logs -f)  # → certificates obtained, for both names
-(cd weftd && docker compose logs -f weftd)
-#                    → "same-origin /ws mounted", then "weftd listening"
+docker compose up -d            # add --build to compile locally instead of pulling
+docker compose logs -f caddy    # → certificates obtained, for both names
+docker compose logs -f weftd    # → "same-origin /ws mounted", then "weftd listening"
 ```
 
 weftd boots on a self-signed placeholder for QUIC and **hot-swaps** Caddy's real
@@ -133,7 +129,6 @@ certificate in once Caddy has it (within a minute) — no restart.
 ### 6. Create the first operator
 
 ```sh
-cd weftd
 docker compose exec weftd weftd admin create admin --password '<a-strong-password>'
 ```
 
@@ -291,9 +286,10 @@ Everything below is in `deploy/weft-matrix/`, except the last item.
   same reason).
 - **`initdb/10-matrix.sql`** — the same password once more; it creates Synapse's
   role.
-- **`../caddy/Caddyfile`** — uncomment the `matrix.…` block (and the apex one, on
-  the delegated shape) and point it at `host.docker.internal:8008`. This is what
-  makes federation work over **443**, so port 8448 never has to be opened.
+- **`../weftd/Caddyfile`** — uncomment the `matrix.…` block (and the apex one, on
+  the delegated shape). It points at `host.docker.internal:8008`, because Caddy lives
+  in the weftd stack and reaches this one through the host. This is what makes
+  federation work over **443**, so port 8448 never has to be opened.
 
 ### 3. Create the adapter key
 
@@ -332,7 +328,7 @@ Until this matches, the bridge is refused with `AUTH-FAILED` — by design.
 cd weft-matrix
 docker compose up -d --build
 docker compose logs -f bridge     # → the adapter pubkey, then "connected to weftd"
-(cd ../caddy && docker compose restart)   # picks up the matrix site block
+(cd ../weftd && docker compose restart caddy)   # picks up the matrix site block
 ```
 
 Synapse's **signing key** is written on first boot into the `synapse_data` volume —
@@ -402,7 +398,7 @@ docker compose down                 # stop; data stays in the named volumes
 | `weftd`       | `pgdata` volume       | the database                                 |
 | `weftd`       | `weftd_media` volume  | uploaded files (content-addressed blobs)     |
 | `weftd`       | `[identity] key_file` | your network's signing key                   |
-| `caddy`       | `data/` directory     | certificates + the ACME account key          |
+| `weftd`       | `caddy_data` volume   | certificates + the ACME account key          |
 | `weft-matrix` | `keys` volume         | the adapter key weftd pins — not recoverable |
 | `weft-matrix` | `synapse_data` volume | Synapse's signing key — likewise             |
 

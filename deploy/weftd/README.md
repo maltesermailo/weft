@@ -1,13 +1,21 @@
 # The weftd stack
 
-**weftd** (built with the embedded web client), **PostgreSQL** and **LiveKit**
-(voice). Two optional stacks sit beside it and reach it over published host ports:
-[`../caddy/`](../caddy/README.md) for TLS, and
-[`../weft-matrix/`](../weft-matrix/README.md) for the Matrix bridge.
+**weftd** (built with the embedded web client), **PostgreSQL**, **LiveKit** (voice)
+and **Caddy** (automatic HTTPS + reverse proxy).
 
-> **Setup walkthrough: [`../README.md`](../README.md)** — one ordered list across
-> all three stacks, so it cannot drift. This file is the reference behind it:
-> running without Caddy, standalone TLS, prebuilt images, local dev, day-2.
+Caddy is in here rather than beside it because weftd needs the *certificate*, not
+just the proxy: QUIC cannot be reverse-proxied — UDP + TLS 1.3 end to end — so weftd
+terminates it itself and reads the certificate out of Caddy's `caddy_data` volume. A
+shared named volume needs one project. It is still optional; see [Running without
+Caddy](#running-without-caddy-http-on-the-host).
+
+The Matrix bridge is a **separate** stack, [`../weft-matrix/`](../weft-matrix/README.md):
+it needs nothing from in here and reaches weftd over its public name. The one thing it
+needs from this side is a `Caddyfile` site block.
+
+> **Setup walkthrough: [`../README.md`](../README.md)** — one ordered list across both
+> stacks, so it cannot drift. This file is the reference behind it: prebuilt images,
+> how the pieces connect, local dev, running without Caddy, standalone TLS, day-2.
 
 ## Day-2 operations
 
@@ -21,7 +29,8 @@ docker compose down               # stop (data persists in named volumes)
 **Back up** the `pgdata` volume (your database) and the `weftd_media` volume
 (uploaded images/files — content-addressed blobs). If you set `[identity]
 key_file` in `weft.toml`, back that up too — it's your network's signing key.
-Caddy's certificates live in `../caddy/data`, which is that stack's business.
+Back up the `caddy_data` volume too — it holds the certificates *and* the ACME
+account key.
 
 ---
 
@@ -91,15 +100,16 @@ docker compose pull weftd && docker compose up -d
 
 ## How the pieces connect
 
-- **Caddy** (its own stack, `../caddy/`) terminates public TLS (443) and
-  reverse-proxies `weft.example.com` → this stack's published `8081` (the SPA,
-  same-origin `/ws`, `/.well-known/weft`, `/media`, all plain HTTP behind Caddy) and
-  `livekit.example.com` → the published `7880`. It reaches both through the host at
-  `host.docker.internal`, not a shared Docker network.
+- **Caddy** terminates public TLS (443) and reverse-proxies `weft.example.com` →
+  `weftd:8081` (the SPA, same-origin `/ws`, `/.well-known/weft`, `/media`, all plain
+  HTTP behind Caddy) and `livekit.example.com` → `livekit:7880`, by service name on
+  this project's network. It auto-obtains and renews the certificates. Its optional
+  `matrix.…` block is the exception: that upstream is in another project, so it goes
+  through the host (`host.docker.internal:8008`).
 - **QUIC** (weftd `4433/udp`, for desktop/native clients) can't be proxied — a
-  reverse proxy can't terminate it. weftd reads Caddy's certificate from
-  `../caddy/data`, bind-mounted read-only at `/data`, via the `[tls]` block. This is
-  the only thing the two stacks share that isn't a port.
+  reverse proxy can't terminate it. weftd reads Caddy's certificate from the shared
+  `caddy_data` volume, mounted read-only at `/data`, via the `[tls]` block. That
+  sharing is the whole reason Caddy is in this project.
 - **LiveKit** signaling rides Caddy (wss); its **media** is UDP `50000-50020`
   direct to the host. weftd's own Room-API calls (mute/kick) go internal to
   `http://livekit:7880` (`[voice.livekit] api_url`).
@@ -132,12 +142,10 @@ host. It's driven by `.env`, no compose-file edits:
 
 ```dotenv
 # deploy/weftd/.env
+COMPOSE_PROFILES=          # empty → do NOT start Caddy
 WEFT_HTTP_BIND=0.0.0.0     # advertise weftd's HTTP port on every host interface
 WEFT_HTTP_PORT=8081        # host port (change if 8081 is taken)
 ```
-
-Then simply don't bring up `../caddy`, and remove the `../caddy/data:/data:ro`
-mount from `docker-compose.yml` (nothing will write it).
 
 ```bash
 docker compose up -d       # postgres + livekit + weftd
@@ -156,9 +164,9 @@ as-is on a trusted network. Notes:
 - **LiveKit voice signaling** was fronted by Caddy too; front it yourself (or set
   `[voice] enabled = false` in `weft.toml`) if you need voice in this mode.
 
-Note the default `WEFT_HTTP_BIND=0.0.0.0`: it has to be reachable from Caddy's
-container, which comes through the host. Firewall it, or bind the Docker bridge
-address — `.env` covers both.
+The default (`COMPOSE_PROFILES=caddy`, `WEFT_HTTP_BIND=127.0.0.1`) keeps the full
+proxied stack: weftd's HTTP stays loopback-only — Caddy reaches it by service name,
+not through the host — and Caddy fronts it on 443.
 
 ---
 

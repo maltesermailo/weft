@@ -89,7 +89,8 @@ enable_registration: false
 #
 # What federation actually needs from the deployment:
 #   1. `server_name` resolvable in public DNS, with real TLS on 443. The Caddy
-#      stack does that (../caddy) — uncomment its matrix block.
+#      Caddy in the weftd stack does that — uncomment its matrix block
+#      (../weftd/Caddyfile).
 #   2. Delegation, so remote servers use 443 instead of 8448. `serve_server_
 #      wellknown` below has Synapse answer `/.well-known/matrix/server` itself,
 #      which works as long as `https://<server_name>/` routes here. With an apex

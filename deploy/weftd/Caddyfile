@@ -11,19 +11,24 @@
 # /.well-known/weft (§10.2), /media (§13). reverse_proxy upgrades WebSockets
 # transparently, so /ws needs no extra config.
 weft.example.com {
-	reverse_proxy host.docker.internal:8081
+	reverse_proxy weftd:8081
 }
 
 # LiveKit signaling (browsers connect wss://livekit.<domain> — this MUST MATCH
 # [voice.livekit] url in weft.toml). Media rides UDP direct to the host.
 livekit.weft.example.com {
-	reverse_proxy host.docker.internal:7880
+	reverse_proxy livekit:7880
 }
 
 # ── Matrix bridge (../weft-matrix, optional) ─────────────────────────────────
 # Uncomment and set your domain to make the companion homeserver reachable —
 # federation needs a public name with real TLS, and this is what provides it.
-# It MUST MATCH `server_name` in homeserver.yaml.
+# It MUST MATCH `server_name` in ../weft-matrix/homeserver.yaml.
+#
+# `host.docker.internal` — not a service name — because the bridge stack is a
+# SEPARATE Compose project: Caddy reaches its published port through the host
+# (`extra_hosts` in docker-compose.yml maps the name). weftd and LiveKit above are
+# in this project, so those resolve directly.
 #
 # No /.well-known/matrix/server block is needed here: `serve_server_wellknown:
 # true` has Synapse serve it, which is what tells remote servers to federate over
@@ -48,7 +53,7 @@ livekit.weft.example.com {
 #             respond `{"m.server": "matrix.weft.example.com:443"}`
 #         }
 #         handle {
-#             reverse_proxy host.docker.internal:8081
+#             reverse_proxy weftd:8081
 #         }
 #     }
 #

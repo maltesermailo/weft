@@ -118,15 +118,15 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        stack: [weftd, caddy, weft-matrix]
+        stack: [weftd, weft-matrix]
     steps:
       - uses: actions/checkout@v4
-      # Validate with every profile enabled, so the setup one-shots are checked too
-      # — a typo in an interpolation, a volume that no `volumes:` entry declares, or
-      # a `depends_on` naming a service that no longer exists fails here instead of
-      # on an operator's server. The `.env` in the repo supplies the required
-      # POSTGRES_PASSWORD.
-      - run: docker compose --profile setup config -q
+      # Validate with every profile enabled, so the optional Caddy and the setup
+      # one-shots are checked too — a typo in an interpolation, a volume that no
+      # `volumes:` entry declares, or a `depends_on` naming a service that no longer
+      # exists fails here instead of on an operator's server. The `.env` in the repo
+      # supplies the required POSTGRES_PASSWORD.
+      - run: docker compose --profile caddy --profile setup config -q
         working-directory: deploy/${{ matrix.stack }}
 
   fuzz:
