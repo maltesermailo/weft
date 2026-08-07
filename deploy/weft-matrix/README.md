@@ -127,7 +127,8 @@ files provide all three:
      subdomain, so an apex Caddy block answers the file with the subdomain as its
      target. MXIDs read `@weft_…:weft.example` instead of
      `@weft_…:matrix.weft.example`. **Step-by-step recipe:
-     [`../README.md`](../README.md) → Part 2, step 1.**
+     [`../README.md`](../README.md#appendix-a--mxids-on-your-main-domain) →
+     Appendix A.**
 
    The constraint that decides the details: Synapse's endpoint can only ever name
    *itself* — it returns `{"m.server": "<server_name>:443"}`. So on the delegated
@@ -140,7 +141,8 @@ files provide all three:
    `curl https://<server_name>/.well-known/matrix/server` — the answer must carry
    `:443`. If it doesn't, either publish `matrix.weft.example:8448` through the proxy
    (and open the port) or author the file in the proxy with the port spelled out.
-   `../README.md` step 6 has both.
+   [`../README.md`](../README.md#appendix-b--when-federation-doesnt-work) →
+   Appendix B has both.
 
 Then run `server_name` through <https://federationtester.matrix.org>, which checks
 DNS, delegation, the certificate and the signing key the way a remote homeserver
