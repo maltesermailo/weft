@@ -189,12 +189,12 @@ example.com            →  203.0.113.10
 
 #### Delegated (apex) — the full recipe
 
-Note that the apex block does **not** have to be weftd's. weftd can live on its own
-subdomain: `/.well-known/weft` is fetched at `https://<network>/`, so weftd's host
-and its `network` are the same string, and that is independent of Matrix's
-`server_name`. The apex then serves exactly one file.
+The apex block does **not** have to be weftd's — Matrix's `server_name` and weftd's
+`network` are independent. So which apex block you want depends on where **weftd**
+lives, and the two cases differ only in the catch-all:
 
-**`Caddyfile`** — add an apex block, and keep the `matrix.…` one:
+**`Caddyfile`, if weftd is on a subdomain** (`network = "weft.example.com"`) — the
+apex serves the delegation and sends everything else to the app:
 
 ```caddyfile
 example.com {
@@ -203,9 +203,9 @@ example.com {
 		respond `{"m.server": "matrix.example.com:443"}`
 	}
 
-	# Everything else on the apex. Drop this block if the apex already serves a
-	# site from elsewhere — but then THAT server has to answer the well-known
-	# above, because the apex is the Matrix authority either way.
+	# Drop this block if the apex already serves a site from elsewhere — but then
+	# THAT server has to answer the well-known above, because the apex is the
+	# Matrix authority either way.
 	handle {
 		redir https://weft.example.com{uri}
 	}
@@ -215,6 +215,33 @@ matrix.example.com {
 	reverse_proxy localhost:8008        # containerised: host.docker.internal:8008
 }
 ```
+
+**`Caddyfile`, if weftd IS the apex** (`network = "example.com"`) — no redirect;
+the catch-all is the proxy weftd already needed, with the delegation added in front:
+
+```caddyfile
+example.com {
+	handle /.well-known/matrix/* {
+		header Content-Type application/json
+		respond `{"m.server": "matrix.example.com:443"}`
+	}
+
+	handle {
+		reverse_proxy weftd:8081
+	}
+}
+
+matrix.example.com {
+	reverse_proxy localhost:8008        # containerised: host.docker.internal:8008
+}
+```
+
+This is the tidiest shape overall: one domain, WEFT accounts read
+`user@example.com` and MXIDs `@weft_…:example.com`. The two well-knowns do not
+collide — `/.well-known/weft` is a different path, and the `handle` above matches
+only the `matrix` subtree, so weftd still serves its own. Note there is no separate
+`weft.example.com` block in this variant, and `weft.toml`'s `[tls]` paths must name
+the apex, since that is the certificate weftd reads for QUIC.
 
 (`localhost:8008` is the port the bridge stack publishes on the host — the two
 stacks share no network. The bundled Caddy is containerised, so there the host is
