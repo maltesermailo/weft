@@ -364,8 +364,14 @@ fn history(
     target: String,
     before: Option<String>,
     thread: Option<String>,
+    label: Option<String>,
 ) -> Result<(), String> {
-    conn.send(weft::build_history(&target, before, thread)?)
+    conn.send(weft::build_history(
+        &target,
+        before,
+        thread,
+        label.as_deref(),
+    )?)
 }
 
 #[tauri::command]
@@ -533,8 +539,13 @@ fn voice_cand(conn: State<'_, Conn>, channel: String, candidate: String) -> Resu
 }
 
 #[tauri::command]
-fn mark(conn: State<'_, Conn>, channel: String, msgid: String) -> Result<(), String> {
-    conn.send(weft::build_mark(&channel, &msgid)?)
+fn mark(
+    conn: State<'_, Conn>,
+    channel: String,
+    msgid: String,
+    label: Option<String>,
+) -> Result<(), String> {
+    conn.send(weft::build_mark(&channel, &msgid, label.as_deref())?)
 }
 
 #[tauri::command]

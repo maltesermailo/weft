@@ -477,7 +477,9 @@ import { mkMsg, catchUpChannel } from "$lib/messages/messages.svelte";
       }
     if (newest && newest !== ch.lastRead) {
       ch.lastRead = newest;
-      weft.mark(ch.name, newest).catch(() => {});
+      // Background-labelled: marking read is automatic, so an unjoined
+      // channel's CAP-REQUIRED must not surface as a toast.
+      weft.mark(ch.name, newest, trackBackground()).catch(() => {});
     }
   });
 

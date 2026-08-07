@@ -495,6 +495,9 @@ struct Session<S> {
     /// live roster without joining the call. Each holds the broadcast forwarder;
     /// aborted on unwatch / join / disconnect.
     voice_watches: HashMap<ChannelName, JoinHandle<()>>,
+    /// Developer mode: the verb currently being dispatched, so a refusal can name
+    /// the code path that produced it. `None` outside developer mode.
+    dev_verb: Option<String>,
     malformed_strikes: Vec<Instant>,
     last_inbound: Instant,
     /// §6.1 a protocol-gateway front-end (WEFT-IRC) that auto-registers emailless
@@ -548,6 +551,7 @@ impl<S: ControlStream> Session<S> {
             batches: 0,
             voice: HashMap::new(),
             voice_watches: HashMap::new(),
+            dev_verb: None,
             malformed_strikes: Vec::new(),
             last_inbound: Instant::now(),
             gateway,
@@ -969,6 +973,19 @@ impl<S: ControlStream> Session<S> {
         cmd: Command,
         account: Account,
     ) -> io::Result<Flow> {
+        // Developer mode: remember what we are dispatching, so any refusal below
+        // can say which verb produced it. `Debug` already names the variant, so
+        // this needs no per-verb bookkeeping to drift out of date.
+        if self.ctx.developer() {
+            let debug = format!("{cmd:?}");
+            let verb = debug
+                .split([' ', '{', '('])
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            self.dev_verb = Some(verb);
+        }
+
         match cmd {
             Command::Ping { token } => {
                 self.send_event(label, Event::Pong { token }).await?;
@@ -1869,7 +1886,8 @@ impl<S: ControlStream> Session<S> {
     }
 
     async fn cap_required(&mut self, label: Option<String>, cap: &str) -> io::Result<Flow> {
-        self.send_err(label, ErrCode::CapRequired, Some(cap), "missing capability")
+        let text = self.dev_text("missing capability", "cap_required");
+        self.send_err(label, ErrCode::CapRequired, Some(cap), &text)
             .await?;
         Ok(Flow::Continue)
     }
@@ -2048,7 +2066,16 @@ impl<S: ControlStream> Session<S> {
         // One line per refusal: with RUST_LOG=debug the server explains
         // every ERR it ever sends (the wire stays uniform; logs may not).
         debug!(code = %code, context = ?context, label = ?label, "refused: {text}");
-        let mut err = ErrEvent::new(code, text);
+        // Developer mode: name the verb in the text the client will show. The
+        // opaque helpers (`cap_required`/`not_member_cap`/`no_such_target`) add
+        // their own name via `dev_text` before calling here.
+        let annotated = match self.dev_verb.as_deref() {
+            Some(verb) if self.ctx.developer() && !text.ends_with(']') => {
+                format!("{text} [{verb}]")
+            }
+            _ => text.to_string(),
+        };
+        let mut err = ErrEvent::new(code, &annotated);
         err.context = context.map(str::to_string);
         self.send_event(label, Event::Err(err)).await
     }
@@ -2076,9 +2103,31 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    /// Developer mode: the refusal text with the verb **and** the helper that
+    /// refused, e.g. `no such target [Members → not_member_cap]`.
+    ///
+    /// `#[track_caller]` cannot give a file:line here — it is a documented no-op on
+    /// `async fn` — and threading `file!()`/`line!()` through the ~100 emit sites
+    /// would be a large diff for a strictly worse signal. Verb + helper pins the
+    /// branch just as precisely: there is exactly one `not_member_cap` reachable
+    /// from `MEMBERS`.
+    fn dev_text(&self, text: &str, helper: &'static str) -> String {
+        if !self.ctx.developer() {
+            return text.to_string();
+        }
+
+        match self.dev_verb.as_deref() {
+            Some(verb) => format!("{text} [{verb} \u{2192} {helper}]"),
+            None => format!("{text} [{helper}]"),
+        }
+    }
+
     async fn no_such_target(&mut self, label: Option<String>) -> io::Result<Flow> {
         // §8: the anti-enumeration code — one text for every flavor of "no".
-        self.send_err(label, ErrCode::NoSuchTarget, None, "no such target")
+        // Developer mode annotates it, which is exactly the uniformity invariant 1
+        // buys; see `ServerCtx::developer`.
+        let text = self.dev_text("no such target", "no_such_target");
+        self.send_err(label, ErrCode::NoSuchTarget, None, &text)
             .await?;
         Ok(Flow::Continue)
     }
@@ -2104,13 +2153,9 @@ impl<S: ControlStream> Session<S> {
         cap: &'static str,
     ) -> io::Result<Flow> {
         if self.ctx.registry.exists(channel) {
-            self.send_err(
-                label,
-                ErrCode::CapRequired,
-                Some(cap),
-                "join the channel first",
-            )
-            .await?;
+            let text = self.dev_text("join the channel first", "not_member_cap");
+            self.send_err(label, ErrCode::CapRequired, Some(cap), &text)
+                .await?;
             Ok(Flow::Continue)
         } else {
             self.no_such_target(label).await

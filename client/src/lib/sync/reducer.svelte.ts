@@ -9,7 +9,7 @@ import type { Msg } from "$lib/types";
 import { store } from "$lib/store/store.svelte";
 import { channelStore, Channel, nsOf } from "$lib/channels/channel.svelte";
 import { mkMsg, applyReaction, pinsHandlers, messageMirrorHandlers } from "$lib/messages/messages.svelte";
-import { toastFor } from "$lib/sync/joinErrors";
+import { toastFor, trackBackground } from "$lib/sync/joinErrors";
 import { pluginHandlers, plugins } from "$lib/plugins/plugins.svelte";
 import { rosterFetchTarget } from "$lib/namespaces/server.svelte";
 import { federationHandlers } from "$lib/federation/federation.svelte";
@@ -82,7 +82,9 @@ export function loadHistory(target: string, initial: boolean) {
   hist.loading = target;
   histByTarget[target] = [];
   const before = initial ? undefined : oldestMsgid(channelStore.channels[target]);
-  weft.history(target, before).catch(() => {
+  // Background-labelled: history loads on opening a channel, so a refusal (an
+  // unjoined channel answers CAP-REQUIRED) is ours to log, not the user's to read.
+  weft.history(target, before, undefined, trackBackground()).catch(() => {
     hist.loading = null; // don't wedge paging if the fetch never lands
   });
 }

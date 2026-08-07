@@ -25,6 +25,15 @@ pub struct Config {
     pub channels: Vec<ChannelConfig>,
     /// §6.1: REGISTER works only when `open`.
     pub registration: Registration,
+    /// **Developer mode** (default off): annotate every refusal with the verb and
+    /// helper that produced it, so a client toast names the code path instead of
+    /// showing a bare §8 code.
+    ///
+    /// Off in production by design — the §8 codes are uniform precisely so a
+    /// caller cannot tell "absent" from "hidden" (invariant 1), and naming the
+    /// branch tells them.
+    #[serde(default)]
+    pub developer: bool,
     /// §6.1 require a contact email at REGISTER (verify-later, §10.5) — which
     /// also enables password reset. Off by default. Turning it on **requires
     /// `[smtp]` to be configured** (a reset code must be deliverable); weftd
@@ -540,6 +549,7 @@ impl Default for Config {
             motd: None,
             channels: vec![ChannelConfig::Name("#general".to_string())],
             registration: Registration::Open,
+            developer: false,
             require_email: false,
             operators: Vec::new(),
             namespaces: Namespaces::default(),

@@ -615,8 +615,8 @@ export function nsRecover(name: string, rotation: string) {
 
 /// Request a page of history for `target`, older than `before` if given, or a
 /// single thread's messages when `thread` (the root msgid) is set (§9.4).
-export function history(target: string, before?: string, thread?: string) {
-  return invoke("history", { target, before: before ?? null, thread: thread ?? null });
+export function history(target: string, before?: string, thread?: string, label?: string) {
+  return invoke("history", { target, before: before ?? null, thread: thread ?? null, label: label ?? null });
 }
 
 export function edit(msgid: string, body: string) {
@@ -680,8 +680,8 @@ export function presence(status: string) {
   return invoke("presence", { status });
 }
 
-export function mark(channel: string, msgid: string) {
-  return invoke("mark", { channel, msgid });
+export function mark(channel: string, msgid: string, label?: string) {
+  return invoke("mark", { channel, msgid, label: label ?? null });
 }
 
 export function members(channel: string, label?: string) {

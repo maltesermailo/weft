@@ -11726,3 +11726,39 @@ async fn an_operator_disconnect_closes_the_session_and_drops_its_presence() {
     ada.send("@label=p PING :still here");
     assert_eq!(ada.recv().await.label.as_deref(), Some("p"));
 }
+
+#[tokio::test]
+async fn developer_mode_names_the_branch_that_refused() {
+    // The §8 codes are uniform by design, which is what makes a bare toast
+    // undiagnosable: `CAP-REQUIRED` on a channel could be any of a dozen
+    // branches. Developer mode says which one — verb + the helper that refused.
+    //
+    // `#[track_caller]` is a no-op on `async fn`, so file:line is not available
+    // without a macro at every emit site; verb + helper pins it just as well.
+    let dev = ctx(&["#general"]);
+    dev.set_developer(true);
+
+    // MEMBERS on a channel we exist-but-are-not-joined-to → `not_member_cap`.
+    let mut ada = ready(&dev, "ada").await;
+    ada.send("@label=m1 MEMBERS #general");
+    let reply = ada.recv().await;
+    let Event::Err(err) = reply.event else {
+        panic!("expected ERR, got {:?}", reply.event);
+    };
+    assert_eq!(err.code, ErrCode::CapRequired);
+    assert!(
+        err.text.contains("Members") && err.text.contains("not_member_cap"),
+        "developer mode must name the verb and the helper: {}",
+        err.text
+    );
+
+    // Off by default, the text is the uniform one — annotating it would leak
+    // exactly what invariant 1 buys (absent vs hidden vs not-a-member).
+    let plain = ctx(&["#general"]);
+    let mut bob = ready(&plain, "bob").await;
+    bob.send("@label=m2 MEMBERS #general");
+    let Event::Err(err) = bob.recv().await.event else {
+        panic!("expected ERR");
+    };
+    assert_eq!(err.text, "join the channel first", "no annotation when off");
+}

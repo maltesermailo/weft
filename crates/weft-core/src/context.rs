@@ -309,6 +309,16 @@ pub struct ServerCtx {
     /// §16 M-lk-3b federated voice: the media-relay driver weftd installs (a
     /// libwebrtc `livekit`-SDK relay, or the no-op default). `None` = no relaying.
     voice_relay: std::sync::OnceLock<Arc<dyn crate::voice::VoiceRelay>>,
+    /// **Developer mode** (`[server] developer`, off by default). When on, every
+    /// refusal carries what produced it — the dispatched verb and the helper that
+    /// said no — appended to the ERR text, so a client toast names the code path
+    /// instead of leaving a bare §8 code to be guessed at.
+    ///
+    /// This **deliberately weakens invariant 1**: `NO-SUCH-TARGET` is uniform
+    /// precisely so a caller cannot tell "absent" from "hidden", and naming the
+    /// branch tells them. That is the whole point of the mode and the reason it is
+    /// opt-in, off by default, and never for a production network.
+    developer: std::sync::atomic::AtomicBool,
     /// §16 M-lk-3b relay refcounts: `(peer, key) → live local participants`,
     /// where `key` is a foreign channel name or a cross-network call room. A relay
     /// starts on the first local joiner and stops on the last (or on
@@ -669,6 +679,7 @@ impl ServerCtx {
             group_calls: std::sync::Mutex::new(HashMap::new()),
             group_echoes: std::sync::Mutex::new(HashMap::new()),
             voice_relay: std::sync::OnceLock::new(),
+            developer: std::sync::atomic::AtomicBool::new(false),
             voice_relays: std::sync::Mutex::new(HashMap::new()),
             mailer: std::sync::OnceLock::new(),
             probe: std::sync::OnceLock::new(),
@@ -696,6 +707,17 @@ impl ServerCtx {
     }
 
     /// weftd installs the §10.5 email sender.
+    /// Turn developer mode on (weftd, from config). See the field's note: this
+    /// trades invariant 1's uniformity for diagnosability, so it is a dev knob.
+    pub fn set_developer(&self, on: bool) {
+        self.developer
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn developer(&self) -> bool {
+        self.developer.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn set_mailer(&self, mailer: Arc<dyn crate::mailer::Mailer>) {
         let _ = self.mailer.set(mailer);
     }

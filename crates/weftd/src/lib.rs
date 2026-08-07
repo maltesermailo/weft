@@ -434,6 +434,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 info,
                 identity,
                 registration_open,
+                config.developer,
                 require_email,
                 dm_policy,
                 maintenance,
@@ -468,6 +469,7 @@ pub async fn start(config: Config) -> anyhow::Result<Server> {
                 info,
                 identity,
                 registration_open,
+                config.developer,
                 require_email,
                 dm_policy,
                 maintenance,
@@ -888,6 +890,7 @@ async fn boot<S>(
     info: ServerInfo,
     identity: Keypair,
     registration_open: bool,
+    developer: bool,
     require_email: bool,
     dm_policy: weft_proto::RetentionPolicy,
     maintenance: MaintenanceConfig,
@@ -1009,6 +1012,7 @@ where
         .with_foreign_adapters(foreign_adapters)
         .with_remote_plugins(remote_plugins.clone()),
     );
+    ctx.set_developer(developer);
     // Which providers are still pinned — the panel refuses to delete a namespace
     // whose provider is still enabled (removing the pin is what unlocks it).
     let configured_schemes: Vec<String> = remote_plugins

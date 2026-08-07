@@ -1572,13 +1572,20 @@ pub fn build_reports_resolve(
 }
 
 /// `MARK <#chan> <msgid>` — read marker, synced across own devices (§6.3).
-pub fn build_mark(channel: &str, msgid: &str) -> Result<String, String> {
+pub fn build_mark(channel: &str, msgid: &str, label: Option<&str>) -> Result<String, String> {
     let channel: weft_proto::ChannelName =
         channel.parse().map_err(|_| "bad channel".to_string())?;
     let msgid: MsgId = msgid.parse().map_err(|_| "bad msgid".to_string())?;
-    Request::new(Command::Mark { channel, msgid })
-        .serialize()
-        .map_err(|e| e.to_string())
+    let command = Command::Mark { channel, msgid };
+
+    // Labelled because the client marks read on its own initiative: an unjoined
+    // channel answers `CAP-REQUIRED`, which is ours to swallow (§3.5).
+    let request = match label {
+        Some(label) => Request::with_label(command, label),
+        None => Request::new(command),
+    };
+
+    request.serialize().map_err(|e| e.to_string())
 }
 
 /// `PIN`/`UNPIN <msgid>` — (un)pin a message (§6.4).
@@ -2185,6 +2192,7 @@ pub fn build_history(
     target: &str,
     before: Option<String>,
     thread: Option<String>,
+    label: Option<&str>,
 ) -> Result<String, String> {
     let target: Target = target.parse().map_err(|_| "bad target".to_string())?;
     let before = match before.filter(|b| !b.is_empty()) {
@@ -2201,15 +2209,22 @@ pub fn build_history(
         ),
         None => None,
     };
-    Request::new(Command::History {
+    let command = Command::History {
         target,
         before,
         after: None,
         limit: Some(50),
         thread,
-    })
-    .serialize()
-    .map_err(|e| e.to_string())
+    };
+
+    // Labelled: history is fetched on opening a channel, not on a user's command,
+    // so its refusal is the client's to handle rather than the user's to read.
+    let request = match label {
+        Some(label) => Request::with_label(command, label),
+        None => Request::new(command),
+    };
+
+    request.serialize().map_err(|e| e.to_string())
 }
 
 /// `NS CREATE <name> <tier>` with `@root=<b64-pubkey>` (§6.2). The keypair is
