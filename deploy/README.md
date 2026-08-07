@@ -246,8 +246,12 @@ Still in `deploy/weftd`:
 
 - **`weft-matrix.toml`** — `[matrix] domain` = the name you just chose,
   `as_token` and `hs_token` (**change both** — anyone holding `hs_token` can
-  inject events as any Matrix user), and `admins` (MXIDs allowed to run the
-  `!weft` console) if you want it.
+  inject events as any Matrix user), `[daemon] database_url` with the **same
+  Postgres password as `weft.toml`** (the bridge opens its own store before it
+  connects to anything, so a stale placeholder here shows up as
+  `password authentication failed for user "weft"` in a reconnect loop and
+  nothing else), and `admins` (MXIDs allowed to run the `!weft` console) if you
+  want it.
 - **`homeserver.yaml`** — `server_name` = **exactly** the same string, and the
   Synapse Postgres password.
 - **`initdb/10-matrix.sql`** — the same Synapse password.

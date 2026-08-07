@@ -70,5 +70,8 @@ admins = []
 # `weft` database would work too; a separate one is the default so the bridge
 # can be removed without touching weftd's data.
 #
-# MUST MATCH the POSTGRES_* values in docker-compose.yml.
+# MUST MATCH the POSTGRES_* values in docker-compose.yml — the same password
+# weft.toml's [storage] url uses. The daemon opens this store before it connects
+# to weftd or the homeserver, so a wrong password here looks like a bridge that
+# never starts: `password authentication failed for user "weft"`, on a loop.
 database_url = "postgres://weft:change-me-postgres-password@postgres/weftmatrix"
