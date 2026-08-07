@@ -2631,7 +2631,9 @@ mod tests {
         })
         .unwrap();
 
-        let events = feed(&format!("@label=i1;view={view} PLUGIN-VIEW modq:1"));
+        // The payload rides the trailing (§4: a tag value caps at 1024 B, and an
+        // SDUI view is a document, not metadata).
+        let events = feed(&format!("@label=i1 PLUGIN-VIEW modq:1 :{view}"));
         let [ClientEvent::PluginView {
             view_id,
             view,
@@ -2650,8 +2652,8 @@ mod tests {
     fn an_undecodable_plugin_payload_is_dropped_at_the_boundary() {
         // A payload the codec cannot read must not reach a renderer that would
         // have to guess what to do with it. Dropped here, where the types are.
-        assert!(feed("@view=not-base64-cbor PLUGIN-VIEW modq:1").is_empty());
-        assert!(feed("@patch=%%%% PLUGIN-PATCH modq:1").is_empty());
+        assert!(feed("PLUGIN-VIEW modq:1 :not-base64-cbor").is_empty());
+        assert!(feed("PLUGIN-PATCH modq:1 :%%%%").is_empty());
     }
 
     #[test]

@@ -174,7 +174,7 @@ The negotiation `WELCOME` is sent *before* auth, so its `features=` also let a c
 ----
 @tag1=value;tag2;tag3=value VERB param1 param2 :trailing free text
 ----
-* Limits: line ≤ *8 KiB*; ≤15 middle params; ≤32 tags; tag key ≤64 B (`[a-z0-9./-]+`); unescaped value ≤1024 B.
+* Limits: line ≤ *32 KiB*; ≤15 middle params; ≤32 tags; tag key ≤64 B (`[a-z0-9./-]+`); unescaped value ≤1024 B.
 * Verbs `[A-Z0-9-]+`. *Unknown verbs ignored by servers; unknown events ignored by clients.*
 * Middle params: no spaces, no leading `:`. Only trailing (after ` :`) may contain spaces or be empty (empty trailing = empty body, meaningful).
 * Tag escaping (the IRCv3 message-tags convention): `;` → `\:`, space → `\s`, CR → `\r`, LF → `\n`, `\` → `\\`; unknown escapes drop the backslash; a dangling backslash is an error.
@@ -1577,7 +1577,7 @@ Optional server-side RFC 2812 + IRCv3 gateway (`:6697` TLS); the gateway _is_ th
 * Threads flatten to a `[thread 01H…]` prefix.
 * Media becomes short-lived tokened HTTPS URLs.
 * *e2ee channels are invisible* (the `NO-SUCH-TARGET` treatment).
-* 8 KiB WEFT lines split to 512 B IRC lines.
+* Over-long WEFT lines split to 512 B IRC lines.
 
 Purpose: the likely operator audience is on IRC today — day-one irssi/WeeChat usability. The gateway is a projection, not a lossy translator.
 
@@ -1689,6 +1689,7 @@ Each entry: what changed, why, and where it now lives. Implementation detail liv
 
 === Post-v0.13 clarifications
 
+* _Line limit 8 KiB → *32 KiB*; plugin payloads moved off tags._ <<s12,§12>>'s plugin surface carries base64-CBOR *documents* on the control plane — a provider's action catalog, an SDUI view, a form submission — and they were riding `@tag=` values, which <<s4,§4>> caps at 1024 B. The reference bridge's seven action declarations came to ~1.4 KB and the session died with `tag "reg" value exceeds 1024 bytes`; the aggregate `PLUGIN-MANIFEST` (every registered provider) would have been worse. Two changes, because they answer different questions. *Where:* every plugin payload now rides the **trailing** — a tag value is metadata, and 1024 B is what enforces that; the trailing is the slot for an opaque blob. *How much:* the line limit is raised to 32 KiB, since one line must hold an aggregate catalog and 8 KiB left too little headroom. The tag cap is deliberately unchanged. Cost is bounded per-connection buffering (`32 KiB × max_connections`); the IRC gateway keeps its own 8 KiB reader cap, which was never the same constant. → <<s4,§4>>, <<s12,§12>>.
 * _NETBLOCK acks disambiguated._ `NETBLOCK ADD` and `REMOVE` both used to echo a reason-less `NETBLOCKED <network>`, so a client couldn't tell block from unblock — applying either as a set meant a `REMOVE` *re-added* the entry (reconciled only via a `LIST` refresh). Now `ADD`/`LIST` echo `NETBLOCKED <network> [:reason]` **with the reason** and `REMOVE` echoes a distinct **`NETBLOCK-REMOVED <network>`**, so a client sets on the former and deletes on the latter — no refresh workaround. → <<s11-6,§11.6>>, <<s7,§7>>.
 
 '''
@@ -1704,4 +1705,4 @@ Where the reference implementation (weftd) keeps things — useful to contributo
 * *Mail.* `VERIFY EMAIL` delivery is SMTP configured in weftd (`[smtp]`); an unconfigured development server records the claim and logs the code.
 * *Unfurl.* Toggle `[unfurl] enabled` (default on). The HTML meta extractor is a pure, dependency-free parser; a permissive CORS layer fronts `/media` and `/unfurl` (desktop-webview uploads send non-simple preflights).
 * *Constants.* History→STREAM threshold *200* events (`HISTORY_STREAM_THRESHOLD`); report-hold context radius *25* (`HOLD_RADIUS`); rung-3 delay *0* (`RECOVERY_DELAY_RUNG3_SECS`) — applied inline rather than parked with an already-elapsed ETA, which would leave the namespace in the abuser's hands until the next maintenance tick.
-* *IRC gateway shipped subset.* Registration (`NICK`/`USER`/`PASS` → `HELLO` + `AUTH`, auto-`REGISTER` on first `AUTH-FAILED`; a ≥12 B `PASS` is the WEFT password), `JOIN`/`PART` incl. `#ns/chan`, `PRIVMSG`/`NOTICE` ↔ `MSG` (bare nick = DM; own echo suppressed), `NAMES` (fills from observed joins), `LIST` ← `DISCOVER`, `PING`/`QUIT`, MOTD; edits/deletes/reactions degraded to text. Deferred: SASL, IRCv3 tags, chathistory, TAGMSG, MODE/TOPIC/KICK projection, 8 KiB↔512 B line splitting, the e2ee-invisible treatment. Enabled by `[listen] irc` (plaintext; TLS termination is the operator's).
+* *IRC gateway shipped subset.* Registration (`NICK`/`USER`/`PASS` → `HELLO` + `AUTH`, auto-`REGISTER` on first `AUTH-FAILED`; a ≥12 B `PASS` is the WEFT password), `JOIN`/`PART` incl. `#ns/chan`, `PRIVMSG`/`NOTICE` ↔ `MSG` (bare nick = DM; own echo suppressed), `NAMES` (fills from observed joins), `LIST` ← `DISCOVER`, `PING`/`QUIT`, MOTD; edits/deletes/reactions degraded to text. Deferred: SASL, IRCv3 tags, chathistory, TAGMSG, MODE/TOPIC/KICK projection, WEFT↔512 B line splitting, the e2ee-invisible treatment. Enabled by `[listen] irc` (plaintext; TLS termination is the operator's).

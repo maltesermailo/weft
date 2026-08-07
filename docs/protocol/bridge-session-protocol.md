@@ -55,7 +55,7 @@ does **not** apply, and only what follows is routed.
 
 | Dir | Line                                           | Notes                                                                                                                                                     |
 |-----|------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
-| →   | `@reg=<b64-CBOR Registration> PLUGIN-REGISTER` | Actions, hooks, and the `schemes` this provider serves.                                                                                                   |
+| →   | `PLUGIN-REGISTER :<b64-CBOR Registration>` | Actions, hooks, and the `schemes` this provider serves. In the trailing, not a tag: §4 caps a tag value at 1024 B and a catalog passes that immediately.                                                                                                   |
 | →   | `REALM REGISTER <scheme>`                      | Control link: claims a scheme without binding a realm.                                                                                                    |
 | →   | `REALM ASSERT <scheme>://<realm>`              | Data connection: binds this session to one realm.                                                                                                         |
 | →   | `REALM WITHDRAW`                               | **Deletion**, not disconnect: cascades away the realm's namespaces and tombstones them to members. Disconnecting instead just marks the provider offline. |

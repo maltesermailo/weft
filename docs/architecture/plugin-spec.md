@@ -621,7 +621,7 @@ New verbs under the `PLUGIN` family (client→server) and `PLUGIN-*` events (ser
 
 ### 12.3 Provider (adapter/remote) side
 A `remote` plugin / bridge on `State::PluginService` sends:
-- `@reg=<b64> PLUGIN-REGISTER` — its self-description: a `Registration` (`{api, id, name, icon?, actions,
+- `PLUGIN-REGISTER :<b64>` — its self-description: a `Registration` (`{api, id, name, icon?, actions,
   hooks}`, §4.2). weftd validates + merges the actions into the client catalog. (The `@reg` payload is a
   `Registration`, distinct from the `@catalog` payload of `PLUGIN-MANIFEST`, which is a `Catalog`.)
 - `PLUGIN-VIEW`/`PLUGIN-PATCH`/`PLUGIN-RESULT` — in response to invocations weftd routed to it.

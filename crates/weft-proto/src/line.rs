@@ -13,7 +13,13 @@ use std::collections::BTreeMap;
 use crate::error::{ParseError, SerializeError};
 
 /// §4: maximum line length in bytes, terminator included.
-pub const MAX_LINE_BYTES: usize = 8192;
+///
+/// Raised from 8192 (spec v0.13, Appendix A): the plugin surface carries
+/// base64-CBOR documents on the control plane — a provider's action catalog, an
+/// SDUI view — and 8 KiB was not enough for an aggregate one. It bounds the
+/// per-connection read buffer at the framing layer, so the cost is
+/// `MAX_LINE_BYTES × max_connections` worst case (32 MiB at the default 1024).
+pub const MAX_LINE_BYTES: usize = 32768;
 /// §4: maximum number of tags.
 pub const MAX_TAGS: usize = 32;
 /// §4: maximum tag key length in bytes.

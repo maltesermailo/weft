@@ -146,7 +146,9 @@ jobs:
           cd crates/weft-proto
           for target in $(cargo fuzz list); do
             echo "::group::$target"
-            cargo fuzz run "$target" -- -max_total_time=60 -max_len=16384
+            # -max_len above §4's 32 KiB line cap, so the parser's rejection path
+            # for over-long input is exercised too.
+            cargo fuzz run "$target" -- -max_total_time=60 -max_len=40960
             echo "::endgroup::"
           done
 

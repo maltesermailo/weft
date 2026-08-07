@@ -4526,7 +4526,7 @@ async fn plugin_register_and_invoke() {
         schemes: vec![],
     };
     plugin.send(&format!(
-        "@reg={} PLUGIN-REGISTER",
+        "PLUGIN-REGISTER :{}",
         weft_proto::plugin_to_b64(&reg).unwrap()
     ));
 
@@ -4551,7 +4551,7 @@ async fn plugin_register_and_invoke() {
         text: "done".into(),
     })
     .unwrap();
-    plugin.send(&format!("@result={result} PLUGIN-RESULT {view_id}"));
+    plugin.send(&format!("PLUGIN-RESULT {view_id} :{result}"));
 
     let reply = client.recv().await;
     assert_eq!(reply.label.as_deref(), Some("i1"));
@@ -4587,7 +4587,7 @@ async fn plugin_scheme_registration_routes_provision() {
         schemes: vec!["instagram".into()],
     };
     plugin.send(&format!(
-        "@reg={} PLUGIN-REGISTER",
+        "PLUGIN-REGISTER :{}",
         weft_proto::plugin_to_b64(&reg).unwrap()
     ));
 
@@ -4639,7 +4639,7 @@ async fn plugin_unauthorized_scheme_is_refused() {
         schemes: vec!["instagram".into()],
     };
     plugin.send(&format!(
-        "@reg={} PLUGIN-REGISTER",
+        "PLUGIN-REGISTER :{}",
         weft_proto::plugin_to_b64(&reg).unwrap()
     ));
     plugin.expect_err(ErrCode::Forbidden).await;
@@ -4674,7 +4674,7 @@ async fn foreign_ns_join_succeeds_via_assertion() {
         schemes: vec!["instagram".into()],
     };
     plugin.send(&format!(
-        "@reg={} PLUGIN-REGISTER",
+        "PLUGIN-REGISTER :{}",
         weft_proto::plugin_to_b64(&reg).unwrap()
     ));
 
@@ -5204,7 +5204,7 @@ async fn duplicate_scheme_claim_is_refused() {
     };
     let first = plugin_session(&ctx, &key1).await;
     first.send(&format!(
-        "@reg={} PLUGIN-REGISTER",
+        "PLUGIN-REGISTER :{}",
         weft_proto::plugin_to_b64(&reg("insta-a")).unwrap()
     ));
 
@@ -5226,7 +5226,7 @@ async fn duplicate_scheme_claim_is_refused() {
     }
 
     second.send(&format!(
-        "@reg={} PLUGIN-REGISTER",
+        "PLUGIN-REGISTER :{}",
         weft_proto::plugin_to_b64(&reg("insta-b")).unwrap()
     ));
     second.expect_err(ErrCode::Conflict).await;
@@ -6199,7 +6199,7 @@ async fn a_multi_step_flow_routes_and_stays_the_callers_own() {
         schemes: vec![],
     };
     plugin.send(&format!(
-        "@reg={} PLUGIN-REGISTER",
+        "PLUGIN-REGISTER :{}",
         weft_proto::plugin_to_b64(&reg).unwrap()
     ));
 
@@ -6221,7 +6221,7 @@ async fn a_multi_step_flow_routes_and_stays_the_callers_own() {
         params: vec![],
     })
     .unwrap();
-    plugin.send(&format!("@view={view} PLUGIN-VIEW {view_id}"));
+    plugin.send(&format!("PLUGIN-VIEW {view_id} :{view}"));
     let reply = ada.recv().await;
     assert_eq!(reply.label.as_deref(), Some("i1"));
     assert!(matches!(reply.event, Event::PluginView { .. }));
@@ -6241,7 +6241,7 @@ async fn a_multi_step_flow_routes_and_stays_the_callers_own() {
         text: "banned".into(),
     })
     .unwrap();
-    plugin.send(&format!("@result={result} PLUGIN-RESULT {view_id}"));
+    plugin.send(&format!("PLUGIN-RESULT {view_id} :{result}"));
     let reply = ada.recv().await;
     assert_eq!(
         reply.label.as_deref(),
@@ -6286,7 +6286,7 @@ async fn the_admin_panel_drives_a_flow_but_cannot_touch_a_sessions() {
         schemes: vec![],
     };
     plugin.send(&format!(
-        "@reg={} PLUGIN-REGISTER",
+        "PLUGIN-REGISTER :{}",
         weft_proto::plugin_to_b64(&reg).unwrap()
     ));
 
@@ -6308,7 +6308,7 @@ async fn the_admin_panel_drives_a_flow_but_cannot_touch_a_sessions() {
         params: vec![],
     })
     .unwrap();
-    plugin.send(&format!("@view={view} PLUGIN-VIEW {view_id}"));
+    plugin.send(&format!("PLUGIN-VIEW {view_id} :{view}"));
 
     let (got_id, answer) = invoke.await.unwrap().expect("the invoke answers");
     assert_eq!(got_id, view_id);
@@ -6336,7 +6336,7 @@ async fn the_admin_panel_drives_a_flow_but_cannot_touch_a_sessions() {
         text: "banned".into(),
     })
     .unwrap();
-    plugin.send(&format!("@result={result} PLUGIN-RESULT {view_id}"));
+    plugin.send(&format!("PLUGIN-RESULT {view_id} :{result}"));
     let answer = step.await.unwrap().expect("the step answers");
     assert!(answer.contains("PLUGIN-RESULT"));
 
@@ -6351,7 +6351,7 @@ async fn the_admin_panel_drives_a_flow_but_cannot_touch_a_sessions() {
     ada.send("@label=i1 PLUGIN INVOKE modq bans");
     let req = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
     let ada_view = req.label.expect("ada's view-id");
-    plugin.send(&format!("@view={view} PLUGIN-VIEW {ada_view}"));
+    plugin.send(&format!("PLUGIN-VIEW {ada_view} :{view}"));
     assert!(matches!(ada.recv().await.event, Event::PluginView { .. }));
 
     assert!(
@@ -6374,7 +6374,7 @@ async fn the_admin_panel_drives_a_flow_but_cannot_touch_a_sessions() {
     });
     let req = weft_proto::Request::parse(&plugin.recv_raw().await).unwrap();
     let view_id2 = req.label.expect("the view-id rides as the label");
-    plugin.send(&format!("@view={view} PLUGIN-VIEW {view_id2}"));
+    plugin.send(&format!("PLUGIN-VIEW {view_id2} :{view}"));
     invoke.await.unwrap().expect("the invoke answers");
 
     ctx.admin_plugin_close(&view_id2);
@@ -6417,7 +6417,7 @@ async fn a_live_panel_is_patched_by_key_and_only_while_watched() {
         schemes: vec![],
     };
     plugin.send(&format!(
-        "@reg={} PLUGIN-REGISTER",
+        "PLUGIN-REGISTER :{}",
         weft_proto::plugin_to_b64(&reg).unwrap()
     ));
 
@@ -6445,7 +6445,7 @@ async fn a_live_panel_is_patched_by_key_and_only_while_watched() {
             .unwrap()
             .label
             .expect("the view-id rides as the label");
-        plugin.send(&format!("@view={panel} PLUGIN-VIEW {view_id}"));
+        plugin.send(&format!("PLUGIN-VIEW {view_id} :{panel}"));
         assert!(matches!(
             client.recv().await.event,
             Event::PluginView { .. }
@@ -6467,7 +6467,7 @@ async fn a_live_panel_is_patched_by_key_and_only_while_watched() {
         component_id: "row-1".into(),
     }])
     .unwrap();
-    plugin.send(&format!("@patch={patch} PLUGIN-PATCH reports"));
+    plugin.send(&format!("PLUGIN-PATCH reports :{patch}"));
 
     for client in [&mut ada, &mut bob] {
         let reply = client.recv().await;
@@ -6485,7 +6485,7 @@ async fn a_live_panel_is_patched_by_key_and_only_while_watched() {
         weft_proto::Command::PluginUnsubscribe { .. }
     ));
 
-    plugin.send(&format!("@patch={patch} PLUGIN-PATCH reports"));
+    plugin.send(&format!("PLUGIN-PATCH reports :{patch}"));
     assert!(matches!(ada.recv().await.event, Event::PluginPatch { .. }));
 
     // The FIFO barrier: bob's next line is his own PONG, not a stray patch.
@@ -6526,7 +6526,7 @@ async fn a_flow_cannot_be_driven_by_anyone_but_its_caller() {
         schemes: vec![],
     };
     plugin.send(&format!(
-        "@reg={} PLUGIN-REGISTER",
+        "PLUGIN-REGISTER :{}",
         weft_proto::plugin_to_b64(&reg).unwrap()
     ));
 
@@ -6781,7 +6781,7 @@ async fn provider_offline_gates_virtual_namespace() {
             schemes: vec!["instagram".into()],
         };
         c.send(&format!(
-            "@reg={} PLUGIN-REGISTER",
+            "PLUGIN-REGISTER :{}",
             weft_proto::plugin_to_b64(&reg).unwrap()
         ));
     };
@@ -6943,7 +6943,7 @@ async fn provider_death_fails_parked_requests_loudly() {
         schemes: vec!["instagram".into()],
     };
     plugin.send(&format!(
-        "@reg={} PLUGIN-REGISTER",
+        "PLUGIN-REGISTER :{}",
         weft_proto::plugin_to_b64(&reg).unwrap()
     ));
 
@@ -7302,7 +7302,7 @@ async fn a_provider_bot_is_a_kind_of_account_not_a_suspended_one() {
         schemes: vec!["matrix".parse().unwrap()],
     };
     plugin.send(&format!(
-        "@reg={} PLUGIN-REGISTER",
+        "PLUGIN-REGISTER :{}",
         weft_proto::plugin_to_b64(&reg).unwrap()
     ));
 

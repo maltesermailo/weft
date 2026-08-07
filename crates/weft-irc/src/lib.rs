@@ -110,7 +110,7 @@ impl ControlStream for IrcStream {
     }
 }
 
-/// Per-line byte cap for the IRC reader — matches the native transports' 8 KiB
+/// Per-line byte cap for the IRC reader. Deliberately NOT the native transports'
 /// line limit (§4) so a peer can't force unbounded buffering by never sending a
 /// newline (threat-model D-6). RFC 2812's own limit is 512 B; this is generous
 /// for IRCv3 tags while still bounded.

@@ -499,16 +499,24 @@ pub struct Connected {
     pub events: mpsc::Receiver<Incoming>,
 }
 
-/// `PLUGIN-REGISTER` carries its payload as the `reg=` tag (§3).
+/// `PLUGIN-REGISTER` carries its payload in the trailing (§3) — a tag caps at 1024
+/// bytes and an action catalog passes that with a handful of declarations.
 fn register_line(registration: &Registration) -> anyhow::Result<String> {
-    let mut line = Reply::new(Event::PluginRegister {
+    let line = Reply::new(Event::PluginRegister {
         registration: weft_proto::plugin_to_b64(registration)?,
     })
     .to_line()?;
-    line.tags
-        .insert("reg".to_string(), weft_proto::plugin_to_b64(registration)?);
 
-    Ok(line.serialize()?)
+    // The line length (§4) is the ceiling on how much a provider may declare. Say so
+    // here: the serializer's own error names a byte count and not the cause.
+    line.serialize().map_err(|e| {
+        anyhow::anyhow!(
+            "{e}: the registration for {} declares {} actions, too much for one line — \
+             declare fewer, or shorten their labels",
+            registration.id,
+            registration.actions.len()
+        )
+    })
 }
 
 /// §4.2: `HELLO` → `AUTH ADAPTER <pubkey>` → sign the challenge → `WELCOME`.

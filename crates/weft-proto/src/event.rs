@@ -25,6 +25,16 @@ fn req_tag(line: &Line, verb: &'static str, key: &'static str) -> Result<String,
         .ok_or(ParseError::MissingParam { verb, what: key })
 }
 
+/// A required, non-empty trailing — for a b64-CBOR payload too large for a tag
+/// (§4 caps tag values at 1024 bytes; a line may be 32 KiB).
+fn req_trailing(line: &Line, verb: &'static str, what: &'static str) -> Result<String, ParseError> {
+    line.trailing
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .ok_or(ParseError::MissingParam { verb, what })
+}
+
 /// An optional, non-empty tag value.
 fn opt_tag(line: &Line, key: &str) -> Option<String> {
     line.tags.get(key).filter(|v| !v.is_empty()).cloned()
@@ -785,9 +795,13 @@ pub enum Event {
         view_id: String,
         result: String,
     },
-    /// `PLUGIN-REGISTER` with `@reg=<b64cbor>` — a remote provider's self-description
-    /// (§12.3, §4.2): its [`crate::Registration`]. Parsed by weftd on a
+    /// `PLUGIN-REGISTER :<b64cbor>` — a remote provider's self-description (§12.3,
+    /// §4.2): its [`crate::Registration`]. Parsed by weftd on a
     /// `State::PluginService` session.
+    ///
+    /// In the **trailing**, not a `reg=` tag: a catalog of action declarations
+    /// outgrows §4's 1024-byte tag cap almost immediately, and the trailing is
+    /// bounded by the line length instead, which §4 sets at 32 KiB.
     PluginRegister {
         registration: String,
     },
@@ -1890,22 +1904,22 @@ impl Event {
                 }
             }
             "PLUGIN-MANIFEST" => Ok(Event::PluginManifest {
-                catalog: req_tag(line, "PLUGIN-MANIFEST", "catalog")?,
+                catalog: req_trailing(line, "PLUGIN-MANIFEST", "catalog")?,
             }),
             "PLUGIN-VIEW" => Ok(Event::PluginView {
                 view_id: Args::new(line, "PLUGIN-VIEW").req("view-id")?.to_string(),
-                view: req_tag(line, "PLUGIN-VIEW", "view")?,
+                view: req_trailing(line, "PLUGIN-VIEW", "view")?,
             }),
             "PLUGIN-PATCH" => Ok(Event::PluginPatch {
                 view_id: Args::new(line, "PLUGIN-PATCH").req("view-id")?.to_string(),
-                patch: req_tag(line, "PLUGIN-PATCH", "patch")?,
+                patch: req_trailing(line, "PLUGIN-PATCH", "patch")?,
             }),
             "PLUGIN-RESULT" => Ok(Event::PluginResult {
                 view_id: Args::new(line, "PLUGIN-RESULT").req("view-id")?.to_string(),
-                result: req_tag(line, "PLUGIN-RESULT", "result")?,
+                result: req_trailing(line, "PLUGIN-RESULT", "result")?,
             }),
             "PLUGIN-REGISTER" => Ok(Event::PluginRegister {
-                registration: req_tag(line, "PLUGIN-REGISTER", "reg")?,
+                registration: req_trailing(line, "PLUGIN-REGISTER", "reg")?,
             }),
             verb => Ok(Event::Unknown {
                 verb: verb.to_string(),
@@ -2778,25 +2792,22 @@ impl Event {
                 vec![group.to_string(), user.to_string(), state.to_string()],
                 None,
             ),
-            Event::PluginManifest { catalog } => {
-                tags.insert("catalog".to_string(), catalog.clone());
-                ("PLUGIN-MANIFEST", vec![], None)
-            }
+            Event::PluginManifest { catalog } => ("PLUGIN-MANIFEST", vec![], Some(catalog.clone())),
             Event::PluginView { view_id, view } => {
-                tags.insert("view".to_string(), view.clone());
-                ("PLUGIN-VIEW", vec![view_id.clone()], None)
+                ("PLUGIN-VIEW", vec![view_id.clone()], Some(view.clone()))
             }
             Event::PluginPatch { view_id, patch } => {
-                tags.insert("patch".to_string(), patch.clone());
-                ("PLUGIN-PATCH", vec![view_id.clone()], None)
+                ("PLUGIN-PATCH", vec![view_id.clone()], Some(patch.clone()))
             }
             Event::PluginResult { view_id, result } => {
-                tags.insert("result".to_string(), result.clone());
-                ("PLUGIN-RESULT", vec![view_id.clone()], None)
+                ("PLUGIN-RESULT", vec![view_id.clone()], Some(result.clone()))
             }
             Event::PluginRegister { registration } => {
-                tags.insert("reg".to_string(), registration.clone());
-                ("PLUGIN-REGISTER", vec![], None)
+                // Trailing, not a tag: §4 caps a tag value at 1024 bytes, and a
+                // provider's action catalog passes that with a handful of
+                // declarations (the Matrix bridge's seven come to ~1.4 KB base64).
+                // The trailing is bounded by the line length instead.
+                ("PLUGIN-REGISTER", vec![], Some(registration.clone()))
             }
             Event::Unknown { .. } => {
                 return Err(SerializeError::Unrepresentable("unknown event"));
@@ -3709,6 +3720,12 @@ mod tests {
         round_trip(&Reply::new(Event::PluginRegister {
             registration: "Zm9v".into(),
         }));
+        // A real catalog exceeds §4's 1024-byte tag cap — which is why this rides
+        // the trailing. The Matrix bridge's seven declarations are ~1400 bytes.
+        round_trip(&Reply::new(Event::PluginRegister {
+            registration: "Zm9v".repeat(500),
+        }));
+        assert!(Reply::parse("PLUGIN-REGISTER").is_err()); // registration required
 
         assert!(Reply::parse("PLUGIN-VIEW v:ab12:1").is_err()); // view payload required
         assert!(Reply::parse("PLUGIN-MANIFEST").is_err()); // catalog required

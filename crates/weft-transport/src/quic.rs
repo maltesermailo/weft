@@ -170,7 +170,7 @@ pub fn client_endpoint(alpn: &[u8]) -> io::Result<quinn::Endpoint> {
 }
 
 /// The control stream of one QUIC connection: line-framed with the §4
-/// 8 KiB cap enforced at the framing layer (a peer can't buffer-bloat us
+/// §4's line cap enforced at the framing layer (a peer can't buffer-bloat us
 /// with a newline-less flood).
 pub struct QuicControlStream {
     framed: Framed<Join<RecvStream, SendStream>, LinesCodec>,

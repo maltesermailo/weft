@@ -1,8 +1,13 @@
 //! Plugin SDUI codec (M-plug-1, `docs/architecture/plugin-spec.md` §10–§11): the
 //! typed component catalog, views, patches, terminal results, and action
 //! declarations. These are structured trees that the line grammar (§4) can't
-//! express, so they ride as **base64-CBOR in a tag** (`@view=<b64>` etc.) — the
-//! same pattern signed manifests and capability tokens already use.
+//! express, so they ride as **base64-CBOR in the trailing**
+//! (`PLUGIN-VIEW <view-id> :<b64>`) — the same encoding signed manifests and
+//! capability tokens already use.
+//!
+//! The trailing rather than a tag, because §4 caps a tag value at 1024 B: that cap
+//! is what makes a tag *metadata*, and these are documents. A catalog of seven
+//! action declarations is already ~1.4 KB.
 //!
 //! Pure L0: serde + ciborium are no-I/O. The client renders **only** known
 //! component `type`s; an unknown `type`/patch-op decodes to a skip-variant
