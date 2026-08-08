@@ -342,6 +342,64 @@ impl<S: ControlStream> Session<S> {
                         Err(e) => return self.internal(label, &e).await,
                     }
                 }
+                // A **foreign-realm replica** is not ours to mint into. weftd is not
+                // a participant in that Matrix room — its users are represented by
+                // puppets, and the companion homeserver mints those events — so it
+                // has no origin standing there and is structurally a spoke, with the
+                // realm as the home (§11.13 applied to a bridged channel, owner
+                // directive 2026-08-08).
+                //
+                // Minting locally is what produced messages stored and shown as
+                // history that the realm never saw. Instead: relay, and let the
+                // copy that comes *back* through ingestion — bridge-minted, and
+                // attributed to this account via the puppet↔ULID mapping — be the
+                // one canonical message. Correlated by the same bridge-label trick
+                // the peer spoke path uses, so the client reconciles it by label.
+                if let Some(scheme) = self.channel_realm_scheme(&channel).await {
+                    let Some((_, out)) = self.ctx.provider_for_scheme(&scheme) else {
+                        // Nowhere to put it, and deliberately no outbox for a
+                        // foreign realm (home-authoritative §5.1): refuse rather
+                        // than store something that may never be postable there.
+                        self.send_err(
+                            label,
+                            ErrCode::Policy,
+                            Some("provider-offline"),
+                            "cannot post to this channel",
+                        )
+                        .await?;
+                        return Ok(Flow::Continue);
+                    };
+
+                    let token = format!("B-{scheme}-{}", weft_proto::Ulid::new());
+                    self.ctx
+                        .register_group_echo(token.clone(), self.id, unix_now_ms());
+                    if let Some(joined) = self.joined.get_mut(&channel) {
+                        joined.pending.push_back(label);
+                    }
+
+                    let user = UserRef::new(account.clone(), self.ctx.info.network.clone());
+                    let ulid = self.actor_ulid(&user).await;
+                    let cmd = Command::Msg {
+                        target: Target::Channel(channel),
+                        body: (!body.is_empty()).then_some(body),
+                        meta,
+                    };
+                    if let Ok(mut line) = Request::new(cmd).to_line() {
+                        line.tags.insert("as".to_string(), user.to_string());
+                        line.tags.insert("label".to_string(), token);
+                        if let Some(ulid) = ulid {
+                            line.tags.insert("ulid".to_string(), ulid);
+                        }
+                        if let Ok(serialized) = line.serialize() {
+                            if out.try_send(serialized).is_err() {
+                                warn!("provider queue full — post dropped");
+                            }
+                        }
+                    }
+
+                    return Ok(Flow::Continue);
+                }
+
                 // §11.13 home-authoritative: if this network owns the channel's
                 // namespace we mint locally (the common case, unchanged). Otherwise
                 // we're a spoke — relay the post to the home to be minted into the
@@ -1109,6 +1167,25 @@ impl<S: ControlStream> Session<S> {
             self.send_event(label.clone(), event).await?;
         }
         Ok(())
+    }
+
+    /// The foreign scheme a channel's namespace is a replica of, or `None` when the
+    /// channel is ours to mint into.
+    ///
+    /// Read from the *channel* record, which already carries the origin URI — no
+    /// extra namespace lookup on the post path, and `can_post` has just fetched the
+    /// same row.
+    async fn channel_realm_scheme(&self, channel: &ChannelName) -> Option<weft_proto::Scheme> {
+        self.ctx
+            .channel_store
+            .channel(channel)
+            .await
+            .ok()
+            .flatten()?
+            .origin
+            .as_deref()
+            .and_then(|o| o.parse::<weft_proto::ForeignUri>().ok())
+            .map(|uri| uri.scheme().clone())
     }
 
     /// §6.3 MEMBERS: a roster snapshot for a member. Framed as a `BATCH` of

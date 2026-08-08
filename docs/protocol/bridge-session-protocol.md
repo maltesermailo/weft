@@ -24,9 +24,13 @@ Everything below follows from two decisions, and they explain most of the asymme
 
 **A realm is a network.** A bridged realm is modeled as a WEFT network, not as a set of local puppet
 accounts. Its users are `alice@matrix.org`; it *mints its own msgids* under `matrix.org`; weftd
-ingests them exactly as it ingests a peer network's. So a replica channel is **multi-origin** — our
-members' events carry our origin, the realm's carry theirs — and that is what makes the ordinary
-federation machinery apply unchanged.
+ingests them exactly as it ingests a peer network's — which is what makes the ordinary federation
+machinery apply unchanged.
+
+**Amended 2026-08-08:** in a *replica* channel the realm mints **everything**, including a local
+member's own post (§8) — the foreign system is that room's source of truth, so weftd keeps no copy of
+its own to diverge. Replica messages are therefore single-origin (the realm's); only a **projected**
+namespace, where weftd genuinely is the home, mints under our origin.
 
 **A bridge behaves as a federation peer.** So commands travel *to* the authority and events come
 *from* it. weftd relays `NS JOIN` as a **request**; the realm answers with `NS-MEMBER` as a
@@ -353,6 +357,11 @@ event lines:
 one-hop rule as a peer bridge. Because a replica is multi-origin, an event we ingested carries the
 realm's origin and is structurally ineligible to go back — no ping-pong.
 
+In a **replica** channel that now leaves only the projection direction and the bookkeeping verbs:
+since weftd no longer mints a local user's post there (next section), there is no `MESSAGE` of ours
+to relay. A **projected** namespace (native, `bridge:<scheme> :open`) still works exactly as above —
+weftd is the home there, so it mints and relays its own events.
+
 System messages (join/part notices) are local channel noise and are not relayed. `MEMBER` is relayed
 only when the user is on our network.
 
@@ -369,6 +378,32 @@ through ordinary ingestion:
 ← @as=<local-user>;ulid=<id> MSG @<user@realm> :<body>   (a DM to one of the realm's users)
 ```
 
+### Posting into a replica channel (amended 2026-08-08)
+
+**The realm is the source of truth in its own channels**, so a local member's post is relayed the same
+way — weftd mints nothing, stores nothing, and does not echo:
+
+```
+← @as=<local-user>;ulid=<id>;label=B-<scheme>-<ulid> MSG #<ns-id>/<chan-id> :<body>
+```
+
+The adapter MUST puppet it into the foreign room, mint `<realm>/<ulid>` from the resulting foreign
+event id, and hand the message back **quoting that label**:
+
+```
+→ @as=<local-user>;msgid=<realm>/<ulid>;label=B-<scheme>-<ulid> MSG #<ns-id>/<chan-id> :<body>
+```
+
+The label is what makes the returning copy the poster's own: weftd routes it to the session waiting on
+that label, so their client reconciles the message it sent instead of seeing a stranger's. **Drop the
+label and the author sees their own message as somebody else's** — and, because a labelled `MSG` is the
+only way `@as` may name a local account (below), an unlabelled one is refused outright.
+
+An adapter that cannot deliver MUST say so (`UNDELIVERED <msgid> :<reason>`) or simply answer nothing:
+silence past the grace window is itself an answer (§9). While the provider is **offline** weftd refuses
+the post at send time (`ERR POLICY`, context `provider-offline`) rather than queueing it — there is no
+outbox for a room we do not own.
+
 **`ulid=` names the actor's stable identity** (added 2026-08-06): account names are mutable vanity
 labels, so an adapter MUST key its puppets and per-user state by the ULID, never by the name — a
 name-keyed puppet is orphaned by a rename. The name still rides in `@as` for attribution.
@@ -382,9 +417,10 @@ local user outbound.
 **Closing the loop:** the confirmation comes back as ordinary ingestion (§5) **attributed to the
 local user** — `@as=<local-user> REACT <realm-msgid> <emoji>` — the one shape of local `@as`
 ingestion accepts (amended 2026-08-05). It is bounded to exactly the class weftd relays: the
-mutation verbs, on a root the realm itself minted. Authoring as a local user (`MSG`, or touching a
-local-origin root) remains a refused forgery. Practically: the adapter sees its own puppet's echo,
-maps the puppet back to the local user, and re-ingests under that name.
+mutation verbs, on a root the realm itself minted, plus (amended 2026-08-08) a `MSG` carrying a bridge
+label weftd issued. Touching a **local-origin** root remains a refused forgery, as does an unlabelled
+`MSG` attributed to one of our accounts. Practically: the adapter sees its own puppet's echo, maps the
+puppet back to the local user, and re-ingests under that name.
 
 ### Backfill
 

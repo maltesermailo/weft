@@ -194,8 +194,12 @@ impl Bridge {
             Incoming::Command {
                 as_user,
                 as_ulid,
+                label,
                 command,
-            } => self.on_weftd_request(as_user, as_ulid, command).await,
+            } => {
+                self.on_weftd_request(as_user, as_ulid, label, command)
+                    .await
+            }
         }
     }
 
@@ -407,6 +411,7 @@ impl Bridge {
         &mut self,
         as_user: Option<String>,
         as_ulid: Option<String>,
+        label: Option<String>,
         command: Command,
     ) {
         // Authority relays (a WEFT-side GRANT/REVOKE inside a bridged
@@ -504,6 +509,27 @@ impl Bridge {
             // §5 a local user's DM to one of the realm's users: weftd stored and
             // echoed it locally, and hands us the copy for the only route that
             // can reach them.
+            // A local user's post into a replica channel. weftd minted nothing —
+            // the realm is the home — so this is a *request* to put it there, and
+            // the copy we send back is what becomes canonical.
+            Command::Msg {
+                target: weft_proto::Target::Channel(channel),
+                body,
+                ..
+            } => {
+                if let Err(e) = self
+                    .post_for_local_user(
+                        &channel.to_string(),
+                        &ulid,
+                        &account,
+                        body.as_deref().unwrap_or_default(),
+                        label.as_deref(),
+                    )
+                    .await
+                {
+                    warn!(user, "posting for a local user failed: {e:#}");
+                }
+            }
             Command::Msg {
                 target:
                     weft_proto::Target::User {
@@ -1412,6 +1438,58 @@ impl Bridge {
                 warn!(user, "membership statement failed: {e:#}");
             }
         }
+    }
+
+    /// Put a local user's post into the realm, then hand the minted copy back.
+    ///
+    /// This is the home-authoritative spoke path applied to a bridged channel: weftd
+    /// is not a participant in that Matrix room — its users act through puppets and
+    /// the homeserver mints those events — so it has no standing to mint, and did
+    /// not. The message becomes real here, and the copy we ingest back (bridge-minted
+    /// id, attributed to the poster's own account via the puppet↔ULID mapping) is the
+    /// one canonical version. `label` rides along so weftd can hand it to the waiting
+    /// session and the poster's client reconciles rather than seeing a duplicate.
+    ///
+    /// Failing here means the message does not exist anywhere, which is the point:
+    /// nothing is stored that the realm never accepted.
+    async fn post_for_local_user(
+        &mut self,
+        channel: &str,
+        ulid: &str,
+        account: &str,
+        body: &str,
+        label: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let Some((room, space)) = self.store.state.room_of_channel(channel) else {
+            return Ok(()); // not a replica channel of ours
+        };
+        let (room, ns_id) = (room.to_string(), space.ns_id.clone());
+
+        if self.store.state.bans.is_banned(&ns_id) {
+            return Ok(());
+        }
+
+        let puppet = self.ensure_puppet(ulid, account).await?;
+        let content = json!({ "msgtype": "m.text", "body": body });
+        let txn = format!("weft-{ulid}-{}", self.next_dm_txn());
+        let event_id = self.send_as_puppet(&room, &puppet, content, &txn).await?;
+
+        // The id is derived from the Matrix event, so it is reproducible after a
+        // database loss — the same rule ingestion already follows.
+        let msgid = ident::msgid_for(
+            self.realm.network(),
+            &event_id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        );
+        self.store.link(&event_id, &msgid, &room).await;
+
+        let sender = format!("{account}@{}", self.realm.network());
+        self.realm
+            .message_labeled(&sender, &msgid, channel, body, label)
+            .await
     }
 
     // ---- WEFT → Matrix (relayed local events) -------------------------------

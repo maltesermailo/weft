@@ -1362,6 +1362,14 @@ impl<S: ControlStream> Session<S> {
             return Ok(Flow::Continue);
         };
 
+        // A bridge label is resolved up front because it serves twice below: it
+        // authorizes a local-sender `MSG` (the realm's answer to a post we
+        // relayed) and it routes the copy to the session waiting on that label.
+        let relay_echo = line
+            .tags
+            .get("label")
+            .and_then(|l| self.ctx.take_group_echo(l));
+
         // The sender must be **foreign** — not ours, and not a peer network's
         // (owner decision 2026-08-05, amending the protocol doc's §5). It need
         // not live on the bound realm itself: foreign systems are cross-realm —
@@ -1391,13 +1399,20 @@ impl<S: ControlStream> Session<S> {
             // close, because the puppet's echo always maps back to a local
             // account. Bounded hard: only the mutation verbs, and only on a
             // root the realm itself minted — the exact class weftd relays.
-            // Authoring as a local user (`MSG`, or touching a local-origin
-            // root) stays a forgery and is refused.
+            // Touching a *local-origin* root stays a forgery and is refused.
             let confirms_relay = match &cmd {
                 Command::Edit { msgid, .. }
                 | Command::Delete { msgid }
                 | Command::React { msgid, .. }
                 | Command::Unreact { msgid, .. } => msgid.origin().as_str() == origin.realm(),
+
+                // The realm is the source of truth in its own channels, so a
+                // local user's post is relayed out and minted *there*; this is
+                // that answer coming back. Authorized by the bridge label we
+                // issued for that very post — an unlabelled `MSG` attributed to
+                // a local account is still a forgery.
+                Command::Msg { .. } => relay_echo.is_some(),
+
                 _ => false,
             };
 
@@ -1445,7 +1460,14 @@ impl<S: ControlStream> Session<S> {
             return Ok(Flow::Continue);
         };
 
-        handle.ingest(self.id, record, event).await;
+        // A labelled copy is the realm's minted answer to a local user's post, so
+        // it is ingested **as that session's own**: its queued label attaches and
+        // the client reconciles the message it is waiting for. Same mechanism the
+        // peer-spoke and group paths use. Anything else fans out normally as
+        // someone else's message.
+        handle
+            .ingest(relay_echo.unwrap_or(self.id), record, event)
+            .await;
 
         Ok(Flow::Continue)
     }
@@ -2414,7 +2436,7 @@ impl<S: ControlStream> Session<S> {
     /// provider-bound relays (owner directive 2026-08-06): account names are
     /// mutable vanity labels, so an adapter that keyed puppets by name would
     /// orphan them on a rename. Foreign actors have no local ULID — `None`.
-    async fn actor_ulid(&self, user: &UserRef) -> Option<String> {
+    pub(super) async fn actor_ulid(&self, user: &UserRef) -> Option<String> {
         if user.network != self.ctx.info.network {
             return None;
         }

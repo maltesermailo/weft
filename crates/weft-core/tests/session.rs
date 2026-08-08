@@ -5303,30 +5303,55 @@ async fn local_posts_relay_outward_without_looping() {
     };
     assert_eq!(ns.as_str(), ns_id.to_lowercase());
 
-    // A LOCAL post is relayed outward to the provider.
+    // A LOCAL post is relayed outward to the provider as a **request** — the realm
+    // is the source of truth in its own channels, so weftd mints nothing and does
+    // not echo. It carries the poster's identity and a bridge label.
     ada.send(&format!("@label=m1 MSG {channel} :hello matrix"));
-    let relayed = weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap();
-    let Event::Message(m) = relayed.event else {
-        panic!("provider expected the relayed MESSAGE");
+    let raw = plugin.recv_raw().await;
+    let line = weft_proto::Line::parse(&raw).unwrap();
+    assert_eq!(
+        line.tags.get("as").map(String::as_str),
+        Some("ada@test.example")
+    );
+    let bridge_label = line
+        .tags
+        .get("label")
+        .expect("the relayed post carries a bridge label")
+        .clone();
+    let weft_proto::Command::Msg { body, .. } =
+        weft_proto::Request::from_line(&line).unwrap().command
+    else {
+        panic!("provider expected the relayed MSG request, got {raw}");
     };
-    assert_eq!(m.body, "hello matrix");
+    assert_eq!(body.as_deref(), Some("hello matrix"));
+
+    // The realm mints the id and hands the message back, quoting the label. THAT
+    // is what ada finally sees — her own message, with a foreign-origin msgid.
+    let root: weft_proto::MsgId = format!("acme-corp/{}", ulid::Ulid::new()).parse().unwrap();
+    plugin.send(&format!(
+        "@as=ada@test.example;msgid={root};label={bridge_label} MSG {channel} :hello matrix"
+    ));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("ada expected her post back, minted by the realm");
+    };
+    assert_eq!(m.msgid, root);
     assert_eq!(m.sender.to_string(), "ada@test.example");
 
-    // A local EDIT + REACT + DELETE relay too.
-    let root = m.msgid.clone();
+    // A local EDIT + REACT relay outward too — the root is foreign-origin now, so
+    // these take the same ask-the-provider path as any bridged message.
     ada.send(&format!("@label=e1 EDIT {root} :hello again"));
     assert!(matches!(
-        weft_proto::Reply::parse(&plugin.recv_raw().await)
+        weft_proto::Request::from_line(&weft_proto::Line::parse(&plugin.recv_raw().await).unwrap())
             .unwrap()
-            .event,
-        Event::Edited { .. }
+            .command,
+        weft_proto::Command::Edit { .. }
     ));
     ada.send(&format!("@label=r1 REACT {root} wave"));
     assert!(matches!(
-        weft_proto::Reply::parse(&plugin.recv_raw().await)
+        weft_proto::Request::from_line(&weft_proto::Line::parse(&plugin.recv_raw().await).unwrap())
             .unwrap()
-            .event,
-        Event::Reaction { .. }
+            .command,
+        weft_proto::Command::React { .. }
     ));
 
     // THE LOOP GUARD: the provider ingests a foreign post; the resulting event
@@ -5338,9 +5363,12 @@ async fn local_posts_relay_outward_without_looping() {
     ));
     ada.send(&format!("@label=d1 DELETE {root}"));
 
-    let next = weft_proto::Reply::parse(&plugin.recv_raw().await).unwrap();
-    let Event::Deleted { msgid, .. } = next.event else {
-        panic!("provider expected the local DELETE next — an ingested event looped back!");
+    let raw = plugin.recv_raw().await;
+    let line = weft_proto::Line::parse(&raw).unwrap();
+    let weft_proto::Command::Delete { msgid } =
+        weft_proto::Request::from_line(&line).unwrap().command
+    else {
+        panic!("provider expected the local DELETE next — an ingested event looped back! {raw}");
     };
     assert_eq!(msgid, root);
 
@@ -6923,14 +6951,28 @@ async fn provider_offline_gates_virtual_namespace() {
     ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
     drain_until_ns_member(&mut ada).await;
 
-    // Online: she can post into the replica.
+    // Online: she can post into the replica. The realm is the source of truth
+    // there, so the post is relayed out and comes back with the id IT minted —
+    // that returning copy, not a local echo, is what she sees.
     ada.send(&format!("@label=m0 MSG {channel} :while online"));
-    let reply = ada.recv().await;
-    assert_eq!(reply.label.as_deref(), Some("m0"));
-    let Event::Message(posted) = reply.event else {
-        panic!("expected her own echo");
+    // Her relayed NS JOIN is still queued ahead of it on this session.
+    let bridge_label = loop {
+        let line = weft_proto::Line::parse(&plugin.recv_raw().await).unwrap();
+
+        if let Ok(weft_proto::Command::Msg { .. }) =
+            weft_proto::Request::from_line(&line).map(|r| r.command)
+        {
+            break line.tags.get("label").expect("a bridge label").clone();
+        }
     };
-    let root = posted.msgid.clone();
+    let root: weft_proto::MsgId = format!("acme-corp/{}", ulid::Ulid::new()).parse().unwrap();
+    plugin.send(&format!(
+        "@as=ada@test.example;msgid={root};label={bridge_label} MSG {channel} :while online"
+    ));
+    let Event::Message(posted) = ada.recv().await.event else {
+        panic!("expected her post back, minted by the realm");
+    };
+    assert_eq!(posted.msgid, root);
 
     // Online: DISCOVER lists the public replica.
     ada.send("DISCOVER");
@@ -11827,39 +11869,30 @@ async fn a_message_the_realm_never_confirms_is_reported_undelivered() {
     //
     // Now the provider must answer, and silence past the grace window is itself an
     // answer: the author gets `UNDELIVERED` for that msgid.
+    //
+    // Scoped to a **projected** namespace, which is where weftd mints at all. In a
+    // *replica* the realm is the source of truth, so weftd relays the post instead
+    // of storing one — there is no locally-minted message to report on.
     let key = Keypair::generate();
     let ctx = ctx_plugin_full(
         vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
         &[],
     );
 
-    let mut plugin = plugin_session(&ctx, &key).await;
-    plugin.send("REALM ASSERT instagram://acme-corp");
-    plugin.send(&format!(
-        "@title=Club;id={} NS-META instagram://acme-corp/club public",
-        ulid::Ulid::new().to_string().to_lowercase()
-    ));
-    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
-        panic!("expected the minted NS-META");
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
     };
     let ns_id = id.to_string();
-    plugin.send(&format!(
-        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
-        ulid::Ulid::new().to_string().to_lowercase()
-    ));
-    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
-        panic!("expected the minted CHANNEL-LAYOUT");
-    };
-
-    let mut ada = ready(&ctx, "ada").await;
+    let channel = ada.channel_by_vanity(&ns_id, "general").await;
+    ada.send(&format!("NS META {ns_id} bridge:instagram :open"));
+    ada.recv().await;
     ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
     drain_until_ns_member(&mut ada).await;
-    assert!(matches!(
-        weft_proto::Request::parse(&plugin.recv_raw().await)
-            .unwrap()
-            .command,
-        weft_proto::Command::NsJoin { .. }
-    ));
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
 
     // She posts. weftd stores + echoes it — that ack is honest about storage.
     ada.send(&format!("@label=m1 MSG {channel} :did this reach Matrix?"));
@@ -11896,14 +11929,26 @@ async fn a_message_the_realm_never_confirms_is_reported_undelivered() {
     let Event::Message(second) = ada.recv().await.event else {
         panic!("expected her own echo");
     };
+    // Wait until the provider has actually been handed it. Her echo does not
+    // imply that: the echo and the forward run on different tasks, so acking a
+    // msgid weftd had not yet marked in-flight resolved nothing — and the sweep
+    // then reported an acked message.
+    loop {
+        let raw = plugin.recv_raw().await;
+
+        if matches!(weft_proto::Reply::parse(&raw).map(|r| r.event),
+            Ok(Event::Message(m)) if m.msgid == second.msgid)
+        {
+            break;
+        }
+    }
+
     plugin.send(&format!("DELIVERED {}", second.msgid));
-    // Barrier: a re-assert on the SAME session replies, and the session reads its
-    // lines in order — so the reply proves DELIVERED was processed first. Without
-    // it the sweep below races the ack and the test passes for the wrong reason.
+    // Barrier: a re-assert on the SAME session re-pushes the projected structure,
+    // and the session reads its lines in order — so that push proves DELIVERED was
+    // processed first. Without it the sweep below races the ack and the test passes
+    // for the wrong reason.
     plugin.send("REALM ASSERT instagram://acme-corp");
-    plugin.send(&format!(
-        "@title=Club;id={ns_id} NS-META instagram://acme-corp/club public"
-    ));
     // Raw lines: this session also carries the forwarded MSG and the membership
     // statement, so match on the text rather than a typed event.
     let mut barriered = false;

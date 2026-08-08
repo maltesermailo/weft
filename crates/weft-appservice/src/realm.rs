@@ -141,6 +141,26 @@ impl Realm {
         channel: &str,
         body: &str,
     ) -> anyhow::Result<()> {
+        self.message_labeled(sender, msgid, channel, body, None)
+            .await
+    }
+
+    /// Replay a message, optionally carrying the `label` of the relayed post it
+    /// answers.
+    ///
+    /// The realm is the home for a replica channel, so a local user's post is
+    /// relayed here and minted *there*; this is the copy that comes back and
+    /// becomes canonical. Echoing the label is what lets weftd hand it to the
+    /// waiting session as its own, so the poster's client reconciles the pending
+    /// message instead of seeing a duplicate arrive from a stranger.
+    pub async fn message_labeled(
+        &self,
+        sender: &str,
+        msgid: &str,
+        channel: &str,
+        body: &str,
+        label: Option<&str>,
+    ) -> anyhow::Result<()> {
         let mut line = weft_proto::Request::new(weft_proto::Command::Msg {
             target: Target::Channel(channel.parse()?),
             body: Some(body.to_string()),
@@ -149,6 +169,9 @@ impl Realm {
         .to_line()?;
         line.tags.insert("as".to_string(), sender.to_string());
         line.tags.insert("msgid".to_string(), msgid.to_string());
+        if let Some(label) = label {
+            line.tags.insert("label".to_string(), label.to_string());
+        }
 
         self.send(line.serialize()?).await
     }

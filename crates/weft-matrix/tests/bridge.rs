@@ -512,6 +512,7 @@ const ADA_ULID: &str = "01arz3ndektsv4rrffq69g5fav";
 async fn join_ada(bridge: &mut Bridge, ns_id: &str) {
     bridge
         .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
             as_user: Some("ada@test.example".into()),
             as_ulid: Some(ADA_ULID.into()),
             command: weft_proto::Command::NsJoin {
@@ -664,6 +665,7 @@ async fn joining_the_namespace_joins_the_space_itself() {
     calls.lock().unwrap().clear();
     bridge
         .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
             as_user: Some("ada@test.example".into()),
             as_ulid: Some(ADA_ULID.into()),
             command: weft_proto::Command::NsLeave {
@@ -1412,6 +1414,7 @@ async fn authority_translates_both_directions() {
     // ours): carol becomes a moderator → 50 in every room of the space.
     bridge
         .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
             as_user: None,
             as_ulid: None,
             command: weft_proto::Command::Grant {
@@ -1435,6 +1438,7 @@ async fn authority_translates_both_directions() {
     // …and a local subject addresses their ULID-keyed puppet.
     bridge
         .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
             as_user: None,
             as_ulid: Some(ADA_ULID.into()),
             command: weft_proto::Command::Grant {
@@ -2289,6 +2293,7 @@ async fn backfill_replays_a_window_as_ordinary_ingestion() {
     bridge.store.link("$anchor", &anchor, "!gen:kde.org").await;
     bridge
         .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
             as_user: None,
             as_ulid: None,
             command: weft_proto::Command::History {
@@ -2339,6 +2344,7 @@ async fn backfill_replays_a_window_as_ordinary_ingestion() {
     let before = drain(&mut lines).len();
     bridge
         .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
             as_user: None,
             as_ulid: None,
             command: weft_proto::Command::History {
@@ -2526,6 +2532,7 @@ async fn dms_and_typing_cross_the_bridge() {
     // WEFT → Matrix: ada DMs carol. The room is opened on first use.
     bridge
         .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
             as_user: Some("ada@test.example".into()),
             as_ulid: Some(ADA_ULID.into()),
             command: weft_proto::Command::Msg {

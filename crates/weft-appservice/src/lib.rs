@@ -116,6 +116,13 @@ pub enum Incoming {
         /// Key puppets and any per-user state by this, never by the account
         /// name, which is a mutable vanity label.
         as_ulid: Option<String>,
+        /// The `label=` correlation, when weftd is waiting on an answer.
+        ///
+        /// A relayed post carries one: the realm is the home for that channel, so
+        /// weftd minted nothing and is waiting for the copy that comes back to be
+        /// tagged with this — that is how the poster's client reconciles the message
+        /// it is showing as pending. Dropping it here left weftd waiting forever.
+        label: Option<String>,
         command: Command,
     },
 }
@@ -436,9 +443,11 @@ impl AppServiceBuilder {
 
                                 let as_user = line.tags.get("as").cloned();
                                 let as_ulid = line.tags.get("ulid").cloned();
+                                let label = line.tags.get("label").cloned();
                                 let _ = events_tx.try_send(Incoming::Command {
                                     as_user,
                                     as_ulid,
+                                    label,
                                     command: req.command,
                                 });
                             }

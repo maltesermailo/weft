@@ -70,7 +70,13 @@ Follow a `MSG #general :hi` from socket to actor:
    `on_<verb>` method below it in the same file.
 4. `on_msg` — session-side checks in order: target kind → attachments →
    empty body → membership → **label dedup** (§9.2, the `dedup` map) →
-   `push pending label` → `ChannelHandle::publish`.
+   `push pending label` → `ChannelHandle::publish`. **Two exits before the
+   publish**, both for channels whose home is elsewhere: a WEFT peer's channel
+   (`registry.is_home` false) and a **bridged replica** (`channel_realm_scheme`
+   → `provider_for_scheme`). Both relay the post outward under a
+   `B-<home>-<ulid>` label instead of minting, so the returning copy reconciles
+   by label (`take_group_echo`). A replica with its provider offline refuses
+   (`POLICY`/`provider-offline`) — no outbox.
 5. `weft-core/src/channel.rs :: Actor::handle(Cmd::Publish)` — the single
    writer: `mint()` assigns the msgid (the ONLY place msgids are born),
    `persist()` appends to the store (skipped for ephemeral), `broadcast()`
@@ -373,7 +379,7 @@ The line-133 "cross-network deferred" note is superseded: the social layer now f
 | Group message federation | `on_group_relay` (`groups.rs`): `@id` absent = spoke→home mint+fanout; present = home→member `group_ingest(origin,…)`. Membership sync = `GroupSync`/`on_group_sync` (reconciles diff, parts removed locals) via `propagate_group`. |
 | Group edit/delete/react federation | `GroupMut`/`apply_group_mutation`/`relay_group_mut`/`on_group_mut` (`groups.rs`); `GroupMutKind` in `directory.rs`. |
 | Group backfill (node-down recovery) | `GroupBackfill` verb. Spoke: `on_history` `Target::Group` → `request_group_backfill` (cursor = latest local msgid) → tunnel to home. Home: `on_group_backfill` → `roots(after:cursor)` → replay as `GroupRelay{msgid:Some}` ingests (idempotent; non-members get nothing). |
-| Spoke-poster labelled echo | `ctx.group_echoes: Mutex<HashMap<token → (session, created_ms)>>` (`context.rs`); `register_group_echo` (TTL-swept, `GROUP_ECHO_TTL_MS`) / `take_group_echo`. Home echoes `@echo=` only to the sender's network; spoke delivers via `group_ingest(origin=session)` so the pending label attaches. |
+| Spoke-poster labelled echo | `ctx.group_echoes: Mutex<HashMap<token → (session, created_ms)>>` (`context.rs`); `register_group_echo` (TTL-swept, `GROUP_ECHO_TTL_MS`) / `take_group_echo`. Home echoes `@echo=` only to the sender's network; spoke delivers via `group_ingest(origin=session)` so the pending label attaches. **Reused verbatim for bridged replicas** (2026-08-08): `on_msg` registers the label, `on_provider_acting` resolves it (`relay_echo`) and ingests with `origin = that session`. The same label is what authorizes a local-sender `MSG` on ingest — see `confirms_relay`. |
 | Cross-network calls (1:1 + group) | `Call`/`GroupCall` signaling in `session.rs`/`federation.rs`; media = LiveKit cascade relay (`voice.rs :: VoiceRelay`, `RelaySpec{peer, key, remote/local url·room·token}`, `relay_acquire/release/drop_peer`). Group call mesh: `GroupCallRoster`/`broadcast_roster`/`on_group_call_roster`. |
 | Group attachment mirroring | `ServerCtx::mirror_group_attachments(group, meta, msgid)` (`federation.rs`) → `MirrorRequest` from the blob's origin network (§11.8). |
 

@@ -42,7 +42,7 @@ daemon + an adapter-binding doc, with **no further core change**.
 | 1 | Foreign identity | **Native, never remapped** — for **spaces/channels**: they keep their own coordinates and are addressed by a `<scheme>://<realm>/<path>` URI, never laundered into WEFT namespace grammar. Supersedes `matrix.md` §5. **AMENDED 2026-08-04 for *users*:** a replica *user* is attributed as a federated `UserRef` on the realm (`alice@matrix.org`) so replicas present as an ordinary federated network — see §7a.0. |
 | 2 | Protocol logic location | **Per-app adapter daemons only.** weftd core knows the generic contract + scheme routing; it never parses a foreign protocol. Restores the `matrix.md` §17 module boundary at the framework level. |
 | 3 | Trust / connection | **Two planes** (§3): a realm-agnostic **control link** per adapter (scheme registration + weftd→adapter provisioning pushes, §3.3) and **one data connection per realm** — pinned-key authed, bound to a single `(scheme, realm)` at connect via a `REALM ASSERT` handshake. **Multiple adapters may connect concurrently** (Matrix + Discord, or sharded per-realm instances). Per-realm binding of the data connection makes cross-realm spoofing structurally impossible and gives per-realm failure/NETBLOCK domains; the scope URI (`matrix://matrix.org/…`) and account (`@a:matrix.org`) are self-describing, so assertions carry no separate realm tag. |
-| 4 | Home authority (inbound) | **Home-authoritative replica.** weftd mints the WEFT-side ULIDs for the foreign replica; the foreign system remains the true social home. Order-divergence is an honest limit. |
+| 4 | Home authority (inbound) | **AMENDED 2026-08-08 (owner directive): the foreign system is the source of truth for its own channels.** Originally weftd minted the WEFT-side ULIDs for a replica ("home-authoritative replica"); it no longer mints there *at all*. A local member's post is **relayed outward** as a `MSG` request and the realm mints the id, exactly as a spoke defers to a home (§7a.0e). weftd keeps no independent copy to diverge — which is what removes the order-divergence limit this decision used to accept, and what makes "posting while the adapter is down" a refusal rather than a message stored nowhere real. |
 | 5 | Consent | **Per-direction, per-namespace opt-in.** Outbound (advertise a WEFT ns into a realm) requires an explicit `NS META <ns> bridge:<scheme> :open` flag. Inbound (consume a foreign space) is an explicit user `NS JOIN <uri>`. Never automatic. |
 | 6 | E2EE | **Never bridged.** A foreign encrypted space is refused on join (`NO-SUCH-TARGET`) and a space that becomes encrypted after join is withdrawn + tombstoned WEFT-side. Invariant 8, per adapter. |
 | 7 | NETBLOCK | **Realm-keyed.** `NETBLOCK REALM <scheme>://<realm>` severs one foreign server; §11.6's four effects map per realm. |
@@ -92,8 +92,8 @@ connect concurrently). The handshake is **`AUTH ADAPTER <pubkey>`**, reusing the
 
 The **data connection** is the trusted component that may:
 
-- **assert foreign namespaces/channels/membership/events** for its bound realm into weftd (weftd
-  mints the replica ULIDs — home-authoritative replica); the scope URI and `@as=<foreign-account>`
+- **assert foreign namespaces/channels/membership/events** for its bound realm into weftd (the
+  adapter mints every replica id — §7a.0d/§7a.0e); the scope URI and `@as=<foreign-account>`
   are self-describing, so assertions need no separate realm tag;
 - **receive** our users' actions on the same connection (weftd relays local joins/posts/edits/
   moderation targeting the realm's URIs back to the adapter to translate outward).
@@ -158,7 +158,7 @@ assertions stand in for the manifest).
     NS-META             matrix://matrix.org/gaming :Gaming
     CHANNEL-LAYOUT      matrix://matrix.org/gaming/general 0
     POLICY              matrix://matrix.org/gaming/general retained:90d
-    …                   (weftd mints replica ULIDs — home-authoritative)
+    …                   (the adapter mints every replica id — §7a.0d)
     adapter → weftd     (CONTROL)  PROVISION-OK j1
 6. weftd                namespace now exists → add the requester as a member, relay the user-join to
                         the data connection (adapter puppet-joins the remote room), complete the
@@ -317,6 +317,45 @@ Three consequences:
 
 An adapter-minted ULID is not authoritative in any cryptographic sense — Matrix has no ULIDs, so
 someone invents it either way. The gain is consistency and stability, not proof.
+
+### 7a.0e A local user's post is relayed, not minted
+
+**Owner directive 2026-08-08, amending decision 4.** The realm mints msgids for *its* users' traffic
+(§7a.0d) — but weftd used to mint for a **local** user posting into a replica, store the message, and
+echo it as accepted. That is two sources of truth for one room, and it failed in the way two sources
+of truth always do: a post accepted while the adapter was down stayed in our store and in the client's
+history forever, visible as delivered, present in no Matrix room.
+
+So a replica channel is treated as a channel whose **home is elsewhere** — the same shape as a
+home-authoritative spoke (`home-authoritative-channels.md`), with the realm as the home:
+
+1. `MSG` into a replica is **not** minted, stored or echoed. It is serialized back out to the
+   provider as a `MSG` **request**, tagged `@as=<poster>` (their own WEFT handle), `@ulid=` (the
+   author's account ULID — the adapter keys puppets by it) and `@label=B-<scheme>-<ulid>`, a
+   bridge label registered against the posting session.
+2. The adapter puppets it into the foreign room, mints `<realm>/<ulid>` from the resulting foreign
+   event id, and hands the message back quoting that label.
+3. That returning copy is ingested on the ordinary federated path and delivered **as the poster's
+   own** — the queued label attaches, so the client reconciles the message it was waiting for
+   instead of seeing a stranger's.
+
+Two consequences worth stating, because both are behaviour a user sees:
+
+- **No provider, no post.** With the adapter offline there is nobody to mint, so the post is refused
+  (`ERR POLICY`, context `provider-offline`) rather than queued. There is deliberately **no outbox**
+  for bridged channels (`home-authoritative-channels.md` §5.1): replaying into someone else's room
+  minutes later is worse than an honest failure at send time.
+- **Every mutation is a relay.** A local user's own message now carries a *foreign* origin, so their
+  `EDIT`/`REACT`/`DELETE` take the existing ask-the-provider path (§8) — one code path for local and
+  foreign authors alike, instead of the origin deciding which of two it is.
+
+The one place weftd still mints for a bridged channel is the **projected** direction (a native
+namespace flagged `bridge:<scheme>`), where weftd genuinely *is* the home — and there the delivery
+ack (§7a) still applies, since a message we minted can be handed to an adapter that never confirms.
+
+Ingestion's forgery rule is bounded accordingly: `@as` naming a **local** account is refused as
+before, except for the two flows that must close — a mutation the realm confirms on a root it minted,
+and a `MSG` carrying a bridge label weftd itself issued.
 
 ### 7a.0d-bis Who holds authority in a replica
 
@@ -626,7 +665,7 @@ plain badged handles unless an adapter does more. Each adapter documents its exa
    data-connection `REALM ASSERT` (binding handshake) + `REALM WITHDRAW` (teardown). Leaving/listing/
    discovery reuse `NS LEAVE`/`PART`/`SYNC`/`DISCOVER` — **no new user verbs**.
 4. Foreign structure via reused `NS-META`/`CHANNEL-LAYOUT` assertions; foreign-scoped event
-   ingestion (reusing `Cmd::Ingest`-style paths); home-authoritative replica minting.
+   ingestion (reusing `Cmd::Ingest`-style paths); adapter-minted ids throughout (§7a.0e).
 5. Store: foreign namespaces / channels / membership via the **existing** tables + an `origin`
    URI marker on the namespace record (mem + PG, shared contract; migration 0052) — reuse +
    discriminator, not a parallel table set (owner call 2026-08-03).
