@@ -2,6 +2,7 @@
 // components touch. A module singleton so neither has to smuggle it through the
 // AppCtx. (Grows as more modal/overlay flags migrate off the layout.)
 import type { Msg } from "$lib/types";
+import { view } from "$lib/navigation/view.svelte";
 
 /// The User Settings overlay tabs.
 export type UserTab = "account" | "appearance" | "connection" | "verification";
@@ -22,6 +23,9 @@ export type NsTab =
   | `plugin:${string}`;
 
 export const ui = $state<{
+  /// The namespace the server-scoped surfaces act on, when it is NOT the one being
+  /// viewed. See `scopedNs`.
+  targetNs: string | null;
   /// The channel whose ChannelSettings (permissions) modal is open, or null.
   /// The reducer re-keys this when that channel is renamed.
   chanPerms: string | null;
@@ -72,6 +76,7 @@ export const ui = $state<{
   draggingCat: string | null;
   catDrop: string | null;
 }>({
+  targetNs: null,
   chanPerms: null,
   emailBannerDismissed: false,
   nsSettingsOpen: false,
@@ -109,4 +114,28 @@ export function toggleTheme(): void {
   } catch {
     /* storage unavailable */
   }
+}
+
+/// The namespace the server-scoped surfaces act on: Server Settings, Server
+/// Profile, notification settings, invites, channel/category creation.
+///
+/// `null` = the one you are viewing, which is the ordinary case (opened from the
+/// sidebar header). The rail's context menu sets it, so those flows can act on a
+/// namespace **without navigating to it** — previously they all read
+/// `view.activeServer` directly, so right-clicking one tile and choosing "Create
+/// Channel" would have created it in whichever server happened to be open.
+///
+/// Cleared whenever one of those surfaces closes, so a stale target can never
+/// silently redirect the next edit.
+export const scopedNs = (): string => ui.targetNs ?? view.activeServer;
+
+/// Open a server-scoped surface against `ns` (or the active one when omitted).
+export function withTargetNs(ns: string | undefined, open: () => void): void {
+  ui.targetNs = ns ?? null;
+  open();
+}
+
+/// Drop the override — call when a server-scoped surface closes.
+export function clearTargetNs(): void {
+  ui.targetNs = null;
 }

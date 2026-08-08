@@ -198,6 +198,19 @@ pub fn registration_yaml(cfg: &Config, url: &str) -> String {
         cfg.matrix.puppet_prefix,
         regex_escape(&cfg.matrix.domain)
     );
+    // Two alias namespaces, and both are needed.
+    //
+    // Declaring them at all is mandatory: Synapse refuses `createRoom` with an
+    // alias outside an appservice's namespaces (`M_EXCLUSIVE`), so with
+    // `aliases: []` outbound projection could never create its Space.
+    //
+    // `#weft_<id>` is **exclusive** — those are the canonical, id-keyed aliases the
+    // bridge relies on, and nobody else should be able to squat one. The catch-all
+    // is **non-exclusive**, which is what lets a Space carry its bare vanity
+    // (`#gaming:…`, the name a Matrix user would guess) without the bridge claiming
+    // every alias on the homeserver: it may mint any name, and so may everyone else.
+    let alias_regex = format!("#weft_.*:{}", regex_escape(&cfg.matrix.domain));
+    let vanity_alias_regex = format!("#.*:{}", regex_escape(&cfg.matrix.domain));
 
     format!(
         r#"id: weft-matrix
@@ -210,7 +223,11 @@ namespaces:
   users:
     - exclusive: true
       regex: {regex}
-  aliases: []
+  aliases:
+    - exclusive: true
+      regex: {alias_regex}
+    - exclusive: false
+      regex: {vanity_alias_regex}
   rooms: []
 "#,
         url = yaml_quoted(url),
@@ -218,6 +235,8 @@ namespaces:
         hs_token = yaml_quoted(&cfg.matrix.hs_token),
         bot = yaml_quoted(&cfg.matrix.bot),
         regex = yaml_quoted(&regex),
+        alias_regex = yaml_quoted(&alias_regex),
+        vanity_alias_regex = yaml_quoted(&vanity_alias_regex),
     )
 }
 

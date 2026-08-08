@@ -151,6 +151,19 @@ export class Session {
 
   // Do I hold a specific capability at the active server's scope (`ns:<server>`,
   // or `*` at network level)? The per-permission gate for server-menu actions.
+  /// A capability at a **named** namespace's scope — `serverCap` for a namespace
+  /// other than the one being viewed (the rail's context menu).
+  ///
+  /// The `ensureCapsAt` is the load-bearing part: caps are server-resolved and
+  /// fetched per scope, so `can()` on a namespace nobody has opened answers
+  /// `false` for everything until the fetch lands. Reading it without ensuring is
+  /// why the tile menu showed only its one ungated entry.
+  nsCap(ns: string, cap: string): boolean {
+    const scope = ns ? `ns:${ns}` : "*";
+    this.ensureCapsAt(this.account, scope);
+    return this.can(cap, scope);
+  }
+
   serverCap(cap: string): boolean {
     const scope = view.activeServer ? `ns:${view.activeServer}` : "*";
     this.ensureCapsAt(this.account, scope);
@@ -170,6 +183,29 @@ export class Session {
       this.isNsOwner(this.account) ||
       this.serverCanGrant() ||
       ["ns-admin", "ban", "mute", "kick", "reports", "chan-create", "policy", "manage-nicks"].some((c) => this.serverCap(c))
+    );
+  }
+
+  /// `serverCanGrant` for a **named** namespace.
+  nsCanGrant(ns: string): boolean {
+    const scope = ns ? `ns:${ns}` : "*";
+    this.ensureCapsAt(this.account, scope);
+    return this.canGrant(scope);
+  }
+
+  /// `canOpenServerSettings` for a **named** namespace — same reachability rule
+  /// (owner, any grant delegation, or any moderation/administration cap), asked of
+  /// a namespace that need not be the one being viewed.
+  nsCanOpenSettings(ns: string): boolean {
+    const scope = ns ? `ns:${ns}` : "*";
+    this.ensureCapsAt(this.account, scope);
+
+    return (
+      store.servers.get(ns)?.owner === this.account ||
+      this.canGrant(scope) ||
+      ["ns-admin", "ban", "mute", "kick", "reports", "chan-create", "policy", "manage-nicks"].some((c) =>
+        this.can(c, scope),
+      )
     );
   }
 

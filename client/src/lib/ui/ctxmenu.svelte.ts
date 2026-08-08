@@ -22,9 +22,10 @@ import { openThread } from "$lib/messages/threads.svelte";
 import { togglePin, openReport, startEdit, doDelete } from "$lib/messages/composer.svelte";
 import { peerOf, profileStore } from "$lib/profile/profile.svelte";
 
-import { openDm, closeDm, dmKeyFor } from "$lib/navigation/navigation";
+import { openDm, closeDm, dmKeyFor, nsLeave } from "$lib/navigation/navigation";
 import { moderate, banScope, liftMod, denyList } from "$lib/moderation/moderation";
 import { openCreateChannel, openCreateChannelInCat, openCreateCategory, deleteCategory } from "$lib/channels/channelcreate.svelte";
+import { openNsSettingsFor, openNotifSettingsFor, openServerProfileFor } from "$lib/namespaces/server.svelte";
 
 const activeChannel = () => channelStore.channels[view.active];
 
@@ -234,6 +235,82 @@ export function catCtx(e: MouseEvent, cat: string): void {
     items.push({ divider: true });
     items.push({ label: "Delete category", icon: "delete", danger: true, run: () => deleteCategory(cat) });
   }
+  openCtx(e, items);
+}
+
+/// Right-click a rail tile. Its own menu, acting on `ns` explicitly — it used to
+/// call `openServerMenu`, which *switched to* the namespace and dropped the
+/// sidebar header open, so right-clicking a tile navigated you somewhere you only
+/// wanted to inspect.
+///
+/// A **locked** namespace (provider-managed, bridge disconnected) offers only
+/// Leave. Everything else here would be refused by weftd while the provider is
+/// down, and leaving is purely local membership, so it still works — which is what
+/// makes the tile actionable rather than a dead end.
+///
+/// The items are the ones that can name a namespace explicitly. Creating channels
+/// and opening Server Settings stay on the sidebar header, because they act on the
+/// *active* server: offering them here would have them quietly apply to whichever
+/// namespace is open rather than the one you right-clicked.
+export function serverCtx(e: MouseEvent, ns: string): void {
+  const server = store.servers.get(ns);
+  const name = server?.displayName ?? ns;
+  const scope = `ns:${ns}`;
+
+  if (server?.providerOnline === false) {
+    openCtx(e, [
+      { header: `${name} — bridge offline` },
+      { label: "Leave server", icon: "leave", danger: true, run: () => void nsLeave(ns) },
+    ]);
+    return;
+  }
+
+  const muted = store.mutedAt(scope);
+  // `nsCap`, not `can`: it ensures this scope's caps are fetched. `can` alone is
+  // false for a namespace whose caps never loaded, which is every namespace you
+  // have not opened.
+  const canInvite = store.session.nsCap(ns, "invite");
+  const canAdmin = store.session.nsCap(ns, "ns-admin");
+  const canCreate = store.session.nsCap(ns, "chan-create");
+
+  // The same set as the sidebar header's menu, but every entry names `ns`
+  // explicitly, so none of them needs the namespace to be open first. That was
+  // the whole problem: they all read `view.activeServer`, so acting on a tile
+  // meant navigating to it (or silently editing whichever server was open).
+  const items: CtxItem[] = [];
+
+  if (canInvite) items.push({ label: "Create Invite", icon: "invite", run: () => store.invites.mintInvite(ns) });
+  items.push({ label: "Notification Settings", icon: "bell", run: () => openNotifSettingsFor(ns) });
+  if (canAdmin) items.push({ label: "Edit Server Profile", icon: "user", run: () => openServerProfileFor(ns) });
+  // Same reachability rule as the header: owner, any grant delegation, or any
+  // moderation/administration cap — not `ns-admin` alone.
+  if (store.session.nsCanOpenSettings(ns))
+    items.push({ label: "Server Settings", icon: "settings", run: () => openNsSettingsFor(ns) });
+
+  if (canCreate) {
+    items.push({ divider: true });
+    items.push({ label: "Create Channel", icon: "channel", run: () => openCreateChannel(undefined, ns) });
+    items.push({ label: "Create Category", icon: "folder", run: () => openCreateCategory(ns) });
+  }
+
+  items.push(...pluginItems("server-menu", ["namespace", "none"], ns));
+
+  items.push({ divider: true });
+  items.push({
+    label: muted ? "Unmute server" : "Mute server",
+    icon: "bell",
+    run: () => setNotifLevel(scope, muted ? "mentions" : "nothing"),
+  });
+  items.push({ label: "Copy Server ID", icon: "copy", run: () => void navigator.clipboard?.writeText(ns) });
+
+  // The owner cannot leave their own namespace — they transfer or delete it.
+  // Compared against *this* namespace's owner, not `isNsOwner`, which answers for
+  // whichever server is currently open.
+  if (server?.owner !== store.session.account) {
+    items.push({ divider: true });
+    items.push({ label: "Leave Server", icon: "leave", danger: true, run: () => void nsLeave(ns) });
+  }
+
   openCtx(e, items);
 }
 

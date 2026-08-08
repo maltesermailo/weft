@@ -4,10 +4,12 @@ import * as media from "$lib/media/media";
 import { Membership } from "$lib/membership/membership.svelte";
 import type { Role } from "$lib/roles/role.svelte";
 import { store, type NotifLevel } from "$lib/store/store.svelte";
+import { ui } from "$lib/ui/ui.svelte";
+import { roleStore } from "$lib/roles/roles.svelte";
 import * as weft from "$lib/transport/weft";
 import { toast } from "$lib/notifications/toasts.svelte";
 import * as md from "$lib/rendering/markdown";
-import { view } from "$lib/navigation/view.svelte";
+import { scopedNs } from "$lib/ui/ui.svelte";
 import type { HandlerMap } from "$lib/sync/handler-map";
 
 // ---- §6.2 namespace-admin editor (ServerSettingsModal) ----
@@ -30,7 +32,7 @@ export class NsAdmin {
 
   // Persist the overview edits (title/description/visibility) for the active ns.
   saveNsMeta(): void {
-    const ns = view.activeServer;
+    const ns = scopedNs();
     if (this.title.trim()) weft.nsMeta(ns, "title", this.title.trim()).catch(() => {});
     if (this.desc.trim()) weft.nsMeta(ns, "description", this.desc.trim()).catch(() => {});
     weft.nsVisibility(ns, this.vis).catch(() => {});
@@ -42,32 +44,32 @@ export class NsAdmin {
   // an operator default.
   nsSetProjection(scheme: string, open: boolean): void {
     weft
-      .nsMeta(view.activeServer, `bridge:${scheme}`, open ? "open" : "closed")
+      .nsMeta(scopedNs(), `bridge:${scheme}`, open ? "open" : "closed")
       .catch((e) => toast(String(e), "error"));
   }
 
   // §11.10 open/close this namespace to on-demand federation (needs public).
   nsSetFederation(open: boolean): void {
-    weft.nsMeta(view.activeServer, "federation", open ? "open" : "closed").catch((e) => toast(String(e), "error"));
+    weft.nsMeta(scopedNs(), "federation", open ? "open" : "closed").catch((e) => toast(String(e), "error"));
   }
 
   // §6.2 set (or clear, "") the channel that greets new members.
   nsSetWelcome(channel: string): void {
-    if (!view.activeServer) return;
-    weft.nsMeta(view.activeServer, "welcome", channel).catch((e) => toast(String(e), "error"));
+    if (!scopedNs()) return;
+    weft.nsMeta(scopedNs(), "welcome", channel).catch((e) => toast(String(e), "error"));
   }
 
   // §2.4 recovery ladder: reveal my quorum pubkey / start / co-sign / submit a
   // recovery record. The record is shared out-of-band and co-signed to quorum.
   showRecoveryKey(): void {
     weft
-      .recoveryPubkey(store.session.network, view.activeServer)
+      .recoveryPubkey(store.session.network, scopedNs())
       .then((k) => (this.myRecoveryKey = k))
       .catch((e) => toast(String(e), "error"));
   }
   startRecovery(): void {
     weft
-      .recoveryStart(store.session.network, view.activeServer, store.session.account)
+      .recoveryStart(store.session.network, scopedNs(), store.session.account)
       .then((doc) => {
         this.recoveryDoc = doc;
         toast("Recovery started — share this record with your quorum to co-sign");
@@ -77,22 +79,22 @@ export class NsAdmin {
   cosignRecovery(): void {
     if (!this.recoveryDoc.trim()) return;
     weft
-      .recoveryCosign(store.session.network, view.activeServer, this.recoveryDoc.trim())
+      .recoveryCosign(store.session.network, scopedNs(), this.recoveryDoc.trim())
       .then((doc) => (this.recoveryDoc = doc))
       .catch((e) => toast(String(e), "error"));
   }
   submitRecovery(): void {
-    if (this.recoveryDoc.trim()) weft.nsRecover(view.activeServer, this.recoveryDoc.trim()).catch((e) => toast(String(e), "error"));
+    if (this.recoveryDoc.trim()) weft.nsRecover(scopedNs(), this.recoveryDoc.trim()).catch((e) => toast(String(e), "error"));
   }
 
   // §9.4 custom emoji (namespace-scoped) admin actions.
   addEmoji(name: string, media: string): void {
-    if (!view.activeServer) return;
-    weft.emojiAdd(view.activeServer, name, media).catch((e) => toast(String(e), "error"));
+    if (!scopedNs()) return;
+    weft.emojiAdd(scopedNs(), name, media).catch((e) => toast(String(e), "error"));
   }
   removeEmoji(name: string): void {
-    if (!view.activeServer) return;
-    weft.emojiRemove(view.activeServer, name).catch((e) => toast(String(e), "error"));
+    if (!scopedNs()) return;
+    weft.emojiRemove(scopedNs(), name).catch((e) => toast(String(e), "error"));
   }
 }
 
@@ -101,12 +103,12 @@ export const nsAdmin = new NsAdmin();
 // ---- §9.4 custom emoji reads (namespace-scoped) ----
 // The active namespace's custom emoji as an array (for pickers).
 export const activeEmoji = (): { name: string; media: string }[] =>
-  [...(view.activeServer ? (store.servers.get(view.activeServer)?.emoji ?? []) : [])].map(([name, media]) => ({ name, media }));
+  [...(scopedNs() ? (store.servers.get(scopedNs())?.emoji ?? []) : [])].map(([name, media]) => ({ name, media }));
 
 // Resolve a `:name:` shortcode to a fetchable image URL in the active namespace,
 // or null if it isn't a custom emoji here.
 export const emojiUrlFor = (name: string): string | null => {
-  const ref = view.activeServer ? store.servers.get(view.activeServer)?.emoji.get(name) : undefined;
+  const ref = scopedNs() ? store.servers.get(scopedNs())?.emoji.get(name) : undefined;
   return ref ? media.mediaUrl(ref) : null;
 };
 
@@ -327,3 +329,36 @@ export const serverHandlers: HandlerMap = {
   // `joined` flag + the deletion drop + the owner auto-join stay on the raw event.
   "ns-descriptor": (e) => store.server(e.id).applyMeta(e),
 };
+
+/// Open Server Settings for `ns` (or the active namespace when omitted).
+///
+/// Lives here rather than in the layout so the rail's context menu can open it
+/// too — it seeds the `nsAdmin` draft from the record and pulls that scope's
+/// roles, so flipping `ui.nsSettingsOpen` alone would show a stale form.
+export function openNsSettingsFor(ns?: string): void {
+  ui.targetNs = ns ?? null;
+
+  const meta = store.servers.get(ns ?? scopedNs());
+  nsAdmin.title = meta?.title ?? "";
+  nsAdmin.desc = meta?.description ?? "";
+  nsAdmin.vis = meta?.visibility ?? "public";
+  nsAdmin.newOwner = "";
+  nsAdmin.recKeys = "";
+  ui.nsTab = "overview";
+  ui.nsSettingsOpen = true;
+  roleStore.fetchRoles(roleStore.nsRoleScope());
+}
+
+/// Open the per-namespace notification settings for `ns`.
+export function openNotifSettingsFor(ns?: string): void {
+  ui.targetNs = ns ?? null;
+  ui.notifSettingsOpen = true;
+  ui.serverMenu = false;
+}
+
+/// Open the per-namespace profile (your nickname there) for `ns`.
+export function openServerProfileFor(ns?: string): void {
+  ui.targetNs = ns ?? null;
+  if (ns ?? scopedNs()) ui.serverProfileOpen = true;
+  ui.serverMenu = false;
+}

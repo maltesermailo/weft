@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { scopedNs as ns } from "$lib/ui/ui.svelte";
   import { store } from "$lib/store/store.svelte";
   import { vm } from "$lib/navigation/viewmodel.svelte";
   import { profileStore } from "$lib/profile/profile.svelte";
@@ -8,10 +9,10 @@
   const app = getApp();
   let { onclose }: { onclose: () => void } = $props();
 
-  const scope = `ns:${app.activeServer}`;
+  const scope = `ns:${ns()}`;
   // `serverName` = the model's `displayName` (title → origin → vanity → id), so a
   // bridged namespace shows where it came from rather than a local placeholder.
-  const serverName = $derived(vm.serverName(app.activeServer));
+  const serverName = $derived(vm.serverName(ns()));
   const current = $derived(profileStore.nickOf(store.session.account));
   let draft = $state(untrack(() => profileStore.nickOf(store.session.account)));
   const dirty = $derived(draft.trim() !== current);

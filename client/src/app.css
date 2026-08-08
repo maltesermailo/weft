@@ -272,6 +272,33 @@ button:disabled {
   justify-content: center;
   border: 2px solid #101218;
 }
+/* §9 a provider-managed namespace whose bridge is disconnected: it exists but
+   nothing in it can load, so the tile says why and stops taking clicks. Shaped
+   like the mention badge (same corner, same size) but amber — a state, not a
+   count. */
+.tile-badge.offline {
+  left: auto;
+  right: -3px;
+  bottom: -3px;
+  top: auto;
+  transform: none;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--warning, #e8a33d);
+  color: #1a1400;
+  font-size: 11px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #101218;
+}
+.comm-tile.offline button {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(1);
+}
 .trust-mark {
   position: absolute;
   right: -2px;

@@ -157,11 +157,14 @@ export class ChannelStore {
   }
 
   // ---- §6.3 category list (server state, on the namespace) ----
-  nsCategories(): string[] {
-    return store.servers.get(view.activeServer)?.categories ?? [];
+  /// `ns` addresses a namespace other than the one being viewed — the rail's
+  /// context menu can create a category without opening the server first.
+  nsCategories(ns?: string): string[] {
+    return store.servers.get(ns || view.activeServer)?.categories ?? [];
   }
-  setCategories(list: string[]): void {
-    if (view.activeServer) weft.nsMeta(view.activeServer, "categories", list.join(",")).catch((e) => toast(String(e), "error"));
+  setCategories(list: string[], ns?: string): void {
+    const target = ns || view.activeServer;
+    if (target) weft.nsMeta(target, "categories", list.join(",")).catch((e) => toast(String(e), "error"));
   }
 
   // ---- Discord-style drag/drop reorder (ChannelList) ----

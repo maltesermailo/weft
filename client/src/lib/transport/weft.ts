@@ -249,6 +249,12 @@ export type WeftEvent =
       /// provider hides. Display gating only — it grants nothing.
       authority: string | null;
       settings_disabled: string[];
+      /// §7a.2 origin URI of a provider-managed replica; null when native.
+      origin: string | null;
+      /// §9 provider liveness for a replica; null when native.
+      provider_online: boolean | null;
+      /// §17.1 outbound-projection opt-ins.
+      bridges: string[];
     }
   | {
       kind: "channel-layout";

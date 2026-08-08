@@ -389,6 +389,20 @@ export function handle(e: weft.WeftEvent) {
       break;
     }
     case "ns-meta":
+      // A provider coming up mid-session is announced as liveness on ITS
+      // namespaces (weftd pushes NS-META with `provider=online`), and nothing
+      // else tells a connected client that the plugin catalog grew. So refresh it
+      // here — that is what makes a bridge started while the app is open appear
+      // in Federation / Projection instead of only after a reconnect.
+      //
+      // Guarded on the scheme actually being missing, so a burst of NS-META for
+      // several namespaces costs one `PLUGINS`, not one each.
+      if (e.provider_online === true) {
+        const scheme = e.origin?.match(/^([a-z][a-z0-9+.-]*):\/\//)?.[1];
+        if (scheme && ![...plugins.catalog.values()].some((p) => (p.schemes ?? []).includes(scheme))) {
+          plugins.refresh();
+        }
+      }
       // v0.13: namespaces are keyed by their immutable **id** everywhere the
       // client addresses them (channels `#<id>/…`, scopes `ns:<id>`, the rail
       // tile is `nsOf(channel)` = the id). The vanity `e.name` is display only.

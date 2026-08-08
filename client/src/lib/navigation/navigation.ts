@@ -72,9 +72,14 @@ export function openServerMenu(ns: string): void {
 /// unsubscribed us by then, so it answers `CAP-REQUIRED`, and `catchUpChannel`
 /// would re-create the very record we just deleted. So: flip membership (the rail
 /// reads that, and updates immediately), leave the view, and only then tear down.
-export async function nsLeave(): Promise<void> {
-  const ns = view.activeServer;
+export async function nsLeave(target?: string): Promise<void> {
+  // An explicit target so the rail's context menu can leave a namespace it is
+  // NOT viewing — notably one locked by a bridge outage, which we deliberately
+  // never switch to.
+  const ns = target ?? view.activeServer;
   if (!ns) return;
+
+  const leavingActive = ns === view.activeServer;
 
   ui.serverMenu = false;
   weft.nsLeave(ns).catch((e) => toast(String(e), "error"));
@@ -82,7 +87,7 @@ export async function nsLeave(): Promise<void> {
   const server = store.servers.get(ns);
   if (server) server.joined = false;
 
-  await goHome();
+  if (leavingActive) await goHome();
 
   for (const name of Object.keys(channelStore.channels)) {
     if (name.startsWith("#") && nsOf(name) === ns) delete channelStore.channels[name];

@@ -2491,13 +2491,52 @@ impl Bridge {
             .unwrap_or_default();
 
         let scope = format!("ns:{ns_id}");
+        // Which side owns authority here decides who asserts it.
+        //
+        // A **consumed** space is the realm's: `authority: levels` means Matrix
+        // power levels *are* the authority, so the translation is asserted on the
+        // realm's own authority (weftd runs a provider's bare GRANT as
+        // `Actor::Provider` precisely because "the provider governs its
+        // namespaces"). Attributing it to the Matrix admin instead made it
+        // circular — `Actor::Foreign` is checked against grants the provider
+        // issued, so promoting someone required already holding WEFT authority,
+        // and every promotion came back `CAP-REQUIRED` and got reverted.
+        //
+        // A **projected** namespace is ours: WEFT is authoritative, so the change
+        // is attributed to the actor and refused if they hold nothing — and the
+        // §10 revert undoes the Matrix side, which had moved first.
+        let consumed = self.store.state.space_of_ns(ns_id).is_some();
+
         for (mxid, level) in crate::levels::diff_users(&old, &new) {
             let Some(subject) = self.weft_subject_of_mxid(&mxid) else {
                 continue; // the bot, or an unmappable identity
             };
 
+            // Revoke-then-grant makes the translation deterministic: the new
+            // tier's caps replace whatever the old tier held.
+            let caps = crate::levels::caps_for_level(level);
+
+            if consumed {
+                // No label and no parked undo: Matrix is authoritative here, so a
+                // WEFT refusal is ours to log, not Matrix's to revert. Reverting
+                // would fight the side that owns the state.
+                if let Err(e) = self.realm.revoke(&subject, &scope, None).await {
+                    warn!(subject, "revoke failed: {e:#}");
+                    continue;
+                }
+                if let Some(caps) = caps {
+                    if let Err(e) = self.realm.grant(&subject, &scope, caps).await {
+                        warn!(subject, "grant failed: {e:#}");
+                    }
+                }
+
+                continue;
+            }
+
             // §10: label the act so a refusal comes back correlated, and park
-            // the undo — the Matrix state changed *before* WEFT agreed.
+            // the undo — the Matrix state changed *before* WEFT agreed. Only the
+            // act that can be *refused* carries the label; a revoke of nothing
+            // cannot.
             let label = self.park_act(PendingAct::Level {
                 room: room_id.to_string(),
                 mxid: mxid.clone(),
@@ -2505,10 +2544,6 @@ impl Bridge {
                 actor: actor.to_string(),
             });
 
-            // Revoke-then-grant makes the translation deterministic: the new
-            // tier's caps replace whatever the old tier held. Only the act that
-            // can be *refused* carries the label — a revoke of nothing cannot.
-            let caps = crate::levels::caps_for_level(level);
             if let Err(e) = self
                 .realm
                 .revoke_as(
@@ -3380,6 +3415,11 @@ impl Bridge {
     /// logged rather than failing the projection.
     async fn ensure_vanity_alias(&self, room: &str, ns_id: &str, vanity: &str) {
         let canonical = format!("#weft_{ns_id}:{}", self.identity.domain());
+        // The bare vanity (owner directive): `#gaming:example.org`, the name a
+        // Matrix user would actually guess. It needs the registration's
+        // *non-exclusive* catch-all alias namespace — an appservice may only create
+        // aliases it has declared, and non-exclusive means the bridge can mint them
+        // without preventing anyone else from using a name.
         let wanted = format!("#{vanity}:{}", self.identity.domain());
 
         // What the room currently advertises, so a rename can drop the stale name

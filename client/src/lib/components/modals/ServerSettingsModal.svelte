@@ -14,6 +14,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
   import * as weft from "$lib/transport/weft";
   import * as media from "$lib/media/media";
   import type { NsTab } from "$lib/ui/ui.svelte";
+  import { scopedNs as ns } from "$lib/ui/ui.svelte";
   import RolesTab from "$lib/components/modals/RolesTab.svelte";
   import PluginBlock from "$lib/components/plugins/PluginBlock.svelte";
   import { plugins } from "$lib/plugins/plugins.svelte";
@@ -24,10 +25,14 @@ import { roleStore } from "$lib/roles/roles.svelte";
   // ---- Per-capability tab visibility (§6.5) ----
   // A moderator sees only the tabs they can act on; owner / ns-admin sees all.
   // Each maps to the concrete WEFT capability that governs that surface.
-  const isAdmin = $derived(store.session.isNsOwner(store.session.account) || store.session.serverCap("ns-admin"));
+  /// Owner-or-ns-admin **of the namespace being configured**. `isNsOwner` and
+  /// `serverCap` both answer for whichever namespace is *viewed*, which is the
+  /// wrong question once Server Settings can be opened from the rail.
+  const isOwner = $derived(store.servers.get(ns())?.owner === store.session.account);
+  const isAdmin = $derived(isOwner || store.session.nsCap(ns(), "ns-admin"));
   // The active namespace's display name (v0.13) — `activeServer` is its id, used
   // for scopes/commands; anywhere a *name* is shown to the user, use this.
-  const serverVanity = $derived(vm.activeNsMeta?.name || app.activeServer);
+  const serverVanity = $derived(vm.activeNsMeta?.name || ns());
   // §7a.3 the namespace's capability profile. A provider-managed namespace says
   // which native surfaces to hide — a Matrix-bridged one hides `roles`, because
   // its authority is power levels and it supplies its own screen for them.
@@ -40,15 +45,25 @@ import { roleStore } from "$lib/roles/roles.svelte";
   // The scheme of the active namespace's origin (`matrix://…` → `matrix`), or
   // null when it is native.
   const nsScheme = $derived(
-    store.servers.get(app.activeServer)?.origin?.match(/^([a-z][a-z0-9+.-]*):\/\//)?.[1] ?? null,
+    store.servers.get(ns())?.origin?.match(/^([a-z][a-z0-9+.-]*):\/\//)?.[1] ?? null,
   );
-  // Schemes some *connected* provider serves — the realms this namespace could be
-  // projected into. Empty when no adapter is up, which is why the section hides.
+  // Realms this namespace could be projected into: what a *connected* provider
+  // serves, plus whatever it is already projected into — so an opt-in stays
+  // visible (and revocable) while its adapter is down.
   const realmSchemes = $derived([
-    ...new Set([...plugins.catalog.values()].flatMap((p) => p.schemes ?? [])),
+    ...new Set([
+      ...[...plugins.catalog.values()].flatMap((p) => p.schemes ?? []),
+      ...(store.servers.get(ns())?.bridges ?? []),
+    ]),
   ].sort());
+  // Only a connected provider can act on a *new* opt-in, so enabling one is gated
+  // on that — but the section is always drawn and says why, rather than vanishing
+  // and leaving "where is the Matrix toggle?" as the only clue.
+  const connectedSchemes = $derived(
+    new Set([...plugins.catalog.values()].flatMap((p) => p.schemes ?? [])),
+  );
   const projectedInto = (scheme: string) =>
-    (store.servers.get(app.activeServer)?.bridges ?? []).includes(scheme);
+    (store.servers.get(ns())?.bridges ?? []).includes(scheme);
 
   const pluginPages = $derived(
     plugins.actionsFor("settings").filter(({ plugin, action }) => {
@@ -80,21 +95,24 @@ import { roleStore } from "$lib/roles/roles.svelte";
     }
 
     app.nsTab = pluginTab(plugin, action);
-    plugins.invoke(plugin, action, app.activeServer);
+    plugins.invoke(plugin, action, ns());
   }
 
-  const profile = $derived(store.servers.get(app.activeServer));
+  const profile = $derived(store.servers.get(ns()));
   const hidden = $derived(new Set(profile?.settingsDisabled ?? []));
   const tabPerm = $derived({
     overview: isAdmin,
-    roles: isAdmin || store.session.serverCanGrant(),
-    members: isAdmin || store.session.serverCanGrant() || ["ban", "mute", "kick", "reports"].some((c) => store.session.serverCap(c)),
+    roles: isAdmin || store.session.nsCanGrant(ns()),
+    members:
+      isAdmin ||
+      store.session.nsCanGrant(ns()) ||
+      ["ban", "mute", "kick", "reports"].some((c) => store.session.nsCap(ns(), c)),
     emoji: isAdmin,
-    invites: isAdmin || store.session.serverCap("invite"),
+    invites: isAdmin || store.session.nsCap(ns(), "invite"),
     federation: isAdmin,
-    bans: isAdmin || store.session.serverCap("ban") || store.session.serverCap("mute"),
-    recovery: store.session.isNsOwner(store.session.account),
-    danger: store.session.isNsOwner(store.session.account),
+    bans: isAdmin || store.session.nsCap(ns(), "ban") || store.session.nsCap(ns(), "mute"),
+    recovery: isOwner,
+    danger: isOwner,
   } as Record<string, boolean>);
   const visibleTabs = $derived(
     (["overview", "roles", "members", "emoji", "invites", "federation", "bans", "recovery", "danger"] as const).filter(
@@ -112,7 +130,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
 
   // ---- Members directory (NS INFO MEMBERS) ----
   let memberSearch = $state("");
-  const roster = $derived(vm.nsMembers(app.activeServer));
+  const roster = $derived(vm.nsMembers(ns()));
   const shownMembers = $derived(
     roster.filter(
       (m) =>
@@ -123,10 +141,10 @@ import { roleStore } from "$lib/roles/roles.svelte";
   // A member's role pill is keyed by role **id** (v0.13); resolve its color +
   // display name through the scope's definitions.
   function roleColor(id: string): string {
-    return roleStore.roleById(`ns:${app.activeServer}`, id)?.color ?? "#99aab5";
+    return roleStore.roleById(`ns:${ns()}`, id)?.color ?? "#99aab5";
   }
   function roleName(id: string): string {
-    return roleStore.roleById(`ns:${app.activeServer}`, id)?.name ?? id;
+    return roleStore.roleById(`ns:${ns()}`, id)?.name ?? id;
   }
   // Join date: "0" means the server had no recorded join time (pre-v0.12 backfill).
   function fmtJoined(ms: number): string {
@@ -170,7 +188,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
   function proposeBridge() {
     const p = brPeer.trim();
     if (!p) return;
-    store.federation.bridgePropose(`ns:${app.activeServer}`, p, brHistory, brMedia, brTyping);
+    store.federation.bridgePropose(`ns:${ns()}`, p, brHistory, brMedia, brTyping);
     brPeer = "";
   }
 
@@ -227,9 +245,9 @@ import { roleStore } from "$lib/roles/roles.svelte";
   <nav class="so-nav">
     <div class="so-nav-inner">
       <div class="so-server-head">
-        <span class="so-server-avatar">{initials(vm.activeNsMeta?.name || app.activeServer)}</span>
+        <span class="so-server-avatar">{initials(vm.activeNsMeta?.name || ns())}</span>
         <div class="so-server-meta">
-          <div class="so-server-name">{vm.activeNsMeta?.name || app.activeServer}</div>
+          <div class="so-server-name">{vm.activeNsMeta?.name || ns()}</div>
           <div class="so-server-sub">Server Settings</div>
         </div>
       </div>
@@ -243,7 +261,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
         <button class="so-navitem" class:active={app.nsTab === "roles"} onclick={() => (app.nsTab = "roles")}>Roles</button>
       {/if}
       {#if visibleTabs.includes("members")}
-        <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => { app.nsTab = "members"; vm.fetchNsMembers(app.activeServer); refreshBans(); }}>Members</button>
+        <button class="so-navitem" class:active={app.nsTab === "members"} onclick={() => { app.nsTab = "members"; vm.fetchNsMembers(ns()); refreshBans(); }}>Members</button>
       {/if}
       {#if visibleTabs.includes("emoji")}
         <button class="so-navitem" class:active={app.nsTab === "emoji"} onclick={() => (app.nsTab = "emoji")}>Emoji</button>
@@ -294,7 +312,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
             <div class="ns-name">⚠ Recovery pending (rung {vm.activeNsMeta.recovery_rung})</div>
             <div class="ns-desc">A root rotation is scheduled. As the live owner you can veto it.</div>
           </div>
-          <button class="danger-btn" onclick={() => weft.nsRecoveryCancel(store.session.network, app.activeServer).catch((e) => app.toast(String(e), "error"))}>Cancel recovery</button>
+          <button class="danger-btn" onclick={() => weft.nsRecoveryCancel(store.session.network, ns()).catch((e) => app.toast(String(e), "error"))}>Cancel recovery</button>
         </div>
       {/if}
 
@@ -304,9 +322,9 @@ import { roleStore } from "$lib/roles/roles.svelte";
 
         <div class="ov-card">
           <div class="ov-identity">
-            <span class="ov-avatar">{initials(nsAdmin.title.trim() || vm.activeNsMeta?.name || app.activeServer)}</span>
+            <span class="ov-avatar">{initials(nsAdmin.title.trim() || vm.activeNsMeta?.name || ns())}</span>
             <div class="ov-identity-meta">
-              <div class="ov-identity-name">{nsAdmin.title.trim() || vm.activeNsMeta?.name || app.activeServer}</div>
+              <div class="ov-identity-name">{nsAdmin.title.trim() || vm.activeNsMeta?.name || ns()}</div>
               <div class="ov-identity-sub">Namespace on {store.session.network}</div>
             </div>
           </div>
@@ -376,12 +394,12 @@ import { roleStore } from "$lib/roles/roles.svelte";
         <RolesTab />
       {:else if app.nsTab === "members"}
         <h1>Members</h1>
-        <p class="so-sub">Everyone in <b>{vm.activeNsMeta?.name || app.activeServer}</b>, when they joined, and the roles they hold. Click a role's <b>✕</b> to remove it, <b>+</b> to add one — roles are the only way to grant capabilities. Right-click a member for moderation.</p>
+        <p class="so-sub">Everyone in <b>{vm.activeNsMeta?.name || ns()}</b>, when they joined, and the roles they hold. Click a role's <b>✕</b> to remove it, <b>+</b> to add one — roles are the only way to grant capabilities. Right-click a member for moderation.</p>
 
         <div class="mem-search">
           <span aria-hidden="true">⌕</span>
           <input bind:value={memberSearch} placeholder="Search members" />
-          <button class="mem-refresh" title="Refresh" aria-label="Refresh roster" onclick={() => { vm.fetchNsMembers(app.activeServer); refreshBans(); }}>↻</button>
+          <button class="mem-refresh" title="Refresh" aria-label="Refresh roster" onclick={() => { vm.fetchNsMembers(ns()); refreshBans(); }}>↻</button>
         </div>
         <div class="mem-count">{shownMembers.length} {shownMembers.length === 1 ? "member" : "members"}</div>
 
@@ -523,7 +541,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
         {/if}
       {:else if app.nsTab === "bans"}
         <h1>Bans &amp; mutes</h1>
-        <p class="so-sub">Accounts denied at <code>ns:{app.activeServer}</code>. A <b>ban</b> blocks join + posting; a <b>mute</b> blocks posting. Lifting one takes effect immediately.</p>
+        <p class="so-sub">Accounts denied at <code>ns:{ns()}</code>. A <b>ban</b> blocks join + posting; a <b>mute</b> blocks posting. Lifting one takes effect immediately.</p>
         <div class="modal-list">
           {#each denyList() as d (d.kind + d.account)}
             <div class="ns-card">
@@ -542,7 +560,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
         <div class="modal-actions"><button class="set-btn" onclick={refreshBans}>Refresh</button></div>
       {:else if app.nsTab === "federation"}
         <h1>Federation</h1>
-        <p class="so-sub">Bridge <b>{serverVanity}</b>'s channels to a peer network. You control this as the namespace owner — bridges are scoped to <code>ns:{app.activeServer}</code>, non-transitive, and every change notifies members.</p>
+        <p class="so-sub">Bridge <b>{serverVanity}</b>'s channels to a peer network. You control this as the namespace owner — bridges are scoped to <code>ns:{ns()}</code>, non-transitive, and every change notifies members.</p>
 
         <div class="field-label">Auto-federation</div>
         <p class="so-sub">When open, another network can reach this namespace on demand — a user there references <code>{store.session.network}/{serverVanity}</code> and their server auto-establishes the bridge. Off by default; enabling it is an explicit opt-in.</p>
@@ -565,8 +583,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
              provider, read from the plugin catalog's `schemes` rather than
              hardcoding "matrix": a future adapter shows up here with no client
              change, and a realm nobody is bridging is not offered at all. -->
-        {#if realmSchemes.length}
-          <div class="field-label">Projection</div>
+        <div class="field-label">Projection</div>
           <p class="so-sub">
             Mirror <b>{serverVanity}</b> into a foreign realm, so its users can find and join it there.
             This is also what authorizes that realm to attribute its users into this namespace, so it is
@@ -576,20 +593,25 @@ import { roleStore } from "$lib/roles/roles.svelte";
             <label class="fed-check" style="margin-bottom:6px">
               <input
                 type="checkbox"
-                checked={(vm.activeNsMeta?.visibility ?? "") === "public" && projectedInto(scheme)}
-                disabled={(vm.activeNsMeta?.visibility ?? "") !== "public"}
+                checked={projectedInto(scheme)}
+                disabled={(vm.activeNsMeta?.visibility ?? "") !== "public" ||
+                  (!connectedSchemes.has(scheme) && !projectedInto(scheme))}
                 onchange={(e) => nsAdmin.nsSetProjection(scheme, e.currentTarget.checked)}
               />
               Project into <b>{scheme}</b>
+              {#if !connectedSchemes.has(scheme)}<span class="rep-state severed">adapter offline</span>{/if}
             </label>
           {/each}
+          {#if !realmSchemes.length}
+            <p class="so-sub">No realm adapter is connected, so there is nothing to project into yet. Start
+              the bridge (the Matrix one registers the <code>matrix</code> scheme) and it appears here.</p>
+          {/if}
           {#if (vm.activeNsMeta?.visibility ?? "") !== "public"}
             <p class="so-sub">Projection needs a <b>public</b> namespace — an unlisted or private one would be
               exposed by the foreign realm's own directory, leaking exactly what its visibility hides. Change
               visibility in Overview first.</p>
           {/if}
-          <div class="section-sep"></div>
-        {/if}
+        <div class="section-sep"></div>
 
         <div class="field-label">Active bridges</div>
         <div class="modal-list">
@@ -645,7 +667,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
         <div class="section-sep"></div>
         <div class="field-label">Quorum keys (comma-separated b64 pubkeys)</div>
         <input class="text-input" bind:value={nsAdmin.recKeys} placeholder="key1,key2,key3" />
-        <div class="modal-actions"><button class="ok-btn" onclick={() => nsAdmin.recKeys.trim() && weft.nsRecoverySet(app.activeServer, nsAdmin.recM, nsAdmin.recKeys.trim()).catch((e) => app.toast(String(e), "error"))}>Set recovery quorum</button></div>
+        <div class="modal-actions"><button class="ok-btn" onclick={() => nsAdmin.recKeys.trim() && weft.nsRecoverySet(ns(), nsAdmin.recM, nsAdmin.recKeys.trim()).catch((e) => app.toast(String(e), "error"))}>Set recovery quorum</button></div>
         <div class="section-sep"></div>
         <div class="set-row">
           <span>My recovery key (share for the quorum)</span>

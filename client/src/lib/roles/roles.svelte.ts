@@ -11,7 +11,7 @@ import type { Membership } from "$lib/membership/membership.svelte";
 import { confirmSuccess, toast, expectSuccess } from "$lib/notifications/toasts.svelte";
 import { EVERYONE_ROLE } from "$lib/constants";
 import { view } from "$lib/navigation/view.svelte";
-import { ui } from "$lib/ui/ui.svelte";
+import { ui, scopedNs } from "$lib/ui/ui.svelte";
 import type { HandlerMap } from "$lib/sync/handler-map";
 
 // ---- classes ----
@@ -98,7 +98,10 @@ export class RoleStore {
   // ---- §6.6 role editor (RolesTab) ----
   // Roles live at the active namespace's scope (or the network `*` off-server).
   nsRoleScope(): string {
-    return view.activeServer ? `ns:${view.activeServer}` : "*";
+    // `scopedNs`, not `view.activeServer`: the Roles tab lives inside Server
+    // Settings, which the rail's context menu can open for a namespace it is not
+    // viewing.
+    return scopedNs() ? `ns:${scopedNs()}` : "*";
   }
 
   toggleNewRoleCap(c: string): void {

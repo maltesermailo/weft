@@ -136,15 +136,15 @@
 {/if}
 
 {#if ui.nsSettingsOpen}
-  <ServerSettingsModal onclose={() => (ui.nsSettingsOpen = false)} />
+  <ServerSettingsModal onclose={() => { ui.nsSettingsOpen = false; ui.targetNs = null; }} />
 {/if}
 
 {#if ui.serverProfileOpen}
-  <ServerProfileModal onclose={() => (ui.serverProfileOpen = false)} />
+  <ServerProfileModal onclose={() => { ui.serverProfileOpen = false; ui.targetNs = null; }} />
 {/if}
 
 {#if ui.notifSettingsOpen}
-  <NotificationSettingsModal onclose={() => (ui.notifSettingsOpen = false)} />
+  <NotificationSettingsModal onclose={() => { ui.notifSettingsOpen = false; ui.targetNs = null; }} />
 {/if}
 
 <CallOverlay />

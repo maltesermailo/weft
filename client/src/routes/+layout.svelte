@@ -24,7 +24,7 @@
   import { store } from "$lib/store/store.svelte";
   
   import { moderate } from "$lib/moderation/moderation";
-  import { nsAdmin } from "$lib/namespaces/server.svelte";
+  import { nsAdmin, openNsSettingsFor, openNotifSettingsFor, openServerProfileFor } from "$lib/namespaces/server.svelte";
   
   
   
@@ -108,10 +108,10 @@ import { mkMsg, catchUpChannel } from "$lib/messages/messages.svelte";
   // Notification-pref resolvers (scopeKeyOf / notifLevel / isMuted / serverMuted /
   // notifLevelOf / setNotifLevel) → `$lib/notif`.
   // ---- notification-settings modal (per-namespace) ----
-  function openNotifSettings() {
-    ui.notifSettingsOpen = true;
-    ui.serverMenu = false;
-  }
+  // These three live in `namespaces/server.svelte` so the rail's context menu can
+  // call them too; the AppCtx just forwards. Omitting the target means "the active
+  // namespace", which is the sidebar-header case.
+  const openNotifSettings = openNotifSettingsFor;
   /// §10.5 open the user settings on the verification tab (from the no-email nudge).
   // ---- navigation: derived from the URL (path-based routes, see lib/nav.ts) ----
   // The single source of truth for "what's open" is the route. `active` is the
@@ -218,10 +218,7 @@ import { mkMsg, catchUpChannel } from "$lib/messages/messages.svelte";
   // the `account@network` friend key, then read state / act on it.
   // ---- namespace admin panel (§6.2 / §2.4 / §6.6) ----
   // §10.3 per-server profile editor (your own nickname on this server).
-  function openServerProfile() {
-    if (activeServer) ui.serverProfileOpen = true;
-    ui.serverMenu = false;
-  }
+  const openServerProfile = openServerProfileFor;
   // §6.7 moderation deny-list (mutes + bans) per scope, for the Bans tab —
   // lives on `store.deny`.
   function assignRole(roleId: string) {
@@ -292,6 +289,20 @@ import { mkMsg, catchUpChannel } from "$lib/messages/messages.svelte";
     if (s && !layoutFetched.has(s)) {
       layoutFetched.add(s);
       weft.channels(s).catch(() => layoutFetched.delete(s));
+    }
+  });
+
+  // §9 liveness: the namespace you are *in* loses its bridge. It cannot serve
+  // history, take a message, or answer a roster from here on, so sitting in it
+  // shows a room that silently does nothing. Leave for DMs, which always work.
+  //
+  // Only `false` — `null` means native (nothing governs it, never offline), and
+  // waiting for a value would bounce every namespace on connect.
+  $effect(() => {
+    const s = activeServer;
+    if (s && store.servers.get(s)?.providerOnline === false) {
+      toast(`${vm.serverName(s)} is unavailable — its bridge is disconnected`, "info");
+      goHome();
     }
   });
 
@@ -535,17 +546,9 @@ import { mkMsg, catchUpChannel } from "$lib/messages/messages.svelte";
   });
 
   // Namespace admin
-  function openNsSettings() {
-    const meta = store.servers.get(activeServer);
-    nsAdmin.title = meta?.title ?? "";
-    nsAdmin.desc = meta?.description ?? "";
-    nsAdmin.vis = meta?.visibility ?? "public";
-    nsDelegSubject = "";
-    nsAdmin.newOwner = "";
-    nsAdmin.recKeys = "";
-    ui.nsTab = "overview";
-    ui.nsSettingsOpen = true;
-    roleStore.fetchRoles(roleStore.nsRoleScope());
+  function openNsSettings(target?: string) {
+    nsDelegSubject = ""; // layout-local draft; the rest is the shared opener
+    openNsSettingsFor(target);
   }
   // §11.10 on-demand federation: live "connecting…" state for the trigger. The
   // bridge establishes asynchronously; we surface the namespace when its

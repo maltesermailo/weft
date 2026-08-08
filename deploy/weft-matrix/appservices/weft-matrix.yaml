@@ -62,7 +62,25 @@ namespaces:
     # Substitute your `server_name`, escaping every dot.
     - exclusive: true
       regex: '@weft_.*:matrix\.weft\.example'
-  # The bridge creates rooms and aliases through its own token rather than
-  # claiming namespaces up front, so nothing to declare.
-  aliases: []
+  aliases:
+    # Declaring these at all is MANDATORY. Synapse refuses `createRoom` with an
+    # alias outside an appservice's namespaces (`M_EXCLUSIVE`), so leaving this
+    # empty makes outbound projection fail on the first Space it tries to create.
+    #
+    # Same escaping and single-quoting rules as above. Substitute your
+    # `server_name` in both.
+    #
+    # `#weft_<id>` — the canonical, id-keyed aliases the bridge relies on. Claimed
+    # EXCLUSIVELY so nobody can squat one.
+    - exclusive: true
+      regex: '#weft_.*:matrix\.weft\.example'
+    # Everything else, NON-exclusively. This is what lets a projected Space also
+    # carry its bare vanity (`#gaming:…` — the name a Matrix user would guess)
+    # instead of an unreadable ULID. Non-exclusive matters: the bridge may mint
+    # any alias, and so may everyone else. Exclusive here would hand the bridge
+    # every alias on the homeserver.
+    - exclusive: false
+      regex: '#.*:matrix\.weft\.example'
+  # Rooms are created through the bridge's own token and never addressed by a
+  # claimed room-id namespace, so nothing to declare here.
   rooms: []

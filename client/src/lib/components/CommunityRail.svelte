@@ -1,10 +1,29 @@
 <script lang="ts">
   import { vm } from "$lib/navigation/viewmodel.svelte";
-  import { openServerMenu, openDiscover } from "$lib/navigation/navigation";
+  import { openDiscover } from "$lib/navigation/navigation";
+  import { serverCtx } from "$lib/ui/ctxmenu.svelte";
+  import { toast } from "$lib/notifications/toasts.svelte";
   import { serverMuted } from "$lib/notifications/notif";
   import { initials } from "$lib/profile/profile.svelte";
   import { getApp } from "$lib/ui/context";
+  import { store } from "$lib/store/store.svelte";
   const app = getApp();
+
+  /// §9 liveness: a provider-managed namespace is only usable while its bridge
+  /// is connected — weftd refuses joins and every write into it, and serves no
+  /// history. `providerOnline` is null for a native namespace (nothing governs
+  /// it, so it is never offline).
+  const offline = (ns: string) => store.servers.get(ns)?.providerOnline === false;
+
+  // Caps are server-resolved per scope and fetched on demand, so a namespace you
+  // have never opened has none — and a context menu built from them would show
+  // nothing. Warm every tile's scope here (deduped by `capsInflight`), so the
+  // first right-click already knows what you may do there.
+  $effect(() => {
+    for (const ns of vm.serverNamespaces) {
+      store.session.ensureCapsAt(store.session.account, `ns:${ns}`);
+    }
+  });
 </script>
 
 <nav class="warp-rail" aria-label="Networks">
@@ -14,9 +33,29 @@
   <div class="rail-divider"></div>
   <div class="rail-communities">
     {#each vm.serverNamespaces as ns (ns)}
-      <div class="comm-tile" class:active={!app.homeView && app.activeServer === ns} class:muted={serverMuted(ns)} title={vm.serverName(ns)}>
-        <button onclick={() => app.selectServer(ns)} oncontextmenu={(e) => { e.preventDefault(); openServerMenu(ns); }} title={vm.serverName(ns)}>{initials(vm.serverName(ns))}</button>
-        {#if vm.serverMentionCount(ns)}<span class="tile-badge mention">{vm.serverMentionCount(ns)}</span>
+      <div
+        class="comm-tile"
+        class:active={!app.homeView && app.activeServer === ns}
+        class:muted={serverMuted(ns)}
+        class:offline={offline(ns)}
+        title={offline(ns) ? `${vm.serverName(ns)} — bridge offline` : vm.serverName(ns)}
+      >
+        <!-- Not `disabled`: a disabled button fires no `contextmenu`, and the
+             locked tile is exactly where the menu matters (it is how you leave).
+             So the click is gated instead, and says why. -->
+        <button
+          onclick={() =>
+            offline(ns)
+              ? toast(`${vm.serverName(ns)} is unavailable — its bridge is disconnected`, "info")
+              : app.selectServer(ns)}
+          oncontextmenu={(e) => serverCtx(e, ns)}
+          aria-disabled={offline(ns)}
+          title={offline(ns) ? `${vm.serverName(ns)} — its bridge is disconnected, so nothing in it can load` : vm.serverName(ns)}
+        >{initials(vm.serverName(ns))}</button>
+        <!-- The offline mark outranks unread: a count you cannot open is noise,
+             and the reason it will not open is the useful thing to show. -->
+        {#if offline(ns)}<span class="tile-badge offline" aria-label="bridge offline">!</span>
+        {:else if vm.serverMentionCount(ns)}<span class="tile-badge mention">{vm.serverMentionCount(ns)}</span>
         {:else if vm.serverUnread(ns) && !serverMuted(ns)}<span class="tile-badge"></span>{/if}
       </div>
     {/each}

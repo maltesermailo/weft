@@ -1,7 +1,7 @@
 // The client domain model — see docs/architecture/client-model-refactor.md.
 import type { HandlerMap } from "$lib/sync/handler-map";
 import { store } from "$lib/store/store.svelte";
-import { ui } from "$lib/ui/ui.svelte";
+import { ui, scopedNs } from "$lib/ui/ui.svelte";
 import * as weft from "$lib/transport/weft";
 import { view } from "$lib/navigation/view.svelte";
 import { toast } from "$lib/notifications/toasts.svelte";
@@ -46,8 +46,11 @@ export class Invites {
     this.id = null;
     this.createOpen = true;
   }
-  mintInvite(): void {
-    this.openInviteCreate();
+  /// `ns` mints for a namespace other than the one being viewed (the rail's
+  /// context menu). `openInviteCreate` already captures the scope, so nothing
+  /// here depends on which server is open at submit time.
+  mintInvite(ns?: string): void {
+    this.openInviteCreate(ns ? `ns:${ns}` : undefined);
   }
 
   // Mint with the chosen limits — `null` = unlimited uses / never expires. The
@@ -82,7 +85,7 @@ export class Invites {
   }
   // The Server-Settings Invites tab lists the whole namespace's invites.
   loadNsInvites(): void {
-    if (view.activeServer) this.loadInvites(`ns:${view.activeServer}`);
+    if (scopedNs()) this.loadInvites(`ns:${scopedNs()}`);
   }
   revokeInvite(id: string): void {
     weft.inviteRevoke(id).catch((e) => toast(String(e), "error"));
