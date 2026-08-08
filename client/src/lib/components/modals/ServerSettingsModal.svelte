@@ -62,6 +62,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
   const connectedSchemes = $derived(
     new Set([...plugins.catalog.values()].flatMap((p) => p.schemes ?? [])),
   );
+  const isPublic = $derived((vm.activeNsMeta?.visibility ?? "") === "public");
   const projectedInto = (scheme: string) =>
     (store.servers.get(ns())?.bridges ?? []).includes(scheme);
 
@@ -584,33 +585,58 @@ import { roleStore } from "$lib/roles/roles.svelte";
              hardcoding "matrix": a future adapter shows up here with no client
              change, and a realm nobody is bridging is not offered at all. -->
         <div class="field-label">Projection</div>
-          <p class="so-sub">
-            Mirror <b>{serverVanity}</b> into a foreign realm, so its users can find and join it there.
-            This is also what authorizes that realm to attribute its users into this namespace, so it is
-            your consent as owner.
-          </p>
-          {#each realmSchemes as scheme (scheme)}
-            <label class="fed-check" style="margin-bottom:6px">
-              <input
-                type="checkbox"
-                checked={projectedInto(scheme)}
-                disabled={(vm.activeNsMeta?.visibility ?? "") !== "public" ||
-                  (!connectedSchemes.has(scheme) && !projectedInto(scheme))}
-                onchange={(e) => nsAdmin.nsSetProjection(scheme, e.currentTarget.checked)}
-              />
-              Project into <b>{scheme}</b>
-              {#if !connectedSchemes.has(scheme)}<span class="rep-state severed">adapter offline</span>{/if}
-            </label>
-          {/each}
-          {#if !realmSchemes.length}
-            <p class="so-sub">No realm adapter is connected, so there is nothing to project into yet. Start
-              the bridge (the Matrix one registers the <code>matrix</code> scheme) and it appears here.</p>
-          {/if}
-          {#if (vm.activeNsMeta?.visibility ?? "") !== "public"}
-            <p class="so-sub">Projection needs a <b>public</b> namespace — an unlisted or private one would be
-              exposed by the foreign realm's own directory, leaking exactly what its visibility hides. Change
-              visibility in Overview first.</p>
-          {/if}
+        <p class="so-sub">
+          Publish <b>{serverVanity}</b> into a foreign realm, so its users can find and join it from there.
+          This is also what authorizes that realm to attribute its users into this namespace, so it is your
+          consent as owner — not a display setting.
+        </p>
+
+        {#if isPublic}
+          <div class="modal-list">
+            {#each realmSchemes as scheme (scheme)}
+              {@const live = connectedSchemes.has(scheme)}
+              {@const on = projectedInto(scheme)}
+              <div class="ns-card">
+                <div class="ns-info">
+                  <div class="ns-name">
+                    {scheme}
+                    {#if on}<span class="rep-state live">published</span>
+                    {:else}<span class="rep-state">not published</span>{/if}
+                    {#if !live}<span class="rep-state severed">adapter offline</span>{/if}
+                  </div>
+                  <div class="ns-desc">
+                    {#if on}
+                      Discoverable in that realm as <code>#{serverVanity}</code>. Its users can join, and its
+                      moderators act here.
+                    {:else if live}
+                      Not published — nobody there can find this namespace.
+                    {:else}
+                      Nothing can be published while the adapter is down.
+                    {/if}
+                  </div>
+                </div>
+                <div class="fed-actions">
+                  {#if on}
+                    <button class="mini-danger" onclick={() => nsAdmin.nsSetProjection(scheme, false)}>Unpublish</button>
+                  {:else}
+                    <button disabled={!live} onclick={() => nsAdmin.nsSetProjection(scheme, true)}>Publish</button>
+                  {/if}
+                </div>
+              </div>
+            {:else}
+              <div class="empty-hint">
+                No realm adapter is connected, so there is nowhere to publish yet. Start the bridge — the
+                Matrix one registers the <code>matrix</code> scheme — and it appears here.
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <div class="empty-hint">
+            Publishing needs a <b>public</b> namespace. An unlisted or private one would be exposed by the
+            foreign realm's own directory, leaking exactly what its visibility hides — so change visibility in
+            Overview first.
+          </div>
+        {/if}
         <div class="section-sep"></div>
 
         <div class="field-label">Active bridges</div>

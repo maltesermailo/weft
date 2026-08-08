@@ -2366,7 +2366,11 @@ button:disabled {
 .danger-btn {
   background: #d83c3e;
 }
-.report-card .rep-state {
+/* Small state chip inside a card title. Was scoped to `.report-card` only, so the
+   same chip in a namespace card (bridge state, projection state) rendered as bare
+   text; the shared selector covers both. */
+.report-card .rep-state,
+.ns-name .rep-state {
   font-size: 9.5px;
   text-transform: uppercase;
   padding: 1px 5px;
@@ -2382,6 +2386,15 @@ button:disabled {
 .rep-state.unverified,
 .rep-state.reporter-attested {
   color: var(--text-faint);
+}
+/* Bridge/projection liveness: published-and-working vs a state you cannot act on. */
+.rep-state.live {
+  color: #3ba55d;
+  border-color: #3ba55d;
+}
+.rep-state.severed {
+  color: var(--warning, #e8a33d);
+  border-color: var(--warning, #e8a33d);
 }
 
 /* namespace settings panel */
