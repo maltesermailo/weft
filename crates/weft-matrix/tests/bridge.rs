@@ -3068,3 +3068,49 @@ async fn making_a_channel_permanent_projects_it_later() {
         "the tombstone must name no successor: {recorded:?}"
     );
 }
+
+#[tokio::test]
+async fn provisioning_seeds_authority_from_existing_power_levels() {
+    // `on_power_levels_event` translates *diffs*, so a level someone already holds
+    // produces nothing. A Matrix admin who was an admin before the bridge ever saw
+    // the room therefore had no WEFT authority — and since a replica's
+    // owner-shortcut is gated off (the realm governs it), they could not administer
+    // their own namespace from WEFT at all. The fix was to demote and re-promote
+    // yourself in Element to manufacture a diff, which is not a fix.
+    let mut rooms = kde_space();
+    rooms.get_mut("!space:kde.org").unwrap().push(json!({
+        "type": "m.room.power_levels", "state_key": "",
+        "content": { "users": {
+            "@carol:kde.org": 100,   // admin
+            "@dave:kde.org": 50,     // moderator
+            "@erin:kde.org": 0,      // nothing to grant
+            "@weftbot:test.example": 100, // ours — needs no WEFT authority
+        } }
+    }));
+    let (mut bridge, mut lines, _calls) = bridge_with(rooms).await;
+
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+
+    let sent = drain(&mut lines);
+    let grants: Vec<&String> = sent.iter().filter(|l| l.contains("GRANT")).collect();
+
+    assert!(
+        grants.iter().any(|l| l.contains("carol")),
+        "an existing Matrix admin must be granted: {grants:?}"
+    );
+    assert!(
+        grants.iter().any(|l| l.contains("dave")),
+        "an existing moderator too: {grants:?}"
+    );
+    assert!(
+        !grants.iter().any(|l| l.contains("erin")),
+        "a default-level user grants nothing: {grants:?}"
+    );
+    assert!(
+        !grants.iter().any(|l| l.contains("weftbot")),
+        "our own bot needs no WEFT authority: {grants:?}"
+    );
+}

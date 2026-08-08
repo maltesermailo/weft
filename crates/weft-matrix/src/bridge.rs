@@ -583,6 +583,18 @@ impl Bridge {
             })
             .await?;
 
+        // Authority the Space already carries, before any change arrives.
+        //
+        // `on_power_levels_event` translates *diffs*, so a level someone already
+        // holds produces nothing: a Matrix admin who was an admin before the bridge
+        // ever saw the room had no WEFT authority, and the replica's owner-shortcut
+        // is gated off (the realm governs it), so they could not administer their own
+        // namespace from WEFT at all. Seeding closes that — and it is what makes an
+        // already-deployed Space heal on reconnect instead of needing a demote and
+        // re-promote in Element to manufacture a diff.
+        self.seed_levels_from_state(&state, &space_room, &ns_id)
+            .await;
+
         // The space's children, in order-key order (design doc §6).
         //
         // `via` is carried through, not just filtered on: joining a room by ID is
@@ -3429,6 +3441,50 @@ impl Bridge {
         self.store.save_projection(ns_id, &space_room).await;
         info!(ns_id, space_room, "projected namespace as a Space");
         Ok(())
+    }
+
+    /// Grant from the power levels a room *already* has, on the realm's own
+    /// authority (the path a consumed space uses — Matrix levels are the authority
+    /// there, so weftd runs a provider's bare GRANT as `Actor::Provider`).
+    ///
+    /// Idempotent: re-granting the same caps is a no-op, so this runs on every
+    /// re-provision. Only *promotions* are seeded — a level below the moderator
+    /// threshold grants nothing rather than revoking, because a first sighting
+    /// should not clobber grants made on the WEFT side; demotions arrive as diffs
+    /// through `on_power_levels_event`.
+    async fn seed_levels_from_state(&mut self, state: &[Value], room: &str, ns_id: &str) {
+        let levels: std::collections::BTreeMap<String, i64> = state
+            .iter()
+            .find(|ev| ev["type"] == "m.room.power_levels" && ev["state_key"] == "")
+            .and_then(|ev| ev["content"]["users"].as_object().cloned())
+            .map(|users| {
+                users
+                    .iter()
+                    .filter_map(|(u, l)| l.as_i64().map(|l| (u.clone(), l)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let scope = format!("ns:{ns_id}");
+        for (mxid, level) in &levels {
+            let Some(caps) = crate::levels::caps_for_level(*level) else {
+                continue;
+            };
+            let Some(subject) = self.weft_subject_of_mxid(mxid) else {
+                continue; // our own bot — it needs no WEFT authority
+            };
+
+            if let Err(e) = self.realm.grant(&subject, &scope, caps).await {
+                warn!(
+                    subject,
+                    level, "seeding authority from power levels failed: {e:#}"
+                );
+            }
+        }
+
+        // The baseline `diff_users` compares against. Without it every level would
+        // read as a change on the next power-levels event and be re-granted.
+        self.store.set_room_levels(room, levels).await;
     }
 
     /// Keep a projected Space listed in the homeserver's public room directory.
