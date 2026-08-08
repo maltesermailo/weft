@@ -11933,3 +11933,56 @@ async fn a_message_the_realm_never_confirms_is_reported_undelivered() {
         }
     }
 }
+
+#[tokio::test]
+async fn enabling_projection_states_the_namespaces_existing_channels() {
+    // `NS-META` describes the namespace and its categories, not its channels. So
+    // switching projection on produced a Space and its sub-spaces on the foreign
+    // side and no rooms at all — the chats were simply never mentioned.
+    //
+    // Making a channel `retained` and back to `permanent` worked around it by
+    // producing a policy change, which is not a fix: an already-permanent channel
+    // in an already-projected namespace must be projected because it *exists*, not
+    // because it changed.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    // The provider must be registered for the scheme, or there is nobody to state
+    // the structure to.
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM REGISTER instagram");
+
+    let mut ada = ready(&ctx, "ada").await;
+    let ns_id = ada.create_ns("gaming").await;
+    // `NS CREATE` already seeds `#general`, so use a distinct vanity.
+    let channel = ada.create_channel(&ns_id, "chat").await;
+    // Only `permanent` projects (locked decision 2), so make it eligible *before*
+    // projection is switched on — that is the case that was broken.
+    ada.send(&format!("@label=p1 CHANNEL POLICY {channel} permanent"));
+
+    ada.send(&format!("@label=b1 NS META {ns_id} bridge:instagram :open"));
+
+    // The provider should hear the namespace *and* its channel.
+    let mut saw_layout = false;
+    let mut saw_policy = false;
+    for _ in 0..60 {
+        let line = plugin.recv_raw().await;
+        if line.contains("CHANNEL-LAYOUT") && line.contains(channel.as_str()) {
+            saw_layout = true;
+        }
+        if line.contains("POLICY") && line.contains(channel.as_str()) {
+            saw_policy = true;
+        }
+        if saw_layout && saw_policy {
+            break;
+        }
+    }
+
+    assert!(
+        saw_layout && saw_policy,
+        "enabling projection must state the existing channel (layout {saw_layout}, policy {saw_policy})"
+    );
+}

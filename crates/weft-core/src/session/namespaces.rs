@@ -943,6 +943,16 @@ impl<S: ControlStream> Session<S> {
             }
             record.bridges = bridges;
             self.announce_ns_meta(label, &record).await?;
+
+            // NS-META describes the namespace and its categories, not its
+            // channels — so on its own, switching projection on produced a Space
+            // with sub-spaces and no rooms. State the channels too, and let the
+            // adapter apply the §3 rules to each.
+            if open {
+                let ns_id = record.id.clone();
+                self.push_channels_to_projectors(&ns_id).await;
+            }
+
             return Ok(Flow::Continue);
         }
         if let Err(e) = self

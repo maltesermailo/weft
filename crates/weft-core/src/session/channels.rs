@@ -305,9 +305,31 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
+    /// Describe every channel of a projected namespace to its providers.
+    ///
+    /// Enabling projection pushes only `NS-META`, which carries the namespace and
+    /// its categories — so the Space and its sub-spaces appeared and the rooms
+    /// never did. The channels have to be stated too, and this is the one place
+    /// that says so, used both when projection is switched on and when a channel
+    /// is created into an already-projected namespace.
+    pub(super) async fn push_channels_to_projectors(&mut self, ns_id: &str) {
+        let Ok(channels) = self.ctx.channel_store.channels_in_namespace(ns_id).await else {
+            return;
+        };
+
+        for (channel, record) in channels {
+            self.push_policy_to_projectors(&channel, record.policy)
+                .await;
+        }
+    }
+
     /// Tell the providers of a projected namespace that one of its channels
     /// changed retention — the fact their projection rule turns on.
-    async fn push_policy_to_projectors(&mut self, channel: &ChannelName, policy: RetentionPolicy) {
+    pub(super) async fn push_policy_to_projectors(
+        &mut self,
+        channel: &ChannelName,
+        policy: RetentionPolicy,
+    ) {
         let Some(ns) = channel.namespace() else {
             return; // top-level channels are never projected
         };
