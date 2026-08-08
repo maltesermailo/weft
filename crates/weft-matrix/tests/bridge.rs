@@ -54,8 +54,17 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
             ),
         )
         .route(
-            "/_matrix/client/v3/directory/room/:alias/",
-            delete(|| async { axum::Json(json!({})) }),
+            "/_matrix/client/v3/directory/room/:alias",
+            delete(
+                |State(hs): State<MockHs>, Path(alias): Path<String>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("DELETE alias/{alias}"),
+                        String::new(),
+                        Value::Null,
+                    ));
+                    axum::Json(json!({}))
+                },
+            ),
         )
         .route(
             "/_matrix/client/v3/directory/list/room/:room",

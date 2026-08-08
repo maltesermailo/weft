@@ -3683,6 +3683,20 @@ impl Bridge {
                     "no longer projectable — tombstoning"
                 );
 
+                // Release the alias FIRST. A tombstoned room keeps its aliases and
+                // Matrix aliases are unique per server, so a later return to
+                // `permanent` tried to create a fresh room under the same
+                // `#weft_<chan-id>` and was refused `M_ROOM_IN_USE` — leaving the
+                // channel invisible with a dead room holding its name.
+                let chan_id = channel.rsplit('/').next().unwrap_or_default();
+                let alias = format!("#weft_{chan_id}:{}", self.identity.domain());
+                if let Err(e) = self.hs.delete_alias(&alias).await {
+                    debug!(
+                        alias,
+                        "could not release the tombstoned room's alias: {e:#}"
+                    );
+                }
+
                 if let Err(e) = self
                     .hs
                     .tombstone(
@@ -3724,15 +3738,35 @@ impl Bridge {
             .unwrap_or_else(|| projection.space_room.clone());
 
         let chan_id = channel.rsplit('/').next().unwrap_or_default().to_string();
-        let room_id = self
-            .hs
-            .create_room(json!({
-                "name": layout.vanity,
-                "room_alias_name": format!("weft_{chan_id}"),
-                "preset": "public_chat",
-                "power_level_content_override": { "users_default": 0, "state_default": 100 },
-            }))
-            .await?;
+        let body = json!({
+            "name": layout.vanity,
+            "room_alias_name": format!("weft_{chan_id}"),
+            "preset": "public_chat",
+            "power_level_content_override": { "users_default": 0, "state_default": 100 },
+        });
+
+        let room_id = match self.hs.create_room(body.clone()).await {
+            Ok(room) => room,
+            // The alias is held by a room we no longer track — a tombstoned one
+            // from before its alias was released, or a create that half-failed. A
+            // tombstoned room keeps its aliases, so without this the channel could
+            // never be projected again: every attempt is refused `M_ROOM_IN_USE`
+            // and the name stays claimed by something dead.
+            //
+            // Only `weft_<chan-id>` aliases reach here, and nothing but this bridge
+            // mints those, so an untracked holder is by definition stale.
+            Err(e) if format!("{e:#}").contains("M_ROOM_IN_USE") => {
+                let alias = format!("#weft_{chan_id}:{}", self.identity.domain());
+                warn!(
+                    channel,
+                    alias, "alias held by an untracked room — releasing it and retrying"
+                );
+
+                self.hs.delete_alias(&alias).await?;
+                self.hs.create_room(body).await?
+            }
+            Err(e) => return Err(e),
+        };
 
         // Space ↔ room links, ordered by the WEFT position (§6).
         self.hs
