@@ -2031,26 +2031,6 @@ impl<S: ControlStream> Session<S> {
             _ => false,
         };
 
-        // A local message going to a provider is now *in flight*: it is stored and
-        // acked here, but whether the realm got it is unanswered until the adapter
-        // says so. Only messages — an edit/react that never arrives is a lesser
-        // wrong than a message the author believes was delivered.
-        if forward {
-            if let Event::Message(m) = &event.event {
-                // Channel messages only: a DM has no projected room to reach.
-                if let (None, weft_proto::Target::Channel(channel)) =
-                    (m.meta.system.as_ref(), &m.target)
-                {
-                    self.ctx.await_delivery(
-                        m.msgid.clone(),
-                        m.sender.account.clone(),
-                        channel.clone(),
-                        unix_now() * 1000,
-                    );
-                }
-            }
-        }
-
         if forward {
             // §3.5 on the projection path: an event minted from this session's
             // own injection carries the injection's label back — the sender's
@@ -2065,6 +2045,34 @@ impl<S: ControlStream> Session<S> {
                 ) if net.as_str() == realm.realm() => Some(l.clone()),
                 _ => None,
             };
+
+            // A local message handed to a provider is *in flight*: stored and acked
+            // here, but whether the realm has it is unanswered until the adapter
+            // says so.
+            //
+            // NOT an injected echo, though. A message the provider itself injected
+            // (a Matrix user's, minted here for the projection return path) is
+            // home-minted, so it looks local by msgid — but it already came *from*
+            // the realm. The adapter recognises its own label, links the id and
+            // returns, so no ack was ever coming, and awaiting one reported a
+            // Matrix user's message as undelivered to Matrix.
+            //
+            // Messages only: an edit or reaction that never lands is a lesser wrong
+            // than a message the author believes was delivered.
+            if label.is_none() {
+                if let Event::Message(m) = &event.event {
+                    if let (None, weft_proto::Target::Channel(channel)) =
+                        (m.meta.system.as_ref(), &m.target)
+                    {
+                        self.ctx.await_delivery(
+                            m.msgid.clone(),
+                            m.sender.account.clone(),
+                            channel.clone(),
+                            unix_now() * 1000,
+                        );
+                    }
+                }
+            }
 
             // The acting **local** user's ULID rides as `ulid=` (owner
             // directive 2026-08-06) — the adapter keys puppets by it, and
