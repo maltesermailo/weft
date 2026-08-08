@@ -25,6 +25,22 @@ impl Hs {
         }
     }
 
+    /// Tombstone a room: it is closed, with **no successor**.
+    ///
+    /// `replacement_room` is empty on purpose. The spec has it name the room that
+    /// continues the conversation, and there is none — the projection promise that
+    /// justified this room existing is gone, so nothing should carry it forward.
+    /// Clients read the tombstone and stop offering to post.
+    pub async fn tombstone(&self, room_id: &str, body: &str) -> anyhow::Result<()> {
+        self.put_state(
+            room_id,
+            "m.room.tombstone",
+            "",
+            json!({ "body": body, "replacement_room": "" }),
+        )
+        .await
+    }
+
     /// Publish a room in this server's **public room directory**.
     ///
     /// Distinct from `createRoom`'s `visibility`, which only applies at creation:

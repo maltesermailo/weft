@@ -3588,6 +3588,54 @@ impl Bridge {
         if policy != weft_proto::RetentionPolicy::Permanent
             || layout.kind == weft_proto::ChannelKind::Voice
         {
+            // Already projected and no longer qualifying: the promise that
+            // justified the room is gone, so the room has to stop. A tombstone is
+            // what makes that true on the Matrix side — clients stop offering to
+            // post — and it is deliberately successor-less: nothing should carry
+            // this conversation forward under a retention rule Matrix cannot keep.
+            //
+            // Irreversible by construction, which is why the mapping is dropped
+            // too: a later return to `permanent` creates a *fresh* room rather than
+            // resurrecting a dead one (matrix.md §3).
+            if let Some(room) = projection.rooms.get(channel).cloned() {
+                let space = projection.space_room.clone();
+                let parent = layout
+                    .category
+                    .as_ref()
+                    .and_then(|c| projection.categories.get(c).cloned())
+                    .unwrap_or(space);
+
+                info!(
+                    channel,
+                    room,
+                    ?policy,
+                    "no longer projectable — tombstoning"
+                );
+
+                if let Err(e) = self
+                    .hs
+                    .tombstone(
+                        &room,
+                        "This room is closed: the WEFT channel it mirrored is no \
+                         longer permanent, and its retention policy cannot be honored here.",
+                    )
+                    .await
+                {
+                    warn!(room, "tombstone failed: {e:#}");
+                }
+                // Unparent as well, so the dead room leaves the Space tree instead
+                // of sitting in it as a closed entry nobody can use.
+                if let Err(e) = self
+                    .hs
+                    .put_state(&parent, "m.space.child", &room, json!({}))
+                    .await
+                {
+                    debug!(room, "could not unparent the tombstoned room: {e:#}");
+                }
+
+                self.store.drop_projected_room(&ns_id, channel).await;
+            }
+
             debug!(channel, ?policy, "not projectable — absent by rule");
             return Ok(());
         }

@@ -3027,11 +3027,44 @@ async fn making_a_channel_permanent_projects_it_later() {
     )
     .await;
 
+    {
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded
+                .iter()
+                .any(|(what, _, body)| what == "POST createRoom" && body["name"] == "general"),
+            "making it permanent must project the room: {recorded:?}"
+        );
+    }
+
+    // …and back off `permanent` tombstones it (matrix.md §3): the promise that
+    // justified the room is gone, so the room must stop rather than linger with a
+    // retention rule Matrix cannot keep.
+    calls.lock().unwrap().clear();
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Policy {
+            channel: channel.parse().unwrap(),
+            policy: "retained:30d".parse().unwrap(),
+        },
+        None,
+        None,
+    )
+    .await;
+
     let recorded = calls.lock().unwrap();
     assert!(
         recorded
             .iter()
-            .any(|(what, _, body)| what == "POST createRoom" && body["name"] == "general"),
-        "making it permanent must project the room: {recorded:?}"
+            .any(|(what, _, _)| what.contains("m.room.tombstone")),
+        "losing `permanent` must tombstone the room: {recorded:?}"
+    );
+    // Successor-less on purpose — nothing should carry the conversation forward.
+    assert!(
+        recorded
+            .iter()
+            .any(|(what, _, body)| what.contains("m.room.tombstone")
+                && body["replacement_room"] == ""),
+        "the tombstone must name no successor: {recorded:?}"
     );
 }

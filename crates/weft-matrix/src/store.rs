@@ -843,6 +843,26 @@ impl Store {
         }
     }
 
+    /// Forget a projected room — its channel stopped qualifying (matrix.md §3:
+    /// `permanent → anything else`). The Matrix room is tombstoned separately;
+    /// dropping the mapping is what lets a later return to `permanent` create a
+    /// *fresh* room rather than resurrect a dead one.
+    pub async fn drop_projected_room(&mut self, ns_id: &str, channel: &str) {
+        if let Some(p) = self.state.projections.get_mut(ns_id) {
+            p.rooms.remove(channel);
+        }
+
+        if let Some(pool) = &self.pool {
+            best_effort(
+                "drop_projected_room",
+                sqlx::query("DELETE FROM matrix_projected_rooms WHERE channel = $1")
+                    .bind(channel)
+                    .execute(pool),
+            )
+            .await;
+        }
+    }
+
     /// Record a category's sub-space.
     pub async fn save_projected_category(&mut self, ns_id: &str, category: &str, room: &str) {
         self.state
