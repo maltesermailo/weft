@@ -89,6 +89,21 @@ enable_registration: false
 # nothing the bridge merely consumes.
 allow_public_rooms_over_federation: true
 
+# WHO may publish a room to that directory. Synapse's default has tightened over
+# releases, and when it denies, the bridge's publish is refused — the Space exists,
+# is joinable by alias, and is simply absent from every directory listing, which
+# looks exactly like "projection didn't work".
+#
+# Explicit and permissive here because this homeserver exists to serve the bridge:
+# the only rooms on it are the ones the bridge creates, so "anyone may publish"
+# means "the bridge may publish its own Spaces". Do NOT copy this onto a
+# homeserver with real users — there it would let anyone list anything.
+room_list_publication_rules:
+  - user_id: "*"
+    alias: "*"
+    room_id: "*"
+    action: allow
+
 # ── Federation ─────────────────────────────────────────────────────────────
 # ON, and it has to be: remote homeservers reaching projected Spaces is the point
 # of outbound projection, and joining remote rooms is the point of consuming
