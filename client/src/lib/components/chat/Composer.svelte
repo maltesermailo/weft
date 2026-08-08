@@ -3,10 +3,20 @@
   import { compose, composeView, composerKey, onComposerInput, doSend, pickMention, pickEmojiSuggestion, attachFile, pasteFiles, dropFiles, removeAttachment } from "$lib/messages/composer.svelte";
   import { renderMd } from "$lib/rendering/mdrender.svelte";
   import { getApp } from "$lib/ui/context";
+  import { nsUnavailable } from "$lib/navigation/navigation";
+  import { nsOf } from "$lib/channels/channel.svelte";
   import { highlightComposer } from "$lib/rendering/mdhighlight";
   import EmojiPicker from "$lib/components/chat/EmojiPicker.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
   const app = getApp();
+
+  // A replica channel whose bridge is gone takes nothing: weftd refuses the post
+  // (`ERR POLICY provider-offline`) because accepting one it cannot deliver would
+  // split-brain the room. Owner directive: posting while the bridge is down must
+  // not work — so say so in the composer instead of taking the message and
+  // bouncing it back as an error.
+  const offline = $derived(!!app.active && nsUnavailable(nsOf(app.active) ?? ""));
+  const canSend = $derived(!!app.active && !offline);
 
   // Keep the arrow-key-highlighted autocomplete row scrolled into view.
   function keepInView(node: HTMLElement, active: boolean) {
@@ -157,7 +167,7 @@
     </div>
   {/if}
   <div class="composer">
-    <button class="icon-btn" title="Attach a file" aria-label="Attach a file" disabled={!app.active} onclick={attachFile}>
+    <button class="icon-btn" title="Attach a file" aria-label="Attach a file" disabled={!canSend} onclick={attachFile}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
     </button>
     <div class="composer-input" class:composing>
@@ -166,8 +176,12 @@
         class="composer-ta"
         bind:this={ta}
         rows="1"
-        placeholder={app.active ? `Message ${vm.titleOf(app.active)}…` : "Join a channel first"}
-        disabled={!app.active}
+        placeholder={!app.active
+          ? "Join a channel first"
+          : offline
+            ? "The bridge for this server is disconnected — messages can't be sent"
+            : `Message ${vm.titleOf(app.active)}…`}
+        disabled={!canSend}
         bind:value={compose.text}
         onkeydown={composerKey}
         oninput={onComposerInput}
@@ -183,7 +197,7 @@
       title="Toggle Markdown preview"
       aria-label="Toggle Markdown preview"
       aria-pressed={previewOn}
-      disabled={!app.active}
+      disabled={!canSend}
       onclick={() => (previewOn = !previewOn)}
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
@@ -193,7 +207,7 @@
         <button class="ctx-backdrop" aria-label="Close" onclick={() => (emojiOpen = false)}></button>
         <div class="composer-emoji-pop"><EmojiPicker onpick={insertEmoji} /></div>
       {/if}
-      <button class="icon-btn" title="Emoji" aria-label="Emoji" disabled={!app.active} onclick={() => (emojiOpen = !emojiOpen)}>
+      <button class="icon-btn" title="Emoji" aria-label="Emoji" disabled={!canSend} onclick={() => (emojiOpen = !emojiOpen)}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><path d="M9 9h.01M15 9h.01" /></svg>
       </button>
     </div>

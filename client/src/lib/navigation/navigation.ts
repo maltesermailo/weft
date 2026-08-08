@@ -114,7 +114,22 @@ export function openDiscover(): void {
 
 
 /// Open a namespace: land on its first channel (by position), else its empty view.
+/// Is this namespace a provider-managed replica whose bridge is disconnected?
+/// `null` means native — nothing governs it, so it is never unavailable.
+export const nsUnavailable = (ns: string): boolean =>
+  store.servers.get(ns)?.providerOnline === false;
+
 export function selectServer(ns: string): void {
+  // Refused here rather than only on the rail tile, because that is not the only
+  // way in: the quick switcher, a channel link and a restored URL all arrive
+  // through this function. Entering a namespace whose bridge is gone gives a view
+  // where nothing loads and every request is refused.
+  if (nsUnavailable(ns)) {
+    toast(`${store.servers.get(ns)?.displayName ?? ns} is unavailable — its bridge is disconnected`, "info");
+    void goHome();
+    return;
+  }
+
   const a = view.active;
   if (a.startsWith("#") && nsOf(a) === ns) return; // already in this server
   const first = Object.values(channelStore.channels)

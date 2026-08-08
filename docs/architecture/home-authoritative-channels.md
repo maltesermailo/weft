@@ -154,6 +154,25 @@ Key points:
   canonical position until the home mints them on recovery; the client shows them
   at the local tail in send order and reconciles when the home returns.
 
+### 5.1 Bridged channels do NOT get the outbox
+
+Owner directive (2026-08-08): for a channel whose home is a **foreign realm** (a
+Matrix room reached through the bridge), posting while the bridge is down **must
+not work**. No outbox, no queued replay — the post is refused.
+
+The reason the outbox is right for a WEFT peer and wrong here is authority. A peer
+home is a WEFT network that will mint our queued posts into its order on recovery,
+so queueing preserves the promise. A foreign realm is not ours to queue for: the
+adapter is the only thing that can put a message there, its own moderation may
+reject it, and a replay minutes later lands out of context in a room other people
+have moved on from. weftd also cannot promise the message is *still* postable —
+membership or power levels there may have changed while it was queued.
+
+So a bridged channel is read-available and write-refused while its provider is
+offline (`ERR POLICY provider-offline`, already enforced), the client disables the
+composer and says why, and the blind window before weftd notices is covered by the
+delivery ack (§7a `DELIVERED`/`UNDELIVERED`) rather than by buffering.
+
 Compared with multi-origin, the trade is: multi-origin never blocks a post but also
 *never establishes a shared order and cannot deliver >2-network channels*;
 home-authority always establishes the order and delivers correctly, and degrades a

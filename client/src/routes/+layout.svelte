@@ -7,7 +7,7 @@
   import * as nav from "$lib/navigation/nav";
   import { ui } from "$lib/ui/ui.svelte";
   import { conn, attemptReconnect, HOMESERVER_KEY, SAVED_KEY, nsMetaFetched, logout, doConnect, keyLogin, chooseServer, changeServer, probeServer } from "$lib/connection/connection.svelte";
-  import { selectServer, goHome } from "$lib/navigation/navigation";
+  import { selectServer, goHome, nsUnavailable } from "$lib/navigation/navigation";
   import { handle, loadHistory, hist } from "$lib/sync/reducer.svelte";
   import { trackBackground } from "$lib/sync/joinErrors";
   import { msgEpoch } from "$lib/rendering/time";
@@ -298,12 +298,22 @@ import { mkMsg, catchUpChannel } from "$lib/messages/messages.svelte";
   //
   // Only `false` — `null` means native (nothing governs it, never offline), and
   // waiting for a value would bounce every namespace on connect.
+  //
+  // Acts once per namespace: `goto` is async, so an unguarded effect re-runs while
+  // the navigation is still in flight and fires the toast (and another `goto`)
+  // repeatedly — churn that reads as the UI hanging.
+  let bouncedFrom = $state<string | null>(null);
   $effect(() => {
     const s = activeServer;
-    if (s && store.servers.get(s)?.providerOnline === false) {
-      toast(`${vm.serverName(s)} is unavailable — its bridge is disconnected`, "info");
-      goHome();
+    if (!s) {
+      bouncedFrom = null; // left it; arm again for next time
+      return;
     }
+    if (s === bouncedFrom || !nsUnavailable(s)) return;
+
+    bouncedFrom = s;
+    toast(`${vm.serverName(s)} is unavailable — its bridge is disconnected`, "info");
+    void goHome();
   });
 
   // ---- §9.4 custom emoji (per namespace) — now `Server.emoji` ----
