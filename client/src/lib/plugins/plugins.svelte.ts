@@ -9,6 +9,7 @@ import { SvelteMap } from "svelte/reactivity";
 import type { HandlerMap } from "$lib/sync/handler-map";
 import { toast } from "$lib/notifications/toasts.svelte";
 import * as weft from "$lib/transport/weft";
+import { store } from "$lib/store/store.svelte";
 import {
   applyPatch,
   initialValues,
@@ -49,6 +50,29 @@ class PluginStore {
   /** The schemes a plugin serves, or `[]` if it governs no realm. */
   schemesOf(pluginId: string): string[] {
     return this.catalog.get(pluginId)?.schemes ?? [];
+  }
+
+  /**
+   * Does `plugin` speak for namespace `ns`?
+   *
+   * A plugin declaring no schemes governs no realm, so its surfaces are generic
+   * and apply anywhere. One that *does* declare schemes is a realm adapter, and
+   * its surfaces belong only to that realm's replicas — a Matrix "Bridged room
+   * settings" page on a native channel opens a flow the adapter refuses ("this
+   * channel is not bridged") and leaves the panel spinning on `Loading…`.
+   *
+   * Filtering by surface + context alone cannot know this, which is why the check
+   * lives here and every caller shares it.
+   */
+  governs(pluginId: string, ns: string | undefined): boolean {
+    const schemes = this.schemesOf(pluginId);
+    if (schemes.length === 0) return true;
+    if (!ns) return false;
+
+    const origin = store.servers.get(ns)?.origin;
+    const scheme = origin?.match(/^([a-z][a-z0-9+.-]*):\/\//)?.[1];
+
+    return !!scheme && schemes.includes(scheme);
   }
 
   /** Every declared action on a surface, flattened with its plugin id. */

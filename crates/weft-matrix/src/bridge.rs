@@ -32,8 +32,13 @@ pub struct Bridge {
     /// Our MXID namespace on the companion homeserver: the bot, the puppets, and
     /// the "is this ours?" test that keeps a relay from being re-ingested.
     pub identity: MatrixIdentity,
-    /// Projected structure buffered between `CHANNEL-LAYOUT` and its `POLICY`
-    /// (the §3 rules need the policy, which travels as a separate event).
+    /// Projected structure by channel, learned from `CHANNEL-LAYOUT` and paired
+    /// with the `POLICY` that arrives separately (the §3 rules turn on the policy).
+    ///
+    /// **Retained, not consumed.** A policy change arrives as a later POLICY with no
+    /// fresh layout, and dropping the layout on first use meant `retained →
+    /// permanent` had nothing to pair with — so a channel made permanent never
+    /// appeared, though matrix.md §3 says "anything → permanent creates it".
     pub pending_layouts: std::collections::HashMap<String, PendingLayout>,
     /// Injections awaiting their labeled echo (§3.5): the Matrix event + room
     /// the minted id must link back to.
@@ -119,7 +124,9 @@ const BACKFILL_PAGE: u32 = 50;
 /// so a `stop` that never arrives (a dropped session) still clears.
 const TYPING_TTL_MS: u64 = 20_000;
 
-/// A projected channel's layout, waiting for its retention policy.
+/// A projected channel's layout, paired with the retention policy that arrives
+/// separately. Clone because it is retained across policy changes, not consumed.
+#[derive(Clone)]
 pub struct PendingLayout {
     pub vanity: String,
     pub kind: weft_proto::ChannelKind,
@@ -319,7 +326,7 @@ impl Bridge {
                 );
             }
             Event::Policy { channel, policy } => {
-                if let Some(layout) = self.pending_layouts.remove(&channel.to_string()) {
+                if let Some(layout) = self.pending_layouts.get(&channel.to_string()).cloned() {
                     if let Err(e) = self
                         .ensure_projected_room(&channel.to_string(), layout, policy)
                         .await

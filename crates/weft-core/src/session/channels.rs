@@ -292,10 +292,64 @@ impl<S: ControlStream> Session<S> {
                 return self.internal(label, &e).await;
             }
         }
+        // matrix.md §3: a projected namespace's realm decides room-by-room from the
+        // policy, so it has to hear the *change*. The broadcast above only reaches
+        // channel subscribers, and a provider subscribes to the channels it already
+        // projected — precisely not the one that just became projectable. So push it
+        // directly, the same way `announce_ns_meta` does for structure.
+        self.push_policy_to_projectors(&channel, policy).await;
+
         // Labeled ack to the actor's own session (members got the broadcast).
         self.send_event(label, Event::Policy { channel, policy })
             .await?;
         Ok(Flow::Continue)
+    }
+
+    /// Tell the providers of a projected namespace that one of its channels
+    /// changed retention — the fact their projection rule turns on.
+    async fn push_policy_to_projectors(&mut self, channel: &ChannelName, policy: RetentionPolicy) {
+        let Some(ns) = channel.namespace() else {
+            return; // top-level channels are never projected
+        };
+        let Ok(Some(record)) = self.ctx.namespaces.namespace_by_id(ns).await else {
+            return;
+        };
+        if record.origin.is_some() {
+            return; // a replica: the realm owns its structure, we do not push ours
+        }
+
+        for scheme in record.bridges.iter().filter_map(|b| b.parse().ok()) {
+            let Some((_, out)) = self.ctx.provider_for_scheme(&scheme) else {
+                continue; // offline; it re-reads the tree on reconnect
+            };
+            // Layout first, then policy: the adapter pairs them, and the channel
+            // may be one it never saw (an unprojectable channel is never pushed).
+            let Ok(chan) = self.ctx.channel_store.channel(channel).await else {
+                continue;
+            };
+            let Some(chan) = chan else { continue };
+
+            for event in [
+                Event::ChannelLayout {
+                    channel: channel.clone(),
+                    category: chan.category.clone(),
+                    position: chan.position,
+                    kind: chan.kind,
+                    vanity: chan.vanity.clone(),
+                    origin: None,
+                },
+                Event::Policy {
+                    channel: channel.clone(),
+                    policy,
+                },
+            ] {
+                if let Ok(line) = Reply::new(event).serialize() {
+                    if out.try_send(line).is_err() {
+                        warn!(%channel, "provider queue full — POLICY push dropped");
+                    }
+                }
+            }
+        }
     }
 
     pub(super) async fn on_channel_meta(

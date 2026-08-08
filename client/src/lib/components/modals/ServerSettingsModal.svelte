@@ -14,6 +14,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
   import * as weft from "$lib/transport/weft";
   import * as media from "$lib/media/media";
   import type { NsTab } from "$lib/ui/ui.svelte";
+  import { channelStore, nsOf } from "$lib/channels/channel.svelte";
   import { scopedNs as ns } from "$lib/ui/ui.svelte";
   import RolesTab from "$lib/components/modals/RolesTab.svelte";
   import PluginBlock from "$lib/components/plugins/PluginBlock.svelte";
@@ -42,11 +43,6 @@ import { roleStore } from "$lib/roles/roles.svelte";
   // that can be *stricter* than the server, never looser.
   // §13.1 actions a plugin declared for the settings surface, scoped to what
   // makes sense here: a namespace-context action, or one with no context.
-  // The scheme of the active namespace's origin (`matrix://…` → `matrix`), or
-  // null when it is native.
-  const nsScheme = $derived(
-    store.servers.get(ns())?.origin?.match(/^([a-z][a-z0-9+.-]*):\/\//)?.[1] ?? null,
-  );
   // Realms this namespace could be projected into: what a *connected* provider
   // serves, plus whatever it is already projected into — so an opt-in stays
   // visible (and revocable) while its adapter is down.
@@ -63,20 +59,27 @@ import { roleStore } from "$lib/roles/roles.svelte";
     new Set([...plugins.catalog.values()].flatMap((p) => p.schemes ?? [])),
   );
   const isPublic = $derived((vm.activeNsMeta?.visibility ?? "") === "public");
+  // matrix.md §3 locked decision 2: a channel projects **iff** its policy is
+  // `permanent`. Open foreign federation can honor exactly one retention policy —
+  // it cannot purge, compact, or guarantee redaction — so anything time-limited
+  // would have its own promise broken by being projected. Channels default to
+  // `retained`, so by default a projected namespace carries no rooms at all, and
+  // nothing said so: the Space appeared with its categories and no chats.
+  const nsChannels = $derived(
+    Object.values(channelStore.channels).filter((c) => c.name.startsWith("#") && nsOf(c.name) === ns()),
+  );
+  const projectableCount = $derived(nsChannels.filter((c) => c.retention === "permanent").length);
   const projectedInto = (scheme: string) =>
     (store.servers.get(ns())?.bridges ?? []).includes(scheme);
 
+  // `plugins.governs` is the shared rule: a realm adapter's surface belongs on its
+  // own realm's namespaces only. Filtering by surface + context alone put Matrix's
+  // Power Levels page on every namespace, native ones included.
   const pluginPages = $derived(
-    plugins.actionsFor("settings").filter(({ plugin, action }) => {
-      if (action.context !== "namespace" && action.context !== "none") return false;
-      // A realm adapter's settings page belongs on *its* realm's replicas only.
-      // Filtering by surface + context alone put Matrix's Power Levels page on
-      // every namespace, native ones included — the catalog said "a plugin offers
-      // a namespace page" and nothing said which namespaces it speaks for.
-      const schemes = plugins.schemesOf(plugin);
-      if (schemes.length === 0) return true; // governs no realm ⇒ generic
-      return nsScheme !== null && schemes.includes(nsScheme);
-    }),
+    plugins
+      .actionsFor("settings")
+      .filter(({ plugin }) => plugins.governs(plugin, ns()))
+      .filter(({ action }) => action.context === "namespace" || action.context === "none"),
   );
   /// Tab key for a plugin page. Namespaced so it can never collide with a native
   /// tab name — a plugin should not be able to shadow "roles" by picking that id.
@@ -608,6 +611,13 @@ import { roleStore } from "$lib/roles/roles.svelte";
                     {#if on}
                       Discoverable in that realm as <code>#{serverVanity}</code>. Its users can join, and its
                       moderators act here.
+                      {#if nsChannels.length && !projectableCount}
+                        <br />No channels are mirrored: only <b>permanent</b> ones can be. Set a channel's
+                        retention in its settings.
+                      {:else if nsChannels.length}
+                        <br />{projectableCount} of {nsChannels.length} channel(s) mirrored — only
+                        <b>permanent</b> ones can be.
+                      {/if}
                     {:else if live}
                       Not published — nobody there can find this namespace.
                     {:else}

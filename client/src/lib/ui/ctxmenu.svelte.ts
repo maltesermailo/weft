@@ -12,7 +12,7 @@ import * as weft from "$lib/transport/weft";
 import { toast } from "$lib/notifications/toasts.svelte";
 import { plugins } from "$lib/plugins/plugins.svelte";
 import type { Surface } from "$lib/plugins/sdui";
-import { channelStore, scopesFor } from "$lib/channels/channel.svelte";
+import { channelStore, scopesFor, nsOf } from "$lib/channels/channel.svelte";
 import { isMuted, setNotifLevel, scopeKeyOf } from "$lib/notifications/notif";
 
 
@@ -77,7 +77,7 @@ export function msgCtx(e: MouseEvent, m: Msg): void {
     if (mod) items.push({ label: "Delete", icon: "delete", danger: true, run: () => doDelete(m) });
     items.push({ label: "Report", run: () => openReport(m) });
   }
-  items.push(...pluginItems("context-menu", ["message"], m.msgid));
+  items.push(...pluginItems("context-menu", ["message"], m.msgid, nsOf(view.active)));
   openCtx(e, items);
 }
 
@@ -88,10 +88,19 @@ export function msgCtx(e: MouseEvent, m: Msg): void {
  * `ctxRef` tells the plugin what it was invoked on — the msgid here — so it can
  * act without a round trip to ask.
  */
-function pluginItems(surface: Surface, contexts: string[], ctxRef?: string): CtxItem[] {
+function pluginItems(
+  surface: Surface,
+  contexts: string[],
+  ctxRef?: string,
+  ns?: string,
+): CtxItem[] {
   const matching = plugins
     .actionsFor(surface)
-    .filter(({ action }) => contexts.includes(action.context));
+    .filter(({ action }) => contexts.includes(action.context))
+    // A realm adapter's surface belongs to its own realm's namespaces only.
+    // `ns === undefined` means the caller has no namespace in play (a DM, a
+    // top-level channel), where a realm surface is meaningless either way.
+    .filter(({ plugin }) => plugins.governs(plugin, ns));
   if (matching.length === 0) return [];
 
   return [
@@ -183,7 +192,7 @@ export function userCtx(e: MouseEvent, name: string): void {
   // §13.2 a member/user action's ctx-ref is the qualified `user@net` — the
   // plugin resolves any further scope itself (a bridge's kick, for instance,
   // asks which channel, since the ref carries none).
-  items.push(...pluginItems("context-menu", ["member", "user"], ref));
+  items.push(...pluginItems("context-menu", ["member", "user"], ref, nsOf(view.active)));
   openCtx(e, items);
 }
 
@@ -293,7 +302,7 @@ export function serverCtx(e: MouseEvent, ns: string): void {
     items.push({ label: "Create Category", icon: "folder", run: () => openCreateCategory(ns) });
   }
 
-  items.push(...pluginItems("server-menu", ["namespace", "none"], ns));
+  items.push(...pluginItems("server-menu", ["namespace", "none"], ns, ns));
 
   items.push({ divider: true });
   items.push({
@@ -322,6 +331,6 @@ export function listCtx(e: MouseEvent): void {
     { label: "Create category", icon: "folder", run: openCreateCategory },
     // §13.1 the `channel-list` surface: the namespace is what a plugin acts on
     // from the sidebar background.
-    ...pluginItems("channel-list", ["namespace", "none"], view.activeServer),
+    ...pluginItems("channel-list", ["namespace", "none"], view.activeServer, view.activeServer),
   ]);
 }

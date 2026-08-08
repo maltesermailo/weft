@@ -2937,3 +2937,101 @@ async fn re_projecting_republishes_an_existing_space() {
         "re-projection must (re)publish the Space in the directory: {recorded:?}"
     );
 }
+
+#[tokio::test]
+async fn making_a_channel_permanent_projects_it_later() {
+    // matrix.md §3: "anything → permanent creates it". A channel defaults to
+    // `retained`, so a freshly projected namespace has a Space, its categories, and
+    // no rooms — and the fix for that is to make a channel permanent.
+    //
+    // That arrives as a later POLICY with no fresh CHANNEL-LAYOUT beside it, so
+    // consuming the layout on first use left nothing to pair with and the room was
+    // never created. The layout is retained instead.
+    let (mut bridge, mut lines, calls) = bridge_with(BTreeMap::new()).await;
+    let ns_id = ulid::Ulid::new().to_string().to_lowercase();
+    let chan_id = ulid::Ulid::new().to_string().to_lowercase();
+    let channel = format!("#{ns_id}/{chan_id}");
+
+    deliver(
+        &mut bridge,
+        weft_proto::Event::NsMeta {
+            id: ns_id.parse().unwrap(),
+            vanity: "gaming".parse().unwrap(),
+            visibility: weft_proto::Visibility::Public,
+            owner: Some("ada".into()),
+            title: None,
+            description: None,
+            icon: None,
+            recovery_set: false,
+            recovery_pending: None,
+            categories: Vec::new(),
+            federation: false,
+            welcome: None,
+            origin: None,
+            provider_online: None,
+            authority: None,
+            settings_disabled: Vec::new(),
+            bridges: vec!["matrix".parse().unwrap()],
+        },
+        None,
+        None,
+    )
+    .await;
+    deliver(
+        &mut bridge,
+        weft_proto::Event::ChannelLayout {
+            channel: channel.parse().unwrap(),
+            category: None,
+            position: 0,
+            kind: weft_proto::ChannelKind::Text,
+            vanity: "general".parse().unwrap(),
+            origin: None,
+        },
+        None,
+        None,
+    )
+    .await;
+    // Retained: by rule, no room.
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Policy {
+            channel: channel.parse().unwrap(),
+            policy: "retained:90d".parse().unwrap(),
+        },
+        None,
+        None,
+    )
+    .await;
+    drain(&mut lines);
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(what, _, body)| what == "POST createRoom" && body["name"] == "general")
+            .count(),
+        0,
+        "a retained channel must not project"
+    );
+
+    // The owner sets it permanent. Only a POLICY arrives — no second layout.
+    calls.lock().unwrap().clear();
+    deliver(
+        &mut bridge,
+        weft_proto::Event::Policy {
+            channel: channel.parse().unwrap(),
+            policy: weft_proto::RetentionPolicy::Permanent,
+        },
+        None,
+        None,
+    )
+    .await;
+
+    let recorded = calls.lock().unwrap();
+    assert!(
+        recorded
+            .iter()
+            .any(|(what, _, body)| what == "POST createRoom" && body["name"] == "general"),
+        "making it permanent must project the room: {recorded:?}"
+    );
+}

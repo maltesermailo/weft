@@ -2,7 +2,7 @@
   import { vm } from "$lib/navigation/viewmodel.svelte";
   import { chanNsScope, chanRoleCaps, setChanRoleCaps, chanMemberGrants, chanMemberCaps, setChanMemberCaps, removeChanRole, removeChanMember, toggleRestricted, toggleViewGated } from "$lib/roles/chanperms";
   import { roleStore } from "$lib/roles/roles.svelte";
-  import { channelStore } from "$lib/channels/channel.svelte";
+  import { channelStore, nsOf } from "$lib/channels/channel.svelte";
   import { profileStore } from "$lib/profile/profile.svelte";
   import { fade } from "svelte/transition";
   import { untrack } from "svelte";
@@ -25,7 +25,14 @@
   // supplies (the bridged Matrix room's name/topic, say) — a page here rather
   // than a button in the channel list.
   const pluginPages = $derived(
-    plugins.actionsFor("channel-settings").filter(({ action }) => action.context === "channel" || action.context === "none"),
+    plugins
+      .actionsFor("channel-settings")
+      // A realm adapter's channel page belongs to its own realm's channels. Without
+      // this, Matrix's "Bridged room settings" appeared on every channel and opened
+      // a flow the adapter refuses ("this channel is not bridged"), leaving the
+      // panel on `Loading…` forever.
+      .filter(({ plugin }) => plugins.governs(plugin, nsOf(channel)))
+      .filter(({ action }) => action.context === "channel" || action.context === "none"),
   );
   /// The panel backing the open plugin page, once its flow has answered. A
   /// plugin that answers with a modal instead is drawn by `AppModals`.
