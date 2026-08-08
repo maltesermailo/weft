@@ -64,6 +64,8 @@ function toRenderMsg(m: weft.CoreMsg): Omit<Msg, "key"> {
     reactions: Object.keys(m.reactions).length ? m.reactions : undefined,
     label: m.label ?? undefined,
     pending: m.pending || undefined,
+    failed: m.failed || undefined,
+    failReason: m.fail_reason ?? undefined,
     time: m.pending ? clock() : (msgTime(m.id) ?? clock()),
     ts: m.pending ? Date.now() : (msgEpoch(m.id) ?? Date.now()),
   };
@@ -84,6 +86,8 @@ function assignRenderMsg(dst: Msg, m: weft.CoreMsg): void {
   dst.thread = s.thread;
   dst.attachments = s.attachments;
   dst.pending = s.pending;
+  dst.failed = s.failed;
+  dst.failReason = s.failReason;
   dst.label = s.label;
   dst.time = s.time;
   dst.ts = s.ts;

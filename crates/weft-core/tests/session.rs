@@ -5331,7 +5331,12 @@ async fn local_posts_relay_outward_without_looping() {
     plugin.send(&format!(
         "@as=ada@test.example;msgid={root};label={bridge_label} MSG {channel} :hello matrix"
     ));
-    let Event::Message(m) = ada.recv().await.event else {
+    let reply = ada.recv().await;
+    // It carries **her own** label (`m1`, not the bridge label): that is the ack her
+    // client reconciles its greyed optimistic echo against — without it she would
+    // see her own message arrive as a stranger's.
+    assert_eq!(reply.label.as_deref(), Some("m1"));
+    let Event::Message(m) = reply.event else {
         panic!("ada expected her post back, minted by the realm");
     };
     assert_eq!(m.msgid, root);

@@ -62,6 +62,10 @@ import { roleScopeOf, roleStore } from "$lib/roles/roles.svelte";
         {#if !m.net && store.session.isStaff(m.author)}<span class="cap-badge staff">staff</span>{/if}
         {#if m.own}<span class="cap-badge owner">you</span>{/if}
         <span class="time">{m.time}</span>
+        <!-- Why it failed, from the store (a refused send / no ack) or from an
+             `UNDELIVERED` push. Rendered rather than fixed in CSS: "not delivered
+             to the bridged room" is a lie for a send that never left. -->
+        {#if m.failed}<span class="fail-note" title={m.failReason}>· {m.failReason ?? "not delivered"}</span>{/if}
       </div>
       {#if compose.editingKey === m.key}
         <textarea class="edit-box" rows="1" bind:value={compose.editDraft} onkeydown={(e) => editKey(e, m)} use:autofocus></textarea>

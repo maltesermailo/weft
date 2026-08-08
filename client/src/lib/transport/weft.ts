@@ -106,6 +106,7 @@ export type CoreMsg = {
   reactions: Record<string, { count: number; mine: boolean }>;
   pending: boolean;
   failed: boolean;
+  fail_reason: string | null;
 };
 
 export type WeftEvent =
@@ -641,6 +642,13 @@ export function react(msgid: string, emoji: string) {
 
 export function unreact(msgid: string, emoji: string) {
   return invoke("react", { msgid, emoji, add: false });
+}
+
+/// The send deadline: mark that label's optimistic echo failed if it is *still*
+/// pending. Fired unconditionally by the composer's timer — the store ignores a
+/// label whose echo already reconciled, so there is nothing to cancel.
+export function failSend(label: string, reason: string) {
+  return invoke("fail_send", { label, reason });
 }
 
 export function sendMessage(

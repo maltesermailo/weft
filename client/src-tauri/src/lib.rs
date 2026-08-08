@@ -430,6 +430,16 @@ fn send_message(
     conn.send(line)
 }
 
+/// The send deadline expired (the frontend's timer): if that label's echo is still
+/// pending it will never reconcile, so mark it failed. A no-op once the ack has
+/// landed, which is why the frontend never has to cancel the timer.
+#[tauri::command]
+fn fail_send(app: AppHandle, model: State<'_, weft::Model>, label: String, reason: String) {
+    for d in model.0.lock().unwrap().fail_send(&label, &reason) {
+        let _ = app.emit("weft", d);
+    }
+}
+
 /// §9 declare the open channels (the two-tier subscription scope): only these get
 /// message-body diffs; every other channel gets just `UnreadChanged`. Local only.
 #[tauri::command]
@@ -1319,6 +1329,7 @@ pub fn run() {
             discover,
             channels,
             send_message,
+            fail_send,
             set_open_channels,
             messages_range,
             send_raw

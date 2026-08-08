@@ -53,6 +53,10 @@ pub struct Msg {
     pub reactions: BTreeMap<String, Reaction>,
     pub pending: bool,
     pub failed: bool,
+    /// Why it failed, shown on the row. Set with `failed`; the two travel together
+    /// because "failed" with no reason is exactly the useless state the greyed
+    /// forever-pending echo already was.
+    pub fail_reason: Option<String>,
 }
 
 /// A channel's unread tally. Model-derived (the *truth*); the TS render layer
@@ -139,6 +143,17 @@ impl Messages {
                 unread,
                 mentions,
             } => self.set_unread(channel, *unread as i64, *mentions as i64),
+            // A refused send: the label identifies which one (§3.5). Chiefly the
+            // bridged case — posting into a replica whose provider is offline is
+            // refused rather than queued, so the optimistic echo must stop looking
+            // like it is still on its way. `fail_pending` ignores labels that name
+            // no pending message, so an `ERR` answering some other request is a
+            // no-op here.
+            ClientEvent::Error {
+                label: Some(label),
+                text,
+                ..
+            } => self.fail_pending(label, text),
             _ => Vec::new(),
         }
     }
@@ -186,23 +201,36 @@ impl Messages {
         )
     }
 
-    /// Mark a pending echo failed (send error) so the UI can show a retry.
-    pub fn fail_pending(&mut self, channel: &str, id: &str) -> Vec<MsgDiff> {
-        let Some(buf) = self.buffers.get_mut(channel) else {
-            return Vec::new();
-        };
-        let Some(m) = buf.iter_mut().find(|m| m.id == id && m.pending) else {
-            return Vec::new();
-        };
+    /// Mark the pending echo carrying `label` failed: it will never reconcile, so
+    /// it stops claiming to be on its way and says why instead.
+    ///
+    /// Keyed by **label**, not by channel + local id, because the two things that
+    /// call this only know the label: a direct `ERR` (§3.5 echoes the label of the
+    /// request it answers) and the send deadline. Labels are per-send UUIDs, so the
+    /// scan matches at most one message — and matching only a *still-pending* one
+    /// makes the call idempotent: an echo that already reconciled is left alone,
+    /// which is what lets the deadline fire unconditionally.
+    pub fn fail_pending(&mut self, label: &str, reason: &str) -> Vec<MsgDiff> {
+        for (channel, buf) in self.buffers.iter_mut() {
+            let Some(m) = buf
+                .iter_mut()
+                .find(|m| m.pending && m.label.as_deref() == Some(label))
+            else {
+                continue;
+            };
 
-        m.failed = true;
-        m.pending = false;
+            m.pending = false;
+            m.failed = true;
+            m.fail_reason = Some(reason.to_string());
 
-        vec![MsgDiff::MsgUpdated {
-            channel: channel.to_string(),
-            id: id.to_string(),
-            msg: m.clone(),
-        }]
+            return vec![MsgDiff::MsgUpdated {
+                channel: channel.clone(),
+                id: m.id.clone(),
+                msg: m.clone(),
+            }];
+        }
+
+        Vec::new()
     }
 
     /// Ingest a live `MESSAGE`: reconcile our own echo (by label) with its pending,
@@ -264,17 +292,24 @@ impl Messages {
             reactions: BTreeMap::new(),
             pending: false,
             failed: false,
+            fail_reason: None,
         };
 
         let buf = self.buffers.entry(channel.clone()).or_default();
 
-        // §3.5/§11.13 reconcile: our echoed copy (by label) replaces the pending.
+        // §3.5/§11.13 reconcile: our echoed copy (by label) replaces the local one.
+        //
+        // Matched on any row that is still a **local echo** — pending *or* failed,
+        // not pending alone: a send past its deadline is marked failed, and if the
+        // ack then turns up late (a slow bridge) it has to replace that row rather
+        // than land beside it. The arriving copy is authoritative, so it also clears
+        // the failure. An already-reconciled row keeps its label but is neither, so
+        // a re-delivery falls through to the id-upsert below and keeps its reactions.
         if msg.own {
             if let Some(label) = &msg.label {
-                if let Some(idx) = buf
-                    .iter()
-                    .position(|m| m.pending && m.label.as_deref() == Some(label.as_str()))
-                {
+                if let Some(idx) = buf.iter().position(|m| {
+                    (m.pending || m.failed) && m.label.as_deref() == Some(label.as_str())
+                }) {
                     let old_id = buf[idx].id.clone();
                     buf[idx] = msg.clone();
 
@@ -563,6 +598,62 @@ mod tests {
         );
         // No duplicate: the buffer holds exactly one.
         assert_eq!(m.range("#n/c", None, 50).len(), 1);
+
+        // The deadline fires anyway (the host never cancels it) and must NOT undo a
+        // reconciled message — the whole point of matching only pending ones.
+        assert!(m.fail_pending("L1", "too late").is_empty());
+        let kept = &m.range("#n/c", None, 50)[0];
+        assert!(!kept.failed && !kept.pending && kept.id == "01srv");
+    }
+
+    #[test]
+    fn a_refused_send_stops_the_echo_looking_pending() {
+        // The bridged case: posting into a replica whose provider is offline is
+        // refused, so the echo would otherwise stay greyed for the whole session.
+        let mut m = Messages::default();
+        m.handle(&connected());
+        let (local_id, _) = m.insert_pending("#n/c", "L1", "into the void", false);
+
+        let d = m.handle(&ClientEvent::Error {
+            code: "POLICY".into(),
+            text: "cannot post to this channel".into(),
+            label: Some("L1".into()),
+        });
+        assert!(matches!(&d[0], MsgDiff::MsgUpdated { id, msg, .. }
+                if id == &local_id
+                    && !msg.pending
+                    && msg.failed
+                    && msg.fail_reason.as_deref() == Some("cannot post to this channel")));
+
+        // A late ack replaces the failed row instead of appearing beside it, and
+        // clears the failure — the message did land after all.
+        let d = m.ingest(
+            &message(
+                "#n/c",
+                "me",
+                "home",
+                "01late",
+                "into the void",
+                true,
+                Some("L1"),
+            ),
+            false,
+        );
+        assert!(matches!(&d[0], MsgDiff::MsgUpdated { id, msg, .. }
+                if id == &local_id && msg.id == "01late" && !msg.failed && msg.fail_reason.is_none()));
+        assert_eq!(m.range("#n/c", None, 50).len(), 1, "no duplicate row");
+
+        // An ERR answering some *other* labelled request leaves messages alone.
+        let mut m2 = Messages::default();
+        m2.handle(&connected());
+        m2.insert_pending("#n/c", "L1", "fine", false);
+        assert!(m2
+            .handle(&ClientEvent::Error {
+                code: "NO-SUCH-TARGET".into(),
+                text: "no such target".into(),
+                label: Some("some-history-request".into()),
+            })
+            .is_empty());
     }
 
     #[test]

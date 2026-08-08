@@ -1218,8 +1218,9 @@ button:disabled {
   padding-left: 6px;
   margin-left: -8px;
 }
-.msg-group.undelivered .msg-body::after {
-  content: " · not delivered to the bridged room";
+/* The reason itself is a rendered span (`.fail-note` in `MessageItem`), not
+   generated content: it differs per failure, and CSS cannot say which. */
+.fail-note {
   color: var(--danger, #d83c3e);
   font-size: 11px;
 }

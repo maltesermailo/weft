@@ -283,6 +283,15 @@ impl AppState {
         self.scope_msgs(diffs)
     }
 
+    /// The send deadline expired: mark that label's echo failed if it is *still*
+    /// pending. Idempotent by design — the host fires this unconditionally and the
+    /// store decides, so no timer needs cancelling when the ack arrives first.
+    pub fn fail_send(&mut self, label: &str, reason: &str) -> Vec<StateDiff> {
+        let diffs = self.messages.fail_pending(label, reason);
+
+        self.scope_msgs(diffs)
+    }
+
     /// The **pull** half of the two-tier IPC: up to `limit` messages in `channel`
     /// ending before `before` (exclusive, else newest). The frontend's window cache
     /// fills from this — bulk bodies never stream over the push path.

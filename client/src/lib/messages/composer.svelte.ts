@@ -22,6 +22,12 @@ import { searchUnicode } from "$lib/rendering/shortcodes";
 type Attachment = { uri: string; name: string; mime: string; thumb: string | null; width: number | null; height: number | null };
 type EmojiSuggestion = { name: string; url: string | null; char?: string };
 
+// How long an optimistic echo may stay greyed before it is called failed. Sized
+// for the slowest honest ack, not the common one: a native channel answers in
+// milliseconds, while a post into a bridged channel is minted by the foreign
+// server, so it waits for a puppet send and a round trip back through the adapter.
+const SEND_DEADLINE_MS = 20_000;
+
 // All mutable composer/edit state in one reactive object so components can bind
 // its fields directly (`bind:value={compose.text}`).
 export const compose = $state<{
@@ -260,6 +266,15 @@ export function doSend(): void {
     compose.text = text;
     toast(String(e), "error");
   });
+
+  // A greyed echo needs an exit even when nothing answers. A refused send is
+  // reported by its `ERR` (the store fails the echo on the label), but silence is
+  // not: in a bridged channel the realm mints the message, so a wedged adapter
+  // acks nothing and there is no local copy that "arrived". Past the deadline the
+  // row says so instead of shimmering for the rest of the session.
+  setTimeout(() => {
+    void weft.failSend(label, "no acknowledgement — it may not have been sent").catch(() => {});
+  }, SEND_DEADLINE_MS);
 }
 
 export function composerKey(e: KeyboardEvent): void {
