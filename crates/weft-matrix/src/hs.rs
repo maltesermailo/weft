@@ -25,6 +25,25 @@ impl Hs {
         }
     }
 
+    /// Publish a room in this server's **public room directory**.
+    ///
+    /// Distinct from `createRoom`'s `visibility`, which only applies at creation:
+    /// this repairs a room that already exists. Projection is meant to be found,
+    /// and a Space created before the flag existed (or created unlisted) would
+    /// otherwise stay invisible to anyone browsing the server forever.
+    pub async fn publish_room(&self, room_id: &str) -> anyhow::Result<()> {
+        self.call(
+            reqwest::Method::PUT,
+            &format!("/_matrix/client/v3/directory/list/room/{}", enc(room_id)),
+            Some(json!({ "visibility": "public" })),
+            None,
+            &[],
+        )
+        .await?;
+
+        Ok(())
+    }
+
     /// Point a room alias at `room_id` in this server's directory.
     ///
     /// Separate from the alias `create_room` mints: that one is the room's stable

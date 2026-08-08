@@ -3362,6 +3362,7 @@ impl Bridge {
                 .put_state(&room, "m.room.name", "", json!({ "name": name }))
                 .await?;
             self.ensure_vanity_alias(&room, ns_id, vanity).await;
+            self.ensure_public_listing(&room).await;
 
             return Ok(());
         }
@@ -3401,10 +3402,31 @@ impl Bridge {
             .await?;
 
         self.ensure_vanity_alias(&space_room, ns_id, vanity).await;
+        self.ensure_public_listing(&space_room).await;
 
         self.store.save_projection(ns_id, &space_room).await;
         info!(ns_id, space_room, "projected namespace as a Space");
         Ok(())
+    }
+
+    /// Keep a projected Space listed in the homeserver's public room directory.
+    ///
+    /// Every projected Space is public by design (owner directive): projection
+    /// only happens for a `public` namespace — `bridge:<scheme> :open` refuses
+    /// anything else — so there is nothing here that visibility was hiding, and a
+    /// Space nobody can find defeats the point of projecting it.
+    ///
+    /// Re-applied on every re-projection rather than only at creation, so a Space
+    /// made before this existed heals on the next reconnect instead of needing to
+    /// be published by hand. Best-effort: unlisted is a discoverability loss, not
+    /// a correctness one.
+    async fn ensure_public_listing(&self, room: &str) {
+        if let Err(e) = self.hs.publish_room(room).await {
+            warn!(
+                room,
+                "could not publish the Space in the room directory: {e:#}"
+            );
+        }
     }
 
     /// Publish `#<vanity>` for a projected Space, and retire the previous one.

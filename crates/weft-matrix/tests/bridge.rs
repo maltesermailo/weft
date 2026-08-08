@@ -58,6 +58,21 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
             delete(|| async { axum::Json(json!({})) }),
         )
         .route(
+            "/_matrix/client/v3/directory/list/room/:room",
+            put(
+                |State(hs): State<MockHs>,
+                 Path(room): Path<String>,
+                 axum::Json(body): axum::Json<Value>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("PUT list/{room}"),
+                        String::new(),
+                        body,
+                    ));
+                    axum::Json(json!({}))
+                },
+            ),
+        )
+        .route(
             "/_matrix/client/v3/join/:room",
             post(
                 |State(hs): State<MockHs>,
@@ -1170,6 +1185,14 @@ async fn a_projected_namespace_becomes_a_space_and_bridges_both_directions() {
                 .iter()
                 .any(|(what, _, _)| what == "PUT alias/#gaming:test.example"),
             "the vanity alias must be published: {recorded:?}"
+        );
+        // Listed in the room directory, or nobody browsing this server finds it.
+        assert!(
+            recorded
+                .iter()
+                .any(|(what, _, body)| what.starts_with("PUT list/")
+                    && body["visibility"] == "public"),
+            "the Space must be published in the directory: {recorded:?}"
         );
         assert_eq!(creates[1].2["name"], "general");
         assert!(
@@ -2855,5 +2878,62 @@ async fn a_room_added_to_a_consumed_space_later_becomes_a_channel() {
     assert!(
         readded.iter().any(|l| l.contains("CHANNEL-LAYOUT")),
         "a re-added room is provisioned again: {readded:?}"
+    );
+}
+
+#[tokio::test]
+async fn re_projecting_republishes_an_existing_space() {
+    // Every projected Space is public by design (owner directive): projection only
+    // happens for a `public` namespace, so there is nothing visibility was hiding,
+    // and a Space nobody can find defeats the point.
+    //
+    // `createRoom`'s `visibility` only covers a *fresh* Space, so a Space created
+    // before that flag existed — or created unlisted — would stay invisible
+    // forever. The idempotent re-projection path must repair it, which is what
+    // makes an already-deployed Space heal on the next reconnect instead of
+    // needing to be published by hand.
+    let (mut bridge, mut lines, calls) = bridge_with(BTreeMap::new()).await;
+    let ns_id = ulid::Ulid::new().to_string().to_lowercase();
+
+    let meta = |ns: &str| weft_proto::Event::NsMeta {
+        id: ns.parse().unwrap(),
+        vanity: "gaming".parse().unwrap(),
+        visibility: weft_proto::Visibility::Public,
+        owner: Some("ada".into()),
+        title: Some("The Lounge".into()),
+        description: None,
+        icon: None,
+        recovery_set: false,
+        recovery_pending: None,
+        categories: Vec::new(),
+        federation: false,
+        welcome: None,
+        origin: None,
+        provider_online: None,
+        authority: None,
+        settings_disabled: Vec::new(),
+        bridges: vec!["matrix".parse().unwrap()],
+    };
+
+    deliver(&mut bridge, meta(&ns_id), None, None).await;
+    drain(&mut lines);
+
+    // Second push: the Space exists, so this takes the refresh branch — no
+    // `createRoom`, and therefore no `visibility` to ride along.
+    calls.lock().unwrap().clear();
+    deliver(&mut bridge, meta(&ns_id), None, None).await;
+
+    let recorded = calls.lock().unwrap();
+    assert!(
+        !recorded
+            .iter()
+            .any(|(what, _, _)| what == "POST createRoom"),
+        "re-projection must not create a second Space: {recorded:?}"
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|(what, _, body)| what.starts_with("PUT list/") && body["visibility"] == "public"),
+        "re-projection must (re)publish the Space in the directory: {recorded:?}"
     );
 }
