@@ -164,6 +164,20 @@ export async function catchUpChannel(name: string): Promise<void> {
 
 /// §6.4 pin wire-event handlers: keep the channel's `pinnedIds` current and, if
 /// the Pins panel is open on that channel, refresh/prune it.
+export const deliveryHandlers: HandlerMap = {
+  // Framework §7a: mark the author's own message as not delivered. It stays in
+  // place — it IS stored here, and history will serve it — but it stops claiming
+  // the realm has it.
+  undelivered: (e) => {
+    const ch = channelStore.channels[e.channel];
+    const m = ch?.messages.find((x) => x.msgid === e.msgid);
+    if (!m) return;
+
+    m.failed = true;
+    m.failReason = e.reason ?? "the bridge did not confirm delivery";
+  },
+};
+
 export const pinsHandlers: HandlerMap = {
   pinned: (e) => {
     const ch = channelStore.ensure(e.channel);

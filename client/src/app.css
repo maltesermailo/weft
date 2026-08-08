@@ -1210,6 +1210,19 @@ button:disabled {
 .msg-group.pending {
   opacity: 0.55;
 }
+/* Framework §7a: stored here, but the realm this channel mirrors never got it.
+   Not greyed like a pending send — this one is finished and wrong, so it is
+   marked rather than faded. */
+.msg-group.undelivered {
+  border-left: 2px solid var(--danger, #d83c3e);
+  padding-left: 6px;
+  margin-left: -8px;
+}
+.msg-group.undelivered .msg-body::after {
+  content: " · not delivered to the bridged room";
+  color: var(--danger, #d83c3e);
+  font-size: 11px;
+}
 .msg-group .avatar {
   margin-top: 2px;
 }

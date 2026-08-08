@@ -110,6 +110,14 @@ pub enum ClientEvent {
     MediaToken {
         token: String,
     },
+    /// Framework §7a: a message of ours is stored here but never reached the realm
+    /// this channel mirrors, and will not be retried. weftd's echo acked local
+    /// storage only; this is the part that says the foreign side never saw it.
+    Undelivered {
+        channel: String,
+        msgid: String,
+        reason: Option<String>,
+    },
     /// §6/§13 a large HISTORY page is being served as a data-plane stream: the
     /// client pulls `/backfill?t=<token>` and folds the returned lines exactly
     /// like an inline `BATCH` (M-media-4). Correlates to the pending HISTORY.
@@ -751,6 +759,17 @@ pub fn on_line<E: EventSink>(
             network: user.network.to_string(),
             joined_ms,
             roles,
+        }),
+        // Framework §7a: stored here, never reached the realm. The author is told
+        // rather than left believing it landed.
+        Event::Undelivered {
+            channel,
+            msgid,
+            reason,
+        } => sink.emit(ClientEvent::Undelivered {
+            channel: channel.to_string(),
+            msgid: msgid.to_string(),
+            reason,
         }),
         Event::MediaToken { token } => sink.emit(ClientEvent::MediaToken { token }),
         // §6/§13 a HISTORY over the stream threshold — pull it off the data plane.

@@ -557,6 +557,33 @@ impl Realm {
     /// Grant capabilities in a namespace we govern — how a foreign moderator
     /// becomes one here. Translate the foreign model (a Matrix power level, a
     /// Discord role) into capabilities yourself: weftd has no notion of a level.
+    /// Confirm a message of weftd's reached the foreign system (framework §7a).
+    ///
+    /// weftd's echo only acks its own storage; this is the half that says the realm
+    /// has it. Answer **every** relayed message one way or the other — silence past
+    /// weftd's grace window is reported to the author as a failure.
+    pub async fn delivered(&self, msgid: &str) -> anyhow::Result<()> {
+        self.send(
+            weft_proto::Request::new(weft_proto::Command::Delivered {
+                msgid: msgid.parse()?,
+            })
+            .serialize()?,
+        )
+        .await
+    }
+
+    /// The negative half: it could not be delivered and will not be retried.
+    pub async fn undelivered(&self, msgid: &str, reason: &str) -> anyhow::Result<()> {
+        self.send(
+            weft_proto::Request::new(weft_proto::Command::Undelivered {
+                msgid: msgid.parse()?,
+                reason: Some(reason.to_string()),
+            })
+            .serialize()?,
+        )
+        .await
+    }
+
     pub async fn grant(&self, subject: &str, scope: &str, caps: &str) -> anyhow::Result<()> {
         self.send(
             weft_proto::Request::new(weft_proto::Command::Grant {

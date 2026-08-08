@@ -1076,6 +1076,12 @@ impl<S: ControlStream> Session<S> {
             Command::Unread { channel } => self.on_unread(label, channel, account).await,
             // Pagination (`cursor`) isn't needed at reference channel sizes —
             // the roster is served in one batch.
+            // Provider-only (framework §7a): delivery into a foreign realm is the
+            // adapter's word, never a client's.
+            Command::Delivered { .. } | Command::Undelivered { .. } => {
+                self.unsupported(label, "delivery acks are for providers")
+                    .await
+            }
             Command::Members { channel, .. } => self.on_members(label, channel).await,
             Command::Pin { msgid } => self.on_pin(label, msgid, account, true).await,
             Command::Unpin { msgid } => self.on_pin(label, msgid, account, false).await,

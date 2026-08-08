@@ -11817,3 +11817,119 @@ async fn a_realm_confirmed_rejoin_subscribes_the_live_session() {
     }
     panic!("HISTORY still refused: the realm-confirmed join never subscribed the session");
 }
+
+#[tokio::test]
+async fn a_message_the_realm_never_confirms_is_reported_undelivered() {
+    // The window that made this necessary: the bridge is gone but weftd has not
+    // noticed yet, so `can_post` still allows the message. It is stored, echoed
+    // (weftd's echo acks local storage, which is all it can honestly promise) —
+    // and silently never reaches Matrix. The author was left believing it landed.
+    //
+    // Now the provider must answer, and silence past the grace window is itself an
+    // answer: the author gets `UNDELIVERED` for that msgid.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+    assert!(matches!(
+        weft_proto::Request::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .command,
+        weft_proto::Command::NsJoin { .. }
+    ));
+
+    // She posts. weftd stores + echoes it — that ack is honest about storage.
+    ada.send(&format!("@label=m1 MSG {channel} :did this reach Matrix?"));
+    let reply = ada.recv().await;
+    assert_eq!(reply.label.as_deref(), Some("m1"));
+    let Event::Message(posted) = reply.event else {
+        panic!("expected her own echo");
+    };
+
+    // The provider was handed it (it is subscribed) and says nothing at all —
+    // which is what a dead adapter looks like from here. Past the deadline, the
+    // author is told.
+    // Well past any grace window, without coupling the test to its exact length.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    ctx.sweep_undelivered(now_ms).await;
+
+    let Event::Undelivered {
+        msgid, channel: ch, ..
+    } = ada.recv().await.event
+    else {
+        panic!("ada expected UNDELIVERED for the message the realm never confirmed");
+    };
+    assert_eq!(msgid, posted.msgid);
+    assert_eq!(ch.to_string(), channel.to_string());
+
+    // And the positive half: a message the provider *acks* is never reported. A
+    // false alarm would be worse than the silence it replaces — every delivered
+    // message would arrive with a scary marker.
+    ada.send(&format!("@label=m2 MSG {channel} :this one lands"));
+    let Event::Message(second) = ada.recv().await.event else {
+        panic!("expected her own echo");
+    };
+    plugin.send(&format!("DELIVERED {}", second.msgid));
+    // Barrier: a re-assert on the SAME session replies, and the session reads its
+    // lines in order — so the reply proves DELIVERED was processed first. Without
+    // it the sweep below races the ack and the test passes for the wrong reason.
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={ns_id} NS-META instagram://acme-corp/club public"
+    ));
+    // Raw lines: this session also carries the forwarded MSG and the membership
+    // statement, so match on the text rather than a typed event.
+    let mut barriered = false;
+    for _ in 0..40 {
+        if plugin.recv_raw().await.contains("NS-META") {
+            barriered = true;
+            break;
+        }
+    }
+    assert!(
+        barriered,
+        "the re-assert must answer, proving DELIVERED landed first"
+    );
+
+    ctx.sweep_undelivered(now_ms + 120_000).await;
+
+    // MEMBERS is the FIFO barrier on ada's side: anything the sweep pushed would
+    // arrive before the batch it answers with.
+    ada.send(&format!("@label=m3 MEMBERS {channel}"));
+    loop {
+        match ada.recv().await.event {
+            Event::Undelivered { msgid, .. } => {
+                assert_ne!(msgid, second.msgid, "an acked message must not be reported");
+            }
+            Event::BatchStart { .. } => break,
+            _ => {}
+        }
+    }
+}

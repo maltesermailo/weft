@@ -199,6 +199,20 @@ impl<S: ControlStream> Session<S> {
                 // it may set capabilities in them (its power levels, mapped).
                 // The ordinary handlers, with the ordinary authority check —
                 // `Actor::Provider` is what makes that work.
+                // Framework §7a: the adapter answering for a message we handed it.
+                // Silence until the deadline is itself an answer — see
+                // `ServerCtx::expired_deliveries`.
+                Command::Delivered { msgid } => {
+                    self.ctx.resolve_delivery(&msgid);
+                    return Ok(Flow::Continue);
+                }
+                Command::Undelivered { msgid, reason } => {
+                    if let Some((author, channel)) = self.ctx.resolve_delivery(&msgid) {
+                        self.report_undelivered(author, channel, msgid, reason)
+                            .await;
+                    }
+                    return Ok(Flow::Continue);
+                }
                 Command::Grant {
                     subject,
                     scope,
@@ -1057,6 +1071,32 @@ impl<S: ControlStream> Session<S> {
         }
 
         Ok(Flow::Continue)
+    }
+
+    /// Tell an author their message never reached the realm.
+    ///
+    /// Delivered to the account, not one session, so it lands wherever they have
+    /// the client open — including a different device from the one that posted.
+    pub(super) async fn report_undelivered(
+        &self,
+        author: Account,
+        channel: ChannelName,
+        msgid: MsgId,
+        reason: Option<String>,
+    ) {
+        warn!(%msgid, %channel, "message not delivered to the realm: {reason:?}");
+
+        self.ctx
+            .directory
+            .notify(
+                author,
+                Event::Undelivered {
+                    channel,
+                    msgid,
+                    reason,
+                },
+            )
+            .await;
     }
 
     /// Tell **local** members that a namespace's roster changed, so live rosters
@@ -1990,6 +2030,26 @@ impl<S: ControlStream> Session<S> {
             // POLICY is not relayed outward.
             _ => false,
         };
+
+        // A local message going to a provider is now *in flight*: it is stored and
+        // acked here, but whether the realm got it is unanswered until the adapter
+        // says so. Only messages — an edit/react that never arrives is a lesser
+        // wrong than a message the author believes was delivered.
+        if forward {
+            if let Event::Message(m) = &event.event {
+                // Channel messages only: a DM has no projected room to reach.
+                if let (None, weft_proto::Target::Channel(channel)) =
+                    (m.meta.system.as_ref(), &m.target)
+                {
+                    self.ctx.await_delivery(
+                        m.msgid.clone(),
+                        m.sender.account.clone(),
+                        channel.clone(),
+                        unix_now() * 1000,
+                    );
+                }
+            }
+        }
 
         if forward {
             // §3.5 on the projection path: an event minted from this session's

@@ -28,6 +28,12 @@ export type Msg = {
   thread?: string;
   /// Sender is from a federated peer network.
   bridged?: boolean;
+  /// Framework §7a: stored here, but the realm this channel mirrors never got it
+  /// and will not be retried. weftd's echo only ever acked local storage, so
+  /// without this the message read as sent.
+  failed?: boolean;
+  /// Why, for the tooltip.
+  failReason?: string;
   /// The sender's network when foreign (`author@net` disambiguates federated
   /// users); absent for local senders, who render as a bare handle.
   net?: string;

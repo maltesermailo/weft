@@ -230,8 +230,23 @@ impl Bridge {
                         return;
                     }
                 }
-                if let Err(e) = self.relay_message(&m, actor_ulid.as_deref()).await {
-                    warn!(msgid = %m.msgid, "relay to Matrix failed: {e:#}");
+                // Answer weftd either way (framework §7a). A bare `warn!` left the
+                // author believing a message landed that Matrix never saw — which is
+                // exactly what happens in the window before weftd notices this
+                // bridge is gone.
+                let msgid = m.msgid.to_string();
+                match self.relay_message(&m, actor_ulid.as_deref()).await {
+                    Ok(()) => {
+                        if let Err(e) = self.realm.delivered(&msgid).await {
+                            debug!(msgid, "could not ack delivery: {e:#}");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(msgid, "relay to Matrix failed: {e:#}");
+                        if let Err(e) = self.realm.undelivered(&msgid, &format!("{e:#}")).await {
+                            debug!(msgid, "could not report non-delivery: {e:#}");
+                        }
+                    }
                 }
             }
             Event::Edited {

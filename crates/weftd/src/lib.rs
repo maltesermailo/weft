@@ -1043,19 +1043,43 @@ where
     let emoji: Arc<dyn weft_store::EmojiStore> = store.clone();
     let accounts: Arc<dyn weft_store::AccountStore> = store.clone();
     let namespaces: Arc<dyn weft_store::NamespaceStore> = store;
-    let tasks = vec![weft_core::spawn_maintenance(
-        events,
-        namespaces,
-        reports,
-        media_refs,
-        Arc::clone(&blobs),
-        profiles,
-        emoji,
-        accounts,
-        channels.clone(),
-        dm_policy,
-        maintenance,
-        ctx.shutdown.clone(),
-    )];
+    // Delivery-ack sweeper. Separate from maintenance because the cadences differ
+    // by two orders of magnitude: retention purge runs every few minutes, while a
+    // message the bridge never confirmed should be marked failed in seconds — the
+    // author is still looking at it.
+    let delivery_ctx = Arc::clone(&ctx);
+    let delivery_sweeper = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    delivery_ctx.sweep_undelivered(now_ms).await;
+                }
+                _ = delivery_ctx.shutdown.cancelled() => break,
+            }
+        }
+    });
+
+    let tasks = vec![
+        delivery_sweeper,
+        weft_core::spawn_maintenance(
+            events,
+            namespaces,
+            reports,
+            media_refs,
+            Arc::clone(&blobs),
+            profiles,
+            emoji,
+            accounts,
+            channels.clone(),
+            dm_policy,
+            maintenance,
+            ctx.shutdown.clone(),
+        ),
+    ];
     Ok((ctx, channels, tasks, admin_router))
 }

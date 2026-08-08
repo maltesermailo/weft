@@ -8,7 +8,7 @@ import * as media from "$lib/media/media";
 import type { Msg } from "$lib/types";
 import { store } from "$lib/store/store.svelte";
 import { channelStore, Channel, nsOf } from "$lib/channels/channel.svelte";
-import { mkMsg, applyReaction, pinsHandlers, messageMirrorHandlers } from "$lib/messages/messages.svelte";
+import { mkMsg, applyReaction, pinsHandlers, deliveryHandlers, messageMirrorHandlers } from "$lib/messages/messages.svelte";
 import { toastFor, trackBackground } from "$lib/sync/joinErrors";
 import { pluginHandlers, plugins } from "$lib/plugins/plugins.svelte";
 import { rosterFetchTarget } from "$lib/namespaces/server.svelte";
@@ -103,6 +103,7 @@ const domainHandlers: HandlerMap = {
   ...invitesHandlers,
   ...accountHandlers,
   ...pinsHandlers,
+  ...deliveryHandlers,
   ...pluginHandlers,
   ...profileHandlers,
   ...serverHandlers,

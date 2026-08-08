@@ -162,6 +162,20 @@ pub enum Command {
         channel: ChannelName,
         cursor: Option<String>,
     },
+    /// `DELIVERED <msgid>` (framework §7a) — a provider confirming it put one of
+    /// our messages into the foreign system. Provider sessions only.
+    ///
+    /// weftd's own echo acks *local* storage, which is all it can honestly
+    /// promise; nothing said whether the message reached the realm. Without this,
+    /// a post made in the window before weftd noticed the bridge was gone was
+    /// stored, echoed, and silently never delivered.
+    Delivered { msgid: MsgId },
+    /// `UNDELIVERED <msgid> [:reason]` — the provider could not deliver it, and
+    /// will not retry. The author is told rather than left believing it landed.
+    Undelivered {
+        msgid: MsgId,
+        reason: Option<String>,
+    },
     /// `PIN <msgid>` — pin a message in its channel (§6.4). Cap: `pin`.
     Pin { msgid: MsgId },
     /// `UNPIN <msgid>` — unpin a message (§6.4). Cap: `pin`.
@@ -989,6 +1003,13 @@ impl Command {
                     cursor: args.opt().map(str::to_string),
                 })
             }
+            "DELIVERED" => Ok(Command::Delivered {
+                msgid: Args::new(line, "DELIVERED").req("msgid")?.parse()?,
+            }),
+            "UNDELIVERED" => Ok(Command::Undelivered {
+                msgid: Args::new(line, "UNDELIVERED").req("msgid")?.parse()?,
+                reason: line.trailing.clone().filter(|r| !r.is_empty()),
+            }),
             "PIN" => Ok(Command::Pin {
                 msgid: Args::new(line, "PIN").req("msgid")?.parse()?,
             }),
@@ -2217,6 +2238,10 @@ impl Command {
                     .collect(),
                 None,
             ),
+            Command::Delivered { msgid } => ("DELIVERED", vec![msgid.to_string()], None),
+            Command::Undelivered { msgid, reason } => {
+                ("UNDELIVERED", vec![msgid.to_string()], reason.clone())
+            }
             Command::Pin { msgid } => ("PIN", vec![msgid.to_string()], None),
             Command::Unpin { msgid } => ("UNPIN", vec![msgid.to_string()], None),
             Command::Pins { channel } => ("PINS", vec![channel.to_string()], None),
@@ -3262,6 +3287,17 @@ mod tests {
         round_trip(&Request::new(Command::Members {
             channel: "#general".parse().unwrap(),
             cursor: Some("c2".to_string()),
+        }));
+        round_trip(&Request::new(Command::Delivered {
+            msgid: MSGID.parse().unwrap(),
+        }));
+        round_trip(&Request::new(Command::Undelivered {
+            msgid: MSGID.parse().unwrap(),
+            reason: Some("homeserver refused the puppet".into()),
+        }));
+        round_trip(&Request::new(Command::Undelivered {
+            msgid: MSGID.parse().unwrap(),
+            reason: None,
         }));
         round_trip(&Request::new(Command::Pin {
             msgid: MSGID.parse().unwrap(),

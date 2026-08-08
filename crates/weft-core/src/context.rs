@@ -332,6 +332,27 @@ pub struct ServerCtx {
     /// §10.5 pending email verification codes: `(account, kind) → (code,
     /// expiry-ms)`. In-memory + short-lived — a restart just means re-request.
     verify_codes: std::sync::Mutex<HashMap<(Account, String), (String, u64)>>,
+    /// Framework §7a: our messages handed to a provider and awaiting its delivery
+    /// ack, by msgid → who to tell and when to give up.
+    ///
+    /// weftd's echo acks *local storage*, which is all it can honestly promise. For
+    /// a replica channel the interesting question is whether the realm got it, and
+    /// nothing answered that — a post made in the window before weftd noticed the
+    /// bridge was gone was stored, echoed, and silently never delivered. An entry
+    /// that is neither acked nor nacked by its deadline is reported as undelivered.
+    pending_delivery: std::sync::Mutex<HashMap<MsgId, PendingDelivery>>,
+}
+
+/// One message awaiting a provider's delivery ack.
+#[derive(Debug, Clone)]
+struct PendingDelivery {
+    /// The author, so the failure reaches every session they have open.
+    author: Account,
+    /// The channel it was posted in — the client keys the message by both.
+    channel: ChannelName,
+    /// Give-up time (ms). Chosen short: this is a live round trip through an
+    /// adapter that is either there or not.
+    deadline_ms: u64,
 }
 
 /// §11.8 a blob to mirror from a bridge peer, handed core→weftd.
@@ -684,6 +705,7 @@ impl ServerCtx {
             mailer: std::sync::OnceLock::new(),
             probe: std::sync::OnceLock::new(),
             verify_codes: std::sync::Mutex::new(HashMap::new()),
+            pending_delivery: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -709,6 +731,76 @@ impl ServerCtx {
     /// weftd installs the §10.5 email sender.
     /// Turn developer mode on (weftd, from config). See the field's note: this
     /// trades invariant 1's uniformity for diagnosability, so it is a dev knob.
+    /// How long a provider has to confirm delivery before we call it failed.
+    /// Short on purpose: the adapter is a live session, not a queue — if it is
+    /// there it answers immediately, and if it is not, waiting changes nothing.
+    pub(crate) const DELIVERY_GRACE_MS: u64 = 10_000;
+
+    /// Note that `msgid` was handed to a provider and we are awaiting its ack.
+    pub(crate) fn await_delivery(
+        &self,
+        msgid: MsgId,
+        author: Account,
+        channel: ChannelName,
+        now_ms: u64,
+    ) {
+        self.pending_delivery
+            .lock()
+            .expect("pending_delivery lock")
+            .insert(
+                msgid,
+                PendingDelivery {
+                    author,
+                    channel,
+                    deadline_ms: now_ms + Self::DELIVERY_GRACE_MS,
+                },
+            );
+    }
+
+    /// The provider answered. `Some(..)` = it was ours to resolve; the caller
+    /// reports a failure, and a success needs no further word.
+    pub(crate) fn resolve_delivery(&self, msgid: &MsgId) -> Option<(Account, ChannelName)> {
+        self.pending_delivery
+            .lock()
+            .expect("pending_delivery lock")
+            .remove(msgid)
+            .map(|p| (p.author, p.channel))
+    }
+
+    /// Everything whose deadline has passed with no answer, cleared as it is
+    /// returned so a failure is reported exactly once.
+    /// Report every message whose delivery ack never came. Called on a short
+    /// interval by weftd; silence past the deadline is the adapter's answer.
+    pub async fn sweep_undelivered(&self, now_ms: u64) {
+        for (msgid, author, channel) in self.expired_deliveries(now_ms) {
+            tracing::warn!(%msgid, %channel, "no delivery ack from the realm's provider");
+            self.directory
+                .notify(
+                    author,
+                    weft_proto::Event::Undelivered {
+                        channel,
+                        msgid,
+                        reason: Some("the bridge did not confirm delivery".into()),
+                    },
+                )
+                .await;
+        }
+    }
+
+    pub(crate) fn expired_deliveries(&self, now_ms: u64) -> Vec<(MsgId, Account, ChannelName)> {
+        let mut pending = self.pending_delivery.lock().expect("pending_delivery lock");
+        let expired: Vec<MsgId> = pending
+            .iter()
+            .filter(|(_, p)| p.deadline_ms <= now_ms)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        expired
+            .into_iter()
+            .filter_map(|id| pending.remove(&id).map(|p| (id, p.author, p.channel)))
+            .collect()
+    }
+
     pub fn set_developer(&self, on: bool) {
         self.developer
             .store(on, std::sync::atomic::Ordering::Relaxed);

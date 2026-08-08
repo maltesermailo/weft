@@ -121,6 +121,8 @@ export type WeftEvent =
   | { kind: "server-info"; network: string; email_required: boolean; email_available: boolean }
   | { kind: "auth-failed"; reason: string }
   | { kind: "media-token"; token: string }
+  /// Framework §7a: stored here, never reached the realm this channel mirrors.
+  | { kind: "undelivered"; channel: string; msgid: string; reason: string | null }
   | { kind: "backfill"; token: string }
   | {
       kind: "message";

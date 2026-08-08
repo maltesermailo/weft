@@ -184,6 +184,18 @@ pub enum Event {
         msgid: MsgId,
         by: Option<Account>,
     },
+    /// `UNDELIVERED <#chan> <msgid> [:reason]` (framework §7a) — a message of
+    /// yours was stored here but could **not** be put into the realm this channel
+    /// mirrors, and will not be retried.
+    ///
+    /// weftd's echo acks local storage, which is all it can honestly promise. For
+    /// a bridged channel that is not the whole story, and without this the author
+    /// was left believing a message landed when the foreign side never saw it.
+    Undelivered {
+        channel: ChannelName,
+        msgid: MsgId,
+        reason: Option<String>,
+    },
     /// `UNPINNED <#chan> <msgid>` — a message was unpinned (§7).
     Unpinned {
         channel: ChannelName,
@@ -939,6 +951,14 @@ impl Event {
                     channel: args.req("channel")?.parse()?,
                     msgid: args.req("msgid")?.parse()?,
                     by: line.tags.get("by").map(|v| v.parse()).transpose()?,
+                })
+            }
+            "UNDELIVERED" => {
+                let mut args = Args::new(line, "UNDELIVERED");
+                Ok(Event::Undelivered {
+                    channel: args.req("channel")?.parse()?,
+                    msgid: args.req("msgid")?.parse()?,
+                    reason: line.trailing.clone().filter(|r| !r.is_empty()),
                 })
             }
             "UNPINNED" => {
@@ -2032,6 +2052,15 @@ impl Event {
                 }
                 ("PINNED", vec![channel.to_string(), msgid.to_string()], None)
             }
+            Event::Undelivered {
+                channel,
+                msgid,
+                reason,
+            } => (
+                "UNDELIVERED",
+                vec![channel.to_string(), msgid.to_string()],
+                reason.clone(),
+            ),
             Event::Unpinned { channel, msgid } => (
                 "UNPINNED",
                 vec![channel.to_string(), msgid.to_string()],
@@ -3061,6 +3090,16 @@ mod tests {
             channel: "#general".parse().unwrap(),
             msgid: MSGID.parse().unwrap(),
             by: Some("ada".parse().unwrap()),
+        }));
+        round_trip(&Reply::new(Event::Undelivered {
+            channel: "#general".parse().unwrap(),
+            msgid: MSGID.parse().unwrap(),
+            reason: Some("bridge offline".into()),
+        }));
+        round_trip(&Reply::new(Event::Undelivered {
+            channel: "#general".parse().unwrap(),
+            msgid: MSGID.parse().unwrap(),
+            reason: None,
         }));
         round_trip(&Reply::new(Event::Unpinned {
             channel: "#general".parse().unwrap(),
