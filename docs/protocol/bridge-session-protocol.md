@@ -590,6 +590,11 @@ Never stored, so it is announced rather than ingested. Same one-hop rule as
 one is the echo of an ingest). Read receipts stay unbridged — WEFT's `MARK` is
 private, Matrix receipts are public.
 
+Both room kinds count, in **both** directions: a consumed **replica** room and a
+room **projected** from a native namespace. Authorizing only the first (via the
+channel's `origin` scheme) made inbound typing and presence dead in every projected
+room — the same blind spot the DM route had.
+
 **Inbound is a set, not an event** (wired 2026-08-09). Foreign systems tend to
 state *who is typing now* per room rather than sending a transition — Matrix's
 `m.typing` EDU carries a `user_ids` array — while `TYPING` is per-user

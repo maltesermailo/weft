@@ -1114,12 +1114,7 @@ impl<S: ControlStream> Session<S> {
         // it — dialing it would spend a well-known fetch and a connect attempt to
         // learn that. Its spaces arrive through the provider, not through
         // federation, so say so rather than failing slowly.
-        if self
-            .ctx
-            .provider_for_realm(network.as_str())
-            .await
-            .is_some()
-        {
+        if self.ctx.provider_for_realm(network.as_str()).is_some() {
             return self
                 .unsupported(label, "that network is bridged, not federated")
                 .await;

@@ -596,6 +596,23 @@ pub enum Phase {
     Ready,
 }
 
+/// The client's account key for a user: bare on our own network, `account@network`
+/// when federated.
+///
+/// This is the form rosters use and the form every account-keyed store in the client
+/// is keyed by, and qualifying is not cosmetic — a bridged realm can carry the same
+/// handle as a local account (`ada@matrix.example` beside your own `ada`), so a bare
+/// key lands a stranger's presence or typing on *your* dot. Events that carry a
+/// separate `network` field leave the joining to their consumer; the ephemera, which
+/// are only ever an account key, join it here.
+fn account_key(user: &weft_proto::UserRef, home: &str) -> String {
+    if user.network.as_str() == home {
+        user.account.to_string()
+    } else {
+        user.to_string()
+    }
+}
+
 /// Process one inbound line: advance the handshake, emit structured events,
 /// and return an outbound line to send in response (if any).
 #[allow(clippy::too_many_arguments)]
@@ -817,11 +834,11 @@ pub fn on_line<E: EventSink>(
             state,
         } => sink.emit(ClientEvent::Typing {
             channel: channel.to_string(),
-            user: user.account.to_string(),
+            user: account_key(&user, net_name),
             state: state.to_string(),
         }),
         Event::Presence { user, status } => sink.emit(ClientEvent::Presence {
-            user: user.account.to_string(),
+            user: account_key(&user, net_name),
             status: status.to_string(),
         }),
         Event::Marked { channel, msgid } => sink.emit(ClientEvent::Marked {

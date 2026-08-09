@@ -7731,6 +7731,85 @@ async fn presence_crosses_a_replica_both_ways() {
 }
 
 #[tokio::test]
+async fn ephemera_and_dms_work_on_a_projection_only_bridge() {
+    // Regression, reported 2026-08-09: typing from Element showed nothing, and DMs
+    // did not work. All three bugs were the *same* shape — foreign traffic has two
+    // doors (a consumed **replica**, and a **projected** native namespace), and each
+    // of these only knew the first:
+    //
+    //   - typing authorized via the channel's `origin` scheme → a projected channel
+    //     has no origin, so an attributed TYPING was dropped;
+    //   - presence enumerated `namespaces_with_origin()` only → same blind spot;
+    //   - the DM route resolved "who serves this realm" by scanning replica origins
+    //     → on a projection-only bridge that answered "nobody".
+    //
+    // So this is a projection-only setup: no replica namespace exists anywhere.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("mx", key.public(), vec!["matrix".parse().unwrap()])],
+        &[],
+    );
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@root={} NS CREATE gaming public", root_key_b64()));
+    let Event::NsMeta { id, .. } = ada.recv().await.event else {
+        panic!("expected NS-META");
+    };
+    let ns_id = id.to_string();
+    let channel = ada.channel_by_vanity(&ns_id, "general").await;
+    ada.send(&format!("NS META {ns_id} bridge:matrix :open"));
+    ada.recv().await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT matrix://matrix.example");
+    plugin.send(&format!("NS-MEMBER {ns_id} carol@matrix.example join"));
+
+    // Typing from the realm's user reaches ada in the projected channel.
+    plugin.send(&format!("@as=carol@matrix.example TYPING {channel} start"));
+    // Past carol's membership statement, which arrives first.
+    let user = loop {
+        match ada.recv().await.event {
+            Event::Typing { user, .. } => break user,
+            _ => continue,
+        }
+    };
+    assert_eq!(user.to_string(), "carol@matrix.example");
+
+    // …and so does their presence.
+    plugin.send("@as=carol@matrix.example PRESENCE away");
+    let reply = loop {
+        let reply = ada.recv_any().await;
+
+        if matches!(reply.event, Event::Presence { .. }) {
+            break reply;
+        }
+    };
+    let Event::Presence { user, status } = reply.event else {
+        unreachable!("filtered above")
+    };
+    assert_eq!(user.to_string(), "carol@matrix.example");
+    assert_eq!(status, weft_proto::PresenceStatus::Away);
+
+    // A DM to one of the realm's users routes to the provider that asserted that
+    // realm — which is now how the route is resolved, rather than by inferring it
+    // from a replica namespace that a projection-only bridge does not have.
+    ada.send("@label=d1 MSG @carol@matrix.example :hey");
+    let relayed = loop {
+        let raw = plugin.recv_raw().await;
+
+        if verb_of(&raw) == "MSG" && raw.contains("carol@matrix.example") {
+            break raw;
+        }
+    };
+    assert!(
+        relayed.contains("as=ada@test.example"),
+        "the DM carries its sender: {relayed}"
+    );
+}
+
+#[tokio::test]
 async fn an_ns_meta_change_reaches_a_projecting_provider() {
     // A provider is not an ns member, so the ordinary fan-out never reaches it
     // — yet NS-META is exactly what describes its structure (Space name,

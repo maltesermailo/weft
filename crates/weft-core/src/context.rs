@@ -521,6 +521,13 @@ struct PluginReg {
     actions: Vec<weft_proto::ActionDecl>,
     /// Schemes this provider provisions (`NS JOIN <scheme>://…` routing, §18).
     schemes: Vec<weft_proto::Scheme>,
+    /// Realms this session bound with `REALM ASSERT` — the authority on "who
+    /// serves `matrix.example`". It used to be *inferred* by scanning replica
+    /// namespaces for a matching origin URI, which silently answered "nobody"
+    /// whenever the only bridged namespace was a **projected** one (a native
+    /// namespace has no origin URI to match), so a DM to one of the realm's users
+    /// was dropped on a projection-only bridge.
+    realms: Vec<String>,
     /// The provider session's own event queue — so another session can ask it
     /// to attach to a newly created channel (`SessionEvent::Attach`).
     events: Option<tokio::sync::mpsc::Sender<crate::session::SessionEvent>>,
@@ -1599,12 +1606,17 @@ impl ServerCtx {
 
         let mut map = self.plugin_registry.lock().expect("plugin_registry lock");
 
+        // A re-registration on a bound session must not forget what the session
+        // already asserted: the schemes it serves, and the realms it serves them
+        // for (the adapter registers *after* `REALM ASSERT` on reconnect).
+        let mut realms = Vec::new();
         if let Some(prior) = map.get(&id) {
             for s in &prior.schemes {
                 if !schemes.contains(s) {
                     schemes.push(s.clone());
                 }
             }
+            realms = prior.realms.clone();
         }
 
         map.insert(
@@ -1615,6 +1627,7 @@ impl ServerCtx {
                 icon,
                 actions,
                 schemes,
+                realms,
                 events: Some(events),
                 bot,
             },
@@ -1628,6 +1641,7 @@ impl ServerCtx {
         &self,
         id: &str,
         scheme: weft_proto::Scheme,
+        realm: Option<&str>,
         out: tokio::sync::mpsc::Sender<String>,
         events: tokio::sync::mpsc::Sender<crate::session::SessionEvent>,
     ) {
@@ -1639,6 +1653,7 @@ impl ServerCtx {
             icon: None,
             actions: Vec::new(),
             schemes: Vec::new(),
+            realms: Vec::new(),
             events: None,
             bot: None,
         });
@@ -1646,6 +1661,9 @@ impl ServerCtx {
 
         if !entry.schemes.contains(&scheme) {
             entry.schemes.push(scheme);
+        }
+        if let Some(realm) = realm.filter(|r| !entry.realms.iter().any(|held| held == r)) {
+            entry.realms.push(realm.to_string());
         }
     }
 
@@ -1788,20 +1806,15 @@ impl ServerCtx {
     /// network (framework §7a.0), so this answers "is this 'network' actually a
     /// bridged realm?" and is what routes a DM to a provider rather than to a
     /// peer WEFT network.
-    pub(crate) async fn provider_for_realm(
+    pub(crate) fn provider_for_realm(
         &self,
         realm: &str,
     ) -> Option<tokio::sync::mpsc::Sender<String>> {
-        let namespaces = self.namespaces.namespaces_with_origin().await.ok()?;
-        let uri = namespaces.iter().find_map(|record| {
-            record
-                .origin
-                .as_deref()
-                .and_then(|o| o.parse::<weft_proto::ForeignUri>().ok())
-                .filter(|uri| uri.realm() == realm)
-        })?;
+        let map = self.plugin_registry.lock().expect("plugin_registry lock");
 
-        self.provider_for_scheme(uri.scheme()).map(|(_, out)| out)
+        map.values()
+            .find(|reg| reg.realms.iter().any(|held| held == realm))
+            .map(|reg| reg.out.clone())
     }
 
     /// The id + writer of the provider handling `scheme`, if any (§18 cap. 6).

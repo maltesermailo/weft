@@ -1078,11 +1078,21 @@ impl Bridge {
         let Some(room) = edu["room_id"].as_str() else {
             return;
         };
+        // Both room kinds, as `on_matrix_event` does: a **consumed replica** room and
+        // a room we **projected** from a native namespace. Resolving only the first
+        // made inbound typing dead in every projected room — which is most of them
+        // while a bridge is being set up.
         let Some((channel, ns_id)) = self
             .store
             .state
             .channel_of_room(room)
             .map(|(chan, space)| (chan.channel.clone(), space.ns_id.clone()))
+            .or_else(|| {
+                self.store
+                    .state
+                    .channel_of_projected_room(room)
+                    .map(|(chan, ns)| (chan.to_string(), ns.to_string()))
+            })
         else {
             return; // a room we do not bridge
         };
@@ -1153,6 +1163,23 @@ impl Bridge {
                     return;
                 }
             }
+        }
+
+        // §5 a DM opened from the *Matrix* side: a foreign user invited one of our
+        // puppets to a direct room. Until now only the outbound half existed — weftd
+        // relaying a local user's DM created the room — so a Matrix user could not
+        // start the conversation: nothing joined, no mapping was recorded, and every
+        // message in that room fell through as an unmapped room.
+        //
+        // Bounded to `is_direct`: accepting any invite would let anyone who knows a
+        // puppet's MXID drag it into arbitrary rooms.
+        if ev["type"] == "m.room.member"
+            && ev["content"]["membership"] == "invite"
+            && ev["content"]["is_direct"] == true
+        {
+            self.accept_dm_invite(&room_id, &sender, ev["state_key"].as_str())
+                .await;
+            return;
         }
 
         // A bridged DM room is neither a replica nor a projection: it carries
@@ -1605,13 +1632,28 @@ impl Bridge {
         reply_to: Option<&weft_proto::MsgId>,
         label: Option<&str>,
     ) -> anyhow::Result<()> {
+        // Not knowing the room is a **failure**, not a no-op: weftd minted nothing
+        // for this post (the realm is the home), so dropping it silently leaves the
+        // author waiting for an acknowledgement that can never come — with nothing
+        // in this log to say why. Naming the likely cause matters too: if we hold the
+        // channel as a *projection*, weftd relayed a request down the replica path
+        // and the bug is on that side.
         let Some((room, space)) = self.store.state.room_of_channel(channel) else {
-            return Ok(()); // not a replica channel of ours
+            if self
+                .store
+                .state
+                .channel_of_projected_room(channel)
+                .is_some()
+            {
+                anyhow::bail!("{channel} is a projection here, not a replica — post not relayed");
+            }
+
+            anyhow::bail!("no Matrix room is mapped for {channel} — post not relayed");
         };
         let (room, ns_id) = (room.to_string(), space.ns_id.clone());
 
         if self.store.state.bans.is_banned(&ns_id) {
-            return Ok(());
+            anyhow::bail!("{ns_id} is banned here — post not relayed");
         }
 
         let puppet = self.ensure_puppet(ulid, account).await?;
@@ -2352,6 +2394,32 @@ impl Bridge {
 
         let room = ev["room_id"].as_str().unwrap_or_default().to_string();
         self.store.link(&event_id, &minted, &room).await;
+    }
+
+    /// Accept a direct-room invite aimed at one of our puppets, and remember the
+    /// pairing — which is what makes [`Bridge::on_dm_event`] recognise the room, and
+    /// what lets the WEFT user reply into it.
+    ///
+    /// A non-puppet target is ignored: our bot has no conversations, and anything
+    /// else is not ours to answer for.
+    async fn accept_dm_invite(&mut self, room: &str, inviter: &str, invited: Option<&str>) {
+        let Some(account) = invited
+            .and_then(|mxid| mxid.try_into().ok())
+            .and_then(|mxid: &ruma::UserId| self.identity.puppet_ulid(mxid))
+            .and_then(|ulid| self.store.state.users.by_ulid(ulid))
+            .map(|user| user.account.clone())
+        else {
+            return;
+        };
+        let puppet = invited.unwrap_or_default().to_string();
+
+        if let Err(e) = self.hs.join(room, &[], Some(&puppet)).await {
+            warn!(room, puppet, "joining a DM invite failed: {e:#}");
+            return;
+        }
+
+        self.store.save_dm_room(&account, inviter, room).await;
+        info!(room, account, inviter, "DM opened from Matrix");
     }
 
     /// §15 mirror a local member's typing as their puppet's typing EDU.

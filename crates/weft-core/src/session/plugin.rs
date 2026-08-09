@@ -540,6 +540,7 @@ impl<S: ControlStream> Session<S> {
         self.ctx.add_provider_scheme(
             &plugin_id,
             scheme.clone(),
+            None,
             self.fed_out_tx.clone(),
             self.events_tx.clone(),
         );
@@ -1478,12 +1479,46 @@ impl<S: ControlStream> Session<S> {
         Ok(Flow::Continue)
     }
 
-    /// §15 a realm's user is typing in one of its replica channels.
+    /// May this provider's key speak for `channel`?
     ///
-    /// Bounded like every other attributed line: the channel must be a replica
-    /// this provider's key is pinned for, and the sender must be foreign — a
-    /// local "is typing" from a bridge would be a small forgery, but a forgery.
-    /// Ephemeral, so it is announced, never ingested.
+    /// Foreign traffic has **two doors**, and every attributed line has to accept
+    /// both or it silently works in one direction only: a **replica** channel, whose
+    /// `origin` names a scheme the key is pinned for, and a **native** channel whose
+    /// namespace opted into projection with `bridge:<scheme>` (matrix.md §17.1). The
+    /// ingest path already branches on exactly this; the ephemera below need the same
+    /// answer without the branch, so it lives here once.
+    async fn may_speak_for(&self, key: &PublicKey, channel: &ChannelName) -> bool {
+        let Ok(Some(record)) = self.ctx.channel_store.channel(channel).await else {
+            return false;
+        };
+
+        if let Some(origin) = record
+            .origin
+            .as_deref()
+            .and_then(|o| o.parse::<ForeignUri>().ok())
+        {
+            return self.ctx.scheme_authorized(key, origin.scheme());
+        }
+
+        let Some(ns_id) = channel.namespace() else {
+            return false; // a top-level channel is never bridged
+        };
+        let Ok(Some(ns)) = self.ctx.namespaces.namespace_by_id(ns_id).await else {
+            return false;
+        };
+
+        ns.bridges.iter().any(|b| {
+            b.parse::<Scheme>()
+                .is_ok_and(|b| self.ctx.scheme_authorized(key, &b))
+        })
+    }
+
+    /// §15 a realm's user is typing in one of its channels.
+    ///
+    /// Bounded like every other attributed line: the channel must be one this
+    /// provider may speak for (replica *or* projected — see [`Self::may_speak_for`]),
+    /// and the sender must be foreign — a local "is typing" from a bridge would be a
+    /// small forgery, but a forgery. Ephemeral, so it is announced, never ingested.
     async fn on_provider_typing(
         &mut self,
         key: &PublicKey,
@@ -1497,15 +1532,7 @@ impl<S: ControlStream> Session<S> {
                 .await;
         }
 
-        let origin = match self.ctx.channel_store.channel(&channel).await {
-            Ok(Some(record)) => record.origin,
-            _ => return Ok(Flow::Continue),
-        };
-        let authorized = origin
-            .as_deref()
-            .and_then(|o| o.parse::<ForeignUri>().ok())
-            .is_some_and(|uri| self.ctx.scheme_authorized(key, uri.scheme()));
-        if !authorized {
+        if !self.may_speak_for(key, &channel).await {
             return Ok(Flow::Continue);
         }
 
@@ -1544,20 +1571,35 @@ impl<S: ControlStream> Session<S> {
                 .await;
         }
 
-        let namespaces = self
+        // Both doors again (see `may_speak_for`): the realm's own **replicas**, and
+        // **native** namespaces that opted into projection. Checking only the first
+        // meant a Matrix user in a projected room had no presence at all.
+        let replicas = self
             .ctx
             .namespaces
             .namespaces_with_origin()
             .await
             .unwrap_or_default();
+        let projected = self
+            .ctx
+            .namespaces
+            .namespaces_bridged()
+            .await
+            .unwrap_or_default();
 
         let mut announce_in = Vec::new();
-        for record in namespaces {
-            let authorized = record
+        for record in replicas.into_iter().chain(projected) {
+            let scheme_of_origin = record
                 .origin
                 .as_deref()
-                .and_then(|o| o.parse::<ForeignUri>().ok())
-                .is_some_and(|uri| self.ctx.scheme_authorized(key, uri.scheme()));
+                .and_then(|o| o.parse::<ForeignUri>().ok());
+            let authorized = match scheme_of_origin {
+                Some(uri) => self.ctx.scheme_authorized(key, uri.scheme()),
+                None => record.bridges.iter().any(|b| {
+                    b.parse::<Scheme>()
+                        .is_ok_and(|b| self.ctx.scheme_authorized(key, &b))
+                }),
+            };
             if !authorized {
                 continue;
             }
@@ -2447,7 +2489,7 @@ impl<S: ControlStream> Session<S> {
             return; // blocked either way — bridged realm or peer network
         }
 
-        if let Some(out) = self.ctx.provider_for_realm(peer.network.as_str()).await {
+        if let Some(out) = self.ctx.provider_for_realm(peer.network.as_str()) {
             let mut line = line;
             line.tags.insert(
                 "as".to_string(),
@@ -2701,6 +2743,7 @@ impl<S: ControlStream> Session<S> {
         self.ctx.add_provider_scheme(
             &plugin_id,
             scheme.clone(),
+            Some(realm.realm()),
             self.fed_out_tx.clone(),
             self.events_tx.clone(),
         );

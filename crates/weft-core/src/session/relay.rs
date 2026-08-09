@@ -370,6 +370,22 @@ impl<S: ControlStream> Session<S> {
                         return Ok(Flow::Continue);
                     };
 
+                    // The adapter keys puppets by ULID and drops any relay without
+                    // one, so a post we cannot stamp is refused *here* — otherwise it
+                    // is dropped a hop away and the author waits out the send deadline
+                    // for an answer that was never coming.
+                    let user = UserRef::new(account.clone(), self.ctx.info.network.clone());
+                    let Some(ulid) = self.actor_ulid(&user).await else {
+                        self.send_err(
+                            label,
+                            ErrCode::Internal,
+                            Some("no-actor-id"),
+                            "cannot post to this channel",
+                        )
+                        .await?;
+                        return Ok(Flow::Continue);
+                    };
+
                     let token = format!("B-{scheme}-{}", weft_proto::Ulid::new());
                     self.ctx
                         .register_group_echo(token.clone(), self.id, unix_now_ms());
@@ -377,8 +393,6 @@ impl<S: ControlStream> Session<S> {
                         joined.pending.push_back(label);
                     }
 
-                    let user = UserRef::new(account.clone(), self.ctx.info.network.clone());
-                    let ulid = self.actor_ulid(&user).await;
                     let cmd = Command::Msg {
                         target: Target::Channel(channel),
                         body: (!body.is_empty()).then_some(body),
@@ -387,9 +401,7 @@ impl<S: ControlStream> Session<S> {
                     if let Ok(mut line) = Request::new(cmd).to_line() {
                         line.tags.insert("as".to_string(), user.to_string());
                         line.tags.insert("label".to_string(), token);
-                        if let Some(ulid) = ulid {
-                            line.tags.insert("ulid".to_string(), ulid);
-                        }
+                        line.tags.insert("ulid".to_string(), ulid);
                         if let Ok(serialized) = line.serialize() {
                             if out.try_send(serialized).is_err() {
                                 warn!("provider queue full — post dropped");

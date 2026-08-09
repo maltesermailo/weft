@@ -3454,3 +3454,81 @@ async fn matrix_typing_becomes_per_user_start_and_stop() {
         .await;
     assert!(drain(&mut lines).is_empty(), "an unbridged room leaked");
 }
+
+#[tokio::test]
+async fn a_matrix_user_can_open_the_dm() {
+    // The half that was missing: only weftd relaying a local user's DM created the
+    // room, so a Matrix user starting the conversation invited a puppet that never
+    // joined — and every message in that room then fell through as an unmapped room.
+    let (mut bridge, mut lines, calls) = bridge_with(kde_space()).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    let ns_id = ident::stable_ulid("!space:kde.org");
+    join_ada(&mut bridge, &ns_id).await;
+    drain(&mut lines);
+    calls.lock().unwrap().clear();
+
+    let puppet = format!("@weft_{ADA_ULID}:test.example");
+    let invite = |direct: bool| {
+        json!({
+            "type": "m.room.member",
+            "room_id": "!dm:kde.org",
+            "event_id": "$inv",
+            "sender": "@carol:kde.org",
+            "state_key": puppet,
+            "origin_server_ts": 1_722_000_000_000u64,
+            "content": { "membership": "invite", "is_direct": direct },
+        })
+    };
+
+    // A non-direct invite is ignored: a puppet must not be joinable into arbitrary
+    // rooms by anyone who knows its MXID.
+    bridge.on_matrix_event(invite(false)).await;
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(what, _, _)| what.contains("join")),
+        "a plain invite was accepted"
+    );
+
+    // A direct one is accepted as the puppet, and the pairing is remembered.
+    bridge.on_matrix_event(invite(true)).await;
+    let recorded = calls.lock().unwrap().clone();
+    assert!(
+        recorded
+            .iter()
+            .any(|(what, query, _)| what == "POST join/!dm:kde.org"
+                && query
+                    .to_lowercase()
+                    .contains(&format!("weft_{ADA_ULID}").to_lowercase())),
+        "joined as the puppet: {recorded:?}"
+    );
+    assert_eq!(
+        bridge.store.state.dm_of_room("!dm:kde.org"),
+        Some(("ada", "@carol:kde.org")),
+        "the DM pairing is remembered"
+    );
+
+    // …so carol's first message ingests as an ordinary WEFT DM.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.message",
+            "room_id": "!dm:kde.org",
+            "event_id": "$dm1",
+            "sender": "@carol:kde.org",
+            "origin_server_ts": 1_722_000_000_001u64,
+            "content": { "msgtype": "m.text", "body": "hi ada" },
+        }))
+        .await;
+    let sent = drain(&mut lines);
+    let dm = sent
+        .iter()
+        .find(|l| l.contains("MSG") && l.contains("hi ada"))
+        .unwrap_or_else(|| panic!("the DM did not ingest: {sent:?}"));
+    assert!(dm.contains("as=carol@kde.org"), "{dm}");
+    assert!(dm.contains("@ada"), "addressed to ada: {dm}");
+}
