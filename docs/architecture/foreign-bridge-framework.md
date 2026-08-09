@@ -632,9 +632,18 @@ widget is the replacement UI.
 
 ### 7a.6 Honest limits
 
-Read receipts, Matrix presence, and typing fidelity are **not** bridged (§7, same-network-only);
-`m.emote`/`m.notice` map to WEFT message forms (lossy); pills/mentions to foreign users render as
-plain badged handles unless an adapter does more. Each adapter documents its exact mapping (§10).
+Read receipts are **not** bridged: WEFT's `MARK` is private and Matrix receipts are public, so
+mirroring them would publish something a user never chose to. Typing crosses outbound only (a Matrix
+`m.typing` EDU names a room, not a per-user channel we can map). `m.emote`/`m.notice` map to WEFT
+message forms (lossy); pills/mentions to foreign users render as plain badged handles unless an
+adapter does more. Each adapter documents its exact mapping (§10).
+
+**Presence is bridged, since 2026-08-09** (owner directive), amending the earlier "same-network-only"
+lock: a realm's users' status reaches our rosters and ours is set on their puppets
+(`bridge-session-protocol.md` §11d). Two things keep it honest — `invisible` never crosses in either
+direction, and a bridged user's remembered status is dropped when their realm's adapter disconnects,
+so a dead bridge shows offline instead of a stale green dot. Replies are likewise mapped both ways
+now (§9.3 ⇄ `m.in_reply_to`), through the same link table that carries edits and reactions.
 
 ## 8. Security invariants (framework additions — implement AS TESTS)
 

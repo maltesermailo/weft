@@ -1220,6 +1220,12 @@ impl<S: ControlStream> Session<S> {
             Command::Typing { channel, state } => {
                 self.on_provider_typing(key, sender, channel, state).await
             }
+            // §6.1 the other ephemeron: one of the realm's users changed status.
+            // Global per user in every system that has it (Matrix included), so
+            // unlike TYPING it names no channel — weftd fans it out to the replica
+            // channels that user is actually in, exactly as it does for a local
+            // session's own `PRESENCE`.
+            Command::Presence { status } => self.on_provider_presence(key, sender, status).await,
             // §10 (matrix.md): a foreign moderator's PL change arrives as an
             // attributed GRANT/REVOKE and succeeds **iff WEFT granted that
             // user** `grant:<cap>` — the ordinary handlers with the ordinary
@@ -1511,6 +1517,89 @@ impl<S: ControlStream> Session<S> {
                     state,
                 })
                 .await;
+        }
+
+        Ok(Flow::Continue)
+    }
+
+    /// §6.1 a realm's user changed presence.
+    ///
+    /// Presence is per-*user* on the wire (`PRESENCE <status>` names nobody — a
+    /// client's session identifies them), so the fan-out is ours to do: we remember
+    /// the status against the qualified user and announce it into the replica
+    /// channels of the namespaces they belong to. Bounded the same way typing is —
+    /// only namespaces whose scheme this provider's key is pinned for.
+    ///
+    /// `invisible` is stored but not announced, as for a local session: relaying it
+    /// would reveal the hiding.
+    async fn on_provider_presence(
+        &mut self,
+        key: &PublicKey,
+        sender: UserRef,
+        status: weft_proto::PresenceStatus,
+    ) -> io::Result<Flow> {
+        if sender.network == self.ctx.info.network {
+            return self
+                .unsupported(None, "@as cannot name a local account")
+                .await;
+        }
+
+        let namespaces = self
+            .ctx
+            .namespaces
+            .namespaces_with_origin()
+            .await
+            .unwrap_or_default();
+
+        let mut announce_in = Vec::new();
+        for record in namespaces {
+            let authorized = record
+                .origin
+                .as_deref()
+                .and_then(|o| o.parse::<ForeignUri>().ok())
+                .is_some_and(|uri| self.ctx.scheme_authorized(key, uri.scheme()));
+            if !authorized {
+                continue;
+            }
+
+            // Membership is namespace-level (§5.3), so a member of the namespace is
+            // a member of its channels — no per-channel roster to consult.
+            let member = weft_store::member_key(&sender, &self.ctx.info.network);
+            match self.ctx.memberships.is_ns_member(&member, &record.id).await {
+                Ok(true) => {}
+                _ => continue,
+            }
+
+            if let Ok(channels) = self
+                .ctx
+                .channel_store
+                .channels_in_namespace(&record.id)
+                .await
+            {
+                announce_in.extend(channels.into_iter().map(|(channel, _)| channel));
+            }
+        }
+
+        if announce_in.is_empty() {
+            return Ok(Flow::Continue); // a user we share nothing with
+        }
+
+        {
+            let mut map = self.ctx.presence.lock().expect("presence lock");
+            map.insert(sender.clone(), status);
+        }
+
+        if status != weft_proto::PresenceStatus::Invisible {
+            for channel in announce_in {
+                if let Some(handle) = self.ctx.registry.get(&channel) {
+                    handle
+                        .announce(Event::Presence {
+                            user: sender.clone(),
+                            status,
+                        })
+                        .await;
+                }
+            }
         }
 
         Ok(Flow::Continue)
@@ -2049,6 +2138,11 @@ impl<S: ControlStream> Session<S> {
             // the same rule applies against the *user* — ours goes out, a
             // bridged user's does not (that one is the echo of an ingest).
             Event::Typing { user, .. } => user.network.as_str() == self.ctx.network_name(),
+            // §6.1 presence, same rule again: our members' status goes out for the
+            // adapter to set on their puppet, a bridged user's does not — that one
+            // is the echo of what the realm just told us. `invisible` never reaches
+            // here (it is stored and not announced), so nothing leaks a hidden user.
+            Event::Presence { user, .. } => user.network.as_str() == self.ctx.network_name(),
             // POLICY is not relayed outward.
             _ => false,
         };
@@ -2106,9 +2200,10 @@ impl<S: ControlStream> Session<S> {
                 Event::Reaction { by, .. } => Some(by),
                 Event::Deleted { by: Some(by), .. } => Some(by),
                 Event::Member { user, .. } => Some(user),
-                // §15 the daemon needs the ULID to pick the right puppet, and
-                // typing is the one ephemeral event that crosses.
+                // §15/§6.1 the daemon needs the ULID to pick the right puppet, and
+                // typing and presence are the ephemeral events that cross.
                 Event::Typing { user, .. } => Some(user),
+                Event::Presence { user, .. } => Some(user),
                 _ => None,
             };
             let ulid = match actor {

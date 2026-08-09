@@ -294,6 +294,25 @@ impl Hs {
         Ok(())
     }
 
+    /// §6.1 set a puppet's presence, mirroring what its WEFT account announced.
+    ///
+    /// `status_msg` is left unset: WEFT's away/dnd carry no text, and inventing one
+    /// would put words on the user's profile. Requires `presence: enabled: true` on
+    /// the homeserver — with presence off Synapse answers 404/403 here and the call
+    /// is a no-op, which is why the caller only logs a failure.
+    pub async fn set_presence(&self, as_user: &str, presence: &str) -> anyhow::Result<()> {
+        self.call(
+            reqwest::Method::PUT,
+            &format!("/_matrix/client/v3/presence/{}/status", enc(as_user)),
+            Some(json!({ "presence": presence })),
+            Some(as_user),
+            &[],
+        )
+        .await?;
+
+        Ok(())
+    }
+
     /// Set a state event as the bot (`m.space.child`, power levels, …).
     pub async fn put_state(
         &self,

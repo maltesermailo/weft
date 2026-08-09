@@ -171,11 +171,16 @@ pub struct ServerCtx {
     /// Group DMs: identity + membership (messages live in `events` under
     /// `Scope::Group`). Federation-able members.
     pub(crate) groups: Arc<dyn GroupStore>,
-    /// §6.1 live presence, in-memory only (never stored, never bridged).
-    /// account → last non-invisible status; served with MEMBERS for correct
-    /// roster dots.
+    /// §6.1 live presence, in-memory only (never stored).
+    ///
+    /// Keyed by the **qualified** user, so a realm's users live here on the same
+    /// terms as ours: a bridged user has no session to read a dot from, and their
+    /// realm is the only thing that knows they are online. One map rather than a
+    /// local one plus a foreign one — "last announced status for this user" is a
+    /// single fact with a single lifecycle, and two maps would have to agree.
+    /// Served with MEMBERS for correct roster dots.
     pub(crate) presence:
-        std::sync::Mutex<std::collections::HashMap<Account, weft_proto::PresenceStatus>>,
+        std::sync::Mutex<std::collections::HashMap<UserRef, weft_proto::PresenceStatus>>,
     /// §13 content-addressed blob storage (fs CAS in weftd; memory in tests).
     /// The DS never reads blob bytes for meaning — it just stores/serves them.
     pub blobs: Arc<dyn BlobStore>,

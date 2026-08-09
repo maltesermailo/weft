@@ -219,6 +219,11 @@ as_token: {as_token}
 hs_token: {hs_token}
 sender_localpart: {bot}
 rate_limited: false
+# §6.1 MSC2409: without this the homeserver pushes room events only, and a Matrix
+# user's presence never reaches WEFT — the mirror is silently one-directional.
+# Synapse also needs `presence: enabled: true` for there to be any presence at all.
+push_ephemeral: true
+de.sorunome.msc2409.push_ephemeral: true
 namespaces:
   users:
     - exclusive: true

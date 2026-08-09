@@ -195,6 +195,21 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
             ),
         )
         .route(
+            "/_matrix/client/v3/presence/:user/status",
+            put(
+                |State(hs): State<MockHs>,
+                 Path(user): Path<String>,
+                 axum::Json(body): axum::Json<Value>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("PUT presence/{user}"),
+                        String::new(),
+                        body,
+                    ));
+                    axum::Json(json!({}))
+                },
+            ),
+        )
+        .route(
             "/_matrix/client/v3/rooms/:room/redact/:event/:txn",
             put(
                 |State(hs): State<MockHs>,
@@ -3128,5 +3143,229 @@ async fn provisioning_seeds_authority_from_existing_power_levels() {
     assert!(
         !grants.iter().any(|l| l.contains("weftbot")),
         "our own bot needs no WEFT authority: {grants:?}"
+    );
+}
+
+#[tokio::test]
+async fn replies_map_to_each_sides_relation() {
+    // §9.3 ⇄ Matrix rich replies. The two protocols point at the same root by
+    // different names, so the link table is the whole translation — and Matrix's
+    // quoted fallback must not survive into a WEFT body, which renders the root
+    // itself and would otherwise quote it twice.
+    let (mut bridge, mut lines, calls) = bridge_with(kde_space()).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    drain(&mut lines);
+    let (channel, ns_id) = {
+        let (chan, space) = bridge.store.state.channel_of_room("!gen:kde.org").unwrap();
+
+        (chan.channel.clone(), space.ns_id.clone())
+    };
+
+    // A root from Matrix, so both sides have an id for it.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.message",
+            "room_id": "!gen:kde.org",
+            "event_id": "$root",
+            "sender": "@carol:kde.org",
+            "origin_server_ts": 1_722_000_000_000u64,
+            "content": { "msgtype": "m.text", "body": "the original" },
+        }))
+        .await;
+    let sent = drain(&mut lines);
+    let root_msgid = sent
+        .iter()
+        .find_map(|l| l.split([';', ' ']).find_map(|t| t.strip_prefix("msgid=")))
+        .expect("the root's minted msgid")
+        .to_string();
+
+    // Matrix → WEFT: the relation becomes `reply-to=`, and the fallback quote is
+    // gone from the body.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.message",
+            "room_id": "!gen:kde.org",
+            "event_id": "$answer",
+            "sender": "@carol:kde.org",
+            "origin_server_ts": 1_722_000_000_001u64,
+            "content": {
+                "msgtype": "m.text",
+                "body": "> <@carol:kde.org> the original\n\nmy answer",
+                "m.relates_to": { "m.in_reply_to": { "event_id": "$root" } },
+            },
+        }))
+        .await;
+    let sent = drain(&mut lines);
+    let reply = sent.iter().find(|l| l.contains("MSG")).expect("MSG");
+    // Case-insensitively: a msgid reaches us in both the wire (lowercase) and
+    // canonical (uppercase ULID) spellings, and the link map keys by one of them.
+    assert!(
+        reply
+            .to_lowercase()
+            .contains(&format!("reply-to={}", root_msgid.to_lowercase())),
+        "the WEFT reply names the root: {reply}"
+    );
+    assert!(
+        reply.ends_with(":my answer"),
+        "the quoted fallback must be stripped: {reply}"
+    );
+
+    // WEFT → Matrix: a local member's reply to that same root goes out with the
+    // Matrix relation pointing at the event the root came from.
+    join_ada(&mut bridge, &ns_id).await;
+    drain(&mut lines);
+    calls.lock().unwrap().clear();
+
+    let mut line = weft_proto::Request::new(weft_proto::Command::Msg {
+        target: weft_proto::Target::Channel(channel.parse().unwrap()),
+        body: Some("answering from weft".into()),
+        meta: weft_proto::MsgMeta {
+            reply_to: Some(root_msgid.parse().unwrap()),
+            ..weft_proto::MsgMeta::default()
+        },
+    })
+    .to_line()
+    .unwrap();
+    line.tags.insert("as".into(), "ada@test.example".into());
+    line.tags.insert("ulid".into(), ADA_ULID.into());
+    line.tags.insert("label".into(), "B-matrix-1".into());
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            label: Some("B-matrix-1".into()),
+            as_user: Some("ada@test.example".into()),
+            as_ulid: Some(ADA_ULID.into()),
+            command: weft_proto::Request::from_line(&line).unwrap().command,
+        })
+        .await;
+
+    let recorded = calls.lock().unwrap().clone();
+    let (_, _, body) = recorded
+        .iter()
+        .find(|(what, _, _)| what == "PUT send/!gen:kde.org/m.room.message")
+        .expect("the reply reached Matrix");
+    assert_eq!(body["m.relates_to"]["m.in_reply_to"]["event_id"], "$root");
+    assert_eq!(
+        body["body"], "answering from weft",
+        "no fallback is invented on the way out"
+    );
+}
+
+#[tokio::test]
+async fn presence_mirrors_in_both_directions() {
+    // §6.1 owner directive 2026-08-09. Matrix has three states and WEFT four, so
+    // the mapping is the substance: `unavailable` is "here but not attending" =
+    // `away`, and `dnd` folds onto it going out. `invisible` must never leave.
+    let (mut bridge, mut lines, calls) = bridge_with(kde_space()).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    drain(&mut lines);
+    let ns_id = bridge
+        .store
+        .state
+        .channel_of_room("!gen:kde.org")
+        .unwrap()
+        .1
+        .ns_id
+        .clone();
+
+    // Matrix → WEFT: a remote user's status is replayed attributed to them, with
+    // no channel — weftd fans it out to what they share with us.
+    bridge
+        .on_matrix_ephemeral(json!({
+            "type": "m.presence",
+            "sender": "@carol:kde.org",
+            "content": { "presence": "unavailable" },
+        }))
+        .await;
+    let sent = drain(&mut lines);
+    let presence = sent
+        .iter()
+        .find(|l| l.contains("PRESENCE"))
+        .expect("PRESENCE relayed to weftd");
+    assert!(presence.contains("as=carol@kde.org"), "{presence}");
+    assert!(
+        presence.contains("away"),
+        "unavailable maps to away: {presence}"
+    );
+
+    // Our own puppet's presence is not fed back — it is a reflection of a WEFT
+    // account's status, and ingesting it would fight the source.
+    bridge
+        .on_matrix_ephemeral(json!({
+            "type": "m.presence",
+            "sender": "@weft_ada:test.example",
+            "content": { "presence": "online" },
+        }))
+        .await;
+    assert!(
+        drain(&mut lines).is_empty(),
+        "a puppet's presence looped back"
+    );
+
+    // An unknown state is not guessed at.
+    bridge
+        .on_matrix_ephemeral(json!({
+            "type": "m.presence",
+            "sender": "@carol:kde.org",
+            "content": { "presence": "vibing" },
+        }))
+        .await;
+    assert!(
+        drain(&mut lines).is_empty(),
+        "an unknown state was invented"
+    );
+
+    // WEFT → Matrix: ada's status is set on her puppet.
+    join_ada(&mut bridge, &ns_id).await;
+    drain(&mut lines);
+    calls.lock().unwrap().clear();
+
+    for (status, expected) in [
+        (weft_proto::PresenceStatus::Dnd, "unavailable"),
+        (weft_proto::PresenceStatus::Online, "online"),
+    ] {
+        bridge
+            .on_incoming(weft_appservice::Incoming::Event {
+                label: None,
+                actor_ulid: Some(ADA_ULID.into()),
+                event: weft_proto::Event::Presence {
+                    user: "ada@test.example".parse().unwrap(),
+                    status,
+                },
+            })
+            .await;
+
+        let recorded = calls.lock().unwrap().clone();
+        let (_, _, body) = recorded
+            .iter()
+            .find(|(what, _, _)| what == &format!("PUT presence/@weft_{ADA_ULID}:test.example"))
+            .unwrap_or_else(|| panic!("presence set for {status}: {recorded:?}"));
+        assert_eq!(body["presence"], expected);
+        calls.lock().unwrap().clear();
+    }
+
+    // Invisible is never mirrored: weftd does not announce it, and mapping it to
+    // anything here would defeat the point of it.
+    bridge
+        .on_incoming(weft_appservice::Incoming::Event {
+            label: None,
+            actor_ulid: Some(ADA_ULID.into()),
+            event: weft_proto::Event::Presence {
+                user: "ada@test.example".parse().unwrap(),
+                status: weft_proto::PresenceStatus::Invisible,
+            },
+        })
+        .await;
+    let recorded = calls.lock().unwrap().clone();
+    assert!(
+        !recorded
+            .iter()
+            .any(|(what, _, _)| what.contains("presence")),
+        "invisible reached Matrix: {recorded:?}"
     );
 }

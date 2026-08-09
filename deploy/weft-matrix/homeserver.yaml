@@ -133,7 +133,12 @@ trusted_key_servers:
   - server_name: "matrix.org"
 suppress_key_server_warning: true
 
-# A bridge-only server needs no presence or URL previews, and both are cost.
+# Presence is ON because it is bridged in both directions (§6.1): a Matrix user's
+# status reaches WEFT rosters, and a WEFT member's is set on their puppet. It is
+# genuinely the chattiest thing Synapse does — turning it off here costs nothing but
+# the dots, and the bridge degrades quietly (nothing to push, `set_presence` 404s,
+# messages are unaffected).
 presence:
-  enabled: false
+  enabled: true
+# A bridge-only server needs no URL previews, and they are cost.
 url_preview_enabled: false

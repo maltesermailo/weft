@@ -653,11 +653,12 @@ impl<S: ControlStream> Session<S> {
             // drop its presence so a later MEMBERS snapshot renders it offline
             // (the live grey-out already rode each channel's disconnect part).
             if !self.ctx.directory.is_online(&account).await {
+                let user = UserRef::new(account.clone(), self.ctx.info.network.clone());
                 self.ctx
                     .presence
                     .lock()
                     .expect("presence lock")
-                    .remove(&account);
+                    .remove(&user);
             }
         }
     }
@@ -1060,8 +1061,9 @@ impl<S: ControlStream> Session<S> {
                 // in the snapshot) but never broadcast — revealing it would
                 // defeat hiding.
                 {
+                    let user = UserRef::new(account.clone(), self.ctx.info.network.clone());
                     let mut map = self.ctx.presence.lock().expect("presence lock");
-                    map.insert(account.clone(), status);
+                    map.insert(user, status);
                 }
                 if status != weft_proto::PresenceStatus::Invisible {
                     let handles: Vec<ChannelHandle> =

@@ -156,6 +156,9 @@ impl Bridge {
                     for event in txn.events {
                         self.on_matrix_event(event).await;
                     }
+                    for edu in txn.ephemeral {
+                        self.on_matrix_ephemeral(edu).await;
+                    }
                 }
             }
         }
@@ -366,6 +369,13 @@ impl Bridge {
                 self.relay_typing(&user, actor_ulid.as_deref(), &channel.to_string(), state)
                     .await;
             }
+            // §6.1 one of our members changed status — mirror it onto their
+            // puppet. Presence is per-user in both protocols, so unlike typing it
+            // names no room and needs no channel lookup.
+            Event::Presence { user, status } => {
+                self.relay_presence(&user.to_string(), actor_ulid.as_deref(), status)
+                    .await;
+            }
             // §13 the upload grant for a blob we are holding.
             Event::StreamAccept { token } => {
                 if let Some(label) = label {
@@ -515,6 +525,7 @@ impl Bridge {
             Command::Msg {
                 target: weft_proto::Target::Channel(channel),
                 body,
+                meta,
                 ..
             } => {
                 if let Err(e) = self
@@ -523,6 +534,7 @@ impl Bridge {
                         &ulid,
                         &account,
                         body.as_deref().unwrap_or_default(),
+                        meta.reply_to.as_ref(),
                         label.as_deref(),
                     )
                     .await
@@ -1012,6 +1024,40 @@ impl Bridge {
 
     // ---- Matrix → WEFT (transaction events) --------------------------------
 
+    /// MSC2409 ephemera. Only `m.presence` is acted on: Matrix typing arrives here
+    /// too, but weftd's typing path is per-channel and the EDU names a room we would
+    /// have to map per user — deferred, and logged nowhere because it is noise.
+    ///
+    /// Presence is mirrored **as the realm's user**, exactly like their messages, so
+    /// weftd fans it out to the channels they share with us. Their own puppets are
+    /// skipped: a puppet's presence is a reflection of a WEFT account's, and feeding
+    /// it back would fight the source.
+    pub async fn on_matrix_ephemeral(&mut self, edu: Value) {
+        if edu["type"] != "m.presence" {
+            return;
+        }
+
+        let Some(mxid) = edu["sender"].as_str() else {
+            return;
+        };
+        let Some(weft_sender) = self.foreign_user(mxid) else {
+            return; // one of our puppets
+        };
+
+        // Matrix has three states where WEFT has four; `unavailable` is "here but
+        // not attending", which is `away`. An unknown value is not guessed at.
+        let status = match edu["content"]["presence"].as_str() {
+            Some("online") => weft_proto::PresenceStatus::Online,
+            Some("unavailable") => weft_proto::PresenceStatus::Away,
+            Some("offline") => weft_proto::PresenceStatus::Offline,
+            _ => return,
+        };
+
+        if let Err(e) = self.realm.presence(&weft_sender, status).await {
+            debug!(mxid, "presence ingestion failed: {e:#}");
+        }
+    }
+
     pub async fn on_matrix_event(&mut self, ev: Value) {
         let Some(room_id) = ev["room_id"].as_str().map(String::from) else {
             return;
@@ -1122,6 +1168,17 @@ impl Bridge {
                 };
                 let minted = ident::msgid_for(&realm, &event_id, ts);
 
+                // §9.3 a reply: resolve the Matrix relation to the WEFT msgid we
+                // minted for that root, and drop the quoted fallback from the body
+                // (a WEFT client renders the root itself).
+                let reply_root = crate::reply::in_reply_to(content)
+                    .and_then(|id| self.store.state.links.msgid_of(id))
+                    .map(String::from);
+                let body = match &reply_root {
+                    Some(_) => crate::reply::strip_fallback(body),
+                    None => body,
+                };
+
                 // An attachment must exist on our side *before* the message
                 // references it, so the blob round trip comes first and the
                 // MSG is sent when the grant lands (§12).
@@ -1142,11 +1199,19 @@ impl Bridge {
                     return;
                 }
 
-                if let Err(e) = self
-                    .realm
-                    .message(&weft_sender, &minted, &channel, body)
-                    .await
-                {
+                let sent = match &reply_root {
+                    Some(root) => {
+                        self.realm
+                            .message_replying(&weft_sender, &minted, &channel, body, root)
+                            .await
+                    }
+                    None => {
+                        self.realm
+                            .message(&weft_sender, &minted, &channel, body)
+                            .await
+                    }
+                };
+                if let Err(e) = sent {
                     warn!(event_id, "message ingestion failed: {e:#}");
                     return;
                 }
@@ -1452,12 +1517,23 @@ impl Bridge {
     ///
     /// Failing here means the message does not exist anywhere, which is the point:
     /// nothing is stored that the realm never accepted.
+    /// The `m.relates_to` for a WEFT reply root, or `None` when there is nothing to
+    /// point at — either the message is not a reply, or its root was never linked to
+    /// a Matrix event.
+    fn reply_relation(&self, reply_to: Option<&weft_proto::MsgId>) -> Option<serde_json::Value> {
+        let root = reply_to?;
+        let event = self.store.state.links.event_of(&root.to_string())?;
+
+        Some(crate::reply::relation(&event.event))
+    }
+
     async fn post_for_local_user(
         &mut self,
         channel: &str,
         ulid: &str,
         account: &str,
         body: &str,
+        reply_to: Option<&weft_proto::MsgId>,
         label: Option<&str>,
     ) -> anyhow::Result<()> {
         let Some((room, space)) = self.store.state.room_of_channel(channel) else {
@@ -1470,7 +1546,10 @@ impl Bridge {
         }
 
         let puppet = self.ensure_puppet(ulid, account).await?;
-        let content = json!({ "msgtype": "m.text", "body": body });
+        let mut content = json!({ "msgtype": "m.text", "body": body });
+        if let Some(root) = self.reply_relation(reply_to) {
+            content["m.relates_to"] = root;
+        }
         let txn = format!("weft-{ulid}-{}", self.next_dm_txn());
         let event_id = self.send_as_puppet(&room, &puppet, content, &txn).await?;
 
@@ -1538,7 +1617,7 @@ impl Bridge {
                 }
             },
         };
-        let content = json!({
+        let mut content = json!({
             "msgtype": "m.text",
             "body": m.body,
             // The id we minted, carried on the event itself: this is what makes the
@@ -1546,6 +1625,12 @@ impl Bridge {
             // ingested message's id is already derivable, ours would not be.
             crate::recover::MSGID_FIELD: m.msgid.to_string(),
         });
+        // §9.3 the reply root, mapped to the Matrix event it is linked to. An
+        // unlinked root (never bridged, or bridged before a data loss) simply sends
+        // as a plain message — dropping the whole reply would be worse.
+        if let Some(root) = self.reply_relation(m.meta.reply_to.as_ref()) {
+            content["m.relates_to"] = root;
+        }
         let event_id = self
             .send_as_puppet(&room_id, &puppet, content, &txn_of(&m.msgid.to_string()))
             .await?;
@@ -2232,6 +2317,42 @@ impl Bridge {
             .await
         {
             debug!(channel, "typing relay failed: {e:#}");
+        }
+    }
+
+    /// §6.1 mirror a local member's status onto their puppet.
+    ///
+    /// WEFT has four states and Matrix three: `away` and `dnd` both map to
+    /// `unavailable`, which is the only "here but not attending" Matrix offers.
+    /// `invisible` never arrives — weftd stores it without announcing, precisely so
+    /// it cannot leak (and mapping it to `offline` would still leak the moment the
+    /// user posted).
+    async fn relay_presence(
+        &mut self,
+        user: &str,
+        ulid: Option<&str>,
+        status: weft_proto::PresenceStatus,
+    ) {
+        let presence = match status {
+            weft_proto::PresenceStatus::Online => "online",
+            weft_proto::PresenceStatus::Away | weft_proto::PresenceStatus::Dnd => "unavailable",
+            weft_proto::PresenceStatus::Offline => "offline",
+            weft_proto::PresenceStatus::Invisible => return,
+        };
+
+        let account = account_of(user);
+        let puppet = match ulid {
+            Some(ulid) => self.ensure_puppet(ulid, &account).await.ok(),
+            None => self.puppet_of_account(&account),
+        };
+        let Some(puppet) = puppet else {
+            return; // nobody to be present as
+        };
+
+        if let Err(e) = self.hs.set_presence(&puppet, presence).await {
+            // Expected on a homeserver with presence disabled — the common case,
+            // and not something an operator needs a warning about per status flip.
+            debug!(user, presence, "presence relay failed: {e:#}");
         }
     }
 

@@ -22,6 +22,20 @@ use anyhow::anyhow;
 use tokio::sync::mpsc;
 use weft_proto::{Event, MemberAction, MsgId, Reply, Target};
 
+/// What is optional about a replayed message (§9.3/§9.2): the reply root, the
+/// media it carries, and the bridge label a relayed post is being answered with.
+/// Private, because callers reach it through the named `message*` methods.
+#[derive(Default)]
+struct Post<'a> {
+    /// A WEFT msgid this message replies to — the adapter resolves its own
+    /// relation to it before calling.
+    reply_to: Option<&'a str>,
+    /// `weft-media://<hash>` references, already uploaded.
+    attachments: Vec<String>,
+    /// The label of the local post this is the realm's minted answer to.
+    label: Option<&'a str>,
+}
+
 /// A handle for speaking as the realm on an authenticated provider session.
 ///
 /// Cheap to clone — every clone writes to the same session.
@@ -141,12 +155,11 @@ impl Realm {
         channel: &str,
         body: &str,
     ) -> anyhow::Result<()> {
-        self.message_labeled(sender, msgid, channel, body, None)
+        self.post(sender, msgid, channel, body, Post::default())
             .await
     }
 
-    /// Replay a message, optionally carrying the `label` of the relayed post it
-    /// answers.
+    /// Replay a message, carrying the `label` of the relayed post it answers.
     ///
     /// The realm is the home for a replica channel, so a local user's post is
     /// relayed here and minted *there*; this is the copy that comes back and
@@ -161,19 +174,41 @@ impl Realm {
         body: &str,
         label: Option<&str>,
     ) -> anyhow::Result<()> {
-        let mut line = weft_proto::Request::new(weft_proto::Command::Msg {
-            target: Target::Channel(channel.parse()?),
-            body: Some(body.to_string()),
-            meta: weft_proto::MsgMeta::default(),
-        })
-        .to_line()?;
-        line.tags.insert("as".to_string(), sender.to_string());
-        line.tags.insert("msgid".to_string(), msgid.to_string());
-        if let Some(label) = label {
-            line.tags.insert("label".to_string(), label.to_string());
-        }
+        self.post(
+            sender,
+            msgid,
+            channel,
+            body,
+            Post {
+                label,
+                ..Post::default()
+            },
+        )
+        .await
+    }
 
-        self.send(line.serialize()?).await
+    /// Replay a message that **replies to** one weftd already knows (§9.3). The
+    /// root is a WEFT msgid: the adapter resolves the foreign relation to it, so
+    /// the reply threads against the same message on both sides.
+    pub async fn message_replying(
+        &self,
+        sender: &str,
+        msgid: &str,
+        channel: &str,
+        body: &str,
+        reply_to: &str,
+    ) -> anyhow::Result<()> {
+        self.post(
+            sender,
+            msgid,
+            channel,
+            body,
+            Post {
+                reply_to: Some(reply_to),
+                ..Post::default()
+            },
+        )
+        .await
     }
 
     /// Replay a **DM** from one of the realm's users to one of ours. Stored in
@@ -233,6 +268,24 @@ impl Realm {
     }
 
     /// Replay a reaction (or its removal). No id of its own, as with a delete.
+    /// §6.1 one of the realm's users changed presence.
+    ///
+    /// Attributed like everything else the realm replays (`@as`), and per-*user*:
+    /// `PRESENCE` names no channel, so weftd fans it out to the channels this user
+    /// shares with us. Ephemeral — nothing is stored, and a status for someone we
+    /// share nothing with is simply dropped.
+    pub async fn presence(
+        &self,
+        sender: &str,
+        status: weft_proto::PresenceStatus,
+    ) -> anyhow::Result<()> {
+        let mut line =
+            weft_proto::Request::new(weft_proto::Command::Presence { status }).to_line()?;
+        line.tags.insert("as".to_string(), sender.to_string());
+
+        self.send(line.serialize()?).await
+    }
+
     pub async fn react(
         &self,
         sender: &str,
@@ -485,17 +538,47 @@ impl Realm {
         body: &str,
         attachments: Vec<String>,
     ) -> anyhow::Result<()> {
+        self.post(
+            sender,
+            msgid,
+            channel,
+            body,
+            Post {
+                attachments,
+                ..Post::default()
+            },
+        )
+        .await
+    }
+
+    /// The one place a replayed `MSG` line is built: `@as` + `@msgid` are what make
+    /// it an ingestion, and everything optional about it lives in [`Post`]. The
+    /// public `message*` methods above are named entry points onto this — each
+    /// exists because callers ask for one thing at a time, not because the line
+    /// differs.
+    async fn post(
+        &self,
+        sender: &str,
+        msgid: &str,
+        channel: &str,
+        body: &str,
+        opts: Post<'_>,
+    ) -> anyhow::Result<()> {
         let mut line = weft_proto::Request::new(weft_proto::Command::Msg {
             target: Target::Channel(channel.parse()?),
             body: Some(body.to_string()),
             meta: weft_proto::MsgMeta {
-                attachments,
+                attachments: opts.attachments,
+                reply_to: opts.reply_to.map(str::parse).transpose()?,
                 ..weft_proto::MsgMeta::default()
             },
         })
         .to_line()?;
         line.tags.insert("as".to_string(), sender.to_string());
         line.tags.insert("msgid".to_string(), msgid.to_string());
+        if let Some(label) = opts.label {
+            line.tags.insert("label".to_string(), label.to_string());
+        }
 
         self.send(line.serialize()?).await
     }

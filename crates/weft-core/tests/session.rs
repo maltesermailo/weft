@@ -35,6 +35,16 @@ impl ControlStream for MockStream {
     }
 }
 
+/// The verb of a wire line, past any `@tags` prefix (§4).
+fn verb_of(raw: &str) -> &str {
+    let rest = match raw.strip_prefix('@') {
+        Some(tagged) => tagged.split_once(' ').map(|(_, rest)| rest).unwrap_or(""),
+        None => raw,
+    };
+
+    rest.split(' ').next().unwrap_or_default()
+}
+
 struct Client {
     to_server: mpsc::UnboundedSender<String>,
     from_server: mpsc::UnboundedReceiver<String>,
@@ -46,16 +56,46 @@ impl Client {
         self.to_server.send(line.to_string()).expect("session gone");
     }
 
-    async fn recv_raw(&mut self) -> String {
+    /// The next line from the server, verbatim.
+    async fn recv_raw_any(&mut self) -> String {
         tokio::time::timeout(Duration::from_secs(5), self.from_server.recv())
             .await
             .expect("timed out waiting for a server line")
             .expect("server closed the stream")
     }
 
+    /// The next line that is not a §6.1 presence flip.
+    ///
+    /// Every member's connect and disconnect broadcasts one, and a provider session
+    /// is subscribed to all of it — so a test reading a *verb* off that stream would
+    /// otherwise have to know which roster dots happened to move first. Tests about
+    /// presence itself read `recv_raw_any` (or the typed `recv`, which is unfiltered).
+    async fn recv_raw(&mut self) -> String {
+        loop {
+            let raw = self.recv_raw_any().await;
+
+            if verb_of(&raw) != "PRESENCE" {
+                return raw;
+            }
+        }
+    }
+
+    /// The next typed reply, skipping §6.1 presence flips — the same roster noise
+    /// `recv_raw` filters, for the same reason. Tests *about* presence use
+    /// [`Client::recv_any`].
     async fn recv(&mut self) -> Reply {
         loop {
-            let raw = self.recv_raw().await;
+            let reply = self.recv_any().await;
+
+            if !matches!(reply.event, Event::Presence { .. }) {
+                return reply;
+            }
+        }
+    }
+
+    async fn recv_any(&mut self) -> Reply {
+        loop {
+            let raw = self.recv_raw_any().await;
             let reply = Reply::parse(&raw).expect("server sent an unparseable line");
             // §13 the media fetch bearer is pushed after auth; it's out-of-band
             // for these (non-media) tests, so skip it transparently.
@@ -354,7 +394,7 @@ async fn roster_names(client: &mut Client) -> std::collections::HashSet<String> 
     }
     let mut names = std::collections::HashSet::new();
     loop {
-        match client.recv().await.event {
+        match client.recv_any().await.event {
             Event::Member { user, .. } => {
                 names.insert(user.account.as_str().to_string());
             }
@@ -839,7 +879,7 @@ async fn disconnect_marks_a_member_offline_not_departed() {
     ada.recv().await; // bob's join broadcast
 
     drop(bob); // connection drops without QUIT
-    let reply = ada.recv().await;
+    let reply = ada.recv_any().await;
     assert!(
         matches!(
             &reply.event,
@@ -3126,7 +3166,7 @@ async fn presence_relays_to_co_members_but_never_invisible() {
     ada.recv().await; // bob's join broadcast
 
     bob.send("PRESENCE away");
-    let reply = ada.recv().await;
+    let reply = ada.recv_any().await;
     assert!(
         matches!(&reply.event, Event::Presence { user, status, .. }
             if user.to_string() == "bob@test.example" && status.to_string() == "away"),
@@ -7568,6 +7608,129 @@ async fn typing_crosses_a_replica_both_ways() {
 }
 
 #[tokio::test]
+async fn presence_crosses_a_replica_both_ways() {
+    // §6.1 owner directive 2026-08-09: a realm's users' presence is mirrored here
+    // and ours is mirrored there. Unlike TYPING, presence names no channel in any
+    // system that has it — it is per-user and global — so weftd does the fan-out
+    // into the channels the user actually shares with us.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("mx", key.public(), vec!["matrix".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT matrix://matrix.org");
+    plugin.send(&format!(
+        "@title=Space;id={} NS-META matrix://matrix.org/space public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT matrix://matrix.org/space/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+
+    // Consume her relayed join, so the reads below start from a known point.
+    assert!(matches!(
+        weft_proto::Request::parse(&plugin.recv_raw().await)
+            .unwrap()
+            .command,
+        weft_proto::Command::NsJoin { .. }
+    ));
+
+    // The realm's user must be a member for us to share a channel with them —
+    // presence is not a way to learn about strangers.
+    plugin.send(&format!("NS-MEMBER {ns_id} carol@matrix.org join"));
+
+    // Realm → us: carol goes away. Ada sees it, attributed, in the shared channel.
+    plugin.send("@as=carol@matrix.org PRESENCE away");
+    let reply = loop {
+        let reply = ada.recv_any().await;
+
+        if matches!(reply.event, Event::Presence { .. }) {
+            break reply;
+        }
+    };
+    let Event::Presence { user, status } = reply.event else {
+        unreachable!("filtered above")
+    };
+    assert_eq!(user.to_string(), "carol@matrix.org");
+    assert_eq!(status, weft_proto::PresenceStatus::Away);
+
+    // …and it rides the roster, which used to read every bridged member offline
+    // because there was no session here to read a dot from.
+    ada.send(&format!("@label=m1 MEMBERS {channel}"));
+    let mut carol_status = None;
+    loop {
+        match ada.recv_any().await.event {
+            Event::BatchEnd { .. } => break,
+            Event::Presence { user, status } if user.to_string() == "carol@matrix.org" => {
+                carol_status = Some(status);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(carol_status, Some(weft_proto::PresenceStatus::Away));
+
+    // A *local* sender is a forgery, exactly as for TYPING.
+    plugin.send("@as=ada@test.example PRESENCE away");
+    plugin.expect_err(ErrCode::Unsupported).await;
+
+    // Us → realm: ada's own status crosses so the adapter can set it on her
+    // puppet, carrying the ULID it keys puppets by.
+    ada.send(&format!("JOIN {channel}"));
+    loop {
+        if matches!(ada.recv().await.event, Event::Policy { .. }) {
+            break;
+        }
+    }
+    ada.send("PRESENCE dnd");
+    let relayed = loop {
+        let raw = plugin.recv_raw_any().await;
+
+        if verb_of(&raw) == "PRESENCE" && raw.contains("ada@test.example") {
+            break raw;
+        }
+    };
+    assert!(relayed.contains("dnd"), "{relayed}");
+    assert!(
+        relayed.contains("ulid="),
+        "puppets key on the ULID: {relayed}"
+    );
+
+    // Invisible is stored and NOT announced — bridging it would reveal the
+    // hiding, which is the one thing it exists to prevent. TYPING is the barrier:
+    // it crosses, and she sends it *after*, so seeing it first proves no PRESENCE
+    // was on the way (the session writes its lines in order).
+    ada.send("PRESENCE invisible");
+    ada.send(&format!("TYPING {channel} start"));
+    let leaked = loop {
+        let raw = plugin.recv_raw_any().await;
+
+        match verb_of(&raw) {
+            "PRESENCE" => break Some(raw),
+            "TYPING" => break None,
+            _ => {}
+        }
+    };
+    assert!(
+        leaked.is_none(),
+        "invisible leaked to the realm: {leaked:?}"
+    );
+}
+
+#[tokio::test]
 async fn an_ns_meta_change_reaches_a_projecting_provider() {
     // A provider is not an ns member, so the ordinary fan-out never reaches it
     // — yet NS-META is exactly what describes its structure (Space name,
@@ -9627,7 +9790,7 @@ async fn members_returns_the_full_roster() {
 
     let mut names = std::collections::HashSet::new();
     loop {
-        let ev = ada.recv().await;
+        let ev = ada.recv_any().await;
         match ev.event {
             Event::Member {
                 user,
@@ -9660,7 +9823,7 @@ async fn members_shows_disconnected_members_offline() {
     drop(bob); // abrupt disconnect
     assert!(
         matches!(
-            &ada.recv().await.event,
+            &ada.recv_any().await.event,
             Event::Presence { user, status: weft_proto::PresenceStatus::Offline }
                 if user.account.as_str() == "bob"
         ),
@@ -9672,7 +9835,7 @@ async fn members_shows_disconnected_members_offline() {
     let mut bob_status = None;
     let mut in_roster = false;
     loop {
-        match ada.recv().await.event {
+        match ada.recv_any().await.event {
             Event::Member { user, .. } if user.account.as_str() == "bob" => in_roster = true,
             Event::Presence { user, status } if user.account.as_str() == "bob" => {
                 bob_status = Some(status)
@@ -9857,7 +10020,7 @@ async fn members_carries_stored_presence() {
     bob.send("MEMBERS #general");
     let mut ada_status = None;
     loop {
-        match bob.recv().await.event {
+        match bob.recv_any().await.event {
             Event::BatchEnd { .. } => break,
             Event::Presence { user, status } if user.account.as_str() == "ada" => {
                 ada_status = Some(status.to_string());
@@ -11756,7 +11919,7 @@ async fn an_operator_disconnect_closes_the_session_and_drops_its_presence() {
     assert!(bob.closed().await);
     // ...and ada sees him go offline.
     let reply = loop {
-        let r = ada.recv().await;
+        let r = ada.recv_any().await;
         if matches!(r.event, Event::Presence { .. }) {
             break r;
         }

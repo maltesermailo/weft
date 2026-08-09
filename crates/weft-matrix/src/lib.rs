@@ -23,4 +23,5 @@ pub mod levels;
 pub mod media;
 pub mod pending;
 pub mod recover;
+pub mod reply;
 pub mod store;

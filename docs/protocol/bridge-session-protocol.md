@@ -422,6 +422,32 @@ label weftd issued. Touching a **local-origin** root remains a refused forgery, 
 `MSG` attributed to one of our accounts. Practically: the adapter sees its own puppet's echo, maps the
 puppet back to the local user, and re-ingests under that name.
 
+### Replies (§9.3, added 2026-08-09)
+
+A reply is a pointer, and each side spells it differently — so the **link table is
+the translation**, in both directions:
+
+| Dir | WEFT | Matrix |
+|-----|------|--------|
+| →   | `reply-to=<msgid>` on the relayed `MSG`/`MESSAGE` | `m.relates_to.m.in_reply_to.event_id` on the sent event |
+| ←   | `reply-to=<msgid>` on the ingested `MSG` | the same relation, resolved through the link map |
+
+Two rules an adapter has to get right:
+
+- **Read the relation, not `event_id`.** An edit (`rel_type: m.replace`) also lives
+  under `m.relates_to` and also carries `event_id`, so reading that field directly
+  makes every edit look like a reply to the message it edits.
+- **Strip the quoted fallback inbound, and never generate one outbound.** Matrix
+  historically prepends a `> `-quoted copy of the original to the body; a WEFT
+  client renders the root itself, so keeping it quotes every reply twice. Going the
+  other way, a WEFT body is authored text — prepending a quote would put words in
+  the author's message. (MSC2781 deprecated the fallback; current clients render
+  the relation.)
+
+An **unlinked** root — never bridged, or bridged before a data loss — sends as a
+plain message rather than being dropped: losing the thread pointer is a smaller
+wrong than losing the message.
+
 ### Backfill
 
 ```
@@ -564,10 +590,42 @@ Never stored, so it is announced rather than ingested. Same one-hop rule as
 one is the echo of an ingest). Read receipts stay unbridged — WEFT's `MARK` is
 private, Matrix receipts are public.
 
+## 11d. Presence (§6.1, added 2026-08-09)
+
+| Dir | Line | Notes |
+|-----|------|-------|
+| →   | `@as=<user@realm> PRESENCE online\|away\|dnd\|offline` | A realm's user. Needs `@as` for the same reason `TYPING` does. |
+| ←   | `PRESENCE <user@ournet> <status>` with `ulid=` | Ours, for the adapter to set on their puppet. |
+
+The one difference from typing, and it decides who does what: **presence names no
+channel**. It is per-user and global in every system that has it, so the adapter
+sends one line per status change and *weftd* fans it out — into the channels of
+the namespaces that user is a member of, bounded to namespaces whose scheme the
+provider's key is pinned for. An adapter that tried to fan out per room would be
+guessing at rosters it does not hold.
+
+- **`invisible` never crosses, either way.** weftd stores it without announcing
+  (§6.1), so it does not reach the link at all; an adapter must not map it onto a
+  foreign "offline" either, since the user would blink back into existence the
+  moment they posted.
+- **Rosters serve it.** A bridged member has no session here, so `MEMBERS` reports
+  what the realm last said — and their entries are dropped when the realm's adapter
+  disconnects, so a dead bridge reads offline rather than serving a remembered
+  green dot.
+- **Mapping is the adapter's.** WEFT has four states, Matrix three: `unavailable`
+  is "here but not attending", so it maps to `away` inbound and receives both
+  `away` and `dnd` outbound.
+- Matrix specifics: inbound needs MSC2409 ephemeral pushes (`push_ephemeral: true`
+  in the registration) **and** `presence: enabled: true` on the homeserver. With
+  either off, the mirror is silently one-directional — WEFT → Matrix still works.
+
 ## 12. Not yet built
 
 - **DM edits/reactions** on a bridged conversation apply locally only; the
   message path is wired (both directions), the mutation verbs are not.
 - **Per-device attestations** on bridged events — trust is network-level: the provider proved control
   of its key on the session, so `att=` tags are not carried per event.
-- **Presence** — never bridged (core lock).
+- **Matrix→WEFT typing** — the outbound half is wired (§11c); inbound arrives as an
+  MSC2409 `m.typing` EDU naming a room, which would have to be mapped per user.
+- ~~**Presence** — never bridged (core lock).~~ **Bridged both ways since
+  2026-08-09 — see §11d.**

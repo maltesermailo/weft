@@ -50,6 +50,15 @@ sender_localpart: 'weftbot'
 # from every user at once.
 rate_limited: false
 
+# §6.1 presence mirroring needs MSC2409 ephemeral pushes. Without these two keys
+# the homeserver pushes room events only, a Matrix user's status never reaches
+# WEFT, and the mirror is silently one-directional (WEFT → Matrix still works).
+# Synapse reads the unstable key on older releases and the stable one on newer, so
+# both are set. It also needs `presence: enabled: true` in homeserver.yaml — with
+# presence disabled there is nothing to push and nothing to set.
+push_ephemeral: true
+de.sorunome.msc2409.push_ephemeral: true
+
 namespaces:
   users:
     # Every puppet, claimed exclusively — that is what lets a puppet be

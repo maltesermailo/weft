@@ -1217,22 +1217,19 @@ impl<S: ControlStream> Session<S> {
         for user in roster {
             // Live in this channel ⇒ online (or the away/dnd they announced;
             // invisible reads as offline). No live session ⇒ offline (a grey
-            // dot, Discord-style). A **bridged** member (4c) holds no local
-            // session or presence, so it always reads offline — presence is
-            // same-network-only and never bridged (§6.1).
-            let local = (user.network == self.ctx.info.network).then(|| user.account.clone());
-            let status = match local.filter(|a| live.contains(a)) {
-                Some(account) => {
-                    let map = self.ctx.presence.lock().expect("presence lock");
-                    match map.get(&account).copied() {
-                        None => weft_proto::PresenceStatus::Online,
-                        Some(weft_proto::PresenceStatus::Invisible) => {
-                            weft_proto::PresenceStatus::Offline
-                        }
-                        Some(other) => other,
-                    }
-                }
-                None => weft_proto::PresenceStatus::Offline,
+            // dot, Discord-style).
+            //
+            // A **bridged** member has no session here, so "live" cannot be read
+            // from one: their realm announces it and we serve what it last said —
+            // but only while that realm's provider is connected. With the adapter
+            // gone we know nothing about them, and a remembered green dot would be
+            // a claim we cannot support (§6.1).
+            let status = if user.network != self.ctx.info.network {
+                self.announced_presence(&user, weft_proto::PresenceStatus::Offline)
+            } else if live.contains(&user.account) {
+                self.announced_presence(&user, weft_proto::PresenceStatus::Online)
+            } else {
+                weft_proto::PresenceStatus::Offline
             };
             self.send_event(
                 None,
@@ -1257,6 +1254,29 @@ impl<S: ControlStream> Session<S> {
         )
         .await?;
         Ok(Flow::Continue)
+    }
+
+    /// What this user last announced, with `invisible` read as offline — hiding
+    /// that would defeat it (§6.1).
+    ///
+    /// `absent` is what "nothing announced" means, and it differs by who is asking:
+    /// a **local** session that never sent `PRESENCE` is still present (online),
+    /// while a **bridged** user has no session at all — we know only what their
+    /// realm told us, so silence is offline rather than a green dot we cannot
+    /// support. Their entries are dropped when the realm's adapter disconnects, so
+    /// absence is also what a dead bridge looks like.
+    fn announced_presence(
+        &self,
+        user: &UserRef,
+        absent: weft_proto::PresenceStatus,
+    ) -> weft_proto::PresenceStatus {
+        let map = self.ctx.presence.lock().expect("presence lock");
+
+        match map.get(user).copied() {
+            None => absent,
+            Some(weft_proto::PresenceStatus::Invisible) => weft_proto::PresenceStatus::Offline,
+            Some(other) => other,
+        }
     }
 
     // ---- §6.4 pins ----

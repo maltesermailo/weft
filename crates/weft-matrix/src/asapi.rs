@@ -21,6 +21,11 @@ use tokio::sync::mpsc;
 pub struct Txn {
     pub id: String,
     pub events: Vec<Value>,
+    /// MSC2409 ephemeral EDUs (`m.presence`, `m.typing`, `m.receipt`), pushed only
+    /// when the registration asks for them with `push_ephemeral: true`. Separate
+    /// from `events` because they are not room history: nothing is stored, and a
+    /// homeserver that never sends them simply leaves this empty.
+    pub ephemeral: Vec<Value>,
 }
 
 #[derive(Clone)]
@@ -78,14 +83,31 @@ async fn transaction(
         }
     }
 
-    let events = serde_json::from_str::<Value>(&body)
-        .ok()
-        .and_then(|v| v.get("events").and_then(Value::as_array).cloned())
-        .unwrap_or_default();
+    let payload = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+    let array = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    // Synapse still sends ephemeral EDUs under the unstable MSC2409 key; accept
+    // both so the bridge works either side of that rename.
+    let mut ephemeral = array("ephemeral");
+    ephemeral.extend(array("de.sorunome.msc2409.ephemeral"));
 
     // Block rather than drop: the homeserver's queue is the durable one, and
     // answering 200 for events we discarded would lose them forever.
-    if st.txns.send(Txn { id: txn_id, events }).await.is_err() {
+    if st
+        .txns
+        .send(Txn {
+            id: txn_id,
+            events: array("events"),
+            ephemeral,
+        })
+        .await
+        .is_err()
+    {
         return (StatusCode::SERVICE_UNAVAILABLE, "{}").into_response();
     }
 
