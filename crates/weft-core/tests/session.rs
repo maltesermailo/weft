@@ -119,6 +119,16 @@ impl Client {
         }
     }
 
+    /// Like [`Client::recv_raw_any`], but tolerant of a long wait — same reason as
+    /// [`Client::recv_slow`]: under `start_paused` the short deadline would be the
+    /// next timer to fire and would trip before the server timer under test.
+    async fn recv_raw_slow(&mut self) -> String {
+        tokio::time::timeout(Duration::from_secs(600), self.from_server.recv())
+            .await
+            .expect("timed out waiting for a server line")
+            .expect("server closed the stream")
+    }
+
     /// Like [`Client::recv`], but tolerant of a long wait — for events driven by
     /// a server *timer* (idle reaping) rather than by a peer's line. Under
     /// `start_paused` the short `recv` deadline would otherwise be the next timer
@@ -7903,6 +7913,110 @@ async fn a_refused_relay_answers_the_poster_at_once() {
         "an unknown label failed a message it does not own: {}",
         err.text
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_silent_provider_is_probed_and_then_taken_offline() {
+    // Owner directive 2026-08-09: liveness must not be *inferred* from traffic. A
+    // bridge is legitimately quiet whenever its realm is, but its namespaces are
+    // advertised as online purely because this session exists — so an adapter that
+    // is gone or wedged behind an open socket makes weftd claim what it cannot
+    // support. weftd asks, and a provider that answers nothing is taken offline.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+
+    // Quiet for the probe interval: weftd asks rather than assuming.
+    let probe = loop {
+        let raw = plugin.recv_raw_slow().await;
+
+        if verb_of(&raw) == "PING" {
+            break raw;
+        }
+    };
+    assert!(probe.contains("liveness"), "{probe}");
+
+    // It answers nothing at all. Past the grace window the session is closed and
+    // the namespace goes offline for its members — the same push a disconnect
+    // produces, because it *is* the disconnect path.
+    let Event::NsMeta {
+        provider_online, ..
+    } = ada.recv_slow().await.event
+    else {
+        panic!("ada expected the provider-offline NS-META push");
+    };
+    assert_eq!(provider_online, Some(false));
+    assert!(
+        plugin.closed().await,
+        "the unanswering session was not closed"
+    );
+}
+
+#[tokio::test]
+async fn a_re_asserted_layout_reaches_the_members() {
+    // Reported 2026-08-09: after the adapter reconnected, the channel still showed a
+    // bare ULID until the *client* was restarted. A re-assert is how a realm restates
+    // a room, and it was answered on the provider's own session only — so weftd's
+    // store was corrected while every connected client kept what it had cached.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    let chan_id = ulid::Ulid::new().to_string().to_lowercase();
+    plugin.send(&format!(
+        "@id={chan_id};vanity=old-name CHANNEL-LAYOUT instagram://acme-corp/club/general 0"
+    ));
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+
+    // The adapter reconnects and restates the room, now naming it.
+    plugin.send(&format!(
+        "@id={chan_id};vanity=general CHANNEL-LAYOUT instagram://acme-corp/club/general 0"
+    ));
+
+    let layout = loop {
+        match ada.recv().await.event {
+            Event::ChannelLayout {
+                channel: c, vanity, ..
+            } if c == channel => break vanity,
+            _ => continue,
+        }
+    };
+    assert_eq!(layout, "general", "the member never heard the new name");
 }
 
 #[tokio::test]

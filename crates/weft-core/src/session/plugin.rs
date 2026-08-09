@@ -780,18 +780,53 @@ impl<S: ControlStream> Session<S> {
             });
 
         if let Some((channel, rec)) = existing {
-            self.send_event(
-                None,
-                Event::ChannelLayout {
-                    channel,
-                    category: rec.category,
-                    position: rec.position,
-                    kind: rec.kind,
-                    vanity: rec.vanity,
-                    origin: Some(uri),
-                },
-            )
-            .await?;
+            // A re-assert is how the realm *restates* a room, so it can carry a new
+            // display name, category or position — and the row we hold may predate
+            // it. Adopt the change and tell the **members**, not just the provider
+            // that asked: the assert used to be answered on this session alone, so a
+            // reconnecting adapter corrected weftd's store while every connected
+            // client kept the name it had cached (a bare ULID, until the user
+            // restarted the client).
+            let asserted_vanity = match vanity.is_empty() {
+                true => rec.vanity.clone(),
+                false => sanitize_vanity(&vanity),
+            };
+            let changed = asserted_vanity != rec.vanity
+                || category != rec.category
+                || position != rec.position;
+
+            if changed {
+                if let Err(e) = self
+                    .ctx
+                    .channel_store
+                    .upsert_channel(&channel, &asserted_vanity, rec.policy, kind)
+                    .await
+                {
+                    return self.internal(None, &e).await;
+                }
+                let _ = self
+                    .ctx
+                    .channel_store
+                    .set_channel_layout(&channel, category.as_deref(), position)
+                    .await;
+            }
+
+            let layout = Event::ChannelLayout {
+                channel: channel.clone(),
+                category: category.clone().or(rec.category),
+                position,
+                kind,
+                vanity: asserted_vanity,
+                origin: Some(uri),
+            };
+
+            if changed {
+                if let Some(handle) = self.ctx.registry.get(&channel) {
+                    handle.announce(layout.clone()).await;
+                }
+            }
+
+            self.send_event(None, layout).await?;
             return Ok(Flow::Continue);
         }
 

@@ -434,6 +434,25 @@ impl AppServiceBuilder {
                                     actor_ulid,
                                 });
                             } else if let Ok(req) = Request::from_line(&line) {
+                                // §3.4 weftd probing us. Answering is what proves the
+                                // adapter is alive rather than merely connected —
+                                // weftd advertises this provider's namespaces as
+                                // online on the strength of this session, so it asks
+                                // when we go quiet and takes them offline if we say
+                                // nothing. Not forwarded: it is session business.
+                                if let Command::Ping { token } = &req.command {
+                                    let pong = Reply::new(weft_proto::Event::Pong {
+                                        token: token.clone(),
+                                    })
+                                    .serialize()
+                                    .expect("PONG serializes");
+
+                                    if let Err(e) = stream.send_line(&pong).await {
+                                        break Err(e.into());
+                                    }
+                                    continue;
+                                }
+
                                 // Flow steps are commands too, but an adapter
                                 // wants them typed and decoded, not raw.
                                 if let Some(step) = step_of(&req.command) {

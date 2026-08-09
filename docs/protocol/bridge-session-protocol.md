@@ -487,6 +487,23 @@ legal-removal path and must work with the bridge down.
 
 ---
 
+## 9a. Liveness is probed, not inferred (2026-08-09)
+
+A bridge is legitimately silent whenever its realm is, so silence cannot mean
+failure — but weftd advertises this provider's namespaces as **online** purely
+because the session exists, and an open socket with a dead or wedged adapter behind
+it makes weftd claim something it cannot support.
+
+So weftd asks. After ~30 s of quiet it sends `PING <token>`; a session that has
+produced *nothing at all* by ~45 s is closed, which takes its namespaces offline
+through the ordinary disconnect path (`provider=offline` in `NS-META` to members).
+
+**Answering is mandatory** — `PONG` to any `PING`, which the SDK does for you. An
+adapter that ignores it will be reaped even while connected, and rightly: from
+weftd's side that is indistinguishable from an adapter that has stopped working. The
+SDK's own ~10 s keepalive means the probe rarely fires at all; it exists for the case
+where the adapter's own loop has stopped.
+
 ## 10. Failure modes worth designing for
 
 | Situation                                    | What weftd does                                                         | What the adapter should do                                           |
@@ -497,6 +514,14 @@ legal-removal path and must work with the bridge down.
 | Provider queue full                          | The line is dropped with a warning                                      | Keep the session drained; weftd does not block on you                |
 | Membership statement lost (provider offline) | Nothing is queued                                                       | Re-state on reconnect — that is what the full-replace window is for  |
 | Local `NS LEAVE` while the provider is down  | Applied anyway; stated back on your next registration (see below)       | Reconcile: whoever is joined foreign-side and absent has left        |
+
+### 10.0 Re-asserting a room restates it, for everyone
+
+A re-assert is not just idempotent bookkeeping: it may carry a **new** display name,
+category or position. weftd adopts the change and announces the layout to the
+channel's **members**, not only back to the provider that asked — answering the
+asking session alone corrected weftd's store while every connected client kept the
+name it had cached (a bare id, until the user restarted their client).
 
 ### 10.1 The membership statement weftd sends *you*
 

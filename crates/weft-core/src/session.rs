@@ -78,6 +78,19 @@ const READY_IDLE: Duration = Duration::from_secs(120);
 /// audio are exempt from browser timer throttling, so the throttling headroom
 /// that `READY_IDLE` allows for isn't needed here.
 const VOICE_IDLE: Duration = Duration::from_secs(30);
+/// How long a **provider** session may be quiet before weftd probes it, and how
+/// long it then has to answer.
+///
+/// Liveness cannot be inferred from traffic here (owner directive 2026-08-09): a
+/// bridge is legitimately silent whenever its realm is, so silence is not failure —
+/// but its namespaces are advertised as *online* on the strength of this session
+/// existing, and a socket that is open while the adapter behind it is gone or wedged
+/// makes weftd claim something it cannot support. So weftd asks: a `PING` after
+/// `PROVIDER_PROBE`, and a session that has produced nothing at all by
+/// `PROVIDER_PROBE + PROVIDER_PROBE_GRACE` is closed, which marks its namespaces
+/// offline through the ordinary disconnect path.
+const PROVIDER_PROBE: Duration = Duration::from_secs(30);
+const PROVIDER_PROBE_GRACE: Duration = Duration::from_secs(15);
 /// §9.2: dedup MSG retries by (session, label) for 5 minutes.
 const DEDUP_WINDOW: Duration = Duration::from_secs(300);
 /// §8: MALFORMED — close after 5 per 60 s.
@@ -509,6 +522,9 @@ struct Session<S> {
     dev_verb: Option<String>,
     malformed_strikes: Vec<Instant>,
     last_inbound: Instant,
+    /// A provider session that has been asked to prove it is alive and has not
+    /// answered yet (see [`PROVIDER_PROBE`]). Cleared by any inbound line.
+    probed: bool,
     /// §6.1 a protocol-gateway front-end (WEFT-IRC) that auto-registers emailless
     /// accounts — exempt from the network's `require_email` policy. Cached from
     /// [`ControlStream::is_gateway`] at construction.
@@ -563,6 +579,7 @@ impl<S: ControlStream> Session<S> {
             dev_verb: None,
             malformed_strikes: Vec::new(),
             last_inbound: Instant::now(),
+            probed: false,
             gateway,
         }
     }
@@ -570,6 +587,16 @@ impl<S: ControlStream> Session<S> {
     async fn run(&mut self) -> io::Result<()> {
         loop {
             let limit = idle_limit(&self.state, !self.voice.is_empty());
+            // A provider is probed rather than merely tolerated (see
+            // `PROVIDER_PROBE`): the wake-up comes early, sends one PING, and the
+            // *next* wake-up closes the session if nothing came back.
+            let deadline = match (&self.state, self.probed) {
+                (State::PluginService { .. }, false) => self.last_inbound + PROVIDER_PROBE,
+                (State::PluginService { .. }, true) => {
+                    self.last_inbound + PROVIDER_PROBE + PROVIDER_PROBE_GRACE
+                }
+                _ => self.last_inbound + limit,
+            };
             let action = tokio::select! {
                 line = self.stream.recv_line() => Action::Line(line?),
                 event = self.events_rx.recv() =>
@@ -580,7 +607,7 @@ impl<S: ControlStream> Session<S> {
                     Action::FedOut(framed.expect("session holds a fed_out sender")),
                 req = self.backfill_demand_rx.recv() =>
                     Action::Backfill(req.expect("session holds a backfill sender")),
-                _ = tokio::time::sleep_until(self.last_inbound + limit) => Action::Idle,
+                _ = tokio::time::sleep_until(deadline) => Action::Idle,
                 // Graceful shutdown: this branch is only reached between commands
                 // (a command in `on_line` runs to completion first), so no
                 // in-flight work is interrupted; `run_session` then cleans up.
@@ -596,6 +623,7 @@ impl<S: ControlStream> Session<S> {
                 Action::Line(None) => return Ok(()), // peer closed
                 Action::Line(Some(raw)) => {
                     self.last_inbound = Instant::now();
+                    self.probed = false;
                     if let Flow::Close = self.on_line(&raw).await? {
                         return Ok(());
                     }
@@ -609,6 +637,24 @@ impl<S: ControlStream> Session<S> {
                 // from the peer over this bridge (outbound bridge sessions only).
                 Action::Backfill(req) => self.on_backfill_demand(req).await,
                 Action::Idle => {
+                    // First wake-up on a quiet provider: ask. Any line it sends
+                    // clears `probed` (see `on_line`), so only a provider that
+                    // answers nothing at all reaches the second wake-up.
+                    if matches!(self.state, State::PluginService { .. }) && !self.probed {
+                        self.probed = true;
+                        // A *command*, not an event: weftd is the one asking here,
+                        // and the SDK answers a PING with PONG on any authenticated
+                        // session (§3.4).
+                        if let Ok(ping) = weft_proto::Request::new(Command::Ping {
+                            token: Some("liveness".to_string()),
+                        })
+                        .serialize()
+                        {
+                            self.stream.send_line(&ping).await?;
+                        }
+                        continue;
+                    }
+
                     debug!("idle timeout");
                     return Ok(());
                 }
