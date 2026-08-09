@@ -997,8 +997,20 @@ impl Bridge {
         }
 
         let chan_id = ident::stable_ulid(room_id);
+        // Name first, then the canonical alias's localpart (`#general:…` → `general`),
+        // and only then the id. Many rooms carry an alias without ever setting a name,
+        // and the ULID fallback is what makes a bridged channel show up as an
+        // unreadable id — worth exhausting the readable options first.
         let vanity = state_str(&state, "m.room.name", "name")
-            .map(|name| vanity_of(&name))
+            .or_else(|| state_str(&state, "m.room.canonical_alias", "alias"))
+            .map(|name| {
+                vanity_of(
+                    name.trim_start_matches('#')
+                        .split(':')
+                        .next()
+                        .unwrap_or(&name),
+                )
+            })
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| chan_id.clone());
 
@@ -1088,6 +1100,54 @@ impl Bridge {
 
         if let Err(e) = self.realm.presence(&weft_sender, status).await {
             debug!(mxid, "presence ingestion failed: {e:#}");
+        }
+    }
+
+    /// Re-assert a replica room's layout after its name or alias changed.
+    ///
+    /// Only the vanity moves, so everything else is restated as we already hold it —
+    /// weftd's re-assert path adopts what differs and announces it to the channel's
+    /// members.
+    async fn reassert_room_name(&mut self, room_id: &str, ev: &Value) {
+        let Some((chan_id, uri, ns_id)) = self
+            .store
+            .state
+            .channel_of_room(room_id)
+            .map(|(chan, space)| (chan.chan_id.clone(), chan.uri.clone(), space.ns_id.clone()))
+        else {
+            return; // not a replica room of ours (a projected room's name is *ours*)
+        };
+
+        let vanity = ev["content"]["name"]
+            .as_str()
+            .or_else(|| ev["content"]["alias"].as_str())
+            .map(|name| {
+                vanity_of(
+                    name.trim_start_matches('#')
+                        .split(':')
+                        .next()
+                        .unwrap_or(name),
+                )
+            })
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| chan_id.clone());
+
+        info!(room_id, vanity, "room renamed — re-asserting the channel");
+
+        if let Err(e) = self
+            .realm
+            .assert_channel(&ChannelAssertion {
+                uri: &uri,
+                id: &chan_id,
+                namespace_id: &ns_id,
+                vanity: &vanity,
+                position: 0,
+                kind: weft_proto::ChannelKind::Text,
+                category: None,
+            })
+            .await
+        {
+            warn!(room_id, "re-asserting the renamed channel failed: {e:#}");
         }
     }
 
@@ -1227,6 +1287,19 @@ impl Bridge {
         {
             self.on_projected_matrix_event(&ev, &room_id, &channel, &ns_id, &weft_sender)
                 .await;
+            return;
+        }
+
+        // A room named (or aliased) *after* provisioning: re-assert its layout so the
+        // new display name reaches weftd and — since weftd announces a changed
+        // re-assert — every member's client. Without this the channel keeps whatever
+        // it was called when the bridge first saw it, which for an unnamed room is a
+        // bare ULID, and naming it in Element changed nothing on the WEFT side.
+        if matches!(
+            ev["type"].as_str(),
+            Some("m.room.name") | Some("m.room.canonical_alias")
+        ) {
+            self.reassert_room_name(&room_id, &ev).await;
             return;
         }
 

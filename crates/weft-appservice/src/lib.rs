@@ -423,10 +423,18 @@ impl AppServiceBuilder {
                             // Not an invoke → weftd talking to us. Surface it.
                             // A full queue means the adapter stopped reading —
                             // its problem to notice, not a reason to stall the
-                            // session. Events first: some lines parse as both
-                            // (`SYNC END` is also a lenient `Command::Sync`),
-                            // and the event reading is the meaningful one.
-                            if let Ok(reply) = Reply::from_line(&line) {
+                            // session. A **known** event wins: some lines parse as
+                            // both (`SYNC END` is also a lenient `Command::Sync`) and
+                            // the event reading is the meaningful one there.
+                            //
+                            // "Known" is the whole point. `Reply::from_line` succeeds
+                            // for *every* verb — an unrecognised one decodes to
+                            // `Event::Unknown` so clients can ignore it (§7) — so
+                            // testing it for success routed every command weftd
+                            // relayed (a DM, `NS JOIN`, a post, a grant, even the
+                            // liveness PING) into the event path, where nothing
+                            // handled it. It looked exactly like weftd never sending.
+                            if let Some(reply) = known_event(&line) {
                                 let actor_ulid = line.tags.get("ulid").cloned();
                                 let _ = events_tx.try_send(Incoming::Event {
                                     event: reply.event,
@@ -634,6 +642,22 @@ fn ctx_ref_of(line: &Line) -> Option<String> {
 }
 
 /// A flow step as an [`Incoming::Step`], if that is what this command is.
+/// The line read as an event, but **only** if it is one weftd actually named.
+///
+/// The catch-all matters: `Reply::from_line` never fails, because an unrecognised
+/// verb decodes to [`weft_proto::Event::Unknown`] so that clients can ignore future
+/// events (§7). That makes "did it parse as a reply?" useless as a discriminator —
+/// every *command* parses as a reply too. Asking "is it a known event?" is the
+/// question the router actually meant.
+fn known_event(line: &Line) -> Option<Reply> {
+    let reply = Reply::from_line(line).ok()?;
+
+    match reply.event {
+        weft_proto::Event::Unknown { .. } => None,
+        _ => Some(reply),
+    }
+}
+
 fn step_of(cmd: &Command) -> Option<Incoming> {
     let decode = |values: &Option<String>| {
         values
@@ -699,6 +723,50 @@ fn invoke_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relayed_command_is_not_read_as_an_event() {
+        // The bug this guards: `Reply::from_line` succeeds for every verb (unknown
+        // ones decode to `Event::Unknown` by design), so routing on "did it parse as
+        // a reply?" sent every command weftd relayed into the event path, where
+        // nothing handled it — a DM, a namespace join, a post, all silently gone.
+        let dm = Line::parse(
+            "@as=ada@test.example;ulid=01ARZ3NDEKTSV4RRFFQ69G5FAV MSG @carol@matrix.example :hi",
+        )
+        .expect("a valid line");
+        assert!(
+            known_event(&dm).is_none(),
+            "a relayed MSG must reach the adapter as a command"
+        );
+        assert!(matches!(
+            Request::from_line(&dm).map(|r| r.command),
+            Ok(Command::Msg { .. })
+        ));
+
+        let join = Line::parse("@as=ada@test.example NS JOIN 01hzzzzzzzzzzzzzzzzzzzzzzz")
+            .expect("a valid line");
+        assert!(known_event(&join).is_none(), "NS JOIN is a command");
+
+        let ping = Line::parse("PING liveness").expect("a valid line");
+        assert!(known_event(&ping).is_none(), "PING is a command");
+
+        // A real event still reads as one…
+        let message = Line::parse(
+            "@msgid=test.example/01ARZ3NDEKTSV4RRFFQ69G5FAV MESSAGE \
+             #01hzzzzzzzzzzzzzzzzzzzzzzz/01hyyyyyyyyyyyyyyyyyyyyyyy ada@test.example :hello",
+        )
+        .expect("a valid line");
+        assert!(known_event(&message).is_some());
+
+        // …including the one that parses as both, where the event reading is meant.
+        // (`SYNC END` carries its cursor as a tag; without one it is not the event.)
+        let sync_end =
+            Line::parse("@cursor=01ARZ3NDEKTSV4RRFFQ69G5FAV SYNC END").expect("a valid line");
+        assert!(
+            known_event(&sync_end).is_some(),
+            "SYNC END is an event, though it also parses as a lenient Command::Sync"
+        );
+    }
 
     #[test]
     fn an_admin_page_is_declared_for_the_panel_not_the_client() {

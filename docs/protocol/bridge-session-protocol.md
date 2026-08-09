@@ -570,6 +570,19 @@ reading it.
 
 ---
 
+## 10.2 Routing a line the adapter receives (2026-08-09)
+
+Discriminate on **whether the verb is a known event**, never on "did it parse as a
+reply?". `Reply::from_line` succeeds for *every* verb — an unrecognised one decodes to
+`Event::Unknown` so clients can ignore future events (§7) — so testing for parse
+success sends every **command** weftd relays into the event path. In the SDK that made
+the whole `Incoming::Command` arm dead: a DM, an `NS JOIN`, a post into a replica, a
+`GRANT`, even the liveness `PING` all arrived as an unknown event and were dropped
+without a word, which from the outside is indistinguishable from weftd never sending.
+
+`SYNC END` is why the event reading wins when a line is genuinely both: it is a real
+event *and* a lenient `Command::Sync`.
+
 ## 11. What the adapter owns, not weftd
 
 Some things deliberately have **no protocol surface** — they are the adapter's, and the SDK supplies

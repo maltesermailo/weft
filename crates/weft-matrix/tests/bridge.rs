@@ -3582,3 +3582,55 @@ async fn a_post_we_cannot_place_is_reported_on_its_label() {
         "a relayed post has no msgid: {report}"
     );
 }
+
+#[tokio::test]
+async fn naming_a_room_in_matrix_renames_the_channel() {
+    // Reported 2026-08-09: a bridged channel kept showing a bare ULID. An unnamed
+    // Matrix room has no readable name to take, so the id is the honest fallback —
+    // but naming it in Element afterwards changed nothing, because the rename was
+    // never consumed. Now it re-asserts, and weftd tells the members.
+    let (mut bridge, mut lines, _calls) = bridge_with(kde_space()).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    drain(&mut lines);
+
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.name",
+            "room_id": "!gen:kde.org",
+            "event_id": "$name",
+            "sender": "@carol:kde.org",
+            "state_key": "",
+            "origin_server_ts": 1_722_000_000_000u64,
+            "content": { "name": "General Chat" },
+        }))
+        .await;
+
+    let sent = drain(&mut lines);
+    let layout = sent
+        .iter()
+        .find(|l| l.contains("CHANNEL-LAYOUT"))
+        .unwrap_or_else(|| panic!("the rename was not re-asserted: {sent:?}"));
+    assert!(layout.contains("vanity=general-chat"), "{layout}");
+
+    // A canonical alias serves the same purpose for a room nobody named.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.canonical_alias",
+            "room_id": "!gen:kde.org",
+            "event_id": "$alias",
+            "sender": "@carol:kde.org",
+            "state_key": "",
+            "origin_server_ts": 1_722_000_000_001u64,
+            "content": { "alias": "#lobby:kde.org" },
+        }))
+        .await;
+    let sent = drain(&mut lines);
+    let layout = sent
+        .iter()
+        .find(|l| l.contains("CHANNEL-LAYOUT"))
+        .unwrap_or_else(|| panic!("the alias was not re-asserted: {sent:?}"));
+    assert!(layout.contains("vanity=lobby"), "{layout}");
+}
