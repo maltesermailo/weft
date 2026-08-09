@@ -47,7 +47,7 @@ export class ProfileStore {
   displayName(acct: string): string {
     const ns = this.activeServer();
     const nick = ns ? this.nicks.get(nickKey(`ns:${ns}`, peerOf(acct))) : undefined;
-    return nick || store.accountOf(acct).displayName;
+    return nick || store.peekAccount(acct).displayName;
   }
   /// An account's server nickname at the active server, or "" (for editors).
   nickOf(acct: string): string {
@@ -133,13 +133,13 @@ export const peerOf = (key: string): string => key.replace(/^@/, "");
 /// Two-letter fallback avatar initials.
 export const initials = (s: string): string => s.replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "··";
 /// The presence dot CSS class for an account.
-export const dotClass = (acct: string): string => store.accountOf(acct).dotClass;
+export const dotClass = (acct: string): string => store.peekAccount(acct).dotClass;
 /// A fetchable avatar URL for an account, or null → render initials.
-export const avatarUrl = (acct: string): string | null => store.accountOf(acct).avatarUrl;
+export const avatarUrl = (acct: string): string | null => store.peekAccount(acct).avatarUrl;
 /// An account's free-text bio (§10.3), or "" if unset.
-export const bioOf = (acct: string): string => store.accountOf(acct).about;
+export const bioOf = (acct: string): string => store.peekAccount(acct).about;
 /// An account's custom status (§10.3), or "" if unset.
-export const statusOf = (acct: string): string => store.accountOf(acct).status;
+export const statusOf = (acct: string): string => store.peekAccount(acct).status;
 
 // ---- events ----
 

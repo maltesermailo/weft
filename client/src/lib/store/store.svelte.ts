@@ -121,6 +121,26 @@ export class AppStore {
     return a;
   }
 
+  /**
+   * Read-only view of an account: the interned record if we hold one, else a
+   * **transient** stand-in with the same handle.
+   *
+   * {@link accountOf} interns on first sight, which is right for anything that
+   * keeps the reference — but a *render* touching an unseen handle would then be
+   * writing state while deriving, which Svelte forbids outright
+   * (`state_unsafe_mutation`): a DM list showing a peer nobody had looked up yet
+   * did exactly that. Every Account default derives from the handle alone, so the
+   * stand-in reads identically to the record that would have been created, and it
+   * stays reactive — `SvelteMap` tracks the *absent* key, so the real record
+   * landing re-renders the reader.
+   *
+   * Rule of thumb: templates and `$derived` read through here; event handlers and
+   * commands use `accountOf`.
+   */
+  peekAccount(handle: string): Account {
+    return this.accounts.get(handle.replace(/^@/, "")) ?? new Account(handle);
+  }
+
   /** Get-or-create the {@link Server} for a namespace id. */
   server(id: string): Server {
     let s = this.servers.get(id);

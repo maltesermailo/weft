@@ -73,7 +73,7 @@
   // local account and can't be DM'd, so the send list is local friends only.
   const statusOf = (ref: string) => {
     const acct = store.social.friendLocalAccount(ref);
-    return acct ? (store.accountOf(acct).presence ?? "offline") : "offline";
+    return acct ? (store.peekAccount(acct).presence ?? "offline") : "offline";
   };
   const isOnline = (ref: string) => statusOf(ref) !== "offline" && statusOf(ref) !== "invisible";
   const friends = $derived(

@@ -16,7 +16,7 @@
   const avatarAccount = (user: string) => store.social.friendLocalAccount(user) ?? user;
   const statusOf = (user: string) => {
     const acct = store.social.friendLocalAccount(user);
-    return acct ? (store.accountOf(acct).presence ?? "offline") : "offline";
+    return acct ? (store.peekAccount(acct).presence ?? "offline") : "offline";
   };
   const isOnline = (user: string) => {
     const s = statusOf(user);

@@ -23,7 +23,7 @@ import { roleScopeOf, roleStore } from "$lib/roles/roles.svelte";
   } = $props();
 
   const b = $derived(store.session.badgeFor(target, app.active));
-  const pr = $derived(store.accountOf(target).presence ?? "offline");
+  const pr = $derived(store.peekAccount(target).presence ?? "offline");
   // Roles + moderation are server-member controls — show them only when we're
   // actually viewing one of the server's channels, not from friends/DMs.
   const inServer = $derived(app.active.startsWith("#"));

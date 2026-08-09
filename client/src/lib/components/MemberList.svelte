@@ -12,7 +12,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
   const app = getApp();
   const members = $derived(vm.activeChannel?.members ?? []);
   const presenceOf = (name: string) =>
-    name === store.session.account ? store.session.myStatus : (store.accountOf(name).presence ?? "offline");
+    name === store.session.account ? store.session.myStatus : (store.peekAccount(name).presence ?? "offline");
   const isOnline = (name: string) => {
     const s = presenceOf(name);
     return s !== "offline" && s !== "invisible";

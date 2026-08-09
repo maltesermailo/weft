@@ -5,7 +5,7 @@
   import { getApp } from "$lib/ui/context";
   const app = getApp();
   let { account }: { account: string } = $props();
-  const acc = $derived(store.accountOf(account));
+  const acc = $derived(store.peekAccount(account));
 </script>
 
 {#if acc.avatarUrl}

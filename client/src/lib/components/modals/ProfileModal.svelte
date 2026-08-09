@@ -14,7 +14,7 @@ import { roleStore } from "$lib/roles/roles.svelte";
 
   const isSelf = $derived(target === store.session.account);
   const handle = $derived(target.includes("@") ? target : `${target}@${store.session.network}`);
-  const status = $derived(isSelf ? store.session.myStatus : (store.accountOf(target).presence ?? "offline"));
+  const status = $derived(isSelf ? store.session.myStatus : (store.peekAccount(target).presence ?? "offline"));
   const online = $derived(status !== "offline" && status !== "invisible");
   const bio = $derived(bioOf(target));
   const badge = $derived(store.session.badgeFor(target, app.active));
