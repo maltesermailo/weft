@@ -399,8 +399,19 @@ that label, so their client reconciles the message it sent instead of seeing a s
 label and the author sees their own message as somebody else's** — and, because a labelled `MSG` is the
 only way `@as` may name a local account (below), an unlabelled one is refused outright.
 
-An adapter that cannot deliver MUST say so (`UNDELIVERED <msgid> :<reason>`) or simply answer nothing:
-silence past the grace window is itself an answer (§9). While the provider is **offline** weftd refuses
+An adapter that cannot deliver MUST say so — and for a relayed post it says so **on
+the label**, because there is no msgid to name:
+
+```
+→ @label=B-<scheme>-<ulid> UNDELIVERED :<reason>
+```
+
+weftd answers the waiting session with `ERR POLICY` (context `not-delivered`) carrying
+the *poster's own* label, so their client fails the pending message immediately with
+the realm's reason, instead of shimmering until its own send deadline. The label is
+also the authorization: one weftd did not issue (or that has expired) is ignored
+rather than failing a message it does not own. `UNDELIVERED <msgid> :<reason>` keeps
+its meaning for the **projection** path, where weftd did mint the message. While the provider is **offline** weftd refuses
 the post at send time (`ERR POLICY`, context `provider-offline`) rather than queueing it — there is no
 outbox for a room we do not own.
 

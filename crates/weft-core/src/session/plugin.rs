@@ -206,10 +206,27 @@ impl<S: ControlStream> Session<S> {
                     self.ctx.resolve_delivery(&msgid);
                     return Ok(Flow::Continue);
                 }
+                // Two shapes, because there are two things that can go undelivered
+                // and only one of them has an id here:
+                //
+                // - **with a msgid** — a message *we* minted and handed over (the
+                //   projection path). The author is told about a message that is
+                //   already in their history, so it is marked rather than failed.
+                // - **with only a `@label`** — a post we *relayed* into a replica,
+                //   which we never minted (the realm is the home). Nothing is stored
+                //   to mark, so the answer is an `ERR` on the poster's own label:
+                //   their client fails the pending echo instead of shimmering until
+                //   its deadline.
                 Command::Undelivered { msgid, reason } => {
-                    if let Some((author, channel)) = self.ctx.resolve_delivery(&msgid) {
-                        self.report_undelivered(author, channel, msgid, reason)
-                            .await;
+                    match (msgid, req.label.as_deref()) {
+                        (Some(msgid), _) => {
+                            if let Some((author, channel)) = self.ctx.resolve_delivery(&msgid) {
+                                self.report_undelivered(author, channel, msgid, reason)
+                                    .await;
+                            }
+                        }
+                        (None, Some(label)) => self.fail_relayed_post(label, reason).await,
+                        (None, None) => debug!("UNDELIVERED names neither a msgid nor a label"),
                     }
                     return Ok(Flow::Continue);
                 }
@@ -1513,6 +1530,29 @@ impl<S: ControlStream> Session<S> {
         })
     }
 
+    /// A **relayed** post the realm refused: answer the waiting session on the
+    /// label it queued, so the author learns at once instead of waiting out their
+    /// client's send deadline.
+    ///
+    /// The bridge label is the only handle either side has on such a post — weftd
+    /// minted nothing — so it carries the routing: which session is waiting, and
+    /// which channel's pending label answers.
+    async fn fail_relayed_post(&mut self, label: &str, reason: Option<String>) {
+        let Some((session, channel)) = self.ctx.take_group_echo_failure(label) else {
+            debug!(label, "UNDELIVERED for an unknown or expired bridge label");
+            return;
+        };
+
+        self.ctx
+            .directory
+            .fail_relay(
+                session,
+                channel,
+                reason.unwrap_or_else(|| "the bridge could not deliver it".to_string()),
+            )
+            .await;
+    }
+
     /// §15 a realm's user is typing in one of its channels.
     ///
     /// Bounded like every other attributed line: the channel must be one this
@@ -2503,12 +2543,24 @@ impl<S: ControlStream> Session<S> {
             return;
         }
 
+        // Not a bridged realm, so it must be a WEFT network: the social path either
+        // rides an existing peer bridge or dials one (§11.10). If *that* finds no
+        // route either, say so — a DM stored and echoed locally with nowhere to go is
+        // the "sent, but nobody got it" case, and it should at least be in the log.
         if let Ok(serialized) = line.serialize() {
-            self.ctx.request_friend_deliver(crate::FriendDeliver {
+            let routed = self.ctx.request_friend_deliver(crate::FriendDeliver {
                 peer: peer.network.clone(),
                 from: Some(from.clone()),
                 line: serialized,
             });
+
+            if !routed {
+                warn!(
+                    %peer,
+                    "DM has no route: no provider asserted that realm and no peer bridge \
+                     could take it — it is stored locally only"
+                );
+            }
         }
     }
 

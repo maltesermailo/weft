@@ -7810,6 +7810,102 @@ async fn ephemera_and_dms_work_on_a_projection_only_bridge() {
 }
 
 #[tokio::test]
+async fn a_refused_relay_answers_the_poster_at_once() {
+    // Owner directive 2026-08-09: `UNDELIVERED` takes a **label**, so a relayed post
+    // the realm refuses is reported rather than waited out. There is no msgid to name
+    // — the realm is the home of a replica channel, so weftd minted nothing — and the
+    // bridge label is the only handle either side has on that post.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::NsMeta { id, .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+    let ns_id = id.to_string();
+    plugin.send(&format!(
+        "@vanity=general;id={} CHANNEL-LAYOUT instagram://acme-corp/club/general 0",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let Event::ChannelLayout { channel, .. } = plugin.recv().await.event else {
+        panic!("expected the minted CHANNEL-LAYOUT");
+    };
+
+    let mut ada = ready(&ctx, "ada").await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+
+    // Her post is relayed under a bridge label…
+    ada.send(&format!("@label=m1 MSG {channel} :will not land"));
+    let bridge_label = loop {
+        let line = weft_proto::Line::parse(&plugin.recv_raw().await).unwrap();
+
+        if let Ok(weft_proto::Command::Msg { .. }) =
+            weft_proto::Request::from_line(&line).map(|r| r.command)
+        {
+            break line.tags.get("label").expect("a bridge label").clone();
+        }
+    };
+
+    // …and the realm answers that it could not deliver it. No msgid: there is none.
+    plugin.send(&format!(
+        "@label={bridge_label} UNDELIVERED :no Matrix room is mapped for that channel"
+    ));
+
+    // She hears it on **her own** label, so the client fails the pending echo it is
+    // holding rather than shimmering until its send deadline.
+    let reply = ada.expect_err(ErrCode::Policy).await;
+    assert_eq!(reply.label.as_deref(), Some("m1"));
+    assert_eq!(err_context(&reply).as_deref(), Some("not-delivered"));
+    let Event::Err(err) = &reply.event else {
+        unreachable!("expect_err")
+    };
+    assert!(
+        err.text.contains("no Matrix room is mapped"),
+        "the realm's reason survives: {}",
+        err.text
+    );
+
+    // An expired or unknown label must not fail a message it does not own — the
+    // token is the authorization here. Barriered by a *real* failure of the next
+    // post: if the bogus line had consumed m2's queued label, the error below would
+    // carry the wrong reason (or no label at all).
+    ada.send(&format!("@label=m2 MSG {channel} :the next one"));
+    let second_label = loop {
+        let line = weft_proto::Line::parse(&plugin.recv_raw().await).unwrap();
+
+        if let Ok(weft_proto::Command::Msg { .. }) =
+            weft_proto::Request::from_line(&line).map(|r| r.command)
+        {
+            break line.tags.get("label").expect("a bridge label").clone();
+        }
+    };
+    plugin.send("@label=B-instagram-nonexistent UNDELIVERED :not a label we issued");
+    plugin.send(&format!(
+        "@label={second_label} UNDELIVERED :the real reason"
+    ));
+
+    let reply = ada.expect_err(ErrCode::Policy).await;
+    assert_eq!(reply.label.as_deref(), Some("m2"));
+    let Event::Err(err) = &reply.event else {
+        unreachable!("expect_err")
+    };
+    assert!(
+        err.text.contains("the real reason"),
+        "an unknown label failed a message it does not own: {}",
+        err.text
+    );
+}
+
+#[tokio::test]
 async fn an_ns_meta_change_reaches_a_projecting_provider() {
     // A provider is not an ns member, so the ordinary fan-out never reaches it
     // — yet NS-META is exactly what describes its structure (Space name,

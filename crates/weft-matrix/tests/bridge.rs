@@ -3532,3 +3532,53 @@ async fn a_matrix_user_can_open_the_dm() {
     assert!(dm.contains("as=carol@kde.org"), "{dm}");
     assert!(dm.contains("@ada"), "addressed to ada: {dm}");
 }
+
+#[tokio::test]
+async fn a_post_we_cannot_place_is_reported_on_its_label() {
+    // The other half of the label-keyed UNDELIVERED: weftd minted nothing for a
+    // relayed post, so if we cannot place it the *only* honest answer is to say so
+    // on the label it arrived under. Silence used to leave the author's client
+    // waiting out its own send deadline with nothing in this log either.
+    let (mut bridge, mut lines, _calls) = bridge_with(kde_space()).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    let ns_id = ident::stable_ulid("!space:kde.org");
+    join_ada(&mut bridge, &ns_id).await;
+    drain(&mut lines);
+
+    // A channel we hold no room for — the reported symptom.
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            label: Some("B-matrix-1".into()),
+            as_user: Some("ada@test.example".into()),
+            as_ulid: Some(ADA_ULID.into()),
+            command: weft_proto::Command::Msg {
+                target: weft_proto::Target::Channel(
+                    "#01hzzzzzzzzzzzzzzzzzzzzzzz/01hyyyyyyyyyyyyyyyyyyyyyyy"
+                        .parse()
+                        .unwrap(),
+                ),
+                body: Some("into the void".into()),
+                meta: weft_proto::MsgMeta::default(),
+            },
+        })
+        .await;
+
+    let sent = drain(&mut lines);
+    let report = sent
+        .iter()
+        .find(|l| l.contains("UNDELIVERED"))
+        .unwrap_or_else(|| panic!("the failure was not reported: {sent:?}"));
+    assert!(report.contains("label=B-matrix-1"), "{report}");
+    assert!(
+        report.contains("no Matrix room is mapped"),
+        "the reason travels: {report}"
+    );
+    // No msgid: there is none to name.
+    assert!(
+        !report.contains("msgid="),
+        "a relayed post has no msgid: {report}"
+    );
+}

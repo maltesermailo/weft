@@ -170,10 +170,16 @@ pub enum Command {
     /// a post made in the window before weftd noticed the bridge was gone was
     /// stored, echoed, and silently never delivered.
     Delivered { msgid: MsgId },
-    /// `UNDELIVERED <msgid> [:reason]` — the provider could not deliver it, and
+    /// `UNDELIVERED [<msgid>] [:reason]` — the provider could not deliver it, and
     /// will not retry. The author is told rather than left believing it landed.
+    ///
+    /// `msgid` is **absent** for a *relayed* post: in a replica channel the realm
+    /// mints, so weftd has no id for a message it never minted — the only handle on
+    /// it is the bridge `@label` weftd issued, which correlates the failure back to
+    /// the waiting session (§3.5). With a msgid it names a message weftd *did* mint
+    /// and handed over (the projection path).
     Undelivered {
-        msgid: MsgId,
+        msgid: Option<MsgId>,
         reason: Option<String>,
     },
     /// `PIN <msgid>` — pin a message in its channel (§6.4). Cap: `pin`.
@@ -1007,7 +1013,12 @@ impl Command {
                 msgid: Args::new(line, "DELIVERED").req("msgid")?.parse()?,
             }),
             "UNDELIVERED" => Ok(Command::Undelivered {
-                msgid: Args::new(line, "UNDELIVERED").req("msgid")?.parse()?,
+                // Optional: a relayed post has no msgid here, only the `@label`
+                // that correlates it (see the variant's docs).
+                msgid: Args::new(line, "UNDELIVERED")
+                    .opt()
+                    .map(str::parse)
+                    .transpose()?,
                 reason: line.trailing.clone().filter(|r| !r.is_empty()),
             }),
             "PIN" => Ok(Command::Pin {
@@ -2239,9 +2250,11 @@ impl Command {
                 None,
             ),
             Command::Delivered { msgid } => ("DELIVERED", vec![msgid.to_string()], None),
-            Command::Undelivered { msgid, reason } => {
-                ("UNDELIVERED", vec![msgid.to_string()], reason.clone())
-            }
+            Command::Undelivered { msgid, reason } => (
+                "UNDELIVERED",
+                msgid.iter().map(MsgId::to_string).collect(),
+                reason.clone(),
+            ),
             Command::Pin { msgid } => ("PIN", vec![msgid.to_string()], None),
             Command::Unpin { msgid } => ("UNPIN", vec![msgid.to_string()], None),
             Command::Pins { channel } => ("PINS", vec![channel.to_string()], None),
@@ -3292,11 +3305,21 @@ mod tests {
             msgid: MSGID.parse().unwrap(),
         }));
         round_trip(&Request::new(Command::Undelivered {
-            msgid: MSGID.parse().unwrap(),
+            msgid: Some(MSGID.parse().unwrap()),
             reason: Some("homeserver refused the puppet".into()),
         }));
         round_trip(&Request::new(Command::Undelivered {
-            msgid: MSGID.parse().unwrap(),
+            msgid: Some(MSGID.parse().unwrap()),
+            reason: None,
+        }));
+        // The relayed-post form: no msgid to name, only a reason (the `@label` tag
+        // carries the correlation).
+        round_trip(&Request::new(Command::Undelivered {
+            msgid: None,
+            reason: Some("no Matrix room is mapped for that channel".into()),
+        }));
+        round_trip(&Request::new(Command::Undelivered {
+            msgid: None,
             reason: None,
         }));
         round_trip(&Request::new(Command::Pin {

@@ -371,10 +371,14 @@ pub struct MirrorRequest {
 
 /// A cross-network group post waiting for its home-minted echo, so the echoed
 /// copy can be delivered as the original poster's own labelled message.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct GroupEcho {
     /// The spoke poster's session, which the echo is delivered to.
     session: u64,
+    /// The channel it was posted into, when there is one — needed to *fail* the
+    /// relay, because the poster's queued label lives in that channel's pending
+    /// queue. `None` for a group DM, which has no channel.
+    channel: Option<weft_proto::ChannelName>,
     /// When the token was registered — the input to the [`GROUP_ECHO_TTL_MS`]
     /// sweep, so an echo that never comes back cannot leak the entry.
     created_ms: u64,
@@ -1326,13 +1330,20 @@ impl ServerCtx {
     /// against a correlation `token`, so the home's echoed copy can be delivered
     /// as that session's own (labelled) message. Expired tokens (echo never came
     /// back within [`GROUP_ECHO_TTL_MS`]) are swept here.
-    pub(crate) fn register_group_echo(&self, token: String, session: u64, now_ms: u64) {
+    pub(crate) fn register_group_echo(
+        &self,
+        token: String,
+        session: u64,
+        channel: Option<weft_proto::ChannelName>,
+        now_ms: u64,
+    ) {
         let mut echoes = self.group_echoes.lock().expect("group echoes lock");
         echoes.retain(|_, echo| now_ms.saturating_sub(echo.created_ms) < GROUP_ECHO_TTL_MS);
         echoes.insert(
             token,
             GroupEcho {
                 session,
+                channel,
                 created_ms: now_ms,
             },
         );
@@ -1345,6 +1356,21 @@ impl ServerCtx {
             .expect("group echoes lock")
             .remove(token)
             .map(|echo| echo.session)
+    }
+
+    /// Consume the token as a **failure**: the session that is waiting, and the
+    /// channel whose queued label has to be answered with an error.
+    pub(crate) fn take_group_echo_failure(
+        &self,
+        token: &str,
+    ) -> Option<(u64, weft_proto::ChannelName)> {
+        let echo = self
+            .group_echoes
+            .lock()
+            .expect("group echoes lock")
+            .remove(token)?;
+
+        Some((echo.session, echo.channel?))
     }
 
     /// The local accounts currently in `group`'s call (for the roster snapshot).

@@ -699,11 +699,29 @@ impl Realm {
         .await
     }
 
+    /// The negative half for a **relayed post** — one weftd asked us to put into the
+    /// foreign system, and which we could not.
+    ///
+    /// There is no msgid to name: in a replica channel the realm mints, so weftd
+    /// never minted one. The bridge `label` it issued for that post is the whole
+    /// correlation, and answering it is what turns the author's pending message into
+    /// an honest failure instead of a silence they wait out.
+    pub async fn undelivered_labeled(&self, label: &str, reason: &str) -> anyhow::Result<()> {
+        let mut line = weft_proto::Request::new(weft_proto::Command::Undelivered {
+            msgid: None,
+            reason: Some(reason.to_string()),
+        })
+        .to_line()?;
+        line.tags.insert("label".to_string(), label.to_string());
+
+        self.send(line.serialize()?).await
+    }
+
     /// The negative half: it could not be delivered and will not be retried.
     pub async fn undelivered(&self, msgid: &str, reason: &str) -> anyhow::Result<()> {
         self.send(
             weft_proto::Request::new(weft_proto::Command::Undelivered {
-                msgid: msgid.parse()?,
+                msgid: Some(msgid.parse()?),
                 reason: Some(reason.to_string()),
             })
             .serialize()?,

@@ -387,8 +387,12 @@ impl<S: ControlStream> Session<S> {
                     };
 
                     let token = format!("B-{scheme}-{}", weft_proto::Ulid::new());
-                    self.ctx
-                        .register_group_echo(token.clone(), self.id, unix_now_ms());
+                    self.ctx.register_group_echo(
+                        token.clone(),
+                        self.id,
+                        Some(channel.clone()),
+                        unix_now_ms(),
+                    );
                     if let Some(joined) = self.joined.get_mut(&channel) {
                         joined.pending.push_back(label);
                     }
@@ -434,8 +438,12 @@ impl<S: ControlStream> Session<S> {
                     // session's own labelled send — so the client reconciles it by
                     // label, exactly like a local post. `B` never reaches a user.
                     let bridge_label = format!("B-{}-{}", home, weft_proto::Ulid::new());
-                    self.ctx
-                        .register_group_echo(bridge_label.clone(), self.id, unix_now_ms());
+                    self.ctx.register_group_echo(
+                        bridge_label.clone(),
+                        self.id,
+                        Some(channel.clone()),
+                        unix_now_ms(),
+                    );
                     if let Some(joined) = self.joined.get_mut(&channel) {
                         joined.pending.push_back(label);
                     }
@@ -544,8 +552,14 @@ impl<S: ControlStream> Session<S> {
                         // deliver as this session's own labelled send — the client
                         // reconciles it by label, like a local post.
                         let bridge_label = format!("B-{}-{}", home, weft_proto::Ulid::new());
-                        self.ctx
-                            .register_group_echo(bridge_label.clone(), self.id, unix_now_ms());
+                        // No channel: a group DM's pending label is queued on the
+                        // session's direct queue, not a channel's.
+                        self.ctx.register_group_echo(
+                            bridge_label.clone(),
+                            self.id,
+                            None,
+                            unix_now_ms(),
+                        );
                         self.pending_direct.push_back(label);
                         let cmd = Command::Msg {
                             target: Target::Group(group),

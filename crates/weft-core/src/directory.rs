@@ -103,6 +103,13 @@ enum Cmd {
         account: Account,
         channels: Vec<weft_proto::ChannelName>,
     },
+    /// Tell **one** session that a post it relayed was refused. Session-keyed, not
+    /// account-keyed: the queued label belongs to that session alone.
+    FailRelay {
+        session: SessionId,
+        channel: weft_proto::ChannelName,
+        reason: String,
+    },
     /// WC7: cut every live session of `account` — the operator-side counterpart
     /// to suspend, which only blocks *new* logins. Replies with how many were
     /// closed. Each session's own loop observes the cancellation and runs its
@@ -250,6 +257,23 @@ impl Directory {
     ///
     /// This grants nothing: the receiving session re-runs its ordinary join,
     /// which re-checks membership and view-gating. It only says "look again".
+    /// A relayed post came back refused: answer the session that is waiting on it.
+    pub(crate) async fn fail_relay(
+        &self,
+        session: SessionId,
+        channel: weft_proto::ChannelName,
+        reason: String,
+    ) {
+        let _ = self
+            .inbox
+            .send(Cmd::FailRelay {
+                session,
+                channel,
+                reason,
+            })
+            .await;
+    }
+
     pub(crate) async fn attach(&self, account: Account, channels: Vec<weft_proto::ChannelName>) {
         if channels.is_empty() {
             return;
@@ -635,6 +659,26 @@ impl Actor {
 
     async fn handle(&mut self, cmd: Cmd) {
         match cmd {
+            Cmd::FailRelay {
+                session,
+                channel,
+                reason,
+            } => {
+                // Scanned rather than indexed: this fires only when a bridge refuses
+                // a post, so one pass over the live sessions is cheaper than a second
+                // map to keep in step with `register`/`deregister`.
+                let target = self
+                    .sessions
+                    .values()
+                    .flatten()
+                    .find(|entry| entry.id == session);
+
+                if let Some(entry) = target {
+                    let _ = entry
+                        .events
+                        .try_send(crate::session::SessionEvent::RelayFailed { channel, reason });
+                }
+            }
             Cmd::Attach { account, channels } => {
                 for entry in self.sessions.get(&account).into_iter().flatten() {
                     for channel in &channels {

@@ -548,6 +548,19 @@ impl Bridge {
                     .await
                 {
                     warn!(user, "posting for a local user failed: {e:#}");
+
+                    // Tell weftd, on the label it relayed under: it minted nothing
+                    // for this post, so silence would leave the author's client
+                    // waiting out its own deadline to guess what we already know.
+                    if let Some(label) = &label {
+                        if let Err(e) = self
+                            .realm
+                            .undelivered_labeled(label, &format!("{e:#}"))
+                            .await
+                        {
+                            debug!(label, "could not report the failed relay: {e:#}");
+                        }
+                    }
                 }
             }
             Command::Msg {

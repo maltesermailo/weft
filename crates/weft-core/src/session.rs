@@ -350,6 +350,15 @@ pub(crate) enum SessionEvent {
     /// on it: a channel actor's broadcast has **no replay**, so a create that
     /// acked before its provider subscribed would silently lose the first
     /// messages — including the ones a client sends immediately after.
+    /// A post this session **relayed** (to a bridge, or to a channel's home) was
+    /// refused there. The session answers the label it queued for that channel with
+    /// an `ERR`, so the author hears it instead of waiting out their client's send
+    /// deadline. Session-targeted on purpose: only the session that queued the label
+    /// may pop it, or another of the account's sessions would fail its own message.
+    RelayFailed {
+        channel: ChannelName,
+        reason: String,
+    },
     Attach {
         channel: ChannelName,
         ready: Option<tokio::sync::oneshot::Sender<()>>,
@@ -1942,6 +1951,22 @@ impl<S: ControlStream> Session<S> {
                 if let Some(ready) = ready {
                     let _ = ready.send(());
                 }
+
+                Ok(())
+            }
+            // A post we relayed was refused at its destination. The client is
+            // holding a greyed optimistic echo against the label we queued for that
+            // channel, so answer *that* label — anything else leaves it shimmering
+            // until the client's own deadline calls it failed.
+            SessionEvent::RelayFailed { channel, reason } => {
+                let label = self
+                    .joined
+                    .get_mut(&channel)
+                    .and_then(|joined| joined.pending.pop_front())
+                    .flatten();
+
+                self.send_err(label, ErrCode::Policy, Some("not-delivered"), &reason)
+                    .await?;
 
                 Ok(())
             }
