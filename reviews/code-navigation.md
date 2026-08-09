@@ -63,6 +63,10 @@ Follow a `MSG #general :hi` from socket to actor:
    `Line::parse` (grammar, `weft-proto/src/line.rs`) then
    `Request::from_line` (typed verb, `weft-proto/src/command.rs`).
    Parse failures → `on_malformed` (5 strikes/60 s closes).
+   **`on_line` branches on session state *before* the `Request` decode**:
+   `State::Bridge` → `on_bridge_line`, `State::PluginService` →
+   `on_plugin_service_line`. Those two streams carry events as well as commands
+   — see "Direction" below.
 2. `on_request` — the FSM gate: dispatches on `self.state`
    (`Negotiating | Unauthed | Ready`). Unknown verbs are dropped here,
    before any state logic (§4).
@@ -85,6 +89,53 @@ Follow a `MSG #general :hi` from socket to actor:
 EDIT/DELETE/REACT take the same shape with one extra hop:
 `on_edit`/`on_delete`/`on_react` → `resolve_message` (the shared
 origin/existence/tombstone/membership/authorship checks) → actor.
+
+## Direction: which decoder, and who decides (added 2026-08-10)
+
+One tokenizer, two decoders, and a rule that is not optional:
+
+```
+Line::parse(&str) ──► Line { tags, verb, params, trailing }     ← the ONLY tokenizer
+                        │
+        ┌───────────────┴───────────────┐
+Request::from_line(&Line)        Reply::from_line(&Line)
+   └► Command (+ label)             └► Event (+ label)
+   unknown verb → Command::Unknown  unknown verb → Event::Unknown
+```
+
+Both decoders are **total** — an unrecognised verb becomes `Unknown` instead of an error
+(§4 lenient-in, §7 ignore-unknown-events). So both succeed on any well-formed line, and
+`Ok` says nothing about which direction the line came from:
+
+> **Decide direction by role, then by tag, then by verb — never by decode success.**
+> (Normative: `docs/protocol/bridge-session-protocol.md` §10.2.)
+
+Where each role does it:
+
+- **client** — `weft-client-core::apply_line`, `weft-tui/src/app.rs`: `Reply::parse` only.
+  No decision to make; it never reads commands.
+- **server, client session** — `Session::on_line` → `Request::from_line` → `on_request`:
+  commands only, dispatched on `state`.
+- **server, federation session** — `session/federation.rs :: on_bridge_line`: `@as` tag →
+  `Request` → `on_federated`; else a verb allow-list (`MESSAGE`/`EDITED`/`DELETED`/
+  `REACTION`/`PROFILE` → `on_ingest`, `GROUP-ROSTER`/`STREAM` → `Reply`); else `Request` →
+  `on_bridge_cmd`.
+- **server, provider session** — `session/plugin.rs :: on_plugin_service_line`: `@as` tag →
+  `Request` → `on_provider_acting`; else `Request` matched against the **known** `Command`
+  variants (`REALM*`/`PROVISION*`/`STREAM OFFER`/grants/roles); else fall through to
+  `Reply::from_line` and the event family.
+- **adapter (SDK)** — `weft-appservice/src/lib.rs` session loop: `invoke_of` → `known_event`
+  (`Reply::from_line` **minus** `Event::Unknown`) → `PING` → `step_of` → `Request`.
+- **IRC gateway** — `weft-irc`: two grammars, so never one decision. `IrcStream::recv_line`
+  uses `irc::parse` + `translate::from_irc`; `send_line` uses `Reply::parse` +
+  `translate::from_weft`.
+- **line-level only** — `context.rs :: with_as_tag`, `weftd/src/dialer.rs`: `Line::parse`,
+  re-tag, re-serialize. Never decoded to `Command` or `Event` at all.
+
+The provider path and the SDK are mirror images (weftd tries `Command` first, the SDK tries
+`Event` first). Both are sound only because each enumerates *its own* recognised set —
+written as "try the other decoder and trust `Ok`", either one drops every line it relays.
+That was the real bug behind "the bridge receives nothing" (fixed in `223bf57`).
 
 ## Chain 4: outbound — an event becomes bytes (the "main to event" chain)
 

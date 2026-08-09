@@ -575,18 +575,43 @@ reading it.
 
 ---
 
-## 10.2 Routing a line the adapter receives (2026-08-09)
+## 10.2 Routing a line: direction is never inferred from decode success (2026-08-09, generalized 2026-08-10)
 
-Discriminate on **whether the verb is a known event**, never on "did it parse as a
-reply?". `Reply::from_line` succeeds for *every* verb — an unrecognised one decodes to
-`Event::Unknown` so clients can ignore future events (§7) — so testing for parse
-success sends every **command** weftd relays into the event path. In the SDK that made
-the whole `Incoming::Command` arm dead: a DM, an `NS JOIN`, a post into a replica, a
-`GRANT`, even the liveness `PING` all arrived as an unknown event and were dropped
-without a word, which from the outside is indistinguishable from weftd never sending.
+**The rule, for every consumer of the codec — client, server, federation, adapter:**
 
-`SYNC END` is why the event reading wins when a line is genuinely both: it is a real
-event *and* a lenient `Command::Sync`.
+> Decide a line's direction by **role**, then by **tag**, then by **verb**. Never by
+> whether one of the decoders returned `Ok`.
+
+There is exactly one tokenizer, `Line::parse`, and two typed decoders over its output —
+`Request::from_line` → `Command` and `Reply::from_line` → `Event`. Both are **total**: an
+unrecognised verb decodes to `Command::Unknown` / `Event::Unknown` rather than failing, by
+design (§4 lenient-in, §7 clients ignore unknown events). So on any well-formed line *both
+decoders succeed*, and `Ok` carries no information about which direction the line came from.
+
+Where each role decides, and how:
+
+|Role|Entry point|Direction|How it decides|
+|---|---|---|---|
+|client|`weft-client-core::apply_line`, `weft-tui`|events only|its role — it only ever calls `Reply::parse`|
+|server, client session|`Session::on_line` → `on_request`|commands only|session **state** (`Negotiating`/`Unauthed`/`Ready`)|
+|server, federation session|`on_bridge_line`|both|`@as` tag → command; else a **verb allow-list** (`MESSAGE`/`EDITED`/… → ingest, `GROUP-ROSTER`/`STREAM` → event); else command|
+|server, provider session|`on_plugin_service_line`|both|`@as` tag → command; else a **known `Command` variant** (`REALM*`/`PROVISION*`/`STREAM OFFER`/…); else fall through to the event family|
+|adapter (SDK)|the session loop|both|`invoke_of`; else `known_event`; else `PING`; else `step_of`; else command|
+|IRC gateway|`IrcStream::recv_line` / `send_line`|both, two grammars|`irc::parse` inbound, `Reply::parse` outbound — never one decision|
+
+Note that weftd's provider path and the SDK are **mirror images**: weftd tries `Command`
+first and falls through to `Event`, the SDK tries `Event` first and falls through to
+`Command`. Both are sound only because each enumerates *its own* recognised set. Written
+either way as "try the other decoder and trust `Ok`", either one has the bug below.
+
+The history: the SDK originally discriminated on "did it parse as a reply?", which made the
+whole `Incoming::Command` arm dead code. A DM, an `NS JOIN`, a post into a replica, a
+`GRANT`, even the liveness `PING` all arrived as an unknown event and were dropped without a
+word — from the outside indistinguishable from weftd never sending. Hence `known_event`:
+`Reply::from_line` minus `Event::Unknown`.
+
+`SYNC END` is why the event reading wins when a line is genuinely both: it is a real event
+*and* a lenient `Command::Sync`.
 
 ## 11. What the adapter owns, not weftd
 
