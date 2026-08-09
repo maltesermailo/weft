@@ -54,6 +54,12 @@ services:
     build:
       context: ../..
       dockerfile: deploy/weftd/Dockerfile
+      args:
+        # Stamped into the binary and logged on the first line, so a running
+        # container can be matched to a commit. compose cannot run git itself:
+        #   WEFT_BUILD=$(git -C ../.. describe --always --dirty) docker compose build
+        # Unset stays "unknown" — honest, rather than a value that could go stale.
+        WEFT_BUILD: ${WEFT_BUILD:-unknown}
     restart: unless-stopped
     depends_on:
       postgres:

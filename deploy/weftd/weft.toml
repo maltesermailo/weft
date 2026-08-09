@@ -12,6 +12,12 @@ operators = []
 # §6.1 open registration so accounts can be created; "closed" to lock it.
 registration = "open"
 
+# Log filter (`EnvFilter` syntax); `RUST_LOG` in the environment overrides it.
+# `sqlx::query=warn` is here because sqlx logs **every statement at INFO**, which
+# buries weftd's own lines in `docker compose logs`. At `warn` you still get its
+# slow-statement warnings, which are the ones worth seeing.
+log = "info,sqlx::query=warn"
+
 [listen]
 # QUIC control plane (desktop/native clients). Behind Caddy, browsers use /ws.
 quic = "0.0.0.0:4433"

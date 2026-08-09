@@ -348,6 +348,25 @@ docker compose pull && docker compose up -d     # update images
 docker compose down                             # stop; data stays in the volumes
 ```
 
+**Upgrading updates one stack, not both.** weftd and the bridge are separate images
+built from the same repo, so a fix in shared code (`weft-proto`, `weft-appservice`)
+reaches the bridge only when the *bridge* is rebuilt or repulled. Doing one and not
+the other produces the worst kind of bug: the two disagree about the protocol and
+neither logs an error. So upgrade both, and check what you got —
+
+```sh
+docker compose logs weftd  | head -1     # → weftd starting version=… build=…
+docker compose logs bridge | head -1     # → weft-matrix starting version=… build=…
+```
+
+Both daemons print that line first, at startup. `build=unknown` means the image was
+built without the commit stamp (`docker compose build` cannot run git itself); to get
+a real value:
+
+```sh
+WEFT_BUILD=$(git -C ../.. describe --always --dirty) docker compose build
+```
+
 Back up, per stack:
 
 | Stack         | What                  | Why                                          |

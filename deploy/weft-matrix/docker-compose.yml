@@ -97,6 +97,10 @@ services:
     build:
       context: ../..
       dockerfile: deploy/weft-matrix/Dockerfile
+      args:
+        # See deploy/weftd/docker-compose.yml — this one matters more, because the
+        # bridge is the image people forget to rebuild.
+        WEFT_BUILD: ${WEFT_BUILD:-unknown}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -130,6 +134,10 @@ services:
     build:
       context: ../..
       dockerfile: deploy/weft-matrix/Dockerfile
+      args:
+        # See deploy/weftd/docker-compose.yml — this one matters more, because the
+        # bridge is the image people forget to rebuild.
+        WEFT_BUILD: ${WEFT_BUILD:-unknown}
     profiles: ["setup"]
     command: ["keygen", "/etc/weft/weft-matrix.toml"]
     environment:
