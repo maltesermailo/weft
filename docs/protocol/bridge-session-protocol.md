@@ -202,6 +202,21 @@ like a local one — being foreign confers nothing.
 
 ### DMs
 
+**Routed by domain, like a peer** (2026-08-09). weftd knows a bridged realm by its
+name, the way it knows a federated network by its own: a DM to `@user@<realm>` goes to
+the provider serving `<realm>`, resolved from the realm the provider **asserted** and —
+so it survives a disconnect — from any replica namespace whose `origin` names that
+realm. That second source is what makes an offline bridge distinguishable from an
+unknown network, and so:
+
+- **provider connected** → relayed as below;
+- **realm known, provider gone** → `ERR POLICY` (context `provider-offline`), the same
+  refusal as posting into one of that realm's channels. It is *not* stored: a DM filed
+  locally with no route looks exactly like a delivered one;
+- **realm unknown** → the federation path takes its turn (it may be a WEFT peer, and
+  the social layer will dial one).
+
+
 | Dir | Line                                                                 |
 |-----|----------------------------------------------------------------------|
 | →   | `@as=<user@realm>;msgid=<realm>/<ULID> MSG @<local-account> :<body>` |
@@ -494,8 +509,8 @@ failure — but weftd advertises this provider's namespaces as **online** purely
 because the session exists, and an open socket with a dead or wedged adapter behind
 it makes weftd claim something it cannot support.
 
-So weftd asks. After ~30 s of quiet it sends `PING <token>`; a session that has
-produced *nothing at all* by ~45 s is closed, which takes its namespaces offline
+So weftd asks. After **5 s** of quiet it sends `PING <token>`; a session that has
+produced *nothing at all* by **10 s** is closed, which takes its namespaces offline
 through the ordinary disconnect path (`provider=offline` in `NS-META` to members).
 
 **Answering is mandatory** — `PONG` to any `PING`, which the SDK does for you. An

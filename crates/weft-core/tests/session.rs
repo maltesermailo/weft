@@ -8020,6 +8020,62 @@ async fn a_re_asserted_layout_reaches_the_members() {
 }
 
 #[tokio::test]
+async fn a_dm_to_an_offline_realm_is_refused_like_a_post() {
+    // Owner directive 2026-08-09: a bridged domain is routed like a federated one —
+    // weftd knows the realm by name — and when its bridge is down the DM must fail
+    // the same way a post into one of its channels does. It used to be stored and
+    // echoed locally instead, which looks exactly like a delivered message.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("insta", key.public(), vec!["instagram".parse().unwrap()])],
+        &[],
+    );
+
+    // A replica namespace is what makes the realm *known* after its provider goes:
+    // the origin URI survives the disconnect, so "bridged but down" stays
+    // distinguishable from "never heard of".
+    let plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT instagram://acme-corp");
+    plugin.send(&format!(
+        "@title=Club;id={} NS-META instagram://acme-corp/club public",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let mut plugin = plugin;
+    let Event::NsMeta { .. } = plugin.recv().await.event else {
+        panic!("expected the minted NS-META");
+    };
+
+    let mut ada = ready(&ctx, "ada").await;
+
+    // While it is connected the DM is relayed.
+    ada.send("@label=d1 MSG @carol@acme-corp :hello");
+    let relayed = loop {
+        let raw = plugin.recv_raw().await;
+
+        if verb_of(&raw) == "MSG" {
+            break raw;
+        }
+    };
+    assert!(relayed.contains("as=ada@test.example"), "{relayed}");
+
+    // The provider goes. The next DM is refused rather than filed: same code and
+    // context as posting into one of that realm's channels.
+    drop(plugin);
+    let refused = loop {
+        ada.send("@label=d2 MSG @carol@acme-corp :are you there");
+        let reply = ada.recv().await;
+
+        match reply.event {
+            Event::Err(_) => break reply,
+            // The provider-offline NS-META push may arrive first.
+            _ => continue,
+        }
+    };
+    assert_eq!(refused.label.as_deref(), Some("d2"));
+    assert_eq!(err_context(&refused).as_deref(), Some("provider-offline"));
+}
+
+#[tokio::test]
 async fn an_ns_meta_change_reaches_a_projecting_provider() {
     // A provider is not an ns member, so the ordinary fan-out never reaches it
     // — yet NS-META is exactly what describes its structure (Space name,

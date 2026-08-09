@@ -2537,6 +2537,7 @@ impl<S: ControlStream> Session<S> {
         meta: MsgMeta,
     ) {
         if peer.network == self.ctx.info.network {
+            debug!(%peer, "DM stays local — no relay");
             return;
         }
 
@@ -2565,15 +2566,21 @@ impl<S: ControlStream> Session<S> {
         }
 
         if let Some(out) = self.ctx.provider_for_realm(peer.network.as_str()) {
+            info!(%peer, %from, "relaying a DM to the realm's provider");
             let mut line = line;
             line.tags.insert(
                 "as".to_string(),
                 UserRef::new(from.clone(), self.ctx.info.network.clone()).to_string(),
             );
-            if let Ok(serialized) = line.serialize() {
-                if out.try_send(serialized).is_err() {
-                    warn!(%peer, "provider queue full — DM relay dropped");
+            match line.serialize() {
+                Ok(serialized) => {
+                    debug!(%peer, line = %serialized, "DM line handed to the provider");
+
+                    if out.try_send(serialized).is_err() {
+                        warn!(%peer, "provider queue full — DM relay dropped");
+                    }
                 }
+                Err(e) => warn!(%peer, "DM line would not serialize: {e}"),
             }
             return;
         }

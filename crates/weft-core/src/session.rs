@@ -89,8 +89,13 @@ const VOICE_IDLE: Duration = Duration::from_secs(30);
 /// `PROVIDER_PROBE`, and a session that has produced nothing at all by
 /// `PROVIDER_PROBE + PROVIDER_PROBE_GRACE` is closed, which marks its namespaces
 /// offline through the ordinary disconnect path.
-const PROVIDER_PROBE: Duration = Duration::from_secs(30);
-const PROVIDER_PROBE_GRACE: Duration = Duration::from_secs(15);
+///
+/// **5 s + 5 s** (owner directive 2026-08-09): a wedged adapter is noticed within
+/// about ten seconds rather than two minutes. The cost is one line every 5 s on an
+/// idle bridge — trivial next to advertising a dead realm as online, and the SDK's
+/// own keepalive usually beats the probe to it anyway.
+const PROVIDER_PROBE: Duration = Duration::from_secs(5);
+const PROVIDER_PROBE_GRACE: Duration = Duration::from_secs(5);
 /// §9.2: dedup MSG retries by (session, label) for 5 minutes.
 const DEDUP_WINDOW: Duration = Duration::from_secs(300);
 /// §8: MALFORMED — close after 5 per 60 s.

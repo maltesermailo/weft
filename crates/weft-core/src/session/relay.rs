@@ -474,6 +474,36 @@ impl<S: ControlStream> Session<S> {
                 // (a provider serves it) or federated (a peer bridge does).
                 let peer =
                     UserRef::new(to, network.unwrap_or_else(|| self.ctx.info.network.clone()));
+                let foreign = peer.network != self.ctx.info.network;
+                debug!(%peer, foreign, "DM target resolved");
+
+                // A **bridged domain** is routed like a federated one: weftd knows the
+                // realm by name, and the provider serving it is the only way in. If
+                // that provider is down, refuse — exactly as posting into one of its
+                // channels does. Storing it instead would file a message that reaches
+                // nobody, which is the one thing a DM must never look like.
+                if foreign {
+                    match self.ctx.realm_route(peer.network.as_str()).await {
+                        crate::context::RealmRoute::Online => {
+                            debug!(%peer, "DM routes to a connected provider")
+                        }
+                        crate::context::RealmRoute::Offline => {
+                            warn!(%peer, "DM refused: that realm is bridged but its provider is offline");
+                            self.send_err(
+                                label,
+                                ErrCode::Policy,
+                                Some("provider-offline"),
+                                "cannot deliver to that user",
+                            )
+                            .await?;
+                            return Ok(Flow::Continue);
+                        }
+                        crate::context::RealmRoute::NotBridged => {
+                            debug!(%peer, "DM is not a bridged realm — trying the federation path")
+                        }
+                    }
+                }
+
                 if !self
                     .ctx
                     .directory

@@ -552,6 +552,21 @@ pub(crate) struct ProviderRegistration {
     pub events: tokio::sync::mpsc::Sender<crate::session::SessionEvent>,
 }
 
+/// What weftd knows about reaching a domain that is not its own — the bridge-side
+/// analogue of "is there a peer bridge for this network?".
+pub(crate) enum RealmRoute {
+    /// A provider serves that realm and is connected. Carries nothing: the sender is
+    /// looked up again where the line is actually written, so there is one place that
+    /// knows how to write it.
+    Online,
+    /// We bridge that realm, but nothing is connected to carry the traffic. The
+    /// caller must refuse rather than store something that cannot be delivered.
+    Offline,
+    /// Not a realm we bridge: it may still be a WEFT peer, so the federation path
+    /// gets its turn.
+    NotBridged,
+}
+
 /// Deliver a control line to a **peer network** (§11.14). Preferred path: the
 /// peer's persistent bridge (see [`ServerCtx::request_friend_deliver`]); the
 /// ephemeral tunnel driver is the fallback for a never-bridged peer. A user
@@ -1841,6 +1856,49 @@ impl ServerCtx {
         map.values()
             .find(|reg| reg.realms.iter().any(|held| held == realm))
             .map(|reg| reg.out.clone())
+    }
+
+    /// How a **domain** is reachable: the way federation knows a peer by its name,
+    /// weftd knows a bridged realm by its own (owner directive 2026-08-09).
+    ///
+    /// Two sources, and both are needed for different reasons:
+    ///
+    /// - the **live** one — a connected provider that asserted this realm. It is the
+    ///   only source for a *projection-only* bridge, whose namespaces are native and
+    ///   carry no origin URI to recognise the realm by.
+    /// - the **durable** one — a replica namespace whose `origin` names this realm.
+    ///   It survives the provider disconnecting, which is what lets us tell "we
+    ///   bridge that domain and it is *down*" from "never heard of it". Without it an
+    ///   offline bridge is indistinguishable from an unknown network, and a message
+    ///   to one of its users is quietly filed instead of refused.
+    pub(crate) async fn realm_route(&self, realm: &str) -> RealmRoute {
+        if self.provider_for_realm(realm).is_some() {
+            return RealmRoute::Online;
+        }
+
+        let scheme = self
+            .namespaces
+            .namespaces_with_origin()
+            .await
+            .ok()
+            .and_then(|records| {
+                records.iter().find_map(|record| {
+                    record
+                        .origin
+                        .as_deref()
+                        .and_then(|o| o.parse::<weft_proto::ForeignUri>().ok())
+                        .filter(|uri| uri.realm() == realm)
+                        .map(|uri| uri.scheme().clone())
+                })
+            });
+
+        match scheme {
+            Some(scheme) => match self.provider_for_scheme(&scheme).is_some() {
+                true => RealmRoute::Online,
+                false => RealmRoute::Offline,
+            },
+            None => RealmRoute::NotBridged,
+        }
     }
 
     /// The id + writer of the provider handling `scheme`, if any (§18 cap. 6).

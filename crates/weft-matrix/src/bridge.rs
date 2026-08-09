@@ -471,6 +471,14 @@ impl Bridge {
             _ => {}
         }
 
+        debug!(
+            ?as_user,
+            ?as_ulid,
+            ?label,
+            ?command,
+            "weftd request received"
+        );
+
         let Some(user) = as_user else {
             debug!(?command, "request without @as — ignored");
             return;
@@ -573,6 +581,8 @@ impl Bridge {
                 ..
             } => {
                 let peer = format!("{peer}@{network}");
+                info!(user, peer, "DM to relay into Matrix");
+
                 if let Err(e) = self
                     .relay_dm(&ulid, &account, &peer, body.as_deref().unwrap_or_default())
                     .await
@@ -2312,6 +2322,7 @@ impl Bridge {
         let Some(mxid) = ident::mxid_of_weft_user(peer) else {
             anyhow::bail!("{peer} has no Matrix identity");
         };
+        debug!(peer, mxid, account, "resolved the DM's Matrix identity");
         let puppet = self.ensure_puppet(ulid, account).await?;
 
         let room = match self
@@ -2366,6 +2377,8 @@ impl Bridge {
                 Some(&puppet),
             )
             .await?;
+
+        info!(room, puppet, mxid, "DM delivered into Matrix");
 
         Ok(())
     }
