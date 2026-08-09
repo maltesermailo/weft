@@ -191,7 +191,7 @@ v1: a WEFT `REPORT` against Matrix-authored content is handled entirely locally 
 
 ## 15. Ephemera
 
-Typing: bridged both ways when the (bridge-internal) manifest says `typing=yes` — config default `yes` for projected namespaces. Read receipts: never bridged (WEFT `MARK` is private; Matrix receipts are public — bridging would leak read state). Presence: **bridged both ways since 2026-08-09** — Matrix `unavailable` ⇄ WEFT `away` (`dnd` also maps out to `unavailable`), `invisible` never crosses. Needs MSC2409 `push_ephemeral` in the registration and `presence: enabled: true` on the homeserver; with either off, only WEFT → Matrix works.
+Typing: bridged both ways (outbound → the puppet's typing EDU; inbound `m.typing` is a per-room *set*, diffed against the previous one to recover per-user `start`/`stop` — needs the same MSC2409 `push_ephemeral` as presence). Read receipts: never bridged (WEFT `MARK` is private; Matrix receipts are public — bridging would leak read state). Presence: **bridged both ways since 2026-08-09** — Matrix `unavailable` ⇄ WEFT `away` (`dnd` also maps out to `unavailable`), `invisible` never crosses. Needs MSC2409 `push_ephemeral` in the registration and `presence: enabled: true` on the homeserver; with either off, only WEFT → Matrix works.
 
 ## 16. Deployment & config
 

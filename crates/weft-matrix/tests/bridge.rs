@@ -505,6 +505,7 @@ async fn bridge_with(
         dm_txn: 0,
         admins: vec!["@boss:test.example".into()],
         local_roster: Default::default(),
+        typing_now: Default::default(),
     };
 
     (bridge, lines, calls)
@@ -3368,4 +3369,88 @@ async fn presence_mirrors_in_both_directions() {
             .any(|(what, _, _)| what.contains("presence")),
         "invisible reached Matrix: {recorded:?}"
     );
+}
+
+#[tokio::test]
+async fn matrix_typing_becomes_per_user_start_and_stop() {
+    // §15 inbound. The EDU is a *set* per room; WEFT's TYPING is per-user
+    // start/stop. So the transitions exist only as the difference against the
+    // previous set — and Matrix's own timeout is what eventually empties it, which
+    // is why "stopped typing" arrives as a shorter list rather than an event.
+    let (mut bridge, mut lines, _calls) = bridge_with(kde_space()).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    drain(&mut lines);
+    let channel = bridge
+        .store
+        .state
+        .channel_of_room("!gen:kde.org")
+        .unwrap()
+        .0
+        .channel
+        .clone();
+
+    let typing = |users: Vec<&str>| {
+        json!({
+            "type": "m.typing",
+            "room_id": "!gen:kde.org",
+            "content": { "user_ids": users },
+        })
+    };
+
+    // carol starts. Our own puppet in the same set is skipped: its typing is the
+    // reflection of a WEFT member's, and feeding it back would fight the source.
+    bridge
+        .on_matrix_ephemeral(typing(vec!["@carol:kde.org", "@weft_ada:test.example"]))
+        .await;
+    let sent = drain(&mut lines);
+    assert_eq!(
+        sent.iter().filter(|l| l.contains("TYPING")).count(),
+        1,
+        "one start, and not for our puppet: {sent:?}"
+    );
+    let start = sent.iter().find(|l| l.contains("TYPING")).unwrap();
+    assert!(start.contains("as=carol@kde.org"), "{start}");
+    assert!(
+        start.contains(&format!("TYPING {channel} start")),
+        "{start}"
+    );
+
+    // dave joins the set: carol is unchanged (no repeat), dave starts.
+    bridge
+        .on_matrix_ephemeral(typing(vec!["@carol:kde.org", "@dave:kde.org"]))
+        .await;
+    let sent = drain(&mut lines);
+    let typings: Vec<_> = sent.iter().filter(|l| l.contains("TYPING")).collect();
+    assert_eq!(typings.len(), 1, "only the new typist: {typings:?}");
+    assert!(typings[0].contains("as=dave@kde.org"), "{:?}", typings[0]);
+
+    // The set empties: both stop.
+    bridge.on_matrix_ephemeral(typing(vec![])).await;
+    let sent = drain(&mut lines);
+    let stops: Vec<_> = sent
+        .iter()
+        .filter(|l| l.contains(&format!("TYPING {channel} stop")))
+        .collect();
+    assert_eq!(stops.len(), 2, "both stopped: {sent:?}");
+    assert!(stops.iter().any(|l| l.contains("carol@kde.org")));
+    assert!(stops.iter().any(|l| l.contains("dave@kde.org")));
+
+    // …and the room is forgotten rather than kept as an empty set.
+    assert!(
+        !bridge.typing_now.contains_key("!gen:kde.org"),
+        "an empty set was retained"
+    );
+
+    // A room we do not bridge is ignored.
+    bridge
+        .on_matrix_ephemeral(json!({
+            "type": "m.typing",
+            "room_id": "!elsewhere:kde.org",
+            "content": { "user_ids": ["@carol:kde.org"] },
+        }))
+        .await;
+    assert!(drain(&mut lines).is_empty(), "an unbridged room leaked");
 }

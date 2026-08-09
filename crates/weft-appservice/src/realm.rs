@@ -268,6 +268,27 @@ impl Realm {
     }
 
     /// Replay a reaction (or its removal). No id of its own, as with a delete.
+    /// §15 one of the realm's users started or stopped typing in a channel.
+    ///
+    /// Attributed (`@as`) and per-user, like everything else the realm replays.
+    /// Purely ephemeral: weftd announces it to the channel and stores nothing, so a
+    /// missed `stop` costs a stale indicator until the next line, not state.
+    pub async fn typing(
+        &self,
+        sender: &str,
+        channel: &str,
+        state: weft_proto::TypingState,
+    ) -> anyhow::Result<()> {
+        let mut line = weft_proto::Request::new(weft_proto::Command::Typing {
+            channel: channel.parse()?,
+            state,
+        })
+        .to_line()?;
+        line.tags.insert("as".to_string(), sender.to_string());
+
+        self.send(line.serialize()?).await
+    }
+
     /// §6.1 one of the realm's users changed presence.
     ///
     /// Attributed like everything else the realm replays (`@as`), and per-*user*:

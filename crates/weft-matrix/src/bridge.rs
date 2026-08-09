@@ -67,6 +67,14 @@ pub struct Bridge {
     /// START` and `BATCH END` (ns id → the local accounts it still holds).
     /// Consumed by the reconcile on `BATCH END`; see [`Bridge::reconcile_local_membership`].
     pub local_roster: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// §15 who Matrix last said was typing in each room.
+    ///
+    /// The EDU is a **set** — "these users are typing now" — while WEFT's `TYPING`
+    /// is a per-user `start`/`stop`, so the transitions only exist as the difference
+    /// against the previous set. Memory only, and deliberately: typing is ephemeral
+    /// by definition, and a restart that forgets is corrected by the next EDU, which
+    /// restates the whole truth.
+    pub typing_now: std::collections::HashMap<String, std::collections::BTreeSet<String>>,
 }
 
 /// A Matrix attachment already in hand, waiting for weftd's upload grant so it
@@ -1024,15 +1032,17 @@ impl Bridge {
 
     // ---- Matrix → WEFT (transaction events) --------------------------------
 
-    /// MSC2409 ephemera. Only `m.presence` is acted on: Matrix typing arrives here
-    /// too, but weftd's typing path is per-channel and the EDU names a room we would
-    /// have to map per user — deferred, and logged nowhere because it is noise.
-    ///
-    /// Presence is mirrored **as the realm's user**, exactly like their messages, so
-    /// weftd fans it out to the channels they share with us. Their own puppets are
-    /// skipped: a puppet's presence is a reflection of a WEFT account's, and feeding
-    /// it back would fight the source.
+    /// MSC2409 ephemera: `m.presence` (§6.1) and `m.typing` (§15). Both are mirrored
+    /// **as the realm's user**, exactly like their messages. Their own puppets are
+    /// skipped throughout: a puppet's status is a reflection of a WEFT account's, and
+    /// feeding it back would fight the source. `m.receipt` is deliberately ignored —
+    /// WEFT's `MARK` is private, so mirroring public receipts would publish read
+    /// state nobody opted into.
     pub async fn on_matrix_ephemeral(&mut self, edu: Value) {
+        if edu["type"] == "m.typing" {
+            self.on_matrix_typing(&edu).await;
+            return;
+        }
         if edu["type"] != "m.presence" {
             return;
         }
@@ -1055,6 +1065,65 @@ impl Bridge {
 
         if let Err(e) = self.realm.presence(&weft_sender, status).await {
             debug!(mxid, "presence ingestion failed: {e:#}");
+        }
+    }
+
+    /// §15 Matrix → WEFT typing.
+    ///
+    /// The EDU states the whole set for one room, so a `start` is a user who was not
+    /// in the previous set and a `stop` is one who has left it — there is no per-user
+    /// event to forward. Matrix's own timeout is what eventually empties the set, so
+    /// a user who simply stopped typing arrives here as a shorter list.
+    async fn on_matrix_typing(&mut self, edu: &Value) {
+        let Some(room) = edu["room_id"].as_str() else {
+            return;
+        };
+        let Some((channel, ns_id)) = self
+            .store
+            .state
+            .channel_of_room(room)
+            .map(|(chan, space)| (chan.channel.clone(), space.ns_id.clone()))
+        else {
+            return; // a room we do not bridge
+        };
+
+        // The operator banned this space: nothing crosses, either direction.
+        if self.store.state.bans.is_banned(&ns_id) {
+            return;
+        }
+
+        let now: std::collections::BTreeSet<String> = edu["content"]["user_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter_map(|mxid| self.foreign_user(mxid))
+            .collect();
+        let before = self.typing_now.remove(room).unwrap_or_default();
+
+        for user in now.difference(&before) {
+            if let Err(e) = self
+                .realm
+                .typing(user, &channel, weft_proto::TypingState::Start)
+                .await
+            {
+                debug!(user, "typing ingestion failed: {e:#}");
+            }
+        }
+        for user in before.difference(&now) {
+            if let Err(e) = self
+                .realm
+                .typing(user, &channel, weft_proto::TypingState::Stop)
+                .await
+            {
+                debug!(user, "typing ingestion failed: {e:#}");
+            }
+        }
+
+        // An empty set is the absence of state, not a state — keeping the key would
+        // grow one entry per room anyone ever typed in.
+        if !now.is_empty() {
+            self.typing_now.insert(room.to_string(), now);
         }
     }
 

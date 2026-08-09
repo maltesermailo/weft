@@ -633,8 +633,9 @@ widget is the replacement UI.
 ### 7a.6 Honest limits
 
 Read receipts are **not** bridged: WEFT's `MARK` is private and Matrix receipts are public, so
-mirroring them would publish something a user never chose to. Typing crosses outbound only (a Matrix
-`m.typing` EDU names a room, not a per-user channel we can map). `m.emote`/`m.notice` map to WEFT
+mirroring them would publish something a user never chose to. Typing crosses **both ways** (2026-08-09): the foreign
+side states a per-room *set* of who is typing, so the adapter diffs it against the
+previous one to recover the per-user `start`/`stop` WEFT carries. `m.emote`/`m.notice` map to WEFT
 message forms (lossy); pills/mentions to foreign users render as plain badged handles unless an
 adapter does more. Each adapter documents its exact mapping (§10).
 

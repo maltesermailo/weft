@@ -161,6 +161,7 @@ async fn session(
         dm_txn: 0,
         admins: cfg.matrix.admins.clone(),
         local_roster: Default::default(),
+        typing_now: Default::default(),
     };
 
     // An empty store on a homeserver we are already joined to means the

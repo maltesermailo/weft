@@ -590,6 +590,22 @@ Never stored, so it is announced rather than ingested. Same one-hop rule as
 one is the echo of an ingest). Read receipts stay unbridged — WEFT's `MARK` is
 private, Matrix receipts are public.
 
+**Inbound is a set, not an event** (wired 2026-08-09). Foreign systems tend to
+state *who is typing now* per room rather than sending a transition — Matrix's
+`m.typing` EDU carries a `user_ids` array — while `TYPING` is per-user
+`start`/`stop`. The adapter therefore holds the last set per room and sends the
+**difference**: a user who appeared is a `start`, one who left is a `stop`. Notes
+that follow from that:
+
+- The set is memory-only and *should* be: typing is ephemeral by definition, and a
+  restart that forgets is corrected by the next EDU, which restates the whole truth.
+- A user who simply stopped typing arrives as a shorter list — the foreign
+  server's own timeout is what empties it, so there is no timer to keep here.
+- An empty set is dropped rather than stored, or the map grows one entry per room
+  anyone ever typed in.
+- Our own puppets are filtered out of the set: their typing is the reflection of a
+  WEFT member's, already relayed outbound, and re-ingesting it would loop.
+
 ## 11d. Presence (§6.1, added 2026-08-09)
 
 | Dir | Line | Notes |
@@ -625,7 +641,5 @@ guessing at rosters it does not hold.
   message path is wired (both directions), the mutation verbs are not.
 - **Per-device attestations** on bridged events — trust is network-level: the provider proved control
   of its key on the session, so `att=` tags are not carried per event.
-- **Matrix→WEFT typing** — the outbound half is wired (§11c); inbound arrives as an
-  MSC2409 `m.typing` EDU naming a room, which would have to be mapped per user.
 - ~~**Presence** — never bridged (core lock).~~ **Bridged both ways since
   2026-08-09 — see §11d.**
