@@ -8057,6 +8057,12 @@ async fn a_dm_to_an_offline_realm_is_refused_like_a_post() {
         }
     };
     assert!(relayed.contains("as=ada@test.example"), "{relayed}");
+    // Mandatory, not decorative: an adapter keys puppets by the stable id and drops
+    // a relay without one, so a DM missing it is written here and discarded there.
+    assert!(
+        relayed.contains("ulid="),
+        "the DM must carry the actor's ULID: {relayed}"
+    );
 
     // The provider goes. The next DM is refused rather than filed: same code and
     // context as posting into one of that realm's channels.

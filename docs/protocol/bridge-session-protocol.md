@@ -430,6 +430,11 @@ its meaning for the **projection** path, where weftd did mint the message. While
 the post at send time (`ERR POLICY`, context `provider-offline`) rather than queueing it — there is no
 outbox for a room we do not own.
 
+**`ulid=` is mandatory on every line an adapter must *act as* somebody for** —
+including the DM relay, which omitted it until 2026-08-09 and was therefore dropped
+on arrival: relayed on weftd's side, discarded on the adapter's, with a log line on
+each side that individually looked fine.
+
 **`ulid=` names the actor's stable identity** (added 2026-08-06): account names are mutable vanity
 labels, so an adapter MUST key its puppets and per-user state by the ULID, never by the name — a
 name-keyed puppet is orphaned by a rename. The name still rides in `@as` for attribution.

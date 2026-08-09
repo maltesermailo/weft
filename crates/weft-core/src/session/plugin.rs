@@ -2567,11 +2567,24 @@ impl<S: ControlStream> Session<S> {
 
         if let Some(out) = self.ctx.provider_for_realm(peer.network.as_str()) {
             info!(%peer, %from, "relaying a DM to the realm's provider");
+            let me = UserRef::new(from.clone(), self.ctx.info.network.clone());
             let mut line = line;
-            line.tags.insert(
-                "as".to_string(),
-                UserRef::new(from.clone(), self.ctx.info.network.clone()).to_string(),
-            );
+            line.tags.insert("as".to_string(), me.to_string());
+
+            // `ulid=` is **mandatory** for anything an adapter must act as: puppets are
+            // keyed by the stable id, never by the mutable name, so a relay without it
+            // is dropped on arrival. The channel-post relay has always stamped it; the
+            // DM relay did not, so a DM was written to the provider and discarded a hop
+            // later — visibly relayed here, and silently gone there.
+            match self.actor_ulid(&me).await {
+                Some(ulid) => {
+                    line.tags.insert("ulid".to_string(), ulid);
+                }
+                None => {
+                    warn!(%peer, %from, "no account ULID — the DM cannot be puppeted");
+                    return;
+                }
+            }
             match line.serialize() {
                 Ok(serialized) => {
                     debug!(%peer, line = %serialized, "DM line handed to the provider");
