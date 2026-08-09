@@ -1014,6 +1014,16 @@ impl Bridge {
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| chan_id.clone());
 
+        // Say so, rather than letting an unreadable channel name look like a bridge
+        // bug: this is the one branch that produces one, and from here it is
+        // indistinguishable downstream from a room genuinely *named* like an id.
+        if vanity == chan_id {
+            info!(
+                room_id,
+                "no m.room.name and no canonical alias — this channel shows as its id"
+            );
+        }
+
         // The room's URI segment is its channel ULID: unique and stable by
         // construction, where a name-derived segment could collide or churn.
         let uri = space_ref.room_uri(&chan_id);

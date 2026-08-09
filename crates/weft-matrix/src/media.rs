@@ -20,10 +20,18 @@ pub struct WeftMedia {
     base: String,
 }
 
+/// How long one blob transfer may take. Same reason as `hs::HS_TIMEOUT` — these
+/// calls are awaited inline in the dispatch loop, so an untimed one stops the whole
+/// bridge — but a blob is megabytes where a state fetch is bytes, so it gets longer.
+const MEDIA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl WeftMedia {
     pub fn new(base: &str) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(MEDIA_TIMEOUT)
+                .build()
+                .expect("a reqwest client with only a timeout set always builds"),
             base: base.trim_end_matches('/').to_string(),
         }
     }

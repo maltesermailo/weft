@@ -16,10 +16,24 @@ pub struct Hs {
     token: String,
 }
 
+/// How long one homeserver call may take before it is a failure.
+///
+/// Every call here is awaited *inline in the dispatch loop*, so an untimed request
+/// does not slow the bridge down — it stops it completely, and invisibly: the
+/// appservice session lives in its own task and keeps answering weftd's liveness
+/// PING, so weftd goes on advertising this provider as online and relaying DMs and
+/// room renames into a loop that will never come back to read them. A generous
+/// ceiling (`/messages` backfill and a first `join` are genuinely slow) that still
+/// turns a hang into a logged error the loop survives.
+const HS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl Hs {
     pub fn new(hs_url: &str, as_token: &str) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(HS_TIMEOUT)
+                .build()
+                .expect("a reqwest client with only a timeout set always builds"),
             base: hs_url.trim_end_matches('/').to_string(),
             token: as_token.to_string(),
         }

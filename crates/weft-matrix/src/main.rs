@@ -73,6 +73,16 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run(cfg: Config) -> anyhow::Result<()> {
+    // First line, before anything can fail: which build this is. weftd and the
+    // bridge ship as two separate images, so "the bridge has the fix" is a
+    // question the log has to be able to answer — guessing at it cost three
+    // debugging rounds. `unknown` = built without the `WEFT_BUILD` build-arg.
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        build = option_env!("WEFT_BUILD").unwrap_or("unknown"),
+        "weft-matrix starting"
+    );
+
     let keypair = load_or_generate_key(&cfg.weft.key_file)?;
     info!(
         pubkey = keypair.public().to_b64(),

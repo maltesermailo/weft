@@ -436,7 +436,7 @@ impl AppServiceBuilder {
                             // handled it. It looked exactly like weftd never sending.
                             if let Some(reply) = known_event(&line) {
                                 let actor_ulid = line.tags.get("ulid").cloned();
-                                let _ = events_tx.try_send(Incoming::Event {
+                                forward(&events_tx, Incoming::Event {
                                     event: reply.event,
                                     label: reply.label,
                                     actor_ulid,
@@ -464,14 +464,14 @@ impl AppServiceBuilder {
                                 // Flow steps are commands too, but an adapter
                                 // wants them typed and decoded, not raw.
                                 if let Some(step) = step_of(&req.command) {
-                                    let _ = events_tx.try_send(step);
+                                    forward(&events_tx, step);
                                     continue;
                                 }
 
                                 let as_user = line.tags.get("as").cloned();
                                 let as_ulid = line.tags.get("ulid").cloned();
                                 let label = line.tags.get("label").cloned();
-                                let _ = events_tx.try_send(Incoming::Command {
+                                forward(&events_tx, Incoming::Command {
                                     as_user,
                                     as_ulid,
                                     label,
@@ -486,7 +486,7 @@ impl AppServiceBuilder {
                             // first cut did, and a flow that never opens looks
                             // to the user like a dead button.
                             let ctx_ref = ctx_ref_of(&line);
-                            let _ = events_tx.try_send(Incoming::Invoke {
+                            forward(&events_tx, Incoming::Invoke {
                                 view_id,
                                 action,
                                 ctx_ref,
@@ -638,6 +638,17 @@ fn ctx_ref_of(line: &Line) -> Option<String> {
     match Request::from_line(line).ok()?.command {
         Command::PluginInvoke { ctx_ref, .. } => ctx_ref,
         _ => None,
+    }
+}
+
+/// Hand one line to the adapter, saying so when it is not keeping up.
+///
+/// A silently dropped `Incoming` is the worst failure this loop has: the session
+/// stays healthy, weftd goes on relaying into it, and the work simply never
+/// happens — indistinguishable in the logs from weftd never sending at all.
+fn forward(tx: &mpsc::Sender<Incoming>, inc: Incoming) {
+    if let Err(e) = tx.try_send(inc) {
+        tracing::warn!("adapter is not reading its event stream: {e}");
     }
 }
 

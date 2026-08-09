@@ -20,6 +20,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     weftd::telemetry::init(&config.log);
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        build = option_env!("WEFT_BUILD").unwrap_or("unknown"),
+        "weftd starting"
+    );
 
     let server = weftd::start(config).await?;
     info!(quic = %server.quic_addr, ws = ?server.ws_addr, http = ?server.http_addr, "weftd listening");

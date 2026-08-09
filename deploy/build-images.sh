@@ -28,6 +28,7 @@ OWNER="${OWNER:-$(git remote get-url origin 2>/dev/null |
 PUSH=false
 ONLY=""
 PLATFORM="${PLATFORM:-}"
+BUILD_ID="$(git describe --always --dirty 2>/dev/null || echo unknown)"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -101,6 +102,9 @@ build_one() {
   args+=(
     --file "$dockerfile"
     --tag "$image:$TAG"
+    # Both daemons log this on startup, so a running container can be matched to a
+    # commit. `-dirty` because a locally built image often is.
+    --build-arg "WEFT_BUILD=$BUILD_ID"
   )
   [ -n "$PLATFORM" ] && args+=(--platform "$PLATFORM")
 

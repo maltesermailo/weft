@@ -13,6 +13,13 @@ FROM rust:1-bookworm AS builder
 WORKDIR /src
 COPY . .
 
+# Which commit this image is, stamped into the binary so its first log line says
+# so (`build-images.sh` passes it). weftd and the bridge are separate images, and
+# telling "the bridge predates the fix" from "the fix does not work" is otherwise
+# guesswork. Absent = "unknown", so a plain `docker build` still works.
+ARG WEFT_BUILD=unknown
+ENV WEFT_BUILD=$WEFT_BUILD
+
 # No system deps beyond the base image: reqwest uses rustls (no OpenSSL), and the
 # daemon links nothing native.
 RUN cargo build --release -p weft-matrix

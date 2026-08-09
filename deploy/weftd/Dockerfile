@@ -59,6 +59,12 @@ RUN apt-get update \
 # 1) Build the browser client → client/build (wasm-pack + vite). 2) Build weftd
 # embedding it, with the selected features.
 RUN cd client && pnpm install --frozen-lockfile && pnpm run build:web
+
+# Which commit this image is — see the matching block in the weft-matrix
+# Dockerfile. weftd logs it on its first line so a stale image is visible.
+ARG WEFT_BUILD=unknown
+ENV WEFT_BUILD=$WEFT_BUILD
+
 RUN cargo build --release -p weftd --features "${WEFTD_FEATURES}"
 
 # ---- runtime ----
