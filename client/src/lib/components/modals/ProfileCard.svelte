@@ -32,6 +32,13 @@ import { roleScopeOf, roleStore } from "$lib/roles/roles.svelte";
   // Exclude the implicit @everyone role — it's baseline, never assigned.
   const allRoles = $derived(roleStore.rolesAt(scope).filter((r) => r.name !== EVERYONE_ROLE));
   const isSelf = $derived(target === store.session.account);
+  // A remaining `@` means a foreign/federated account: `openProfile` strips our
+  // own network, never someone else's. It matters for the controls below —
+  // `NICK`/`MUTE`/`BAN`/`KICK` all name a bare `Account` on the wire, so a
+  // qualified handle cannot even be expressed, and the realm governs its own
+  // users anyway (framework §7a.0d-bis).
+  const foreign = $derived(target.includes("@"));
+  const realm = $derived(foreign ? target.slice(target.lastIndexOf("@") + 1) : "");
   // "Owner/admin" for controls means the real namespace owner or an explicitly
   // delegated ns-admin — NOT a network operator (their god-mode caps are
   // web-admin authority, surfaced as a Staff badge, not server control here).
@@ -147,7 +154,7 @@ import { roleScopeOf, roleStore } from "$lib/roles/roles.svelte";
         <button class="pf-primary" onclick={() => { profileStore.openFullProfile(target); onclose(); }}>Open profile</button>
         {#if target !== store.session.account}
           <button class="pf-secondary" onclick={() => { openDm(target); onclose(); }}>Message</button>
-          {#if inServer && scope.startsWith("ns:")}
+          {#if inServer && scope.startsWith("ns:") && !foreign}
             <div class="pf-mod">
               <div class="profile-section-label">Server nickname</div>
               <div class="pf-mod-inputs">
@@ -156,7 +163,15 @@ import { roleScopeOf, roleStore } from "$lib/roles/roles.svelte";
               </div>
             </div>
           {/if}
-          {#if inServer && store.session.canModerate(app.active)}
+          {#if inServer && foreign}
+            <!-- Said rather than silently omitted: "why is there no Ban button"
+                 is the question the empty space would leave. -->
+            <div class="pf-foreign-note">
+              Nicknames and moderation for this account live on <strong>{realm}</strong> — it governs its
+              own users, and this server has no name for them to act on.
+            </div>
+          {/if}
+          {#if inServer && !foreign && store.session.canModerate(app.active)}
             <div class="pf-mod">
               <div class="profile-section-label">Moderation</div>
               <div class="pf-mod-inputs">

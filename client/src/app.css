@@ -2750,11 +2750,19 @@ button:disabled {
 .author-btn:hover {
   text-decoration: underline;
 }
-/* Foreign (federated) sender: fully qualified `alice@net`, no local profile. */
+/* Foreign (federated) sender: fully qualified `alice@net`. Same affordance as a
+   local author — the handle is a real account here, so it opens a real card. */
 .author.foreign {
   font-weight: 600;
   font-size: 14px;
   color: var(--text-primary);
+}
+/* Why a bridged account has no nickname/moderation controls (ProfileCard). */
+.pf-foreign-note {
+  font-size: 12px;
+  color: var(--text-faint);
+  line-height: 1.4;
+  padding: 6px 0;
 }
 .net-suffix {
   color: var(--text-faint);

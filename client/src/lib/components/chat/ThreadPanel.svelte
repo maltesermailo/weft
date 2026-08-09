@@ -74,8 +74,12 @@ import { roleStore } from "$lib/roles/roles.svelte";
           <div class="thread-body">
             <div class="thread-meta">
               {#if m.net}
-                <span class="author foreign" title="from {m.net}"
-                  >{profileStore.displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></span
+                <!-- Clickable on the qualified handle, as in `MessageItem`. -->
+                <button
+                  class="author author-btn foreign"
+                  title="from {m.net}"
+                  onclick={(e) => profileStore.openProfile(`${m.author}@${m.net}`, e)}
+                  >{profileStore.displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></button
                 >
               {:else}
                 <button

@@ -46,8 +46,16 @@ import { roleScopeOf, roleStore } from "$lib/roles/roles.svelte";
       {/if}
       <div class="msg-meta">
         {#if m.net}
-          <!-- Foreign sender: fully qualified, and no local profile to open. -->
-          <span class="author foreign" title="from {m.net}">{profileStore.displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></span>
+          <!-- Foreign sender: clickable like any other, on the **qualified** handle.
+               A bridged user is an ordinary federated `UserRef` here (framework
+               §7a.0), so the card's profile, DM and moderation actions all address
+               them — treating the name as dead text was the only thing stopping it. -->
+          <button
+            class="author author-btn foreign"
+            title="from {m.net}"
+            style={roleStore.nameColor(`${m.author}@${m.net}`) ? `color:${roleStore.nameColor(`${m.author}@${m.net}`)}` : ""}
+            onclick={(e) => profileStore.openProfile(`${m.author}@${m.net}`, e)}
+          >{profileStore.displayName(`${m.author}@${m.net}`)}<span class="net-suffix">@{m.net}</span></button>
           <!-- §11.11 recognition: a federated user's role(s) held on this network. -->
           {#each roleStore.rolesOf(`${m.author}@${m.net}`, roleScopeOf(app.active)) as r (r.name)}
             <span class="role-pill" style="--role:{r.color}"><span class="role-dot"></span>{r.name}</span>
