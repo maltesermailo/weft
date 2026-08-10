@@ -603,7 +603,7 @@ export function handle(e: weft.WeftEvent) {
       // than the §8 code can: those are deliberately identical across causes
       // (invariant 1), so the context has to come from our side.
       // ...and a failure the user never asked for is not theirs to read at all.
-      const message = toastFor(e.code, e.text, e.label);
+      const message = toastFor(e.code, e.text, e.label, e.context);
       if (message) toast(message, "error");
       break;
     }

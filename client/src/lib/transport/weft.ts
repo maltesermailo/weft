@@ -357,7 +357,7 @@ export type WeftEvent =
     }
   | { kind: "voice-desc"; channel: string; sdp: string }
   | { kind: "voice-cand"; channel: string; candidate: string }
-  | { kind: "error"; code: string; text: string; label: string | null }
+  | { kind: "error"; code: string; text: string; context: string | null; label: string | null }
   | { kind: "closed"; reason: string }
   | { kind: "raw"; line: string };
 

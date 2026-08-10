@@ -152,8 +152,9 @@ impl Messages {
             ClientEvent::Error {
                 label: Some(label),
                 text,
+                context,
                 ..
-            } => self.fail_pending(label, text),
+            } => self.fail_pending(label, &Self::refusal_reason(context.as_deref(), text)),
             _ => Vec::new(),
         }
     }
@@ -199,6 +200,20 @@ impl Messages {
                 msg,
             }],
         )
+    }
+
+    /// Why a send was refused, in words.
+    ///
+    /// `context` is §8's machine-readable discriminator and reads like one, while the
+    /// text is written for whoever is reading a log ("cannot post to this channel" —
+    /// true, and no help at all). The cases a user can actually cause get a sentence
+    /// naming the cause; everything else keeps the server's own words, which is
+    /// better than a guess.
+    fn refusal_reason(context: Option<&str>, text: &str) -> String {
+        match context {
+            Some("provider-offline") => "the bridge for this server is offline".to_string(),
+            _ => text.to_string(),
+        }
     }
 
     /// Mark the pending echo carrying `label` failed: it will never reconcile, so
@@ -617,13 +632,14 @@ mod tests {
         let d = m.handle(&ClientEvent::Error {
             code: "POLICY".into(),
             text: "cannot post to this channel".into(),
+            context: Some("provider-offline".into()),
             label: Some("L1".into()),
         });
         assert!(matches!(&d[0], MsgDiff::MsgUpdated { id, msg, .. }
                 if id == &local_id
                     && !msg.pending
                     && msg.failed
-                    && msg.fail_reason.as_deref() == Some("cannot post to this channel")));
+                    && msg.fail_reason.as_deref() == Some("the bridge for this server is offline")));
 
         // A late ack replaces the failed row instead of appearing beside it, and
         // clears the failure — the message did land after all.
@@ -651,6 +667,7 @@ mod tests {
             .handle(&ClientEvent::Error {
                 code: "NO-SUCH-TARGET".into(),
                 text: "no such target".into(),
+                context: None,
                 label: Some("some-history-request".into()),
             })
             .is_empty());

@@ -1324,7 +1324,16 @@ impl Bridge {
         }
 
         let Some((room, space)) = self.store.state.channel_of_room(&room_id) else {
-            return; // an unmapped room (the space room itself, or noise)
+            // Mostly noise (the Space room itself), but it is also where a DM whose
+            // room we never recorded ends up — and silence there is indistinguishable
+            // from the homeserver not pushing the event at all.
+            debug!(
+                room_id,
+                sender,
+                kind = ev["type"].as_str().unwrap_or_default(),
+                "event in an unmapped room — ignored"
+            );
+            return;
         };
         let (channel, ns_id, realm) = (
             room.channel.clone(),
@@ -2482,7 +2491,16 @@ impl Bridge {
             return; // already ingested
         }
         let Some(sender) = ev["sender"].as_str().filter(|s| *s == mxid) else {
-            return; // our own puppet's copy, or a third party in a "DM"
+            // The puppet's own copy of an outbound DM lands here, which is why this is
+            // not a warning — but so does a third party in what we recorded as a 1:1,
+            // and that one is worth being able to see.
+            debug!(
+                event_id,
+                sender = ev["sender"].as_str().unwrap_or_default(),
+                expected = mxid,
+                "DM-room message from someone else — ignored"
+            );
+            return;
         };
         let Some(weft_sender) = self.foreign_user(sender) else {
             return;
@@ -2500,6 +2518,7 @@ impl Bridge {
             warn!(event_id, "DM ingestion failed: {e:#}");
             return;
         }
+        info!(weft_sender, account, msgid = %minted, "DM from Matrix ingested");
 
         let room = ev["room_id"].as_str().unwrap_or_default().to_string();
         self.store.link(&event_id, &minted, &room).await;

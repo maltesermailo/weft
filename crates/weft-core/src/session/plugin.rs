@@ -2466,6 +2466,7 @@ impl<S: ControlStream> Session<S> {
         body: Option<String>,
         meta: MsgMeta,
     ) -> io::Result<Flow> {
+        debug!(%sender, %to, %msgid, "ingesting a DM from the realm");
         self.ctx
             .directory
             .ingest_dm(sender.clone(), to, msgid, body.unwrap_or_default(), meta)

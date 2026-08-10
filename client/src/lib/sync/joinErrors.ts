@@ -72,7 +72,12 @@ function devMode(): boolean {
 /// One entry point so "is this the user's business at all?" is answered in a
 /// single place: a background fetch's failure is logged and dropped, a tracked
 /// request gets the context only we have, everything else gets friendly text.
-export function toastFor(code: string, text: string, label: string | null): string | null {
+export function toastFor(
+  code: string,
+  text: string,
+  label: string | null,
+  context: string | null = null,
+): string | null {
   if (label && background.has(label)) {
     background.delete(label);
     // Kept in the console: silent to the user is not the same as invisible to
@@ -84,7 +89,8 @@ export function toastFor(code: string, text: string, label: string | null): stri
     return devMode() ? `${label}: ${code} ${text}` : null;
   }
 
-  const message = explainJoinError(code, label) ?? friendlyError(code, text);
+  const message =
+    BY_CONTEXT[context ?? ""] ?? explainJoinError(code, label) ?? friendlyError(code, text);
 
   // Canned wording replaces the server's text, which in developer mode is where
   // the annotation lives — so keep the raw line alongside it.
@@ -116,6 +122,14 @@ function explainJoinError(code: string, label: string | null): string | null {
 
   return `Couldn't join ${join.space} on ${join.realm} (${code}).`;
 }
+
+/// Keyed on §8's `context` — the machine-readable discriminator (`ERR POLICY
+/// provider-offline`), which unlike the code names the actual cause. It outranks the
+/// per-code text: "the server's policy doesn't allow that" is true of a bridge being
+/// down and tells the user nothing they can act on, where naming the bridge does.
+const BY_CONTEXT: Record<string, string> = {
+  "provider-offline": "The bridge for this server is offline — nothing was sent.",
+};
 
 /// Human text for the codes a user can actually meet outside a tracked request.
 /// Anything absent falls through to the raw code, which is the honest default —

@@ -571,6 +571,11 @@ pub enum ClientEvent {
     Error {
         code: String,
         text: String,
+        /// §8's machine-readable discriminator (`ERR POLICY provider-offline`) — the
+        /// missing capability, the failing precondition. The code alone is
+        /// deliberately uninformative, so this is the only part of an error the UI
+        /// can safely *branch* on; the text is prose and may be annotated.
+        context: Option<String>,
         /// §3.5: the label of the request this answers, echoed on every direct
         /// response *including* `ERR`. Carrying it is what lets the UI say what
         /// failed — §8 codes are deliberately uninformative on their own
@@ -1266,6 +1271,7 @@ pub fn on_line<E: EventSink>(
         Event::Err(e) => sink.emit(ClientEvent::Error {
             code: e.code.to_string(),
             text: e.text,
+            context: e.context,
             label,
         }),
         // Federation (§11): bridge manifests + netblock notifications.
