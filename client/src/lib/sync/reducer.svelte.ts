@@ -238,16 +238,24 @@ export function handle(e: weft.WeftEvent) {
       confirmSuccess(`policy:${e.channel}`);
       break;
     case "message": {
-      // Channels key by name; DMs (`@to`) key by the *peer* — the other
-      // party — so both sides land in one conversation.
+      // The canonical handle: bare for one of ours, `account@network` for anyone
+      // else. `e.sender` alone is *not* an identity — the same rule the roster and
+      // the notification text already follow.
+      const who = e.network === network ? e.sender : `${e.sender}@${e.network}`;
+      // Channels key by name; DMs (`@to`) key by the *peer* — the other party — so
+      // both sides land in one conversation. Our own copy is already addressed to
+      // the peer; an inbound one names them as the sender, and it must carry their
+      // network: a bridged realm can hold your own handle, so keying an incoming DM
+      // by the bare account filed your Matrix self's messages under a DM *with
+      // yourself* — and replying there went to the local account of that name,
+      // which weftd delivers locally and never relays.
       let key: string;
       if (e.target.startsWith("#")) key = e.target;
-      else if (e.target.startsWith("@")) key = "@" + (e.own ? e.target.slice(1) : e.sender);
+      else if (e.target.startsWith("@")) key = e.own ? e.target : `@${who}`;
       else if (e.target.startsWith("&")) key = e.target; // group DM: keyed by id
       else break;
       // Server-generated system messages (join/part, …) — a persistent line
       // that rides the normal message + history path, rendered Discord-style.
-      const who = e.network === network ? e.sender : `${e.sender}@${e.network}`;
       if (!e.system) profileStore.queryProfile(who); // §10.3 the sender's avatar + display name
       const systemBody = e.system
         ? e.system === "join"
@@ -342,8 +350,6 @@ export function handle(e: weft.WeftEvent) {
       if (!e.own && !redelivered && !document.hasFocus()) {
         const dm = e.target.startsWith("@");
         const notify = level === "all" || (level === "mentions" && (dm || pinged));
-        // Qualify a foreign sender so the notification isn't ambiguous.
-        const who = e.network !== network ? `${e.sender}@${e.network}` : e.sender;
         if (notify)
           weft.notify(
             dm ? `DM from ${who}` : `${who} in ${channelStore.short(key)}`,

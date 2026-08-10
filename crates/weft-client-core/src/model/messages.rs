@@ -274,7 +274,7 @@ impl Messages {
             return Vec::new();
         };
 
-        let Some(channel) = channel_key(target, sender, *own) else {
+        let Some(channel) = channel_key(target, sender, network, &self.home, *own) else {
             return Vec::new();
         };
         let is_system = system.is_some();
@@ -489,14 +489,25 @@ impl Messages {
 
 /// §9 conversation key: channel by name, group DM by id, 1:1 DM by the **other**
 /// party (both sides → one conversation). `None` for an unrecognized target.
-fn channel_key(target: &str, sender: &str, own: bool) -> Option<String> {
+///
+/// An inbound DM has to be keyed by its *sender*, because a local DM delivers one
+/// event to both parties and the recipient's copy is addressed to themselves — but
+/// the sender's account alone is not an identity. A bridged realm can carry your own
+/// handle, so the bare form filed your Matrix self's DMs under a conversation *with
+/// yourself*, and a reply there went to the local account of that name — stored and
+/// echoed locally, never relayed. Qualified with the network, exactly like the roster.
+fn channel_key(target: &str, sender: &str, network: &str, home: &str, own: bool) -> Option<String> {
     if target.starts_with('#') || target.starts_with('&') {
         return Some(target.to_string());
     }
 
     target
         .strip_prefix('@')
-        .map(|peer| format!("@{}", if own { peer } else { sender }))
+        .map(|peer| match (own, network == home) {
+            (true, _) => format!("@{peer}"),
+            (false, true) => format!("@{sender}"),
+            (false, false) => format!("@{sender}@{network}"),
+        })
 }
 
 fn system_line(who: &str, kind: &str) -> String {
@@ -574,6 +585,57 @@ mod tests {
             md: false,
             label: label.map(Into::into),
         }
+    }
+
+    #[test]
+    fn a_foreign_dm_from_your_own_handle_is_not_a_dm_with_yourself() {
+        // The realm holds an account with the *same name* as ours — which is the
+        // normal case for a bridge to your own homeserver. An inbound DM is keyed by
+        // its sender (a local DM delivers one event to both parties, and the
+        // recipient's copy is addressed to themselves), so keying by the bare account
+        // filed it under `@me`: the client showed a DM with yourself, and replying to
+        // that key went to the local account, which never leaves the network.
+        let mut m = Messages::default();
+        m.handle(&connected());
+
+        let d = m.ingest(
+            &message(
+                "@me@realm.example",
+                "me",
+                "realm.example",
+                "01f",
+                "hi",
+                false,
+                None,
+            ),
+            false,
+        );
+        assert!(matches!(&d[0], MsgDiff::MsgAppended { channel, .. }
+                if channel == "@me@realm.example"));
+
+        // Our own copy is already addressed to the peer, so it lands in the same
+        // conversation — both halves in one thread, not two.
+        let d = m.ingest(
+            &message(
+                "@me@realm.example",
+                "me",
+                "home",
+                "01g",
+                "hello back",
+                true,
+                None,
+            ),
+            false,
+        );
+        assert!(matches!(&d[0], MsgDiff::MsgAppended { channel, .. }
+                if channel == "@me@realm.example"));
+
+        // A local DM still keys by the bare sender.
+        let d = m.ingest(
+            &message("@me", "ada", "home", "01h", "yo", false, None),
+            false,
+        );
+        assert!(matches!(&d[0], MsgDiff::MsgAppended { channel, .. } if channel == "@ada"));
     }
 
     #[test]

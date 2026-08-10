@@ -911,6 +911,30 @@ impl Store {
         }
     }
 
+    /// Forget a bridged DM's room, because the peer left it.
+    ///
+    /// Reusing a room the other party walked out of is how a conversation dies
+    /// silently: the puppet is still joined, so every relay succeeds and lands
+    /// somewhere nobody is reading. Dropping the mapping makes the next DM open a
+    /// fresh room and invite them again. The old room and its history stay on the
+    /// Matrix side untouched — that is what leaving means.
+    pub async fn forget_dm_room(&mut self, account: &str, mxid: &str) {
+        self.state
+            .dm_rooms
+            .remove(&(account.to_string(), mxid.to_string()));
+
+        if let Some(pool) = &self.pool {
+            best_effort(
+                "forget_dm_room",
+                sqlx::query("DELETE FROM matrix_dm_rooms WHERE account = $1 AND mxid = $2")
+                    .bind(account)
+                    .bind(mxid)
+                    .execute(pool),
+            )
+            .await;
+        }
+    }
+
     /// Replace a room's power-level baseline (after translating a PL event).
     pub async fn set_room_levels(&mut self, room_id: &str, users: BTreeMap<String, i64>) {
         if let Some(pool) = self.pool.clone() {

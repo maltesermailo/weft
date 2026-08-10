@@ -2478,6 +2478,23 @@ impl Bridge {
     /// A Matrix message in a bridged **DM** room: ingest it as an ordinary WEFT
     /// DM (`Scope::Dm`), keyed by the realm's msgid like any other ingest.
     async fn on_dm_event(&mut self, ev: &Value, account: &str, mxid: &str) {
+        // The peer walked out. Keeping the mapping would make every later DM relay
+        // *succeed* into a room nobody is reading — the conversation looks delivered
+        // from WEFT and simply never arrives, and starting a new DM cannot help
+        // because the stale room is what it finds. Forget it, so the next one opens a
+        // fresh room and invites them again.
+        if ev["type"] == "m.room.member"
+            && ev["state_key"].as_str() == Some(mxid)
+            && matches!(
+                ev["content"]["membership"].as_str(),
+                Some("leave") | Some("ban")
+            )
+        {
+            info!(account, mxid, "the DM's peer left — forgetting the room");
+            self.store.forget_dm_room(account, mxid).await;
+            return;
+        }
+
         if ev["type"] != "m.room.message" {
             return; // v1 bridges DM text; edits/reactions ride the channel path
         }
