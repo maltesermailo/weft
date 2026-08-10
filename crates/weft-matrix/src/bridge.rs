@@ -2417,45 +2417,28 @@ impl Bridge {
         debug!(peer, mxid, account, "resolved the DM's Matrix identity");
         let puppet = self.ensure_puppet(ulid, account).await?;
 
-        let room = match self
+        // Reuse the room only while the peer is actually in it. Their `leave` normally
+        // drops the mapping as it arrives, but a leave during a bridge outage is never
+        // seen — and a room they are no longer in accepts our relays happily, so the
+        // DM would look delivered forever and never be read.
+        let known = self
             .store
             .state
             .dm_rooms
             .get(&(account.to_string(), mxid.clone()))
-        {
-            Some(room) => room.clone(),
-            None => {
-                // `is_direct` + the invite is what makes clients render it as a
-                // DM rather than a tiny room; created **as the puppet**, so the
-                // conversation belongs to the two of them.
-                let room = self
-                    .hs
-                    .create_room_as(
-                        json!({
-                            "is_direct": true,
-                            "preset": "trusted_private_chat",
-                            "invite": [mxid],
-                        }),
-                        Some(&puppet),
-                    )
-                    .await?;
-                // Same idea as the Space marker: a DM room says whose it is,
-                // so it can be re-attached without a database.
-                if let Err(e) = self
-                    .hs
-                    .put_state(
-                        &room,
-                        crate::recover::DM_MARKER,
-                        "",
-                        json!({ "account": account, "mxid": mxid }),
-                    )
-                    .await
-                {
-                    warn!(room, "could not mark the DM room: {e:#}");
+            .cloned();
+        let room = match known {
+            Some(room) if self.dm_peer_present(&room, &mxid).await => room,
+            known => {
+                if let Some(stale) = &known {
+                    info!(
+                        room = stale,
+                        mxid, "the DM's peer is gone — opening a new room"
+                    );
+                    self.store.forget_dm_room(account, &mxid).await;
                 }
 
-                self.store.save_dm_room(account, &mxid, &room).await;
-                room
+                self.open_dm_room(account, &mxid, &puppet).await?
             }
         };
 
@@ -2473,6 +2456,70 @@ impl Bridge {
         info!(room, puppet, mxid, "DM delivered into Matrix");
 
         Ok(())
+    }
+
+    /// Is the DM's peer still in `room`?
+    ///
+    /// Fails **open** — an unreadable membership counts as present. The cost of the
+    /// two answers is not symmetric: treating a live room as dead opens a second one
+    /// and splits the conversation on every homeserver blip, where treating a dead
+    /// room as live loses one message and is corrected by the next `leave` we see.
+    async fn dm_peer_present(&self, room: &str, mxid: &str) -> bool {
+        match self.hs.get_state(room, "m.room.member", mxid).await {
+            Ok(Some(member)) => {
+                matches!(member["membership"].as_str(), Some("join") | Some("invite"))
+            }
+            Ok(None) => false, // no member event at all: never joined
+            Err(e) => {
+                debug!(
+                    room,
+                    mxid, "could not read DM membership, assuming present: {e:#}"
+                );
+                true
+            }
+        }
+    }
+
+    /// Open a fresh DM room between `account`'s puppet and `mxid`, and remember it.
+    async fn open_dm_room(
+        &mut self,
+        account: &str,
+        mxid: &str,
+        puppet: &str,
+    ) -> anyhow::Result<String> {
+        // `is_direct` + the invite is what makes clients render it as a DM rather
+        // than a tiny room; created **as the puppet**, so the conversation belongs
+        // to the two of them.
+        let room = self
+            .hs
+            .create_room_as(
+                json!({
+                    "is_direct": true,
+                    "preset": "trusted_private_chat",
+                    "invite": [mxid],
+                }),
+                Some(puppet),
+            )
+            .await?;
+
+        // Same idea as the Space marker: a DM room says whose it is, so it can be
+        // re-attached without a database.
+        if let Err(e) = self
+            .hs
+            .put_state(
+                &room,
+                crate::recover::DM_MARKER,
+                "",
+                json!({ "account": account, "mxid": mxid }),
+            )
+            .await
+        {
+            warn!(room, "could not mark the DM room: {e:#}");
+        }
+
+        self.store.save_dm_room(account, mxid, &room).await;
+
+        Ok(room)
     }
 
     /// A Matrix message in a bridged **DM** room: ingest it as an ordinary WEFT

@@ -228,6 +228,25 @@ The other direction is already wired: a local user's `MSG @<user@realm>` is stor
 locally **and** relayed to the realm's provider as `@as=<local-user>;ulid=<id> MSG @<user@realm>`
 (§8) — the only route that can reach them.
 
+**An inbound DM is keyed by its sender, and the sender's network is part of that key**
+(2026-08-10). A local DM delivers *one* event to both parties, and the recipient's copy
+is addressed to themselves, so a client must key an incoming DM by who sent it — but on
+the bare account that collides. A bridge to your own homeserver gives the realm an
+account with your own handle, and `you@<realm>` keyed as `@you` files the conversation
+under *yourself*: replies then address the local account of that name, which weftd
+delivers locally and correctly never relays. The DM is delivered and unreachable at the
+same time. Qualify the key (`@you@<realm>`) — the rule rosters already follow.
+
+**Adapter side: never reuse a conversation the peer has left.** A foreign 1:1 usually
+has a durable container (a Matrix DM room) mapped to the pair, and our own identity
+stays in it after the peer walks out — so relays keep *succeeding* into a room nobody
+reads, and a "new" DM finds the stale mapping instead of opening one. Drop the mapping
+when the peer's leave arrives, **and** check they are still present before reusing it,
+since a leave during an outage is never seen. That check fails **open** (an unreadable
+membership counts as present): the two errors are not symmetric — treating a live
+conversation as dead splits it in two on every transient failure, while treating a dead
+one as live costs one message and self-corrects.
+
 ### Outbound projection — the return path into a native channel (2026-08-06)
 
 A **native** namespace whose ns-admin opted in — `NS META <ns-id> bridge:<scheme> :open` (requires
