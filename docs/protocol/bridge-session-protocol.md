@@ -191,14 +191,19 @@ UNSUPPORTED` where a caller is waiting). Nothing is minted on a bad line.
 
 ### Moderation by a foreign moderator
 
-| Dir | Line                                                                                |
-|-----|-------------------------------------------------------------------------------------|
-| →   | `@as=<user@realm> MUTE <scope> <account> [:reason]` (also `UNMUTE`, `BAN`, `UNBAN`) |
-| →   | `@as=<user@realm> KICK #<ns-id>/<chan-id> <account> [:reason]`                      |
+| Dir | Line                                                                               |
+|-----|------------------------------------------------------------------------------------|
+| →   | `@as=<user@realm> MUTE <scope> <member> [:reason]` (also `UNMUTE`, `BAN`, `UNBAN`) |
+| →   | `@as=<user@realm> KICK #<ns-id>/<chan-id> <member> [:reason]`                      |
 
 These run through weftd's **ordinary** actor-aware moderation path as `Actor::Foreign`, checked
 against the grants the provider itself issued (§7). A foreign user with no grant is refused exactly
 like a local one — being foreign confers nothing.
+
+`<member>` is a bare account for one of weftd's own and `<user@realm>` for a foreign one
+(spec §6.7, widened 2026-08-11). It used to be a bare account only, which meant a foreign
+moderator could moderate weftd's users but not their own — and weftd could not moderate
+them at all.
 
 ### DMs
 
@@ -300,6 +305,16 @@ The inbound statement is what writes the membership row — for the realm's own 
 once the foreign side actually has them. It is keyed `user@realm` for a foreign member and the bare
 account for a local one.
 
+**Only transitions are stated, so the adapter must not forget who it has already stated**
+(learned the hard way, 2026-08-11). A first room join is the namespace join and a last leave
+the namespace part, which makes the per-member room set load-bearing state: if it dies with
+your process, every member who joined before the restart is never mentioned again. weftd then
+holds no membership row for them, and that costs more than a roster entry — it also drops
+their **presence**, since presence for a member weftd does not know is presence for someone
+it shares nothing with. Persist the set, and rebuild it from foreign state on recovery (the
+reference adapter does both, and its `!weft recover` reports the count). Re-stating a
+membership weftd already holds is harmless: `NS-MEMBER … join` is idempotent.
+
 ### Resync (full replace)
 
 A realm corrects drift by **re-stating**, in the same snapshot framing a client gets on login (§6.9):
@@ -398,6 +413,41 @@ weftd is the home there, so it mints and relays its own events.
 
 System messages (join/part notices) are local channel noise and are not relayed. `MEMBER` is relayed
 only when the user is on our network.
+
+### Relayed moderation (2026-08-11)
+
+A WEFT-side `MUTE`/`UNMUTE`/`BAN`/`UNBAN`/`KICK` inside a namespace you bridge is relayed
+to you to apply in your realm:
+
+```
+← BAN ns:<ns-id> <member> [:reason]      (also UNBAN, MUTE, UNMUTE)
+← KICK #<ns-id>/<chan-id> <member> [:reason]
+← @ulid=<subject-ulid> BAN ns:<ns-id> <account>      (a *local* subject)
+```
+
+Sent **bare**, like the authority relays (§7): weftd states the fact and the foreign
+expression of it is yours. A local subject carries `ulid=` so you can find their puppet
+without waiting for their first message; a foreign subject addresses their own identity and
+carries none.
+
+Three rules the reference adapter follows, each learned from a way of getting it wrong:
+
+- **An `ns:` scope covers every bridged room *and the container*** (the Matrix Space). A
+  restricted room authorizes entry by container membership (§6), so a removal that spares the
+  container leaves the door open. A `KICK` names one channel and touches that room alone —
+  matching WEFT, where a kick is a force-part the member may undo by rejoining.
+- **Restoring a lifted mute must not clobber another authority's level.** If you express a
+  mute as a lowered rank, only lift ranks you lowered — writing the default unconditionally
+  turns every unmute into a silent demotion of a moderator.
+- **You may refuse, and it changes nothing here.** In a *consumed* realm your bot often has
+  no power to remove anyone. weftd's deny-list already refuses that member's traffic on
+  ingest, so a failed relay costs nothing and must not be reported as the act failing. A
+  moderator's decision does not depend on a bridge being up.
+
+The relay's loop guard is the **session**, not the actor: your own attributed moderation
+(§5) wears `Actor::Foreign`, which weftd cannot tell from a federated peer's moderator
+acting on it — and that one *does* need relaying onward. So weftd suppresses the relay for
+acts that arrived on a provider session, whatever actor they wear.
 
 ### Acting on behalf of a local user
 
