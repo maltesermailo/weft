@@ -1974,9 +1974,12 @@ async fn the_kick_flow_picks_its_scope_and_reverts_when_refused() {
         "the projected channel is offered: {options:?}"
     );
 
-    // A **foreign** member is removed foreign-side: weftd's moderation verbs
-    // take a bare `Account` and cannot name `carol@kde.org` at all, and their
-    // membership is the realm's to state (§6).
+    // A **foreign** member takes the ordinary WEFT path now that §6.7's verbs
+    // name a member rather than an account: an attributed `KICK` that weftd
+    // capability-checks. This action used to call the homeserver directly,
+    // because `carol@kde.org` could not be expressed on the wire at all — which
+    // made the one moderation act that skipped weftd's check the one aimed at
+    // the people least able to answer for it.
     bridge
         .on_step(
             "k1",
@@ -1990,6 +1993,37 @@ async fn the_kick_flow_picks_its_scope_and_reverts_when_refused() {
             false,
         )
         .await;
+    let kick = drain(&mut lines);
+    let kick = kick
+        .iter()
+        .find(|l| l.contains("KICK"))
+        .expect("an attributed WEFT KICK");
+    assert!(
+        kick.contains("carol@kde.org") && kick.contains("as=ada@test.example"),
+        "the kick names the foreign member and its actor: {kick}"
+    );
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(what, _, _)| what.starts_with("POST kick/")),
+        "nothing happens on Matrix until weftd authorizes it"
+    );
+
+    // …and when weftd does authorize it, the act comes back to be applied.
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
+            as_user: None,
+            as_ulid: None,
+            command: weft_proto::Command::Kick {
+                channel: channel.parse().unwrap(),
+                member: "carol@kde.org".parse().unwrap(),
+                reason: Some("spam".to_string()),
+            },
+        })
+        .await;
     assert!(
         calls
             .lock()
@@ -1998,11 +2032,7 @@ async fn the_kick_flow_picks_its_scope_and_reverts_when_refused() {
             .any(|(what, _, body)| what == &format!("POST kick/{room_id}")
                 && body["user_id"] == "@carol:kde.org"
                 && body["reason"] == "spam"),
-        "the foreign member was removed on Matrix"
-    );
-    assert!(
-        !drain(&mut lines).iter().any(|l| l.contains("KICK")),
-        "…and no WEFT KICK was attempted with an unnameable account"
+        "the authorized kick removed her from the room"
     );
 
     // A **local** member takes the WEFT path: an attributed BAN whose scope is
@@ -2645,6 +2675,263 @@ async fn dms_and_typing_cross_the_bridge() {
             .iter()
             .any(|(what, _, body)| what.starts_with("PUT typing/") && body["typing"] == false),
         "stop clears the indicator"
+    );
+}
+
+#[tokio::test]
+async fn a_weft_moderation_act_is_applied_on_matrix() {
+    // Owner request 2026-08-11, the foreign half: weftd moderated a member of a
+    // bridged namespace and relays the act here. A ban must cover every room of
+    // the namespace **and the Space** — a restricted room authorizes entry by
+    // Space membership, so leaving the Space out would leave the door open.
+    let (mut bridge, mut lines, calls) = bridge_with(BTreeMap::new()).await;
+    let (ns_id, channel, room_id) = projected_fixture(&mut bridge, &mut lines).await;
+    let space_room = bridge.store.state.projections[&ns_id].space_room.clone();
+
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
+            as_user: None,
+            as_ulid: None,
+            command: weft_proto::Command::Ban {
+                scope: format!("ns:{ns_id}"),
+                member: "carol@kde.org".parse().unwrap(),
+                reason: Some("raiding".to_string()),
+            },
+        })
+        .await;
+    {
+        let recorded = calls.lock().unwrap();
+        for room in [&room_id, &space_room] {
+            assert!(
+                recorded
+                    .iter()
+                    .any(|(what, _, body)| what == &format!("POST ban/{room}")
+                        && body["user_id"] == "@carol:kde.org"
+                        && body["reason"] == "raiding"),
+                "banned in {room}: {recorded:?}"
+            );
+        }
+    }
+
+    // Unban lifts it in the same set.
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
+            as_user: None,
+            as_ulid: None,
+            command: weft_proto::Command::Unban {
+                scope: format!("ns:{ns_id}"),
+                member: "carol@kde.org".parse().unwrap(),
+            },
+        })
+        .await;
+    assert!(
+        calls.lock().unwrap().iter().any(|(what, _, body)| what
+            == &format!("POST unban/{space_room}")
+            && body["user_id"] == "@carol:kde.org"),
+        "the unban reaches the Space too"
+    );
+
+    // A kick names one channel, so it touches that room alone — matching WEFT,
+    // where a kick is a force-part they may undo by rejoining.
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
+            as_user: None,
+            as_ulid: None,
+            command: weft_proto::Command::Kick {
+                channel: channel.parse().unwrap(),
+                member: "carol@kde.org".parse().unwrap(),
+                reason: None,
+            },
+        })
+        .await;
+    {
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded
+                .iter()
+                .any(|(what, _, _)| what == &format!("POST kick/{room_id}")),
+            "kicked from the channel's room: {recorded:?}"
+        );
+        assert!(
+            !recorded
+                .iter()
+                .any(|(what, _, _)| what == &format!("POST kick/{space_room}")),
+            "a kick is not a namespace act — the Space is untouched"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unmuting_restores_the_default_level_but_never_demotes() {
+    // A mute is a negative power level (below `events_default`, so the
+    // homeserver refuses their messages). Lifting one must not be a blanket
+    // write of 0: a moderator sitting at 50 would be silently demoted by every
+    // unmute, and the WEFT side would never know it had happened.
+    let (mut bridge, mut lines, calls) = bridge_with(BTreeMap::new()).await;
+    let (ns_id, _channel, room_id) = projected_fixture(&mut bridge, &mut lines).await;
+    let scope = format!("ns:{ns_id}");
+
+    let mute = weft_appservice::Incoming::Command {
+        label: None,
+        as_user: None,
+        as_ulid: None,
+        command: weft_proto::Command::Mute {
+            scope: scope.clone(),
+            member: "carol@kde.org".parse().unwrap(),
+            reason: None,
+        },
+    };
+    bridge.on_incoming(mute).await;
+    assert_eq!(
+        bridge.store.state.room_levels[&room_id]["@carol:kde.org"], -1,
+        "a mute writes a negative level"
+    );
+
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
+            as_user: None,
+            as_ulid: None,
+            command: weft_proto::Command::Unmute {
+                scope: scope.clone(),
+                member: "carol@kde.org".parse().unwrap(),
+            },
+        })
+        .await;
+    assert!(
+        !bridge.store.state.room_levels[&room_id].contains_key("@carol:kde.org"),
+        "lifting it restores the default (0 = absent from the users map)"
+    );
+
+    // Now the case the guard exists for: a moderator at 50 who is not muted.
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
+            as_user: None,
+            as_ulid: None,
+            command: weft_proto::Command::Grant {
+                subject: "dave@kde.org".to_string(),
+                scope: scope.clone(),
+                caps: "ban,kick".to_string(),
+                expiry: None,
+            },
+        })
+        .await;
+    assert_eq!(
+        bridge.store.state.room_levels[&room_id]["@dave:kde.org"],
+        50
+    );
+    let writes_before = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(what, _, _)| what.starts_with("PUT state/"))
+        .count();
+
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
+            as_user: None,
+            as_ulid: None,
+            command: weft_proto::Command::Unmute {
+                scope,
+                member: "dave@kde.org".parse().unwrap(),
+            },
+        })
+        .await;
+    assert_eq!(
+        bridge.store.state.room_levels[&room_id]["@dave:kde.org"], 50,
+        "unmuting someone who was not muted leaves their level alone"
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(what, _, _)| what.starts_with("PUT state/"))
+            .count(),
+        writes_before,
+        "…and writes nothing at all"
+    );
+}
+
+#[tokio::test]
+async fn recovery_restores_the_matrix_members_of_a_projected_room() {
+    // Reported 2026-08-11: Matrix members of a projected server did not appear
+    // in the WEFT roster. Only *transitions* are stated (`member_joined` returns
+    // an action for the first room only), and a projection's member set was
+    // memory-only — so anyone who joined before the last bridge restart was
+    // never mentioned to weftd again. No membership row means no roster entry
+    // and, because weftd drops presence for a member it does not know, no
+    // presence either. Nothing short of leaving and rejoining fixed it.
+    let ns_id = ident::stable_ulid("!space:test.example");
+
+    let mut rooms = BTreeMap::new();
+    rooms.insert(
+        "!space:test.example".to_string(),
+        vec![json!({ "type": "dev.weft.space", "state_key": "",
+                     "content": { "kind": "projected", "ns": ns_id } })],
+    );
+    rooms.insert(
+        "!gen:test.example".to_string(),
+        vec![
+            json!({ "type": "m.space.parent", "state_key": "!space:test.example",
+                    "content": { "via": ["test.example"], "canonical": true } }),
+            // Two Matrix members, one who left, and one of our own puppets —
+            // which is a relay of a local user, never a member in its own right.
+            json!({ "type": "m.room.member", "state_key": "@carol:kde.org",
+                    "content": { "membership": "join" } }),
+            json!({ "type": "m.room.member", "state_key": "@dave:kde.org",
+                    "content": { "membership": "join" } }),
+            json!({ "type": "m.room.member", "state_key": "@eve:kde.org",
+                    "content": { "membership": "leave" } }),
+            json!({ "type": "m.room.member", "state_key": format!("@weft_{ADA_ULID}:test.example"),
+                    "content": { "membership": "join", "displayname": "ada" } }),
+        ],
+    );
+    rooms.insert(
+        "__joined__".to_string(),
+        vec![json!("!space:test.example"), json!("!gen:test.example")],
+    );
+
+    let (mut bridge, mut lines, _calls) = bridge_with(rooms).await;
+    let found = bridge.recover().await.expect("recovery ran");
+
+    assert_eq!(found.members, 2, "the two joined Matrix members: {found}");
+    let stated = drain(&mut lines);
+    for who in ["carol@kde.org", "dave@kde.org"] {
+        assert!(
+            stated
+                .iter()
+                .any(|l| l.contains("NS-MEMBER") && l.contains(who) && l.contains("join")),
+            "{who} was stated to weftd: {stated:?}"
+        );
+    }
+    assert!(
+        !stated.iter().any(|l| l.contains("eve@kde.org")),
+        "someone who left is not a member: {stated:?}"
+    );
+    assert!(
+        !stated
+            .iter()
+            .any(|l| l.contains("NS-MEMBER") && l.contains("ada")),
+        "a puppet is our own user's relay, not a foreign member: {stated:?}"
+    );
+    assert_eq!(
+        bridge.store.state.projections[&ns_id].member_rooms.len(),
+        2,
+        "and the room-set is restored, so the next leave is recognised as one"
+    );
+
+    // Idempotent — the roster is already stated, so a second pass announces
+    // nothing new.
+    let again = bridge.recover().await.expect("recovery repeats");
+    assert_eq!(
+        again.members, 0,
+        "a member weftd already holds is not re-announced: {again}"
     );
 }
 

@@ -534,6 +534,19 @@ impl Store {
             }
         }
 
+        for row in sqlx::query("SELECT ns_id, member, room_id FROM matrix_projected_members")
+            .fetch_all(pool)
+            .await?
+        {
+            let ns_id: String = row.get("ns_id");
+            if let Some(p) = state.projections.get_mut(&ns_id) {
+                p.member_rooms
+                    .entry(row.get("member"))
+                    .or_default()
+                    .insert(row.get("room_id"));
+            }
+        }
+
         for row in
             sqlx::query("SELECT ns_id, category, space_room FROM matrix_projected_categories")
                 .fetch_all(pool)
@@ -786,6 +799,47 @@ impl Store {
                      WHERE space_uri = $1 AND member = $2 AND room_id = $3",
                 )
                 .bind(space_uri)
+                .bind(member)
+                .bind(room_id)
+                .execute(pool),
+            )
+            .await;
+        }
+    }
+
+    /// Persist one projected member-room delta — the outbound-projection twin of
+    /// [`Self::persist_member_room`] (the in-memory transition already ran via
+    /// [`Projection::member_joined`]/[`Projection::member_left`]).
+    pub async fn persist_projected_member(
+        &mut self,
+        ns_id: &str,
+        member: &str,
+        room_id: &str,
+        joined: bool,
+    ) {
+        let Some(pool) = &self.pool else { return };
+
+        if joined {
+            best_effort(
+                "projected_member join",
+                sqlx::query(
+                    "INSERT INTO matrix_projected_members (ns_id, member, room_id) \
+                     VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                )
+                .bind(ns_id)
+                .bind(member)
+                .bind(room_id)
+                .execute(pool),
+            )
+            .await;
+        } else {
+            best_effort(
+                "projected_member leave",
+                sqlx::query(
+                    "DELETE FROM matrix_projected_members \
+                     WHERE ns_id = $1 AND member = $2 AND room_id = $3",
+                )
+                .bind(ns_id)
                 .bind(member)
                 .bind(room_id)
                 .execute(pool),

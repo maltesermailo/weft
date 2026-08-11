@@ -97,6 +97,23 @@ CREATE TABLE IF NOT EXISTS matrix_room_levels (
     PRIMARY KEY (room_id, mxid)
 );
 
+-- §8 in the outbound sense: which projected rooms each **Matrix** user has
+-- joined, so a restart does not forget the foreign half of a projected roster.
+-- Without it, a Matrix member who joined before the last restart is never
+-- re-stated to weftd (only *transitions* are stated), so they vanish from the
+-- roster and their presence is dropped as "someone we share nothing with".
+--
+-- The consumed-space equivalent is `matrix_member_rooms`. A projection has no
+-- space URI to key by (the Space is ours, minted per namespace), and putting two
+-- different key spaces in one column is exactly the kind of drift a shared table
+-- invites — so it gets its own.
+CREATE TABLE IF NOT EXISTS matrix_projected_members (
+    ns_id   TEXT NOT NULL,
+    member  TEXT NOT NULL,
+    room_id TEXT NOT NULL,
+    PRIMARY KEY (ns_id, member, room_id)
+);
+
 -- Per-space bridging bans (bridge-session-protocol §11): weftd tells us once
 -- and keeps no record, so this table IS the enforcement across restarts.
 CREATE TABLE IF NOT EXISTS matrix_bans (

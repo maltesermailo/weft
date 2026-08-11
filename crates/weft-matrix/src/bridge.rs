@@ -123,6 +123,18 @@ pub enum PendingAct {
     },
 }
 
+/// Which §6.7 membership act weftd asked us to apply (`Bridge::apply_removal_outbound`).
+///
+/// A ban and a kick are one Matrix call apart but a different *scope* apart — a
+/// ban covers the namespace, a kick one channel — so the distinction has to
+/// survive as far as the room list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    Ban,
+    Unban,
+    Kick,
+}
+
 /// How many events one backfill page fetches. Matrix's `/messages` is
 /// paginated far below WEFT's `MAX_HISTORY_LIMIT` (500), and backfill is
 /// demand-driven — the client scrolls again for the next window.
@@ -451,6 +463,75 @@ impl Bridge {
             Command::Revoke { subject, scope, .. } => {
                 let (subject, scope) = (subject.clone(), scope.clone());
                 self.apply_level_outbound(&scope, &subject, as_ulid.as_deref(), 0)
+                    .await;
+                return;
+            }
+            // §6.7 moderation, outbound: weftd moderated a member of a bridged
+            // namespace and asks us to apply it here. Same bare shape as the
+            // authority relays above — weftd states the fact, the Matrix
+            // expression of it is ours (§7).
+            Command::Ban {
+                scope,
+                member,
+                reason,
+            } => {
+                let (scope, member, reason) = (scope.clone(), member.to_string(), reason.clone());
+                self.apply_removal_outbound(
+                    &scope,
+                    &member,
+                    as_ulid.as_deref(),
+                    reason.as_deref(),
+                    Removal::Ban,
+                )
+                .await;
+                return;
+            }
+            Command::Unban { scope, member } => {
+                let (scope, member) = (scope.clone(), member.to_string());
+                self.apply_removal_outbound(
+                    &scope,
+                    &member,
+                    as_ulid.as_deref(),
+                    None,
+                    Removal::Unban,
+                )
+                .await;
+                return;
+            }
+            Command::Kick {
+                channel,
+                member,
+                reason,
+            } => {
+                let (channel, member, reason) =
+                    (channel.to_string(), member.to_string(), reason.clone());
+                self.apply_removal_outbound(
+                    &channel,
+                    &member,
+                    as_ulid.as_deref(),
+                    reason.as_deref(),
+                    Removal::Kick,
+                )
+                .await;
+                return;
+            }
+            // A mute is a negative power level: below `events_default`, so the
+            // homeserver refuses their messages. Lifting it restores 0 — but
+            // only from a negative, so unmuting a moderator cannot demote them.
+            Command::Mute { scope, member, .. } => {
+                let (scope, member) = (scope.clone(), member.to_string());
+                self.apply_level_outbound(
+                    &scope,
+                    &member,
+                    as_ulid.as_deref(),
+                    crate::levels::MUTED_LEVEL,
+                )
+                .await;
+                return;
+            }
+            Command::Unmute { scope, member } => {
+                let (scope, member) = (scope.clone(), member.to_string());
+                self.lift_mute_outbound(&scope, &member, as_ulid.as_deref())
                     .await;
                 return;
             }
@@ -1060,7 +1141,7 @@ impl Bridge {
 
     /// A remote MXID as a WEFT user — `None` for our own bot/puppets (their
     /// events are relays, never originals) and for unmappable identities.
-    fn foreign_user(&self, mxid: &str) -> Option<String> {
+    pub(crate) fn foreign_user(&self, mxid: &str) -> Option<String> {
         let parsed: &ruma::UserId = mxid.try_into().ok()?;
 
         if self.identity.is_ours(parsed) {
@@ -1655,26 +1736,56 @@ impl Bridge {
                 };
                 let joined = ev["content"]["membership"] == "join";
 
-                let Some(projection) = self.store.state.projections.get_mut(ns_id) else {
-                    return;
-                };
-                let action = if joined {
-                    projection.member_joined(&subject, room_id)
-                } else {
-                    projection.member_left(&subject, room_id)
-                };
-
-                // First projected-room join IS the namespace join (§8, run in
-                // the outbound sense); weftd accepts the statement because the
-                // namespace is flagged for our scheme.
-                if let Some(action) = action {
-                    if let Err(e) = self.realm.member(ns_id, &subject, action).await {
-                        warn!(subject, "projected membership statement failed: {e:#}");
-                    }
-                }
+                self.note_projected_member(ns_id, room_id, &subject, joined)
+                    .await;
             }
             other => debug!(other, "unbridged Matrix event type (projected room)"),
         }
+    }
+
+    /// A Matrix user's membership of one projected room changed. Three steps
+    /// that must happen together, so they live in one place: the in-memory
+    /// transition, its row, and — when it is a namespace-level transition —
+    /// the statement to weftd.
+    ///
+    /// Both callers need all three. The live handler above reacts to a
+    /// `m.room.member` event; recovery replays a room's current membership
+    /// through it (`recover_projected_members`). Splitting them would be how the
+    /// persisted set and the stated roster drift apart.
+    ///
+    /// Persistence is what makes the roster survive a restart: only
+    /// *transitions* are stated, so a forgotten room-set means a member who
+    /// joined before the last restart is never announced again — they silently
+    /// leave the WEFT roster, and their presence goes with it (weftd drops
+    /// presence for anyone it does not consider a member).
+    pub(crate) async fn note_projected_member(
+        &mut self,
+        ns_id: &str,
+        room_id: &str,
+        subject: &str,
+        joined: bool,
+    ) -> Option<MemberAction> {
+        let projection = self.store.state.projections.get_mut(ns_id)?;
+        let action = if joined {
+            projection.member_joined(subject, room_id)
+        } else {
+            projection.member_left(subject, room_id)
+        };
+
+        self.store
+            .persist_projected_member(ns_id, subject, room_id, joined)
+            .await;
+
+        // First projected-room join IS the namespace join (§8, run in the
+        // outbound sense); weftd accepts the statement because the namespace is
+        // flagged for our scheme.
+        if let Some(action) = action {
+            if let Err(e) = self.realm.member(ns_id, subject, action).await {
+                warn!(subject, "projected membership statement failed: {e:#}");
+            }
+        }
+
+        action
     }
 
     /// A fresh injection label, parked with what its echo must link.
@@ -2958,26 +3069,61 @@ impl Bridge {
         subject_ulid: Option<&str>,
         level: i64,
     ) {
-        let Some(ns_id) = scope.strip_prefix("ns:") else {
-            return; // only namespace authority maps onto a space (§10)
-        };
-
-        // Consumed space or outbound projection — collect its rooms.
-        let mut rooms: Vec<String> = Vec::new();
-        if let Some(space) = self.store.state.space_of_ns(ns_id) {
-            rooms.extend(space.rooms.keys().cloned());
-            rooms.push(space.room_id.clone());
-        } else if let Some(p) = self.store.state.projections.get(ns_id) {
-            rooms.extend(p.rooms.values().cloned());
-            rooms.push(p.space_room.clone());
-        } else {
+        let rooms = self.rooms_of_ns_scope(scope);
+        if rooms.is_empty() {
             return;
         }
+        let Some(mxid) = self.mxid_of_subject(subject, subject_ulid).await else {
+            return;
+        };
 
-        // The subject on the Matrix side: a foreign handle addresses its real
-        // MXID; a local account addresses their puppet — registered here if
-        // this is the first we hear of them (the relay carries their ULID
-        // precisely so a grant need not wait for their first message).
+        for room in rooms {
+            if let Err(e) = self.set_room_level(&room, &mxid, level).await {
+                warn!(room, mxid, level, "power-level write failed: {e:#}");
+            }
+        }
+    }
+
+    /// The rooms an `ns:<id>` scope covers — every bridged room of the namespace
+    /// **plus the Space itself**.
+    ///
+    /// The Space is not decoration: a restricted room authorizes entry by Space
+    /// membership, so leaving it out of a removal would leave the door open, and
+    /// leaving it out of a level write would make the Space disagree with its
+    /// children. One list, so a removal and a level change can never cover
+    /// different rooms.
+    ///
+    /// Empty = not a bridged namespace (or not one of ours), which every caller
+    /// treats as "nothing to do".
+    fn rooms_of_ns_scope(&self, scope: &str) -> Vec<String> {
+        let Some(ns_id) = scope.strip_prefix("ns:") else {
+            return Vec::new(); // only namespace authority maps onto a space (§10)
+        };
+
+        // Consumed space or outbound projection.
+        if let Some(space) = self.store.state.space_of_ns(ns_id) {
+            let mut rooms: Vec<String> = space.rooms.keys().cloned().collect();
+            rooms.push(space.room_id.clone());
+            return rooms;
+        }
+        if let Some(p) = self.store.state.projections.get(ns_id) {
+            let mut rooms: Vec<String> = p.rooms.values().cloned().collect();
+            rooms.push(p.space_room.clone());
+            return rooms;
+        }
+
+        Vec::new()
+    }
+
+    /// A WEFT subject's Matrix identity: a foreign handle addresses its real
+    /// MXID; a local account addresses their puppet — registered here if this is
+    /// the first we hear of them (the relay carries their ULID precisely so an
+    /// act need not wait for their first message).
+    async fn mxid_of_subject(
+        &mut self,
+        subject: &str,
+        subject_ulid: Option<&str>,
+    ) -> Option<String> {
         let mxid = if subject.contains('@') {
             ident::mxid_of_weft_user(subject)
         } else {
@@ -2986,17 +3132,89 @@ impl Bridge {
                 None => self.puppet_of_account(subject),
             }
         };
-        let Some(mxid) = mxid else {
-            warn!(
-                subject,
-                "no Matrix identity for the grant subject — skipped"
-            );
+        if mxid.is_none() {
+            warn!(subject, "no Matrix identity for the subject — skipped");
+        }
+
+        mxid
+    }
+
+    /// §6.7 apply a WEFT ban / unban / kick to the Matrix side.
+    ///
+    /// A ban or unban covers the scope's whole namespace (Space included, see
+    /// [`Self::rooms_of_ns_scope`]); a kick names one channel, so it touches
+    /// that room alone — matching WEFT, where a kick is a force-part they may
+    /// undo by rejoining.
+    ///
+    /// Performed as the bot, which is the only authority we have here (§9:
+    /// bridge-created rooms are bridge-controlled). In a **consumed** space the
+    /// bot may hold no such power and the homeserver refuses — that is not an
+    /// error to hide, but it does not undo anything: the WEFT-side deny already
+    /// stands, and refuses the member's traffic on ingest.
+    async fn apply_removal_outbound(
+        &mut self,
+        scope: &str,
+        member: &str,
+        member_ulid: Option<&str>,
+        reason: Option<&str>,
+        removal: Removal,
+    ) {
+        let rooms = match removal {
+            Removal::Kick => self.room_of_channel(scope).into_iter().collect(),
+            Removal::Ban | Removal::Unban => self.rooms_of_ns_scope(scope),
+        };
+        if rooms.is_empty() {
+            return; // not a bridged scope
+        }
+        let Some(mxid) = self.mxid_of_subject(member, member_ulid).await else {
             return;
         };
 
         for room in rooms {
-            if let Err(e) = self.set_room_level(&room, &mxid, level).await {
-                warn!(room, mxid, level, "power-level write failed: {e:#}");
+            let result = match removal {
+                Removal::Ban => self.hs.remove_member(&room, &mxid, reason, true).await,
+                Removal::Kick => self.hs.remove_member(&room, &mxid, reason, false).await,
+                Removal::Unban => self.hs.unban(&room, &mxid).await,
+            };
+            match result {
+                Ok(()) => info!(room, mxid, ?removal, "applied a WEFT moderation act"),
+                // Expected where the bot has no power (a consumed space) or the
+                // member is not in that room at all. The WEFT-side deny stands.
+                Err(e) => debug!(room, mxid, ?removal, "moderation act not applied: {e:#}"),
+            }
+        }
+    }
+
+    /// §6.7 lift a mute: restore the default level, but **only from a negative
+    /// one**.
+    ///
+    /// A mute is the only level we set below zero, so a negative level is ours to
+    /// clear. Anything at or above zero was set by something else — most likely a
+    /// `GRANT` that made them a moderator at 50 — and writing 0 unconditionally
+    /// would turn every unmute into a silent demotion.
+    async fn lift_mute_outbound(&mut self, scope: &str, member: &str, member_ulid: Option<&str>) {
+        let rooms = self.rooms_of_ns_scope(scope);
+        if rooms.is_empty() {
+            return;
+        }
+        let Some(mxid) = self.mxid_of_subject(member, member_ulid).await else {
+            return;
+        };
+
+        for room in rooms {
+            let level = self
+                .store
+                .state
+                .room_levels
+                .get(&room)
+                .and_then(|levels| levels.get(&mxid))
+                .copied()
+                .unwrap_or(0);
+            if level >= 0 {
+                continue;
+            }
+            if let Err(e) = self.set_room_level(&room, &mxid, 0).await {
+                warn!(room, mxid, "unmute power-level write failed: {e:#}");
             }
         }
     }
@@ -3648,8 +3866,13 @@ impl Bridge {
     ) -> anyhow::Result<String> {
         let reason = crate::actions::value(values, "reason");
         let reason = (!reason.is_empty()).then_some(reason);
-        // §13.2: the ctx-ref is `user@net`; weftd's moderation verbs name the
-        // bare account (a foreign member keeps their handle).
+        // §13.2: the ctx-ref is the member — a bare account for one of weftd's,
+        // a `user@realm` handle for a foreign one. Both go the same way now
+        // that §6.7's verbs take a member reference; before, a foreign handle
+        // could not be named at all and this action called the homeserver
+        // directly, which meant the one act on this surface that skipped
+        // weftd's capability check was the one aimed at the people least able
+        // to answer for it.
         let target = flow.ctx_ref.clone();
         let channel = crate::actions::value(values, "channel").to_string();
         anyhow::ensure!(!channel.is_empty(), "pick a channel");
@@ -3659,32 +3882,14 @@ impl Bridge {
         };
         let mxid = self.matrix_id_of(&target);
 
-        // A **foreign** member cannot be named by weftd's moderation verbs at
-        // all — they take a bare `Account`, and a foreign handle is a
-        // `user@realm`. That is not an oversight to route around: a foreign
-        // member's membership is the realm's to state (§6), so removing them
-        // is a foreign-side act, and the realm's `NS-MEMBER part` follows.
-        if target.contains('@') {
-            let Some(mxid) = mxid else {
-                anyhow::bail!("that member has no Matrix identity to remove");
-            };
-            let ban = button == Some("ban");
-            anyhow::ensure!(ban || button == Some("kick"), "pick an action");
-
-            self.hs.remove_member(&room, &mxid, reason, ban).await?;
-
-            return Ok(if ban {
-                format!("banned {target} from the room")
-            } else {
-                format!("kicked {target} from the room")
-            });
-        }
-
+        // Nothing is done foreign-side here any more, for either button: weftd
+        // authorizes the act and then relays it back to us to apply
+        // (`apply_removal_outbound`). So a refusal has nothing to reverse — the
+        // parked act carries only the notice, which is why both buttons park the
+        // same "nothing was banned" shape. (`was_banned: true` is still reached
+        // from the *inbound* direction, where a real Matrix ban did land first.)
         match button {
             Some("kick") => {
-                // Foreign-side first, so a WEFT refusal has something to
-                // revert; a kick cannot be undone, so the notice is the remedy
-                // (see `revert_act`).
                 let label = self.park_act(PendingAct::Membership {
                     room: room.clone(),
                     mxid,
@@ -3709,7 +3914,7 @@ impl Bridge {
                 let label = self.park_act(PendingAct::Membership {
                     room: room.clone(),
                     mxid,
-                    was_banned: true,
+                    was_banned: false,
                     actor: flow.invoker.clone(),
                 });
 

@@ -59,6 +59,8 @@ pub struct Recovered {
     pub dms: usize,
     pub puppets: usize,
     pub bans: usize,
+    /// Matrix members of projected rooms restored to the WEFT roster.
+    pub members: usize,
     /// Rooms we are joined to but could not classify — the honest residue.
     pub unclaimed: Vec<String>,
 }
@@ -68,14 +70,15 @@ impl std::fmt::Display for Recovered {
         write!(
             f,
             "{} consumed space(s), {} room(s), {} projection(s), {} category sub-space(s), \
-             {} DM(s), {} puppet(s), {} ban(s)",
+             {} DM(s), {} puppet(s), {} ban(s), {} projected member(s)",
             self.spaces,
             self.rooms,
             self.projections,
             self.categories,
             self.dms,
             self.puppets,
-            self.bans
+            self.bans,
+            self.members
         )?;
         if !self.unclaimed.is_empty() {
             write!(f, "; {} room(s) unclaimed", self.unclaimed.len())?;
@@ -157,6 +160,7 @@ impl Bridge {
             // Puppets and levels are per-room facts, wherever the room landed.
             found.puppets += self.recover_puppets(&state).await;
             self.recover_levels(&room_id, &state).await;
+            found.members += self.recover_projected_members(&room_id, &state).await;
         }
 
         Ok(found)
@@ -320,6 +324,63 @@ impl Bridge {
         self.store.save_space(space).await;
 
         Some(Classified::Room)
+    }
+
+    /// The Matrix members of a **projected** room, replayed into the roster.
+    ///
+    /// This is what makes a Matrix member of one of our servers visible at all
+    /// after a restart, and why it exists as a recovery pass rather than only as
+    /// a live handler: weftd is told about *transitions*, so someone who joined
+    /// while the bridge was down — or before the namespace was ever projected —
+    /// is never mentioned again. They then have no membership row, which means no
+    /// roster entry and no presence (weftd drops presence for a member it does
+    /// not know), and nothing short of them leaving and rejoining would fix it.
+    ///
+    /// Replays through [`Bridge::note_projected_member`], so the persisted set
+    /// and the stated roster are written by the same code that handles a live
+    /// join. Idempotent: a membership weftd already holds is re-stated at most
+    /// once (only the first room is a namespace transition) and `NS-MEMBER join`
+    /// is itself idempotent.
+    ///
+    /// Counts only the members it *newly* announced — the number worth showing an
+    /// operator who ran `!weft recover` because a roster looked wrong.
+    async fn recover_projected_members(
+        &mut self,
+        room_id: &str,
+        state: &[serde_json::Value],
+    ) -> usize {
+        let Some(ns_id) = self
+            .store
+            .state
+            .channel_of_projected_room(room_id)
+            .map(|(_, ns_id)| ns_id.to_string())
+        else {
+            return 0; // not a projected room — a consumed space states its own
+        };
+        let mut announced = 0;
+
+        for ev in state.iter().filter(|ev| ev["type"] == "m.room.member") {
+            if ev["content"]["membership"] != "join" {
+                continue;
+            }
+            // `foreign_user` filters out our own puppets, which are a relay of
+            // our users and never members in their own right.
+            let Some(subject) = ev["state_key"]
+                .as_str()
+                .and_then(|mxid| self.foreign_user(mxid))
+            else {
+                continue;
+            };
+            if self
+                .note_projected_member(&ns_id, room_id, &subject, true)
+                .await
+                .is_some()
+            {
+                announced += 1;
+            }
+        }
+
+        announced
     }
 
     /// Puppets from a room's membership: the localpart *is* the account ULID

@@ -10,6 +10,9 @@
 //! | admin | 90 | `ns-admin` (which implies the rest weftd-side) |
 //! | moderator | 50 | `mute,ban,kick,delete-any` |
 //! | member | 0 | — |
+//! | muted | -1 | a §6.7 mute — below `events_default`, so the homeserver
+//!   refuses their messages. Outbound only: an inbound negative level reads as
+//!   "no tier" and revokes caps, not as a WEFT mute. |
 //!
 //! The bot sits at 100, above every mapped tier — §9: bridge-created rooms
 //! are bridge-controlled.
@@ -19,6 +22,11 @@ use std::collections::BTreeMap;
 pub const BOT_LEVEL: i64 = 100;
 pub const ADMIN_LEVEL: i64 = 90;
 pub const MOD_LEVEL: i64 = 50;
+
+/// What a §6.7 mute writes. The only level we ever set below zero, which is what
+/// makes lifting one safe: a negative level is ours to clear, anything else was
+/// set by something we must not overwrite (see `Bridge::lift_mute_outbound`).
+pub const MUTED_LEVEL: i64 = -1;
 
 pub const MOD_CAPS: &str = "mute,ban,kick,delete-any";
 pub const ADMIN_CAPS: &str = "ns-admin";
