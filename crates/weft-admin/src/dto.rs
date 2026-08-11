@@ -160,6 +160,7 @@ pub struct Channel {
 #[derive(Serialize)]
 pub struct Moderation {
     pub scope: String,
+    /// The denied member: a bare account, or a bridged `user@network` handle.
     pub account: String,
     pub kind: String,
     pub actor: String,
@@ -171,7 +172,7 @@ impl From<ModRecord> for Moderation {
     fn from(m: ModRecord) -> Self {
         Self {
             scope: m.scope,
-            account: m.account.to_string(),
+            account: m.member.to_string(),
             kind: m.kind.as_str().to_string(),
             actor: m.actor,
             reason: m.reason,

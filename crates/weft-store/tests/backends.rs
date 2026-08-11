@@ -5,8 +5,8 @@
 //! when absent so `cargo test` needs no database.
 
 use weft_proto::{
-    Account, ChannelName, ContentState, FriendState, GroupId, MsgId, MsgMeta, NetworkName,
-    ReportStatus, ResolveAction, RetentionPolicy, Ulid, UserRef,
+    Account, ChannelName, ContentState, FriendState, GroupId, MemberRef, MsgId, MsgMeta,
+    NetworkName, ReportStatus, ResolveAction, RetentionPolicy, Ulid, UserRef,
 };
 use weft_store::{
     materialize, AccountStore, AuditStore, CapabilityStore, ChannelStore, EmojiStore, EventKind,
@@ -344,7 +344,7 @@ where
     store
         .set_moderation(ModRecord {
             scope: "*".to_string(),
-            account: cara.clone(),
+            member: MemberRef::local(cara.clone()),
             kind: ModKind::Mute,
             actor: "op".to_string(),
             reason: None,
@@ -358,7 +358,11 @@ where
     assert!(store.memberships(&cara).await.unwrap().is_empty());
     assert!(store.grants_for(&cara_ulid).await.unwrap().is_empty());
     assert!(!store
-        .is_moderated(&cara, &["*".to_string()], ModKind::Mute)
+        .is_moderated(
+            &MemberRef::local(cara.clone()),
+            &["*".to_string()],
+            ModKind::Mute
+        )
         .await
         .unwrap());
     // Deleting an unknown account is a no-op false.
@@ -2026,7 +2030,8 @@ where
     assert_ne!(recomputed, tampered.hash, "tamper breaks the chain hash");
 
     // ---- §6.7 moderation deny-list ----
-    let bob: Account = format!("bob-{tag}").parse().unwrap();
+    let bob_account: Account = format!("bob-{tag}").parse().unwrap();
+    let bob = MemberRef::local(bob_account);
     let chan_scope = format!("#suite-{tag}");
     let ns_scope = format!("ns:suite-{tag}");
     // Covering scopes a channel MSG checks against.
@@ -2040,7 +2045,7 @@ where
     store
         .set_moderation(ModRecord {
             scope: ns_scope.clone(),
-            account: bob.clone(),
+            member: bob.clone(),
             kind: ModKind::Mute,
             actor: "mod".to_string(),
             reason: Some("spam".to_string()),
@@ -2076,6 +2081,42 @@ where
         .unwrap());
     assert!(!store
         .is_moderated(&bob, &covering, ModKind::Mute)
+        .await
+        .unwrap());
+
+    // A **bridged** member is denied by the same rows: the subject is a
+    // `user@network` handle, and both backends must round-trip it unchanged —
+    // a foreign member truncated to their bare account here would silence (or
+    // fail to silence) a *local* account of the same name.
+    let alice_matrix: MemberRef = "alice@matrix.org".parse().unwrap();
+    let alice_local = MemberRef::local("alice".parse().unwrap());
+    store
+        .set_moderation(ModRecord {
+            scope: ns_scope.clone(),
+            member: alice_matrix.clone(),
+            kind: ModKind::Ban,
+            actor: "mod".to_string(),
+            reason: Some("raid".to_string()),
+            at_ms: 2_000,
+        })
+        .await
+        .unwrap();
+    assert!(store
+        .is_moderated(&alice_matrix, &covering, ModKind::Ban)
+        .await
+        .unwrap());
+    assert!(
+        !store
+            .is_moderated(&alice_local, &covering, ModKind::Ban)
+            .await
+            .unwrap(),
+        "the local `alice` is a different person from `alice@matrix.org`"
+    );
+    let list = store.list_moderation(&ns_scope).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].member, alice_matrix, "the handle survives storage");
+    assert!(store
+        .clear_moderation(&ns_scope, &alice_matrix, ModKind::Ban)
         .await
         .unwrap());
 

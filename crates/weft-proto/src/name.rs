@@ -127,6 +127,88 @@ impl fmt::Display for UserRef {
     }
 }
 
+/// A member of one of our namespaces, whoever they are: one of our accounts
+/// (`ada`) or a **bridged** member on their own network (`alice@matrix.org`).
+///
+/// This is the moderation subject (§6.7). A bare `Account` cannot name a
+/// bridged member — it has no `@` — which is why mute/ban/kick could not touch
+/// a Matrix user at all: the verb did not parse. Membership itself never had
+/// that limit (a namespace roster holds both forms), so the moderation verbs
+/// were the odd one out.
+///
+/// The two forms are exactly the two `weft_store::member_key` writes, and
+/// `local()`/`user()` are its `local_member`/`member_key` pair at the wire
+/// level. Which form is canonical depends on *our* network name, so the local
+/// form is deliberately un-qualified: `ada` moderated on `weft.example` stays
+/// `ada` if the network is later renamed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MemberRef {
+    /// One of ours, by bare account.
+    Local(Account),
+    /// A bridged or federated member, on their own network.
+    Foreign(UserRef),
+}
+
+impl MemberRef {
+    pub fn local(account: Account) -> Self {
+        MemberRef::Local(account)
+    }
+
+    /// A qualified user reduced to the form we store: bare when they are on
+    /// `home`, `user@network` otherwise.
+    pub fn of_user(user: &UserRef, home: &NetworkName) -> Self {
+        if user.network == *home {
+            MemberRef::Local(user.account.clone())
+        } else {
+            MemberRef::Foreign(user.clone())
+        }
+    }
+
+    /// The inverse: fill in `home` for a local member so callers that need a
+    /// full identity (presence, roster events) have one.
+    pub fn user(&self, home: &NetworkName) -> UserRef {
+        match self {
+            MemberRef::Local(account) => UserRef::new(account.clone(), home.clone()),
+            MemberRef::Foreign(user) => user.clone(),
+        }
+    }
+
+    /// The account half, without its network — for the local-only paths (voice
+    /// rooms, channel-actor ejection) that key on our own accounts.
+    pub fn account(&self) -> &Account {
+        match self {
+            MemberRef::Local(account) => account,
+            MemberRef::Foreign(user) => &user.account,
+        }
+    }
+
+    /// One of ours? (The local paths above apply only to these.)
+    pub fn is_local(&self) -> bool {
+        matches!(self, MemberRef::Local(_))
+    }
+}
+
+impl FromStr for MemberRef {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, ParseError> {
+        if s.contains('@') {
+            return Ok(MemberRef::Foreign(s.parse()?));
+        }
+
+        Ok(MemberRef::Local(s.parse()?))
+    }
+}
+
+impl fmt::Display for MemberRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MemberRef::Local(account) => account.fmt(f),
+            MemberRef::Foreign(user) => user.fmt(f),
+        }
+    }
+}
+
 /// Namespace name: one segment `[a-z0-9-_]+` (§2.3), no `#`, no `/`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NamespaceName(String);

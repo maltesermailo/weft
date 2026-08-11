@@ -1232,7 +1232,7 @@ impl<S: ControlStream> Session<S> {
         match cmd {
             Command::Mute {
                 scope,
-                account: target,
+                member: target,
                 reason,
             } => {
                 self.on_moderate(label, scope, target, ModKind::Mute, true, reason, actor)
@@ -1240,14 +1240,14 @@ impl<S: ControlStream> Session<S> {
             }
             Command::Unmute {
                 scope,
-                account: target,
+                member: target,
             } => {
                 self.on_moderate(label, scope, target, ModKind::Mute, false, None, actor)
                     .await
             }
             Command::Ban {
                 scope,
-                account: target,
+                member: target,
                 reason,
             } => {
                 self.on_moderate(label, scope, target, ModKind::Ban, true, reason, actor)
@@ -1255,14 +1255,14 @@ impl<S: ControlStream> Session<S> {
             }
             Command::Unban {
                 scope,
-                account: target,
+                member: target,
             } => {
                 self.on_moderate(label, scope, target, ModKind::Ban, false, None, actor)
                     .await
             }
             Command::Kick {
                 channel,
-                account: target,
+                member: target,
                 reason,
             } => self.on_kick(label, channel, target, reason, actor).await,
 
@@ -1503,6 +1503,12 @@ impl<S: ControlStream> Session<S> {
                 debug!(%blocked, "ingestion touching a netblocked network — dropped");
                 return Ok(Flow::Continue);
             }
+        }
+
+        // §6.7, the same shape one line up: a member this server has muted or
+        // banned does not get to keep talking through the bridge.
+        if self.foreign_denied(&channel, &sender).await {
+            return Ok(Flow::Continue);
         }
 
         // The provider minted these, exactly as a peer network does, so they take
@@ -1787,6 +1793,12 @@ impl<S: ControlStream> Session<S> {
             .unwrap_or(false)
         {
             debug!(network = %sender.network, "projected ingest from a netblocked network — dropped");
+            return Ok(Flow::Continue);
+        }
+        // §6.7 as on the replica door: a muted or banned member is silent here
+        // too. This is the projected case — our own channel, so the ban is
+        // unambiguously ours to enforce.
+        if self.foreign_denied(&channel, &sender).await {
             return Ok(Flow::Continue);
         }
 
@@ -2447,6 +2459,161 @@ impl<S: ControlStream> Session<S> {
                 warn!(%subject, "provider queue full — authority relay dropped");
             }
         }
+    }
+
+    /// **Moderation, outbound**: a local `MUTE`/`BAN`/`KICK` inside a bridged
+    /// namespace is relayed to the provider, which applies it in the foreign
+    /// system — a banned Matrix member is removed from the room, not merely
+    /// ignored here.
+    ///
+    /// Both doors, like [`Self::relay_provider_grant`] (whose shape this
+    /// follows): a **replica**'s realm scheme, or a **projected** native
+    /// namespace's flagged one.
+    ///
+    /// The local deny-list does not depend on this succeeding. With the provider
+    /// offline the act still stands here — their traffic is refused on ingest —
+    /// and the foreign side reconciles when the adapter returns. That ordering is
+    /// deliberate: a moderator's decision must not need a bridge to be true.
+    pub(super) async fn relay_provider_moderation(
+        &self,
+        scope: &str,
+        member: &MemberRef,
+        action: ModAction,
+        reason: Option<&str>,
+        actor: &Actor,
+    ) {
+        // The realm told *us* — echoing it back would ping-pong. The guard is
+        // the **session**, not the actor: a realm-side moderation arrives
+        // attributed (`@as=<their moderator>`) and so wears `Actor::Foreign`,
+        // which is indistinguishable from a federated peer's moderator acting
+        // on us — and that one does need relaying onward.
+        if matches!(self.state, State::PluginService { .. }) || matches!(actor, Actor::Provider(_))
+        {
+            return;
+        }
+
+        // The namespace the scope belongs to: `ns:<id>` names it, a channel
+        // scope (`#<ns-id>/<chan-id>`, which is what KICK always carries) is
+        // resolved through it.
+        let ns = match TokenScope::parse(scope) {
+            Some(TokenScope::Namespace(ns)) => ns,
+            Some(TokenScope::Channel(channel)) => {
+                match channel
+                    .parse::<ChannelName>()
+                    .ok()
+                    .and_then(|c| channel_namespace(&c))
+                {
+                    Some(ns) => ns.to_string(),
+                    None => return, // a top-level channel has no realm
+                }
+            }
+            _ => return, // `*` is ours alone — no realm governs the network
+        };
+        let Ok(Some(record)) = self.ctx.namespaces.namespace_by_id(&ns).await else {
+            return;
+        };
+        let scheme = match record
+            .origin
+            .as_deref()
+            .and_then(|o| o.parse::<ForeignUri>().ok())
+        {
+            Some(uri) => Some(uri.scheme().clone()),
+            None => record.bridges.iter().find_map(|b| b.parse::<Scheme>().ok()),
+        };
+        let Some((_, out)) = scheme
+            .as_ref()
+            .and_then(|s| self.ctx.provider_for_scheme(s))
+        else {
+            return; // native + unprojected, or the provider is offline
+        };
+
+        let reason = reason.map(str::to_string);
+        let cmd = match action {
+            ModAction::Mute => Command::Mute {
+                scope: scope.to_string(),
+                member: member.clone(),
+                reason,
+            },
+            ModAction::Unmute => Command::Unmute {
+                scope: scope.to_string(),
+                member: member.clone(),
+            },
+            ModAction::Ban => Command::Ban {
+                scope: scope.to_string(),
+                member: member.clone(),
+                reason,
+            },
+            ModAction::Unban => Command::Unban {
+                scope: scope.to_string(),
+                member: member.clone(),
+            },
+            ModAction::Kick => match scope.parse::<ChannelName>() {
+                Ok(channel) => Command::Kick {
+                    channel,
+                    member: member.clone(),
+                    reason,
+                },
+                Err(_) => return,
+            },
+        };
+
+        // A **local** subject rides with `ulid=` so the adapter can find their
+        // puppet (names are mutable); a bridged one addresses their own foreign
+        // identity and needs none.
+        //
+        // Sent bare otherwise, like the authority relay: the *act* is what the
+        // realm needs, and it performs the removal with its own authority (§9 —
+        // bridge-created rooms are bridge-controlled). The moderator's identity
+        // stays on the WEFT-side `MODERATED` (`by=`), which is where the audit
+        // trail lives.
+        let subject_ulid = match member {
+            MemberRef::Local(account) => {
+                self.ctx.accounts.account_ulid(account).await.ok().flatten()
+            }
+            MemberRef::Foreign(_) => None,
+        };
+
+        if let Ok(mut line) = Request::new(cmd).to_line() {
+            if let Some(ulid) = subject_ulid {
+                line.tags.insert("ulid".to_string(), ulid);
+            }
+            let Ok(line) = line.serialize() else {
+                return;
+            };
+            if out.try_send(line).is_err() {
+                warn!(%member, "provider queue full — moderation relay dropped");
+            }
+        }
+    }
+
+    /// Is this **bridged** sender muted or banned in `channel`?
+    ///
+    /// The counterpart of `can_post` for traffic that arrives over a provider
+    /// session. Without it a ban on a bridged member was a statement with no
+    /// effect: nothing on either ingest door consulted the deny-list, so their
+    /// messages kept landing in the channel they were banned from.
+    ///
+    /// Only the deny-list applies here — `restricted`/`frozen`/`provider-offline`
+    /// are gates on *our* users posting into *our* channels, and a realm's own
+    /// traffic answers to the realm.
+    pub(super) async fn foreign_denied(&self, channel: &ChannelName, sender: &UserRef) -> bool {
+        let member = MemberRef::of_user(sender, &self.ctx.info.network);
+        let scopes = covering_scopes(channel);
+
+        for kind in [ModKind::Ban, ModKind::Mute] {
+            if self
+                .ctx
+                .moderation
+                .is_moderated(&member, &scopes, kind)
+                .await
+                .unwrap_or(false)
+            {
+                debug!(%sender, %channel, kind = kind.as_str(), "ingest from a moderated member — dropped");
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Slice 4d, inbound: a bridged user DMs one of ours.

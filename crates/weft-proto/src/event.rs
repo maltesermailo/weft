@@ -7,7 +7,7 @@ use crate::foreign::ForeignUri;
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
 use crate::name::{
-    Account, ChannelId, ChannelName, GroupId, NamespaceId, NetworkName, Target, UserRef,
+    Account, ChannelId, ChannelName, GroupId, MemberRef, NamespaceId, NetworkName, Target, UserRef,
 };
 use crate::policy::RetentionPolicy;
 use crate::types::{
@@ -582,12 +582,13 @@ pub enum Event {
         hash: String,
         reason: Option<String>,
     },
-    /// `MODERATED <scope> <account> <action>` with `by=`/`reason=` tags (§6.7)
+    /// `MODERATED <scope> <member> <action>` with `by=`/`reason=` tags (§6.7)
     /// — a moderation state change (mute/ban/kick), broadcast to a channel's
-    /// members and echoed to the acting moderator.
+    /// members and echoed to the acting moderator. `member` is bare for one of
+    /// ours, `user@network` for a bridged one (see [`MemberRef`]).
     Moderated {
         scope: String,
-        account: Account,
+        member: MemberRef,
         action: ModAction,
         /// Who moderated — a local name or a foreign `account@network` (§10.4,
         /// a federated moderator acting on H via homeserver authority).
@@ -1719,11 +1720,11 @@ impl Event {
             "MODERATED" => {
                 let mut args = Args::new(line, "MODERATED");
                 let scope = args.req("scope")?.to_string();
-                let account = args.req("account")?.parse()?;
+                let member = args.req("member")?.parse()?;
                 let action = args.req("action")?.parse()?;
                 Ok(Event::Moderated {
                     scope,
-                    account,
+                    member,
                     action,
                     by: line.tags.get("by").filter(|v| !v.is_empty()).cloned(),
                     reason: line.tags.get("reason").filter(|v| !v.is_empty()).cloned(),
@@ -2593,7 +2594,7 @@ impl Event {
             }
             Event::Moderated {
                 scope,
-                account,
+                member,
                 action,
                 by,
                 reason,
@@ -2606,7 +2607,7 @@ impl Event {
                 }
                 (
                     "MODERATED",
-                    vec![scope.clone(), account.to_string(), action.to_string()],
+                    vec![scope.clone(), member.to_string(), action.to_string()],
                     None,
                 )
             }
@@ -3875,7 +3876,7 @@ mod tests {
         let full = Reply::with_label(
             Event::Moderated {
                 scope: "#general".into(),
-                account: "bob".parse().unwrap(),
+                member: "bob".parse().unwrap(),
                 action: crate::types::ModAction::Mute,
                 by: Some("mod".to_string()),
                 reason: Some("spamming".into()),
@@ -3889,7 +3890,7 @@ mod tests {
         // Minimal form (broadcast, no by/reason).
         round_trip(&Reply::new(Event::Moderated {
             scope: "*".into(),
-            account: "eve".parse().unwrap(),
+            member: "eve".parse().unwrap(),
             action: crate::types::ModAction::Ban,
             by: None,
             reason: None,
@@ -3897,7 +3898,7 @@ mod tests {
         // §10.4 a federated moderator (account@network) as `by`.
         round_trip(&Reply::new(Event::Moderated {
             scope: "ns:gaming".into(),
-            account: "eve".parse().unwrap(),
+            member: "eve".parse().unwrap(),
             action: crate::types::ModAction::Mute,
             by: Some("alice@peer.example".to_string()),
             reason: None,

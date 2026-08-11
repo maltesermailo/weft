@@ -489,7 +489,7 @@ impl Realm {
         &self,
         actor: &str,
         scope: &str,
-        account: &str,
+        member: &str,
         reason: Option<&str>,
         ban: bool,
         label: Option<&str>,
@@ -497,13 +497,13 @@ impl Realm {
         let cmd = if ban {
             weft_proto::Command::Ban {
                 scope: scope.to_string(),
-                account: account.parse()?,
+                member: member.parse()?,
                 reason: reason.map(str::to_string),
             }
         } else {
             weft_proto::Command::Unban {
                 scope: scope.to_string(),
-                account: account.parse()?,
+                member: member.parse()?,
             }
         };
 
@@ -515,7 +515,7 @@ impl Realm {
         &self,
         actor: &str,
         channel: &str,
-        account: &str,
+        member: &str,
         reason: Option<&str>,
         label: Option<&str>,
     ) -> anyhow::Result<()> {
@@ -524,7 +524,7 @@ impl Realm {
             label,
             weft_proto::Command::Kick {
                 channel: channel.parse()?,
-                account: account.parse()?,
+                member: member.parse()?,
                 reason: reason.map(str::to_string),
             },
         )
@@ -660,7 +660,7 @@ impl Realm {
         &self,
         actor: &str,
         scope: &str,
-        account: &str,
+        member: &str,
         reason: Option<&str>,
         mute: bool,
         label: Option<&str>,
@@ -668,13 +668,13 @@ impl Realm {
         let cmd = if mute {
             weft_proto::Command::Mute {
                 scope: scope.to_string(),
-                account: account.parse()?,
+                member: member.parse()?,
                 reason: reason.map(str::to_string),
             }
         } else {
             weft_proto::Command::Unmute {
                 scope: scope.to_string(),
-                account: account.parse()?,
+                member: member.parse()?,
             }
         };
 

@@ -1188,13 +1188,13 @@ pub fn on_line<E: EventSink>(
         }),
         Event::Moderated {
             scope,
-            account,
+            member,
             action,
             by,
             reason,
         } => sink.emit(ClientEvent::Moderated {
             scope,
-            account: account.to_string(),
+            account: member.to_string(),
             action: action.to_string(),
             by: by.map(|a| a.to_string()),
             reason,
@@ -1530,39 +1530,37 @@ pub fn build_bridge_sever(peer: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Moderation (§6.7): `MUTE`/`UNMUTE`/`BAN`/`UNBAN` `<scope> <account> [:reason]`
-/// or `KICK <#chan> <account> [:reason]`. For `kick`, `scope` is the channel.
+/// Moderation (§6.7): `MUTE`/`UNMUTE`/`BAN`/`UNBAN` `<scope> <member> [:reason]`
+/// or `KICK <#chan> <member> [:reason]`. For `kick`, `scope` is the channel.
+///
+/// `member` is a bare handle for one of ours and `user@network` for a bridged
+/// one — the same string the roster shows, passed through unchanged, so the UI
+/// can moderate a Matrix member with the handle it already displays.
 pub fn build_moderation(
     verb: &str,
     scope: &str,
-    account: &str,
+    member: &str,
     reason: Option<&str>,
 ) -> Result<String, String> {
-    let acct: weft_proto::Account = account.parse().map_err(|_| "bad account".to_string())?;
+    let member: weft_proto::MemberRef = member.parse().map_err(|_| "bad member".to_string())?;
     let scope = scope.to_string();
     let reason = reason.filter(|r| !r.is_empty()).map(String::from);
     let cmd = match verb {
         "mute" => Command::Mute {
             scope,
-            account: acct,
+            member,
             reason,
         },
-        "unmute" => Command::Unmute {
-            scope,
-            account: acct,
-        },
+        "unmute" => Command::Unmute { scope, member },
         "ban" => Command::Ban {
             scope,
-            account: acct,
+            member,
             reason,
         },
-        "unban" => Command::Unban {
-            scope,
-            account: acct,
-        },
+        "unban" => Command::Unban { scope, member },
         "kick" => Command::Kick {
             channel: scope.parse().map_err(|_| "bad channel".to_string())?,
-            account: acct,
+            member,
             reason,
         },
         _ => return Err(format!("unknown moderation verb: {verb}")),

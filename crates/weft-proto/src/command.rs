@@ -5,7 +5,7 @@ use crate::error::{ParseError, SerializeError};
 use crate::foreign::{ForeignUri, Scheme};
 use crate::id::MsgId;
 use crate::line::{label_from_tags, write_label, Args, Line, Tags};
-use crate::name::{Account, ChannelName, GroupId, NetworkName, Target, UserRef};
+use crate::name::{Account, ChannelName, GroupId, MemberRef, NetworkName, Target, UserRef};
 use crate::types::{
     report_category_ok, HistoryMode, MediaMode, MsgMeta, PresenceStatus, ReportScope, ReportStatus,
     ResolveAction, StreamMode, TypingState, Visibility,
@@ -617,28 +617,32 @@ pub enum Command {
         category: String,
         note: Option<String>,
     },
-    /// `MUTE <scope> <account> [:reason]` — deny `send` to an account at a
+    /// `MUTE <scope> <member> [:reason]` — deny `send` to a member at a
     /// scope (`#chan|ns:<name>|*`, §6.7). Cap `mute` at the scope.
+    ///
+    /// `member` is bare for one of ours, `user@network` for a bridged member —
+    /// a moderator's reach covers everyone in the room, not only the locals
+    /// (see [`MemberRef`]).
     Mute {
         scope: String,
-        account: Account,
+        member: MemberRef,
         reason: Option<String>,
     },
-    /// `UNMUTE <scope> <account>` — lift a mute.
-    Unmute { scope: String, account: Account },
-    /// `BAN <scope> <account> [:reason]` — deny join + send at a scope. Cap `ban`.
+    /// `UNMUTE <scope> <member>` — lift a mute.
+    Unmute { scope: String, member: MemberRef },
+    /// `BAN <scope> <member> [:reason]` — deny join + send at a scope. Cap `ban`.
     Ban {
         scope: String,
-        account: Account,
+        member: MemberRef,
         reason: Option<String>,
     },
-    /// `UNBAN <scope> <account>` — lift a ban.
-    Unban { scope: String, account: Account },
-    /// `KICK <#chan> <account> [:reason]` — force-part (no persistent state).
+    /// `UNBAN <scope> <member>` — lift a ban.
+    Unban { scope: String, member: MemberRef },
+    /// `KICK <#chan> <member> [:reason]` — force-part (no persistent state).
     /// Channel-only. Cap `kick`.
     Kick {
         channel: ChannelName,
-        account: Account,
+        member: MemberRef,
         reason: Option<String>,
     },
     /// `MODLIST <scope>` — list the moderation deny-list (mutes + bans) at a
@@ -1829,28 +1833,28 @@ impl Command {
                 };
                 let mut args = Args::new(line, verb);
                 let scope = args.req("scope")?.to_string();
-                let account = args.req("account")?.parse()?;
+                let member = args.req("member")?.parse()?;
                 let reason = args.trailing_opt();
                 Ok(match verb {
                     "MUTE" => Command::Mute {
                         scope,
-                        account,
+                        member,
                         reason,
                     },
-                    "UNMUTE" => Command::Unmute { scope, account },
+                    "UNMUTE" => Command::Unmute { scope, member },
                     "BAN" => Command::Ban {
                         scope,
-                        account,
+                        member,
                         reason,
                     },
-                    _ => Command::Unban { scope, account },
+                    _ => Command::Unban { scope, member },
                 })
             }
             "KICK" => {
                 let mut args = Args::new(line, "KICK");
                 Ok(Command::Kick {
                     channel: args.req("channel")?.parse()?,
-                    account: args.req("account")?.parse()?,
+                    member: args.req("member")?.parse()?,
                     reason: args.trailing_opt(),
                 })
             }
@@ -2855,35 +2859,35 @@ impl Command {
             }
             Command::Mute {
                 scope,
-                account,
+                member,
                 reason,
             } => (
                 "MUTE",
-                vec![scope.clone(), account.to_string()],
+                vec![scope.clone(), member.to_string()],
                 reason.clone(),
             ),
-            Command::Unmute { scope, account } => {
-                ("UNMUTE", vec![scope.clone(), account.to_string()], None)
+            Command::Unmute { scope, member } => {
+                ("UNMUTE", vec![scope.clone(), member.to_string()], None)
             }
             Command::Ban {
                 scope,
-                account,
+                member,
                 reason,
             } => (
                 "BAN",
-                vec![scope.clone(), account.to_string()],
+                vec![scope.clone(), member.to_string()],
                 reason.clone(),
             ),
-            Command::Unban { scope, account } => {
-                ("UNBAN", vec![scope.clone(), account.to_string()], None)
+            Command::Unban { scope, member } => {
+                ("UNBAN", vec![scope.clone(), member.to_string()], None)
             }
             Command::Kick {
                 channel,
-                account,
+                member,
                 reason,
             } => (
                 "KICK",
-                vec![channel.to_string(), account.to_string()],
+                vec![channel.to_string(), member.to_string()],
                 reason.clone(),
             ),
             Command::ModList { scope } => ("MODLIST", vec![scope.clone()], None),
@@ -4348,7 +4352,7 @@ mod tests {
         round_trip(&Request::with_label(
             Command::Mute {
                 scope: "#general".into(),
-                account: "bob".parse().unwrap(),
+                member: "bob".parse().unwrap(),
                 reason: Some("spamming".into()),
             },
             "m1",
@@ -4356,7 +4360,7 @@ mod tests {
         assert_eq!(
             Request::new(Command::Mute {
                 scope: "ns:gaming".into(),
-                account: "bob".parse().unwrap(),
+                member: "bob".parse().unwrap(),
                 reason: None,
             })
             .serialize()
@@ -4365,25 +4369,71 @@ mod tests {
         );
         round_trip(&Request::new(Command::Unmute {
             scope: "*".into(),
-            account: "bob".parse().unwrap(),
+            member: "bob".parse().unwrap(),
         }));
         round_trip(&Request::new(Command::Ban {
             scope: "*".into(),
-            account: "eve".parse().unwrap(),
+            member: "eve".parse().unwrap(),
             reason: Some("raid".into()),
         }));
         round_trip(&Request::new(Command::Unban {
             scope: "#general".into(),
-            account: "eve".parse().unwrap(),
+            member: "eve".parse().unwrap(),
         }));
         round_trip(&Request::new(Command::Kick {
             channel: "#general".parse().unwrap(),
-            account: "eve".parse().unwrap(),
+            member: "eve".parse().unwrap(),
             reason: None,
         }));
         round_trip(&Request::new(Command::ModList {
             scope: "ns:games".into(),
         }));
+    }
+
+    /// Every moderation verb accepts a **bridged** member (`user@network`), not
+    /// only one of ours — the whole point of `MemberRef`. Before this the
+    /// parameter was an `Account`, so a Matrix member's handle failed to parse
+    /// and the verb could not be expressed at all.
+    #[test]
+    fn moderation_verbs_name_a_bridged_member() {
+        let matrix: MemberRef = "alice@matrix.org".parse().unwrap();
+        assert!(!matrix.is_local());
+
+        assert_eq!(
+            Request::new(Command::Ban {
+                scope: "ns:01arz3ndektsv4rrffq69g5fav".into(),
+                member: matrix.clone(),
+                reason: Some("raid".into()),
+            })
+            .serialize()
+            .unwrap(),
+            "BAN ns:01arz3ndektsv4rrffq69g5fav alice@matrix.org :raid"
+        );
+        round_trip(&Request::new(Command::Mute {
+            scope: "*".into(),
+            member: matrix.clone(),
+            reason: None,
+        }));
+        round_trip(&Request::new(Command::Unban {
+            scope: "*".into(),
+            member: matrix.clone(),
+        }));
+        round_trip(&Request::new(Command::Kick {
+            channel: "#01arz3ndektsv4rrffq69g5fav/01bx5zzkbkactav9wevgemmvrz"
+                .parse()
+                .unwrap(),
+            member: matrix,
+            reason: Some("cool off".into()),
+        }));
+
+        // A handle with no network is still one of ours (the bare form), and a
+        // malformed network is still a parse error — lenient-in, not blind.
+        assert!(matches!(
+            "bob".parse::<MemberRef>().unwrap(),
+            MemberRef::Local(_)
+        ));
+        assert!("bob@".parse::<MemberRef>().is_err());
+        assert!("@matrix.org".parse::<MemberRef>().is_err());
     }
 
     #[test]

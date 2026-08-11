@@ -2,8 +2,8 @@
 //! are rows referencing the original message's msgid — never mutations.
 
 use weft_proto::{
-    Account, ChannelKind, ChannelName, ContentState, GroupId, MsgId, MsgMeta, NamespaceName,
-    NetworkName, ReportStatus, ResolveAction, RetentionPolicy, Ulid, UserRef,
+    Account, ChannelKind, ChannelName, ContentState, GroupId, MemberRef, MsgId, MsgMeta,
+    NamespaceName, NetworkName, ReportStatus, ResolveAction, RetentionPolicy, Ulid, UserRef,
 };
 
 /// Where events live: a channel, a same-network DM pair (§9.5), or a group DM.
@@ -401,7 +401,10 @@ pub struct PeerRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModRecord {
     pub scope: String,
-    pub account: Account,
+    /// Who is denied — bare for one of ours, `user@network` for a bridged
+    /// member (§6.7). Stored as its `Display` form, which is exactly the member
+    /// key the roster uses, so the same subject reads the same everywhere.
+    pub member: MemberRef,
     pub kind: ModKind,
     /// The moderator who set it.
     pub actor: String,

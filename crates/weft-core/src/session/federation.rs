@@ -1454,10 +1454,11 @@ impl<S: ControlStream> Session<S> {
         account: &Account,
     ) -> Result<Option<(ErrCode, &'static str)>, weft_store::StoreError> {
         let scopes = covering_scopes(channel);
+        let member = MemberRef::local(account.clone());
         if self
             .ctx
             .moderation
-            .is_moderated(account, &scopes, ModKind::Ban)
+            .is_moderated(&member, &scopes, ModKind::Ban)
             .await?
         {
             return Ok(Some((ErrCode::Forbidden, "banned")));
@@ -1465,7 +1466,7 @@ impl<S: ControlStream> Session<S> {
         if self
             .ctx
             .moderation
-            .is_moderated(account, &scopes, ModKind::Mute)
+            .is_moderated(&member, &scopes, ModKind::Mute)
             .await?
         {
             return Ok(Some((ErrCode::Forbidden, "muted")));
@@ -1573,7 +1574,7 @@ impl<S: ControlStream> Session<S> {
         match cmd {
             Command::Mute {
                 scope,
-                account: target,
+                member: target,
                 reason,
             } => {
                 self.on_moderate(label, scope, target, ModKind::Mute, true, reason, actor)
@@ -1581,14 +1582,14 @@ impl<S: ControlStream> Session<S> {
             }
             Command::Unmute {
                 scope,
-                account: target,
+                member: target,
             } => {
                 self.on_moderate(label, scope, target, ModKind::Mute, false, None, actor)
                     .await
             }
             Command::Ban {
                 scope,
-                account: target,
+                member: target,
                 reason,
             } => {
                 self.on_moderate(label, scope, target, ModKind::Ban, true, reason, actor)
@@ -1596,14 +1597,14 @@ impl<S: ControlStream> Session<S> {
             }
             Command::Unban {
                 scope,
-                account: target,
+                member: target,
             } => {
                 self.on_moderate(label, scope, target, ModKind::Ban, false, None, actor)
                     .await
             }
             Command::Kick {
                 channel,
-                account: target,
+                member: target,
                 reason,
             } => self.on_kick(label, channel, target, reason, actor).await,
             // §6.5 delegation: a federated admin re-delegates caps she holds

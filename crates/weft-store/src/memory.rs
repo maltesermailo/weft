@@ -7,8 +7,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use weft_proto::{
-    Account, ChannelName, FriendState, GroupId, MsgId, NamespaceName, NetworkName, RetentionPolicy,
-    Ulid, UserRef,
+    Account, ChannelName, FriendState, GroupId, MemberRef, MsgId, NamespaceName, NetworkName,
+    RetentionPolicy, Ulid, UserRef,
 };
 
 use crate::blob::BlobRecord;
@@ -151,8 +151,8 @@ struct Inner {
     /// WC1 admin audit log, in append order — index i is `seq == i + 1`. The
     /// `Vec` position IS the chain order (single-writer, like ULID minting).
     audit: Vec<AuditRecord>,
-    /// (scope, account, kind) → moderation deny record (§6.7).
-    moderation: HashMap<(String, Account, ModKind), ModRecord>,
+    /// (scope, member, kind) → moderation deny record (§6.7).
+    moderation: HashMap<(String, MemberRef, ModKind), ModRecord>,
     /// channel → pinned msgids, ordered by ULID (§6.4).
     pins: HashMap<ChannelName, std::collections::BTreeMap<Ulid, MsgId>>,
     /// §9.4 thread names: (scope key, root msgid) → display name.
@@ -685,7 +685,9 @@ impl AccountStore for MemoryStore {
         inner.ns_memberships.remove(account.as_str()); // member key = bare local name
         inner.channel_hides.remove(account);
         inner.grants.retain(|(subject, _), _| subject != &ulid);
-        inner.moderation.retain(|(_, acct, _), _| acct != account);
+        inner
+            .moderation
+            .retain(|(_, member, _), _| member != &MemberRef::local(account.clone()));
         inner
             .role_assignments
             .retain(|(_, _, subject)| subject != account.as_str());
@@ -1191,7 +1193,7 @@ impl ChannelStore for MemoryStore {
             }
         }
         // 9. moderation deny-list (key scope + record scope).
-        let mk: Vec<(String, Account, ModKind)> = inner
+        let mk: Vec<(String, MemberRef, ModKind)> = inner
             .moderation
             .keys()
             .filter(|(s, _, _)| *s == ok)
@@ -1944,7 +1946,7 @@ impl ModerationStore for MemoryStore {
     async fn set_moderation(&self, record: ModRecord) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         inner.moderation.insert(
-            (record.scope.clone(), record.account.clone(), record.kind),
+            (record.scope.clone(), record.member.clone(), record.kind),
             record,
         );
         Ok(())
@@ -1953,19 +1955,19 @@ impl ModerationStore for MemoryStore {
     async fn clear_moderation(
         &self,
         scope: &str,
-        account: &Account,
+        member: &MemberRef,
         kind: ModKind,
     ) -> Result<bool, StoreError> {
         let mut inner = self.inner.lock().expect("store lock");
         Ok(inner
             .moderation
-            .remove(&(scope.to_string(), account.clone(), kind))
+            .remove(&(scope.to_string(), member.clone(), kind))
             .is_some())
     }
 
     async fn is_moderated(
         &self,
-        account: &Account,
+        member: &MemberRef,
         scopes: &[String],
         kind: ModKind,
     ) -> Result<bool, StoreError> {
@@ -1973,7 +1975,7 @@ impl ModerationStore for MemoryStore {
         Ok(scopes.iter().any(|scope| {
             inner
                 .moderation
-                .contains_key(&(scope.clone(), account.clone(), kind))
+                .contains_key(&(scope.clone(), member.clone(), kind))
         }))
     }
 
@@ -1985,7 +1987,7 @@ impl ModerationStore for MemoryStore {
             .filter(|r| r.scope == scope)
             .cloned()
             .collect();
-        records.sort_by(|a, b| a.account.as_str().cmp(b.account.as_str()));
+        records.sort_by_key(|r| r.member.to_string());
         Ok(records)
     }
 }

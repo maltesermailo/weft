@@ -11,8 +11,8 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use weft_proto::{
-    Account, ChannelName, ContentState, FriendState, GroupId, MsgId, MsgMeta, NamespaceName,
-    NetworkName, ReportStatus, RetentionPolicy, Ulid, UserRef,
+    Account, ChannelName, ContentState, FriendState, GroupId, MemberRef, MsgId, MsgMeta,
+    NamespaceName, NetworkName, ReportStatus, RetentionPolicy, Ulid, UserRef,
 };
 
 use crate::compact::compaction_plan;
@@ -2698,7 +2698,7 @@ impl ModerationStore for PgStore {
             "#,
         )
         .bind(&record.scope)
-        .bind(record.account.as_str())
+        .bind(record.member.to_string())
         .bind(record.kind.as_str())
         .bind(&record.actor)
         .bind(&record.reason)
@@ -2712,14 +2712,14 @@ impl ModerationStore for PgStore {
     async fn clear_moderation(
         &self,
         scope: &str,
-        account: &Account,
+        member: &MemberRef,
         kind: ModKind,
     ) -> Result<bool, StoreError> {
         let result = sqlx::query(
             "DELETE FROM weft_moderation WHERE scope = $1 AND account = $2 AND kind = $3",
         )
         .bind(scope)
-        .bind(account.as_str())
+        .bind(member.to_string())
         .bind(kind.as_str())
         .execute(&self.pool)
         .await
@@ -2729,7 +2729,7 @@ impl ModerationStore for PgStore {
 
     async fn is_moderated(
         &self,
-        account: &Account,
+        member: &MemberRef,
         scopes: &[String],
         kind: ModKind,
     ) -> Result<bool, StoreError> {
@@ -2739,7 +2739,7 @@ impl ModerationStore for PgStore {
         sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM weft_moderation WHERE account = $1 AND kind = $2 AND scope = ANY($3))",
         )
-        .bind(account.as_str())
+        .bind(member.to_string())
         .bind(kind.as_str())
         .bind(scopes)
         .fetch_one(&self.pool)
@@ -2761,10 +2761,10 @@ impl ModerationStore for PgStore {
                 };
                 Ok(ModRecord {
                     scope: row.get("scope"),
-                    account: row
+                    member: row
                         .get::<&str, _>("account")
                         .parse()
-                        .map_err(|_| StoreError::Backend("corrupt row: account".to_string()))?,
+                        .map_err(|_| StoreError::Backend("corrupt row: member".to_string()))?,
                     kind,
                     actor: row.get("actor"),
                     reason: row.get("reason"),

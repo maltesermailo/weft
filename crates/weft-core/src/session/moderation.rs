@@ -310,7 +310,7 @@ impl<S: ControlStream> Session<S> {
         &mut self,
         label: Option<String>,
         scope: String,
-        target: Account,
+        target: MemberRef,
         kind: ModKind,
         add: bool,
         reason: Option<String>,
@@ -337,7 +337,7 @@ impl<S: ControlStream> Session<S> {
                 .moderation
                 .set_moderation(ModRecord {
                     scope: scope.clone(),
-                    account: target.clone(),
+                    member: target.clone(),
                     kind,
                     actor: actor.to_string(),
                     reason: reason.clone(),
@@ -355,19 +355,23 @@ impl<S: ControlStream> Session<S> {
             return self.internal(label, &e).await;
         }
         // A fresh channel-scope ban force-parts the target (text) and, §16,
-        // ejects them from that channel's voice room too.
-        if add && kind == ModKind::Ban {
+        // ejects them from that channel's voice room too. Both act on a live
+        // local session, so a **bridged** member has nothing to eject here —
+        // their removal is the realm's to perform, and the relay below asks for
+        // it. Their traffic stops either way: the deny-list above is what the
+        // ingest path checks.
+        if add && kind == ModKind::Ban && target.is_local() {
             if let Ok(channel) = scope.parse::<ChannelName>() {
                 if let Some(handle) = self.ctx.registry.get(&channel) {
-                    handle.eject(target.clone()).await;
+                    handle.eject(target.account().clone()).await;
                 }
-                self.eject_channel_voice(&target, &channel).await;
+                self.eject_channel_voice(target.account(), &channel).await;
             }
         }
         // §16 a MUTE/UNMUTE also silences/resumes the target live in any voice
         // room they're in — drop their audio at the SFU + flip the roster flag.
-        if kind == ModKind::Mute && self.ctx.voice_backend().is_some() {
-            self.mute_in_voice(&target, add).await;
+        if kind == ModKind::Mute && target.is_local() && self.ctx.voice_backend().is_some() {
+            self.mute_in_voice(target.account(), add).await;
         }
         let action = match (kind, add) {
             (ModKind::Mute, true) => ModAction::Mute,
@@ -375,11 +379,16 @@ impl<S: ControlStream> Session<S> {
             (ModKind::Ban, true) => ModAction::Ban,
             (ModKind::Ban, false) => ModAction::Unban,
         };
+
+        // Ask the realm to apply it foreign-side (a bridged namespace only).
+        self.relay_provider_moderation(&scope, &target, action, reason.as_deref(), &actor)
+            .await;
+
         self.send_event(
             label,
             Event::Moderated {
                 scope,
-                account: target,
+                member: target,
                 action,
                 by: Some(actor.to_string()),
                 reason,
@@ -395,7 +404,7 @@ impl<S: ControlStream> Session<S> {
         &mut self,
         label: Option<String>,
         channel: ChannelName,
-        target: Account,
+        target: MemberRef,
         reason: Option<String>,
         actor: Actor,
     ) -> io::Result<Flow> {
@@ -412,14 +421,23 @@ impl<S: ControlStream> Session<S> {
         let Some(handle) = self.ctx.registry.get(&channel) else {
             return self.no_such_target(label).await;
         };
-        handle.eject(target.clone()).await;
-        // §16 a kick also removes them from the channel's voice room.
-        self.eject_channel_voice(&target, &channel).await;
+        // Local halves — a bridged member holds no session and no voice slot
+        // here; the relay below is what removes them where they actually are.
+        if target.is_local() {
+            handle.eject(target.account().clone()).await;
+            // §16 a kick also removes them from the channel's voice room.
+            self.eject_channel_voice(target.account(), &channel).await;
+        }
+
+        let scope = channel.to_string();
+        self.relay_provider_moderation(&scope, &target, ModAction::Kick, reason.as_deref(), &actor)
+            .await;
+
         self.send_event(
             label,
             Event::Moderated {
-                scope: channel.to_string(),
-                account: target,
+                scope,
+                member: target,
                 action: ModAction::Kick,
                 by: Some(actor.to_string()),
                 reason,
@@ -473,7 +491,7 @@ impl<S: ControlStream> Session<S> {
                 None,
                 Event::Moderated {
                     scope: record.scope,
-                    account: record.account,
+                    member: record.member,
                     action,
                     by: Some(record.actor),
                     reason: record.reason,

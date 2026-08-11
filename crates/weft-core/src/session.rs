@@ -19,10 +19,10 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use weft_crypto::{Capability, PublicKey, SignedManifest, TokenScope};
 use weft_proto::{
     Account, BridgeState, ChannelKind, ChannelName, Command, ContentState, ErrCode, ErrEvent,
-    Event, ForeignUri, GroupId, HistoryMode, Line, MediaMode, MemberAction, MessageEvent,
-    ModAction, MsgId, MsgMeta, NamespaceName, NetworkName, NsInfoKind, ParseError, Reply,
-    ReportScope, ReportStatus, Request, ResolveAction, RetentionPolicy, Scheme, StreamMode, Target,
-    Ulid, UserRef, VerifyState, Visibility, MAX_LABEL_BYTES,
+    Event, ForeignUri, GroupId, HistoryMode, Line, MediaMode, MemberAction, MemberRef,
+    MessageEvent, ModAction, MsgId, MsgMeta, NamespaceName, NetworkName, NsInfoKind, ParseError,
+    Reply, ReportScope, ReportStatus, Request, ResolveAction, RetentionPolicy, Scheme, StreamMode,
+    Target, Ulid, UserRef, VerifyState, Visibility, MAX_LABEL_BYTES,
 };
 
 use weft_store::{
@@ -1446,7 +1446,7 @@ impl<S: ControlStream> Session<S> {
             // §6.7 moderation. `account` here is the acting moderator.
             Command::Mute {
                 scope,
-                account: target,
+                member: target,
                 reason,
             } => {
                 self.on_moderate(
@@ -1462,7 +1462,7 @@ impl<S: ControlStream> Session<S> {
             }
             Command::Unmute {
                 scope,
-                account: target,
+                member: target,
             } => {
                 self.on_moderate(
                     label,
@@ -1477,7 +1477,7 @@ impl<S: ControlStream> Session<S> {
             }
             Command::Ban {
                 scope,
-                account: target,
+                member: target,
                 reason,
             } => {
                 self.on_moderate(
@@ -1493,7 +1493,7 @@ impl<S: ControlStream> Session<S> {
             }
             Command::Unban {
                 scope,
-                account: target,
+                member: target,
             } => {
                 self.on_moderate(
                     label,
@@ -1508,7 +1508,7 @@ impl<S: ControlStream> Session<S> {
             }
             Command::Kick {
                 channel,
-                account: target,
+                member: target,
                 reason,
             } => {
                 self.on_kick(label, channel, target, reason, Actor::Local(account))

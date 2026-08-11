@@ -52,10 +52,11 @@ impl<S: ControlStream> Session<S> {
 
         // §6.7 moderation: a ban denies voice outright; a mute removes `speak`.
         let scopes = covering_scopes(&channel);
+        let member = MemberRef::local(account.clone());
         match self
             .ctx
             .moderation
-            .is_moderated(&account, &scopes, ModKind::Ban)
+            .is_moderated(&member, &scopes, ModKind::Ban)
             .await
         {
             Ok(true) => {
@@ -69,7 +70,7 @@ impl<S: ControlStream> Session<S> {
         let muted = match self
             .ctx
             .moderation
-            .is_moderated(&account, &scopes, ModKind::Mute)
+            .is_moderated(&member, &scopes, ModKind::Mute)
             .await
         {
             Ok(muted) => muted,
@@ -297,7 +298,7 @@ impl<S: ControlStream> Session<S> {
         if matches!(
             self.ctx
                 .moderation
-                .is_moderated(account, &scopes, ModKind::Ban)
+                .is_moderated(&MemberRef::local(account.clone()), &scopes, ModKind::Ban)
                 .await,
             Ok(true)
         ) {

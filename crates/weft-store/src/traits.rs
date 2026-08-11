@@ -3,7 +3,8 @@
 
 use async_trait::async_trait;
 use weft_proto::{
-    Account, ChannelName, FriendState, GroupId, MsgId, ReportStatus, RetentionPolicy, Ulid, UserRef,
+    Account, ChannelName, FriendState, GroupId, MemberRef, MsgId, ReportStatus, RetentionPolicy,
+    Ulid, UserRef,
 };
 
 use weft_proto::NamespaceName;
@@ -702,22 +703,22 @@ pub trait PeerStore: Send + Sync {
 #[async_trait]
 pub trait ModerationStore: Send + Sync {
     /// Set (or refresh) a mute/ban. Replaces any existing record for the same
-    /// `(scope, account, kind)`.
+    /// `(scope, member, kind)`.
     async fn set_moderation(&self, record: ModRecord) -> Result<(), StoreError>;
 
     /// Clear a mute/ban. False = there was none.
     async fn clear_moderation(
         &self,
         scope: &str,
-        account: &Account,
+        member: &MemberRef,
         kind: ModKind,
     ) -> Result<bool, StoreError>;
 
-    /// Is `account` under a record of `kind` at any of `scopes` (the covering
+    /// Is `member` under a record of `kind` at any of `scopes` (the covering
     /// set: channel, its namespace, `*`)?
     async fn is_moderated(
         &self,
-        account: &Account,
+        member: &MemberRef,
         scopes: &[String],
         kind: ModKind,
     ) -> Result<bool, StoreError>;

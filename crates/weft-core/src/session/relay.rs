@@ -94,7 +94,11 @@ impl<S: ControlStream> Session<S> {
         if self
             .ctx
             .moderation
-            .is_moderated(account, &covering_scopes(channel), ModKind::Ban)
+            .is_moderated(
+                &MemberRef::local(account.clone()),
+                &covering_scopes(channel),
+                ModKind::Ban,
+            )
             .await
             .unwrap_or(false)
         {

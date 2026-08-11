@@ -463,10 +463,29 @@ Commands marked _(bridge)_ run only inside an authenticated bridge session; the 
 | `REPORTS LIST` | `REPORTS LIST <scope> [status=open\|resolved] [cursor]` | `reports` at scope | The handler queue. → `REPORT-FILED` page + `MORE`. `scope` is the concrete cap scope (`ns:<ns-id>` or `*`). | `REPORTS LIST ns:01J8NSGAMING status=open` → `@scope=ns;state=verified REPORT-FILED r_01J… test.example/01J…B harassment` + `MORE <cursor>`
 | `REPORTS RESOLVE` | `REPORTS RESOLVE <report-id> <action> [:note]` | `reports` | Releases the retention hold after a 7-day grace (RECOMMENDED). → `REPORT-RESOLVED`. | `REPORTS RESOLVE r_01J… content-removed :removed` → `@by=ada@test.example;note=removed REPORT-RESOLVED r_01J… content-removed`
 | `MODLIST` | `MODLIST <scope>` | `mute` *or* `ban` at scope | List the current deny-list (mutes + bans) at a scope. → a `BATCH` of `MODERATED` (one per live entry, `by=`/`reason=` populated); non-moderators get `CAP-REQUIRED`. | `MODLIST ns:01J8NSGAMING` → `@id=b2 BATCH START` … `@by=ada@test.example;reason=spam MODERATED ns:01J8NSGAMING bob mute` … `@id=b2 BATCH END`
-| `MUTE` / `UNMUTE` | `MUTE <scope> <account> [:reason]` | `mute` at scope | Deny/allow `send`. `scope` = `#ns-id/chan-id\|ns:<ns-id>\|*` (a `*` mute is network-wide). → `MODERATED`. | `MUTE #01J8NSGAMING/01J8CHGENERAL bob :spamming` → `@by=ada@test.example;reason=spamming MODERATED #01J8NSGAMING/01J8CHGENERAL bob mute`
-| `BAN` / `UNBAN` | `BAN <scope> <account> [:reason]` | `ban` at scope | Deny/allow join + send; a fresh channel-scope ban force-parts the target. → `MODERATED`; blocked joins get `BANNED`. | `BAN ns:01J8NSGAMING bob :repeated` → `@by=ada@test.example;reason=repeated MODERATED ns:01J8NSGAMING bob ban` (+ `MEMBER … part`)
-| `KICK` | `KICK <#ns-id/chan-id> <account> [:reason]` | `kick` | Force-part (no persistent state — may rejoin). → `MODERATED`. | `KICK #01J8NSGAMING/01J8CHGENERAL bob :cool off` → `@by=ada@test.example;reason=cool\soff MODERATED #01J8NSGAMING/01J8CHGENERAL bob kick`
+| `MUTE` / `UNMUTE` | `MUTE <scope> <member> [:reason]` | `mute` at scope | Deny/allow `send`. `scope` = `#ns-id/chan-id\|ns:<ns-id>\|*` (a `*` mute is network-wide). → `MODERATED`. | `MUTE #01J8NSGAMING/01J8CHGENERAL bob :spamming` → `@by=ada@test.example;reason=spamming MODERATED #01J8NSGAMING/01J8CHGENERAL bob mute`
+| `BAN` / `UNBAN` | `BAN <scope> <member> [:reason]` | `ban` at scope | Deny/allow join + send; a fresh channel-scope ban force-parts the target. → `MODERATED`; blocked joins get `BANNED`. | `BAN ns:01J8NSGAMING alice@matrix.org :repeated` → `@by=ada@test.example;reason=repeated MODERATED ns:01J8NSGAMING alice@matrix.org ban` (+ `MEMBER … part`)
+| `KICK` | `KICK <#ns-id/chan-id> <member> [:reason]` | `kick` | Force-part (no persistent state — may rejoin). → `MODERATED`. | `KICK #01J8NSGAMING/01J8CHGENERAL bob :cool off` → `@by=ada@test.example;reason=cool\soff MODERATED #01J8NSGAMING/01J8CHGENERAL bob kick`
 |===
+
+*Who can be moderated.* `<member>` is a **member reference**: a bare `<account>`
+for one of this network's own, or `<account>@<network>` for a member who is not —
+a federated peer's user, or a **bridged** one — a Matrix member of a projected or
+consumed namespace, who is modeled as a user of the realm's network
+(<<s11-4,§11.4>>). Namespace rosters have always held both
+forms; the moderation verbs took a bare account only, which made a bridged member
+unmoderatable by construction. They are not a separate class of participant, and a
+moderator's reach is the room, not the passport.
+
+Two consequences follow from the deny-list being *ours*:
+
+* It is enforced where their traffic **enters** — a muted or banned bridged member's
+  relayed messages are refused on ingest, exactly as a NETBLOCKed network's are
+  (<<s11-6,§11.6>>). This holds whether or not the bridge is reachable.
+* A server SHOULD also relay the act outward so the foreign system applies it
+  (removing them from the room). That relay MAY fail — the home is not an authority
+  in someone else's realm — and its failure MUST NOT undo the local deny. A
+  moderator's decision does not depend on a bridge being up.
 
 *How posting permission composes.* A message is allowed only when all three of these hold:
 
@@ -479,7 +498,7 @@ Two independent surfaces feed that check:
 * *Deny-list (mute / ban)* — per-account blocks keyed by `(scope, account)`. A block applies to a channel if its scope _covers_ that channel: the channel itself (`#ns-id/chan-id`), its namespace (`ns:<ns-id>`), or the whole network (`*`). That covering rule is also _who moderates what_ — a `*` block is set by network moderators, `ns:` by namespace moderators, `#ns-id/chan-id` by channel moderators.
 * *Restricted posting* — `CHANNEL META <#ns-id/chan-id> posting :restricted` flips a channel from open to send-gated. Posting then requires the `send` capability, so `GRANT send` / `REVOKE send` (+ epoch, <<s10-4,§10.4>>) decides who may speak — e.g. an announcements channel.
 
-A *mute always denies*, whatever the posting mode. Kick and ban broadcast a `MEMBER … part` so the target sees the removal; the acting moderator gets a `MODERATED <scope> <account> <mute|unmute|ban|unban|kick>` echo (`by=`/`reason=` tags).
+A *mute always denies*, whatever the posting mode. Kick and ban broadcast a `MEMBER … part` so the target sees the removal; the acting moderator gets a `MODERATED <scope> <member> <mute|unmute|ban|unban|kick>` echo (`by=`/`reason=` tags).
 
 *`REPORT` arguments.*
 
@@ -707,7 +726,7 @@ Events are the server→client half of the protocol; a client *MUST ignore any e
 |===
 | Event | Payload / tags | Example
 
-| `MODERATED <scope> <account> <action>` | `mute\|unmute\|ban\|unban\|kick`; `by=`, `reason=` — to the acting moderator (a join blocked by a ban returns the `ERR BANNED` code, <<s8,§8>>) | `@by=ada@test.example;reason=spam MODERATED #01J8NSGAMING/01J8CHGENERAL bob mute`
+| `MODERATED <scope> <member> <action>` | `mute\|unmute\|ban\|unban\|kick`; `by=`, `reason=` — to the acting moderator (a join blocked by a ban returns the `ERR BANNED` code, <<s8,§8>>). `<member>` is bare for a local account, `<account>@<network>` for a federated or bridged one (<<s6-7,§6.7>>) | `@by=ada@test.example;reason=spam MODERATED #01J8NSGAMING/01J8CHGENERAL bob mute`
 | `REPORTED <report-id>` | `label=` — ack to the reporter | `REPORTED r_01J…`
 | `REPORT-FILED <report-id> <msgid> <category>` | `state=verified\|unverified\|reporter-attested`, `reporter=` (per config), `scope=` — to `reports` holders | `@scope=ns;state=verified REPORT-FILED r_01J… test.example/01J…B harassment`
 | `REPORT-RESOLVED <report-id> <action>` | handlers get `by=`/`note=`; the reporter gets the minimal form | `@by=ada@test.example REPORT-RESOLVED r_01J… content-removed`
@@ -1690,6 +1709,7 @@ Each entry: what changed, why, and where it now lives. Implementation detail liv
 === Post-v0.13 clarifications
 
 * _Line limit 8 KiB → *32 KiB*; plugin payloads moved off tags._ <<s12,§12>>'s plugin surface carries base64-CBOR *documents* on the control plane — a provider's action catalog, an SDUI view, a form submission — and they were riding `@tag=` values, which <<s4,§4>> caps at 1024 B. The reference bridge's seven action declarations came to ~1.4 KB and the session died with `tag "reg" value exceeds 1024 bytes`; the aggregate `PLUGIN-MANIFEST` (every registered provider) would have been worse. Two changes, because they answer different questions. *Where:* every plugin payload now rides the **trailing** — a tag value is metadata, and 1024 B is what enforces that; the trailing is the slot for an opaque blob. *How much:* the line limit is raised to 32 KiB, since one line must hold an aggregate catalog and 8 KiB left too little headroom. The tag cap is deliberately unchanged. Cost is bounded per-connection buffering (`32 KiB × max_connections`); the IRC gateway keeps its own 8 KiB reader cap, which was never the same constant. → <<s4,§4>>, <<s12,§12>>.
+* _Moderation names a *member*, not an account._ `MUTE`/`UNMUTE`/`BAN`/`UNBAN`/`KICK` and the `MODERATED` event took a bare `<account>`, which cannot express a member who lives on another network — so a **bridged** member (a Matrix user in a projected or consumed namespace) was unmoderatable *by construction*: the line did not parse. They now take a `<member>` (bare, or `<account>@<network>`), the form namespace rosters have carried since v0.12. Two enforcement points come with it: the deny-list is checked where bridged traffic **enters** (a banned member's relayed messages are refused on ingest, as a NETBLOCKed network's are — previously no ingest path consulted it at all, so a ban would have been decorative), and the act SHOULD be relayed to the realm to be applied foreign-side, with an explicit rule that the relay's failure never undoes the local deny. *Why:* a moderator's authority is over the room, and half the room being unreachable to it is not a policy — it is a missing parameter. → <<s6-7,§6.7>>, <<s7,§7>>.
 * _NETBLOCK acks disambiguated._ `NETBLOCK ADD` and `REMOVE` both used to echo a reason-less `NETBLOCKED <network>`, so a client couldn't tell block from unblock — applying either as a set meant a `REMOVE` *re-added* the entry (reconciled only via a `LIST` refresh). Now `ADD`/`LIST` echo `NETBLOCKED <network> [:reason]` **with the reason** and `REMOVE` echoes a distinct **`NETBLOCK-REMOVED <network>`**, so a client sets on the former and deletes on the latter — no refresh workaround. → <<s11-6,§11.6>>, <<s7,§7>>.
 
 '''

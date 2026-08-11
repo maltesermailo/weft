@@ -42,7 +42,7 @@ pub use line::{
     MAX_TAG_KEY_BYTES, MAX_TAG_VALUE_BYTES,
 };
 pub use name::{
-    Account, ChannelId, ChannelName, GroupId, NamespaceId, NamespaceName, NamespaceRef,
+    Account, ChannelId, ChannelName, GroupId, MemberRef, NamespaceId, NamespaceName, NamespaceRef,
     NetworkName, RoleId, Target, UserRef, VanityName,
 };
 pub use plugin::{

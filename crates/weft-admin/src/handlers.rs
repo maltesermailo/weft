@@ -17,7 +17,7 @@ use axum::{Extension, Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use weft_proto::{Account, ChannelName, MsgId, ResolveAction, Ulid};
+use weft_proto::{Account, ChannelName, MemberRef, MsgId, ResolveAction, Ulid};
 use weft_store::{
     materialize, AuditEntry, ModKind, ModRecord, Page, ReportResolution, Scope, StoreError,
 };
@@ -304,7 +304,9 @@ async fn list_accounts(State(st): State<AdminState>) -> Response {
             .into_iter()
             .map(|g| (g.subject, g.caps))
             .collect();
-        // account → mod kinds at `*`.
+        // member → mod kinds at `*`. The list may also hold bridged members
+        // (`user@matrix.org`); the panel enumerates *local* accounts, so those
+        // rows simply never match one.
         let star_mod = st.moderation.list_moderation("*").await?;
         let mut out = Vec::with_capacity(accounts.len());
         for account in accounts {
@@ -313,12 +315,13 @@ async fn list_accounts(State(st): State<AdminState>) -> Response {
                 .account_ulid(&account)
                 .await?
                 .unwrap_or_default();
+            let member = MemberRef::local(account.clone());
             let muted = star_mod
                 .iter()
-                .any(|m| m.account == account && matches!(m.kind, ModKind::Mute));
+                .any(|m| m.member == member && matches!(m.kind, ModKind::Mute));
             let banned = star_mod
                 .iter()
-                .any(|m| m.account == account && matches!(m.kind, ModKind::Ban));
+                .any(|m| m.member == member && matches!(m.kind, ModKind::Ban));
             let deletion_scheduled = st.accounts.deletion_scheduled(&account).await?;
             let suspended = st.accounts.is_suspended(&account).await?;
             let bot = st.accounts.is_bot(&account).await?;
@@ -412,11 +415,19 @@ async fn account_detail(State(st): State<AdminState>, Path(name): Path<String>) 
             verifications,
             muted: st
                 .moderation
-                .is_moderated(&account, &["*".to_string()], ModKind::Mute)
+                .is_moderated(
+                    &MemberRef::local(account.clone()),
+                    &["*".to_string()],
+                    ModKind::Mute,
+                )
                 .await?,
             banned: st
                 .moderation
-                .is_moderated(&account, &["*".to_string()], ModKind::Ban)
+                .is_moderated(
+                    &MemberRef::local(account.clone()),
+                    &["*".to_string()],
+                    ModKind::Ban,
+                )
                 .await?,
             deletion_scheduled: st.accounts.deletion_scheduled(&account).await?,
             suspended: st.accounts.is_suspended(&account).await?,
@@ -1144,16 +1155,17 @@ async fn moderate(
         "ban" | "unban" => ModKind::Ban,
         other => return (StatusCode::BAD_REQUEST, format!("unknown verb {other}")).into_response(),
     };
+    let member = MemberRef::local(account.clone());
     let result = if req.verb.starts_with("un") {
         st.moderation
-            .clear_moderation(&req.scope, &account, kind)
+            .clear_moderation(&req.scope, &member, kind)
             .await
             .map(|_| ())
     } else {
         st.moderation
             .set_moderation(ModRecord {
                 scope: req.scope.clone(),
-                account: account.clone(),
+                member: member.clone(),
                 kind,
                 actor: who.to_string(),
                 reason: req.reason,

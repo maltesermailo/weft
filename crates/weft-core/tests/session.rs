@@ -6222,13 +6222,13 @@ async fn a_provider_mirrors_its_own_roles() {
     }
 
     plugin.send(&format!("@as=carol@acme-corp MUTE {channel} ada :spam"));
-    let Event::Moderated { account, by, .. } = weft_proto::Reply::parse(&plugin.recv_raw().await)
+    let Event::Moderated { member, by, .. } = weft_proto::Reply::parse(&plugin.recv_raw().await)
         .unwrap()
         .event
     else {
         panic!("the role-wearing foreign moderator expected the MODERATED ack");
     };
-    assert_eq!(account.to_string(), "ada");
+    assert_eq!(member.to_string(), "ada");
     assert_eq!(by.as_deref(), Some("carol@acme-corp"));
 
     // A provider's authority stops at its own realms: it may not touch a scope
@@ -6866,13 +6866,13 @@ async fn authority_translates_both_ways_with_the_provider() {
     // Carol mutes ada. `MODERATED` acks the moderator, so the proof that the
     // authority is real is the *effect*: ada can no longer post.
     plugin.send(&format!("@as=carol@acme-corp MUTE {channel} ada :spam"));
-    let Event::Moderated { account, by, .. } = weft_proto::Reply::parse(&plugin.recv_raw().await)
+    let Event::Moderated { member, by, .. } = weft_proto::Reply::parse(&plugin.recv_raw().await)
         .unwrap()
         .event
     else {
         panic!("the foreign moderator expected the MODERATED ack");
     };
-    assert_eq!(account.to_string(), "ada");
+    assert_eq!(member.to_string(), "ada");
     assert_eq!(by.as_deref(), Some("carol@acme-corp"));
 
     ada.send(&format!("@label=m1 MSG {channel} :am i muted"));
@@ -7737,6 +7737,137 @@ async fn presence_crosses_a_replica_both_ways() {
     assert!(
         leaked.is_none(),
         "invisible leaked to the realm: {leaked:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_bridged_member_is_moderated_like_any_other() {
+    // Owner request 2026-08-11: a Matrix member of one of my servers must be
+    // moderatable. Two halves, and the feature is only real with both:
+    //
+    // 1. the verb can *name* them — `MUTE`/`BAN`/`KICK` take a member, and a
+    //    bridged member's handle is `user@realm`, which a bare `Account` could
+    //    not express (so the client hid the buttons rather than send a line that
+    //    could not parse);
+    // 2. it *does* something — the deny-list is checked on the ingest door, and
+    //    the act is relayed to the realm so they are removed room-side. Before
+    //    this, nothing on either provider-ingest path consulted the deny-list.
+    let key = Keypair::generate();
+    let ctx = ctx_plugin_full(
+        vec![("mx", key.public(), vec!["matrix".parse().unwrap()])],
+        &[],
+    );
+
+    let mut ada = ready(&ctx, "ada").await;
+    let ns_id = ada.create_ns("gaming").await;
+    let channel = ada.channel_by_vanity(&ns_id, "general").await;
+    ada.send(&format!("NS META {ns_id} bridge:matrix :open"));
+    ada.recv().await;
+    ada.send(&format!("@label=j1 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut ada).await;
+
+    let mut plugin = plugin_session(&ctx, &key).await;
+    plugin.send("REALM ASSERT matrix://matrix.org");
+
+    // A Matrix user joins the projected room, and talks.
+    plugin.send(&format!("NS-MEMBER {ns_id} carol@kde.org join"));
+    let Event::Member { user, .. } = ada.recv().await.event else {
+        panic!("ada expected carol's MEMBER join");
+    };
+    assert_eq!(user.to_string(), "carol@kde.org");
+    plugin.send(&format!("@as=carol@kde.org MSG {channel} :hello"));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("ada expected carol's message");
+    };
+    assert_eq!(m.body, "hello");
+
+    // ada bans her at the namespace scope. The ack names the full handle…
+    ada.send(&format!("@label=b1 BAN ns:{ns_id} carol@kde.org :raiding"));
+    let Event::Moderated { member, action, .. } = ada.recv().await.event else {
+        panic!("ada expected the MODERATED ack");
+    };
+    assert_eq!(member.to_string(), "carol@kde.org");
+    assert_eq!(action, weft_proto::ModAction::Ban);
+
+    // …and the realm is asked to apply it, so the adapter can remove her from
+    // the room. Sent bare, like the authority relay: the realm performs it with
+    // its own authority (§9), and the moderator stays on the WEFT-side `by=`.
+    let relayed = loop {
+        let raw = plugin.recv_raw().await;
+        if verb_of(&raw) == "BAN" {
+            break raw;
+        }
+    };
+    assert!(
+        relayed.contains("carol@kde.org") && relayed.contains(&format!("ns:{ns_id}")),
+        "the relayed ban names the member and scope: {relayed}"
+    );
+    assert!(
+        !relayed.contains("ulid="),
+        "a bridged member addresses their own foreign identity, no puppet ULID: {relayed}"
+    );
+
+    // Her next message is dropped rather than ingested. Proved by ordering, not
+    // by waiting: ada's own post is behind it in the same actor's queue, so
+    // seeing hers next means carol's never landed.
+    plugin.send(&format!("@as=carol@kde.org MSG {channel} :still here?"));
+    ada.send(&format!("@label=m2 MSG {channel} :mine"));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("ada expected her own message");
+    };
+    assert_eq!(
+        m.body, "mine",
+        "a banned member's traffic must not reach the channel"
+    );
+
+    // Lifting it lets her back in, and is relayed too.
+    ada.send(&format!("@label=b2 UNBAN ns:{ns_id} carol@kde.org"));
+    ada.recv().await;
+    let lifted = loop {
+        let raw = plugin.recv_raw().await;
+        if verb_of(&raw) == "UNBAN" {
+            break raw;
+        }
+    };
+    assert!(lifted.contains("carol@kde.org"), "{lifted}");
+    plugin.send(&format!("@as=carol@kde.org MSG {channel} :back"));
+    let Event::Message(m) = ada.recv().await.event else {
+        panic!("ada expected carol's message again");
+    };
+    assert_eq!(m.body, "back");
+
+    // A KICK names the channel and reaches the realm the same way — it has no
+    // local effect for a bridged member (they hold no session here), so the
+    // relay *is* the kick.
+    ada.send(&format!("@label=k1 KICK {channel} carol@kde.org :cool off"));
+    let Event::Moderated { member, action, .. } = ada.recv().await.event else {
+        panic!("ada expected the KICK ack");
+    };
+    assert_eq!(member.to_string(), "carol@kde.org");
+    assert_eq!(action, weft_proto::ModAction::Kick);
+    let kicked = loop {
+        let raw = plugin.recv_raw().await;
+        if verb_of(&raw) == "KICK" {
+            break raw;
+        }
+    };
+    assert!(
+        kicked.contains(channel.as_str()) && kicked.contains("carol@kde.org"),
+        "the relayed kick names the channel and member: {kicked}"
+    );
+
+    // A mute is scoped to the member it names: banning `carol@kde.org` must not
+    // silence a *local* `carol`, who is a different person entirely.
+    let mut carol = ready(&ctx, "carol").await;
+    carol.send(&format!("@label=j2 NS JOIN {ns_id}"));
+    drain_until_ns_member(&mut carol).await;
+    ada.send(&format!("@label=b3 BAN ns:{ns_id} carol@kde.org :again"));
+    ada.recv().await;
+    carol.send(&format!("@label=m3 MSG {channel} :i am not her"));
+    let reply = carol.recv().await;
+    assert!(
+        matches!(&reply.event, Event::Message(m) if m.body == "i am not her"),
+        "the local carol is not the banned carol@kde.org: {reply:?}"
     );
 }
 
@@ -9400,9 +9531,7 @@ async fn modlist_returns_the_deny_list() {
     let mut got = Vec::new();
     loop {
         match op.recv().await.event {
-            Event::Moderated {
-                account, action, ..
-            } => got.push((account.to_string(), action)),
+            Event::Moderated { member, action, .. } => got.push((member.to_string(), action)),
             Event::BatchEnd { .. } => break,
             other => panic!("unexpected in modlist batch: {other:?}"),
         }
