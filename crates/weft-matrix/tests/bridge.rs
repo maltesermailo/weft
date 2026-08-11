@@ -2762,6 +2762,42 @@ async fn a_weft_moderation_act_is_applied_on_matrix() {
             "a kick is not a namespace act — the Space is untouched"
         );
     }
+
+    // A **channel-scope** ban is a channel-scope ban: that room, not the Space.
+    // Resolving rooms by the kind of act rather than the shape of the scope made
+    // this case resolve to no rooms at all — the ban stood on the WEFT side while
+    // Matrix never heard of it.
+    bridge
+        .on_incoming(weft_appservice::Incoming::Command {
+            label: None,
+            as_user: None,
+            as_ulid: None,
+            command: weft_proto::Command::Ban {
+                scope: channel.clone(),
+                member: "carol@kde.org".parse().unwrap(),
+                reason: None,
+            },
+        })
+        .await;
+    {
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded
+                .iter()
+                .filter(|(what, _, _)| what == &format!("POST ban/{room_id}"))
+                .count()
+                >= 2,
+            "the channel-scope ban reached that room too: {recorded:?}"
+        );
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|(what, _, _)| what == &format!("POST ban/{space_room}"))
+                .count(),
+            1,
+            "…and only the earlier namespace ban touched the Space"
+        );
+    }
 }
 
 #[tokio::test]

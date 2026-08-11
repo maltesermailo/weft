@@ -125,7 +125,9 @@ async fn everything_written_survives_a_reconnect() {
     // that used to be memory-only, so a restart dropped every Matrix member of a
     // projected server out of the WEFT roster (and their presence with it).
     let mut projecting = third;
-    projecting.save_projection("projns", "!space:test.example").await;
+    projecting
+        .save_projection("projns", "!space:test.example")
+        .await;
     projecting
         .save_projected_room("projns", "#projns/chanid", "!gen:test.example")
         .await;

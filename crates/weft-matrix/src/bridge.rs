@@ -520,18 +520,13 @@ impl Bridge {
             // only from a negative, so unmuting a moderator cannot demote them.
             Command::Mute { scope, member, .. } => {
                 let (scope, member) = (scope.clone(), member.to_string());
-                self.apply_level_outbound(
-                    &scope,
-                    &member,
-                    as_ulid.as_deref(),
-                    crate::levels::MUTED_LEVEL,
-                )
-                .await;
+                self.apply_mute_outbound(&scope, &member, as_ulid.as_deref(), true)
+                    .await;
                 return;
             }
             Command::Unmute { scope, member } => {
                 let (scope, member) = (scope.clone(), member.to_string());
-                self.lift_mute_outbound(&scope, &member, as_ulid.as_deref())
+                self.apply_mute_outbound(&scope, &member, as_ulid.as_deref(), false)
                     .await;
                 return;
             }
@@ -3069,7 +3064,10 @@ impl Bridge {
         subject_ulid: Option<&str>,
         level: i64,
     ) {
-        let rooms = self.rooms_of_ns_scope(scope);
+        if !scope.starts_with("ns:") {
+            return; // only namespace authority maps onto a space (§10)
+        }
+        let rooms = self.rooms_of_scope(scope);
         if rooms.is_empty() {
             return;
         }
@@ -3084,32 +3082,41 @@ impl Bridge {
         }
     }
 
-    /// The rooms an `ns:<id>` scope covers — every bridged room of the namespace
-    /// **plus the Space itself**.
+    /// The rooms a WEFT scope covers, by the **shape of the scope**:
     ///
-    /// The Space is not decoration: a restricted room authorizes entry by Space
-    /// membership, so leaving it out of a removal would leave the door open, and
-    /// leaving it out of a level write would make the Space disagree with its
-    /// children. One list, so a removal and a level change can never cover
-    /// different rooms.
+    /// - `ns:<id>` → every bridged room of the namespace **plus the Space
+    ///   itself**. The Space is not decoration: a restricted room authorizes
+    ///   entry by Space membership, so leaving it out of a removal would leave
+    ///   the door open, and leaving it out of a level write would make the Space
+    ///   disagree with its children.
+    /// - `#<ns-id>/<chan-id>` → that one room. A channel-scoped act is a
+    ///   channel-scoped act; widening it to the namespace would ban someone from
+    ///   a server because they misbehaved in one room.
+    /// - `*` → nothing. The network is ours alone; no realm governs it, and
+    ///   weftd does not relay a `*` act for that reason.
     ///
-    /// Empty = not a bridged namespace (or not one of ours), which every caller
-    /// treats as "nothing to do".
-    fn rooms_of_ns_scope(&self, scope: &str) -> Vec<String> {
-        let Some(ns_id) = scope.strip_prefix("ns:") else {
-            return Vec::new(); // only namespace authority maps onto a space (§10)
-        };
-
-        // Consumed space or outbound projection.
-        if let Some(space) = self.store.state.space_of_ns(ns_id) {
-            let mut rooms: Vec<String> = space.rooms.keys().cloned().collect();
-            rooms.push(space.room_id.clone());
-            return rooms;
+    /// Keyed on the scope rather than on the kind of act, because the alternative
+    /// silently loses cases: resolving "a ban covers the namespace" made a
+    /// **channel-scope** ban or mute resolve to no rooms at all and do nothing
+    /// here, while the WEFT-side deny stood — the two sides disagreeing, quietly.
+    fn rooms_of_scope(&self, scope: &str) -> Vec<String> {
+        if let Some(ns_id) = scope.strip_prefix("ns:") {
+            // Consumed space or outbound projection.
+            if let Some(space) = self.store.state.space_of_ns(ns_id) {
+                let mut rooms: Vec<String> = space.rooms.keys().cloned().collect();
+                rooms.push(space.room_id.clone());
+                return rooms;
+            }
+            if let Some(p) = self.store.state.projections.get(ns_id) {
+                let mut rooms: Vec<String> = p.rooms.values().cloned().collect();
+                rooms.push(p.space_room.clone());
+                return rooms;
+            }
+            return Vec::new();
         }
-        if let Some(p) = self.store.state.projections.get(ns_id) {
-            let mut rooms: Vec<String> = p.rooms.values().cloned().collect();
-            rooms.push(p.space_room.clone());
-            return rooms;
+
+        if scope.starts_with('#') {
+            return self.room_of_channel(scope).into_iter().collect();
         }
 
         Vec::new()
@@ -3139,12 +3146,9 @@ impl Bridge {
         mxid
     }
 
-    /// §6.7 apply a WEFT ban / unban / kick to the Matrix side.
-    ///
-    /// A ban or unban covers the scope's whole namespace (Space included, see
-    /// [`Self::rooms_of_ns_scope`]); a kick names one channel, so it touches
-    /// that room alone — matching WEFT, where a kick is a force-part they may
-    /// undo by rejoining.
+    /// §6.7 apply a WEFT ban / unban / kick to the Matrix side, over the rooms
+    /// its scope covers ([`Self::rooms_of_scope`] — a `KICK` always carries a
+    /// channel, so it lands on one room without needing a special case).
     ///
     /// Performed as the bot, which is the only authority we have here (§9:
     /// bridge-created rooms are bridge-controlled). In a **consumed** space the
@@ -3159,10 +3163,7 @@ impl Bridge {
         reason: Option<&str>,
         removal: Removal,
     ) {
-        let rooms = match removal {
-            Removal::Kick => self.room_of_channel(scope).into_iter().collect(),
-            Removal::Ban | Removal::Unban => self.rooms_of_ns_scope(scope),
-        };
+        let rooms = self.rooms_of_scope(scope);
         if rooms.is_empty() {
             return; // not a bridged scope
         }
@@ -3185,15 +3186,27 @@ impl Bridge {
         }
     }
 
-    /// §6.7 lift a mute: restore the default level, but **only from a negative
-    /// one**.
+    /// §6.7 mute or unmute on the Matrix side: a per-user power level below
+    /// `events_default`, so the homeserver refuses their messages.
     ///
-    /// A mute is the only level we set below zero, so a negative level is ours to
-    /// clear. Anything at or above zero was set by something else — most likely a
+    /// Lifting one restores the default **only from a negative level**. A mute is
+    /// the only level we ever set below zero, so a negative one is ours to clear;
+    /// anything at or above zero was set by something else — most likely a
     /// `GRANT` that made them a moderator at 50 — and writing 0 unconditionally
     /// would turn every unmute into a silent demotion.
-    async fn lift_mute_outbound(&mut self, scope: &str, member: &str, member_ulid: Option<&str>) {
-        let rooms = self.rooms_of_ns_scope(scope);
+    ///
+    /// Separate from [`Self::apply_level_outbound`] because a mute follows the
+    /// *scope* (a channel mute silences one room) while a grant maps only onto a
+    /// namespace, and because unmuting is a conditional write rather than a
+    /// straight one.
+    async fn apply_mute_outbound(
+        &mut self,
+        scope: &str,
+        member: &str,
+        member_ulid: Option<&str>,
+        muted: bool,
+    ) {
+        let rooms = self.rooms_of_scope(scope);
         if rooms.is_empty() {
             return;
         }
@@ -3202,19 +3215,22 @@ impl Bridge {
         };
 
         for room in rooms {
-            let level = self
-                .store
-                .state
-                .room_levels
-                .get(&room)
-                .and_then(|levels| levels.get(&mxid))
-                .copied()
-                .unwrap_or(0);
-            if level >= 0 {
-                continue;
+            if !muted {
+                let level = self
+                    .store
+                    .state
+                    .room_levels
+                    .get(&room)
+                    .and_then(|levels| levels.get(&mxid))
+                    .copied()
+                    .unwrap_or(0);
+                if level >= 0 {
+                    continue; // not muted by us — leave their rank alone
+                }
             }
-            if let Err(e) = self.set_room_level(&room, &mxid, 0).await {
-                warn!(room, mxid, "unmute power-level write failed: {e:#}");
+            let level = if muted { crate::levels::MUTED_LEVEL } else { 0 };
+            if let Err(e) = self.set_room_level(&room, &mxid, level).await {
+                warn!(room, mxid, muted, "mute power-level write failed: {e:#}");
             }
         }
     }
