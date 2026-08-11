@@ -16,7 +16,8 @@ async fn everything_written_survives_a_reconnect() {
     // A clean slate: this test owns the matrix_* tables for its run.
     sqlx::raw_sql(
         "TRUNCATE matrix_spaces, matrix_rooms, matrix_member_rooms, matrix_links, \
-         matrix_users, matrix_reactions, matrix_sent_reactions, matrix_bans",
+         matrix_users, matrix_reactions, matrix_sent_reactions, matrix_bans, \
+         matrix_projections, matrix_projected_rooms, matrix_projected_members",
     )
     .execute(store.pool().expect("connected store has a pool"))
     .await
@@ -118,5 +119,48 @@ async fn everything_written_survives_a_reconnect() {
     assert!(
         third.state.spaces[&uri].member_rooms.is_empty(),
         "the leave delta persisted"
+    );
+
+    // The **projected** roster, the outbound twin of the above. This is the one
+    // that used to be memory-only, so a restart dropped every Matrix member of a
+    // projected server out of the WEFT roster (and their presence with it).
+    let mut projecting = third;
+    projecting.save_projection("projns", "!space:test.example").await;
+    projecting
+        .save_projected_room("projns", "#projns/chanid", "!gen:test.example")
+        .await;
+    projecting
+        .state
+        .projections
+        .get_mut("projns")
+        .unwrap()
+        .member_joined("carol@kde.org", "!gen:test.example");
+    projecting
+        .persist_projected_member("projns", "carol@kde.org", "!gen:test.example", true)
+        .await;
+
+    let fourth = Store::connect(&url).await.expect("fourth connect");
+    assert!(
+        fourth.state.projections["projns"].member_rooms["carol@kde.org"]
+            .contains("!gen:test.example"),
+        "a projected member survives the restart"
+    );
+
+    // And the leave half, so the set can shrink as well as grow.
+    let mut leaving = fourth;
+    leaving
+        .state
+        .projections
+        .get_mut("projns")
+        .unwrap()
+        .member_left("carol@kde.org", "!gen:test.example");
+    leaving
+        .persist_projected_member("projns", "carol@kde.org", "!gen:test.example", false)
+        .await;
+
+    let fifth = Store::connect(&url).await.expect("fifth connect");
+    assert!(
+        fifth.state.projections["projns"].member_rooms.is_empty(),
+        "the projected leave delta persisted"
     );
 }

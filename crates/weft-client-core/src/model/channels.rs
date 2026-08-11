@@ -190,17 +190,23 @@ impl Channels {
         }
     }
 
-    // §6.3 maintain a channel's roster. Join adds (deduped by account); part
+    // §6.3 maintain a channel's roster. Join adds (deduped by identity); part
     // removes. Emits the full list so the mirror just sets `Channel.members`. A
     // no-op (no diff) when nothing changed — a duplicate join (MEMBERS re-fetch)
     // or a part of someone absent. The channel's own removal (self-part → leave)
     // is a TS side-effect that needs the session's "me"; the model just drops the
     // member here and lets the (instance-gone) roster diff no-op in the mirror.
+    //
+    // Identity is `(account, network)`, not the account alone: a local `alice` and
+    // a bridged `alice@matrix.org` are different people, and keying on the bare
+    // name meant the second one to join was swallowed as a duplicate — and either
+    // one's part removed both.
     fn member(&mut self, channel: &str, user: &str, network: &str, action: &str) -> Vec<ChanDiff> {
         let members = self.roster.entry(channel.to_string()).or_default();
+        let same = |m: &RosterMember| m.account == user && m.network == network;
 
         let changed = if action == "join" {
-            if members.iter().any(|m| m.account == user) {
+            if members.iter().any(same) {
                 false
             } else {
                 members.push(RosterMember {
@@ -211,7 +217,7 @@ impl Channels {
             }
         } else {
             let before = members.len();
-            members.retain(|m| m.account != user);
+            members.retain(|m| !same(m));
             members.len() != before
         };
 
@@ -1056,6 +1062,34 @@ mod tests {
         assert!(ch
             .handle(&member("#n/c", "ghost", "home", "part"))
             .is_empty());
+    }
+
+    /// A bridged member and a local one can share a name and are not the same
+    /// person. Keying the roster on the bare account swallowed the second join
+    /// as a duplicate, and made either one's part remove both.
+    #[test]
+    fn a_bridged_member_is_not_the_local_member_of_the_same_name() {
+        let mut ch = Channels::default();
+        ch.handle(&member("#n/c", "alice", "home", "join"));
+        assert_eq!(
+            roster_of(&one(ch.handle(&member(
+                "#n/c",
+                "alice",
+                "matrix.org",
+                "join"
+            )))),
+            Some(vec![("alice", "home"), ("alice", "matrix.org")])
+        );
+        assert_eq!(
+            roster_of(&one(ch.handle(&member(
+                "#n/c",
+                "alice",
+                "matrix.org",
+                "part"
+            )))),
+            Some(vec![("alice", "home")]),
+            "the Matrix alice left; ours did not"
+        );
     }
 
     #[test]
