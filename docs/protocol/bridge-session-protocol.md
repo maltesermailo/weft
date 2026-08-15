@@ -252,6 +252,18 @@ membership counts as present): the two errors are not symmetric — treating a l
 conversation as dead splits it in two on every transient failure, while treating a dead
 one as live costs one message and self-corrects.
 
+**Adapter side: a conversation opened from the realm starts before you are in it**
+(2026-08-15). The realm-side flow is create-invite-and-talk in one burst — the person
+invites our identity and immediately types the line the invite exists for. Foreign
+systems generally deliver a room's traffic only to its **members**, so everything said
+between the invite and our accepting it is not delivered late, it is not delivered at
+all; and it is precisely the opening message, the one that says what the conversation is
+about. No amount of joining faster wins that race — the send happens first. So on
+accepting, **fetch the window back** and ingest it before going live, bounded by the
+invite's timestamp so that re-entering a long-lived conversation replays its whole
+scrollback as new DMs. Ingesting a foreign event is idempotent (§5: the msgid derives
+from the foreign event id), so a message that *did* arrive live is not delivered twice.
+
 ### Outbound projection — the return path into a native channel (2026-08-06)
 
 A **native** namespace whose ns-admin opted in — `NS META <ns-id> bridge:<scheme> :open` (requires

@@ -1346,7 +1346,7 @@ impl Bridge {
             && ev["content"]["membership"] == "invite"
             && ev["content"]["is_direct"] == true
         {
-            self.accept_dm_invite(&room_id, &sender, ev["state_key"].as_str())
+            self.accept_dm_invite(&room_id, &sender, ev["state_key"].as_str(), ts)
                 .await;
             return;
         }
@@ -1359,7 +1359,7 @@ impl Bridge {
             .dm_of_room(&room_id)
             .map(|(a, m)| (a.to_string(), m.to_string()))
         {
-            self.on_dm_event(&ev, &account, &mxid).await;
+            self.on_dm_event(&ev, &room_id, &account, &mxid).await;
             return;
         }
 
@@ -2630,7 +2630,10 @@ impl Bridge {
 
     /// A Matrix message in a bridged **DM** room: ingest it as an ordinary WEFT
     /// DM (`Scope::Dm`), keyed by the realm's msgid like any other ingest.
-    async fn on_dm_event(&mut self, ev: &Value, account: &str, mxid: &str) {
+    ///
+    /// The room is passed rather than read off the event: the caller always knows
+    /// it, and a replayed `/messages` page is not obliged to carry it.
+    async fn on_dm_event(&mut self, ev: &Value, room: &str, account: &str, mxid: &str) {
         // The peer walked out. Keeping the mapping would make every later DM relay
         // *succeed* into a room nobody is reading — the conversation looks delivered
         // from WEFT and simply never arrives, and starting a new DM cannot help
@@ -2690,8 +2693,7 @@ impl Bridge {
         }
         info!(weft_sender, account, msgid = %minted, "DM from Matrix ingested");
 
-        let room = ev["room_id"].as_str().unwrap_or_default().to_string();
-        self.store.link(&event_id, &minted, &room).await;
+        self.store.link(&event_id, &minted, room).await;
     }
 
     /// Accept a direct-room invite aimed at one of our puppets, and remember the
@@ -2700,7 +2702,13 @@ impl Bridge {
     ///
     /// A non-puppet target is ignored: our bot has no conversations, and anything
     /// else is not ours to answer for.
-    async fn accept_dm_invite(&mut self, room: &str, inviter: &str, invited: Option<&str>) {
+    async fn accept_dm_invite(
+        &mut self,
+        room: &str,
+        inviter: &str,
+        invited: Option<&str>,
+        invited_at: u64,
+    ) {
         let Some(account) = invited
             .and_then(|mxid| mxid.try_into().ok())
             .and_then(|mxid: &ruma::UserId| self.identity.puppet_ulid(mxid))
@@ -2718,6 +2726,43 @@ impl Bridge {
 
         self.store.save_dm_room(&account, inviter, room).await;
         info!(room, account, inviter, "DM opened from Matrix");
+
+        self.catch_up_dm(room, &account, inviter, invited_at).await;
+    }
+
+    /// Ingest whatever was said between the invite and our join.
+    ///
+    /// That window is not a corner case, it is the normal opening of a DM: the
+    /// person invites the puppet *and immediately types the message the invite
+    /// exists for*, seconds before we are a joined member. Until we are, the
+    /// homeserver has no reason to push us that room's timeline — an appservice is
+    /// offered the rooms its users are **in** — so the first message, the one that
+    /// says what the conversation is about, is the one most likely to be lost. It
+    /// never arrives late; it never arrives at all. Fetching it back on join is the
+    /// only thing that recovers it.
+    ///
+    /// Bounded by the invite's timestamp, not by the page alone: a re-invite into a
+    /// long-lived room would otherwise replay years of its scrollback as brand-new
+    /// DMs. Replaying is safe to repeat — msgids derive from the event id, and an
+    /// event we already linked is skipped — so a message that *did* arrive live is
+    /// not delivered twice.
+    async fn catch_up_dm(&mut self, room: &str, account: &str, mxid: &str, invited_at: u64) {
+        let chunk = match self.hs.messages_back(room, None, BACKFILL_PAGE).await {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                warn!(room, "could not read the DM's opening messages: {e:#}");
+                return;
+            }
+        };
+
+        // Matrix pages newest-first; a conversation reads the other way.
+        for ev in chunk.into_iter().rev() {
+            if ev["origin_server_ts"].as_u64().unwrap_or_default() < invited_at {
+                continue;
+            }
+
+            self.on_dm_event(&ev, room, account, mxid).await;
+        }
     }
 
     /// §15 mirror a local member's typing as their puppet's typing EDU.

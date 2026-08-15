@@ -3857,6 +3857,80 @@ async fn a_matrix_user_can_open_the_dm() {
 }
 
 #[tokio::test]
+async fn the_dm_opening_message_is_fetched_back_on_join() {
+    // The message that starts a DM is the one most likely to be lost: the client
+    // creates the room, invites the puppet and sends it in one burst, so it is
+    // written before we are a joined member — and until we are, the homeserver has
+    // no reason to push us that room at all. No join is ever fast enough to win
+    // that race, so the opening line has to be fetched back rather than waited for.
+    const INVITED_AT: u64 = 1_722_000_000_000;
+    let mut rooms = kde_space();
+    // Newest-first, as Matrix pages.
+    rooms.insert(
+        "__messages__".to_string(),
+        vec![
+            json!({ "type": "m.room.message", "event_id": "$dm1", "sender": "@carol:kde.org",
+                    "origin_server_ts": INVITED_AT + 1, "content": { "body": "hi ada" } }),
+            // Older than the invite: a re-invite into a long-lived room must not
+            // replay its scrollback as brand-new DMs.
+            json!({ "type": "m.room.message", "event_id": "$old", "sender": "@carol:kde.org",
+                    "origin_server_ts": INVITED_AT - 1_000, "content": { "body": "old business" } }),
+        ],
+    );
+
+    let (mut bridge, mut lines, calls) = bridge_with(rooms).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+    let ns_id = ident::stable_ulid("!space:kde.org");
+    join_ada(&mut bridge, &ns_id).await;
+    drain(&mut lines);
+    calls.lock().unwrap().clear();
+
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.member",
+            "room_id": "!dm:kde.org",
+            "event_id": "$inv",
+            "sender": "@carol:kde.org",
+            "state_key": format!("@weft_{ADA_ULID}:test.example"),
+            "origin_server_ts": INVITED_AT,
+            "content": { "membership": "invite", "is_direct": true },
+        }))
+        .await;
+
+    let sent = drain(&mut lines);
+    let dm = sent
+        .iter()
+        .find(|l| l.contains("MSG") && l.contains("hi ada"))
+        .unwrap_or_else(|| panic!("the opening message was not fetched back: {sent:?}"));
+    assert!(dm.contains("as=carol@kde.org"), "{dm}");
+    assert!(dm.contains("@ada"), "addressed to ada: {dm}");
+    assert!(
+        !sent.iter().any(|l| l.contains("old business")),
+        "scrollback from before the invite was replayed: {sent:?}"
+    );
+
+    // The same message pushed live afterwards is already ours: the msgid derives
+    // from the event id, so the catch-up cannot deliver it twice.
+    bridge
+        .on_matrix_event(json!({
+            "type": "m.room.message",
+            "room_id": "!dm:kde.org",
+            "event_id": "$dm1",
+            "sender": "@carol:kde.org",
+            "origin_server_ts": INVITED_AT + 1,
+            "content": { "msgtype": "m.text", "body": "hi ada" },
+        }))
+        .await;
+    assert!(
+        drain(&mut lines).is_empty(),
+        "the opening message was delivered twice"
+    );
+}
+
+#[tokio::test]
 async fn a_post_we_cannot_place_is_reported_on_its_label() {
     // The other half of the label-keyed UNDELIVERED: weftd minted nothing for a
     // relayed post, so if we cannot place it the *only* honest answer is to say so
