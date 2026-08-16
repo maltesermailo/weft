@@ -811,6 +811,16 @@ guessing at rosters it does not hold.
 - **Mapping is the adapter's.** WEFT has four states, Matrix three: `unavailable`
   is "here but not attending", so it maps to `away` inbound and receives both
   `away` and `dnd` outbound.
+- **State it with the membership; do not wait for a change** (2026-08-16). Foreign
+  presence arrives as a *transition* — a realm reports that someone changed status,
+  never that they are simply online — so a live stream alone can never answer "who
+  is here now". Everyone already online when the session began, which after any
+  restart is everyone, has no presence at all on this side and renders offline until
+  they happen to toggle something. Whenever the adapter states that a foreign user is
+  a member, it must also state their current status, reading it from the realm if
+  that is what it takes. The outbound direction has no such gap because weftd
+  re-announces a local user's presence on join and reconnect; this is the inbound
+  half of the same rule, and the same rule §6 already applies to membership.
 - Matrix specifics: inbound needs MSC2409 ephemeral pushes (`push_ephemeral: true`
   in the registration) **and** `presence: enabled: true` on the homeserver. With
   either off, the mirror is silently one-directional — WEFT → Matrix still works.

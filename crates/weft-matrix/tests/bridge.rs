@@ -207,6 +207,31 @@ async fn mock_hs(state: BTreeMap<String, Vec<Value>>) -> (String, Calls) {
                     ));
                     axum::Json(json!({}))
                 },
+            )
+            // Reading a user's current status. `__presence__` holds one event per
+            // user whose status the homeserver knows; anyone else 404s, as Synapse
+            // does for a user it holds nothing for.
+            .get(
+                |State(hs): State<MockHs>, Path(user): Path<String>| async move {
+                    hs.calls.lock().unwrap().push((
+                        format!("GET presence/{user}"),
+                        String::new(),
+                        Value::Null,
+                    ));
+                    let known = hs
+                        .state
+                        .get("__presence__")
+                        .and_then(|all| all.iter().find(|p| p["user"] == user).cloned());
+
+                    match known {
+                        Some(p) => axum::Json(json!({ "presence": p["presence"] })).into_response(),
+                        None => (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(json!({ "errcode": "M_UNKNOWN", "error": "no presence" })),
+                        )
+                            .into_response(),
+                    }
+                },
             ),
         )
         .route(
@@ -3574,6 +3599,68 @@ async fn replies_map_to_each_sides_relation() {
     assert_eq!(
         body["body"], "answering from weft",
         "no fallback is invented on the way out"
+    );
+}
+
+#[tokio::test]
+async fn a_members_current_presence_is_stated_not_awaited() {
+    // Reported 2026-08-16: online in Element, online in WEFT, still a grey dot.
+    // `m.presence` is a *transition* — the homeserver pushes one when someone
+    // changes status, never when they simply are online — so every member who was
+    // already online when the session began (after a restart, all of them) had no
+    // presence weftd-side at all and rendered offline until they happened to toggle
+    // something. The same shape as membership before it was re-stated on reconnect:
+    // state what is true now rather than waiting for the next change.
+    let mut rooms = kde_space();
+    rooms.insert(
+        "__presence__".to_string(),
+        vec![json!({ "user": "@carol:kde.org", "presence": "online" })],
+    );
+
+    let (mut bridge, mut lines, calls) = bridge_with(rooms).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+
+    let sent = drain(&mut lines);
+    let presence = sent
+        .iter()
+        .find(|l| l.contains("PRESENCE"))
+        .unwrap_or_else(|| panic!("nobody's presence was stated: {sent:?}"));
+    assert!(presence.contains("as=carol@kde.org"), "{presence}");
+    assert!(presence.contains("online"), "{presence}");
+
+    // It is read as the bot, per member of the space we just stated.
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(what, _, _)| what == "GET presence/@carol:kde.org"),
+        "presence was never read"
+    );
+}
+
+#[tokio::test]
+async fn a_homeserver_with_presence_off_still_bridges() {
+    // A 404/403 from `/presence` is the ordinary answer on a server running with
+    // presence disabled, not a failure: the roster must still be stated, with no
+    // dots. `__presence__` is unset here, so every read 404s.
+    let (mut bridge, mut lines, _calls) = bridge_with(kde_space()).await;
+    bridge
+        .provision("matrix://kde.org/community")
+        .await
+        .unwrap();
+
+    let sent = drain(&mut lines);
+    assert!(
+        sent.iter().any(|l| l.contains("NS-MEMBER")),
+        "membership was not stated: {sent:?}"
+    );
+    assert!(
+        !sent.iter().any(|l| l.contains("PRESENCE")),
+        "a status was invented for a user the homeserver holds none for: {sent:?}"
     );
 }
 

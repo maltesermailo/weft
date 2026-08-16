@@ -327,6 +327,34 @@ impl Hs {
         Ok(())
     }
 
+    /// §6.1 read a user's **current** presence.
+    ///
+    /// The counterpart to the `m.presence` EDU, which only ever reports a
+    /// *change*. Someone who was already online when we connected never
+    /// generates one, so the live stream alone can never answer "who is here".
+    ///
+    /// `None` when the homeserver has nothing to give: presence disabled (403),
+    /// or a user it holds no status for (404). Neither is an error — it is the
+    /// ordinary answer on a server that runs with presence off.
+    pub async fn presence_of(&self, mxid: &str) -> anyhow::Result<Option<String>> {
+        match self
+            .call(
+                reqwest::Method::GET,
+                &format!("/_matrix/client/v3/presence/{}/status", enc(mxid)),
+                None,
+                None,
+                &[],
+            )
+            .await
+        {
+            Ok(v) => Ok(v["presence"].as_str().map(String::from)),
+            Err(e) if e.to_string().contains(" 404 ") || e.to_string().contains(" 403 ") => {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Set a state event as the bot (`m.space.child`, power levels, …).
     pub async fn put_state(
         &self,

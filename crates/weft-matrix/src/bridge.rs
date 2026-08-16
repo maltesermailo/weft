@@ -806,9 +806,13 @@ impl Bridge {
         // State the membership we can see. Additive statements, not a SYNC
         // window — full-replace covers *every* namespace we govern, which is
         // exactly wrong while provisioning space #2 of 2.
-        for user in space.member_rooms.keys() {
+        let members: Vec<String> = space.member_rooms.keys().cloned().collect();
+        for user in &members {
             let _ = self.realm.member(&ns_id, user, MemberAction::Join).await;
         }
+
+        // Who is here is only half of it; whether they are *here* is the other.
+        self.state_presence(&members).await;
 
         // Record the consumed Space so recovery can tell it from a projected one —
         // the two are restored differently (its channels come from the realm's
@@ -1175,17 +1179,47 @@ impl Bridge {
             return; // one of our puppets
         };
 
-        // Matrix has three states where WEFT has four; `unavailable` is "here but
-        // not attending", which is `away`. An unknown value is not guessed at.
-        let status = match edu["content"]["presence"].as_str() {
-            Some("online") => weft_proto::PresenceStatus::Online,
-            Some("unavailable") => weft_proto::PresenceStatus::Away,
-            Some("offline") => weft_proto::PresenceStatus::Offline,
-            _ => return,
+        let Some(status) = presence_status(edu["content"]["presence"].as_str()) else {
+            return;
         };
 
         if let Err(e) = self.realm.presence(&weft_sender, status).await {
             debug!(mxid, "presence ingestion failed: {e:#}");
+        }
+    }
+
+    /// State the **current** presence of members we have just stated.
+    ///
+    /// `m.presence` is a transition: the homeserver pushes one when someone
+    /// changes status, never when they simply are online. So every member who was
+    /// already online when this session began — after any restart, that is all of
+    /// them — had no presence on the WEFT side at all and rendered as offline,
+    /// permanently, until they happened to toggle something in their client.
+    ///
+    /// The outbound direction never had this problem because weftd re-announces a
+    /// local user's presence on join and reconnect. This is the inbound half of
+    /// that, and the same rule membership already follows (§6): a gap is closed by
+    /// stating what is true now, not by waiting for the next change.
+    async fn state_presence(&mut self, members: &[String]) {
+        for member in members {
+            let Some(mxid) = ident::mxid_of_weft_user(member) else {
+                continue;
+            };
+
+            match self.hs.presence_of(&mxid).await {
+                Ok(status) => {
+                    let Some(status) = presence_status(status.as_deref()) else {
+                        continue; // no status held, or one we do not map
+                    };
+
+                    if let Err(e) = self.realm.presence(member, status).await {
+                        debug!(member, "stating presence failed: {e:#}");
+                    }
+                }
+                // Presence is off on this homeserver, or it is having a bad day.
+                // Either way the roster is still right; only the dots are missing.
+                Err(e) => debug!(mxid, "could not read presence: {e:#}"),
+            }
         }
     }
 
@@ -1793,6 +1827,10 @@ impl Bridge {
             if let Err(e) = self.realm.member(ns_id, subject, action).await {
                 warn!(subject, "projected membership statement failed: {e:#}");
             }
+
+            if matches!(action, MemberAction::Join) {
+                self.state_presence(&[subject.to_string()]).await;
+            }
         }
 
         action
@@ -1833,6 +1871,10 @@ impl Bridge {
         if let Some(action) = action {
             if let Err(e) = self.realm.member(ns_id, user, action).await {
                 warn!(user, "membership statement failed: {e:#}");
+            }
+
+            if matches!(action, MemberAction::Join) {
+                self.state_presence(&[user.to_string()]).await;
             }
         }
     }
@@ -4668,6 +4710,18 @@ fn state_str(state: &[Value], event_type: &str, field: &str) -> Option<String> {
         .find(|ev| ev["type"] == event_type && ev["state_key"] == "")
         .and_then(|ev| ev["content"][field].as_str())
         .map(String::from)
+}
+
+/// Matrix's presence values as WEFT's. Matrix has three where WEFT has four;
+/// `unavailable` is "here but not attending", which is `away`. Anything else —
+/// including a user the homeserver holds no status for — is not guessed at.
+fn presence_status(value: Option<&str>) -> Option<weft_proto::PresenceStatus> {
+    match value {
+        Some("online") => Some(weft_proto::PresenceStatus::Online),
+        Some("unavailable") => Some(weft_proto::PresenceStatus::Away),
+        Some("offline") => Some(weft_proto::PresenceStatus::Offline),
+        _ => None,
+    }
 }
 
 /// A room name as a channel vanity: lowercase, runs of anything unusable
