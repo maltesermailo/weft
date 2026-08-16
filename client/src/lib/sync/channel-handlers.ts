@@ -102,7 +102,13 @@ export const channelMirrorHandlers: HandlerMap = {
   "chan-state": (e) => {
     const ch = channelStore.ensure(e.name);
     ch.voice = e.voice;
-    ch.vanity = e.vanity || undefined; // model sends "" for unset; keep TS undefined
+    // "" is *unknown*, not *cleared* — the same rule the model applies to itself
+    // (`channels.rs :: layout`). A reconnect resets the model but replays only a
+    // `SYNC since=` delta, so the layout never comes again: assigning the empty
+    // string through wiped the name the UI still had and left every channel
+    // showing its bare ULID for the rest of the session. Only `chan-renamed`
+    // clears a vanity, and it does so explicitly below.
+    if (e.vanity) ch.vanity = e.vanity;
     ch.topic = e.topic ?? undefined; // model sends null for unset
     ch.restricted = e.restricted;
     ch.viewGated = e.view_gated;

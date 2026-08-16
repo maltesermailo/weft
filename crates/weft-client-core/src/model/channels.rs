@@ -88,15 +88,24 @@ pub struct MoveResult {
     pub sends: Vec<(String, String, String)>,
 }
 
-/// The persisted per-channel layout (category + position) — the model's cache,
-/// stored by the host (localStorage / file) and restored via `seed` on connect
-/// for an instant first paint (replaces TS `ensureChannel`'s cache-seeding).
+/// The persisted per-channel layout (name + category + position) — the model's
+/// cache, stored by the host (localStorage / file) and restored via `seed` on
+/// connect for an instant first paint (replaces TS `ensureChannel`'s
+/// cache-seeding).
+///
+/// The `vanity` is cached with the order because a v0.13 channel's wire name is
+/// all ULIDs: without it the "instant first paint" is a sidebar of unreadable
+/// ids, and a **reconnect** — which resets the model but replays only a `SYNC
+/// since=` delta, never the layout — left it that way for the rest of the
+/// session.
 #[derive(Serialize, Deserialize, Default)]
 struct LayoutEntry {
     #[serde(default)]
     category: Option<String>,
     #[serde(default)]
     position: i64,
+    #[serde(default)]
+    vanity: String,
 }
 
 /// The full persisted layout the host stores: per-channel entries + per-namespace
@@ -454,6 +463,7 @@ impl Channels {
                     LayoutEntry {
                         category: ch.category.clone(),
                         position: ch.position,
+                        vanity: ch.vanity.clone(),
                     },
                 )
             })
@@ -482,6 +492,7 @@ impl Channels {
             let ch = self.map.entry(name.clone()).or_default();
             ch.category = entry.category;
             ch.position = entry.position;
+            ch.vanity = entry.vanity;
 
             self.provisional.insert(name.clone());
             diffs.push(self.snapshot(&name));
@@ -804,6 +815,26 @@ mod tests {
         assert_eq!(cat_pos(&fresh.snapshot("#n/a")), ("#n/a", Some("G"), 2));
         assert_eq!(cat_pos(&fresh.snapshot("#n/b")), ("#n/b", None, 0));
         assert!(fresh.take_dirty().is_none()); // a restore is not a change
+    }
+
+    #[test]
+    fn the_cached_layout_carries_the_name_it_paints() {
+        // Reported 2026-08-16: a client left open across a reconnect showed every
+        // channel as its ULID. A reconnect resets the model and replays only a
+        // `SYNC since=` delta — the server never re-sends CHANNEL-LAYOUT — so
+        // whatever the seed does not restore is gone for the rest of the session.
+        // A v0.13 wire name is all ULIDs, which makes the vanity part of the
+        // layout: seeding order without the name paints an unreadable sidebar.
+        let mut ch = Channels::default();
+        ch.handle(&layout("#n/a", Some("G"), 2, "text", "general"));
+        let blob = ch.serialize();
+
+        let mut fresh = Channels::default();
+        fresh.seed(&blob);
+        let ChanDiff::ChanState { vanity, .. } = fresh.snapshot("#n/a") else {
+            panic!("a snapshot is a ChanState");
+        };
+        assert_eq!(vanity, "general", "the seeded name survives a reconnect");
     }
 
     #[test]
