@@ -4030,4 +4030,35 @@ async fn naming_a_room_in_matrix_renames_the_channel() {
         .find(|l| l.contains("CHANNEL-LAYOUT"))
         .unwrap_or_else(|| panic!("the alias was not re-asserted: {sent:?}"));
     assert!(layout.contains("vanity=lobby"), "{layout}");
+
+    // …but an event that names *nothing* must leave the name alone. A canonical
+    // alias moving only its `alt_aliases`, a cleared name, a redaction: none of
+    // them say what the channel is called, and an assertion is the whole truth —
+    // so the old "fall back to the id" turned each of them into a silent rename to
+    // an unreadable ULID. Reported 2026-08-16 after an overnight disconnect, where
+    // a homeserver replaying its queued transactions is exactly how one of these
+    // arrives out of nowhere.
+    for quiet in [
+        json!({ "alt_aliases": ["#other:kde.org"] }),
+        json!({ "name": "" }),
+        json!({}),
+    ] {
+        bridge
+            .on_matrix_event(json!({
+                "type": "m.room.canonical_alias",
+                "room_id": "!gen:kde.org",
+                "event_id": "$quiet",
+                "sender": "@carol:kde.org",
+                "state_key": "",
+                "origin_server_ts": 1_722_000_000_002u64,
+                "content": quiet,
+            }))
+            .await;
+
+        let sent = drain(&mut lines);
+        assert!(
+            !sent.iter().any(|l| l.contains("CHANNEL-LAYOUT")),
+            "an event naming nothing renamed the channel: {sent:?}"
+        );
+    }
 }

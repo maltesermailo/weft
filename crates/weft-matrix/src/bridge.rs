@@ -1204,7 +1204,16 @@ impl Bridge {
             return; // not a replica room of ours (a projected room's name is *ours*)
         };
 
-        let vanity = ev["content"]["name"]
+        // Silence is not a rename. A `m.room.canonical_alias` that only moves its
+        // `alt_aliases` carries no `alias`; a cleared name and a redaction carry no
+        // `name`; and a homeserver replaying transactions queued while we were
+        // unreachable can deliver any of them long after the fact. None of those say
+        // what the channel is called — but the fallback here was the channel's ULID,
+        // and an assertion is the whole truth (§7a.0e), so what we send *becomes* the
+        // vanity. An event that changed nothing a Matrix user can see therefore
+        // renamed a perfectly good channel to an unreadable id. Keep what we have:
+        // the name is only ever changed by an event that states one.
+        let Some(vanity) = ev["content"]["name"]
             .as_str()
             .or_else(|| ev["content"]["alias"].as_str())
             .map(|name| {
@@ -1216,7 +1225,13 @@ impl Bridge {
                 )
             })
             .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| chan_id.clone());
+        else {
+            debug!(
+                room_id,
+                "a name event that names nothing — vanity unchanged"
+            );
+            return;
+        };
 
         info!(room_id, vanity, "room renamed — re-asserting the channel");
 
